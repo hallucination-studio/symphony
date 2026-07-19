@@ -1,18 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 
 import type {
+  AgentExecutionPolicy,
   CodexTurnSettings,
   CommandHandler,
   DesktopCommandResult,
   PerformerProfileSummaryView,
   SecretHandler,
 } from "./types";
+import { CommandRuleEditor } from "./CommandRuleEditor";
 
 type SubmissionStatus = "editing" | "pending" | "confirmed" | "error";
 
 export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { conductorId: string; profile?: PerformerProfileSummaryView; onClose: () => void; onCommand: CommandHandler }) {
   const [authenticationMethod, setAuthenticationMethod] = useState<"chatgpt" | "api_key">(profile?.authenticationMethod ?? "chatgpt");
   const [isFastModeEnabled, setIsFastModeEnabled] = useState(profile?.codexTurnSettings.isFastModeEnabled ?? true);
+  const [executionPolicy, setExecutionPolicy] = useState<AgentExecutionPolicy>(() =>
+    profile
+      ? structuredClone(profile.executionPolicy)
+      : {
+          sandboxMode: "workspace_write",
+          commandAllowlist: [],
+          commandDenylist: [],
+        }
+  );
   const [status, setStatus] = useState<SubmissionStatus>("editing");
   const dialogRef = useRef<HTMLElement>(null);
   useDialogFocus(dialogRef, onClose);
@@ -38,6 +49,7 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
               profileId: profile.profileId,
               displayName: String(formData.get("displayName") ?? ""),
               codexTurnSettings,
+              executionPolicy,
             }
           : {
               kind: "create_performer_profile",
@@ -45,6 +57,7 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
               displayName: String(formData.get("displayName") ?? ""),
               authenticationMethod,
               codexTurnSettings,
+              executionPolicy,
             },
       );
       setStatus(statusFromResult(result));
@@ -71,6 +84,19 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
           <label>Reasoning effort<select name="reasoningEffort" aria-label="Reasoning effort" defaultValue={profile?.codexTurnSettings.reasoningEffort ?? "high"}><option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select></label>
           <label><input type="checkbox" aria-label="Fast mode" checked={isFastModeEnabled} disabled={authenticationMethod === "api_key"} onChange={(event) => setIsFastModeEnabled(event.target.checked)} /> Fast mode</label>
           <p className="quiet">{authenticationMethod === "api_key" ? "Fast unavailable for API Key Profiles." : "Fast applies on the next Turn."}</p>
+          <label>Sandbox mode<select aria-label="Sandbox mode" value={executionPolicy.sandboxMode} onChange={(event) => setExecutionPolicy((current) => ({ ...current, sandboxMode: event.target.value as AgentExecutionPolicy["sandboxMode"] }))}><option value="read_only">Read only</option><option value="workspace_write">Workspace write</option><option value="unrestricted">Unrestricted</option></select></label>
+          <CommandRuleEditor
+            legend="Allowed commands"
+            addLabel="Add allow rule"
+            rules={executionPolicy.commandAllowlist}
+            onChange={(commandAllowlist) => setExecutionPolicy((current) => ({ ...current, commandAllowlist }))}
+          />
+          <CommandRuleEditor
+            legend="Denied commands"
+            addLabel="Add deny rule"
+            rules={executionPolicy.commandDenylist}
+            onChange={(commandDenylist) => setExecutionPolicy((current) => ({ ...current, commandDenylist }))}
+          />
           <div className="button-row"><button className="button" type="button" onClick={onClose}>Cancel</button><button data-testid="profile-save" className="button primary" type="submit">Save profile</button></div>
         </form>
       )}

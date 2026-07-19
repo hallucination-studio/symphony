@@ -106,6 +106,11 @@ export const conductorDetail: ConductorDetailView = {
         reasoningEffort: "high",
         isFastModeEnabled: true,
       },
+      executionPolicy: {
+        sandboxMode: "workspace_write",
+        commandAllowlist: [],
+        commandDenylist: [],
+      },
       readiness: "ready",
       isActive: true,
       sanitizedAccountLabel: "murphy@example.com",
@@ -119,6 +124,11 @@ export const conductorDetail: ConductorDetailView = {
         model: "gpt-5",
         reasoningEffort: "high",
         isFastModeEnabled: false,
+      },
+      executionPolicy: {
+        sandboxMode: "workspace_write",
+        commandAllowlist: [],
+        commandDenylist: [],
       },
       readiness: "login-required",
       isActive: false,

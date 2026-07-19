@@ -425,12 +425,17 @@ h1:focus-visible {
   font-size: var(--font-size-caption);
 }
 
-.dialog input {
+.dialog input,
+.dialog select {
   min-height: 38px;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
   color: var(--color-text);
+}
+
+.dialog select {
+  background: var(--color-surface);
 }
 
 .dialog fieldset {
@@ -439,6 +444,30 @@ h1:focus-visible {
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+}
+
+.dialog .command-rules {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.command-rule {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.command-argument {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-2);
+}
+
+.command-rule-actions {
+  justify-content: flex-start;
 }
 
 @media (max-width: 760px) {

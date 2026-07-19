@@ -99,6 +99,17 @@ export interface CodexTurnSettings {
   isFastModeEnabled: boolean;
 }
 
+export interface AgentCommandRule {
+  executable: string;
+  argvPrefix: string[];
+}
+
+export interface AgentExecutionPolicy {
+  sandboxMode: "read_only" | "workspace_write" | "unrestricted";
+  commandAllowlist: AgentCommandRule[];
+  commandDenylist: AgentCommandRule[];
+}
+
 export interface RepositorySelection {
   repositoryHandle: string;
   displayName: string;
@@ -111,6 +122,7 @@ export interface PerformerProfileSummaryView {
   displayName: string;
   authenticationMethod: "chatgpt" | "api_key";
   codexTurnSettings: CodexTurnSettings;
+  executionPolicy: AgentExecutionPolicy;
   readiness: "login-required" | "ready" | "invalid";
   isActive: boolean;
   sanitizedAccountLabel?: string;
@@ -171,6 +183,7 @@ export type DesktopCommand =
       displayName: string;
       authenticationMethod: "chatgpt" | "api_key";
       codexTurnSettings: CodexTurnSettings;
+      executionPolicy: AgentExecutionPolicy;
     }
   | {
       kind: "update_performer_profile";
@@ -178,6 +191,7 @@ export type DesktopCommand =
       profileId: string;
       displayName: string;
       codexTurnSettings: CodexTurnSettings;
+      executionPolicy: AgentExecutionPolicy;
     }
   | { kind: "start_codex_chatgpt_login"; conductorId: string; profileId: string }
   | { kind: "activate_performer_profile"; conductorId: string; profileId: string };

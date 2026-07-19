@@ -233,8 +233,53 @@ test("submits the selected reasoning and Fast settings for a ChatGPT profile", (
         reasoningEffort: "medium",
         isFastModeEnabled: false,
       },
+      executionPolicy: {
+        sandboxMode: "workspace_write",
+        commandAllowlist: [],
+        commandDenylist: [],
+      },
     }),
   );
+});
+
+test("round-trips structured execution policy when editing a Profile", () => {
+  const sendCommand = vi.fn().mockResolvedValue({ kind: "accepted" });
+  render(
+    <App
+      initialState={{
+        kind: "ready",
+        overview: connectedOverview,
+        conductorDetail,
+      }}
+      onCommand={sendCommand}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Conductors" }));
+  fireEvent.click(screen.getByRole("button", { name: /Studio conductor/ }));
+  fireEvent.click(screen.getAllByRole("button", { name: "Edit settings" })[0]!);
+  fireEvent.change(screen.getByLabelText("Sandbox mode"), {
+    target: { value: "read_only" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add deny rule" }));
+  fireEvent.change(screen.getByLabelText("Denied commands executable 1"), {
+    target: { value: "git" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add argument" }));
+  fireEvent.change(screen.getByLabelText("Denied commands rule 1 argument 1"), {
+    target: { value: "push" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+
+  expect(sendCommand).toHaveBeenCalledWith(expect.objectContaining({
+    kind: "update_performer_profile",
+    profileId: "profile-1",
+    executionPolicy: {
+      sandboxMode: "read_only",
+      commandAllowlist: [],
+      commandDenylist: [{ executable: "git", argvPrefix: ["push"] }],
+    },
+  }));
 });
 
 test("shows a retryable sanitized error when a profile command is rejected", async () => {

@@ -218,6 +218,7 @@ function commandBody(command: DesktopCommand): JsonValue {
         display_name: command.displayName,
         authentication_method: command.authenticationMethod,
         codex_turn_settings: settings(command.codexTurnSettings),
+        execution_policy: executionPolicy(command.executionPolicy),
       };
     case "update_performer_profile":
       return {
@@ -226,6 +227,7 @@ function commandBody(command: DesktopCommand): JsonValue {
         profile_id: command.profileId,
         display_name: command.displayName,
         codex_turn_settings: settings(command.codexTurnSettings),
+        execution_policy: executionPolicy(command.executionPolicy),
       };
     case "start_codex_chatgpt_login":
     case "activate_performer_profile":
@@ -246,6 +248,22 @@ function settings(value: {
     model: value.model,
     reasoning_effort: value.reasoningEffort,
     is_fast_mode_enabled: value.isFastModeEnabled,
+  };
+}
+
+function executionPolicy(value: {
+  sandboxMode: string;
+  commandAllowlist: { executable: string; argvPrefix: string[] }[];
+  commandDenylist: { executable: string; argvPrefix: string[] }[];
+}) {
+  const rules = (items: typeof value.commandAllowlist) => items.map((rule) => ({
+    executable: rule.executable,
+    argv_prefix: rule.argvPrefix,
+  }));
+  return {
+    sandbox_mode: value.sandboxMode,
+    command_allowlist: rules(value.commandAllowlist),
+    command_denylist: rules(value.commandDenylist),
   };
 }
 
