@@ -4,6 +4,7 @@ import test from "node:test";
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 import { PodiumClientServicesImpl } from "../dist/internal/composition/PodiumClientServicesImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
+import { LinearRequestBudget } from "../dist/internal/linear-gateway/LinearRequestBudget.js";
 
 function project() {
   return {
@@ -13,7 +14,39 @@ function project() {
   };
 }
 
-async function createConductorServices(linearSdk) {
+test("request budget prioritizes control and mutation without starving workflow reads", async () => {
+  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2 });
+  const order = [];
+  let release;
+  const blocker = budget.run("observation", () => new Promise((resolve) => {
+    release = resolve;
+  }));
+  await Promise.resolve();
+  const observation = budget.run("observation", async () => { order.push("observation"); });
+  const workflow = budget.run("workflow-read", async () => { order.push("workflow"); });
+  const mutation = budget.run("mutation", async () => { order.push("mutation"); });
+  const control = budget.run("control", async () => { order.push("control"); });
+  const mutationTwo = budget.run("mutation", async () => { order.push("mutation-2"); });
+  release();
+  await Promise.all([blocker, observation, workflow, mutation, control, mutationTwo]);
+  assert.deepEqual(order, ["control", "mutation", "workflow", "mutation-2", "observation"]);
+});
+
+test("request budget rejects work after its bounded admission deadline", async () => {
+  let now = 0;
+  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2,
+    now: () => now });
+  let release;
+  const blocker = budget.run("control", () => new Promise((resolve) => { release = resolve; }));
+  await Promise.resolve();
+  const queued = budget.run("workflow-read", async () => undefined, { deadlineAtMs: 10 });
+  now = 11;
+  release();
+  await blocker;
+  await assert.rejects(queued, /linear_request_budget_exhausted/);
+});
+
+async function createConductorServices(linearSdk, onObservation = () => undefined) {
   const binding = {
     bindingId: "binding-1",
     conductorId: "conductor-1",
@@ -33,7 +66,7 @@ async function createConductorServices(linearSdk) {
     {
       getConductorBinding: () => binding,
       getLinearCredential: () => ({}),
-      saveRuntimeObservation() {},
+      saveRuntimeObservation: onObservation,
       saveRootRuntimeObservation() {},
     },
     {
@@ -58,6 +91,25 @@ async function createConductorServices(linearSdk) {
   });
   return services;
 }
+
+test("Runtime Problem observations preserve only closed correlation fields", async () => {
+  let observation;
+  const services = await createConductorServices({}, (value) => { observation = value; });
+  await services.handle({
+    kind: "conductor_runtime_report", binding_id: "binding-1", instance_id: "instance-1",
+    status: "recovering", observed_at: "2026-07-19T00:00:00Z",
+    sanitized_summary: "Linear rate limited.",
+    runtime_problem: {
+      code: "linear_rate_limited", scope: "turn", severity: "error",
+      sanitized_reason: "Linear rate limited.", action_required: "Retry later.",
+      first_observed_at: "2026-07-19T00:00:00Z", last_observed_at: "2026-07-19T00:00:00Z",
+      root_issue_id: "root-1", turn_id: "turn-1", performer_profile_id: "profile-1",
+    },
+  });
+  assert.equal(observation.problem.code, "linear_rate_limited");
+  assert.equal(observation.problem.turnId, "turn-1");
+  assert.equal(observation.problem.performerProfileId, "profile-1");
+});
 
 test("mutation conflict rereads and never executes stale state", async () => {
   let mutations = 0;
@@ -217,6 +269,41 @@ test("retry exhaustion returns concrete sanitized blocking failure", async () =>
   assert.equal(result.error.sanitizedReason, "Linear request failed.");
   assert.deepEqual(delays, [10, 20]);
   assert.equal(attempts, 3);
+});
+
+test("Linear retry honors bounded upstream retry time and jitter", async () => {
+  const delays = [];
+  let attempts = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl({
+    async readProjectResolution() {
+      return { kind: "resolved", projectId: "project-1", updatedAt: "2026-07-16T00:00:00Z" };
+    },
+    async readMutationTarget() {
+      return { issueId: "issue-1", updatedAt: "2026-07-16T00:00:00Z", state: "Todo" };
+    },
+    async executeMutation() {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error("rate limited");
+        error.retryable = true;
+        error.retryAfterMs = 120;
+        throw error;
+      }
+    },
+    async readMutationOutcome() {
+      return attempts > 1 ? { issue: { issueId: "issue-1", updatedAt: "2026-07-16T00:00:01Z" } } : undefined;
+    },
+  }, {
+    sleep: async (delay) => delays.push(delay), maxAttempts: 2, baseDelayMs: 100,
+    maxDelayMs: 125, random: () => 1,
+  });
+  const result = await handler.mutate({
+    kind: "update_issue_state", project: project(),
+    precondition: { expectedIssueId: "issue-1", expectedUpdatedAt: "2026-07-16T00:00:00Z" },
+    state: "In Progress",
+  });
+  assert.equal(result.kind, "applied");
+  assert.deepEqual(delays, [125]);
 });
 
 test("gateway reads fully paginate and reject cross-project issue data", async () => {

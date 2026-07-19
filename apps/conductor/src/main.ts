@@ -24,6 +24,7 @@ import {
   validateCodexBaseUrl,
 } from "./performer-turns/internal/PerformerProcessEnvironment.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
+import { PodiumConductorRuntimeReporterImpl } from "./runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.js";
 import { GitRootDeliveryImpl } from "./root-delivery/internal/GitRootDeliveryImpl.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { BoundedLinearTreeContextImpl } from "./linear-tree/internal/BoundedLinearTreeContextImpl.js";
@@ -218,6 +219,12 @@ export async function runConductor(environment = process.env): Promise<void> {
     binding_id: config.bindingId,
     instance_id: config.instanceId,
   });
+  const runtimeReporter = new PodiumConductorRuntimeReporterImpl({
+    bindingId: config.bindingId,
+    instanceId: config.instanceId,
+    now: () => new Date().toISOString(),
+    send: report,
+  });
   const runtime = new V3ConductorRuntime(
     config.conductorId,
     gateway,
@@ -235,17 +242,7 @@ export async function runConductor(environment = process.env): Promise<void> {
             : {}),
           status: value.status,
         });
-        await report({
-          kind: "conductor_runtime_report",
-          binding_id: config.bindingId,
-          instance_id: config.instanceId,
-          status: "ready",
-          ...(value.rootId ? { active_root_issue_id: value.rootId } : {}),
-          ...(value.sanitizedReason
-            ? { sanitized_summary: value.sanitizedReason }
-            : {}),
-          observed_at: new Date().toISOString(),
-        });
+        await runtimeReporter.report(value);
       },
     },
   );

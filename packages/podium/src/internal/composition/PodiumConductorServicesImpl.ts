@@ -1,6 +1,7 @@
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
+import { LinearRequestBudget, type LinearRequestClass } from "../linear-gateway/LinearRequestBudget.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import type {
   LinearIssueState,
@@ -14,6 +15,10 @@ type Body = Record<string, JsonValue> & { kind: string };
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   #activeInstanceId: string | undefined;
+  readonly #linearRequests = new LinearRequestBudget({
+    maxConcurrent: 8,
+    maxHighPriorityBurst: 4,
+  });
 
   constructor(
     private readonly store: PodiumConductorStoreInterface,
@@ -69,10 +74,13 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       {
         maxAttempts: 4,
         baseDelayMs: 250,
+        maxDelayMs: 30_000,
+        random: Math.random,
         sleep: this.options.sleep,
       },
     );
-    switch (body.kind) {
+    return this.#linearRequests.run(requestClass(body.kind), async () => {
+      switch (body.kind) {
       case "resolve_conductor_project":
         return this.#resolveProject(gateway, body);
       case "list_root_issues":
@@ -93,7 +101,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         ) as unknown as JsonValue;
       default:
         throw new Error("conductor_request_unsupported");
-    }
+      }
+    }, { deadlineAtMs: Date.now() + 30_000 });
   }
 
   #runtime(body: Body): JsonValue {
@@ -149,6 +158,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       ...(typeof body.current_project_id === "string"
         ? { lastResolvedProjectId: body.current_project_id }
         : {}),
+      ...(body.runtime_problem ? { problem: runtimeProblem(body.runtime_problem) } : {}),
     });
     if (typeof body.active_root_issue_id === "string") {
       this.store.saveRootRuntimeObservation({
@@ -300,6 +310,13 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       page_info: { has_next_page: false },
     };
   }
+}
+
+function requestClass(kind: string): LinearRequestClass {
+  if (kind === "resolve_conductor_project") return "control";
+  if (kind === "get_issue_tree" || kind === "list_root_issues") return "workflow-read";
+  if (kind === "list_root_usage") return "observation";
+  return "mutation";
 }
 
 function matchesRepository(
@@ -551,6 +568,29 @@ function recordValue(value: JsonValue | undefined, code: string) {
     throw new Error(code);
   }
   return value;
+}
+
+function runtimeProblem(value: JsonValue) {
+  const problem = recordValue(value, "runtime_problem_invalid");
+  const scope = requiredString(problem.scope, "runtime_problem_scope_invalid");
+  const severity = requiredString(problem.severity, "runtime_problem_severity_invalid");
+  if (!(["application", "binding", "root", "turn", "profile", "workspace"] as string[])
+    .includes(scope) || (severity !== "warning" && severity !== "error")) {
+    throw new Error("runtime_problem_invalid");
+  }
+  return {
+    code: requiredString(problem.code, "runtime_problem_code_invalid"),
+    scope: scope as "application" | "binding" | "root" | "turn" | "profile" | "workspace",
+    severity: severity as "warning" | "error",
+    sanitizedReason: requiredString(problem.sanitized_reason, "runtime_problem_reason_invalid"),
+    firstObservedAt: requiredString(problem.first_observed_at, "runtime_problem_first_invalid"),
+    lastObservedAt: requiredString(problem.last_observed_at, "runtime_problem_last_invalid"),
+    ...(typeof problem.action_required === "string" ? { actionRequired: problem.action_required } : {}),
+    ...(typeof problem.root_issue_id === "string" ? { rootIssueId: problem.root_issue_id } : {}),
+    ...(typeof problem.turn_id === "string" ? { turnId: problem.turn_id } : {}),
+    ...(typeof problem.performer_profile_id === "string"
+      ? { performerProfileId: problem.performer_profile_id } : {}),
+  };
 }
 
 function requiredNumber(value: JsonValue | undefined, code: string) {

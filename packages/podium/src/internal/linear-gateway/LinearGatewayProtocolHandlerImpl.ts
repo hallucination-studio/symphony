@@ -13,6 +13,8 @@ interface RetryOptions {
   sleep(delayMs: number): Promise<void>;
   maxAttempts: number;
   baseDelayMs: number;
+  maxDelayMs?: number;
+  random?: () => number;
 }
 
 const MAX_ROOTS = 512;
@@ -411,9 +413,16 @@ export class LinearGatewayProtocolHandlerImpl {
         if (!isRetryable || attempt === this.retry.maxAttempts) {
           return { kind: "failed", error: protocolFailure(error) };
         }
-        await this.retry.sleep(
-          this.retry.baseDelayMs * 2 ** (attempt - 1),
-        );
+        const retryAfterMs = typeof record.retryAfterMs === "number"
+          && Number.isFinite(record.retryAfterMs) && record.retryAfterMs >= 0
+          ? record.retryAfterMs : 0;
+        const exponential = this.retry.baseDelayMs * 2 ** (attempt - 1);
+        const jitter = this.retry.random
+          ? Math.floor(exponential * 0.25 * this.retry.random()) : 0;
+        await this.retry.sleep(Math.min(
+          this.retry.maxDelayMs ?? 60_000,
+          Math.max(retryAfterMs, exponential) + jitter,
+        ));
       }
     }
 

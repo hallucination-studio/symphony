@@ -63,6 +63,20 @@ export interface RuntimeObservation {
   sanitizedSummary: string;
   lastResolvedProjectId?: string;
   projectResolutionConflict?: string;
+  problem?: RuntimeProblem;
+}
+
+export interface RuntimeProblem {
+  code: string;
+  scope: "application" | "binding" | "root" | "turn" | "profile" | "workspace";
+  severity: "warning" | "error";
+  sanitizedReason: string;
+  actionRequired?: string;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  rootIssueId?: string;
+  turnId?: string;
+  performerProfileId?: string;
 }
 
 export interface RootRuntimeObservation {
