@@ -75,6 +75,7 @@ export function App({
             void onSelectRoot(nextRootId);
           }}
           onOpenExternal={onOpenExternal}
+          onCommand={onCommand}
         />
       )}
       {page === "conductors" && (

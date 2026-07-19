@@ -89,13 +89,44 @@ test("persisted Retry Block prevents every later automatic retry", async () => {
   assert.equal(bootstrapCalls, 0);
 });
 
+test("acknowledge clears only the exact fresh Retry Block without starting a process", async () => {
+  let bootstrapCalls = 0;
+  let cleared = 0;
+  const lifecycle = retryLifecycle({
+    onBootstrap: () => { bootstrapCalls += 1; },
+    onClear: () => { cleared += 1; },
+    reconstructCleared: true,
+  });
+
+  assert.deepEqual(await lifecycle.acknowledge("root-1", "2026-07-19T00:00:03Z"), {
+    kind: "acknowledged",
+  });
+  assert.equal(cleared, 1);
+  assert.equal(bootstrapCalls, 0);
+});
+
+test("acknowledge rejects stale observation and terminal Root without mutation", async () => {
+  let cleared = 0;
+  const lifecycle = retryLifecycle({ bootstrapFailure: true, onClear: () => { cleared += 1; } });
+  assert.deepEqual(await lifecycle.acknowledge("root-1", "2026-07-19T00:00:02Z"), {
+    kind: "rejected", reason: "root_retry_acknowledgement_stale",
+  });
+  const terminalLifecycle = retryLifecycle({ terminalBlocked: true, onClear: () => { cleared += 1; } });
+  assert.equal((await terminalLifecycle.acknowledge("root-1", "2026-07-19T00:00:03Z")).kind, "rejected");
+  assert.equal(cleared, 0);
+});
+
 function retryLifecycle(options: {
   bootstrapFailure?: boolean;
   onBootstrap?(): void;
   onReplace?(expected: string | undefined, replacement: string): void;
   onBlock?(block: object): void;
   onTimeline?(): void;
+  onClear?(): void;
+  reconstructCleared?: boolean;
+  terminalBlocked?: boolean;
 } = {}) {
+  let reconstructCalls = 0;
   return new RootConversationLifecycle({
     conductorId: "conductor-1", baseBranch: "main",
     now: () => "2026-07-19T00:00:03Z", requestId: () => "retry-1",
@@ -126,7 +157,17 @@ function retryLifecycle(options: {
       },
       async writeRetryBlock(input) { options.onBlock?.(input.retryBlock); return "applied"; },
       async appendRetryProblem() { options.onTimeline?.(); },
+      async clearRetryBlock() { options.onClear?.(); return "applied"; },
       async reconstruct() {
+        reconstructCalls += 1;
+        if (options.reconstructCleared) {
+          return reconstructCalls === 1 ? blockedView() : claimedView();
+        }
+        if (options.terminalBlocked) {
+          const view = blockedView();
+          view.root = { ...view.root, state: "Done" };
+          return view;
+        }
         const view = claimedView();
         if (options.bootstrapFailure) {
           view.managedComment = { ...view.managedComment!, retryBlock: {
@@ -140,6 +181,15 @@ function retryLifecycle(options: {
       },
     },
   });
+}
+
+function blockedView(): V3RootRunView {
+  const view = claimedView();
+  view.managedComment = { ...view.managedComment!, retryBlock: {
+    expectedPerformerId: "conversation-1", failureCode: "provider_auth_unavailable",
+    observedAt: "2026-07-19T00:00:03Z",
+  } };
+  return view;
 }
 
 function profile() {

@@ -92,6 +92,17 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       case "stop_conductor":
       case "restart_conductor":
         return this.#controlConductor(body);
+      case "acknowledge_root_retry_block": {
+        const result = record(await this.host.relayProfile({
+          kind: body.kind,
+          root_issue_id: requiredString(body.root_issue_id, "root_issue_id_missing"),
+          retry_observed_at: requiredString(body.retry_observed_at, "retry_observed_at_missing"),
+        }), "root_retry_acknowledgement_invalid");
+        if (result.kind !== "root_retry_block_acknowledged") {
+          throw new Error("root_retry_acknowledgement_invalid");
+        }
+        return accepted(body.kind, "accepted");
+      }
       case "create_performer_profile":
       case "update_performer_profile":
       case "start_codex_chatgpt_login":
@@ -369,6 +380,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       binding.bindingId,
       rootIssueId,
     );
+    const retryObservedAt = rootRetryObservedAt(tree.rootManagedComments);
     return {
       summary: rootSummary(root, tree.observedAt),
       workflow_nodes: tree.nodes
@@ -391,6 +403,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
             occurred_at: rootObservation.observedAt,
           }]
         : [],
+      ...(retryObservedAt ? { retry_observed_at: retryObservedAt } : {}),
     };
   }
 
@@ -420,6 +433,35 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     }
     return binding;
   }
+}
+
+function rootRetryObservedAt(
+  comments: Array<{ body: string }>,
+): string | undefined {
+  if (comments.length !== 1) return undefined;
+  const marker = comments[0]!.body.match(/<!-- symphony root\n([\s\S]*?)\n-->/u);
+  if (!marker) return undefined;
+  const fields = new Map<string, string>();
+  const allowed = new Set([
+    "conductor_id", "performer_profile_id", "performer_id", "delivery_branch",
+    "pull_request", "retry_blocked", "retry_expected_performer_id",
+    "retry_failure_code", "retry_observed_at",
+  ]);
+  for (const line of marker[1]!.split("\n")) {
+    const separator = line.indexOf(":");
+    if (separator < 1) return undefined;
+    const key = line.slice(0, separator).trim();
+    if (!allowed.has(key) || fields.has(key)) return undefined;
+    fields.set(key, line.slice(separator + 1).trim());
+  }
+  const observedAt = fields.get("retry_observed_at");
+  return fields.size === allowed.size
+      && fields.get("retry_blocked") === "true"
+      && observedAt !== undefined
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(observedAt)
+      && Number.isFinite(Date.parse(observedAt))
+    ? observedAt
+    : undefined;
 }
 
 export function createLinearAuth(

@@ -236,6 +236,12 @@ function commandBody(command: DesktopCommand): JsonValue {
         conductor_id: command.conductorId,
         profile_id: command.profileId,
       };
+    case "acknowledge_root_retry_block":
+      return {
+        kind: command.kind,
+        root_issue_id: command.rootIssueId,
+        retry_observed_at: command.retryObservedAt,
+      };
   }
 }
 

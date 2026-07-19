@@ -1,6 +1,8 @@
+import { useState } from "react";
+
 import { EmptyState, NextAction, PageHeading, StatusBadge } from "./components";
 import { formatNumber, labelFromIdentifier } from "./format";
-import type { DesktopOverviewView, RootDetailView } from "./types";
+import type { CommandHandler, DesktopOverviewView, RootDetailView } from "./types";
 
 export function WorkPage({
   roots,
@@ -8,19 +10,58 @@ export function WorkPage({
   headingRef,
   onSelect,
   onOpenExternal,
+  onCommand,
 }: {
   roots: DesktopOverviewView["activeRoots"];
   detail: RootDetailView | undefined;
   headingRef: React.RefObject<HTMLHeadingElement>;
   onSelect: (rootId: string) => void;
   onOpenExternal: (url: string) => void;
+  onCommand: CommandHandler;
 }) {
+  const [recovery, setRecovery] = useState<
+    { kind: "idle" | "pending" | "confirmed" }
+    | { kind: "rejected"; reason: string }
+  >({ kind: "idle" });
   if (detail) {
+    const retryObservedAt = detail.retryObservedAt;
     return (
       <>
         <PageHeading title={`${detail.summary.identifier} · ${detail.summary.title}`} description={detail.summary.status} headingRef={headingRef} />
         <div className="page-stack">
           <NextAction action={detail.nextAction} onOpenExternal={onOpenExternal} />
+          {retryObservedAt && (
+            <section className="panel action-row" aria-label="Conversation recovery">
+              <div>
+                <h2>Conversation needs attention</h2>
+                <p>Retry is paused until the current problem is resolved.</p>
+              </div>
+              <button
+                type="button"
+                className="button primary"
+                disabled={recovery.kind === "pending" || recovery.kind === "confirmed"}
+                onClick={() => {
+                  setRecovery({ kind: "pending" });
+                  void onCommand({
+                    kind: "acknowledge_root_retry_block",
+                    rootIssueId: detail.summary.rootIssueId,
+                    retryObservedAt,
+                  }).then((result) => {
+                    setRecovery(result.kind === "rejected"
+                      ? { kind: "rejected", reason: result.sanitizedReason }
+                      : { kind: "confirmed" });
+                  });
+                }}
+              >
+                {recovery.kind === "pending" ? "Confirming..."
+                  : recovery.kind === "confirmed" ? "Retry acknowledged"
+                  : "Retry conversation"}
+              </button>
+              {recovery.kind === "rejected" && (
+                <p role="alert">{recovery.reason}</p>
+              )}
+            </section>
+          )}
           <section className="panel">
             <h2>Workflow tree</h2>
             <ul className="workflow-tree" role="tree" aria-label="Workflow tree">

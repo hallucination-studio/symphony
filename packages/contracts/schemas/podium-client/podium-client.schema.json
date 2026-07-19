@@ -475,6 +475,7 @@
       "required": ["summary", "workflow_nodes", "usage", "events"],
       "properties": {
         "summary": { "$ref": "#/$defs/RootSummaryView" },
+        "retry_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
         "workflow_nodes": {
           "type": "array",
           "maxItems": 512,
@@ -513,6 +514,16 @@
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
+    "AcknowledgeRootRetryBlockCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "retry_observed_at"],
+      "properties": {
+        "kind": { "const": "acknowledge_root_retry_block" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "retry_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
     "CommandAcceptedResult": {
       "type": "object",
       "additionalProperties": false,
@@ -531,7 +542,8 @@
             "update_performer_profile",
             "start_codex_chatgpt_login",
             "set_codex_api_key",
-            "activate_performer_profile"
+            "activate_performer_profile",
+            "acknowledge_root_retry_block"
           ]
         },
         "status": { "enum": ["accepted", "starting", "stopping"] }
@@ -555,6 +567,7 @@
         { "$ref": "#/$defs/GetDesktopOverviewQuery" },
         { "$ref": "#/$defs/GetConductorDetailQuery" },
         { "$ref": "#/$defs/GetRootDetailQuery" },
+        { "$ref": "#/$defs/AcknowledgeRootRetryBlockCommand" },
         { "$ref": "#/$defs/CommandAcceptedResult" },
         { "$ref": "#/$defs/DesktopOverviewView" },
         { "$ref": "#/$defs/ConductorDetailView" },

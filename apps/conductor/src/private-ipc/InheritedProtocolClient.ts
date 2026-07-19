@@ -28,6 +28,7 @@ const PROFILE_REQUEST_KINDS = new Set([
   "create_profile",
   "update_profile",
   "shutdown_conductor",
+  "acknowledge_root_retry_block",
 ]);
 
 export class InheritedProtocolClient {

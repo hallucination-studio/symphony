@@ -171,6 +171,24 @@ test("keeps workflow read only and delegates human actions to Linear", () => {
   expect(openExternal).toHaveBeenCalledWith("https://linear.app/acme/issue/SYM-42");
 });
 
+test("acknowledges only the displayed Root retry observation", () => {
+  const sendCommand = vi.fn().mockResolvedValue({ kind: "confirmed" });
+  render(<App initialState={{
+    kind: "ready", overview: connectedOverview,
+    rootDetail: { ...rootDetail, retryObservedAt: "2026-07-19T00:00:03Z" },
+  }} onCommand={sendCommand} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Work" }));
+  fireEvent.click(screen.getByRole("button", { name: /SYM-42/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Retry conversation" }));
+
+  expect(sendCommand).toHaveBeenCalledWith({
+    kind: "acknowledge_root_retry_block",
+    rootIssueId: rootDetail.summary.rootIssueId,
+    retryObservedAt: "2026-07-19T00:00:03Z",
+  });
+});
+
 test("never redisplays an API key and waits for confirmed profile activation", () => {
   const sendSecret = vi.fn().mockResolvedValue({ kind: "accepted" });
   render(

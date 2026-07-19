@@ -251,6 +251,18 @@ test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", 
   );
 });
 
+test("Root retry acknowledgement is closed across Desktop and Conductor", async () => {
+  for (const family of ["podium-client", "podium-conductor"]) {
+    const schema = await loadSchema(family);
+    const command = schema.$defs.AcknowledgeRootRetryBlockCommand;
+    assert.equal(command.additionalProperties, false);
+    assert.deepEqual(command.required, ["kind", "root_issue_id", "retry_observed_at"]);
+    assert.deepEqual(Object.keys(command.properties), [
+      "kind", "root_issue_id", "retry_observed_at",
+    ]);
+  }
+});
+
 test("generation is deterministic and check mode detects drift", async () => {
   const first = run("npm", ["run", "contracts:generate"]);
   assert.equal(first.status, 0, first.stderr);

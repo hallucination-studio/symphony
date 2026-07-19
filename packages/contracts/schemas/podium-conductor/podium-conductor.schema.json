@@ -767,6 +767,26 @@
         }
       ]
     },
+    "AcknowledgeRootRetryBlockCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "retry_observed_at"],
+      "properties": {
+        "kind": { "const": "acknowledge_root_retry_block" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "retry_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RootRetryBlockAcknowledgedResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "retry_observed_at"],
+      "properties": {
+        "kind": { "const": "root_retry_block_acknowledged" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "retry_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
     "PodiumConductorBody": {
       "oneOf": [
         { "$ref": "#/$defs/ConductorHandshakeCommand" },
@@ -785,6 +805,8 @@
         { "$ref": "#/$defs/LinearMutationResult" },
         { "$ref": "#/$defs/ProfileRelayMetadata" },
         { "$ref": "#/$defs/ProfileRelayResult" },
+        { "$ref": "#/$defs/AcknowledgeRootRetryBlockCommand" },
+        { "$ref": "#/$defs/RootRetryBlockAcknowledgedResult" },
         { "$ref": "common.schema.json#/$defs/ProtocolError" }
       ]
     },

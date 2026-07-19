@@ -67,6 +67,15 @@ interface ClaimDependencies {
       failureCode: string;
       observedAt: string;
     }): Promise<void>;
+    clearRetryBlock?(input: {
+      rootIssueId: string;
+      resolvedProjectId: string;
+      expectedRootUpdatedAt: string;
+      expectedCommentUpdatedAt: string;
+      expectedPerformerId?: string;
+      expectedFailureCode: string;
+      expectedObservedAt: string;
+    }): Promise<"applied" | "conflict">;
     reconstruct(rootIssueId: string): Promise<V3RootRunView>;
   };
 }
@@ -250,6 +259,49 @@ export class RootConversationLifecycle {
         },
       },
     };
+  }
+
+  async acknowledge(
+    rootIssueId: string,
+    retryObservedAt: string,
+  ): Promise<{ kind: "acknowledged" } | { kind: "rejected"; reason: string }> {
+    const fresh = await this.dependencies.claims.reconstruct(rootIssueId);
+    const managed = fresh.managedComment;
+    const remote = fresh.managedCommentRemote;
+    const block = managed?.retryBlock;
+    if (fresh.root.issueId !== rootIssueId
+      || fresh.root.state === "Done" || fresh.root.state === "Canceled"
+      || !managed || managed.conductorId !== this.dependencies.conductorId
+      || !remote || !block) {
+      return { kind: "rejected", reason: "root_retry_acknowledgement_invalid" };
+    }
+    if (block.observedAt !== retryObservedAt) {
+      return { kind: "rejected", reason: "root_retry_acknowledgement_stale" };
+    }
+    if (block.expectedPerformerId !== managed.performerId) {
+      return { kind: "rejected", reason: "root_retry_pointer_conflict" };
+    }
+    const outcome = await this.dependencies.claims.clearRetryBlock?.({
+      rootIssueId,
+      resolvedProjectId: fresh.resolvedProjectId,
+      expectedRootUpdatedAt: fresh.root.updatedAt,
+      expectedCommentUpdatedAt: remote.updatedAt,
+      ...(managed.performerId ? { expectedPerformerId: managed.performerId } : {}),
+      expectedFailureCode: block.failureCode,
+      expectedObservedAt: block.observedAt,
+    });
+    if (outcome !== "applied") {
+      return { kind: "rejected", reason: "root_retry_acknowledgement_conflict" };
+    }
+    const readBack = await this.dependencies.claims.reconstruct(rootIssueId);
+    if (readBack.root.state === "Done" || readBack.root.state === "Canceled"
+      || readBack.managedComment?.conductorId !== managed.conductorId
+      || readBack.managedComment?.performerProfileId !== managed.performerProfileId
+      || readBack.managedComment?.performerId !== managed.performerId
+      || readBack.managedComment.retryBlock !== undefined) {
+      return { kind: "rejected", reason: "root_retry_acknowledgement_read_back_mismatch" };
+    }
+    return { kind: "acknowledged" };
   }
 }
 

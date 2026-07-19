@@ -45,6 +45,7 @@ export async function decodeRootDetailView(value: JsonValue): Promise<RootDetail
     "usage",
     "events",
     "next_action",
+    "retry_observed_at",
   ]);
   const workflowNodes = requireArray(rootDetail.workflow_nodes).map(
     contracts.decodePodiumClientWorkflowNodeView,
@@ -57,6 +58,9 @@ export async function decodeRootDetailView(value: JsonValue): Promise<RootDetail
     workflow_nodes: workflowNodes,
     usage: contracts.decodePodiumClientPerformerUsageView(rootDetail.usage!),
     events,
+    ...(rootDetail.retry_observed_at === undefined
+      ? {}
+      : { retry_observed_at: rootDetail.retry_observed_at }),
     ...(rootDetail.next_action === undefined
       ? {}
       : {

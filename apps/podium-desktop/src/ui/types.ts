@@ -154,6 +154,7 @@ export interface RootDetailView {
   usage: PerformerUsageView;
   events: RuntimeEventView[];
   nextAction?: NextActionView;
+  retryObservedAt?: string;
 }
 
 export type DesktopState =
@@ -194,7 +195,8 @@ export type DesktopCommand =
       executionPolicy: AgentExecutionPolicy;
     }
   | { kind: "start_codex_chatgpt_login"; conductorId: string; profileId: string }
-  | { kind: "activate_performer_profile"; conductorId: string; profileId: string };
+  | { kind: "activate_performer_profile"; conductorId: string; profileId: string }
+  | { kind: "acknowledge_root_retry_block"; rootIssueId: string; retryObservedAt: string };
 
 export type DesktopCommandResult =
   | { kind: "accepted" }
