@@ -188,14 +188,7 @@ test("Root usage reuses the Primary comments fetched with Root headers", async (
   let commentReads = 0;
   const primaryComment = {
     id: "primary-comment",
-    body: [
-      "usage_input_tokens: 10",
-      "usage_cached_input_tokens: 2",
-      "usage_output_tokens: 3",
-      "usage_reasoning_output_tokens: 1",
-      "usage_total_tokens: 13",
-      "<!-- symphony root marker -->",
-    ].join("\n"),
+    body: v3PrimaryComment(),
     updatedAt: new Date("2026-07-16T00:00:00Z"),
   };
   const root = issue({ id: "root-1" });
@@ -233,15 +226,7 @@ test("Root usage reuses the Primary comments fetched with Root headers", async (
   });
 
   assert.equal(commentReads, 1);
-  assert.deepEqual(result.items, [{
-    rootIssueId: "root-1",
-    inputTokens: 10,
-    cachedInputTokens: 2,
-    outputTokens: 3,
-    reasoningOutputTokens: 1,
-    totalTokens: 13,
-    observedAt: "2026-07-16T00:00:00.000Z",
-  }]);
+  assert.deepEqual(result.items, []);
 });
 
 test("Root usage fails closed when header Primary comments are ambiguous", async () => {
@@ -249,12 +234,12 @@ test("Root usage fails closed when header Primary comments are ambiguous", async
   root.comments = async () => connection([
     {
       id: "primary-1",
-      body: "First\n<!-- symphony root marker -->",
+      body: v3PrimaryComment("conversation-1"),
       updatedAt: new Date("2026-07-16T00:00:00Z"),
     },
     {
       id: "primary-2",
-      body: "Second\n<!-- symphony root marker -->",
+      body: v3PrimaryComment("conversation-2"),
       updatedAt: new Date("2026-07-16T00:00:00Z"),
     },
   ]);
@@ -578,7 +563,7 @@ test("official SDK adapter upserts the Primary comment by direct id lookup", asy
   const comment = {
     id: "comment-1",
     issueId: "root-1",
-    body: "Symphony Root Run\nturn_status: planning\n<!-- symphony root marker -->",
+    body: v3PrimaryComment("conversation-1"),
     updatedAt: new Date("2026-07-16T00:00:00Z"),
   };
   const root = issue({ id: "root-1" });
@@ -604,7 +589,7 @@ test("official SDK adapter upserts the Primary comment by direct id lookup", asy
 
   await adapter.executeMutation(command);
 
-  assert.match(comment.body, /turn_status: working/u);
+  assert.match(comment.body, /performer_id: conversation-2/u);
   assert.ok(await adapter.readMutationOutcome(command));
   assert.equal(lookups, 2);
 });
@@ -617,7 +602,7 @@ test("official SDK adapter rejects an invalid Primary comment identity", async (
     {
       comment: {
         issueId: "root-other",
-        body: "Symphony Root Run\n<!-- symphony root marker -->",
+        body: v3PrimaryComment("conversation-1"),
       },
       command,
     },
@@ -628,7 +613,7 @@ test("official SDK adapter rejects an invalid Primary comment identity", async (
     {
       comment: {
         issueId: "root-1",
-        body: "Symphony Root Run\n<!-- symphony root marker -->",
+        body: v3PrimaryComment("conversation-1"),
       },
       command: {
         ...command,
@@ -698,7 +683,7 @@ test("official SDK adapter discovers the Primary comment after 65 user comments"
     })),
     {
       id: "primary-comment",
-      body: "Symphony Root Run\n<!-- symphony root marker -->",
+      body: v3PrimaryComment("conversation-1"),
       updatedAt: new Date("2026-07-16T00:00:00Z"),
     },
   ];
@@ -726,10 +711,23 @@ function rootCommentCommand(identity) {
     },
     rootIssueId: "root-1",
     body: identity.commentId
-      ? "Symphony Root Run\nturn_status: working\n<!-- symphony root marker -->"
+      ? v3PrimaryComment("conversation-2")
       : `Provider failed.\n\n<!-- symphony turn event\nevent_key: ${identity.eventKey}\n-->`,
     ...identity,
   };
+}
+
+function v3PrimaryComment(performerId = "conversation-1") {
+  return [
+    "Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
+    "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
+    "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
+    "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
+    "performer_profile_id: profile-1", `performer_id: ${performerId}`,
+    "delivery_branch: symphony/runs/root-1", "pull_request: none", "retry_blocked: false",
+    "retry_expected_performer_id: none", "retry_failure_code: none",
+    "retry_observed_at: none", "-->",
+  ].join("\n");
 }
 
 test("Project label assignment rejects a conflicting Conductor label introduced before read-back", async () => {

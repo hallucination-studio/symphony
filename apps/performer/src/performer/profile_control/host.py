@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, BinaryIO
 
-from performer.turn_protocol.contract_adapter import validate
+from performer.contracts import validate
 
 
 class ProfileControlHost:

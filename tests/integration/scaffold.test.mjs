@@ -9,7 +9,7 @@ const processEntrypoints = [
   "apps/podium-desktop/src-tauri/src/main.rs"
 ];
 
-test("each V1 process role has a scaffold entrypoint", async () => {
+test("each product process role has a scaffold entrypoint", async () => {
   await Promise.all(processEntrypoints.map((entrypoint) => access(entrypoint)));
   assert.equal(processEntrypoints.length, 4);
 });

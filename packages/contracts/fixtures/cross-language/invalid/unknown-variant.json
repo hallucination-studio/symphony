@@ -1,6 +1,14 @@
 {
-  "schema": "conductor-performer.schema.json#/$defs/PerformerTurnCommand",
+  "schema": "conductor-performer.schema.json#/$defs/RootTurnResult",
   "value": {
-    "turn_kind": "priority_scheduler"
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "root_issue_id": "root-1",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "context_digest": "abc123",
+    "result_kind": "priority_scheduler",
+    "completed_at": "2026-07-19T11:05:00Z",
+    "turn_usage": { "wall_time_ms": 1, "context_bytes": 1, "provider_tokens": 0, "broker_calls": 0, "mutations": 0 }
   }
 }

@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 
-import { ConductorRuntime } from "./composition/ConductorRuntime.js";
-import { ManagedRootActionExecutor } from "./composition/ManagedRootActionExecutor.js";
+import { V3ConductorRuntime } from "./composition/ConductorRuntime.js";
+import { AgentRootContextBuilder } from "./agent-symphony-harness/internal/AgentRootContextBuilder.js";
+import { AgentSymphonyHarnessImpl } from "./agent-symphony-harness/internal/AgentSymphonyHarnessImpl.js";
+import { RootConversationLifecycle } from "./agent-symphony-harness/internal/RootConversationLifecycle.js";
+import { RootRetryBlockCommandHandler } from "./agent-symphony-harness/internal/RootRetryBlockCommandHandler.js";
+import { RunAgentRootTurnUseCase } from "./agent-symphony-harness/internal/RunAgentRootTurnUseCase.js";
+import { ScopedAgentCommandBrokerImpl } from "./agent-symphony-harness/internal/ScopedAgentCommandBrokerImpl.js";
+import { TurnCommandBudget } from "./agent-symphony-harness/internal/TurnCommandBudget.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
 import { FilePerformerProfileStoreImpl } from "./performer-profiles/internal/FilePerformerProfileStoreImpl.js";
 import { ConductorProfileRelayHandler } from "./performer-profiles/internal/ConductorProfileRelayHandler.js";
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
 import { GlobalPerformerLane } from "./performer-turns/internal/GlobalPerformerLane.js";
-import { PerformerTurnProcessImpl } from "./performer-turns/internal/PerformerTurnProcessImpl.js";
+import { SubprocessPerformerProcessImpl } from "./performer-turns/internal/SubprocessPerformerProcessImpl.js";
 import {
   performerProcessEnvironment,
   validateCodexBaseUrl,
@@ -20,6 +26,7 @@ import {
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { GitRootDeliveryImpl } from "./root-delivery/internal/GitRootDeliveryImpl.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
+import { BoundedLinearTreeContextImpl } from "./linear-tree/internal/BoundedLinearTreeContextImpl.js";
 
 type JsonValue =
   | null
@@ -38,6 +45,10 @@ export async function runConductor(environment = process.env): Promise<void> {
   });
   const profiles = new FilePerformerProfileStoreImpl(config.dataRoot);
   const performerLane = new GlobalPerformerLane();
+  const git = new NativeGitWorkspaceImpl(
+    config.repositoryRoot,
+    path.join(config.dataRoot, "worktrees"),
+  );
   const profileControl = new PerformerProfileControlProcessImpl(
     performerLane,
     profiles,
@@ -48,6 +59,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     },
   );
   let stopping = false;
+  const runtimeHandlers: { retry?: RootRetryBlockCommandHandler } = {};
   const protocol = new InheritedProtocolClient(input, output, {
     async handleRequest(body, secret) {
       if (
@@ -58,6 +70,11 @@ export async function runConductor(environment = process.env): Promise<void> {
       ) {
         stopping = true;
         return { kind: "shutdown_conductor" };
+      }
+      if (body && typeof body === "object" && !Array.isArray(body)
+        && body.kind === "acknowledge_root_retry_block") {
+        if (!runtimeHandlers.retry) throw new Error("conductor_runtime_not_ready");
+        return runtimeHandlers.retry.handle(body);
       }
       return new ConductorProfileRelayHandler(
         config.conductorId,
@@ -73,6 +90,14 @@ export async function runConductor(environment = process.env): Promise<void> {
     profiles,
     {
       timeoutMs: 30_000,
+      conductorId: config.conductorId,
+      async gitWorkspaceFacts({ rootIssueId, branch }) {
+        const workspace = { rootIssueId, branch,
+          worktreePath: path.join(config.dataRoot, "worktrees", rootIssueId) };
+        const snapshot = await git.inspect(workspace);
+        return { branch: snapshot.branch, worktreePath: workspace.worktreePath,
+          head: snapshot.head, status: snapshot.status.items };
+      },
       async profileReadiness(profileId) {
         const result = await profileControl.status(profileId);
         const readiness = result.readiness;
@@ -87,87 +112,86 @@ export async function runConductor(environment = process.env): Promise<void> {
       },
     },
   );
-  const git = new NativeGitWorkspaceImpl(
-    config.repositoryRoot,
-    path.join(config.dataRoot, "worktrees"),
-  );
-  const executor = new ManagedRootActionExecutor({
-    conductorId: config.conductorId,
-    baseBranch: config.baseBranch,
-    gateway,
-    profiles,
-    git,
-    turns: new PerformerTurnProcessImpl(performerLane, {
+  const performer = new SubprocessPerformerProcessImpl(performerLane, {
       runtimeRoot: path.join(config.dataRoot, "turns"),
       executable: config.performerExecutable,
       environment: (profileId) => performerProcessEnvironment(
         config.codexBaseUrl,
         { CODEX_HOME: profiles.codexHome(profileId) },
       ),
-      deadlineMs: 30 * 60_000,
-    }),
-    delivery: new GitRootDeliveryImpl(),
-    now: () => new Date().toISOString(),
-    createId: randomUUID,
-    sleep: delay,
-    reportWarning(code) {
-      logEvent("warning", "managed_run_usage_update_failed", {
-        conductor_id: config.conductorId,
-        binding_id: config.bindingId,
-        instance_id: config.instanceId,
-        sanitized_reason: code,
-      });
-    },
-    reportTurnRetry(warning) {
-      logEvent("warning", "performer_turn_retry", {
-        conductor_id: config.conductorId,
-        binding_id: config.bindingId,
-        instance_id: config.instanceId,
-        attempt: String(warning.attempt),
-        error_code: warning.errorCode,
-        sanitized_reason: warning.sanitizedReason,
-      });
-    },
-    reportTurnObservation(observation) {
-      const correlation = {
-        conductor_id: config.conductorId,
-        binding_id: config.bindingId,
-        instance_id: config.instanceId,
-        turn_id: observation.turnId,
-        root_issue_id: observation.rootIssueId,
-        ...(observation.workIssueId
-          ? { work_issue_id: observation.workIssueId }
-          : {}),
-        sequence: String(observation.sequence),
-        event_kind: observation.eventKind,
-      };
-      if (observation.observationKind === "failure") {
-        logEvent("warning", "performer_turn_observation_failed", {
-          ...correlation,
-          error_code: observation.failureCode,
-          sanitized_reason: observation.sanitizedReason,
-        });
-        return;
-      }
-      logEvent(
-        observation.eventKind === "warning_raised" ||
-          observation.eventKind === "error_raised"
-          ? "warning"
-          : "info",
-        "performer_turn_event",
-        {
-          ...correlation,
-          ...(observation.code ? { event_code: observation.code } : {}),
-          ...(observation.retryable === undefined
-            ? {}
-            : { retryable: String(observation.retryable) }),
-          ...(observation.sanitizedReason
-            ? { sanitized_reason: observation.sanitizedReason }
-            : {}),
-        },
-      );
+      startupDeadlineMs: 120_000,
+      cancellationGraceMs: 1_000,
+  });
+  const readyProfile = async (profileId?: string) => {
+    const file = await profiles.list();
+    const id = profileId ?? file.activeProfileId;
+    const profile = id ? file.profiles.find(({ profileId }) => profileId === id) : undefined;
+    if (!profile || await gateway.profileReadiness(profile.profileId) !== "ready") return undefined;
+    return { ...profile, readiness: "ready" as const };
+  };
+  const conversations = new RootConversationLifecycle({
+    conductorId: config.conductorId, baseBranch: config.baseBranch,
+    now: () => new Date().toISOString(), requestId: randomUUID,
+    bootstrapDeadlineMs: 120_000,
+    profiles: { activeReadyProfile: () => readyProfile(), fixedReadyProfile: readyProfile },
+    workspaces: git, performer, claims: {
+      compareAndSetClaim: (value) => gateway.compareAndSetClaim(value),
+      compareAndSetConversation: (value) => gateway.compareAndSetConversation(value),
+      writeRetryBlock: (value) => gateway.writeRetryBlock(value),
+      appendRetryProblem: (value) => gateway.appendRetryProblem(value),
+      clearRetryBlock: (value) => gateway.clearRetryBlock(value),
+      reconstruct: (rootId) => gateway.reconstructV3(rootId),
     },
   });
+  const delivery = new GitRootDeliveryImpl(undefined, {
+    async readFreshFacts(command) {
+      const fresh = await gateway.reconstructV3(command.rootIssueId);
+      const snapshot = await git.inspect(command.workspace);
+      return {
+        root_issue_id: fresh.root.issueId,
+        root_version: fresh.root.updatedAt,
+        performer_id: fresh.managedComment?.performerId ?? "missing",
+        terminal: fresh.root.state === "Done" || fresh.root.state === "Canceled",
+        blocker_issue_ids: fresh.blockerRelations
+          .filter(({ targetState }) => targetState !== "Done" && targetState !== "Canceled")
+          .map(({ targetIssueId }) => targetIssueId),
+        tree_digest: digest(fresh.workflowNodes), tree_complete: fresh.workflowTreeComplete,
+        git_head: snapshot.head, checks_digest: digest([]), checks_passed: true,
+        ...(fresh.delivery ? { existing_delivery: fresh.delivery } : {}),
+      };
+    },
+  });
+  runtimeHandlers.retry = new RootRetryBlockCommandHandler(conversations);
+  const limits = { maxWallTimeMs: 30 * 60_000, maxContextBytes: 8_388_608,
+    maxBrokerCalls: 256, maxMutations: 64 };
+  const turns = new RunAgentRootTurnUseCase({
+    reconstruct: (rootId) => gateway.reconstructV3(rootId),
+    context: new AgentRootContextBuilder(new BoundedLinearTreeContextImpl(gateway)),
+    profiles: { get: readyProfile },
+    broker({ turnId, view, performerId }) {
+      const workspace = view.gitWorkspace && { rootIssueId: view.root.issueId,
+        branch: view.gitWorkspace.branch, worktreePath: view.gitWorkspace.worktreePath };
+      return new ScopedAgentCommandBrokerImpl({
+        conductorId: config.conductorId, turnId, rootIssueId: view.root.issueId,
+        performerId, linear: gateway, git, delivery,
+        ...(workspace ? { workspace } : {}),
+        readGitHead: async () => (await git.inspect(workspace!)).head,
+        deliveryContext: { baseBranch: config.baseBranch, title: view.root.title,
+          body: view.root.description, treeDigest: digest(view.workflowNodes),
+          checksDigest: digest([]) },
+        budget: new TurnCommandBudget(limits),
+      });
+    },
+    performer,
+    async observe({ freshView, result }) {
+      if (result && typeof result === "object" && !Array.isArray(result)
+        && result.result_kind === "root_conversation_unavailable") {
+        await conversations.retry(freshView, freshView.managedComment?.performerId);
+      }
+    },
+    turnId: randomUUID, now: () => new Date().toISOString(), limits,
+  });
+  const harness = new AgentSymphonyHarnessImpl(conversations, turns);
   const report = async (body: JsonValue) => {
     await protocol.request({
       requestId: randomUUID(),
@@ -194,11 +218,11 @@ export async function runConductor(environment = process.env): Promise<void> {
     binding_id: config.bindingId,
     instance_id: config.instanceId,
   });
-  const runtime = new ConductorRuntime(
+  const runtime = new V3ConductorRuntime(
     config.conductorId,
     gateway,
     new LinearPriorityRootSchedulingPolicyImpl(),
-    executor,
+    harness,
     {
       async report(value) {
         logEvent(value.status === "blocked" ? "error" : "info", "conductor_cycle_reported", {
@@ -290,6 +314,10 @@ function positiveInteger(value: string | undefined, code: string): number {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function digest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function logEvent(

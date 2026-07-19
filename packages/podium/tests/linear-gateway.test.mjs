@@ -311,7 +311,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
                 issueId: "root-1",
                 updatedAt: "2026-07-16T00:00:00Z",
                 managedMarker: "root-1:root-comment",
-                body: "Symphony Root Run\n<!-- symphony root marker -->",
+                body: v3PrimaryComment(),
               }],
             }],
             pageInfo: { hasNextPage: true, endCursor: "next" },
@@ -365,7 +365,7 @@ test("Root scheduling gateway rejects malformed closed values", async () => {
         issueId: "root-other",
         updatedAt: "2026-07-16T00:00:00Z",
         managedMarker: "root-other:root-comment",
-        body: "Symphony Root Run\n<!-- symphony root marker -->",
+        body: v3PrimaryComment(),
       }],
     },
     {
@@ -817,7 +817,7 @@ test("Root Managed Comment create conflicts instead of overwriting an existing c
       expectedUpdatedAt: "2026-07-16T00:00:00Z",
     },
     managedMarker: "root-1:root-comment",
-    body: "Symphony Root Run\n<!-- symphony root marker -->",
+    body: v3PrimaryComment(),
   });
 
   assert.equal(result.kind, "linear_precondition_conflict");
@@ -873,7 +873,7 @@ test("ambiguous Root comment mutation uses exact outcome read-back", async () =>
       expectedUpdatedAt: "2026-07-16T00:00:00Z",
     },
     managedMarker: "root-1:root-comment",
-    body: "Symphony Root Run\n<!-- symphony root marker -->",
+    body: v3PrimaryComment(),
   });
 
   assert.equal(result.kind, "already_applied");
@@ -1219,4 +1219,15 @@ function issue(issueId, projectId) {
     description: "",
     updatedAt: "2026-07-16T00:00:00Z",
   };
+}
+
+function v3PrimaryComment() {
+  return ["Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
+    "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
+    "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
+    "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
+    "performer_profile_id: profile-1", "performer_id: conversation-1",
+    "delivery_branch: symphony/runs/root-1", "pull_request: none", "retry_blocked: false",
+    "retry_expected_performer_id: none", "retry_failure_code: none",
+    "retry_observed_at: none", "-->"].join("\n");
 }

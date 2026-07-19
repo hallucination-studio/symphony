@@ -1,17 +1,18 @@
 {
-  "schema": "conductor-performer.schema.json#/$defs/PerformerTurnEvent",
+  "schema": "conductor-performer.schema.json#/$defs/RootTurnEvent",
   "value": {
     "protocol_version": "1",
     "turn_id": "turn-1",
     "root_issue_id": "root-1",
-    "work_issue_id": "work-1",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "context_digest": "abc123",
     "sequence": 4,
     "occurred_at": "2026-07-16T00:05:00Z",
     "body": {
-      "kind": "error_raised",
-      "error_code": "provider_unavailable",
-      "sanitized_summary": "The Provider request failed.",
-      "retryable": true
+      "kind": "error",
+      "code": "provider_unavailable",
+      "sanitized_summary": "The Provider request failed."
     }
   }
 }

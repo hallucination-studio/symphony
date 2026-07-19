@@ -1,18 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://symphony.local/contracts/conductor-performer.schema.json",
-  "title": "Conductor Performer Protocol V1",
- "$defs": {
+  "title": "Conductor Performer Protocol V3",
+  "$defs": {
     "AgentCommandRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["executable", "argv_prefix"],
+      "required": [
+        "executable",
+        "argv_prefix"
+      ],
       "properties": {
-        "executable": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "executable": {
+          "$ref": "common.schema.json#/$defs/ShortText"
+        },
         "argv_prefix": {
           "type": "array",
           "maxItems": 16,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
+          "items": {
+            "$ref": "common.schema.json#/$defs/ShortText"
+          }
         }
       }
     },
@@ -20,662 +27,381 @@
       "type": "object",
       "additionalProperties": false,
       "$comment": "Command denylist rules take precedence over command allowlist rules.",
-      "required": ["sandbox_mode", "command_allowlist", "command_denylist"],
+      "required": [
+        "sandbox_mode",
+        "command_allowlist",
+        "command_denylist"
+      ],
       "properties": {
         "sandbox_mode": {
-          "enum": ["read_only", "workspace_write", "unrestricted"],
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "unrestricted"
+          ],
           "default": "workspace_write"
         },
         "command_allowlist": {
           "type": "array",
           "maxItems": 64,
           "default": [],
-          "items": { "$ref": "#/$defs/AgentCommandRule" }
+          "items": {
+            "$ref": "#/$defs/AgentCommandRule"
+          }
         },
         "command_denylist": {
           "type": "array",
           "maxItems": 64,
           "default": [],
-          "items": { "$ref": "#/$defs/AgentCommandRule" }
+          "items": {
+            "$ref": "#/$defs/AgentCommandRule"
+          }
         }
       }
     },
-
     "CodexTurnSettings": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "reasoning_effort", "is_fast_mode_enabled"],
+      "required": [
+        "model",
+        "reasoning_effort",
+        "is_fast_mode_enabled"
+      ],
       "properties": {
-        "model": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "reasoning_effort": {
-          "enum": ["none", "minimal", "low", "medium", "high", "xhigh"]
+        "model": {
+          "$ref": "common.schema.json#/$defs/ShortText"
         },
-        "is_fast_mode_enabled": { "type": "boolean" }
-      }
-    },
-    "IssueInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["title", "description"],
-      "properties": {
-        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "TreeNodeInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["issue_id", "kind", "order", "depth", "state", "title", "description"],
-      "properties": {
-        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "kind": { "enum": ["work", "human"] },
-        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
-        "depth": { "type": "integer", "minimum": 0, "maximum": 32 },
-        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "PlanTurnBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_issue", "current_tree"],
-      "properties": {
-        "root_issue": { "$ref": "#/$defs/IssueInput" },
-        "current_tree": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/TreeNodeInput" }
+        "reasoning_effort": {
+          "enum": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        "is_fast_mode_enabled": {
+          "type": "boolean"
         }
       }
-    },
-    "HumanInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["human_issue_id", "status"],
-      "properties": {
-        "human_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "status": { "enum": ["answered", "canceled"] },
-        "answer": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "WorkLeafInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["identifier", "title", "description"],
-      "properties": {
-        "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "WorkTurnBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_issue", "work_leaf", "human_inputs"],
-      "properties": {
-        "root_issue": { "$ref": "#/$defs/IssueInput" },
-        "work_leaf": { "$ref": "#/$defs/WorkLeafInput" },
-        "human_inputs": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/HumanInput" }
-        }
-      }
-    },
-    "RootGateTurnBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_issue", "complete_tree"],
-      "properties": {
-        "root_issue": { "$ref": "#/$defs/IssueInput" },
-        "complete_tree": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/TreeNodeInput" }
-        }
-      }
-    },
-    "PlanTurnCommand": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "turn_id",
-        "turn_kind",
-        "root_issue_id",
-        "performer_profile_id",
-        "codex_turn_settings",
-        "turn_input_hash",
-        "workspace_root",
-        "started_at",
-        "hard_deadline_at",
-        "body"
-      ],
-      "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "turn_kind": { "const": "plan" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "turn_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "workspace_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "hard_deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "body": { "$ref": "#/$defs/PlanTurnBody" }
-      }
-    },
-    "WorkTurnCommand": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "turn_id",
-        "turn_kind",
-        "root_issue_id",
-        "work_issue_id",
-        "performer_profile_id",
-        "performer_id",
-        "codex_turn_settings",
-        "turn_input_hash",
-        "workspace_root",
-        "started_at",
-        "hard_deadline_at",
-        "body"
-      ],
-      "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "turn_kind": { "const": "work" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "turn_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "workspace_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "hard_deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "body": { "$ref": "#/$defs/WorkTurnBody" }
-      }
-    },
-    "RootGateTurnCommand": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "turn_id",
-        "turn_kind",
-        "root_issue_id",
-        "performer_profile_id",
-        "performer_id",
-        "codex_turn_settings",
-        "turn_input_hash",
-        "workspace_root",
-        "started_at",
-        "hard_deadline_at",
-        "body"
-      ],
-      "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "turn_kind": { "const": "root_gate" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "turn_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "workspace_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "hard_deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "body": { "$ref": "#/$defs/RootGateTurnBody" }
-      }
-    },
-    "PerformerTurnCommand": {
-      "oneOf": [
-        { "$ref": "#/$defs/PlanTurnCommand" },
-        { "$ref": "#/$defs/WorkTurnCommand" },
-        { "$ref": "#/$defs/RootGateTurnCommand" }
-      ]
     },
     "PerformerTurnUsageSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"],
-      "properties": {
-        "input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "cached_input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "reasoning_output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
-      }
-    },
-    "PlannedWorkflowNode": {
-      "type": "object",
-      "additionalProperties": false,
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["kind"],
-          "properties": {
-            "kind": { "const": "work" },
-            "target_client_node_key": false
-          }
-        },
-        {
-          "type": "object",
-          "required": ["kind", "target_client_node_key"],
-          "properties": {
-            "kind": { "const": "human" }
-          }
-        }
-      ],
-      "required": ["client_node_key", "kind", "order", "title", "description"],
-      "properties": {
-        "client_node_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "parent_client_node_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "kind": { "enum": ["work", "human"] },
-        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
-        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "existing_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "target_client_node_key": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "PlanReadyBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary", "nodes"],
-      "properties": {
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "nodes": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/PlannedWorkflowNode" }
-        }
-      }
-    },
-    "SummaryBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary"],
-      "properties": {
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "HumanInputRequiredBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["sanitized_prompt"],
-      "properties": {
-        "sanitized_prompt": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "RootGateFailedBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary", "findings"],
-      "properties": {
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "findings": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedText" }
-        }
-      }
-    },
-    "TurnFailedBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["error_code", "sanitized_reason", "retryable", "action_required"],
-      "properties": {
-        "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "retryable": { "type": "boolean" },
-        "action_required": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "TurnCanceledBody": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["sanitized_reason"],
-      "properties": {
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "PerformerTurnResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "plan" },
-            "result_kind": { "const": "plan_ready" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": { "$ref": "#/$defs/PlanReadyBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "work_issue_id", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "work" },
-            "result_kind": { "const": "work_completed" },
-            "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": { "$ref": "#/$defs/SummaryBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "work_issue_id", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "work" },
-            "result_kind": { "const": "human_input_required" },
-            "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": { "$ref": "#/$defs/HumanInputRequiredBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "root_gate" },
-            "result_kind": { "const": "root_gate_passed" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": { "$ref": "#/$defs/SummaryBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "root_gate" },
-            "result_kind": { "const": "root_gate_failed" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": { "$ref": "#/$defs/RootGateFailedBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "body"],
-          "properties": {
-            "turn_kind": { "const": "plan" },
-            "result_kind": { "const": "turn_failed" },
-            "body": { "$ref": "#/$defs/TurnFailedBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "body"],
-          "properties": {
-            "turn_kind": { "const": "plan" },
-            "result_kind": { "const": "turn_canceled" },
-            "body": { "$ref": "#/$defs/TurnCanceledBody" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "work_issue_id", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "work" },
-            "result_kind": { "enum": ["turn_failed", "turn_canceled"] },
-            "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": {
-              "oneOf": [
-                { "$ref": "#/$defs/TurnFailedBody" },
-                { "$ref": "#/$defs/TurnCanceledBody" }
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["turn_kind", "result_kind", "performer_id", "body"],
-          "properties": {
-            "turn_kind": { "const": "root_gate" },
-            "result_kind": { "enum": ["turn_failed", "turn_canceled"] },
-            "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-            "body": {
-              "oneOf": [
-                { "$ref": "#/$defs/TurnFailedBody" },
-                { "$ref": "#/$defs/TurnCanceledBody" }
-              ]
-            }
-          }
-        }
-      ],
       "required": [
-        "protocol_version",
-        "turn_id",
-        "turn_kind",
-        "result_kind",
-        "root_issue_id",
-        "performer_profile_id",
-        "turn_input_hash",
-        "completed_at",
-        "body"
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens"
       ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "turn_kind": { "enum": ["plan", "work", "root_gate"] },
-        "result_kind": {
-          "enum": ["plan_ready", "work_completed", "human_input_required", "root_gate_passed", "root_gate_failed", "turn_failed", "turn_canceled"]
+        "input_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
         },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "turn_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "usage": { "$ref": "#/$defs/PerformerTurnUsageSnapshot" },
-        "body": {}
-      }
-    },
-    "PerformerTurnEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["protocol_version", "turn_id", "root_issue_id", "sequence", "occurred_at", "body"],
-      "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sequence": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "body": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind"],
-              "properties": { "kind": { "const": "turn_started" } }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "stage"],
-              "properties": {
-                "kind": { "const": "progress" },
-                "stage": { "enum": ["context_loaded", "planning", "analyzing", "editing", "checking", "reviewing", "finalizing", "waiting_provider"] }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "warning_code", "sanitized_summary"],
-              "properties": {
-                "kind": { "const": "warning_raised" },
-                "warning_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-                "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "error_code", "sanitized_summary", "retryable"],
-              "properties": {
-                "kind": { "const": "error_raised" },
-                "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-                "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-                "retryable": { "type": "boolean" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "usage"],
-              "properties": {
-                "kind": { "const": "usage_updated" },
-                "usage": { "$ref": "#/$defs/PerformerTurnUsageSnapshot" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "result_kind", "sanitized_summary"],
-              "properties": {
-                "kind": { "const": "turn_completed" },
-                "result_kind": {
-                  "enum": ["plan_ready", "work_completed", "human_input_required", "root_gate_passed", "root_gate_failed"]
-                },
-                "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind"],
-              "properties": { "kind": { "const": "heartbeat" } }
-            }
-          ]
+        "cached_input_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "output_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "reasoning_output_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "total_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
         }
       }
     },
     "OpenRootConversationCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "performer_profile_id", "codex_turn_settings", "hard_deadline_at"],
+      "required": [
+        "protocol_version",
+        "request_id",
+        "performer_profile_id",
+        "codex_turn_settings",
+        "hard_deadline_at"
+      ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "hard_deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "request_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "codex_turn_settings": {
+          "$ref": "#/$defs/CodexTurnSettings"
+        },
+        "hard_deadline_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        }
       }
     },
     "RootConversationOpenedResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "performer_profile_id", "performer_id", "completed_at"],
+      "required": [
+        "protocol_version",
+        "request_id",
+        "performer_profile_id",
+        "performer_id",
+        "completed_at"
+      ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "request_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "completed_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        }
       }
     },
     "ConversationOpenFailedResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "performer_profile_id", "error_code", "sanitized_reason", "retryable", "completed_at"],
+      "required": [
+        "protocol_version",
+        "request_id",
+        "performer_profile_id",
+        "error_code",
+        "sanitized_reason",
+        "retryable",
+        "completed_at"
+      ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "retryable": { "type": "boolean" },
-        "action_required": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "request_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "error_code": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "sanitized_reason": {
+          "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "action_required": {
+          "$ref": "common.schema.json#/$defs/ShortText"
+        },
+        "completed_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        }
       }
     },
     "OpenRootConversationResult": {
       "oneOf": [
-        { "$ref": "#/$defs/RootConversationOpenedResult" },
-        { "$ref": "#/$defs/ConversationOpenFailedResult" }
+        {
+          "$ref": "#/$defs/RootConversationOpenedResult"
+        },
+        {
+          "$ref": "#/$defs/ConversationOpenFailedResult"
+        }
       ]
     },
     "AgentRootContextPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["json", "markdown"],
+      "required": [
+        "json",
+        "markdown"
+      ],
       "properties": {
-        "json": { "type": "string", "maxLength": 8388608 },
-        "markdown": { "type": "string", "maxLength": 8388608 }
+        "json": {
+          "type": "string",
+          "maxLength": 8388608
+        },
+        "markdown": {
+          "type": "string",
+          "maxLength": 8388608
+        }
       }
     },
     "RootCommandChannel": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "request_fd", "response_fd"],
+      "required": [
+        "kind",
+        "request_fd",
+        "response_fd"
+      ],
       "properties": {
-        "kind": { "const": "inherited_framed_channel" },
-        "request_fd": { "type": "integer", "minimum": 3, "maximum": 1024 },
-        "response_fd": { "type": "integer", "minimum": 3, "maximum": 1024 }
+        "kind": {
+          "const": "inherited_framed_channel"
+        },
+        "request_fd": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 1024
+        },
+        "response_fd": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 1024
+        }
       }
     },
     "RootTurnLimits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_wall_time_ms", "max_context_bytes", "max_broker_calls", "max_mutations"],
+      "required": [
+        "max_wall_time_ms",
+        "max_context_bytes",
+        "max_broker_calls",
+        "max_mutations"
+      ],
       "properties": {
-        "max_wall_time_ms": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
-        "max_context_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
-        "max_broker_calls": { "type": "integer", "minimum": 0, "maximum": 10000 },
-        "max_mutations": { "type": "integer", "minimum": 0, "maximum": 1000 }
+        "max_wall_time_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 86400000
+        },
+        "max_context_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_broker_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "max_mutations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        }
       }
     },
     "RootTurnCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "turn_id", "root_issue_id", "performer_profile_id", "performer_id", "codex_turn_settings", "execution_policy", "root_context", "context_digest", "command_channel", "workspace_root", "started_at", "turn_limits"],
+      "required": [
+        "protocol_version",
+        "turn_id",
+        "root_issue_id",
+        "performer_profile_id",
+        "performer_id",
+        "codex_turn_settings",
+        "execution_policy",
+        "root_context",
+        "context_digest",
+        "command_channel",
+        "workspace_root",
+        "started_at",
+        "turn_limits"
+      ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "execution_policy": { "$ref": "#/$defs/AgentExecutionPolicy" },
-        "root_context": { "$ref": "#/$defs/AgentRootContextPayload" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "command_channel": { "$ref": "#/$defs/RootCommandChannel" },
-        "workspace_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "turn_limits": { "$ref": "#/$defs/RootTurnLimits" }
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "turn_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "root_issue_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "codex_turn_settings": {
+          "$ref": "#/$defs/CodexTurnSettings"
+        },
+        "execution_policy": {
+          "$ref": "#/$defs/AgentExecutionPolicy"
+        },
+        "root_context": {
+          "$ref": "#/$defs/AgentRootContextPayload"
+        },
+        "context_digest": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "command_channel": {
+          "$ref": "#/$defs/RootCommandChannel"
+        },
+        "workspace_root": {
+          "$ref": "common.schema.json#/$defs/BoundedPath"
+        },
+        "started_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "turn_limits": {
+          "$ref": "#/$defs/RootTurnLimits"
+        }
       }
     },
     "RootTurnUsage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["wall_time_ms", "context_bytes", "provider_tokens", "broker_calls", "mutations"],
+      "required": [
+        "wall_time_ms",
+        "context_bytes",
+        "provider_tokens",
+        "broker_calls",
+        "mutations"
+      ],
       "properties": {
-        "wall_time_ms": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "context_bytes": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "provider_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "broker_calls": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "mutations": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
+        "wall_time_ms": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "context_bytes": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "provider_tokens": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "broker_calls": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "mutations": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        }
       }
     },
     "RootTurnResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "turn_id", "root_issue_id", "performer_profile_id", "performer_id", "context_digest", "result_kind", "completed_at", "turn_usage"],
+      "required": [
+        "protocol_version",
+        "turn_id",
+        "root_issue_id",
+        "performer_profile_id",
+        "performer_id",
+        "context_digest",
+        "result_kind",
+        "completed_at",
+        "turn_usage"
+      ],
       "oneOf": [
         {
           "type": "object",
           "properties": {
-            "result_kind": { "const": "root_turn_completed" },
+            "result_kind": {
+              "const": "root_turn_completed"
+            },
             "error_code": false,
             "sanitized_reason": false,
             "retryable": false,
@@ -684,10 +410,20 @@
         },
         {
           "type": "object",
-          "required": ["error_code", "sanitized_reason"],
+          "required": [
+            "error_code",
+            "sanitized_reason"
+          ],
           "properties": {
-            "result_kind": { "const": "root_conversation_unavailable" },
-            "error_code": { "enum": ["conversation_not_found", "conversation_unrecoverable"] },
+            "result_kind": {
+              "const": "root_conversation_unavailable"
+            },
+            "error_code": {
+              "enum": [
+                "conversation_not_found",
+                "conversation_unrecoverable"
+              ]
+            },
             "bounded_summary": false,
             "yield_reason": false,
             "retryable": false,
@@ -696,18 +432,28 @@
         },
         {
           "type": "object",
-          "required": ["error_code", "sanitized_reason", "retryable"],
+          "required": [
+            "error_code",
+            "sanitized_reason",
+            "retryable"
+          ],
           "properties": {
-            "result_kind": { "const": "root_turn_failed" },
+            "result_kind": {
+              "const": "root_turn_failed"
+            },
             "bounded_summary": false,
             "yield_reason": false
           }
         },
         {
           "type": "object",
-          "required": ["sanitized_reason"],
+          "required": [
+            "sanitized_reason"
+          ],
           "properties": {
-            "result_kind": { "const": "root_turn_canceled" },
+            "result_kind": {
+              "const": "root_turn_canceled"
+            },
             "bounded_summary": false,
             "yield_reason": false,
             "error_code": false,
@@ -717,50 +463,168 @@
         }
       ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "result_kind": { "enum": ["root_turn_completed", "root_conversation_unavailable", "root_turn_failed", "root_turn_canceled"] },
-        "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "usage": { "$ref": "#/$defs/PerformerTurnUsageSnapshot" },
-        "turn_usage": { "$ref": "#/$defs/RootTurnUsage" },
-        "bounded_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "yield_reason": { "enum": ["command_limit_reached", "waiting_human", "delivered", "agent_finished"] },
-        "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "retryable": { "type": "boolean" },
-        "action_required": { "$ref": "common.schema.json#/$defs/ShortText" }
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "turn_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "root_issue_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "context_digest": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "result_kind": {
+          "enum": [
+            "root_turn_completed",
+            "root_conversation_unavailable",
+            "root_turn_failed",
+            "root_turn_canceled"
+          ]
+        },
+        "completed_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "usage": {
+          "$ref": "#/$defs/PerformerTurnUsageSnapshot"
+        },
+        "turn_usage": {
+          "$ref": "#/$defs/RootTurnUsage"
+        },
+        "bounded_summary": {
+          "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "yield_reason": {
+          "enum": [
+            "command_limit_reached",
+            "waiting_human",
+            "delivered",
+            "agent_finished"
+          ]
+        },
+        "error_code": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "sanitized_reason": {
+          "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "action_required": {
+          "$ref": "common.schema.json#/$defs/ShortText"
+        }
       }
     },
     "RootTurnEvent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "turn_id", "root_issue_id", "performer_profile_id", "performer_id", "context_digest", "sequence", "occurred_at", "body"],
+      "required": [
+        "protocol_version",
+        "turn_id",
+        "root_issue_id",
+        "performer_profile_id",
+        "performer_id",
+        "context_digest",
+        "sequence",
+        "occurred_at",
+        "body"
+      ],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sequence": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "turn_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "root_issue_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_profile_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "performer_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "context_digest": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "sequence": {
+          "$ref": "common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "occurred_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
         "body": {
           "oneOf": [
             {
-              "type": "object", "additionalProperties": false, "required": ["kind"],
-              "properties": { "kind": { "enum": ["protocol_ready", "turn_started", "heartbeat", "turn_completed"] } }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "protocol_ready",
+                    "turn_started",
+                    "heartbeat",
+                    "turn_completed"
+                  ]
+                }
+              }
             },
             {
-              "type": "object", "additionalProperties": false, "required": ["kind", "stage"],
-              "properties": { "kind": { "const": "progress" }, "stage": { "enum": ["context_loaded", "resuming_conversation", "running_provider", "waiting_broker", "finalizing"] } }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "stage"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "progress"
+                },
+                "stage": {
+                  "enum": [
+                    "context_loaded",
+                    "resuming_conversation",
+                    "running_provider",
+                    "waiting_broker",
+                    "finalizing"
+                  ]
+                }
+              }
             },
             {
-              "type": "object", "additionalProperties": false, "required": ["kind", "code", "sanitized_summary"],
-              "properties": { "kind": { "enum": ["warning", "error"] }, "code": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" } }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "sanitized_summary"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "warning",
+                    "error"
+                  ]
+                },
+                "code": {
+                  "$ref": "common.schema.json#/$defs/Identifier"
+                },
+                "sanitized_summary": {
+                  "$ref": "common.schema.json#/$defs/BoundedText"
+                }
+              }
             }
           ]
         }
@@ -771,24 +635,58 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "enum": ["get_profile_status", "start_chatgpt_login"] },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "enum": [
+                "get_profile_status",
+                "start_chatgpt_login"
+              ]
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id", "secret_frame_length"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id",
+            "secret_frame_length"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "const": "set_api_key" },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "secret_frame_length": { "type": "integer", "minimum": 1, "maximum": 16384 }
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "const": "set_api_key"
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "secret_frame_length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            }
           }
         }
       ]
@@ -798,66 +696,156 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id", "readiness"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id",
+            "readiness"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "const": "profile_status" },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "readiness": { "enum": ["login-required", "ready", "invalid"] },
-            "sanitized_account_label": { "$ref": "common.schema.json#/$defs/ShortText" }
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "const": "profile_status"
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "readiness": {
+              "enum": [
+                "login-required",
+                "ready",
+                "invalid"
+              ]
+            },
+            "sanitized_account_label": {
+              "$ref": "common.schema.json#/$defs/ShortText"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "enum": ["login_started", "login_succeeded"] },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "enum": [
+                "login_started",
+                "login_succeeded"
+              ]
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id", "verification_url", "user_code", "expires_at"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id",
+            "verification_url",
+            "user_code",
+            "expires_at"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "const": "login_pending" },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "const": "login_pending"
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
             "verification_url": {
               "type": "string",
               "maxLength": 2048,
               "pattern": "^https://"
             },
-            "user_code": { "$ref": "common.schema.json#/$defs/ShortText" },
-            "expires_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+            "user_code": {
+              "$ref": "common.schema.json#/$defs/ShortText"
+            },
+            "expires_at": {
+              "$ref": "common.schema.json#/$defs/Timestamp"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["protocol_version", "request_id", "kind", "profile_id", "error"],
+          "required": [
+            "protocol_version",
+            "request_id",
+            "kind",
+            "profile_id",
+            "error"
+          ],
           "properties": {
-            "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-            "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "kind": { "const": "login_failed" },
-            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+            "protocol_version": {
+              "$ref": "common.schema.json#/$defs/ProtocolVersion"
+            },
+            "request_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "kind": {
+              "const": "login_failed"
+            },
+            "profile_id": {
+              "$ref": "common.schema.json#/$defs/Identifier"
+            },
+            "error": {
+              "$ref": "common.schema.json#/$defs/ProtocolError"
+            }
           }
         }
       ]
     },
     "ConductorPerformerMessage": {
       "oneOf": [
-        { "$ref": "#/$defs/PerformerTurnCommand" },
-        { "$ref": "#/$defs/PerformerTurnResult" },
-        { "$ref": "#/$defs/PerformerTurnEvent" },
-        { "$ref": "#/$defs/PerformerProfileControlMetadata" },
-        { "$ref": "#/$defs/PerformerProfileControlResult" }
+        {
+          "$ref": "#/$defs/OpenRootConversationCommand"
+        },
+        {
+          "$ref": "#/$defs/OpenRootConversationResult"
+        },
+        {
+          "$ref": "#/$defs/RootTurnCommand"
+        },
+        {
+          "$ref": "#/$defs/RootTurnResult"
+        },
+        {
+          "$ref": "#/$defs/RootTurnEvent"
+        },
+        {
+          "$ref": "#/$defs/PerformerProfileControlMetadata"
+        },
+        {
+          "$ref": "#/$defs/PerformerProfileControlResult"
+        }
       ]
     }
   },

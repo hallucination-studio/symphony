@@ -70,7 +70,7 @@ function run(command, args, options = {}) {
   });
 }
 
-test("all V1 protocol families are closed JSON Schema 2020-12 sources", async () => {
+test("all active protocol families are closed JSON Schema 2020-12 sources", async () => {
   for (const family of protocolFamilies) {
     const schema = await loadSchema(family);
     assert.equal(
@@ -93,7 +93,7 @@ test("all V1 protocol families are closed JSON Schema 2020-12 sources", async ()
   }
 });
 
-test("the schemas include only the approved V1 protocol vocabulary", async () => {
+test("the schemas include only the approved active protocol vocabulary", async () => {
   const schemas = await Promise.all(protocolFamilies.map(loadSchema));
   const source = JSON.stringify(schemas);
 
@@ -104,10 +104,10 @@ test("the schemas include only the approved V1 protocol vocabulary", async () =>
     "OpenExternalUrlCommand",
     "ResolveConductorProjectQuery",
     "LinearMutationCommand",
-    "PlanTurnCommand",
-    "WorkTurnCommand",
-    "RootGateTurnCommand",
-    "PerformerTurnEvent",
+    "OpenRootConversationCommand",
+    "RootTurnCommand",
+    "RootTurnResult",
+    "RootTurnEvent",
   ]) {
     assert.match(source, new RegExp(`"${requiredName}"`), requiredName);
   }
@@ -120,6 +120,11 @@ test("the schemas include only the approved V1 protocol vocabulary", async () =>
     "DeliveryReceipt",
     "PlanRevision",
     "ProviderConfigMap",
+    "PlanTurnCommand",
+    "WorkTurnCommand",
+    "RootGateTurnCommand",
+    "PerformerTurnEvent",
+    "turn_kind",
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }
@@ -245,7 +250,7 @@ test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", 
     assert.equal(schema.$defs.RootTurnResult.properties[forbidden], undefined);
   }
   assert.doesNotMatch(JSON.stringify(schema.$defs.RootTurnEvent), /usage_updated|provider_tokens/u);
-  assert.doesNotMatch(
+  assert.match(
     JSON.stringify(schema.$defs.ConductorPerformerMessage),
     /OpenRootConversation|RootTurn/u,
   );
@@ -287,7 +292,7 @@ test("generation is deterministic and check mode detects drift", async () => {
   );
   assert.deepEqual(after, before);
   assert.match(before[0], /export type PodiumClientConnectLinearCommand/);
-  assert.match(before[1], /class ConductorPerformerPlanTurnCommand/);
+  assert.match(before[1], /class ConductorPerformerRootTurnCommand/);
   assert.match(
     before[2],
     /define_contract_type!\(DesktopHostOpenExternalUrlCommand/,

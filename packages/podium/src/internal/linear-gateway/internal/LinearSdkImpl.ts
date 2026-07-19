@@ -26,7 +26,7 @@ const MAX_ROOT_COMMENTS = 4_096;
 const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
-const ROOT_MARKER = "<!-- symphony root marker -->";
+const ROOT_MARKER_START = "<!-- symphony root\n";
 const TURN_EVENT_MARKER =
   /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
 const MANAGED_IDENTITY_MARKER =
@@ -212,7 +212,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     return {
       issueId: comment.issueId,
       updatedAt: comment.updatedAt.toISOString(),
-      ...(comment.body.endsWith(ROOT_MARKER)
+      ...(isRootManagedComment(comment.body)
         ? { managedMarker: rootCommentMarker(comment.issueId) }
         : {}),
     };
@@ -561,14 +561,11 @@ export class LinearSdkImpl implements LinearClientInterface {
     limit: number;
   }): Promise<{ items: RootUsageValue[]; pageInfo: PageInfo }> {
     const roots = await this.listRootIssues(input);
-    const items: RootUsageValue[] = [];
     for (const root of roots.items) {
       const comments = root.rootManagedComments;
-      if (comments.length === 0) continue;
-      if (comments.length !== 1) throw new Error("linear_root_comment_ambiguous");
-      items.push(parseUsage(root.issue.issueId, comments[0]!));
+      if (comments.length > 1) throw new Error("linear_root_comment_ambiguous");
     }
-    return { items, pageInfo: roots.pageInfo };
+    return { items: [], pageInfo: roots.pageInfo };
   }
 
   async #replaceRootPhase(
@@ -600,7 +597,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     ) {
       throw new Error("linear_root_comment_marker_invalid");
     }
-    if (!command.body.endsWith(ROOT_MARKER)) {
+    if (!isRootManagedComment(command.body)) {
       throw new Error("linear_root_comment_marker_invalid");
     }
     if (command.commentPrecondition) {
@@ -667,12 +664,12 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #rootManagedComments(issueId: string): Promise<Comment[]> {
     const issue = await this.#client.issue(issueId);
     const comments = await this.#rootComments(issue);
-    return comments.filter(({ body }) => body.endsWith(ROOT_MARKER));
+    return comments.filter(({ body }) => isRootManagedComment(body));
   }
 
   async #rootManagedCommentValues(issue: Issue) {
     const comments = (await this.#rootComments(issue))
-      .filter(({ body }) => body.endsWith(ROOT_MARKER));
+      .filter(({ body }) => isRootManagedComment(body));
     if (comments.length > 2) {
       throw new Error("linear_root_comments_too_many");
     }
@@ -770,8 +767,8 @@ function isPrimaryCommentForRoot(
   nextBody: string,
 ): comment is Comment {
   return comment?.issueId === rootIssueId &&
-    comment.body.endsWith(ROOT_MARKER) &&
-    nextBody.endsWith(ROOT_MARKER);
+    isRootManagedComment(comment.body) &&
+    isRootManagedComment(nextBody);
 }
 
 function timelineComments(comments: Comment[], eventKey: string): Comment[] {
@@ -946,43 +943,13 @@ function managedNodeMatches(
   );
 }
 
-function parseUsage(
-  rootIssueId: string,
-  comment: { body: string; updatedAt: Date | string },
-): RootUsageValue {
-  const values = new Map<string, string>();
-  for (const line of comment.body.split("\n")) {
-    const separator = line.indexOf(":");
-    if (separator < 1) continue;
-    const key = line.slice(0, separator).trim();
-    if (values.has(key)) throw new Error("linear_root_usage_duplicate");
-    values.set(key, line.slice(separator + 1).trim());
-  }
-  const read = (key: string) => {
-    const source = values.get(key);
-    if (!source || !/^\d+$/.test(source)) throw new Error("linear_root_usage_invalid");
-    const value = Number(source);
-    if (!Number.isSafeInteger(value)) throw new Error("linear_root_usage_invalid");
-    return value;
-  };
-  const inputTokens = read("usage_input_tokens");
-  const cachedInputTokens = read("usage_cached_input_tokens");
-  if (cachedInputTokens > inputTokens) throw new Error("linear_root_usage_invalid");
-  return {
-    rootIssueId,
-    inputTokens,
-    cachedInputTokens,
-    outputTokens: read("usage_output_tokens"),
-    reasoningOutputTokens: read("usage_reasoning_output_tokens"),
-    totalTokens: read("usage_total_tokens"),
-    observedAt: typeof comment.updatedAt === "string"
-      ? comment.updatedAt
-      : comment.updatedAt.toISOString(),
-  };
-}
-
 function rootCommentMarker(issueId: string) {
   return `${issueId}:root-comment`;
+}
+
+function isRootManagedComment(body: string): boolean {
+  const marker = body.lastIndexOf(ROOT_MARKER_START);
+  return body.startsWith("Symphony\n") && marker > 0 && body.endsWith("\n-->");
 }
 
 function linearIssueState(value: string): LinearIssueState {

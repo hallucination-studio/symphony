@@ -17,9 +17,6 @@ def validate(name: str, value: Any) -> Any:
             "RootTurnCommand": "Root Turn command",
             "RootTurnResult": "Root Turn result",
             "RootTurnEvent": "Root Turn event",
-            "PerformerTurnCommand": "Performer Turn command",
-            "PerformerTurnResult": "Performer Turn result",
-            "PerformerTurnEvent": "Performer Turn event",
             "PerformerProfileControlMetadata": "Performer Profile control metadata",
             "PerformerProfileControlResult": "Performer Profile control result",
         }

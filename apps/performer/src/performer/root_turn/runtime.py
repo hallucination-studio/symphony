@@ -10,7 +10,7 @@ from performer.backends.provider_backend_interface import (
     ProviderConversationUnavailable,
     ProviderTurnDeadlineExpired,
 )
-from performer.turn_protocol.contract_adapter import validate
+from performer.contracts import validate
 
 
 class RootTurnBackend(Protocol):

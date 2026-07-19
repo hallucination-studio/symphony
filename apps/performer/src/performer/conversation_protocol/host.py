@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from performer.backends.provider_backend_interface import ProviderBackendError
-from performer.turn_protocol.contract_adapter import validate
+from performer.contracts import validate
 
 
 class ConversationFileHost:

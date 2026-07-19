@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from performer.events.event_mapper import root_turn_event
-from performer.turn_protocol.contract_adapter import validate
+from performer.contracts import validate
 
 
 class RootTurnFileHost:
@@ -23,6 +23,15 @@ class RootTurnFileHost:
             "RootTurnCommand",
             json.loads(request_path.read_text(encoding="utf-8")),
         )
+        return self.run_command(command, result_path, event_sequence_start)
+
+    def run_command(
+        self,
+        command: dict[str, Any],
+        result_path: Path,
+        event_sequence_start: int = 0,
+    ) -> dict[str, Any]:
+        command = validate("RootTurnCommand", command)
         self._emit(
             root_turn_event(command, event_sequence_start, {"kind": "turn_started"})
         )

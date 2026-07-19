@@ -393,7 +393,7 @@ export class LinearGatewayProtocolHandlerImpl {
           try {
             const outcome = await this.client.readMutationOutcome(command);
             if (outcome) return { kind: "already_applied", ...outcome };
-          } catch (readBackError) {
+          } catch {
             if (attempt === this.retry.maxAttempts) {
               return {
                 kind: "write_unconfirmed",

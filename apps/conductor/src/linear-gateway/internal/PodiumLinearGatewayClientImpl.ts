@@ -1,16 +1,16 @@
-import type { RuntimeGateway } from "../../composition/ConductorRuntime.js";
+import type { V3RuntimeGateway } from "../../composition/ConductorRuntime.js";
+import type { LinearGatewayInterface, LinearRootScopeSnapshot } from "../api/LinearGatewayInterface.js";
 import type { PerformerProfileStoreInterface } from "../../performer-profiles/api/PerformerProfileStoreInterface.js";
 import type {
   DiscoveredRoot,
   LinearIssueState,
   LinearPriority,
-  RootPhase,
-  RootRunView,
+  V3RootRunView,
   WorkflowNode,
 } from "../../root-workflow/api/Models.js";
 import {
-  hashWorkInput,
-  parseRootManagedComment,
+  parseV3RootManagedComment,
+  serializeV3RootManagedComment,
 } from "../../root-workflow/api/index.js";
 
 type JsonValue =
@@ -48,10 +48,11 @@ type WireIssue = {
   target_issue_id?: string;
 };
 
-export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
+export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGatewayInterface {
   #sequence = 0;
   #projectId: string | undefined;
   #projectUpdatedAt: string | undefined;
+  readonly #rootBlockers = new Map<string, DiscoveredRoot["blockers"]>();
 
   constructor(
     private readonly conductorShortHash: string,
@@ -59,6 +60,10 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
     private readonly profiles: PerformerProfileStoreInterface,
     private readonly options: {
       timeoutMs: number;
+      conductorId?: string;
+      gitWorkspaceFacts?(input: {
+        rootIssueId: string; rootIdentifier: string; branch: string;
+      }): Promise<V3RootRunView["gitWorkspace"]>;
       profileReadiness(
         profileId: string,
       ): Promise<"login-required" | "ready" | "invalid">;
@@ -119,11 +124,11 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
       for (const value of items) {
         const item = record(value);
         const issue = wireIssue(item.issue);
-        const managed = managedCommentSnapshots(
+        const managed = v3ManagedCommentSnapshots(
           item.root_managed_comments,
           issue.issue_id,
         );
-        roots.push({
+        const discovered: DiscoveredRoot = {
           issueId: issue.issue_id,
           identifier: issue.identifier,
           state: issue.state,
@@ -144,7 +149,9 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
           ...(managed.comment
             ? { managedConductorId: managed.comment.conductorId }
             : {}),
-        });
+        };
+        roots.push(discovered);
+        this.#rootBlockers.set(discovered.issueId, discovered.blockers);
         if (roots.length > 512) throw new Error("linear_roots_too_many");
       }
       const pageInfo = record(response.page_info);
@@ -163,115 +170,222 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
     return roots;
   }
 
-  async reconstruct(rootId: string): Promise<RootRunView> {
+  async reconstructV3(rootId: string): Promise<V3RootRunView> {
     const projectId = this.#projectId;
-    if (!projectId) throw new Error("linear_project_not_resolved");
-    const state = await this.#managedState(projectId, rootId);
+    const conductorId = this.options.conductorId;
+    if (!projectId || !conductorId) throw new Error("linear_v3_runtime_not_configured");
+    const state = await this.#v3ManagedState(projectId, rootId);
     const root = state.nodes.find(({ issue_id }) => issue_id === rootId);
     if (!root) throw new Error("linear_tree_root_missing");
-    const profileId = state.managedComment?.performerProfileId;
-    const profileFile = await this.profiles.list();
+    const profiles = await this.profiles.list();
+    const profileId = state.managedComment?.performerProfileId
+      ?? profiles.activeProfileId;
     const profile = profileId
-      ? profileFile.profiles.find(({ profileId: candidate }) => candidate === profileId)
+      ? profiles.profiles.find(({ profileId: candidate }) => candidate === profileId)
       : undefined;
     const workflowNodes = state.nodes
       .filter(({ issue_id }) => issue_id !== rootId)
-      .map((node) =>
-        workflowNode(
-          node,
-          rootId,
-          state.humanAnswers.get(node.issue_id),
-        ),
-      );
-    for (const work of workflowNodes.filter(
-      (node): node is WorkflowNode & { kind: "work" } => node.kind === "work",
-    )) {
-      work.currentInputHash = hashWorkInput(
-        { title: root.title, description: root.description },
-        {
-          identifier: work.identifier,
-          title: work.title,
-          description: work.description,
-          humanInputs: workflowNodes
-            .filter(
-              (node) =>
-                node.kind === "human" && node.targetIssueId === work.issueId,
-            )
-            .map((node) => ({
-              issueId: node.issueId,
-              status: node.state === "Canceled" ? "canceled" : "answered",
-              ...(node.answer ? { answer: node.answer } : {}),
-            })),
-          isLeaf: !workflowNodes.some(
-            ({ parentIssueId }) => parentIssueId === work.issueId,
-          ),
-        },
-      );
-    }
+      .map((node) => workflowNode(node, rootId, state.humanAnswers.get(node.issue_id)));
+    const gitWorkspace = state.managedComment && this.options.gitWorkspaceFacts
+      ? await this.options.gitWorkspaceFacts({
+          rootIssueId: rootId,
+          rootIdentifier: root.identifier,
+          branch: state.managedComment.deliveryBranch,
+        })
+      : undefined;
     return {
-      root: {
-        issueId: root.issue_id,
-        identifier: root.identifier,
-        state: root.state,
-        title: root.title,
-        description: root.description,
-        updatedAt: root.updated_at,
-      },
-      conductorId: state.managedComment?.conductorId ?? "unclaimed",
+      root: rootIssue(root),
+      conductorId,
       resolvedProjectId: projectId,
-      phaseLabels: state.phaseLabels,
-      ...(state.managedComment
-        ? { managedComment: state.managedComment }
-        : {}),
+      ...(state.managedComment ? { managedComment: state.managedComment } : {}),
       ...(state.managedCommentRemote
-        ? { managedCommentRemote: state.managedCommentRemote }
-        : {}),
-      ...(profile
-        ? {
-            profile: {
-              profileId: profile.profileId,
-              readiness: await this.options.profileReadiness(profile.profileId),
-            },
-          }
-        : {}),
+        ? { managedCommentRemote: state.managedCommentRemote } : {}),
+      ...(profile ? { profile: {
+        profileId: profile.profileId,
+        readiness: await this.options.profileReadiness(profile.profileId),
+      } } : {}),
       workflowNodes,
+      workflowTreeComplete: true,
+      blockerRelations: this.#rootBlockers.get(rootId) ?? [],
+      ...(gitWorkspace ? { gitWorkspace } : {}),
+      attentionProblems: [],
     };
   }
 
-  async #managedState(projectId: string, rootId: string) {
-    const response = record(
-      await this.#request({
-        kind: "get_issue_tree",
-        project_id: projectId,
-        root_issue_id: rootId,
-        page: { limit: 250 },
-      }),
-    );
+  async readFreshRootScope(rootIssueId: string): Promise<LinearRootScopeSnapshot> {
+    const view = await this.reconstructV3(rootIssueId);
+    return {
+      root_issue_id: rootIssueId,
+      conductor_id: view.managedComment?.conductorId ?? "unclaimed",
+      ...(view.managedComment?.performerId
+        ? { performer_id: view.managedComment.performerId } : {}),
+      terminal: view.root.state === "Done" || view.root.state === "Canceled",
+      issues: [{ issue_id: view.root.issueId, identifier: view.root.identifier,
+        updated_at: view.root.updatedAt }, ...view.workflowNodes.map((issue) => ({
+        issue_id: issue.issueId, identifier: issue.identifier,
+        updated_at: issue.updatedAt,
+        parent_issue_id: issue.parentIssueId ?? rootIssueId,
+      }))],
+    };
+  }
+
+  async read(input: {
+    rootIssueId: string; issueId: string; include: string[];
+    cursor?: string; limit?: number;
+  }): Promise<JsonValue> {
+    const scope = await this.readFreshRootScope(input.rootIssueId);
+    const issue = scope.issues.find(({ issue_id }) => issue_id === input.issueId);
+    if (!issue) throw new Error("linear_target_out_of_scope");
+    return { issue, include: input.include.slice(0, 16) } as unknown as JsonValue;
+  }
+
+  async readRootContext(rootIssueId: string) {
+    const view = await this.reconstructV3(rootIssueId);
+    const section = (items: JsonValue[], cap: number) => ({
+      items: items.slice(0, cap), cap, hasMore: items.length > cap, includeErrors: [],
+    });
+    return {
+      root: section([view.root as unknown as JsonValue], 1),
+      tree: section(view.workflowNodes as unknown as JsonValue[], 512),
+      ancestors: section([], 32),
+      comments: section([], 128),
+      relations: section(view.blockerRelations as unknown as JsonValue[], 512),
+    };
+  }
+
+  async compareAndSetClaim(input: {
+    rootIssueId: string; resolvedProjectId: string; expectedRootUpdatedAt: string;
+    expectedRootState: "Todo"; expectedManagedComment: "none";
+    managedComment: import("../../root-workflow/api/Models.js").V3RootManagedComment;
+  }) {
+    this.#assertProject(input.resolvedProjectId);
+    return mutationCas(await this.sendMutation({
+      kind: "upsert_root_managed_comment", project: this.projectPrecondition(),
+      root_precondition: { expected_issue_id: input.rootIssueId,
+        expected_updated_at: input.expectedRootUpdatedAt,
+        expected_state: input.expectedRootState },
+      managed_marker: `${input.rootIssueId}:root-comment`,
+      body: serializeV3RootManagedComment(input.managedComment),
+    }));
+  }
+
+  async compareAndSetConversation(input: {
+    rootIssueId: string; resolvedProjectId: string; expectedRootUpdatedAt: string;
+    expectedCommentUpdatedAt: string; expectedPerformerId?: string; performerId: string;
+  }) {
+    return this.#replaceManagedComment(input, (managed) => ({ ...managed,
+      performerId: input.performerId }));
+  }
+
+  async writeRetryBlock(input: {
+    rootIssueId: string; resolvedProjectId: string; expectedRootUpdatedAt: string;
+    expectedCommentUpdatedAt: string; expectedPerformerId?: string;
+    retryBlock: import("../../root-workflow/api/Models.js").RootRetryBlock;
+  }) {
+    return this.#replaceManagedComment(input, (managed) => ({ ...managed,
+      retryBlock: input.retryBlock }));
+  }
+
+  async clearRetryBlock(input: {
+    rootIssueId: string; resolvedProjectId: string; expectedRootUpdatedAt: string;
+    expectedCommentUpdatedAt: string; expectedPerformerId?: string;
+    expectedFailureCode: string; expectedObservedAt: string;
+  }) {
+    return this.#replaceManagedComment(input, (managed) => {
+      if (managed.retryBlock?.failureCode !== input.expectedFailureCode
+        || managed.retryBlock.observedAt !== input.expectedObservedAt) {
+        throw new Error("root_retry_acknowledgement_stale");
+      }
+      const next = { ...managed };
+      delete next.retryBlock;
+      return next;
+    });
+  }
+
+  async appendRetryProblem(input: {
+    rootIssueId: string; writeId: string; failureCode: string; observedAt: string;
+  }) {
+    const eventKey = `root-retry-${input.rootIssueId}:0`;
+    await this.sendMutation({ kind: "project_root_comment",
+      project: this.projectPrecondition(), root_issue_id: input.rootIssueId,
+      event_key: eventKey,
+      body: `Symphony Timeline\n${input.failureCode}\nObserved: ${input.observedAt}\n<!-- symphony turn event\nevent_key: ${eventKey}\n-->` });
+  }
+
+  async #replaceManagedComment(
+    input: { rootIssueId: string; resolvedProjectId: string;
+      expectedRootUpdatedAt: string; expectedCommentUpdatedAt: string;
+      expectedPerformerId?: string },
+    update: (managed: import("../../root-workflow/api/Models.js").V3RootManagedComment) =>
+      import("../../root-workflow/api/Models.js").V3RootManagedComment,
+  ) {
+    this.#assertProject(input.resolvedProjectId);
+    const current = await this.reconstructV3(input.rootIssueId);
+    const managed = current.managedComment;
+    const remote = current.managedCommentRemote;
+    if (!managed || !remote || remote.updatedAt !== input.expectedCommentUpdatedAt
+      || managed.performerId !== input.expectedPerformerId) return "conflict" as const;
+    return mutationCas(await this.sendMutation({
+      kind: "upsert_root_managed_comment", project: this.projectPrecondition(),
+      root_precondition: { expected_issue_id: input.rootIssueId,
+        expected_updated_at: input.expectedRootUpdatedAt },
+      comment_precondition: { expected_issue_id: remote.commentId,
+        expected_updated_at: remote.updatedAt,
+        expected_managed_marker: `${input.rootIssueId}:root-comment` },
+      managed_marker: `${input.rootIssueId}:root-comment`,
+      body: serializeV3RootManagedComment(update(managed)),
+    }));
+  }
+
+  async mutate(input: Parameters<LinearGatewayInterface["mutate"]>[0]) {
+    const args = input.args;
+    const project = this.projectPrecondition();
+    const precondition = (issueId: string) => ({
+      expected_issue_id: issueId,
+      expected_updated_at: requiredString(args.expected_remote_version),
+    });
+    let command: JsonValue;
+    if (input.command === "linear.status.set") {
+      command = { kind: "update_issue_state", project,
+        precondition: precondition(requiredString(args.issue_id)),
+        state: requiredString(args.status) };
+    } else if (input.command === "linear.comment.create") {
+      command = { kind: "project_root_comment", project,
+        root_issue_id: input.rootIssueId,
+        event_key: `${requiredString(args.write_id)}:0`,
+        body: `${requiredString(args.body)}\n\n<!-- symphony turn event\nevent_key: ${requiredString(args.write_id)}:0\n-->` };
+    } else {
+      return { kind: "rejected" as const, code: "linear_command_unsupported",
+        summary: "The requested Linear mutation is not supported." };
+    }
+    const result = await this.sendMutation(command);
+    if (result.kind === "applied") return { kind: "applied" as const, summary: "Mutation applied." };
+    if (result.kind === "already_applied") return { kind: "already_applied" as const, summary: "Mutation already applied." };
+    if (result.kind === "linear_precondition_conflict") return { kind: "conflict" as const, summary: "Linear precondition changed." };
+    if (result.kind === "write_unconfirmed") return {
+      kind: "unconfirmed" as const, summary: "Mutation requires read-back.",
+      read_back_target: { kind: "issue" as const, issue_id: requiredString(args.issue_id ?? input.rootIssueId) },
+    };
+    return { kind: "failed" as const, code: "linear_mutation_failed", summary: "Linear mutation failed." };
+  }
+
+  async #v3ManagedState(projectId: string, rootId: string) {
+    const response = record(await this.#request({
+      kind: "get_issue_tree", project_id: projectId,
+      root_issue_id: rootId, page: { limit: 250 },
+    }));
     if (response.kind !== "issue_tree_page") throw protocolError(response);
     const tree = record(response.tree);
-    const managed = managedCommentSnapshots(
-      tree.root_managed_comments,
-      rootId,
-    );
-    const phases = array(tree.root_phase_labels, "root_phase_labels_invalid");
-    if (phases.length > 1) throw new Error("root_phase_ambiguous");
+    const managed = v3ManagedCommentSnapshots(tree.root_managed_comments, rootId);
     return {
       nodes: array(tree.nodes, "linear_tree_invalid").map(wireIssue),
-      humanAnswers: new Map(
-        array(tree.human_answers, "linear_human_answers_invalid").map(
-          (value) => {
-            const answer = record(value);
-            return [
-              string(
-                answer.human_issue_id,
-                "linear_human_answer_issue_invalid",
-              ),
-              string(answer.answer, "linear_human_answer_invalid"),
-            ];
-          },
-        ),
-      ),
-      phaseLabels: phases.map(rootPhase),
+      humanAnswers: new Map(array(tree.human_answers, "linear_human_answers_invalid").map(
+        (value) => {
+          const answer = record(value);
+          return [string(answer.human_issue_id, "linear_human_answer_issue_invalid"),
+            string(answer.answer, "linear_human_answer_invalid")] as const;
+        },
+      )),
       ...(managed.comment ? { managedComment: managed.comment } : {}),
       ...(managed.remote ? { managedCommentRemote: managed.remote } : {}),
     };
@@ -288,7 +402,7 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
     };
   }
 
-  async mutate(body: JsonValue) {
+  async sendMutation(body: JsonValue) {
     return record(await this.#request(body));
   }
 
@@ -369,38 +483,32 @@ function workflowNode(
   return work;
 }
 
-function managedCommentSnapshots(
-  value: JsonValue | undefined,
-  rootIssueId: string,
-) {
+function v3ManagedCommentSnapshots(value: JsonValue | undefined, rootIssueId: string) {
   const comments = array(value, "root_managed_comments_invalid");
   if (comments.length > 1) throw new Error("root_managed_comment_ambiguous");
   if (!comments[0]) return {};
   const snapshot = record(comments[0]);
-  if (
-    string(snapshot.issue_id, "root_managed_comment_issue_invalid") !== rootIssueId ||
-    string(snapshot.managed_marker, "root_managed_comment_marker_invalid") !==
-      `${rootIssueId}:root-comment`
-  ) {
+  if (string(snapshot.issue_id, "root_managed_comment_issue_invalid") !== rootIssueId
+    || string(snapshot.managed_marker, "root_managed_comment_marker_invalid")
+      !== `${rootIssueId}:root-comment`) {
     throw new Error("root_managed_comment_identity_invalid");
   }
-  const parsed = parseRootManagedComment(
-    string(snapshot.body, "root_managed_comment_invalid"),
-  );
+  const parsed = parseV3RootManagedComment(string(snapshot.body, "root_managed_comment_invalid"));
   if (!parsed.ok) throw new Error(parsed.error);
-  return {
-    comment: parsed.value,
-    remote: {
-      commentId: string(
-        snapshot.comment_id,
-        "root_managed_comment_id_invalid",
-      ),
-      updatedAt: string(
-        snapshot.updated_at,
-        "root_managed_comment_updated_at_invalid",
-      ),
-    },
-  };
+  return { comment: parsed.value, remote: {
+    commentId: string(snapshot.comment_id, "root_managed_comment_id_invalid"),
+    updatedAt: string(snapshot.updated_at, "root_managed_comment_updated_at_invalid"),
+  } };
+}
+
+function rootIssue(issue: WireIssue) {
+  return { issueId: issue.issue_id, identifier: issue.identifier, state: issue.state,
+    title: issue.title, description: issue.description, updatedAt: issue.updated_at };
+}
+
+function requiredString(value: JsonValue | undefined): string {
+  if (typeof value !== "string") throw new Error("linear_command_string_invalid");
+  return value;
 }
 
 function wireIssue(value: JsonValue | undefined): WireIssue {
@@ -476,16 +584,12 @@ function linearIssueState(value: JsonValue | undefined): LinearIssueState {
   throw new Error("linear_issue_state_invalid");
 }
 
-function rootPhase(value: JsonValue): RootPhase {
-  if (
-    value === "planning" || value === "awaiting-human" || value === "working" ||
-    value === "gating" || value === "delivering" || value === "in-review" ||
-    value === "blocked" || value === "failed"
-  ) return value;
-  throw new Error("root_phase_invalid");
-}
-
 function protocolError(response: Record<string, JsonValue>): Error {
   const code = typeof response.code === "string" ? response.code : "private_protocol_unexpected_result";
   return new Error(code);
+}
+
+function mutationCas(response: Record<string, JsonValue>): "applied" | "conflict" {
+  return response.kind === "applied" || response.kind === "already_applied"
+    ? "applied" : "conflict";
 }
