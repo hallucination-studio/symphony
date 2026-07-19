@@ -31,3 +31,16 @@ export interface GitWorkspaceInterface {
     expectedHead: string;
   }): Promise<{ kind: "committed" | "no_changes"; commit: string }>;
 }
+
+export interface GitWorktreeCleanupInput {
+  workspace: GitWorkspace;
+  terminal: boolean;
+  explicitlyAuthorized: boolean;
+  hasLiveWriter: boolean;
+  hasActivePermit: boolean;
+  deliveryProven: boolean;
+}
+
+export interface GitWorktreeCleanupInterface {
+  cleanup(input: GitWorktreeCleanupInput): Promise<{ kind: "removed" }>;
+}

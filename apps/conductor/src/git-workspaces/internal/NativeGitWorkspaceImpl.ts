@@ -6,11 +6,14 @@ import type {
   GitWorkspace,
   GitWorkspaceInterface,
   GitWorkspaceSnapshot,
+  GitWorktreeCleanupInput,
+  GitWorktreeCleanupInterface,
 } from "../api/GitWorkspaceInterface.js";
+import { SafeWorktreeCleanup } from "./SafeWorktreeCleanup.js";
 
 export type { GitWorkspace } from "../api/GitWorkspaceInterface.js";
 
-export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
+export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktreeCleanupInterface {
   constructor(
     private readonly repositoryRoot: string,
     private readonly worktreeRoot: string,
@@ -131,6 +134,10 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
     const readBack = await this.#readCommitOutcome(input.workspace, input.expectedHead, message);
     if (!readBack) throw new Error("git_commit_unconfirmed");
     return { kind: "committed" as const, commit: readBack };
+  }
+
+  cleanup(input: GitWorktreeCleanupInput) {
+    return new SafeWorktreeCleanup(this.repositoryRoot, this.worktreeRoot).cleanup(input);
   }
 
   async commitWork(workspace: GitWorkspace, message: string) {
