@@ -1,4 +1,4 @@
-# Git Worktree 与代码交付
+# Git Worktree与Root交付
 
 状态：目标架构提案。Symphony只接受Git repository；一个Root对应一个deterministic branch和worktree。
 
@@ -8,161 +8,134 @@
 Linear Root
   -> symphony/runs/<root-identifier-lower> branch
   -> <conductor-data-root>/worktrees/<root-issue-id> worktree
-  -> Work Turns and Conductor commits
+  -> Root Agent edits + brokered commits/checks
   -> Root Gate
-  -> PR when gh is usable
-     otherwise branch delivery
+  -> PR when gh is usable, otherwise branch delivery
 ```
 
-不存在非Git目录模式，也不把修改复制回普通目录。
+不存在非Git目录模式、per-Leaf branch/worktree或把修改复制回普通目录。
 
-## 2. Conductor Binding与Repository Context
+## 2. Repository Context
 
-创建Conductor时，Podium Desktop让用户选择：
+Conductor Binding保存用户选择的local Git repository和base branch。Conductor启动时验证repository
+identity、Git binary、base branch、deterministic run branch和worktree identity。原工作目录中的
+未提交修改不进入Root worktree，也不被Conductor清理或覆盖。
 
-- 一个Linear Project；
-- 一个本地Git repository；
-- 一个base branch。
+Branch和worktree名称只从稳定Root identity推导，不使用Issue title、Comment或Agent输出：
 
-Conductor Binding保存稳定Repository Context。Conductor启动时验证：
-
-- 路径仍是同一个Git repository；
-- `git`可用；
-- base branch存在；
-- deterministic run branch没有指向冲突身份；
-- worktree可以创建或重新发现。
-
-原工作目录中的未提交修改不自动进入Root worktree，也不被Conductor清理或覆盖。
+```text
+branch:   symphony/runs/<root-identifier-lower>
+worktree: <conductor-data-root>/worktrees/<root-issue-id>
+```
 
 ## 3. 所有权
 
 Conductor拥有：
 
-- branch/worktree命名、创建、发现和清理；
-- Work完成后的commit；
-- push、`gh`检查和PR创建；
-- Root Delivery信息写回Root Primary Status Comment。
+- branch/worktree创建、发现、identity验证和safe cleanup；
+- brokered commit和checks correlation；
+- push、`gh`检查、PR查找/创建和branch delivery；
+- delivery写回Root Primary Status Comment。
 
-Performer只拥有给定worktree中的文件修改。Performer不得：
-
-- 创建、切换或删除branch/worktree；
-- commit、merge、rebase、reset、clean或push；
-- 调用`gh`；
-- 修改Git topology。
-
-Podium只保存Conductor Binding，不操作Root branch或PR。
+Performer/Root Agent可以读取和修改给定worktree、运行开发工具，并通过closed broker请求commit或
+delivery；不能直接创建/切换/删除branch/worktree，不能commit、merge、rebase、reset、clean、push或
+调用`gh`。
 
 ## 4. 创建与恢复
 
-Branch名称固定为：
+首次claim Root：
 
-```text
-symphony/runs/<root-identifier-lower>
-```
-
-Worktree路径固定从Root issue ID推导。名称不使用Issue title或Comment。
-
-首次处理Root：
-
-1. 验证Conductor Binding中的Repository Context和base branch；
-2. 从base branch创建deterministic run branch；
-3. 为该branch创建worktree；
+1. 验证Repository Context和base branch；
+2. 创建或验证deterministic branch；
+3. 创建或验证该branch的worktree；
 4. 把branch写入Root Primary Status Comment；
-5. 才启动Plan Turn。
+5. 才bootstrap Root Conversation并开放Root Turn。
 
-重启时不读取workspace receipt：
+重启或Root retry：
 
-- branch和worktree都存在且匹配：复用；
-- branch存在、worktree缺失：从该branch重建worktree；
-- worktree存在但branch不匹配：Root blocked；
-- branch指向其他Root身份：Root blocked，不删除或接管；
-- worktree中有未commit修改：视为中断Turn留下的代码，使用同一`performer_id`继续。
+- branch/worktree都存在且identity匹配：复用；
+- branch存在、worktree缺失：从该branch重建；
+- worktree存在但branch/Root identity不匹配：`needs_attention`；
+- worktree有未提交修改：作为Root Git事实保留，新Root Turn审计后继续或返工；
+- 不读取workspace receipt，不reset/clean猜测恢复。
 
-## 5. Work提交
+Conversation替换不创建新branch/worktree，也不改变Git HEAD。
 
-一个Work Leaf的Work Turn成功且Linear read-back仍允许应用时：
+## 5. Brokered commit
+
+Root Agent完成一个Work Leaf时调用：
 
 ```text
-inspect worktree
--> create one Conductor-owned commit for current Work
--> record current Work input hash in Work Managed Metadata
--> update Work to In Review
+symphony git commit --issue <work-issue-id> ...
 ```
 
-Commit message使用稳定Root/Work identifier，不使用未转义自由文本。若Turn没有代码变化但任务本身可以无代码完成，Conductor仍可把Work置为In Review；是否完成由Performer Result负责，Conductor不附加独立Verification、Manifest或Evidence层。
+Broker在commit前验证：
 
-三步中的任意一步都允许重启后继续收敛：
+- Root、current `performer_id`和worktree identity；
+- Work仍属于当前Root且remote precondition成立；
+- worktree identity和expected Git HEAD；
+- staged/unstaged changes均位于Root worktree；
+- requested checks的真实结果。
 
-- commit成功但`completed_input_hash`未写：Work仍为In Progress，下一Turn使用同一
-  Conversation和当前worktree重新确认完成，再补齐Linear状态；
-- hash已写但Work仍为In Progress：Conductor直接补写In Review，不重新执行；
-- Work已经In Review/Done但hash缺失或损坏：Root blocked，不把当前内容自动当作完成；
-- 任何Linear写入都必须使用最新Issue version/state precondition，冲突时重新读取，
-  不能覆盖用户刚刚执行的Canceled或状态修改。
+Commit message使用稳定Root/Work identifiers，不拼接未转义自由文本。Commit成功后Agent写可读的
+Work Completion Comment，包含summary、checks和commit SHA，再把Work置为In Review。无代码任务也
+必须在Linear留下明确完成证据；Performer Result本身不负责完成。
 
-Conductor不把多个Root放在同一branch，也不把Work commit直接写入base branch。
+中断后从Linear/Git收敛：
 
-## 6. Root Gate与交付
+- commit存在但Completion Comment缺失：新Root Turn审计commit并补写或返工；
+- Completion Comment存在但Work仍In Progress：read-back evidence和Issue version后补写In Review；
+- Work业务内容晚于Completion Comment：重开Work；
+- remote state/parent/version冲突：不覆盖用户更新，重新读取Root。
 
-全部有效Work Leaves完成后，Performer执行Root Gate。
+Completion evidence是Linear/Git事实，不是Conductor Leaf checkpoint或Result ledger。
 
-Gate失败：
+## 6. Root Gate与delivery
 
-- branch/worktree保留；
-- Conductor创建或更新Root Gate Rework Node；
-- 不push、不创建PR。
+Root Agent在最新Tree/Git上执行Root Gate。失败时写findings并创建/重开Rework child，不push或创建PR。
+通过时调用：
 
-Gate通过：
+```text
+symphony root deliver ...
+```
 
-1. 把非Canceled的In Review Work Nodes/Work Groups置为Done；
-2. Root Phase变为`delivering`；
-3. 确认branch包含最新Work commit；
-4. 尝试GitHub PR交付；
-5. 无法创建PR时交付branch；
-6. 写回branch、commit、PR或明确的branch-only原因；
-7. Root进入In Review。
+Conductor在命令时重新验证Root ownership/state、blockers、Tree completion evidence、Git HEAD、checks和
+已有delivery。交付顺序：
 
-Symphony不自动merge、rebase、squash、cherry-pick或把Root置为Done。
+```text
+find/reuse existing PR for deterministic head
+-> push branch when possible
+-> create PR when GitHub remote + authenticated gh are available
+-> otherwise record remote or local branch delivery
+-> write Root delivery facts
+-> Root In Review
+```
 
-## 7. PR与branch策略
+Symphony不自动merge、rebase、squash、cherry-pick或把Root置为Done。重复delivery必须先查找既有PR，
+避免crash/retry后重复创建。
 
-PR路径只在以下条件成立时使用：
+## 7. In Review之后
 
-- repository有GitHub remote；
-- `gh`命令可用且已认证；
-- branch可以push；
-- 可以查找或创建对应PR。
+Root In Review表示代码已经以PR或branch交付。只有用户或外部SCM/Linear automation把Root置为Done。
 
-Conductor先按deterministic head branch查找现有PR，再决定是否创建，避免重启后重复PR。
+Root/Work内容没有变化时不继续修改branch。Root目标变化、新增/reopen Work或completion evidence失效
+时，Root回到In Progress并重新进入Root scheduling；继续复用同一branch/worktree。若current
+Conversation仍可用就resume，失效则Root-level retry后使用新Conversation。完成后重新Gate和delivery。
 
-不能创建PR时，branch就是交付物：
+Done/Canceled Root不自动重开。
 
-- 能push时，写remote branch；
-- 不能push时，保留local branch并写清楚原因；
-- 不因PR不可用重新执行Work或Root Gate；
-- 不伪造PR成功。
+## 8. Cleanup
 
-## 8. In Review之后
-
-Root进入In Review表示代码已经以PR或branch形式交付，等待用户审核。只有用户或外部SCM/Linear automation把Root置为Done。
-
-In Review期间：
-
-- Root/Work输入没有变化时，Conductor不继续修改该Root branch；
-- Root title/description变化时，Root自动回到In Progress + planning；
-- 已完成Work Leaf的title/description变化时，该Work重新进入In Progress，Root回到working；
-- 新增Todo Work Node时，Root回到working并按最新Linear顺序执行；
-- 继续处理时复用同一Root、branch、worktree和`performer_id`，并在完成后重新Root Gate和交付；
-- Done/Canceled Root不自动重开。
+cleanup不是Root完成条件。只有Root Done/Canceled或用户明确请求，且没有live process或writer、
+worktree identity完全匹配、没有未提交/未push/未交付修改时才能删除。任何证明不足都停止并显示原因。
 
 ## 9. 不变量
 
 1. Symphony只处理Git repository。
 2. 一个Root只有一个deterministic branch和worktree。
-3. Performer不能修改Git topology。
-4. Work成功后由Conductor commit。
-5. Root Gate通过前不交付。
-6. PR是优先交付面，branch是必备交付面。
-7. Symphony不自动合并base branch。
-8. Git与Linear足以重建交付状态，不保存Delivery Receipt。
-9. Root或Work变化后的新交付继续使用同一branch，不创建第二个Root branch。
+3. Leaf和Conversation retry不创建第二branch/worktree。
+4. Performer不能直接修改Git topology或delivery。
+5. commit和delivery通过Conductor broker并在执行时read-back。
+6. Root Gate通过前不交付；Root不自动Done。
+7. Git与Linear足以重建代码/交付状态，不保存Delivery Receipt或Leaf checkpoint。
+8. Root retry保留worktree、commits和未提交修改。

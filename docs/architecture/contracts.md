@@ -1,31 +1,28 @@
 # 契约与接口边界
 
-状态：目标架构提案。所有模块交互只依赖`*Interface`；具体技术实现使用`*Impl`并保持内部可见。
+状态：目标架构提案。所有模块交互只依赖`*Interface`和closed generated schemas；具体技术实现使用
+`*Impl`并保持内部可见。目标架构只维护一个当前Protocol版本，不为旧状态机保留兼容union。
 
-## 1. 命名
-
-命名规则的唯一事实源是[代码模块与命名规范](code-organization.md)。本文件只约束
-跨模块和跨进程契约，不重新定义后缀表。
-
-边界示例：
+## 1. 模块接口
 
 ```text
-LinearGatewayInterface    <- PodiumLinearGatewayClientImpl
-RootSchedulingPolicyInterface <- LinearPriorityRootSchedulingPolicyImpl
-LinearTreeTraversalPolicyInterface <- LinearDepthFirstTreeTraversalPolicyImpl
-RootActionPolicyInterface <- RootRunActionPolicyImpl
-PerformerProcessInterface <- SubprocessPerformerProcessImpl
-GitWorkspaceInterface     <- NativeGitWorkspaceImpl
-ProviderBackendInterface  <- CodexBackendImpl
+LinearGatewayInterface          <- PodiumLinearGatewayClientImpl
+RootSchedulingPolicyInterface   <- LinearPriorityRootSchedulingPolicyImpl
+LinearTreeContextInterface      <- BoundedLinearTreeContextImpl
+AgentSymphonyHarnessInterface   <- AgentSymphonyHarnessImpl
+AgentCommandBrokerInterface     <- ScopedAgentCommandBrokerImpl
+PerformerProcessInterface       <- SubprocessPerformerProcessImpl
+GitWorkspaceInterface           <- NativeGitWorkspaceImpl
+RootDeliveryInterface           <- GitRootDeliveryImpl
+ProviderBackendInterface        <- CodexBackendImpl
 ```
 
-## 2. 跨进程Protocol
+命名规则的唯一事实源是[代码模块与命名规范](code-organization.md)。Interface不能包含SDK、数据库、
+transport、process handle或credential type。
 
-### `PodiumClientProtocol`
+## 2. Public Desktop protocol
 
-React与Desktop Backend的Command/Query/View。禁止Token、process handle、SDK object和原始本地路径。
-
-主要View是：
+`PodiumClientProtocol`连接React和Desktop Backend。主要Views：
 
 ```text
 DesktopOverviewView
@@ -39,211 +36,181 @@ RuntimeEventView
 NextActionView
 ```
 
-主要Command只覆盖`ConnectLinearCommand`、`ReconnectLinearCommand`、
-`CreateConductorCommand`、`StartConductorCommand`、`StopConductorCommand`和
-`RestartConductorCommand`，以及目标Conductor的closed Performer Profile
-Command/Query：
+主要Commands覆盖Linear connection、Conductor Binding lifecycle和Performer Profile lifecycle。唯一
+Root recovery command是`AcknowledgeRootRetryBlockCommand`；它只确认一个带exact observation
+precondition的Conversation retry block。Desktop不能发送其他Root workflow command、任意Linear
+mutation、Provider prompt或process control handle。
+
+所有响应不包含Token、cookie、Authorization header、API Key、SDK object、raw Provider output、绝对
+Profile path或arbitrary metadata。
+
+## 3. Podium-Conductor protocol
+
+Podium与Conductor private protocol承载三类closed消息：
 
 ```text
-GetPerformerProfilesQuery
-GetPerformerProfileStatusQuery
-CreatePerformerProfileCommand
-UpdatePerformerProfileCommand
-StartCodexChatGPTLoginCommand
-SetCodexApiKeyCommand
-ActivatePerformerProfileCommand
-```
-
-只有`SetCodexApiKeyCommand`可以携带secret input。该值只允许从Desktop表单经private
-内存relay进入Conductor和Performer stdin，不进入View、response body或任何持久化
-Command文件。
-
-Workflow编辑、Plan Approval Node、Human回答、Priority、blocker和Done不进入该Protocol，
-仍在Linear完成。具体页面和状态见[Podium Desktop](podium-desktop.md)。
-
-### `DesktopHostProtocol`
-
-Backend与Tauri Host的窗口、浏览器、Git Context、Conductor process lifecycle和shutdown。
-
-### Podium-Conductor Protocol
-
-包含三组能力：
-
-```text
-ConductorRuntimeProtocol
 LinearGatewayProtocol
-PerformerProfileProtocol
+PerformerProfileRelayProtocol
+ConductorRuntimeReportingProtocol
 ```
 
-Conductor Runtime：
+`LinearGatewayProtocol`使用generated request/result schemas传输业务DTO。Podium Handler验证
+organization、Project、pagination、payload大小和remote response shape，再调用Linear SDK。
 
-- conductor identity/repository handshake；
-- Conductor health/report；
-- shutdown。
+`RootIssueSnapshot`是header DTO，包含Root native fields、delegation、Priority、blockers和最多两条
+`root_managed_comments`，用于发现ownership/retry事实；它不包含descendants、phase labels、Human
+answers或完整Tree。只有候选Root的`GetIssueTreeQuery`返回这些完整事实。
 
-Linear Gateway：
-
-- closed Linear Command/Query/Result；
-- pagination；
-- sanitized SDK failure。
-
-Performer Profile：
-
-- Profile CRUD中的Create/Update和active选择；
-- SDK ChatGPT/API Key login触发；
-- sanitized Profile/account/status View；
-- secret-bearing API Key relay。
-
-除`SetCodexApiKeyCommand`的bounded secret frame外，不传Token、GraphQL、SDK object或
-Workflow decision。API Key不得出现在JSON metadata frame。
-
-Profile Command只有在Conductor返回成功Result后才改变Desktop View；Podium不提供
-local optimistic commit。`UpdatePerformerProfileCommand`不能修改`backendKind`或
-`authenticationMethod`。
-
-### Conductor-Performer Protocol
-
-通过request/result文件和唯一stdout Event stream传输三种Turn：
+Conductor Project级command必须携带：
 
 ```text
-PlanTurnCommand
-WorkTurnCommand
-RootGateTurnCommand
+conductor_short_hash
+expected_project_id
 ```
 
-Command、Result、`TurnCanceledResult`和Envelope的唯一事实源是
-[Performer Turn Command与Result契约](performer-command-contracts.md)。Event的唯一
-事实源是[Performer Event设计](performer-events.md)。Turn stdout只允许newline-delimited
-closed Event frames；不使用Event文件、Result旁路events数组或退出后批量回放。
+Root/Issue mutation还携带full Conductor ownership、Root、显式target、expected remote version/state/
+parent和stable `write_id`。Protocol没有arbitrary GraphQL、arbitrary JSON mutation或SDK passthrough。
 
-Profile登录和status使用独立`PerformerProfileControlProtocol`：
+## 4. Agent command channel
+
+Root Turn通过继承的private、turn-scoped channel调用`AgentCommandBrokerInterface`：
 
 ```text
-GetPerformerProfileStatusQuery
-StartCodexChatGPTLoginCommand
-SetCodexApiKeyCommand
+AgentCommandEnvelope
+  protocol_version
+  request_id
+  turn_id
+  root_issue_id
+  performer_id
+  command
+
+AgentCommandResult
+  = AgentCommandSucceededResult
+  | AgentCommandConflictResult
+  | AgentCommandUnconfirmedResult
+  | AgentCommandRejectedResult
+  | AgentCommandFailedResult
 ```
 
-secret-free metadata使用bounded stdin/stdout JSON；API Key作为独立length-delimited
-stdin frame传入，不写request/result文件。详细边界见
-[Performer Profile与Codex配置](performer-profiles.md)。
-
-不包含Linear mutation、Root Phase、Priority、blocker、Git topology或Provider SDK type。
-`CodexTurnSettings`是当前唯一允许跨该边界的Provider相关产品DTO；它不包含SDK type、
-credential、配置文件内容或任意map。
-
-## 3. Linear Gateway DTO
-
-DTO只表达Conductor需要的Linear事实：
+公共错误字段保持一致：
 
 ```text
-RootIssueSnapshot
-LinearProjectSnapshot
-ResolvedConductorProject
-ProjectResolutionResult
-LinearIssueTreeSnapshot
-LinearIssueNodeSnapshot
-LinearCommentSnapshot
-LinearBlockerSnapshot
-RootUsageSnapshot
-LinearMutationResult
-```
-
-每个Snapshot包含稳定id、remote version/updated_at、必要state/order/parent字段和有界内容。
-
-每个Project级Linear mutation Command包含`conductor_short_hash`和
-`expected_project_id`，作为Resolved Conductor Project的远端precondition；目标架构
-不创建Conductor Binding版本对象。
-
-每个修改已有Issue、Comment或Label的业务Command还必须携带它实际依赖的远端
-precondition：
-
-```text
-expected_issue_id
-expected_updated_at
-expected_state?
-expected_parent_issue_id?
-expected_managed_marker?
-```
-
-Gateway只在precondition仍成立时执行mutation；不成立返回
-`linear_precondition_conflict`，Conductor丢弃旧Snapshot并重新计算。用户把Root或Work
-置为Done/Canceled、修改parent或更新内容后，旧Command不能覆盖该变化。
-
-Root observation comment projection是明确例外，不依赖Root或comment revision：
-
-- 带`comment_id`的variant只upsert Root Primary Status Comment；Podium按ID读取comment，
-  验证它属于目标Root，且旧body与新body拥有同一Primary managed identity；
-- 不带`comment_id`的variant append Root Timeline Comment，必须带
-  `event_key = turn_id:sequence`和匹配的hidden marker；
-- 同event key和同body的read-back返回`already_applied`，不创建第二条comment。
-
-两种variant仍验证Resolved Conductor Project。它们不刷新Root snapshot，不进入
-workflow revision或stale Result判断。
-
-create Command使用稳定Managed Marker作为幂等键。timeout或连接中断后先按Managed Marker
-read-back，确认远端不存在时才重试create。
-
-## 4. Performer Turn契约
-
-Envelope字段、Result union和各Turn业务输入只在
-[Performer Turn Command与Result契约](performer-command-contracts.md)定义。
-`turn_id`是process correlation，`performer_id`是Conversation continuation，
-`turn_input_hash`是旧Snapshot保护；三者不能互相替代。
-
-## 5. 输入输出验证
-
-- unknown field/variant拒绝；
-- text/list/tree depth/node count有上限；
-- path canonicalization；
-- Linear响应验证organization/project/parent/order/state；
-- Provider Result验证turn/root/work correlation；
-- Provider Result验证`performer_profile_id` correlation；
-- `CodexTurnSettings`验证closed字段、长度、reasoning enum和Fast认证约束；
-- Provider Result验证`turn_input_hash` correlation；
-- Linear mutation验证Project Resolution和目标对象remote precondition；
-- Root/Work Description按不可信用户输入处理；
-- Token、Header、SDK object、raw exception、raw reasoning禁止越界。
-- Profile API Key只允许通过声明过的secret frame越界，并在所有日志/View/Result中拒绝。
-
-## 6. 错误
-
-统一使用`ProtocolError`：
-
-```text
-ProtocolError
 code
-category
 sanitized_reason
 retryable
-action_required
-next_action
+latest_facts?
+next_steps?
 ```
 
-SDK/Provider exception在拥有该SDK的Impl中归一化。
+Broker在边界strict validate envelope和command schema，再fresh读取current Root/Conversation/Git facts。
+Linear Issue内容和Agent payload都是untrusted input；知道ID或payload字段不是mutation authority。
 
-## 7. Interface所有权
+Channel描述可以进入`RootTurnCommand`，但不能包含Token、socket secret、host credential或可在Turn外
+复用的capability。Turn取消、command limit、Root terminal、ownership变化或Conversation替换后，
+所有旧request返回`AgentCommandRejectedResult`。
 
-- Conductor的`linear-gateway`模块定义`LinearGatewayInterface`，并由
-  `PodiumLinearGatewayClientImpl`实现；
-- Podium实现generated `LinearGatewayProtocolHandlerImpl`，并在内部调用`LinearSdkImpl`；
-- Conductor定义`PerformerProcessInterface`和`GitWorkspaceInterface`；
-- Conductor定义`PerformerProfileStoreInterface`和`PerformerProfileControlInterface`；
-- Podium定义`PerformerProfileRelayInterface`，由
-  `ConductorPerformerProfileRelayImpl`实现；
+## 5. Conductor-Performer protocol
+
+Conductor通过request/result文件和唯一stdout Event stream执行：
+
+```text
+OpenRootConversationCommand
+  -> RootConversationOpenedResult
+   | ConversationOpenFailedResult
+
+RootTurnCommand
+  -> RootTurnCompletedResult
+   | RootConversationUnavailableResult
+   | RootTurnFailedResult
+   | RootTurnCanceledResult
+```
+
+详细字段只由[Performer Command与Result契约](performer-command-contracts.md)定义。Event字段只由
+[Performer Event设计](performer-events.md)定义。
+
+Contract不包含按Plan、Leaf Work或Root Gate拆分的业务Turn，也不包含Leaf target字段。Root是唯一
+业务target；Plan/Work/Human/Gate/Delivery effect只能通过command
+broker写入Linear/Git。
+
+`openRootConversation`没有Root context、workspace或command channel。`RootTurnCommand`必须携带
+已经在Linear read-back确认的current `performer_id`；Performer不能在Root Turn内部静默创建或替换
+Conversation。
+
+`AcknowledgeRootRetryBlockCommand`只携带`root_issue_id`和`retry_observed_at`。Podium在existing private
+channel转发，Conductor从Primary重新读取expected performer ID和failure code；成功清除必须验证full
+ownership、Root非终态、current pointer和exact observation，并在Linear semantic read-back确认。
+
+## 6. Performer Profile protocol
+
+Profile login/account/status使用独立`PerformerProfileControlProtocol`，不复用Root Turn：
+
+```text
+GetPerformerProfileStatusQuery
+StartCodexChatGPTLoginCommand
+SetCodexApiKeyCommand
+```
+
+API Key通过bounded secret stdin frame传给Performer control process，不进入JSON、日志、View或
+Podium storage。Codex login handle只存在于当前control process。
+
+## 7. Validation与correlation
+
+所有第三方响应、Issue content、comments、Provider Result和Event都在对应边界strict validate。
+
+Root Turn correlation：
+
+```text
+protocol_version
+turn_id
+root_issue_id
+performer_profile_id
+performer_id
+context_digest
+```
+
+Result只有全部字段与原Command、current Root ownership和current Conversation匹配时才有效。即使有效，
+Result也不能声明Workflow完成；Conductor read-back Linear/Git后重新评估Root。
+
+Agent command correlation额外包含`request_id`，每个write还包含remote/Git precondition和
+stable `write_id`。ambiguous write返回统一`unconfirmed` shape，调用方必须read-back。
+
+## 8. Error与fail-closed
+
+跨进程错误使用closed code和sanitized reason，不返回raw exception、stack中的secret、SDK object或
+任意details map。边界不能混用throw/null/partial success表达同一失败；每种Protocol使用显式Result
+union。
+
+`RootConversationUnavailableResult`只表示Provider确认Conversation不存在或不可恢复。network timeout、
+rate-limit、invalid settings或Profile未ready必须使用其他错误code，避免错误触发Root-level retry。
+
+未知variant、未知field、超长payload、invalid enum、scope mismatch和stale Turn全部fail closed。
+
+## 9. Interface ownership
+
+- Conductor定义`LinearGatewayInterface` consumer DTO和`AgentCommandBrokerInterface`；
+- Podium实现`LinearGatewayProtocolHandlerImpl`和内部`LinearSdkImpl`；
+- Conductor定义`AgentSymphonyHarnessInterface`、`RootSchedulingPolicyInterface`、
+  `LinearTreeContextInterface`、`PerformerProcessInterface`、`GitWorkspaceInterface`和
+  `RootDeliveryInterface`；
 - Performer定义`ProviderBackendInterface`；
-- Podium定义`LinearInstallationStoreInterface`、`ConductorBindingStoreInterface`、
-  `RuntimeObservationStoreInterface`、`PodiumDesktopInterface`和`DesktopViewInterface`；
-- Podium内部使用`PodiumDesktopImpl`实现`PodiumDesktopInterface`，使用
-  `PodiumDesktopViewImpl`实现`DesktopViewInterface`；
-- Podium内部定义`LinearClientInterface <- LinearSdkImpl`；
-- 调用方不能深路径导入对方Impl。
+- Podium定义Desktop/Binding/installation/runtime observation interfaces；
+- Impl不从package public exports导出，调用方不能deep import另一role实现。
 
-## 8. 不变量
+## 10. V4/V5扩展
 
-1. Interface不出现具体SDK/数据库/transport类型。
-2. Impl不从package public exports导出。
-3. 一个Interface只表达一个相干能力。
-4. 跨进程只使用generated closed Schema，详细wire字段只在对应契约文档定义一次。
-5. 不维护多Protocol版本或兼容shim。
-6. Podium不持久化Performer Profile或Codex secret；Conductor不读取Codex-owned文件。
+V4 child Turn broker复用`AgentCommandEnvelope`和Root scope，不增加顶层Workflow Protocol。V5只新增
+`ProviderBackendInterface`实现，继续输出相同Conversation bootstrap、RootTurn Result和Event schemas。
+
+Target architecture不保留旧Plan/Work/Gate Turn schemas或并行Protocol版本。实现迁移必须作为明确
+授权的独立工作，不在契约中增加compatibility shim。
+
+## 11. 不变量
+
+1. 所有public/cross-process inputs和outputs有closed typed schemas。
+2. Root是Conductor-Performer唯一业务target。
+3. Conversation bootstrap无业务副作用，Root Turn不能静默换Conversation。
+4. mutation必须通过fresh Linear/Git read-back，不能由payload、Issue文本、summary或缓存决定。
+5. Error shape一致、脱敏且fail closed。
+6. SDK、database、transport handle和secrets不跨public interface。
+7. Result/Event不决定Linear/Git状态。
+8. V4/V5扩展同一Root contract，不复制控制面。

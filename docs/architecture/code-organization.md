@@ -22,14 +22,14 @@
 | 具体实现 | `*Impl` | `LinearSdkImpl` |
 | 改变状态的输入 | `*Command` | `UpdateIssueStateCommand` |
 | 读取输入 | `*Query` | `GetIssueTreeQuery` |
-| 封闭结果 | `*Result` | `WorkCompletedResult` |
+| 封闭结果 | `*Result` | `RootTurnCompletedResult` |
 | 结构化失败 | `*Error` | `ProtocolError` |
 | 可丢弃观察 | `*Event` | `PerformerHeartbeatEvent` |
 | 外部事实副本 | `*Snapshot` | `LinearIssueTreeSnapshot` |
 | 组合后的当前视图 | `*View` | `RootRunView` |
 | 模块间纯决策边界 | `*PolicyInterface` | `RootSchedulingPolicyInterface` |
 | 模块内纯规则 | `*Policy` | `LinearPriorityPolicy` |
-| 应用编排 | `*UseCase` | `ExecuteRootActionUseCase` |
+| 应用编排 | `*UseCase` | `RunAgentRootTurnUseCase` |
 | 跨进程封闭协议 | `*Protocol` | `LinearGatewayProtocol` |
 
 禁止把`Manager`、`Service`、`Helper`、`Utils`作为默认命名。只有当领域本身就叫Service时才允许使用。
@@ -90,7 +90,7 @@ linear-gateway
 root-discovery
 root-scheduling
 linear-tree
-root-workflow
+agent-symphony-harness
 performer-turns
 performer-profiles
 git-workspaces
@@ -100,6 +100,12 @@ runtime-reporting
 
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
 `RootRunView`和`LinearIssueTreeSnapshot`只存在于内存。
+
+`agent-symphony-harness`拥有`AgentSymphonyHarnessInterface`和
+`AgentCommandBrokerInterface`。Context builder、command registry、schema validation和具体broker
+实现留在该模块internal；其他Conductor模块不能另建Agent command入口。`root-scheduling`只处理
+Root readiness和Root排序；`linear-tree`只验证、规范化和裁剪Root context，二者都不能选择
+current Leaf或生成Plan/Work/Gate directive。
 
 Conductor可以保存`PerformerProfile`明文配置文件，但不能读取或修改Profile
 `CODEX_HOME`中的Codex-owned文件。Profile配置文件不是数据库。
@@ -117,12 +123,9 @@ SDK逻辑。
 模块：
 
 ```text
-turn_protocol
-turn_runtime
+conversation_protocol
+root_turn
 profile_control
-planning
-work_execution
-root_gate
 events
 backends
 ```
@@ -177,6 +180,8 @@ TypeScript：
 
 ```text
 LinearGatewayInterface.ts
+AgentSymphonyHarnessInterface.ts
+AgentSymphonyHarnessImpl.ts
 PodiumLinearGatewayClientImpl.ts
 LinearGatewayProtocolHandlerImpl.ts
 GetIssueTreeQuery.ts
@@ -188,8 +193,8 @@ Python：
 ```text
 provider_backend_interface.py
 codex_backend_impl.py
-work_turn_command.py
-work_completed_result.py
+root_turn_command.py
+root_turn_completed_result.py
 ```
 
 语言内遵守各自惯例，但类型后缀保持一致。缩写只使用产品已确认词汇，例如`OAuth`、`SDK`、`PR`。

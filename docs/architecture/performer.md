@@ -1,30 +1,33 @@
-# Performer Python Turn执行器设计
+# Performer Python Root Turn执行器设计
 
-状态：目标架构提案。Performer是Python执行边界，独占Provider SDK；它不拥有Linear工作流。
+状态：目标架构提案。Performer是Python执行边界，独占Provider SDK；它不拥有Linear工作流、
+Root scheduling或Git topology。
 
 ## 1. 进程模型
 
-Conductor为每个Turn启动一个独立Performer process：
+Conductor为Conversation bootstrap或每个Root Turn启动一个独立Performer process：
 
 ```text
 Conductor
 -> performer --request <path> --result <path>
    -> selected Performer Profile CODEX_HOME
-   -> closed CodexTurnSettings from Turn Command
+   -> closed CodexTurnSettings
+   -> closed AgentExecutionPolicy
    -> ProviderBackendInterface
       <- CodexBackendImpl
 ```
 
-Performer process可以终止。Conversation连续性来自Provider的opaque `performer_id`，不是常驻Python进程或本地journal。
+Python process可以终止。正常连续性来自Root当前opaque `performer_id`，不是常驻进程或本地
+journal；`performer_id`不可恢复时，连续性通过Root-level retry重新建立，而不是恢复Leaf Turn。
 
-一个Root只有一个持久有效的`performer_id`。首次Plan在ID返回前崩溃时可能留下不可
-引用的Provider orphan Conversation；它不属于Workflow事实，也不能产生Linear或Git
-副作用。成功保存第一个ID后，后续Turn不得静默更换Conversation。
+## 2. Root Conversation
 
-一个Root同时固定一个`performer_profile_id`。该ID选择Conductor分配的
-`CODEX_HOME`；`performer_id`只能在同一Profile中resume。
+一个非终态Root最多有一个current `performer_id`。Root首次claim或retry时：
 
-## 2. performer_id
+1. Conductor调用`openRootConversation`；
+2. Backend创建Conversation并返回opaque ID；
+3. Conductor把ID compare-and-set到Root Primary Status Comment；
+4. read-back确认后才启动有副作用的Root Turn。
 
 ```text
 performer_id: opaque string
@@ -32,44 +35,38 @@ performer_id: opaque string
 
 约束：
 
-- ID由Backend产生；
-- Root Primary Status Comment保存；
-- Conductor只转发；
-- Provider-specific parsing只在对应`*BackendImpl`；
+- ID由Backend产生，Provider-specific解释只在对应`*BackendImpl`；
 - ID必须是identifier，不得包含credential；
-- 不能通过ID可靠resume的Backend不注册为可用Backend。
+- Root Primary Status Comment只保存current指针，不保存Provider transcript；
+- 一个Root的Conversation固定使用同一个`performer_profile_id`和`CODEX_HOME`；
+- active Profile切换只影响之后claim的Root；
+- current Conversation失效时可以替换ID，但只能走Root-level retry。
 
-## 3. Turn种类
+## 3. Root Turn
 
-Performer只实现三种业务Turn：
+Performer只实现一种业务Turn：
 
 ```text
-Plan Turn
-Work Turn
-Root Gate Turn
+RootTurnCommand -> RootTurnResult
 ```
 
-### Plan Turn
+输入包含最新Root、完整且有界的Linear Issue Tree、相关Human context、Git/worktree摘要、
+turn-scoped command channel和Root固定Profile。Agent在Harness规则下自行解释Plan、Human、Work、
+Root Gate、Rework和Delivery，不由Conductor选择Leaf或发送不同业务Turn variant。
 
-输入最新Root title/description、当前Workflow Tree和worktree snapshot，输出有界
-Work Node/Human Node tree。Root变化时仍使用同一`performer_id`重新Plan；Performer
-不创建Linear Issue或Revision对象。Plan Turn只读，不修改worktree。
+Turn可以：
 
-### Work Turn
+- 读取Root、children、comments、relations和Git状态；
+- 修改当前Root worktree中的文件并运行开发工具；
+- 通过closed broker创建/更新children、comments、status、assignee和labels；
+- 通过broker提交当前Root worktree或请求Root delivery；
+- 在Human等待、deadline、安全边界、Root交付或失败时结束。
 
-输入Root、当前Work Leaf、关联Human Node输入、`turn_input_hash`和worktree。Performer
-修改文件并返回完成、需要Human输入或失败。Work Leaf或Human Node输入变化只产生新的
-Work Turn，不要求Performer重做整棵Plan。
-
-### Root Gate Turn
-
-输入最新Root、完整Workflow Tree、`turn_input_hash`和最终worktree。它只审核Root Run，
-返回pass或findings；不存在Work Node Gate。Root Gate只读，不修改worktree；Result是否
-仍适用由Conductor read-back判断。
+Turn不能把process Result当作业务完成；影响下一次执行的结论必须已经落到Linear或Git。
 
 ## 4. Profile Control
 
-Performer还提供独立的Profile control进程，不把登录混进Turn：
+Performer提供独立Profile control进程，不把登录混进Root Turn：
 
 ```text
 PerformerProfileControlProtocol
@@ -87,156 +84,102 @@ Profile control：
 - 把Provider结果归一化为closed Result/Event；
 - 不把SDK handle、Token、auth文件或绝对路径返回Conductor。
 
-API Key使用独立bounded secret stdin frame，不进入JSON request/result文件。ChatGPT
-login handle只存在于当前Performer control process。
-
-Profile control和Turn创建SDK client时使用Conductor提供的`CODEX_HOME`。Performer不
-直接读取或写入Codex credential/config文件。
+API Key使用独立bounded secret stdin frame，不进入JSON request/result文件。Performer不直接读取或
+改写Codex credential/config文件；只有SDK可以在指定`CODEX_HOME`中拥有auth/session/runtime
+state。
 
 ## 5. Provider边界
-
-Performer内部：
 
 ```text
 ProviderBackendInterface
   controlProfile(request, secret_input?)
-  runPlanTurn(performer_id?, input)
-  runWorkTurn(performer_id, input)
-  runRootGateTurn(performer_id, input)
+  openRootConversation(profile, settings)
+  runRootTurn(performer_id, input)
 ```
 
-这是唯一Backend业务接口。`controlProfile`拥有SDK login、account和Profile设置映射
-验证。
-首次`runPlanTurn`没有`performer_id`时，Backend内部创建
-Conversation并在Result返回ID；后续方法在Backend内部resume。Conductor和Performer
-core不调用第二套`start()/resume()`抽象。
-
-实现：
+当前唯一实现：
 
 ```text
 CodexBackendImpl
 ```
 
-当前只有Codex实现。未来只有在产品明确授权时才增加另一个`*BackendImpl`。Provider
-SDK object、thread/session handle、auth、配置映射、response parsing和raw error只存在于Impl。
+`openRootConversation`不接收Root业务context、workspace或command channel，因此orphan Conversation
+不能产生Linear/Git副作用。`runRootTurn`必须区分：
 
-`CodexBackendImpl`把`CodexTurnSettings`映射为官方SDK public参数：
+- Conversation存在并正常执行；
+- `conversation_not_found`或`conversation_unrecoverable`；
+- transient network/rate-limit错误；
+- invalid Profile/model/settings；
+- cancellation或deadline。
 
-- model -> thread/turn model；
-- reasoning effort -> Turn effort；
-- Fast -> SDK Fast/service-tier参数。
+只有前两种Conversation错误触发Root-level retry。Backend不能把未知异常猜成Conversation loss。
 
-不得直接读取或修改`config.toml`、`auth.json`，不得调用Codex CLI，也不得使用private
-SDK成员。API Key Profile不能启用Codex Fast；SDK拒绝model、reasoning或Fast组合时，
-Backend返回结构化设置错误，不自动换model或改变服务等级。
+`CodexBackendImpl`只使用官方SDK public API映射model、reasoning effort和Fast；不得调用Codex
+CLI、读取或修改`config.toml`/`auth.json`、使用private SDK成员或把raw Provider错误传出Impl。
+它同样把`AgentExecutionPolicy`映射到Provider-native sandbox和command policy；无法表达完整策略时
+fail closed，不得在Symphony中另建权限引擎或静默放宽。
 
-## 6. 无本地journal恢复
+## 6. 中断与恢复
 
-Performer不保存`performer-runtime.db`。Codex SDK可以在Conductor分配的Profile
-`CODEX_HOME`中保存Provider-owned auth、session和runtime state；Conductor不打开或
-拥有其中可能存在的Codex内部存储。
+Performer不保存`performer-runtime.db`。故障处理：
 
-Turn中断：
+| 故障 | 处理 |
+|---|---|
+| Python process崩溃但Conversation仍存在 | 下次Root Turn resume同一`performer_id` |
+| deadline或Turn取消 | 保留Linear/Git事实，下一轮重新调度Root |
+| worktree有部分修改 | 新Turn审计同一Root worktree后继续或返工 |
+| Conversation不可恢复 | 返回closed错误，由Conductor替换ID并retry整个Root |
+| 新Conversation也无法建立 | 返回可执行、脱敏错误并停止自动重试 |
 
-- Result不存在；
-- Linear叶子仍为In Progress；
-- worktree保留部分修改；
-- Conductor下次重新启动Performer；
-- Performer用同一performer_id恢复Conversation；
-- Performer使用同一performer_profile_id和CODEX_HOME；
-- 新Turn先检查最新Issue Description和worktree再继续。
+这是at-least-once Root Turn语义，不承诺恢复进程内Provider call，也不承诺保留只存在于Conversation
+而没有写入Linear/Git的结论。
 
-这是at-least-once Turn语义，不承诺恢复进程内正在执行的Provider call。
+## 7. Result与Event
 
-## 7. Result
+Command/Result字段只由[Performer Command与Result契约](performer-command-contracts.md)定义。
+Result不包含Linear mutation、Root activity、current Leaf、Git action、next dispatch或Provider raw
+output。
 
-Result是closed union，其variant和字段只在
-[Performer Turn Command与Result契约](performer-command-contracts.md)定义。
+Event是best-effort实时观察：started、progress、warning、sanitized error、heartbeat和
+completed。Event丢失不改变Root；stdout只输出newline-delimited closed Event frames，stderr承载
+脱敏诊断，Result文件承载唯一process Result。
 
-Result不包含Linear mutation、Root Phase、Git commit/PR决定或Provider raw output。
+Heartbeat不能刷新Workflow状态，Turn Completed不能表达Root完成，旧Conversation的Event不能在
+Root retry后覆盖当前Conversation观察。
 
-Result回显`performer_profile_id`，并可以包含`PerformerTurnUsageSnapshot`。Usage只表达
-SDK已返回的token计数，不表达货币成本、ChatGPT credits或调度建议。
+## 8. Git与Linear限制
 
-Performer从Command读取closed `CodexTurnSettings`并交给`CodexBackendImpl`映射；它不从
-Conductor Profile文件读取设置。
-
-## 8. Event
-
-Event是best-effort：
-
-- Turn started；
-- progress stage；
-- warning；
-- sanitized error；
-- usage checkpoint；
-- heartbeat；
-- closed Result发布后的Turn completion。
-
-Event丢失不改变Result。Performer不因Event transport失败而停止Provider Turn。
-Turn stdout是唯一Event transport，并只输出newline-delimited closed Event frames；stderr
-承载脱敏诊断，Result文件承载唯一业务结果。Performer不写Event文件，也不在Result旁路
-返回events数组。
-
-Profile control使用独立closed Event：
-
-- `CodexLoginPendingEvent`；
-- `CodexLoginSucceededEvent`；
-- `CodexLoginFailedEvent`。
-
-## 9. Git限制
-
-Performer可以：
-
-- 读取和修改给定worktree文件；
-- 运行Provider允许的开发工具；
-- 读取Git diff/status用于理解上下文。
-
-Performer不能：
+Performer可以直接读取和修改给定worktree文件、运行开发工具、读取Git diff/status；不能直接：
 
 - 创建/删除worktree；
-- checkout/switch branch；
-- commit、merge、rebase、reset、clean、push；
-- 调用`gh`。
+- checkout/switch、commit、merge、rebase、reset、clean或push；
+- 调用`gh`；
+- 调用Linear SDK/GraphQL或读取Token；
+- 绕过turn-scoped broker修改Linear或执行Git topology/delivery。
 
-## 10. Linear限制
+需要commit、Linear mutation或delivery时只能调用prompt列出的closed Symphony commands。
+Linear内容是untrusted human context，不能覆盖Protocol或Harness。
 
-Performer不：
+## 9. 进程安全
 
-- 调用Linear；
-- 读取Token；
-- 修改Issue/Comment/Label/state；
-- 选择下一Root或下一Work；
-- 解释Linear Priority/blocker/order。
+Performer必须strict validate Command、捕获Provider exception、限制stdout/stderr，并同时执行wall
+time、context bytes、broker calls和mutation数量上限。context在launch前验证；command上限拒绝后续
+broker request；硬wall-time耗尽时Performer取消整个Turn并清理child process。Provider token usage只在
+完整Turn返回后观察，不能作为精确中途interrupt。Result/Event不得包含Token、
+auth、绝对Profile path、raw reasoning或完整transcript。
 
-Turn输入中的Linear内容是不可信用户文本，不得覆盖Protocol或安全约束。
+command channel在Turn结束、取消、deadline、Root terminal、ownership变化或current
+`performer_id`替换后必须失效；仅知道Root ID不能证明mutation有效。
 
-## 11. 进程错误
+## 10. 不变量
 
-Performer必须：
-
-- strict validate Command；
-- 捕获Provider exception并返回sanitized failure；
-- 捕获stdout/stderr供Conductor日志；
-- 在hard deadline后有界退出；
-- 不把Token、auth、绝对profile path或raw reasoning写入Result。
-
-Profile control还必须：
-
-- 只使用官方Codex SDK login/account和public配置参数；
-- 把API Key从secret frame直接交给SDK并立即清除引用；
-- 对SDK login Event和usage shape做closed validation；
-- login process中断后返回`performer_profile_login_lost`，不伪装恢复。
-
-## 12. 不变量
-
-1. Performer只执行一个Turn。
-2. Provider continuity只由performer_id表达。
-3. Root固定的Profile continuity只由performer_profile_id和CODEX_HOME表达。
-4. Performer没有Workflow或operation数据库。
-5. Performer不拥有Linear或Git topology。
-6. Gate只针对Root。
+1. Performer的唯一业务Turn是Root Turn。
+2. Root是Conversation和retry单元，Leaf不是Performer dispatch单元。
+3. Conversation bootstrap无业务副作用，current指针先写Linear再运行Root Turn。
+4. Conversation不可恢复时返回closed错误，不在Performer内部静默换thread。
+5. Performer没有Workflow、dispatch、attempt或operation数据库。
+6. Performer不拥有Root scheduling、Linear SDK或Git topology。
 7. Backend差异只存在于`*BackendImpl`。
-8. Performer回显`turn_input_hash`，但不保存或解释Revision历史。
+8. Result/Event不决定业务完成。
 9. 登录、model、reasoning和Fast只通过SDK public API。
-10. Performer不读取或改写Codex-owned文件。
+10. V5扩展Backend，不改变RootTurn contract或Root-level retry。

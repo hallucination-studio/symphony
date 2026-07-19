@@ -59,15 +59,18 @@ apps/conductor/
     │       └── LinearPriorityRootSchedulingPolicyImpl.ts
     ├── linear-tree/
     │   ├── api/
-    │   │   └── LinearTreeTraversalPolicyInterface.ts
+    │   │   └── LinearTreeContextInterface.ts
     │   └── internal/
-    │       └── LinearDepthFirstTreeTraversalPolicyImpl.ts
-    ├── root-workflow/
+    │       └── BoundedLinearTreeContextImpl.ts
+    ├── agent-symphony-harness/
     │   ├── api/
-    │   │   └── RootActionPolicyInterface.ts
+    │   │   ├── AgentSymphonyHarnessInterface.ts
+    │   │   └── AgentCommandBrokerInterface.ts
     │   └── internal/
-    │       ├── RootRunActionPolicyImpl.ts
-    │       └── ExecuteRootActionUseCase.ts
+    │       ├── AgentSymphonyHarnessImpl.ts
+    │       ├── AgentRootContextBuilder.ts
+    │       ├── ScopedAgentCommandBrokerImpl.ts
+    │       └── RunAgentRootTurnUseCase.ts
     ├── performer-turns/
     │   ├── api/
     │   │   └── PerformerProcessInterface.ts
@@ -132,12 +135,9 @@ apps/performer/
 └── src/performer/
     ├── __main__.py
     ├── composition/
-    ├── turn_protocol/
-    ├── turn_runtime/
+    ├── conversation_protocol/
+    ├── root_turn/
     ├── profile_control/
-    ├── planning/
-    ├── work_execution/
-    ├── root_gate/
     ├── events/
     └── backends/
         ├── provider_backend_interface.py

@@ -1,199 +1,154 @@
 # Root Issue工作流
 
-状态：目标架构提案。本文只描述一个Linear Root Issue，不讨论Root之间的Priority、blocker或Project调度。
+状态：目标架构提案。本文只描述一个Linear Root Issue内部如何表达Plan、Human、Work、Root Gate、
+Rework和Delivery；跨Root Priority、blocker和调度由[Linear端到端流转](linear-flow.md)拥有。
 
-## 1. Root Issue与Root Run
+## 1. Root模型
 
-Conductor没有数据库。一个Root的运行状态从以下远端/文件系统事实重建：
+Root是Symphony V3唯一调度、Conversation和retry单元：
 
 ```text
 RootRunView
-  = Root Issue state
-  + one Root Phase Label
-  + one Root Primary Status Comment
+  = Root Issue native fields and state
+  + Root Primary Status Comment
   + complete descendant Issue Tree
+  + relevant comments and relations
   + deterministic Git branch/worktree
+  + delivery facts
 ```
 
-一个Root对应：
+`RootRunView`每轮从Linear/Git重建并丢弃。一个Root对应：
 
 ```text
-1 persisted active performer_id
-1 persisted active Provider Conversation
+0..1 current performer_id
+1 pinned performer_profile_id
 1 delivery branch
 1 worktree
-1 Root Gate
+1 Root Gate requirement
 ```
+
+Leaf不对应独立Conversation、worktree、dispatch、attempt或recovery checkpoint。Plan、Work、Human、
+Gate和Delivery是Root Agent根据最新Linear/Git事实推进的工作内容，不是Conductor内部状态机。
 
 ## 2. Root Linear状态
 
 ```text
 Todo -> In Progress -> In Review -> Done
 Todo | In Progress | In Review -> Canceled
-In Review -> In Progress  when Root input changes
+In Review -> In Progress  when the Root needs more work
 ```
 
 | Root state | 含义 |
 |---|---|
-| `Todo` | 尚未开始 |
-| `In Progress` | planning、working、awaiting-human、gating、delivering、blocked或failed |
-| `In Review` | PR/branch已交付，等待人工审核 |
-| `Done` | 用户或SCM automation确认接受/merge |
-| `Canceled` | 用户取消 |
+| `Todo` | 尚未被Symphony claim |
+| `In Progress` | Root Agent正在推进、等待Human、返工或准备交付 |
+| `In Review` | branch/PR已交付，等待人工或SCM接受 |
+| `Done` | 用户或SCM automation确认接受 |
+| `Canceled` | 用户取消；任何旧Turn不得继续产生副作用 |
 
-Root只表达整个任务处于什么大阶段，不镜像当前Work Leaf的细节。
+Root state只表达整个Root的大生命周期。当前工作、Human等待和Rework必须从children、comments和
+Git中看见，不能编码成Conductor私有phase。
 
-用户在任一Turn期间把Root置为`Done`或`Canceled`时，当前Turn不被强制抢占，
-但其Result不得再开始创建节点、提交代码或推进任何Linear状态。Conductor在Result
-应用前重新读取Root state，并丢弃已终止Root的旧Result。若用户取消恰好与本地commit
-竞态，已经产生的commit只作为未交付Git事实保留；Conductor不得再更新Work/Root状态、
-运行Gate或交付该branch。
+Root Primary Status Comment可以投影`waiting | working | failed | delivered`。每个投影必须同时显示
+evidence sources和`observed_at`；可选`symphony:run/*` Label只能镜像已经写入并read-back的Primary
+投影。缺失、陈旧或冲突时不显示这四种确定状态，也不能据此决定Root eligibility、Conversation
+retry、Leaf选择或业务完成。
 
-## 3. Root Phase Label
+用户在Root Turn期间把Root置为Done/Canceled时，broker立即拒绝新的mutation。已经产生的Git
+修改或commit作为事实保留，但旧Turn Result不能再更新children、运行delivery或改变Root状态。
 
-Root始终最多有一个Conductor管理的Root Phase Label：
+## 3. Root Managed Comments
 
-```text
-symphony:run/planning
-symphony:run/awaiting-human
-symphony:run/working
-symphony:run/gating
-symphony:run/delivering
-symphony:run/in-review
-symphony:run/blocked
-symphony:run/failed
-```
+### 3.1 Root Primary Status Comment
 
-Conductor只创建、删除和替换Root Phase Label，不修改用户其他Labels。
-
-Label缺失时可以从Root/Workflow Tree/Git推导并补写；存在多个Root Phase Labels时
-不能猜测。此时blocked是Root Primary Status Comment和`RootDetailView`中的派生状态，
-Conductor不得再追加第三个Root Phase Label；用户清理冲突Label后重新计算。
-
-## 4. Root Managed Comments
-
-Root Managed Comment是Symphony在Root下管理的用户可见comment，分为两类：
-
-- `Root Primary Status Comment`：claim Root时创建的第一条Symphony-managed comment，
-  保存恢复、交付和最新Turn观察字段；Conductor在`RootRunView`中持有其Linear
-  `comment_id`，之后只按该ID upsert；
-- `Root Timeline Comment`：warning、error和Performer Turn completion等离散观察事件，
-  默认append，不形成可更新的“last event”comment。
-
-“第一条”只表示该Root的第一条Symphony-managed comment，不要求早于用户已经存在的
-comment。Primary Status Comment格式为：
+Root claim时创建一条用户可读、按comment ID更新的Primary Status Comment：
 
 ```text
-Symphony Root Run
+Symphony
+Conductor: <stable full id>
+Performer profile: <profile id>
+Conversation: <active | restarting | action required>
+Activity: <waiting | working | failed | delivered | none>
+Evidence: <source identities, versions and observations>
+Observed at: <timestamp>
+Branch: <delivery branch>
+Pull request: <url when available>
+Current problem: <sanitized operator action when applicable>
+Explanation: <optional Agent summary; never evidence>
+
+<!-- symphony root
 conductor_id: <stable full id>
 performer_profile_id: <profile id>
-performer_id: <opaque id>
-planned_root_input_hash: <hash or none>
-usage_input_tokens: <integer>
-usage_cached_input_tokens: <integer>
-usage_output_tokens: <integer>
-usage_reasoning_output_tokens: <integer>
-usage_total_tokens: <integer>
-last_usage_turn_id: <turn id or none>
+performer_id: <opaque current id or none>
 delivery_branch: <branch>
-pull_request: <url when available>
-last_error: <current non-Turn blocking reason when applicable>
-turn_id: <latest observed turn id when available>
-turn_status: <latest observed status when available>
-turn_event_sequence: <latest observed sequence when available>
-turn_status_updated_at: <latest observed timestamp when available>
-<!-- symphony root marker -->
-```
-
-`last_error`只保存当前Root调度所需的非Turn阻塞原因；Performer warning/error不覆盖该
-字段，而是append Timeline Comment。Turn观察字段只面向用户，不是恢复或调度事实。
-
-`performer_id`是Provider-neutral opaque string：
-
-- Codex Backend可以使用Codex thread id；
-- 未来Backend可以使用自己的session/conversation id；
-- Conductor不解析、不转换；
-- Performer根据配置的Backend解释并resume；
-- `performer_id`不能包含Token或credential。
-
-`performer_profile_id`在Root首次claim时从Conductor的active Performer Profile复制。
-它确定该Root后续Turn使用的`CODEX_HOME`和`CodexTurnSettings`。Root得到
-`performer_id`后不得切换Profile；Desktop切换active Profile只影响之后claim的Root。
-Profile身份固定不等于设置版本固定：用户编辑该Profile的model、reasoning或Fast后，
-这个Root的下一Turn使用新设置，当前Turn不被抢占。
-
-`planned_root_input_hash`是当前Plan已消费的Root title + description规范化hash。它只保留最新值，不形成Revision历史。
-
-active Root必须恰好存在一条合法Root Primary Status Comment。缺失、重复、Managed Marker
-损坏、`performer_profile_id`无效或已有`performer_id`不可解析时，拥有该Root的
-Conductor不能猜测、改用active Profile或创建新Conversation伪装恢复，必须把Root置为
-blocked并给出明确原因。
-
-Podium读取Primary Status Comment时把`comment_id`返回给Conductor，Conductor只在当前
-`RootRunView`中持有该ID，不建立comment ID数据库。状态类Event按ID实时upsert该
-comment；warning、error和Turn complete不带comment ID，append Timeline Comment并以
-`turn_id:sequence`去重。Timeline body末尾必须带精确受管marker：
-
-```text
-<!-- symphony turn event
-event_key: <turn_id>:<sequence>
+pull_request: <url or none>
+retry_blocked: true | false
+retry_expected_performer_id: <opaque failed id or none>
+retry_failure_code: <closed ConversationOpenFailedResult code or none>
+retry_observed_at: <timestamp or none>
 -->
 ```
 
-Timeline Comments不解析进`RootRunView`工作流事实。Primary中的Turn观察字段和全部
-Timeline Comments都必须从Issue Tree revision、input hash、Result stale检查和调度决策
-中过滤；按comment ID upsert或append都不要求刷新Root snapshot或comment revision。
+受管marker保存closed identity和唯一的Root retry interlock，不保存phase、current Leaf、attempt、
+next action、accepted Result或Provider transcript。`performer_id`是current Conversation pointer；
+它可以在Root-level retry时由remote precondition保护的compare-and-set替换。
 
-首次Plan尚未成功时`performer_id`可以为空，但`performer_profile_id`必须已经固定。
-Provider已经创建Conversation、但process
-在Result返回前中断时，可能留下一个无法引用的orphan Conversation；Plan只读，因此它
-不能改变Linear或Git。下一轮可以创建新Conversation。第一个成功Plan Result返回ID后，
-Conductor立即写入comment，之后不得静默替换。
+Activity evidence最少满足：
 
-若`conductor_id`与当前Conductor不匹配，当前Conductor只跳过并报告
-`root_owned_by_other_conductor`，不得修改该Root。Conductor Project Label移回原
-Conductor后，由原Conductor继续。
+| Activity | 客观evidence source |
+|---|---|
+| `waiting` | 具体Human Issue ID、native state、`updated_at`和等待的未完成条件 |
+| `working` | 具体Work Issue ID/state/`updated_at`、dispatch前Git HEAD，以及最近Turn observation time |
+| `failed` | stable error code、失败边界、相关Issue或Conversation identity、Git HEAD/check result（如相关） |
+| `delivered` | PR/branch identity、delivered Git HEAD、required check IDs/conclusions |
 
-Root Phase只以Root Phase Label为准；current Workflow Node从Workflow Tree推导；Root Gate
-状态从Root Phase、Work Node状态和Root Gate Rework Node推导。三者不再写入Root
-Managed Comment，避免事实双写。
+每个Linear/SCM/check引用都带自身version、`updated_at`或observation time；Primary的`observed_at`表示
+Conductor何时完成这一组read-back。Agent bounded summary只能进入`Explanation`，不能填充或替代
+evidence，也不能把`working`、`failed`或`delivered`变成事实。
 
-每个由Symphony执行的Work Leaf，在description末尾有一个Work Managed Metadata block：
+Root首次claim时固定`performer_profile_id`。Root retry使用同一个Profile和`CODEX_HOME`创建新
+Conversation；Desktop切换active Profile只影响之后claim的Root。
+
+Primary缺失、重复或identity损坏时，Conductor停止该Root并给出修复动作；不得猜测Root ownership。
+首次claim的bootstrap可以从`performer_id: none`写入第一个ID；claim完成后，只有current pointer缺失或
+Provider明确报告不可恢复时才允许创建新Conversation，这必须走Root retry，不能静默接管某个Leaf。
+
+### 3.2 Root Retry Block
+
+`retry_blocked: true`是唯一允许阻止自动Root retry的durable fact，并且其余三个retry字段必须都非
+`none`。它只在一次Root-level retry的`openRootConversation`失败后写入：
 
 ```text
-kind: work
-origin: user | symphony
-completed_input_hash: <hash or none>
+retry_expected_performer_id = the failed current performer_id | none
+retry_failure_code = closed ConversationOpenFailedResult.error_code
+retry_observed_at = the completed Linear read-back time
 ```
 
-业务description不包含该block；input hash计算时排除该block。用户创建的无marker
-Work在首次执行前补充`origin: user`，Plan创建的Work使用`origin: symphony`。
-补充metadata不会改变title/description所有权。该hash用于判断Work内容是否在完成
-后被用户修改；它不是Work状态、Attempt或历史账本。
+该block只有在Root当前`performer_id`仍等于`retry_expected_performer_id`时有效；不匹配表示旧fact，
+Conductor停止并报告identity conflict，不能自行选择一边。有效block使Root assessment稳定为
+`needs_attention`，重启和poll都不得再次调用`openRootConversation`。
 
-Work Managed Metadata是无DB恢复所需的受管事实，不能在缺失或损坏时猜测：
+operator修复Profile/auth/Provider原因后，通过Desktop发送closed
+`AcknowledgeRootRetryBlockCommand(root_issue_id, retry_observed_at)`。Conductor重新验证Resolved Project、
+full ownership、Root非终态、block仍为true、timestamp和current pointer全部匹配，才把四个字段原子
+改为`false/none/none/none`并read-back。下一次scheduler随后允许一次正常Root retry。stale acknowledge、
+普通Root comment、Issue内容修改、进程重启或仅修复Profile readiness都不能清除block。
 
-- Todo或In Progress的无marker用户Work可以补充`origin: user`后正常执行；
-- In Review或Done Work缺少合法`completed_input_hash`时不能自动建立完成基线；
-- 用户若希望重新执行该Work，将它移回In Progress，Conductor重新补充metadata并执行；
-- 用户若确认该Work不再需要执行，将它置为Canceled；
-- `origin: symphony`、kind或hash marker损坏时Root进入
-  `blocked`，直到Work回到In Progress重跑或被用户Canceled。
+### 3.3 Root Timeline Comments
 
-Token usage字段是best-effort operator指标，不是Workflow状态。Conductor只在Result
-correlation有效且`last_usage_turn_id`不等于当前`turn_id`时累计一次。usage缺失不阻止
-Workflow；Root已经Done/Canceled时不为补指标而修改Root Primary Status Comment。
+只把人需要理解的关键事实append到Root Timeline：Plan发布、Conversation retry、terminal error、
+Root Gate findings和delivery。Heartbeat、tool activity和普通progress只进入Event/Desktop，不刷屏
+Linear。
 
-## 5. Workflow Node类型
+Timeline create使用稳定`write_id`和hidden marker去重。Comment正文是人类上下文，不作为命令；
+machine marker只提供identity/correlation，不能编码next action或transition graph。
 
-Root的descendant Issues形成Workflow Tree。
+## 4. Workflow Tree
+
+Root descendants形成Workflow Tree：
 
 ```text
 LinearIssueNodeSnapshot
-  = WorkNodeSnapshot
-  | HumanNodeSnapshot
-
-common wire fields
   issue_id
   parent_issue_id
   sibling_order
@@ -201,344 +156,137 @@ common wire fields
   state
   title
   description
+  assignee
   updated_at
 ```
 
-Workflow Node类型规则：
+节点规则：
 
-- Plan创建的Workflow Node带Managed Marker；Work Node的`kind`来自Work Managed
-  Metadata，Human Node的`kind`来自Managed Marker；
-- 用户手工创建、没有Managed Marker的普通Sub Issue默认是Work Node；
-- 用户Work Node首次执行前补充`origin: user` Work Managed Metadata，但不改写其业务title/description；
+- 普通Sub Issue默认是Work Node；
+- Plan创建的Human Node带closed Managed Marker和`[Human Action]` title prefix；
 - Human Node必须是叶子；
-- 有children的Work Node派生为`WorkGroupView`，不直接交给Performer；
-- 没有children的Work Node派生为可执行`WorkLeafView`。
+- 有children的Work Node是Work Group，只组织范围；
+- 没有children的Work Node是Work Leaf；
+- Canceled节点及其subtree不再执行；
+- Linear parent和sibling order是Root内部唯一结构与顺序权威。
 
-Root Gate不是Tree中的普通排序节点，而是Workflow Tree完成后的固定Root Phase。
+Managed Marker只提供Symphony-created对象的稳定identity和幂等create，不保存Leaf attempt、owner
+lease、current cursor或完成状态。Symphony只reconcile自己创建且仍未完成的受管节点；用户创建的
+业务内容仍由用户维护。
 
-## 6. Plan Turn与节点创建
+## 5. Plan与批准
 
-Root首次进入planning，或Root title/description相对`planned_root_input_hash`发生变化时，Conductor用最新Root、当前完整Tree和worktree调用Performer Plan Turn。
+Root首次运行，或Root目标变化需要重新规划时，Root Agent：
 
-Plan Result输出有界树：
+1. 读取Root、完整Tree和repository/Git摘要；
+2. 在Root上创建或更新一条人类可读Plan comment；
+3. 幂等创建、复用、移动或取消未完成的Symphony-origin Work/Human children；
+4. 保留用户创建的children和已经完成的历史；
+5. 创建或重开`[Human Action] Approve Plan` child；
+6. 把该Human child分配给用户并结束当前Root Turn。
 
-```text
-PlannedWorkflowNode
-  client_node_key
-  parent_client_node_key?
-  kind: work | human
-  order
-  title
-  description
-  existing_issue_id?
-  target_client_node_key?  # human only
-```
+Plan comment marker记录它基于哪个Root remote version生成，只用于判断用户是否在批准前修改了
+目标，不形成Plan Revision、checkpoint或Conductor state。任何部分写入在下一次Root Turn通过
+stable node marker和Linear read-back收敛。
 
-Conductor按Result对当前Workflow Tree做最小reconcile：
+批准前不执行后续Work。Approval child进入Done表示批准；Canceled表示拒绝。普通Root comment不
+等价于批准，Issue title/description中的文本也不能绕过Harness规则。
 
-- `work`创建Work Node；
-- `human`创建带`[Human Action]` title prefix的Human Node；
-- 每个普通Human Node必须关联一个目标Work Node，并作为该Work之前的同级叶子；
-- parent关系和sibling order来自Plan；
-- Conductor不额外排序；
-- 引用`existing_issue_id`的未完成`origin: symphony`节点就地更新；
-- Result未引用的未完成`origin: symphony`节点置为Canceled；
-- `origin: user`节点始终保留，不能被Plan删除或覆盖；
-- In Review/Done节点保留；若新需求还需要工作，Plan创建新的Work，而不是抹掉已完成历史；
-- Root Gate不由Plan创建。
+## 6. Root内部工作顺序
 
-Result应用前，Conductor重新计算Root和Tree input hash；任一已经变化时，不应用nodes
-并重新Plan。若Root仍非Done/Canceled、这是首次Plan且Result已返回合法
-`performer_id`，仍先保存该ID，再用同一Conversation处理最新输入。
-
-每个Plan创建的节点marker包含`root_issue_id + turn_input_hash +
-client_node_key`。同一个Plan Result的重复create必须返回同一个Issue；timeout后先按
-Managed Marker read-back。Workflow Tree reconcile的完成顺序是：
-
-1. 幂等创建或更新Result引用的节点；
-2. read-back确认parent、order、kind和marker；
-3. 将未引用的未完成`origin: symphony`节点置为Canceled；
-4. 创建或更新Plan Approval Node；
-5. 最后覆盖`planned_root_input_hash`并进入`awaiting-human`。
-
-若Conductor在中间退出，`planned_root_input_hash`仍是旧值。下一轮重新Plan，并把
-Linear中已经存在但只完成部分写入的Symphony-origin Workflow Nodes作为
-`current_tree`输入；新的reconcile复用仍被引用的节点，取消不再引用的节点。部分写入
-不得形成两个同时有效的同身份Workflow Nodes。
-
-若Workflow Tree和Plan Approval Node已经完成，但进程在最终Root Primary Status Comment和
-Root Phase Label写入之间退出：
-
-- `planned_root_input_hash`已更新且phase仍为planning：补写`awaiting-human`；
-- Root Phase mutation timeout：read-back Root Phase Labels，不盲目追加第二个Label；
-- Plan Approval Node、hash或Tree任一不匹配：保持planning并重新Plan/reconcile。
-
-Plan完整应用后的结果必须同时满足：
-
-- Root Primary Status Comment中的`planned_root_input_hash`已经覆盖；
-- 固定的Root级Plan Approval Node已经创建或复用，Linear title使用
-  `[Human Action] Approve Plan`，最新Plan
-  summary已经写入其description，并处于In Progress；
-- Root Phase已经变为`awaiting-human`。
-
-批准前不执行Work。Plan Approval Node不属于Plan输出，也不参与普通Work
-Nodes/Human Nodes顺序。
-
-## 7. Tree遍历
-
-Conductor每个Turn边界重新读取完整Tree，使用纯`LinearTreeTraversalPolicyInterface`：
+Root Agent每次都从完整Tree解释可行动内容：
 
 ```text
-for child in linear sibling order:
-  if child is Canceled:
-    continue
-
-  if child has incomplete descendants:
-    descend into child
-
-  if child is an In Review/Done Work
-     and has no valid completed_input_hash:
-    return blocked
-
-  if child is an In Review/Done Work
-     and current input hash differs from completed_input_hash:
-    reopen and select child
-
-  if child is In Review or Done:
-    continue
-
-  if child is a leaf Work:
-    select child
-
-  if child is a leaf Human:
-    wait for child
-
-if current level has no incomplete child:
-  return to parent level
+walk children in Linear sibling order
+-> skip Canceled subtrees
+-> descend through Work Groups
+-> stop at the first unresolved Human leaf
+-> otherwise work on the first incomplete Work leaf
+-> when no incomplete leaf remains, perform Root Gate
 ```
 
-选择结果是第一个最深层、按Linear顺序出现的未完成叶子。
+这是Harness给Agent的确定性工作规则，不是Conductor生成的Leaf dispatch。Conductor不保存Queue、
+Cursor或“当前Leaf”；RootTurn contract也没有`target_issue_id`。
 
-规则：
+V3只有一个writer，因此同一Root最多一个Agent-owned Work Leaf处于In Progress。Human child可以在
+等待期间处于In Progress并分配给用户。多个Agent-owned In Progress Work是Linear冲突；Harness
+停止Root并要求修复，不能任选一个作为恢复checkpoint。
 
-- 不保存Queue或Cursor；
-- 不根据title、创建时间或本地序号重新排序；
-- 当前Turn不因用户拖动节点而被抢占；
-- 下一个Turn使用最新Linear顺序；
-- Canceled节点永远跳过；
-- In Review/Done Work只有在其title/description hash没有变化时才跳过；
-- In Review/Done Work缺少合法`completed_input_hash`时不能静默视为完成；
-- Plan Approval Node由Root Phase处理，不由Tree遍历选择。
+用户新增、嵌套、重排、取消或重开children后，当前command的remote precondition可能失败；Agent
+必须read-back，并在同一个或下一个Root Turn按最新Tree重新解释。
 
-## 8. Work状态
+## 7. Work完成证据
+
+Work使用Linear native state：
 
 ```text
 Todo -> In Progress -> In Review -> Done
 Todo | In Progress | In Review -> Canceled
-In Review | Done -> In Progress  when Work input changes
+In Review | Done -> In Progress  when more work is required
 ```
 
-| state | 含义 |
-|---|---|
-| `Todo` | 等待Tree解释器选择 |
-| `In Progress` | 当前Turn正在处理；重启后应resume |
-| `In Review` | Performer完成、Conductor已commit且`completed_input_hash`匹配，等待Root Gate |
-| `Done` | Root Gate通过；内容变化时可重新进入In Progress |
-| `Canceled` | 用户或新Plan取消；不再调度 |
+Agent处理Work Leaf时：
 
-Work完成是一个可重放的收敛过程：
+1. read-back确认它仍属于当前Root且是当前顺序下可行动的Leaf；
+2. 将其置为In Progress；
+3. 修改Root worktree并运行相关checks；
+4. 通过broker创建Git commit；
+5. 写一条可读的Work Completion Comment，包含summary、checks和commit SHA；
+6. read-back确认后把Work置为In Review。
 
-```text
-commit current changes
--> write completed_input_hash
--> Work In Review
-```
+Completion Comment marker可以记录`issue_updated_at + commit_sha + write_id`，用于幂等补写和判断
+完成后业务内容是否被修改。它是Linear/Git上的完成证据，不是Conductor内部checkpoint，也不表示
+下一Leaf。缺失或不匹配时，Root Agent重新审计该Work；不能根据旧Result直接补成完成。
 
-重启时：
+进程在任一步中断时，新的Root Turn看到当前Linear state、既有commit和worktree diff后收敛：可以
+补写缺失证据、继续工作或返工，但不会恢复旧Leaf process/attempt。
 
-- Work为In Progress且`completed_input_hash`已经匹配：直接补写In Review，不再启动Performer；
-- Work为In Progress且hash尚未写入：使用同一`performer_id`和当前worktree重新执行该Work Turn；
-- Work为In Review或Done但hash缺失或损坏：blocked，不自动建立基线；
-- commit成功但后续Linear写入失败：保留commit，并按以上规则重新执行或补齐Linear状态。
+## 8. Human输入
 
-这保证三步中的任意一步中断后都能从Git、Linear和Conversation收敛，不需要operation journal。
+Human Node分为Plan Approval、planned input和runtime input，但都使用同一种Linear表达：
 
-Work Group的显示状态由非Canceled descendants推导：
+- 一个真实child Issue；
+- `[Human Action]` title prefix和closed kind marker；
+- human assignee；
+- In Progress表示等待回答；
+- answer写在该Issue thread；
+- Done表示回答可被Root Agent消费；
+- Canceled表示该输入被放弃。
 
-- 任一非Canceled descendant In Progress：Group In Progress；
-- 全部非Canceled Work descendants In Review/Done且非Canceled Human已Done：Group In Review；
-- Root Gate通过：Group Done。
+Agent需要新输入时必须先创建或复用Human child并写清问题，再结束Root Turn。下一次Root scheduling
+从Tree看出该Root `waiting_human`，不会启动Performer。用户完成Human child后，Root自然重新变为
+runnable；不需要Conductor恢复命令或checkpoint。
 
-Canceled Group的整个subtree不参与投影。Group state只是descendants的Linear投影；
-遍历始终先看children，不允许Group自身state隐藏未完成descendant。
+普通Comment不是命令。只有对应Human child thread中的回答作为业务输入，且仍受untrusted human
+context规则约束。
 
-## 9. Human Node
+## 9. Root Gate与Rework
 
-```text
-Todo -> In Progress -> Done | Canceled
-Canceled -> In Progress  when the user reopens the same Human
-```
-
-Human Node分为：
-
-- `plan_approval` `PlanApprovalNodeView`：Root级固定Plan Approval Node，Done表示批准当前Plan，
-  不要求回答Comment；Canceled表示拒绝，Root进入blocked；
-- `planned_input` `PlannedInputNodeView`：Plan创建的Planned Input Node；
-- `runtime_input` `RuntimeInputNodeView`：Performer在Work Turn中请求的Runtime Input Node。
-
-解释器遇到第一个Planned Input Node或Runtime Input Node：
-
-1. Human置为In Progress；
-2. Root Phase置为`awaiting-human`；
-3. 等待用户Comment和Done/Canceled；
-4. 只有同时存在明确回答Comment并进入Done，才把该回答作为下一个Turn输入；
-5. Canceled表示该Human步骤被放弃；下一个关联Work Turn收到`canceled`输入。
-
-普通Root/Work Comment不是命令。只有当前Human Node的Comment会作为明确输入。
-
-Human回答使用该Issue当前所有非Symphony Comment，按Linear顺序组成一个确定输入。目标Work的完成hash包含title、业务description以及这些已解决Human输入；因此Human回答在Work完成后被编辑时，只重跑关联Work。
-
-Performer在Work Turn中请求Human时：
-
-1. 当前Work从In Progress退回Todo；
-2. Conductor在同一parent下、当前Work之前创建或复用一个`runtime_input` Human sibling；
-3. marker中的`target_issue_id`指向该Work；
-4. Human进入In Progress；
-5. Human完成后遍历器自然再次选择原Work。
-
-Runtime Input Node不能创建为当前Work的child，否则Work会变成非叶子Work Group而无法继续执行。
-
-Plan Approval Node被Canceled后，用户可以：
-
-- 将同一个Plan Approval Node重新置为Todo或In Progress，继续审核当前Plan；或
-- 修改Root title/description，让Conductor重新Plan并重新打开该Plan Approval Node。
-
-Conductor观察到Approval重新可处理后，把Root从`blocked`恢复为
-`awaiting-human`。普通Comment本身不恢复Approval。
-
-## 10. blocked与failed恢复
-
-`blocked`表示当前事实需要用户修复；它不是一个只能手工删除的永久Label。每个调度
-周期都重新计算阻塞条件，条件消失后Conductor替换Root Phase Label并继续原Root。
-
-| 原因 | 用户动作 | 恢复结果 |
-|---|---|---|
-| Plan Approval Node Canceled | 重新打开该Node，或修改Root触发重新Plan | `awaiting-human`或`planning` |
-| 多个In Progress叶子 | 只保留一个In Progress，其余置为Todo或Canceled | `working` |
-| 多个Root Phase Labels | 删除冲突Label，只保留或恢复一个有效Root Phase | 重新计算Root Phase |
-| Work Managed Metadata缺失/损坏 | Work回到In Progress重跑，或置为Canceled | `working` |
-| Git branch/worktree冲突 | 恢复匹配的branch/worktree，或清除冲突身份后重建 | 回到原phase |
-| retryable SDK/Provider错误 | 无需改变业务内容；Conductor按有界backoff重试 | 回到原phase |
-
-`failed`只用于在当前Root事实下无法安全重试的终止性错误。它必须写明具体原因和下一
-动作；修复底层事实后，用户修改Root输入可重新进入`planning`。如果该错误无法修复，
-用户将Root置为Canceled并创建新Root。可重试错误不得进入`failed`。
-
-## 11. Root Issue与Work Node内容变化
-
-不创建Source Revision或Plan Revision。Conductor只比较当前输入和Root Primary Status Comment
-中的最新已消费hash。
-
-### Root变化
-
-这里的Root变化只指title或description变化，不包括Symphony自己的state、Label或
-Root Primary Status Comment更新。
-
-任一非Done/Canceled Root发生变化：
-
-1. 当前Turn不被抢占；
-2. Turn结束后重新读取Root；
-3. 旧Root hash上的Plan、Work或Gate Result不能推进状态；
-4. 保留worktree中的代码；
-5. Root回到In Progress + `planning`；
-6. 使用同一`performer_id`重新Plan并reconcile未完成Work Nodes/Human Nodes；
-7. 重新批准；
-8. revised Tree完成后重新执行Root Gate。
-
-Root在In Review时发生变化也走同一路径，不要求用户先手工改回In Progress。Root已经Done或Canceled后不自动重开。
-
-### Work Leaf变化
-
-这里的Work只指Work Leaf；Work Group不是执行单元。
-
-- Todo Work变化：首次执行时直接使用最新title/description；
-- In Progress Work的title、description或关联Human输入在Turn期间变化：旧Result不完成该Work，下一个Turn用同一`performer_id`和最新输入重跑；
-- In Review或Done Work的title、description或关联Human输入变化：`completed_input_hash`不再匹配，Conductor把该Work重新置为In Progress，Root回到`working`，下一个Turn重跑；
-- Work重跑后，全部Work再次完成时重新Gate；
-- Work Group内容变化：只影响Linear组织展示和Root Gate，不重跑Work Leaf。
-
-## 12. 用户修改Tree
-
-用户可以：
-
-- 新增普通Sub Issue：默认成为Work Node；
-- 嵌套Sub Issue：父Work Node变为Work Group；
-- 拖动同级顺序：下一个Turn按新顺序；
-- 把节点Canceled：解释器跳过；
-- 添加Human：只有带有效Managed Marker且`kind: human`时才作为Human Node，否则仍是Work Node。
-
-Root处于In Review时新增Todo Work，不重新Plan；Conductor把Root移回In Progress + `working`，按最新Linear顺序执行该节点，之后重新Root Gate和交付。
-
-当前Work执行期间：
-
-- 当前Turn使用启动时Issue snapshot；
-- Result返回后Conductor重新读取Root和当前Work；
-- 当前Turn输入已变化时不应用旧Result；
-- 新增/重排其他节点只影响下一个Turn。
-
-## 13. Root Gate
-
-当以下条件全部成立时进入gating：
-
-```text
-no Todo/In Progress Work leaf in the non-Canceled tree
-all non-Canceled Work leaves are In Review or Done
-all non-Canceled Work leaves have matching completed_input_hash
-all non-Canceled Human leaves are Done
-```
-
-Canceled节点及其整个subtree不属于Gate有效集合。Canceled Work不会阻止Gate，
-也不会被Gate重新置为Done。
-
-Conductor：
-
-1. Root Phase设为`gating`；
-2. 使用同一`performer_id`执行Root Gate Turn；
-3. Gate读取最新Root、完整Tree和当前worktree。
-
-Gate通过：
-
-```text
-all non-Canceled In Review Work Nodes/Work Groups -> Done
-Root Phase -> delivering
-```
+当非Canceled Tree中没有未完成Work/Human时，Root Agent必须对整个Root目标、Tree、Git diff、
+commits和checks执行fresh Root Gate。Root Gate不是独立Issue、Performer Turn variant或Conductor
+phase。
 
 Gate失败：
 
-```text
-keep existing Work in In Review
-create or reuse one Symphony-origin Todo Work Leaf:
-  [Rework] Root Gate Findings
-Root Phase -> working
-```
+- 在Root写可读findings；
+- 创建或重开一个`[Rework] Root Gate Findings` Work child；
+- 保留已经完成的Work和Git事实；
+- 结束Turn，等待该Rework按正常Tree顺序处理。
 
-首次失败时把`RootGateReworkNodeView`对应的Root Gate Rework Node追加到Root末尾；
-再次失败时更新并重开同一个
-Rework Node，不累计Gate Revision或第二个Root Gate。Rework完成后重新运行Root Gate。
-Root Gate只审核Root Run，不存在Work Node Gate。
+Gate通过：
 
-Gate Turn完成后、进入交付前，Conductor必须重新读取Root和Tree。以下任一变化都使Gate Result失效：
+- 确认所有有效Work completion evidence仍匹配；
+- 把仍在In Review的有效Work置为Done；
+- 调用closed `symphony root deliver` command。
 
-- Root input hash变化；
-- 有效Tree中新增Todo Work；
-- 任一非Canceled Work的当前input hash与`completed_input_hash`不匹配；
-- 任一非Canceled Human尚未Done。
+Gate结论不保存为本地checkpoint。Gate通过后若在delivery前崩溃，新Conversation或新Turn必须从
+最新Tree/Git重新审核；重复Gate允许且必须幂等。Root或Work内容、blocker、Git HEAD或checks变化会
+使旧delivery precondition失败。
 
-Conductor先重新Plan或执行Work，再重新Gate。
+## 10. Delivery
 
-## 14. 交付
-
-Root Gate通过后，Conductor使用deterministic branch/worktree交付：
+`symphony root deliver`由Conductor执行并在命令时重新验证Root ownership、Root state、Tree、
+blockers、Git HEAD、checks和已有delivery：
 
 ```text
 gh available + push + PR success -> pull_request
@@ -546,47 +294,80 @@ otherwise push succeeds           -> remote_branch
 otherwise                         -> local_branch
 ```
 
-交付完成：
+交付事实写入Git/SCM和Root Primary Status Comment，Root进入In Review但不自动Done。重复请求先查找
+deterministic branch/PR并收敛，不能创建重复PR。
 
-- Root Primary Status Comment写branch、commit和PR；
-- Root state变为In Review；
-- Root Phase Label变为`symphony:run/in-review`；
-- Root不自动Done。
+Root处于In Review后新增或重开Work时，Root回到In Progress并重新进入Root scheduling；完成新Work
+后重新Gate和交付。
 
-交付期间若Root或已完成Work内容变化，停止交付并回到对应的planning或working流程；不能发布旧Gate结果。
+## 11. Conversation loss与Root retry
 
-## 15. 重启重建
-
-Conductor不读取本地Run数据库：
+正常process crash或Turn timeout保留current `performer_id`，下一次Root Turn尝试resume。只有Provider
+明确返回`conversation_not_found`/`conversation_unrecoverable`，或Root current指针确实缺失时，
+触发Root-level retry：
 
 ```text
-read Root state
-read one Root Phase Label
-read Root Primary Status Comment
-read complete Tree
-read Work Managed Metadata
-inspect deterministic Git workspace
-derive RootAction
+cancel the old Turn and terminate its process tree
+-> preserve all Linear/Git facts
+-> require current performer_id == failed ID or none, matching the observed loss
+-> append Root retry comment
+-> open a new Conversation with the pinned Profile
+-> compare-and-set current performer_id from that expected value to the new ID
+-> rebuild the entire RootRunView
+-> return the Root to Root scheduling
 ```
 
-唯一In Progress Work就是当前恢复节点。多个In Progress叶子是Linear状态冲突，必须blocked而不是任选一个。
+新Conversation首先审计整个Root，不接收“恢复这个Leaf”的prompt。Root retry不统一重置Leaf状态、
+不删除children、不reset worktree、不清除commits，也不恢复旧Result。旧Conversation的迟到command、
+Event和Result因为current pointer不匹配而失效。
 
-## 16. 不变量
+若这次新Conversation创建也失败，Conductor不执行pointer CAS，也不再自动调用
+`openRootConversation`。它在Root Primary Status Comment中稳定写入`Conversation: action required`、
+`Activity: failed`、expected failed ID或`none`、closed failure code、evidence source、`observed_at`和
+operator action，并把marker写成`retry_blocked: true`及对应expected pointer/failure/observation，
+再append一条相同evidence的去重terminal Timeline Comment。只要该block仍与Linear current pointer
+匹配，重启和后续poll都把Root评估为`needs_attention`；不得因内存状态丢失而重新进入自动retry。
+它不是attempt counter，只能由带matching precondition的显式operator acknowledge清除。
 
-1. Linear Tree是唯一Workflow结构。
-2. Linear sibling order是唯一Work Nodes/Human Nodes顺序。
-3. Work Group不执行。
-4. 当前最多一个In Progress可执行叶子。
-5. Canceled节点不再执行；Done Work内容变化后可以重跑。
-6. performer_id只存在于Root Primary Status Comment和Turn contract。
-7. performer_profile_id只存在于Root Primary Status Comment、Turn contract和Conductor Profile Store。
-8. Root Gate只审核Root且只在Tree完成后运行。
-9. Root Gate失败通过Root Gate Rework Node表达，不写本地rework状态。
-10. Root Phase只由一个Root Phase Label表达。
-11. Conductor没有Work Node、Queue、Root Gate或Root Run数据库。
-12. Root变化触发重新Plan；Work Leaf变化只重跑该Work。
-13. 输入hash只保存最新消费位置，不形成Revision模型。
-14. Canceled节点和subtree不属于Root Gate有效集合。
-15. 缺失或损坏的Work Managed Metadata不能被静默视为已完成。
-16. Root Done/Canceled后，任何在途Result都不能继续推进。
-17. Profile切换不迁移已有Root Conversation。
+## 12. Root变化与用户编辑
+
+不创建Source Revision、Plan Revision或本地input checkpoint。变化处理使用Linear remote version、
+受管Plan/Completion Comment marker和Git commit事实：
+
+- Root title/description在非终态变化：当前command因precondition失效；Root Agent重新审计并更新Plan；
+- Todo/In Progress Work变化：Agent使用最新内容继续或返工；
+- In Review/Done Work的业务内容晚于Completion Comment：Root Agent重开该Work并重新完成；
+- Human answer变化且影响已完成Work：Root Agent重开相关Work；
+- 用户新增/重排Tree：下次read-back立即生效；
+- Done/Canceled Root不自动重开。
+
+这些判断从Linear/Git事实完成，不需要隐藏的input hash、Leaf cursor或attempt journal。
+
+## 13. 错误可见性
+
+`needs_attention`不是持久Conductor状态。Harness从当前事实发现无法安全继续时：
+
+- 在Root Timeline写一条去重、脱敏、可执行的原因；
+- 在Primary投影`failed`及其客观evidence/`observed_at`，再best-effort同步Label；
+- 释放Agent lane；
+- 后续周期重新读取事实，问题消失后Root自然恢复runnable。
+
+Conversation loss本身走Root retry，不把Leaf标成failed。新Conversation无法创建、Profile未ready、
+Root ownership冲突、多个In Progress Work或Git identity冲突才需要operator action。新Conversation
+创建失败后以Primary marker中的closed Root Retry Block停止自动重试，不保存attempt counter，也不能
+无限循环。
+
+## 14. 不变量
+
+1. Root是唯一调度、Conversation和retry单元。
+2. Linear Tree是唯一Workflow结构，Linear sibling order是唯一Root内部顺序。
+3. Leaf没有Conversation、dispatch、worktree、cursor、attempt或recovery checkpoint。
+4. Work Group不执行；Canceled subtree不执行。
+5. V3单writer下最多一个Agent-owned Work Leaf处于In Progress。
+6. Plan、Human、Work、Gate、Rework和Delivery都必须在Linear/Git上留下人可理解的事实。
+7. Root Gate审核整个Root，不是独立Performer Turn或持久phase。
+8. current `performer_id`只表达Root Conversation continuation，可以通过Root retry替换。
+9. Root retry保留全部Linear/Git事实并拒绝旧Conversation副作用。
+10. waiting/working/failed/delivered投影必须带客观evidence和freshness；Agent summary不是状态依据。
+11. Conductor没有Root Run、Leaf、Queue、Gate、checkpoint、attempt或Result数据库。
+12. Result/Event/process exit不能替代Linear/Git read-back。

@@ -1,267 +1,171 @@
-# Symphony 架构 Roadmap 与 V1边界
+# Symphony架构Roadmap与版本边界
 
-状态：目标版本边界。本文描述未来四个大版本逐步完成目标架构，不包含日期、人员、迁移步骤或当前代码实施计划。
+状态：目标版本边界。本文描述五个大版本如何扩大能力，不包含日期、人员、迁移步骤或当前代码
+实施计划。
 
 ## 1. Roadmap原则
 
 1. 每个版本都形成Podium Desktop、Linear、Conductor、Performer和Git的完整纵向闭环。
-2. Linear Tree始终是Workflow权威，不在后续版本为Conductor引入任何数据库。
-3. Interface作为扩展边界保留，但未来实现只有获得产品授权后才加入。
-4. 版本只扩大已明确的能力，不为未来版本预建空状态、空表或不可达分支。
+2. Linear始终是Workflow authority，Git始终是code/delivery authority。
+3. Root始终是顶层调度和恢复边界；后续版本不能退回Leaf Queue或Stage state machine。
+4. Interface只为已授权能力建立，不为未来版本预建空表、空状态或不可达分支。
+5. Conductor所有版本都没有Workflow、Queue、dispatch、attempt或checkpoint数据库。
 
-## 2. 四个大版本
+## 2. 五个大版本
 
 | 版本 | 主题 | 完成边界 |
 |---|---|---|
-| V1 | 单Root完整闭环 | Codex Profiles、一个Root、一个worktree、Plan Approval Node、顺序Work Nodes/Human Nodes、Root Gate、PR或branch、单Conductor Binding重启恢复 |
-| V2 | 多Root稳定调度 | blocker、Linear Priority、Root order、等待Human时切换Root、用户Tree调整 |
-| V3 | Runtime与产品硬化 | 多Binding Desktop reconcile、错误可见性、打包升级、资源与rate-limit边界 |
-| V4 | Provider扩展 | 在不改变Conductor/Linear模型的前提下启用新的Provider Backend |
+| V1 | 单Root完整闭环 | 一个Root、一个worktree、一个Codex Conversation、Plan/Human/Work/Root Gate/Delivery和重启恢复 |
+| V2 | 多Root稳定调度 | blocker、Linear Priority、Root order、等待Human时切换Root和用户Tree调整 |
+| V3 | Agent Symphony Harness与Runtime硬化 | Root作为唯一dispatch/Conversation/retry单元；Agent以closed commands推进Linear/Git |
+| V4 | Agent Cluster | 一个已调度Root内的trusted roles、bounded child Turns、fresh review和capacity |
+| V5 | 多Provider Performer | 更多Provider Backend复用同一个RootTurn、Harness和Root retry contract |
 
-V4只说明架构允许Provider扩展，不代表当前已经授权Claude或其他Provider产品功能。
+V5只说明架构允许Provider扩展，不代表当前已授权具体第二Provider。
 
-## 3. V1目标
+## 3. V1：单Root完整闭环
 
-V1证明最小但完整的单Root模型：
+V1证明最小产品闭环：
 
 ```text
-Podium Desktop Login Linear
--> select Project + Git repository + base branch
--> start one Conductor
--> create and login Codex Performer Profiles
--> activate one ready Profile
--> claim one delegated Root
--> create deterministic branch/worktree
--> Performer Plan Turn
--> create Workflow Tree
--> create Plan Approval Node with [Human Action] title prefix
--> approval
--> execute deepest ordered Work leaves
--> resolve Human leaves when encountered
--> Performer Root Gate
--> PR when gh works, otherwise branch
+Podium Desktop connects Linear
+-> bind Project + repository + base branch
+-> claim one Root
+-> pin one ready Codex Profile and Conversation
+-> create one deterministic worktree
+-> Plan + Plan Approval child
+-> ordered Work/Human children
+-> Root Gate and Rework
+-> PR or branch delivery
 -> Root In Review
 ```
 
-V1不追求多Root公平性、并行Turn或第二Provider。
+V1要求Linear Token只在Podium、Provider SDK只在Performer、Conductor无数据库、Root restart后复用
+同一Tree/branch/worktree/Conversation。它不包含多Root fairness、并行Agent或第二Provider。
 
-## 4. V1功能边界
+V1恢复保证process crash、Turn interruption、部分Git修改、commit/Linear写入中断和delivery重入都可从
+Linear/Git收敛；它不保证旧Provider call跨process继续运行，也不保证磁盘故障后未落盘修改。
 
-### Podium Desktop
-
-- Linear OAuth登录和连接状态；
-- Project catalog；
-- 选择一个Project、local Git repository和base branch；
-- 创建、启动、停止一个Conductor Binding；
-- 检测该Conductor退出，并在旧process tree终止后按同一Binding重启；
-- 提供Overview、Work、Conductors和Settings四个固定入口；
-- 显示`NextActionView`、脱敏Conductor状态、Root状态和错误恢复说明；
-- 创建/编辑多个Codex Performer Profiles；
-- 通过Performer SDK完成ChatGPT登录或API Key登录；
-- 无重启activate Profile；
-- ChatGPT Profile可在SDK支持时配置Fast；API Key Profile显示Fast unavailable；
-- 显示Total Tokens和Completed Roots；
-- Plan Approval Node、Human回答和Root Done仍跳转到Linear完成。
-
-### Podium
-
-- `podium.db`保存credential、Project Catalog、Conductor Identity与Conductor Binding；
-  Resolved Conductor Project由Conductor Project Label表达；
-- 独占Linear SDK和Token refresh；
-- 实现`LinearGatewayProtocolHandlerImpl`；
-- 只转发Performer Profile Command和组合Profile/usage View，不持久化；
-- 不解释Root Workflow。
-
-### Conductor
-
-- TypeScript daemon；
-- 无任何数据库；
-- 使用明文`profiles.json`保存多个`PerformerProfile`和active Profile ID；
-- 为每个Profile分配独立`CODEX_HOME`，但不读取或修改其中Codex-owned文件；
-- 通过`PerformerProfileControlInterface`启动SDK登录/status；
-- full-read一个Root及其完整Tree；
-- 每轮按`symphony:conductor/<short-hash>`解析当前Project；
-- 维护一个Root Phase Label和一条Root Primary Status Comment；离散Turn事件append
-  Root Timeline Comments；
-- 使用Root Primary Status Comment和Work Managed Metadata中的覆盖式input hash识别内容变化；
-- depth-first ordered leaf traversal；
-- 每次一个Python Performer Turn；
-- deterministic branch/worktree；
-- Work commit、Root Gate和PR/branch交付；
-- Desktop replacement启动后，Conductor从Linear和Git继续；
-- 重启后从Linear、Git、Profile配置文件、`CODEX_HOME`和`performer_id`恢复。
-
-### Performer
-
-- Python process per Turn；
-- 只启用`CodexBackendImpl`；
-- 通过官方Codex Python SDK执行ChatGPT/API Key登录；
-- 把model、reasoning和Fast映射为SDK public参数；
-- 支持Plan、Work和Root Gate；
-- 使用opaque `performer_id`继续Conversation；
-- 无本地journal或任何数据库；
-- 不调用Linear，不修改Git topology。
-
-### Linear
-
-- Root状态：Todo、In Progress、In Review、Done、Canceled；
-- Root Phase Label：planning、awaiting-human、working、gating、delivering、in-review、blocked、failed；
-- Work Nodes/Human Nodes都使用Sub Issue表达；
-- Root Gate不创建Issue；
-- Plan Approval Node使用受管Human Node表达；
-- branch、PR、`performer_profile_id`、`performer_id`和usage写Root Primary Status
-  Comment；warning、error和Turn completion append Root Timeline Comments；
-- Work最新完成input hash写该Work Managed Metadata。
-
-## 5. V1明确不做
-
-- 多Root Priority/blocker调度；
-- 多Performer并行；
-- Plan Revision、Source Revision或Comment Revision；
-- checkpoint、dispatch Queue、operation journal；
-- Verification、Manifest、Evidence或Delivery Receipt；
-- 非Git目录；
-- 自动merge base branch；
-- Web产品；
-- 第二Provider；
-- Profile加密或Podium Profile存储；
-- Profile删除或修改既有Profile的登录方式；
-- 跨Conductor共享Profile；
-- 货币成本、ChatGPT credits或billing-grade usage；
-- compatibility shim。
-
-## 6. V1恢复边界
-
-V1保证：
-
-- Conductor process重启后可重读Linear/Git和Profile配置文件；
-- Codex SDK可从每个Profile原`CODEX_HOME`恢复auth/session；
-- 已保存`performer_id`时可继续同一Conversation；
-- In Progress Work可以在新Turn中继续；
-- worktree部分修改不会因Conductor重启丢失；
-- Work commit、hash或state更新中断后可以重放或补齐；
-- Canceled Work/subtree不会阻止Root Gate；
-- metadata损坏时进入可恢复blocked，不静默视为完成；
-- delivery阶段可按deterministic branch查找既有PR。
-
-V1不保证：
-
-- Python Performer process崩溃后旧Provider call仍继续运行；
-- 操作系统或磁盘故障后的未落盘修改恢复；
-- Provider无法通过ID resume时继续旧Conversation。
-
-## 7. V1状态闭环
-
-Performer Profile：
-
-```text
-readiness: login-required -> ready | invalid
-selection: ready -> active
-```
-
-```text
-Root Todo
--> Root In Progress + planning
--> awaiting-human
--> working
--> gating
--> delivering
--> Root In Review + in-review
--> user Done
-```
-
-异常：
-
-```text
-recoverable operator action -> blocked
-terminal runtime failure     -> failed
-user cancel                  -> Canceled
-```
-
-Work：
-
-```text
-Todo -> In Progress -> In Review -> Done
-Todo | In Progress | In Review -> Canceled
-```
-
-Human：
-
-```text
-Todo -> In Progress -> Done | Canceled
-Canceled -> In Progress when reopened
-```
-
-## 8. V1验收边界
-
-V1架构只有在以下事实可被证明时才算闭环：
-
-1. Linear Token只在Podium，Conductor通过Gateway完成Linear读写；
-2. Conductor Project Label唯一解析到Resolved Conductor Project，Label变化后下个Turn边界切换Project；
-3. 一个Root只产生一个Root Primary Status Comment、Root Phase Label、branch和worktree；
-   Timeline Comments按`turn_id:sequence`append且不重复；
-4. Plan生成的嵌套Tree与Linear parent/order一致；
-5. 未批准Plan不会执行Work；
-6. 用户新增或重排Sub Issue后，下一个Turn使用最新Tree；
-7. Root title/description变化后重新Plan、reconcile未完成Work并重新批准；
-8. Work Leaf title/description变化后只重跑该Work，不重做整棵Plan；
-9. Performer中断后能以同一`performer_id`继续In Progress Work；
-10. Root Gate失败创建一个Rework Work，成功才进入交付；
-11. `gh`可用时创建或复用PR，不可用时清楚交付branch；
-12. Root只进入In Review，不由Symphony自动Done；
-13. Canceled Work和subtree不参与Root Gate；
-14. In Review/Done Work缺少合法metadata时不会被静默视为完成；
-15. 用户在Turn期间Done/Canceled Root后，旧Result不能推进；
-16. Linear mutation precondition冲突后重新读取，不覆盖用户最新state；
-17. Work commit/hash/state任一步中断后可以从Linear和Git收敛；
-18. Conductor重启不依赖数据库；
-19. Desktop可以创建多个Profile，ChatGPT/API Key登录只调用Codex SDK；
-20. Symphony不读取或改写`auth.json`、`config.toml`；
-21. activate Profile无需重启，新Root使用新Profile，已有Root保持原Profile；
-22. model、reasoning和Fast在下一个Turn通过SDK参数生效；
-23. API Key不进入Podium/Conductor自定义持久化或任何View/日志；
-24. Desktop显示best-effort Token usage和Completed Roots。
-
-## 9. V2：多Root调度
+## 4. V2：多Root稳定调度
 
 V2增加：
 
-- 一个Conductor Binding内发现多个delegated Roots；
-- unresolved Linear blocker优先阻止调度；
-- eligible Roots按Linear Priority、Root order、identifier排序；
-- 等Human的Root释放唯一Performer Turn；
-- 每个Turn边界重读Priority、blocker和Tree顺序；
-- dependency cycle和多In Progress冲突可见。
+- 一个Conductor Binding发现多个delegated Roots；
+- Linear blocker优先于Priority；
+- runnable Roots按Priority、Root order、identifier排序；
+- waiting Human的Root释放唯一Agent lane；
+- Root headers全量发现，按Priority/order懒加载候选Tree，dispatch前完整fresh read；
+- dependency cycle、ownership和Tree冲突人类可见。
 
-仍然不增加本地Queue、checkpoint、aging或ready sequence。
+V2仍然不增加FIFO、aging、ready sequence、Leaf Queue、checkpoint或dispatch table。
 
-## 10. V3：Runtime与产品硬化
+## 5. V3：Agent Symphony Harness
+
+V3不是给旧状态机改名。它删除Conductor对Plan、Leaf Work、Human、Root Gate和Delivery的closed
+transition/directive控制面，把这些行为放进一个Root-scoped Agent Harness：
+
+```text
+read Linear/Git
+-> assess runnable Roots
+-> schedule one Root
+-> start/resume its Conversation
+-> run one bounded RootTurn with scoped commands
+-> read back Linear/Git
+-> discard transient runtime objects
+```
+
+### 5.1 Root单位
+
+- Root是唯一dispatch target；Performer contract没有`work_issue_id`/`target_issue_id`；
+- Root最多一个current `performer_id`和一个worktree；
+- Leaf只是Linear Tree中的工作结构；
+- Conductor不保存current Leaf、Leaf attempt或Leaf recovery checkpoint；
+- Plan/Work/Human/Gate/Delivery全部通过Linear/Git事实可见。
+
+### 5.2 Conversation retry
+
+正常crash/timeout resume同一Conversation。Provider明确报告Conversation不存在或不可恢复时：
+
+- 取消旧Turn并终止process tree；
+- 保留全部Tree、comments、states、commits和worktree diff；
+- 使用固定Profile创建新Conversation；
+- compare-and-set Root current pointer；
+- 把整个Root重新放回Root scheduler；
+- 新Conversation先审计完整Root，不接收Leaf recovery prompt。
+
+Root retry不清空事实、不reset worktree、不恢复attempt，也不把旧Result作为checkpoint。
+
+### 5.3 Harness能力
 
 V3增加：
 
-- Desktop启动时reconcile多个active Conductor Bindings；
-- 多个Conductor Bindings各自保持恰好一个Conductor；
-- 完整的错误、日志和named Desktop Views；
-- Linear rate-limit与bounded polling；
-- 打包升级、批量shutdown和多Conductor Binding crash replacement硬化；
-- worktree清理和长期运行资源边界。
+- trusted harness / untrusted human context / executable commands分层；
+- bounded context和显式partial/truncation；
+- Profile-owned Provider-native sandbox mode和有界command allowlist/denylist；
+- context launch limit、whole-Turn wall deadline、broker/mutation command limits；
+- Provider token只在完整Turn结束后观察和记账；
+- typed command registry和closed Linear/Git/delivery broker；
+- stable write ID、semantic read-back和ambiguous-write handling；
+- stale Result、old Conversation和late command rejection；
+- process readiness、complete-Turn accounting、heartbeat、cancellation和child-process cleanup；
+- Linear/Desktop上的脱敏、人可执行错误。
 
-这些能力强化运行可靠性，不改变Linear-authoritative Workflow模型。
+这些机制参考Orca，但不复制其task DAG、orchestration DB、dispatch rows、mailbox或failure counter。
 
-## 11. V4：Provider扩展
+### 5.4 V3明确不做
+
+- Agent roles、child Turn broker、fan-out/fan-in或多Agent并发；
+- 第二Provider Backend；
+- Workflow/Root/Leaf/dispatch/attempt/checkpoint数据库；
+- per-Agent worktree、多writer、自动merge；
+- Provider transcript或raw reasoning持久化。
+
+### 5.5 V3验收
+
+1. Root是唯一调度、Conversation和retry单元。
+2. Performer只有Root-scoped业务Turn。
+3. current Conversation先写Linear并read-back，再启动业务Root Turn。
+4. Conversation loss替换ID并重新调度整个Root，保留Linear/Git事实。
+5. 旧Conversation和旧Result不能在retry后继续写。
+6. Leaf没有dispatch、Conversation、worktree、cursor、attempt或recovery checkpoint。
+7. Agent所有durable结论通过closed commands落到Linear/Git。
+8. Result/Event/process exit不决定业务完成。
+9. Root discovery只读取bounded headers/Primary Comments；完整Issue Tree只为按序评估的候选和dispatch前
+   fresh read加载，不得对每个header串行执行`GetIssueTreeQuery`。
+10. V3没有Agent Cluster或第二Provider。
+
+## 6. V4：Agent Cluster
+
+V4只在一个已由V3调度的Root内部扩展协作：
+
+- coordinator、planner、writer、reviewer是trusted Turn roles，不是Issue states；
+- coordinator可请求bounded child Turns；
+- analysis可fan-out，所有participant计入真实capacity；
+- 同一Root worktree同时最多一个writer；
+- reviewer使用fresh Conversation且不修改workspace；
+- child dispatch、fan-in和session全部transient；
+- Cluster crash或coordinator Conversation loss走Root-level retry，从Linear/Git重启整个Root Cluster。
+
+V4不增加task/dispatch DB、mailbox、Stage checkpoint、per-Agent delivery或第二Provider。
+
+## 7. V5：多Provider Performer
 
 当第二Provider被明确授权时：
 
-- 在Performer内部增加新的`ProviderBackendInterface`实现；
-- 把Provider session/thread ID映射为同一个opaque `performer_id`；
-- 继续使用相同Plan、Work、Root Gate Command/Result；
-- 不修改Conductor调度、Linear Tree或Git交付模型。
+- 只在Performer内部新增`ProviderBackendInterface`实现；
+- Profile选择已注册Backend；
+- Backend实现相同Conversation bootstrap、`RootTurnCommand`和Result/Event；
+- Backend必须明确区分Conversation unavailable与transient failure；
+- Conversation loss仍触发相同Root-level retry；
+- Linear、Harness、Cluster、Git和Root scheduling不增加Provider-specific分支。
 
-若Provider不能可靠通过opaque ID恢复Conversation，则不接入，而不是为其重建Conductor数据库。
+无法满足closed RootTurn和Root-level retry的Provider不接入，而不是为它增加
+Conductor state或Leaf checkpoint。
 
-## 12. 不变量
+## 8. 不变量
 
-1. 所有版本都保持Linear权威和Conductor无任何数据库。
-2. V1先闭合单Root，V2再扩大到多Root。
-3. Roadmap不授权未来Provider或Web实现。
-4. 后续版本不能重新引入已删除的revision、receipt或operation模型。
+1. V1闭合单Root，V2扩大到多Root，V3校正为Root-level Agent Harness。
+2. V4只扩展Root内部Agent协作，V5只扩展Provider Backend。
+3. Linear/Git是所有版本唯一durable Workflow/code authority。
+4. Root始终是顶层调度和retry authority。
+5. 后续版本不能重新引入Workflow DB、Leaf Queue、Stage checkpoint或mirrored Issue state。

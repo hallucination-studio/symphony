@@ -1,33 +1,31 @@
-# Conductor无数据库解释器与调度设计
+# Conductor无数据库Root调度与Harness设计
 
-状态：目标架构提案。Conductor使用一个Conductor Binding，并通过Conductor Project
-Label解析Resolved Conductor Project；它没有任何Conductor-owned数据库，只使用明文
-Profile配置文件、Git workspace和Codex-owned `CODEX_HOME`。
+状态：目标架构提案。Conductor使用一个Conductor Binding，并通过Conductor Project Label解析
+Resolved Conductor Project；它没有Workflow、Root Run、dispatch或checkpoint数据库。
 
 ## 1. 职责
 
 Conductor负责：
 
-- 从`LinearGatewayInterface`读取Roots和Issue Trees；
-- 按Conductor Project Label解析Resolved Conductor Project；
-- 从Root Phase Label、Root Primary Status Comment、Workflow Tree和Git重建`RootRunView`；
-- 比较Root/Work当前输入与最新已消费hash；
-- 选择跨Root `RootAction`；
-- 解释单Root Workflow Tree并选择最深层Work Leaf；
-- 启动Python Performer Turn；
-- 保存多个`PerformerProfile`、active Profile ID和deterministic Profile
-  `CODEX_HOME`；
-- 通过`PerformerProfileControlInterface`触发SDK登录和account/status读取；
-- 创建deterministic branch/worktree和commit；
-- 决定Linear node/Label/state mutation；
-- 执行Root Gate和PR/branch交付。
+- 通过`LinearGatewayInterface`解析Project、全量发现含bounded Primary Comment的Root headers并按需
+  读取完整Issue Trees；
+- 从Root Primary Status Comment、Tree和Git重建可丢弃`RootRunView`；
+- 判断Root是runnable、waiting human、needs attention还是terminal；
+- 按blocker、Linear Priority、Root order和identifier选择一个Root；
+- 创建或resume该Root的Provider Conversation；
+- 组装trusted Root Harness、human context和closed command catalog；
+- 启动一个Python Performer Root Turn并监管其process tree；
+- 在每个Agent command前fresh验证Root scope、remote/Git precondition；
+- 维护Root deterministic branch/worktree、commit和delivery；
+- 保存Performer Profiles和active Profile ID，并通过Performer执行SDK login/status；
+- 把错误、retry和delivery以脱敏、人可理解的方式显示在Linear/Desktop。
 
 Conductor不负责：
 
 - Linear OAuth、Token、SDK或GraphQL；
-- Provider SDK、SDK登录、Codex-owned文件或thread/session解释；
-- 保存`workflow.db`、Queue、checkpoint、Plan Revision或Work Node镜像；
-- Podium/Tauri生命周期；
+- Provider SDK、Codex-owned文件或Provider transcript；
+- 决定或保存current Leaf、Plan/Work/Gate transition；
+- 保存Workflow DB、Root Queue、Leaf dispatch、attempt、checkpoint或Result ledger；
 - 自动merge target branch。
 
 ## 2. 模块
@@ -40,7 +38,7 @@ apps/conductor/src/
   root-discovery/
   root-scheduling/
   linear-tree/
-  root-workflow/
+  agent-symphony-harness/
   performer-profiles/
   performer-turns/
   git-workspaces/
@@ -52,264 +50,201 @@ apps/conductor/src/
 | 模块 | 职责 | 关键接口 |
 |---|---|---|
 | `linear-gateway` | Podium private protocol adapter | `LinearGatewayInterface` |
-| `root-discovery` | 获取Root、Priority、blocker | `LinearGatewayInterface` |
-| `root-scheduling` | Root eligibility和排序 | `RootSchedulingPolicyInterface` |
-| `linear-tree` | validate/normalize Workflow Tree、选择Work Leaf/Human Node | `LinearTreeTraversalPolicyInterface` |
-| `root-workflow` | 从事实计算`RootAction` | `RootActionPolicyInterface` |
-| `performer-profiles` | 保存Profile、active选择并启动SDK login/status control | `PerformerProfileStoreInterface`、`PerformerProfileControlInterface` |
-| `performer-turns` | Plan Turn、Work Turn和Root Gate Turn process调用 | `PerformerProcessInterface` |
-| `git-workspaces` | deterministic branch/worktree/commit | `GitWorkspaceInterface` |
-| `root-delivery` | push并交付PR/remote branch/local branch | `RootDeliveryInterface` |
-| `runtime-reporting` | 脱敏日志、Profile/usage和named Desktop View所需报告 | `ConductorRuntimeReporterInterface` |
+| `root-discovery` | Project解析、Root发现、blocker和ownership | `LinearGatewayInterface` |
+| `root-scheduling` | Root readiness、Priority和Root order | `RootSchedulingPolicyInterface` |
+| `linear-tree` | validate/normalize完整Root Tree和bounded context | `LinearTreeContextInterface` |
+| `agent-symphony-harness` | Conversation、Root context、broker、Root Turn和read-back | `AgentSymphonyHarnessInterface`、`AgentCommandBrokerInterface` |
+| `performer-profiles` | Profile store、active选择、SDK login/status control | `PerformerProfileStoreInterface`、`PerformerProfileControlInterface` |
+| `performer-turns` | Conversation bootstrap和Root Turn subprocess | `PerformerProcessInterface` |
+| `git-workspaces` | deterministic branch/worktree、safe commit/checks | `GitWorkspaceInterface` |
+| `root-delivery` | push并交付PR/remote/local branch | `RootDeliveryInterface` |
+| `runtime-reporting` | 脱敏日志、usage和Desktop views | `ConductorRuntimeReporterInterface` |
 
-模块只通过`*Interface`交互；`*Impl`留在Composition Root或模块内部。
+`linear-tree`不选择下一Leaf；Root Agent按Harness规则和最新Linear顺序解释Tree。其他模块不能另建
+Agent command入口或业务调度循环。
 
 ## 3. 可重建View
 
 ```text
 RootRunView
-  rootIssue
-  resolvedConductorProject
-  rootPhase
-  rootPrimaryStatusComment
-  workflowTree
-  blockerRelations
-  performerProfile
-  gitWorkspace
+  root_issue
+  resolved_conductor_project
+  root_primary_status_comment
+  optional_activity_projection
+  complete_issue_tree
+  blocker_relations
+  performer_profile
+  git_workspace
+  delivery
 ```
 
-`RootRunView`是一次调度周期的内存对象，不持久化。任何时刻都可以重新通过Linear/Git生成。
+`RootRunView`是一次poll/Turn的内存组合，不持久化。`performer_id`来自Linear Root；branch、commit、
+diff和PR来自Git/SCM；Profile定义来自Conductor明文配置。Profile配置是运行前提，不承载Workflow。
 
 ## 4. 主循环
 
 ```text
 while running:
-  project = linearGateway.resolveConductorProject(conductorShortHash)
-  if project is unbound or conflicted:
-    report and wait
-    continue
-  roots = linearGateway.listRootIssues(project.id)
-  candidates = []
+  project = resolve Project from the Conductor Project Label
+  headers = full-page delegated non-terminal Root headers
+  ordered = sort headers by blockers, Priority, Linear order and identifier
 
-  for root in roots:
-    view = reconstruct(root)
-    action = rootActionPolicy.compute(view)
-    if action is runnable:
-      candidates.append(action)
+  for header in ordered:
+    view = lazily reconstruct this candidate from complete Linear Tree and Git
+    assessment = agentSymphonyHarness.assessRoot(view)
+    if assessment.readiness == runnable:
+      selected = fresh-read the complete Root, blockers and Git again
+      if selected is still runnable:
+        agentSymphonyHarness.runRootTurn(selected)
+        break
 
-  selected = rootSchedulingPolicy.select(candidates)
-  execute(selected)
-  discard snapshots
+  discard views, assessments, process results and events
 ```
 
-没有background business queue。Conductor Project Label在每个周期重新解析；poll
-interval、backoff和SDK rate-limit属于运行机制，不改变业务顺序。
+没有background business Queue。等待Human的Root释放单机Agent lane，其他Root可以运行。poll interval、
+rate-limit backoff和runtime capacity只影响何时再次读取，不改变Linear Priority或Root order。memory
+cache只能合并/减少读取；assessment、Conversation和mutation都以fresh facts为准。
 
-未claim Root只在active Performer Profile为`ready`时产生`ClaimRootAction`。已有Root
-使用Root Primary Status Comment中的`performer_profile_id`，不因active Profile变化而迁移。
-
-## 5. Root Action
-
-`RootActionPolicyInterface`暴露纯决策并返回`RootAction`：
+## 5. Root readiness与调度
 
 ```text
-Root state/phase/tree/git
-  -> ClaimRootAction
-   | PlanRootAction
-   | WaitForHumanNodeAction
-   | ExecuteWorkLeafAction
-   | RunRootGateAction
-   | DeliverRootAction
-   | IdleRootAction
-   | BlockedRootAction
+RootDispatchAssessment
+  readiness: runnable | waiting_human | needs_attention | terminal
+  sanitized_reason?
 ```
 
-`PlanRootAction`同时覆盖首次Plan和Root变化后的重新Plan。
-`ExecuteWorkLeafAction`同时覆盖
-Todo、In Progress和内容变化后需要重跑的叶子。
+assessment只控制Root是否进入scheduler：
 
-In Review或Done Work缺少合法`completed_input_hash`时，Conductor不能建立完成基线，
-而是返回`BlockedRootAction`。用户把它移回In Progress后重新执行，或置为Canceled后从
-有效Workflow Tree中排除。Blocked条件在每个周期重新计算；事实修复后自然回到对应
-Root Phase，不维护单独恢复命令。
+- `runnable`：Root仍由当前Conductor拥有、无未解决Root blocker、Profile可用，且Tree/Git存在Agent可推进内容；
+- `waiting_human`：Tree顺序要求先完成一个Human child；
+- `needs_attention`：ownership、Profile、Tree或Git事实冲突，不能安全运行；
+- `terminal`：Root Done/Canceled，或In Review且没有新增/重开工作。
 
-选择Work Leaf时只调用`LinearTreeTraversalPolicyInterface`，不得在Conductor另写第二套排序。
+assessment不是closed workflow action union，不包含Plan、Work、Gate、Delivery或target Leaf。每轮从
+最新事实重算；问题消失后Root自然恢复。
 
-## 6. Linear mutation
+## 6. Conversation bootstrap与retry
 
-Conductor不调用SDK，只调用Gateway：
+未claim Root只有在active Profile ready时开始。Conductor先写Root ownership、固定Profile和
+deterministic branch，再调用无业务副作用的`openRootConversation`。新`performer_id`通过remote
+precondition写入Root Primary Status Comment并read-back成功后，才启动业务Root Turn。
 
-```text
-LinearGatewayInterface
-  <- PodiumLinearGatewayClientImpl
-     -> generated Podium-Conductor Protocol
-```
+正常Turn crash/timeout保留current `performer_id`，下一次Root Turn尝试resume。只有closed
+`RootConversationUnavailableResult`或确实缺失current pointer时，Harness执行Root-level retry：
 
-`PodiumLinearGatewayClientImpl`属于Conductor的`linear-gateway`模块，只负责Protocol调用；Podium端的Handler
-负责SDK执行。Conductor拥有mutation决策，Podium拥有SDK执行。所有create使用Managed
-Marker，所有update只修改Conductor拥有的surface。
+1. 取消旧Turn并终止旧process tree；
+2. 记录预期current pointer：Provider失效路径为失败ID，pointer缺失路径为`none`；
+3. read-back确认Linear current pointer仍等于该预期值；
+4. append一条去重的Root retry comment；
+5. 使用Root固定Profile创建新Conversation；
+6. 从该预期值compare-and-set新ID并read-back；
+7. 重建整个RootRunView并把Root重新交给Root scheduler。
 
-每个Project级mutation都携带当前`conductor_short_hash`、`expected_project_id`和
-Project remote precondition。修改已有对象时还携带目标Issue/Comment的remote
-version、预期state/parent和Managed Marker。任一precondition冲突时，Conductor丢弃
-旧View并开始下一轮解析，不能用旧Command覆盖用户刚刚执行的修改。
+retry不修改Leaf states、不reset worktree、不删除commits，也不恢复旧Leaf/attempt/checkpoint。current
+pointer替换后，旧Conversation的command和Result因`performer_id`不匹配而失效。
 
-## 7. Performer Turn
+## 7. Agent command broker
 
-Conductor每次只启动一个Performer process：
+Conductor通过`AgentCommandBrokerInterface`向Root Turn提供private、turn-scoped command channel。
+每个command验证：
 
-```text
-build Turn Command
--> resolve performer_profile_id
--> set selected Profile CODEX_HOME
--> load current CodexTurnSettings
--> put closed CodexTurnSettings in Turn Command
--> invoke installed performer command
--> consume bounded Event frames from Turn stdout while process is running
--> read closed Result
--> inspect latest Root/Work inputs and Git state
--> apply result or continue next Turn
-```
+- Turn、Root和current `performer_id`；
+- current Resolved Project和full `conductor_id`；
+- Root尚未Done/Canceled；
+- target仍在当前Root Tree且command/effect被允许；
+- expected remote version、state、parent和Git HEAD；
+- mutation完成后的semantic read-back。
 
-每个Command只携带一个`turn_input_hash`。Result返回后重新读取Linear/Git：
+Broker只调用`LinearGatewayInterface`、`GitWorkspaceInterface`或`RootDeliveryInterface`。Agent看不到
+Linear Token、SDK、GraphQL、Profile credential、process handle或arbitrary mutation。
 
-- Conductor Project Label已不再解析到该Root所属Project：旧Result不推进；
-- Result的`performer_profile_id`与Root Primary Status Comment或原始Command不匹配：旧Result
-  不推进；不得与当前active Profile比较；
-- Root已经Done/Canceled或full `conductor_id`不匹配：旧Result不推进；
-- Root/Work state、phase、input hash和结构precondition匹配：按Result执行下一状态；
-- hash不匹配：保留worktree，不应用Result，从最新`RootRunView`重新计算下一动作。
+CLI help、JSON catalog、prompt examples、schema和broker dispatch来自同一command registry。create和
+comment使用稳定`write_id`；unconfirmed write先read-back，不盲目重放。
 
-Conductor不保留active operation journal。进程中断时：
+## 8. Performer Result
 
-- Linear Work仍为In Progress；
-- Root Primary Status Comment仍有performer_id；
-- worktree保留当前文件；
-- 下次调度使用同一performer_id和最新Issue snapshot继续。
+Performer contract只有Conversation bootstrap和Root Turn。Conductor验证protocol、Turn、Root、Profile、
+current Conversation、context digest、Project和Root terminal state。
 
-同一时刻只能有一个Conductor实例控制一个Binding。Performer必须属于Conductor的受控process tree；Desktop Host必须先确认旧Conductor及其Performer child全部退出，再启动replacement。
+`RootTurnCompletedResult`只接受bounded summary、yield reason和Turn/Provider usage。任何Plan、
+Human、Work、Gate或Delivery结论
+如果没有通过broker写入Linear/Git，都视为丢失，不能在Result返回后由Conductor补成业务状态。
 
-Profile login、Profile status和业务Performer Turn共享一个全局Performer lane；一个
-Conductor同一时刻最多只有一个Performer子进程。Profile配置文件的Update/Activate使用
-原子文件替换，不接触`CODEX_HOME`，可以在Turn运行时完成：
+`command_limit_reached`只表示broker/mutation上限拒绝了后续command，不是Root failure。Conductor完成
+fresh read-back并让该Root重新参与Priority调度；它不立即续跑同一Leaf，也不保存remaining limit。
+Provider token usage只在完整Turn后观察，不能触发精确的中途取消。
 
-- Activate立即改变“新Root使用哪个Profile”；
-- 编辑当前Profile的Turn设置只在该Profile下一Turn生效；
-- 当前Turn不被抢占；
-- login/status在当前Turn结束后执行。
+`RootConversationUnavailableResult`走Root retry。其他retryable failure保留事实并有界重调度Root；
+需要operator action的failure写Linear/Desktop并使assessment成为`needs_attention`。Conductor不保存
+failure count或attempt journal。
 
-Result返回后，Conductor按固定顺序处理：
+新Conversation创建失败时，Conductor以current pointer和Primary remote version为precondition写入
+closed Root Retry Block。`AcknowledgeRootRetryBlockCommand`只有在Root ownership、非终态、block
+observation和current pointer全部匹配时才能清除；清除read-back前不得重新open Conversation。
 
-1. 重新读取Linear和Git并验证Root、Work、Profile、`turn_id`和input hash；
-2. 对合法Result尝试把usage累计到Root Primary Status Comment；
-3. usage写入失败时记录warning并继续，不让观察指标阻塞业务；
-4. 按Result和最新事实执行commit、节点状态、Root Gate或错误收敛。
+## 9. Git与delivery
 
-## 8. Git
+一个Root固定一个branch和worktree。Performer可以修改文件和运行工具，但commit、Git topology和
+delivery只能经broker调用Conductor-owned接口。
 
-每个Root路径可推导：
+`git commit --issue <id>`重新检查Root/Issue scope、Git HEAD和worktree，并使用稳定Root/Issue identity
+生成message。`root deliver`重新检查blockers、Tree、completion evidence、checks和delivery identity，
+然后创建或复用PR/branch。Conductor不信任Agent Result声明“checks passed”或“delivered”。
 
-```text
-branch:   symphony/runs/<root-identifier-lower>
-worktree: <conductor-data-root>/worktrees/<root-issue-id>
-```
+Root retry、process crash或Desktop restart都复用同一worktree；不得reset/clean用户或旧Turn留下的
+修改。发现identity冲突时进入`needs_attention`。
 
-Conductor拥有branch/worktree/commit/push/PR。Performer只修改给定worktree文件。
+## 10. 重启
 
-Work Turn成功：
+Conductor启动顺序：
 
-```text
-commit current changes
--> update Work Managed Metadata completed_input_hash
--> Work In Review
-```
+1. 读取Binding和Profile配置；
+2. 验证当前Conductor generation是唯一实例；
+3. 连接Podium private channel；
+4. 解析Conductor Project Label；
+5. full-scan Root headers并按Priority/order排列；
+6. 按序懒加载候选Tree和current Conversation；
+7. dispatch前fresh-read选中Root并inspect其branch/worktree/delivery；
+8. 进入正常Root scheduling。
 
-若在三步之间退出：
+Conductor不恢复旧process、assessment、current Leaf、Turn Result或retry attempt。若旧Conductor
+未退出，Host不得启动第二实例；无DB不等于允许双控制器。
 
-- matching hash已经写入但Work仍为In Progress：只补写In Review；
-- hash尚未写入：用同一Conversation和当前worktree重新执行Work Turn；
-- In Review/Done Work缺少合法hash：blocked，不自动建立完成基线。
+## 11. 错误与可见性
 
-Root Gate通过后：
+同一错误进入structured log、Root Timeline/Primary status、Desktop Root Detail和Attention Item。
+原因必须脱敏、稳定、可执行。Heartbeat、tool progress和Turn completion只作为runtime observation，
+不写成Workflow事实；Linear只保留Plan、retry、terminal error、Gate findings和delivery等人需要理解
+的关键事件。
 
-```text
-non-Canceled In Review Work -> Done
--> delivery
-```
+activity Label是best-effort投影。写Label失败不能改变Root assessment；Root/Tree/Git事实修复后，
+下一轮自然恢复，不需要“resume operation”命令。
 
-## 9. 重启
-
-启动不需要任何数据库migration或lock：
-
-1. 与Podium完成Conductor Runtime handshake；
-2. 打开`PerformerProfileStoreInterface`并验证Profile目录；
-3. 通过Performer SDK重新读取所有Profile account/status，并确认active Profile；
-4. 获取Linear Gateway session；
-5. 验证repository；
-6. 按Conductor Project Label解析当前Project；
-7. full-scan Roots；
-8. 对每个active Root重建View；
-9. 检查固定Profile、多Root Phase Labels、多In Progress Work Leaves和Git冲突；
-10. 正常进入调度循环。
-
-若旧Conductor未退出，Host不得启动新实例；无DB不意味着允许双控制器。
-
-## 10. 错误可见性
-
-Root级业务或调度错误同时进入：
-
-- structured log；
-- Root Primary Status Comment中的当前非Turn阻塞原因；
-- Root Phase Label `blocked`或`failed`；
-- `RootDetailView`。
-
-Performer warning/error和Turn completion属于观察事件：warning/error/completion append Root
-Timeline Comment，连续状态按保存的Primary `comment_id`实时upsert。观察日志或Linear
-projection失败不得改变closed Result、retry或Workflow mutation。
-
-Conductor级错误，例如Conductor Project Label缺失、重复或冲突，没有对应Root，只进入
-structured log和`ConductorDetailView`。错误不写Root Description，不泄露Token、绝对
-路径、Provider输出或SDK exception。
-
-Profile级登录、status或设置错误进入`PerformerProfileDetailView`。API Key、Codex auth
-内容和`CODEX_HOME`绝对路径不得进入Runtime report。
-
-Conductor Project Label移动到另一个Project时，旧Project Root暂停但不转移所有权。
-Conductor把Previous/Current Resolved Conductor Project和已知Active Root摘要报告给
-Podium；用户把Label移回后，原
-Root按正常重启路径继续。
-
-## 11. 接口命名
+## 12. 接口命名
 
 ```text
-LinearGatewayInterface       <- PodiumLinearGatewayClientImpl
-RootSchedulingPolicyInterface <- LinearPriorityRootSchedulingPolicyImpl
-LinearTreeTraversalPolicyInterface <- LinearDepthFirstTreeTraversalPolicyImpl
-RootActionPolicyInterface    <- RootRunActionPolicyImpl
-PerformerProfileStoreInterface <- FilePerformerProfileStoreImpl
+LinearGatewayInterface          <- PodiumLinearGatewayClientImpl
+RootSchedulingPolicyInterface   <- LinearPriorityRootSchedulingPolicyImpl
+LinearTreeContextInterface      <- BoundedLinearTreeContextImpl
+AgentSymphonyHarnessInterface   <- AgentSymphonyHarnessImpl
+AgentCommandBrokerInterface     <- ScopedAgentCommandBrokerImpl
+PerformerProfileStoreInterface  <- FilePerformerProfileStoreImpl
 PerformerProfileControlInterface <- SubprocessPerformerProfileControlImpl
-PerformerProcessInterface     <- SubprocessPerformerProcessImpl
-GitWorkspaceInterface         <- NativeGitWorkspaceImpl
-RootDeliveryInterface         <- GitRootDeliveryImpl
-ConductorRuntimeReporterInterface  <- PodiumConductorRuntimeReporterImpl
+PerformerProcessInterface       <- SubprocessPerformerProcessImpl
+GitWorkspaceInterface           <- NativeGitWorkspaceImpl
+RootDeliveryInterface           <- GitRootDeliveryImpl
+ConductorRuntimeReporterInterface <- PodiumConductorRuntimeReporterImpl
 ```
 
-## 12. 不变量
+## 13. 不变量
 
-1. Conductor没有任何数据库。
-2. Linear/Git/Provider是恢复事实。
-3. 每个调度周期重新计算，不复用旧Queue/Cursor。
-4. 一个Binding只有一个有效Conductor。
-5. 一个Conductor同时最多一个Performer Turn。
-6. Conductor不接触Linear Token/SDK。
-7. Performer Event不能改变Workflow。
-8. 所有下一步都能从`RootRunView`纯计算得到。
-9. Root变化触发重新Plan，Work Leaf变化只触发该Work重跑。
-10. Conductor只保存覆盖式input hash到Linear，不保存Revision历史。
-11. Conductor不持久化project_id；每轮从Conductor Project Label解析。
-12. full `conductor_id`不匹配的Root不能恢复。
-13. Root Done/Canceled后，任何在途Result都不能推进。
-14. 缺失或损坏的Work Managed Metadata不能被静默接受。
-15. Conductor只保存Profile业务字段，不读取或改写Codex-owned文件。
-16. active Profile切换只影响新Root；已有Root固定原Profile。
-17. Profile control与业务Turn共享一个全局Performer lane，不并发启动子进程。
+1. Conductor只调度Root，不调度Plan、Leaf、Gate或Delivery Turn。
+2. Root readiness每轮纯计算，不是状态机或持久directive。
+3. Leaf顺序由Root Agent从Linear Tree解释，Conductor不保存current Leaf。
+4. current Conversation先在Linear确认，再启动业务Root Turn。
+5. Conversation loss触发Root-level retry并拒绝旧Conversation副作用。
+6. Conductor不保存Workflow、Queue、dispatch、attempt、checkpoint或Result数据库。
+7. Result/Event/process exit不能替代Linear/Git read-back。
+8. Linear SDK只在Podium，Provider SDK只在Performer。
+9. 一个Root一个worktree，V3同时最多一个writer。
+10. V4/V5复用Root Harness，不复制顶层调度或恢复控制面。

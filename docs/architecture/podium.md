@@ -19,8 +19,8 @@ Podium拥有：
 Podium不拥有：
 
 - Workflow Tree解释；
-- Root Phase决策；
-- Root Action、Work Leaf和Root Gate调度；
+- Root Activity投影或Root readiness派生；
+- Root scheduling、Root内部Leaf解释和Root Gate；
 - Git worktree/branch/PR；
 - Provider SDK或performer_id解释；
 - Performer Profile、Codex auth、API Key或`CODEX_HOME`持久化；
@@ -184,7 +184,7 @@ LinearGatewayProtocolHandlerImpl
 ```
 
 `DesktopViewInterface`只组合Conductor当前报告、Podium control-plane事实和安全display
-信息。它不解释Workflow Tree、不产生`RootAction`，也不把View写回为Workflow状态。
+信息。它不解释Workflow Tree、不产生`RootDispatchAssessment`，也不把View写回为Workflow状态。
 页面、状态和字段边界见[Podium Desktop产品与Runtime设计](podium-desktop.md)。
 
 `PodiumDesktopImpl`和`PodiumDesktopViewImpl`都属于Podium内部实现，不进入package
