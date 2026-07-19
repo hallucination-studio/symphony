@@ -45,6 +45,7 @@ function issue(input) {
     delegateId: input.delegateId,
     title: input.title ?? "Title",
     description: input.description ?? "",
+    priority: input.priority ?? 0,
     sortOrder: input.order ?? 1,
     subIssueSortOrder: input.parentId ? (input.order ?? 1) : undefined,
     updatedAt: new Date("2026-07-16T00:00:00Z"),
@@ -53,10 +54,22 @@ function issue(input) {
       states: async () => connection([{ id: "state-todo", name: "Todo" }]),
     }),
     children: async () => connection(input.children ?? []),
+    inverseRelations: async () => input.inverseRelations ?? connection([]),
     comments: async () => connection([]),
     labels: async () => connection([]),
   };
   return value;
+}
+
+function blocks(source, target) {
+  return {
+    id: `${source.id}-blocks-${target.id}`,
+    type: "blocks",
+    issueId: source.id,
+    relatedIssueId: target.id,
+    issue: Promise.resolve(source),
+    relatedIssue: Promise.resolve(target),
+  };
 }
 
 test("official SDK adapter maps each Podium credential kind to the correct Authorization scheme", async (t) => {
@@ -96,6 +109,140 @@ test("development-token SDK uses the persisted app user for Root delegation", as
 
   const roots = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
   assert.equal(roots.items[0].isDelegatedToSymphony, true);
+});
+
+test("Root scheduling maps every Linear priority and preserves Root sort order", async () => {
+  const roots = [0, 1, 2, 3, 4].map((priority) => issue({
+    id: `root-${priority}`,
+    priority,
+    order: 10.5 + priority,
+  }));
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection(roots) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const result = await adapter.listRootIssues({
+    projectId: "project-1",
+    limit: 250,
+  });
+
+  assert.deepEqual(
+    result.items.map(({ issue: root, priority, blockers }) => ({
+      order: root.order,
+      priority,
+      blockers,
+    })),
+    [
+      { order: 10.5, priority: "no_priority", blockers: [] },
+      { order: 11.5, priority: "urgent", blockers: [] },
+      { order: 12.5, priority: "high", blockers: [] },
+      { order: 13.5, priority: "normal", blockers: [] },
+      { order: 14.5, priority: "low", blockers: [] },
+    ],
+  );
+});
+
+test("Root scheduling reads every blocker page and target state outside the candidate set", async () => {
+  const doneBlocker = issue({ id: "external-done" });
+  doneBlocker.state = Promise.resolve({ id: "state-done", name: "Done" });
+  const activeBlocker = issue({ id: "external-active" });
+  activeBlocker.state = Promise.resolve({ id: "state-progress", name: "In Progress" });
+  const root = issue({ id: "root-1" });
+  root.inverseRelations = async () => paginatedConnection([
+    [blocks(doneBlocker, root)],
+    [blocks(activeBlocker, root)],
+  ]);
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const result = await adapter.listRootIssues({
+    projectId: "project-1",
+    limit: 250,
+  });
+
+  assert.deepEqual(result.items[0].blockers, [
+    {
+      sourceIssueId: "root-1",
+      targetIssueId: "external-done",
+      targetState: "Done",
+    },
+    {
+      sourceIssueId: "root-1",
+      targetIssueId: "external-active",
+      targetState: "In Progress",
+    },
+  ]);
+});
+
+test("Root scheduling fails closed when a blocker relation has inconsistent endpoints", async () => {
+  const blocker = issue({ id: "blocker-1" });
+  const root = issue({ id: "root-1" });
+  const wrongTarget = issue({ id: "root-2" });
+  root.inverseRelations = async () => connection([blocks(blocker, wrongTarget)]);
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  await assert.rejects(
+    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
+    /linear_blocker_relation_invalid/u,
+  );
+});
+
+test("Root scheduling fails closed for an unknown Linear priority", async () => {
+  const root = issue({ id: "root-1", priority: 5 });
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  await assert.rejects(
+    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
+    /linear_issue_priority_invalid/u,
+  );
+});
+
+test("Root scheduling fails closed for a cross-project Root", async () => {
+  const root = issue({ id: "root-1" });
+  root.projectId = "project-2";
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  await assert.rejects(
+    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
+    /linear_root_project_mismatch/u,
+  );
 });
 
 test("official SDK adapter resolves the unique Project label and reads complete Root trees", async () => {

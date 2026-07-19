@@ -13,7 +13,9 @@ import type {
 import type {
   LinearIssueValue,
   LinearIssueState,
+  LinearBlockerValue,
   LinearMutationCommand,
+  LinearPriority,
   RootIssueValue,
   RootUsageValue,
 } from "../types.js";
@@ -456,10 +458,15 @@ export class LinearSdkImpl implements LinearClientInterface {
     const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const items: RootIssueValue[] = [];
     for (const issue of page.nodes) {
-      if (issue.projectId !== input.projectId || issue.parentId) continue;
+      if (issue.projectId !== input.projectId) {
+        throw new Error("linear_root_project_mismatch");
+      }
+      if (issue.parentId) continue;
       items.push({
         issue: await issueValue(issue, 0),
         isDelegatedToSymphony: issue.delegateId === delegateActorId,
+        priority: linearPriority(issue.priority),
+        blockers: await blockerValues(issue),
       });
     }
     return { items, pageInfo: pageInfo(page.pageInfo) };
@@ -964,6 +971,54 @@ function linearIssueState(value: string): LinearIssueState {
     return value;
   }
   throw new Error("linear_issue_state_invalid");
+}
+
+function linearPriority(value: number): LinearPriority {
+  switch (value) {
+    case 0:
+      return "no_priority";
+    case 1:
+      return "urgent";
+    case 2:
+      return "high";
+    case 3:
+      return "normal";
+    case 4:
+      return "low";
+    default:
+      throw new Error("linear_issue_priority_invalid");
+  }
+}
+
+async function blockerValues(issue: Issue): Promise<LinearBlockerValue[]> {
+  const relations = await allNodes(
+    issue.inverseRelations({ first: PAGE_LIMIT }),
+    MAX_TREE_NODES,
+  );
+  const blockers: LinearBlockerValue[] = [];
+  for (const relation of relations) {
+    if (relation.type !== "blocks") continue;
+    if (
+      !relation.issueId ||
+      relation.relatedIssueId !== issue.id ||
+      relation.issueId === issue.id
+    ) {
+      throw new Error("linear_blocker_relation_invalid");
+    }
+    const target = await relation.issue;
+    if (!target || target.id !== relation.issueId) {
+      throw new Error("linear_blocker_relation_invalid");
+    }
+    const statePromise = target.state;
+    const state = statePromise ? await statePromise : undefined;
+    if (!state) throw new Error("linear_blocker_target_state_missing");
+    blockers.push({
+      sourceIssueId: issue.id,
+      targetIssueId: target.id,
+      targetState: linearIssueState(state.name),
+    });
+  }
+  return blockers;
 }
 
 async function allNodes<Node>(

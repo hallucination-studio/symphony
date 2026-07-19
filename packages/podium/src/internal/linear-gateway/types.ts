@@ -7,6 +7,19 @@ export type LinearIssueState =
   | "Done"
   | "Canceled";
 
+export type LinearPriority =
+  | "urgent"
+  | "high"
+  | "normal"
+  | "low"
+  | "no_priority";
+
+export interface LinearBlockerValue {
+  sourceIssueId: string;
+  targetIssueId: string;
+  targetState: LinearIssueState;
+}
+
 export interface ProjectPrecondition {
   conductorShortHash: string;
   expectedProjectId: string;
@@ -120,6 +133,8 @@ export interface LinearIssueValue {
 export interface RootIssueValue {
   issue: LinearIssueValue;
   isDelegatedToSymphony: boolean;
+  priority: LinearPriority;
+  blockers: LinearBlockerValue[];
 }
 
 export interface RootUsageValue {
