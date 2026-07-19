@@ -63,7 +63,7 @@ pub struct DesktopController {
     host_acks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     conductor_channel: Mutex<UnixStream>,
     repositories: Mutex<HashMap<String, RepositoryContext>>,
-    conductor: AsyncMutex<Option<ActiveConductor>>,
+    conductors: AsyncMutex<HashMap<String, ActiveConductor>>,
     backend: AsyncMutex<ManagedProcess>,
 }
 
@@ -91,7 +91,7 @@ impl DesktopController {
             host_acks: Mutex::new(HashMap::new()),
             conductor_channel: Mutex::new(conductor_child),
             repositories: Mutex::new(HashMap::new()),
-            conductor: AsyncMutex::new(None),
+            conductors: AsyncMutex::new(HashMap::new()),
             backend: AsyncMutex::new(backend),
         });
         let host_controller = controller.clone();
@@ -284,12 +284,12 @@ impl DesktopController {
     }
 
     async fn start_conductor(&self, config: ConductorConfig) -> Result<(), ControllerError> {
-        let mut active = self.conductor.lock().await;
-        if active.is_some() {
+        let mut active = self.conductors.lock().await;
+        if active.contains_key(&config.binding_id) {
             return Err(ControllerError::ConductorAlreadyRunning);
         }
         let (process, instance_id) = self.spawn_conductor(&config)?;
-        *active = Some(ActiveConductor { config, instance_id, process });
+        active.insert(config.binding_id.clone(), ActiveConductor { config, instance_id, process });
         Ok(())
     }
 
@@ -297,44 +297,48 @@ impl DesktopController {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let replacement = {
-                let mut active = self.conductor.lock().await;
-                let Some(current) = active.as_mut() else {
-                    continue;
-                };
-                let tree_exited = match current.process.try_observed_exit() {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(ProcessError::ProcessTreeStillRunning) => {
-                        current.process.shutdown_within(Duration::from_secs(5)).await.is_ok()
+                let mut active = self.conductors.lock().await;
+                let binding_ids = active.keys().cloned().collect::<Vec<_>>();
+                let mut replacements = Vec::new();
+                for binding_id in binding_ids {
+                    let Some(current) = active.get_mut(&binding_id) else { continue };
+                    let tree_exited = match current.process.try_observed_exit() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(ProcessError::ProcessTreeStillRunning) => {
+                            current.process.shutdown_within(Duration::from_secs(5)).await.is_ok()
+                        }
+                        Err(_) => false,
+                    };
+                    if !tree_exited {
+                        continue;
                     }
-                    Err(_) => false,
-                };
-                if !tree_exited {
-                    continue;
+                    let config = current.config.clone();
+                    if self
+                        .forward_process_exit(
+                            &config,
+                            &current.instance_id,
+                            "conductor_process_exited",
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        active.remove(&binding_id);
+                        replacements.push(config);
+                    }
                 }
-                let config = current.config.clone();
-                if self
-                    .forward_process_exit(&config, &current.instance_id, "conductor_process_exited")
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                *active = None;
-                Some(config)
+                replacements
             };
-            if let Some(config) = replacement {
+            for config in replacement {
                 let _ = self.start_conductor(config).await;
             }
         }
     }
 
     async fn stop_conductor(&self, conductor_id: &str) -> Result<(), ControllerError> {
-        let mut active = self.conductor.lock().await;
-        let current = active.as_mut().ok_or(ControllerError::ConductorMissing)?;
-        if current.config.conductor_id != conductor_id {
-            return Err(ControllerError::ConductorMismatch);
-        }
+        let mut active = self.conductors.lock().await;
+        let binding_id = binding_for_conductor(&active, conductor_id)?;
+        let current = active.get_mut(&binding_id).ok_or(ControllerError::ConductorMissing)?;
         current
             .process
             .shutdown_within(Duration::from_secs(5))
@@ -346,17 +350,15 @@ impl DesktopController {
             "conductor_process_stopped",
         )
         .await?;
-        *active = None;
+        active.remove(&binding_id);
         Ok(())
     }
 
     async fn restart_conductor(&self, conductor_id: &str) -> Result<(), ControllerError> {
         let config = {
-            let active = self.conductor.lock().await;
-            let current = active.as_ref().ok_or(ControllerError::ConductorMissing)?;
-            if current.config.conductor_id != conductor_id {
-                return Err(ControllerError::ConductorMismatch);
-            }
+            let active = self.conductors.lock().await;
+            let binding_id = binding_for_conductor(&active, conductor_id)?;
+            let current = active.get(&binding_id).ok_or(ControllerError::ConductorMissing)?;
             current.config.clone()
         };
         self.stop_conductor(conductor_id).await?;
@@ -400,9 +402,11 @@ impl DesktopController {
     }
 
     pub async fn shutdown(&self) {
-        if let Some(active) = self.conductor.lock().await.as_mut() {
+        let mut conductors = self.conductors.lock().await;
+        for active in conductors.values_mut() {
             let _ = active.process.shutdown_within(Duration::from_secs(5)).await;
         }
+        conductors.clear();
         let _ = self.backend.lock().await.shutdown_within(Duration::from_secs(5)).await;
     }
 
@@ -441,6 +445,22 @@ impl DesktopController {
         } else {
             Err(ControllerError::ProtocolIoFailed)
         }
+    }
+}
+
+fn binding_for_conductor(
+    active: &HashMap<String, ActiveConductor>,
+    conductor_id: &str,
+) -> Result<String, ControllerError> {
+    let matches = active
+        .iter()
+        .filter(|(_, generation)| generation.config.conductor_id == conductor_id)
+        .map(|(binding_id, _)| binding_id.clone())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [binding_id] => Ok(binding_id.clone()),
+        [] => Err(ControllerError::ConductorMissing),
+        _ => Err(ControllerError::ConductorMismatch),
     }
 }
 
@@ -586,4 +606,45 @@ fn uuid_like() -> String {
 #[allow(dead_code)]
 fn _is_absolute(path: &str) -> bool {
     Path::new(path).is_absolute()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation(binding_id: &str, conductor_id: &str) -> ActiveConductor {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        ActiveConductor {
+            config: ConductorConfig {
+                binding_id: binding_id.to_owned(),
+                conductor_id: conductor_id.to_owned(),
+                conductor_short_hash: "short".to_owned(),
+                linear_installation_id: "installation".to_owned(),
+                organization_id: "organization".to_owned(),
+                repository_handle: "repository".to_owned(),
+                repository_root: "/repository".to_owned(),
+                base_branch: "main".to_owned(),
+                conductor_data_root: "/data".to_owned(),
+            },
+            instance_id: format!("instance-{binding_id}"),
+            process: ManagedProcess::spawn(command).unwrap(),
+        }
+    }
+
+    #[test]
+    fn generation_lookup_keeps_bindings_independent_and_rejects_ambiguity() {
+        let mut active = HashMap::new();
+        active.insert("binding-1".to_owned(), generation("binding-1", "conductor-1"));
+        active.insert("binding-2".to_owned(), generation("binding-2", "conductor-2"));
+        assert_eq!(binding_for_conductor(&active, "conductor-1").unwrap(), "binding-1");
+        active.insert("binding-3".to_owned(), generation("binding-3", "conductor-1"));
+        assert!(matches!(
+            binding_for_conductor(&active, "conductor-1"),
+            Err(ControllerError::ConductorMismatch)
+        ));
+        for generation in active.values_mut() {
+            generation.process.observed_exit().unwrap();
+        }
+    }
 }
