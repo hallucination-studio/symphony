@@ -54,6 +54,7 @@ export class ConductorProfileRelayHandler {
           backendKind: "codex",
           authenticationMethod: authentication(body.authentication_method),
           codexTurnSettings: settings(body.codex_turn_settings),
+          executionPolicy: executionPolicy(body.execution_policy),
           now: this.now(),
         });
         return {
@@ -66,6 +67,7 @@ export class ConductorProfileRelayHandler {
           profileId: required(body.profile_id),
           displayName: required(body.display_name),
           codexTurnSettings: settings(body.codex_turn_settings),
+          executionPolicy: executionPolicy(body.execution_policy),
           now: this.now(),
         });
         return {
@@ -137,6 +139,17 @@ export class ConductorProfileRelayHandler {
         reasoning_effort: profile.codexTurnSettings.reasoningEffort,
         is_fast_mode_enabled: profile.codexTurnSettings.isFastModeEnabled,
       },
+      execution_policy: {
+        sandbox_mode: profile.executionPolicy.sandboxMode,
+        command_allowlist: profile.executionPolicy.commandAllowlist.map((rule) => ({
+          executable: rule.executable,
+          argv_prefix: rule.argvPrefix,
+        })),
+        command_denylist: profile.executionPolicy.commandDenylist.map((rule) => ({
+          executable: rule.executable,
+          argv_prefix: rule.argvPrefix,
+        })),
+      },
       readiness,
       is_active:
         (knownActiveProfileId ?? file?.activeProfileId) === profile.profileId,
@@ -187,6 +200,41 @@ function settings(
     reasoningEffort: effort as PerformerProfile["codexTurnSettings"]["reasoningEffort"],
     isFastModeEnabled: input.is_fast_mode_enabled,
   };
+}
+
+function executionPolicy(
+  value: JsonValue | undefined,
+): PerformerProfile["executionPolicy"] {
+  const input = record(value ?? null);
+  const sandboxMode = required(input.sandbox_mode);
+  if (
+    sandboxMode !== "read_only" &&
+    sandboxMode !== "workspace_write" &&
+    sandboxMode !== "unrestricted"
+  ) {
+    throw new Error("profile_execution_policy_invalid");
+  }
+  return {
+    sandboxMode,
+    commandAllowlist: commandRules(input.command_allowlist),
+    commandDenylist: commandRules(input.command_denylist),
+  };
+}
+
+function commandRules(value: JsonValue | undefined) {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new Error("profile_execution_policy_invalid");
+  }
+  return value.map((ruleValue) => {
+    const rule = record(ruleValue);
+    if (!Array.isArray(rule.argv_prefix) || rule.argv_prefix.length > 16) {
+      throw new Error("profile_execution_policy_invalid");
+    }
+    return {
+      executable: required(rule.executable),
+      argvPrefix: rule.argv_prefix.map(required),
+    };
+  });
 }
 
 function parseReadiness(value: JsonValue | undefined): Readiness {

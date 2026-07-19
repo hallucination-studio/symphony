@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  AgentExecutionPolicy,
   PerformerProfile,
   PerformerProfileStoreInterface,
 } from "../api/PerformerProfileStoreInterface.js";
@@ -37,9 +38,12 @@ export class FilePerformerProfileStoreImpl
     backendKind: "codex";
     authenticationMethod: "chatgpt" | "api_key";
     codexTurnSettings: PerformerProfile["codexTurnSettings"];
+    executionPolicy?: AgentExecutionPolicy;
     now: string;
   }) {
     validateSettings(input.authenticationMethod, input.codexTurnSettings);
+    const executionPolicy = input.executionPolicy ?? defaultExecutionPolicy();
+    validateExecutionPolicy(executionPolicy);
     const file = await this.list();
     if (file.profiles.some((profile) => profile.profileId === input.profileId)) {
       throw new Error("profile_already_exists");
@@ -50,6 +54,7 @@ export class FilePerformerProfileStoreImpl
       backendKind: "codex",
       authenticationMethod: input.authenticationMethod,
       codexTurnSettings: input.codexTurnSettings,
+      executionPolicy,
       createdAt: input.now,
       updatedAt: input.now,
     };
@@ -63,6 +68,7 @@ export class FilePerformerProfileStoreImpl
     profileId: string;
     displayName: string;
     codexTurnSettings: PerformerProfile["codexTurnSettings"];
+    executionPolicy?: AgentExecutionPolicy;
     now: string;
   }) {
     const file = await this.list();
@@ -71,10 +77,13 @@ export class FilePerformerProfileStoreImpl
     );
     if (!existing) throw new Error("profile_not_found");
     validateSettings(existing.authenticationMethod, input.codexTurnSettings);
+    const executionPolicy = input.executionPolicy ?? existing.executionPolicy;
+    validateExecutionPolicy(executionPolicy);
     const updated: PerformerProfile = {
       ...existing,
       displayName: requireText(input.displayName),
       codexTurnSettings: input.codexTurnSettings,
+      executionPolicy,
       updatedAt: input.now,
     };
     await this.#write({
@@ -178,6 +187,7 @@ function validateProfile(value: unknown): PerformerProfile {
       "backendKind",
       "authenticationMethod",
       "codexTurnSettings",
+      "executionPolicy",
       "createdAt",
       "updatedAt",
     ]) ||
@@ -194,6 +204,7 @@ function validateProfile(value: unknown): PerformerProfile {
     typeof value.codexTurnSettings.model !== "string" ||
     typeof value.codexTurnSettings.reasoningEffort !== "string" ||
     typeof value.codexTurnSettings.isFastModeEnabled !== "boolean" ||
+    !isRecord(value.executionPolicy) ||
     typeof value.createdAt !== "string" ||
     typeof value.updatedAt !== "string"
   ) {
@@ -201,9 +212,53 @@ function validateProfile(value: unknown): PerformerProfile {
   }
   const profile = value as unknown as PerformerProfile;
   validateSettings(profile.authenticationMethod, profile.codexTurnSettings);
+  validateExecutionPolicy(profile.executionPolicy);
   requireText(profile.profileId);
   requireText(profile.displayName);
   return profile;
+}
+
+function defaultExecutionPolicy(): AgentExecutionPolicy {
+  return {
+    sandboxMode: "workspace_write",
+    commandAllowlist: [],
+    commandDenylist: [],
+  };
+}
+
+function validateExecutionPolicy(policy: AgentExecutionPolicy) {
+  if (
+    !isRecord(policy) ||
+    !hasOnlyKeys(policy, [
+      "sandboxMode",
+      "commandAllowlist",
+      "commandDenylist",
+    ]) ||
+    !["read_only", "workspace_write", "unrestricted"].includes(
+      String(policy.sandboxMode),
+    ) ||
+    !validRules(policy.commandAllowlist) ||
+    !validRules(policy.commandDenylist)
+  ) {
+    throw new Error("profile_execution_policy_invalid");
+  }
+}
+
+function validRules(value: unknown): value is AgentExecutionPolicy["commandAllowlist"] {
+  return Array.isArray(value) && value.length <= 64 && value.every((rule) =>
+    isRecord(rule) &&
+    hasOnlyKeys(rule, ["executable", "argvPrefix"]) &&
+    validPolicyText(rule.executable) &&
+    Array.isArray(rule.argvPrefix) &&
+    rule.argvPrefix.length <= 16 &&
+    rule.argvPrefix.every(validPolicyText)
+  );
+}
+
+function validPolicyText(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const length = Array.from(value).length;
+  return length >= 1 && length <= 256;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

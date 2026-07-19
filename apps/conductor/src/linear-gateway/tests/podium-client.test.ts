@@ -56,6 +56,11 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
               reasoningEffort: "high" as const,
               isFastModeEnabled: true,
             },
+            executionPolicy: {
+              sandboxMode: "workspace_write" as const,
+              commandAllowlist: [],
+              commandDenylist: [],
+            },
             createdAt: observedAt,
             updatedAt: observedAt,
           }],

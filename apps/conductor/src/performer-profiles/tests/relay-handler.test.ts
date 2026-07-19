@@ -14,12 +14,32 @@ test("Profile relay creates, reads, and activates one Conductor-owned Profile", 
         return activeProfileId ? { profiles, activeProfileId } : { profiles };
       },
       async create(input) {
-        const profile = { ...input, createdAt: input.now, updatedAt: input.now };
+        const profile: PerformerProfile = {
+          ...input,
+          executionPolicy: input.executionPolicy ?? {
+            sandboxMode: "workspace_write",
+            commandAllowlist: [],
+            commandDenylist: [],
+          },
+          createdAt: input.now,
+          updatedAt: input.now,
+        };
         profiles.push(profile);
         return profile;
       },
-      async update() {
-        throw new Error("unused");
+      async update(input) {
+        const index = profiles.findIndex(({ profileId }) => profileId === input.profileId);
+        const existing = profiles[index];
+        if (!existing) throw new Error("profile_not_found");
+        const profile: PerformerProfile = {
+          ...existing,
+          displayName: input.displayName,
+          codexTurnSettings: input.codexTurnSettings,
+          executionPolicy: input.executionPolicy ?? existing.executionPolicy,
+          updatedAt: input.now,
+        };
+        profiles[index] = profile;
+        return profile;
       },
       async activate(profileId) {
         activeProfileId = profileId;
@@ -54,8 +74,46 @@ test("Profile relay creates, reads, and activates one Conductor-owned Profile", 
       reasoning_effort: "high",
       is_fast_mode_enabled: true,
     },
+    execution_policy: {
+      sandbox_mode: "workspace_write",
+      command_allowlist: [],
+      command_denylist: [],
+    },
   });
   assert.equal((saved as { kind: string }).kind, "profile_saved");
+  assert.deepEqual(
+    (saved as { profile: { execution_policy: unknown } }).profile.execution_policy,
+    {
+      sandbox_mode: "workspace_write",
+      command_allowlist: [],
+      command_denylist: [],
+    },
+  );
+
+  const updated = await handler.handleRequest({
+    kind: "update_profile",
+    conductor_id: "conductor-1",
+    profile_id: "profile-1",
+    display_name: "Restricted",
+    codex_turn_settings: {
+      model: "gpt-5",
+      reasoning_effort: "high",
+      is_fast_mode_enabled: true,
+    },
+    execution_policy: {
+      sandbox_mode: "read_only",
+      command_allowlist: [],
+      command_denylist: [{ executable: "git", argv_prefix: ["push"] }],
+    },
+  });
+  assert.deepEqual(
+    (updated as { profile: { execution_policy: unknown } }).profile.execution_policy,
+    {
+      sandbox_mode: "read_only",
+      command_allowlist: [],
+      command_denylist: [{ executable: "git", argv_prefix: ["push"] }],
+    },
+  );
 
   const activated = await handler.handleRequest({
     kind: "activate_profile",
