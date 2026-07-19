@@ -46,6 +46,22 @@ test("request budget rejects work after its bounded admission deadline", async (
   await assert.rejects(queued, /linear_request_budget_exhausted/);
 });
 
+test("request budget bounds active work without releasing its concurrency slot", async () => {
+  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2 });
+  let release;
+  let queuedStarted = false;
+  const active = budget.run("workflow-read", () => new Promise((resolve) => {
+    release = resolve;
+  }), { deadlineAtMs: Date.now() + 10 });
+  const queued = budget.run("control", async () => { queuedStarted = true; });
+
+  await assert.rejects(active, /linear_request_budget_exhausted/);
+  assert.equal(queuedStarted, false);
+  release();
+  await queued;
+  assert.equal(queuedStarted, true);
+});
+
 async function createConductorServices(linearSdk, onObservation = () => undefined) {
   const binding = {
     bindingId: "binding-1",

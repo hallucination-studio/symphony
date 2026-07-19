@@ -58,7 +58,16 @@ export class LinearRequestBudget {
         continue;
       }
       this.#active += 1;
+      const remainingMs = next.deadlineAtMs === undefined
+        ? undefined
+        : Math.max(0, next.deadlineAtMs - this.#now());
+      const deadline = remainingMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            next.reject(new Error("linear_request_budget_exhausted"));
+          }, remainingMs);
       void next.run().then(next.resolve, next.reject).finally(() => {
+        if (deadline) clearTimeout(deadline);
         this.#active -= 1;
         this.#drain();
       });
