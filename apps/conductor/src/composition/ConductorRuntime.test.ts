@@ -68,6 +68,97 @@ test("multi-Root runtime lets waiting Human yield to runnable Work", async () =>
   }]);
 });
 
+test("Turn-boundary refresh applies changed Priority, order, blockers, and Tree next cycle", async () => {
+  const first = discoveredRoot("root-first", "urgent", 2, "In Progress");
+  const second = discoveredRoot("root-second", "low", 2, "In Progress");
+  let secondIsWaiting = true;
+  let reads = 0;
+  let releaseFirst: (() => void) | undefined;
+  let signalFirst: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+  const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const executions: string[] = [];
+  const runtime = new ConductorRuntime(
+    "conductor-1",
+    {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1" };
+      },
+      async listRoots() {
+        reads += 1;
+        return [first, second];
+      },
+      async reconstruct(rootId: string) {
+        if (rootId === first.issueId) return activeView(first, "working");
+        return activeView(second, secondIsWaiting ? "waiting" : "working");
+      },
+    },
+    new LinearPriorityRootSchedulingPolicyImpl(),
+    {
+      async execute(view) {
+        executions.push(view.root.issueId);
+        if (executions.length === 1) {
+          signalFirst?.();
+          await firstReleased;
+        }
+      },
+    },
+    { async report() {} },
+  );
+
+  const firstCycle = runtime.cycle();
+  await firstStarted;
+  first.priority = "low";
+  first.order = 2;
+  first.blockers = [{
+    sourceIssueId: first.issueId,
+    targetIssueId: "external-blocker",
+    targetState: "In Progress",
+  }];
+  second.priority = "low";
+  second.order = 1;
+  secondIsWaiting = false;
+  assert.deepEqual(executions, ["root-first"]);
+  assert.equal(reads, 1);
+  releaseFirst?.();
+  await firstCycle;
+
+  await runtime.cycle();
+
+  assert.deepEqual(executions, ["root-first", "root-second"]);
+  assert.equal(reads, 2);
+});
+
+for (const phase of ["gating", "delivering"] as const) {
+  test(`Turn-boundary refresh blocks stale ${phase} action on the next cycle`, async () => {
+    const root = discoveredRoot(`root-${phase}`, "urgent", 1, "In Progress");
+    const actions: string[] = [];
+    const runtime = new ConductorRuntime(
+      "conductor-1",
+      gateway([root], (candidate) => terminalPhaseView(candidate, phase)),
+      new LinearPriorityRootSchedulingPolicyImpl(),
+      {
+        async execute(_view, action) {
+          actions.push(action.kind);
+        },
+      },
+      { async report() {} },
+    );
+
+    await runtime.cycle();
+    root.blockers = [{
+      sourceIssueId: root.issueId,
+      targetIssueId: "external-blocker",
+      targetState: "Todo",
+    }];
+    await runtime.cycle();
+
+    assert.deepEqual(actions, [
+      phase === "gating" ? "run_root_gate" : "deliver_root",
+    ]);
+  });
+}
+
 function gateway(
   roots: DiscoveredRoot[],
   reconstruct: (root: DiscoveredRoot) => RootRunView,
@@ -169,5 +260,17 @@ function activeView(
           description: "",
           updatedAt: root.updatedAt,
         }],
+  };
+}
+
+function terminalPhaseView(
+  root: DiscoveredRoot,
+  phase: "gating" | "delivering",
+): RootRunView {
+  const view = activeView(root, "working");
+  return {
+    ...view,
+    phaseLabels: [phase],
+    workflowNodes: [],
   };
 }
