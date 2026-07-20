@@ -295,6 +295,7 @@ export async function runCoreLiveE2E({
       project,
       git,
       ids,
+      log,
     });
     assertRunActive(deadline);
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
@@ -674,12 +675,18 @@ export async function finalizeCoreLiveResult({ result, cleanup, finalEvidence, w
   return Object.freeze(finalResult);
 }
 
-async function bootstrapPodiumState({ databasePath, developmentToken, preflight, project, git, ids }) {
+async function bootstrapPodiumState({
+  databasePath, developmentToken, preflight, project, git, ids, log,
+}) {
   const { bootstrapDevelopmentTokenInstallation } = await import("@symphony/podium");
   const installation = await bootstrapDevelopmentTokenInstallation({
     databasePath,
     developmentToken,
     delegateActorId: preflight.actorId,
+    observeLinearRequest: (observation) => log({
+      event: "linear_physical_request",
+      ...observation,
+    }),
   });
   if (installation.organizationId !== preflight.organizationId) {
     throw stableError("e2e_linear_organization_mismatch");

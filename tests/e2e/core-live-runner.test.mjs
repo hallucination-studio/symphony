@@ -101,6 +101,7 @@ test("core live runner reports unverified before mutation without required input
 test("core live topology uses production boundaries and state-based completion", async () => {
   const source = await readFile("tools/e2e/core-live-runner.mjs", "utf8");
   assert.match(source, /bootstrapDevelopmentTokenInstallation/u);
+  assert.match(source, /observeLinearRequest: \(observation\) => log/u);
   assert.match(source, /createProductionPodiumConductorOwner/u);
   assert.match(source, /startConductorHarness/u);
   assert.match(source, /provisionApiKeyProfile/u);

@@ -5,6 +5,7 @@ import {
   type IssueLabel,
   type ProjectLabel,
 } from "@linear/sdk";
+import { randomUUID } from "node:crypto";
 
 import type {
   LinearClientInterface,
@@ -275,8 +276,14 @@ export class LinearSdkImpl implements LinearClientInterface {
 
   static async discoverDevelopmentTokenOrganizationId(
     developmentToken: string,
+    observe?: (observation: LinearPhysicalRequestObservation) => void,
   ): Promise<string> {
-    const client = new LinearClient({ apiKey: developmentToken });
+    const client = observedClient(
+      { kind: "development_token", token: developmentToken, delegateActorId: "bootstrap" },
+      observe
+        ? { correlationId: randomUUID, now: Date.now, observe }
+        : undefined,
+    );
     const organization = await client.organization;
     if (!organization.id) throw new Error("linear_organization_missing");
     return organization.id;

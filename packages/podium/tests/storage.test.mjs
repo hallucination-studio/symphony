@@ -186,12 +186,22 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
 test("development-token installation persists without OAuth placeholders", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-dev-token-"));
   const databasePath = path.join(directory, "podium.db");
+  const observations = [];
   const result = await bootstrapDevelopmentTokenInstallation({
     databasePath,
     developmentToken: "development-secret",
     delegateActorId: "app-user-1",
-    discoverOrganizationId: async (token) => {
+    observeLinearRequest: (observation) => observations.push(observation),
+    discoverOrganizationId: async (token, observe) => {
       assert.equal(token, "development-secret");
+      observe({
+        operation: "LinearOrganization",
+        correlationId: "request-1",
+        durationMs: 5,
+        status: 200,
+        requestWindow: { limit: 1000, remaining: 999, reset: 60 },
+        complexityWindow: { limit: 250000, remaining: 249900, reset: 60 },
+      });
       return "organization-1";
     },
   });
@@ -200,6 +210,14 @@ test("development-token installation persists without OAuth placeholders", async
     installationId: "development-token:organization-1",
     organizationId: "organization-1",
   });
+  assert.deepEqual(observations, [{
+    operation: "LinearOrganization",
+    correlationId: "request-1",
+    durationMs: 5,
+    status: 200,
+    requestWindow: { limit: 1000, remaining: 999, reset: 60 },
+    complexityWindow: { limit: 250000, remaining: 249900, reset: 60 },
+  }]);
   const store = new SqlitePodiumStoreImpl(databasePath);
   assert.deepEqual(store.getOnlyLinearInstallation(), {
     kind: "development_token",
