@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 from openai_codex import InvalidRequestError
 
-from performer.backends.codex.codex_backend_impl import CodexBackendImpl
+from performer.backends.codex.codex_backend_impl import (
+    SYMPHONY_BASE_INSTRUCTIONS,
+    CodexBackendImpl,
+)
 from performer.backends.provider_backend_interface import (
     ProviderBackendError,
     ProviderConversationUnavailable,
@@ -57,6 +60,11 @@ def test_open_conversation_is_side_effect_free():
                                 "is_fast_mode_enabled": False},
     })
     assert outcome == {"performer_id": "thread-1"}
+    assert sdk.started == [{
+        "model": "gpt-5.2-codex",
+        "service_tier": None,
+        "base_instructions": SYMPHONY_BASE_INSTRUCTIONS,
+    }]
     assert sdk.thread.calls == []
 
 
@@ -65,12 +73,28 @@ def test_root_turn_only_resumes_supplied_conversation(root_command):
     outcome = CodexBackendImpl(sdk).run_root_turn(root_command)
     assert sdk.started == []
     assert sdk.resumed[0][0] == "conversation-1"
+    assert sdk.resumed[0][1]["base_instructions"] == SYMPHONY_BASE_INSTRUCTIONS
     prompt, kwargs = sdk.thread.calls[0]
     assert root_command["root_context"]["json"] in prompt
-    assert root_command["root_context"]["markdown"] in prompt
+    assert root_command["root_context"]["markdown"] not in prompt
+    assert prompt.count(root_command["root_context"]["json"]) == 1
+    assert json.dumps(root_command["command_channel"], separators=(",", ":")) in prompt
+    assert json.dumps(root_command["turn_limits"], separators=(",", ":")) in prompt
     assert "output_schema" not in kwargs
     assert outcome["bounded_summary"] == "Root work yielded."
     assert outcome["yield_reason"] == "agent_finished"
+
+
+def test_base_instructions_define_closed_root_performer_safety_boundary():
+    for phrase in (
+        "supplied Root",
+        "untrusted data",
+        "private broker channel",
+        "Do not claim an effect",
+        "smallest workflow-advancing action",
+        "Do not create alternate workflow state",
+    ):
+        assert phrase in SYMPHONY_BASE_INSTRUCTIONS
 
 
 def test_first_root_turn_uses_the_side_effect_free_opened_thread(root_command):
