@@ -42,15 +42,27 @@ test("Conversation pointer CAS conflict reaps the orphan bootstrap", async () =>
 test("claim persists and reads back the exact Conversation pointer before a Turn permit", async () => {
   let persistedPerformerId: string | undefined;
   let bootstrapWorkspace: string | undefined;
+  const events: string[] = [];
+  let workspaceEvidence: unknown;
   const lifecycle = createLifecycle({
     onClaim: (performerId) => { persistedPerformerId = performerId; },
     onBootstrapWorkspace: (workspaceRoot) => { bootstrapWorkspace = workspaceRoot; },
+    onWorkspaceReady: (value) => { events.push("workspace-ready"); workspaceEvidence = value; },
+    onBootstrap: () => { events.push("bootstrap"); },
   });
 
   const result = await lifecycle.claim(unclaimedView());
 
   assert.equal(persistedPerformerId, "conversation-1");
   assert.equal(bootstrapWorkspace, "/worktrees/root-1");
+  assert.deepEqual(events, ["workspace-ready", "bootstrap"]);
+  assert.deepEqual(workspaceEvidence, {
+    rootIssueId: "root-1",
+    rootIdentifier: "SYM-1",
+    branch: "symphony/runs/sym-1",
+    workspaceId: "root-1",
+    baselineHead: "abc123",
+  });
   assert.deepEqual(result, {
     kind: "ready",
     permit: {
@@ -90,6 +102,13 @@ function createLifecycle(options: {
   onWorkspace?(): void;
   onBootstrap?(): void;
   onBootstrapWorkspace?(workspaceRoot: string): void;
+  onWorkspaceReady?(value: {
+    rootIssueId: string;
+    rootIdentifier: string;
+    branch: string;
+    workspaceId: string;
+    baselineHead: string;
+  }): void;
   onClaim?(performerId: string): void;
   onReconstruct?(): void;
   onAbandon?(performerId: string): void;
@@ -100,6 +119,7 @@ function createLifecycle(options: {
     now: () => "2026-07-19T00:00:00Z",
     requestId: () => "bootstrap-1",
     bootstrapDeadlineMs: 60_000,
+    ...(options.onWorkspaceReady ? { onWorkspaceReady: options.onWorkspaceReady } : {}),
     profiles: {
       async activeReadyProfile() {
         return options.profileReadiness === "login-required"
@@ -122,6 +142,11 @@ function createLifecycle(options: {
           worktreePath: `/worktrees/${input.rootIssueId}`,
           rootIssueId: input.rootIssueId,
         };
+      },
+      async inspect() {
+        return { head: "abc123", branch: "symphony/runs/sym-1", status: {
+          items: [], returned: 0, cap: 512, has_more: false, partial: false,
+        } };
       },
     },
     performer: {

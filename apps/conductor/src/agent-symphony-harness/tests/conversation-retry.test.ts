@@ -179,12 +179,19 @@ function retryLifecycle(options: {
       async activeReadyProfile() { return profile(); },
       async fixedReadyProfile() { return profile(); },
     },
-    workspaces: { async ensureWorkspace() {
-      options.onWorkspace?.();
-      return options.workspace ?? {
-        branch: "symphony/runs/sym-1", worktreePath: "/worktrees/root-1", rootIssueId: "root-1",
-      };
-    } },
+    workspaces: {
+      async ensureWorkspace() {
+        options.onWorkspace?.();
+        return options.workspace ?? {
+          branch: "symphony/runs/sym-1", worktreePath: "/worktrees/root-1", rootIssueId: "root-1",
+        };
+      },
+      async inspect() {
+        return { head: "abc123", branch: "symphony/runs/sym-1", status: {
+          items: [], returned: 0, cap: 512, has_more: false, partial: false,
+        } };
+      },
+    },
     performer: { async openRootConversation(input) {
       options.onBootstrap?.();
       options.onBootstrapWorkspace?.(input.workspaceRoot);

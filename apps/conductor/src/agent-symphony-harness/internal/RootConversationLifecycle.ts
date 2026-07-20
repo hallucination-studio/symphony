@@ -35,7 +35,9 @@ interface ClaimDependencies {
       rootIdentifier: string;
       baseBranch: string;
     }): Promise<GitWorkspace>;
+    inspect(workspace: GitWorkspace): Promise<{ head: string; branch: string }>;
   };
+  onWorkspaceReady?(evidence: RootWorkspaceEvidence): void;
   performer: Pick<PerformerProcessInterface, "openRootConversation">
     & Partial<Pick<PerformerProcessInterface, "abandonRootConversation">>;
   claims: {
@@ -82,6 +84,14 @@ interface ClaimDependencies {
   };
 }
 
+export interface RootWorkspaceEvidence {
+  rootIssueId: string;
+  rootIdentifier: string;
+  branch: string;
+  workspaceId: string;
+  baselineHead: string;
+}
+
 export interface RootTurnPermit {
   rootIssueId: string;
   performerProfileId: string;
@@ -112,6 +122,7 @@ export class RootConversationLifecycle {
       }),
       view,
     );
+    await this.#observeWorkspace(view, workspace);
     const requestId = this.dependencies.requestId();
     const startedAt = this.dependencies.now();
     const bootstrap = await this.dependencies.performer.openRootConversation({
@@ -201,6 +212,7 @@ export class RootConversationLifecycle {
       }),
       view,
     );
+    await this.#observeWorkspace(view, workspace);
     const requestId = this.dependencies.requestId();
     const observedAt = this.dependencies.now();
     const bootstrap = await this.dependencies.performer.openRootConversation({
@@ -274,6 +286,22 @@ export class RootConversationLifecycle {
         workspace,
       },
     };
+  }
+
+  async #observeWorkspace(view: V3RootRunView, workspace: GitWorkspace): Promise<void> {
+    const snapshot = await this.dependencies.workspaces.inspect(workspace);
+    const workspaceId = path.basename(workspace.worktreePath);
+    if (snapshot.branch !== workspace.branch || !safeWorkspaceId(workspaceId)
+      || !safeGitHead(snapshot.head)) {
+      throw new Error("git_workspace_identity_conflict");
+    }
+    this.dependencies.onWorkspaceReady?.({
+      rootIssueId: view.root.issueId,
+      rootIdentifier: view.root.identifier,
+      branch: workspace.branch,
+      workspaceId,
+      baselineHead: snapshot.head,
+    });
   }
 
   async acknowledge(
@@ -402,6 +430,14 @@ function validatedWorkspace(viewWorkspace: GitWorkspace, view: V3RootRunView): G
     throw new Error("git_workspace_identity_conflict");
   }
   return viewWorkspace;
+}
+
+function safeWorkspaceId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
+function safeGitHead(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
 }
 
 function claimReadBackMatches(

@@ -9,6 +9,7 @@ import { conductorCycleDelayMs } from "./composition/ConductorCycleDelayPolicy.j
 import { AgentRootContextBuilder } from "./agent-symphony-harness/internal/AgentRootContextBuilder.js";
 import { AgentSymphonyHarnessImpl } from "./agent-symphony-harness/internal/AgentSymphonyHarnessImpl.js";
 import { RootConversationLifecycle } from "./agent-symphony-harness/internal/RootConversationLifecycle.js";
+import { recordDeliveryCompleted } from "./agent-symphony-harness/internal/LifecycleEvidence.js";
 import { RootRetryBlockCommandHandler } from "./agent-symphony-harness/internal/RootRetryBlockCommandHandler.js";
 import { RunAgentRootTurnUseCase } from "./agent-symphony-harness/internal/RunAgentRootTurnUseCase.js";
 import { ScopedAgentCommandBrokerImpl } from "./agent-symphony-harness/internal/ScopedAgentCommandBrokerImpl.js";
@@ -151,7 +152,17 @@ export async function runConductor(environment = process.env): Promise<void> {
     now: () => new Date().toISOString(), requestId: randomUUID,
     bootstrapDeadlineMs: 120_000,
     profiles: { activeReadyProfile: () => readyProfile(), fixedReadyProfile: readyProfile },
-    workspaces: git, performer, claims: {
+    workspaces: git, performer,
+    onWorkspaceReady(evidence) {
+      logEvent("info", "workspace_ready", {
+        root_issue_id: evidence.rootIssueId,
+        root_identifier: evidence.rootIdentifier,
+        branch: evidence.branch,
+        workspace_id: evidence.workspaceId,
+        baseline_head: evidence.baselineHead,
+      });
+    },
+    claims: {
       compareAndSetClaim: (value) => gateway.compareAndSetClaim(value),
       compareAndSetConversation: (value) => gateway.compareAndSetConversation(value),
       writeRetryBlock: (value) => gateway.writeRetryBlock(value),
@@ -202,8 +213,9 @@ export async function runConductor(environment = process.env): Promise<void> {
       return {
         async execute(value: unknown) {
           const result = await scoped.execute(value);
+          let parsedCommand;
           try {
-            const command = parseAgentCommand(value);
+            parsedCommand = parseAgentCommand(value);
             const output = result as Record<string, JsonValue>;
             const commandProblem = output.problem && typeof output.problem === "object"
               && !Array.isArray(output.problem) ? output.problem : undefined;
@@ -211,13 +223,22 @@ export async function runConductor(environment = process.env): Promise<void> {
               turn_id: turnId,
               root_issue_id: view.root.issueId,
               performer_id: performerId,
-              command: command.command,
+              command: parsedCommand.command,
               status: typeof output.status === "string" ? output.status : "failed",
               ...(commandProblem && typeof commandProblem.code === "string"
                 ? { problem_code: commandProblem.code } : {}),
             });
           } catch {
             // Invalid model output is rejected by the broker and is not echoed to logs.
+          }
+          if (workspace && parsedCommand) {
+            await recordDeliveryCompleted({
+              command: parsedCommand,
+              result,
+              workspace,
+              inspect: (target) => git.inspect(target),
+              log: logEvent,
+            });
           }
           return result;
         },
