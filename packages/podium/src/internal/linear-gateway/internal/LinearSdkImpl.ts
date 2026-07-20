@@ -56,7 +56,7 @@ const ROOT_HEADER_FACTS_QUERY = `
   }
 `;
 const ISSUE_TREE_ROOT_QUERY = `
-  query SymphonyIssueTreeRoot($rootIssueId: ID!, $commentMarker: String!) {
+  query SymphonyIssueTreeRoot($rootIssueId: String!, $commentMarker: String!) {
     issue(id: $rootIssueId) {
       id identifier title description sortOrder updatedAt
       project { id }
@@ -96,7 +96,7 @@ const ISSUE_TREE_CHILDREN_QUERY = `
   }
 `;
 const ROOT_SCOPE_ROOT_QUERY = `
-  query SymphonyRootScopeRoot($rootIssueId: ID!, $commentMarker: String!) {
+  query SymphonyRootScopeRoot($rootIssueId: String!, $commentMarker: String!) {
     issue(id: $rootIssueId) {
       id identifier updatedAt
       project { id }

@@ -798,7 +798,10 @@ test("complete Issue Trees batch physical reads by depth instead of node count",
       client: {
         async rawRequest(query, variables) {
           calls.push({ query, variables });
-          if (variables.rootIssueId) return { data: { issue: root } };
+          if (variables.rootIssueId) {
+            assert.match(query, /\$rootIssueId: String!/u);
+            return { data: { issue: root } };
+          }
           const nodes = variables.parentIds.includes("root-1") ? children : [];
           return { data: { issues: {
             nodes,
@@ -1000,14 +1003,17 @@ test("compact Root scope reads only authority and bounded Issue versions", async
     async issue() { throw new Error("lazy issue read forbidden"); },
     client: { async rawRequest(query, variables) {
       queries.push(query);
-      if (variables.rootIssueId) return { data: { issue: {
-        id: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z",
-        project: { id: "project-1" }, parent: null, state: { name: "In Progress" },
-        comments: { nodes: [{
-          id: "primary-1", body: v3PrimaryComment("conversation-1"),
-          updatedAt: "2026-07-20T00:00:00Z", issue: { id: "root-1" },
-        }], pageInfo: { hasNextPage: false } },
-      } } };
+      if (variables.rootIssueId) {
+        assert.match(query, /\$rootIssueId: String!/u);
+        return { data: { issue: {
+          id: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z",
+          project: { id: "project-1" }, parent: null, state: { name: "In Progress" },
+          comments: { nodes: [{
+            id: "primary-1", body: v3PrimaryComment("conversation-1"),
+            updatedAt: "2026-07-20T00:00:00Z", issue: { id: "root-1" },
+          }], pageInfo: { hasNextPage: false } },
+        } } };
+      }
       const nodes = variables.parentIds.includes("root-1") ? [{
         id: "work-1", identifier: "SYM-2", updatedAt: "2026-07-20T00:00:01Z",
         project: { id: "project-1" }, parent: { id: "root-1" },
