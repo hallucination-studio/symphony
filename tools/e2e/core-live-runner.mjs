@@ -14,6 +14,7 @@ import { provisionApiKeyProfile } from "./conductor-profile.mjs";
 import { coreLiveStepIds, evaluateCoreLiveEvidence } from "./core-live-verdict.mjs";
 import { acquireGlobalLock, coreLiveLockRoot, lockPathForConfig } from "./global-lock.mjs";
 import { createE2ELogger } from "./logging.mjs";
+import { createCoreLiveMonitor } from "./core-live-monitor.mjs";
 import {
   cleanupRunScope,
   createRunScope,
@@ -24,7 +25,7 @@ import { createHumanActor } from "./human-actor.mjs";
 
 const execute = promisify(execFile);
 const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const DEFAULT_RUN_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_RUN_TIMEOUT_MS = 25 * 60_000;
 const FIRST_MANAGED_COMMENT_BUDGET_MS = 30_000;
 const FIRST_PLANNING_TURN_BUDGET_MS = 120_000;
 const FIRST_PLANNING_INPUT_TOKEN_BUDGET = 300_000;
@@ -313,7 +314,7 @@ export async function runCoreLiveE2E({
   environment = process.env,
   runId = environment.SYMPHONY_E2E_RUN_ID ?? `run-${randomUUID()}`,
   timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
-  pollIntervalMs = 10_000,
+  pollIntervalMs = 5_000,
 } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId)) {
     throw stableError("e2e_run_id_invalid");
@@ -325,7 +326,30 @@ export async function runCoreLiveE2E({
   const deadline = Date.now() + timeoutMs;
   const baseLog = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
   const runtimeEvidence = createRuntimeEvidenceTracker(baseLog);
-  const log = runtimeEvidence.log;
+  const monitor = createCoreLiveMonitor({ log: runtimeEvidence.log });
+  let monitorFailure;
+  const log = (event) => {
+    if (!monitorFailure) {
+      try {
+        monitor.observeEvent(event);
+      } catch (error) {
+        monitorFailure = error;
+      }
+    }
+    runtimeEvidence.log(event);
+    monitor.heartbeat();
+    if (!monitorFailure) {
+      try {
+        monitor.checkDeadlines();
+      } catch (error) {
+        monitorFailure = error;
+      }
+    }
+  };
+  const assertMonitorHealthy = () => {
+    if (monitorFailure) throw monitorFailure;
+    monitor.checkDeadlines();
+  };
   const turnLane = createTurnLaneTracker(log);
   log({ event: "e2e_run_started" });
   const linear = createRunScopedLinearOperator({
@@ -396,6 +420,7 @@ export async function runCoreLiveE2E({
     const podium = await createProductionPodiumConductorOwner({ databasePath, log });
 
     log({ event: "e2e_step_started", step: "conductor_handshake" });
+    monitor.startBoundary("runtimeReady");
     harness = await startConductorHarness({
       podium,
       environment: createConductorEnvironment({ environment, config, scope, git, installation, ids }),
@@ -404,6 +429,8 @@ export async function runCoreLiveE2E({
       log: turnLane.log,
     });
     assertRunActive(deadline);
+    monitor.checkDeadlines();
+    monitor.completeBoundary("runtimeReady");
     evidence.push({ step: "conductor_handshake", status: "passed" });
     log({ event: "e2e_step_completed", step: "conductor_handshake" });
 
@@ -438,6 +465,12 @@ export async function runCoreLiveE2E({
       }));
       assertRunActive(deadline);
     }
+    monitor.startBoundary("rootDiscovery");
+    fixtures.forEach(({ rootId }) => monitor.startBoundary("workspaceReady", rootId));
+    monitor.registerRoots(fixtures.map(({ rootId }, index) => ({
+      rootIssueId: rootId,
+      priority: rootInputs[index][3],
+    })));
     evidence.push({
       step: "root_created",
       status: "passed",
@@ -451,10 +484,12 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_step_started", step: "first_managed_comment" });
 
     const [firstManagedComment] = await pollUntil(
-      () => readRootStates(linear, [fixtures[0]]),
+      () => readRootStates(linear, [fixtures[0]], monitor),
       ([state]) => Boolean(state?.performerId),
       { deadline, pollIntervalMs },
     );
+    monitor.completeBoundary("rootDiscovery");
+    assertMonitorHealthy();
     log({ event: "e2e_step_completed", step: "first_managed_comment" });
     firstManagedCommentDurationMs = runtimeEvidence.evidence()
       .stepDurationsMs.first_managed_comment;
@@ -476,7 +511,7 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_step_started", step: "multi_root_scheduling" });
     let lastPlanningStateLog;
     const planningStates = await pollUntil(
-      () => readRootStates(linear, fixtures),
+      () => readRootStates(linear, fixtures, monitor),
       (states) => {
         const planningStateLog = JSON.stringify(states);
         if (planningStateLog !== lastPlanningStateLog) {
@@ -500,6 +535,7 @@ export async function runCoreLiveE2E({
         pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS,
       },
     );
+    assertMonitorHealthy();
     const firstPlan = planningStates[0];
     firstPlanningTurnDurationMs = turnLane.firstCompletedTurnDurationMs(fixtures[0].rootId);
     firstPlanningInputTokens = firstPlan.providerInputTokens;
@@ -530,14 +566,23 @@ export async function runCoreLiveE2E({
     });
     evidence.push({ step: "plan_ready", status: "passed", rootCount: planningStates.length });
     for (const [index, state] of planningStates.entries()) {
-      await humanActor.respondAndComplete({
-        lock,
-        runId,
-        fixture: { ...fixtures[index], approvalId: state.approvalId },
-        doneStateId: preflight.doneStateId,
-      });
+      const fixture = fixtures[index];
+      monitor.startBoundary("humanInput", fixture.rootId);
+      await beforeDeadline(
+        () => humanActor.respondAndComplete({
+          lock,
+          runId,
+          fixture: { ...fixture, approvalId: state.approvalId },
+          doneStateId: preflight.doneStateId,
+        }),
+        Math.min(deadline, Date.now() + 30_000),
+        () => stableError("e2e_human_input_timeout"),
+      );
+      monitor.checkDeadlines();
+      monitor.completeBoundary("humanInput", fixtures[index].rootId);
     }
     assertRunActive(deadline);
+    assertMonitorHealthy();
     evidence.push({
       step: "plan_approved",
       status: "passed",
@@ -547,9 +592,11 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_step_completed", step: "multi_root_scheduling" });
     log({ event: "e2e_step_started", step: "root_completion" });
 
+    monitor.startBoundary("allRoots");
     const completedRoots = [];
     for (const [index, plan] of planningStates.entries()) {
       const [, filename, expected] = rootInputs[index];
+      monitor.startBoundary("rootCompletion", fixtures[index].rootId);
       completedRoots.push(await waitForRootCompletion({
         linear,
         fixture: fixtures[index],
@@ -561,10 +608,14 @@ export async function runCoreLiveE2E({
         pollIntervalMs,
         turnLane,
         runtimeEvidence,
+        monitor,
         log,
       }));
+      monitor.completeBoundary("rootCompletion", fixtures[index].rootId);
       assertRunActive(deadline);
+      assertMonitorHealthy();
     }
+    monitor.completeBoundary("allRoots");
     const completedRoot = completedRoots[completedRoots.length - 1];
     const laneEvidence = turnLane.evidence();
     if (
@@ -640,6 +691,7 @@ export async function runCoreLiveE2E({
         linear.readRootCommentEvidence({ fixture: candidate })),
     );
     assertRunActive(deadline);
+    assertMonitorHealthy();
     const eventKeys = rootComments.flatMap((item) => item.eventKeys);
     evidence.push({
       step: "root_comments_verified",
@@ -724,6 +776,7 @@ export async function runCoreLiveE2E({
       step: "request_budget_verified",
       status: "passed",
       ...runtimeEvidence.evidence(),
+      monitor: monitor.evidence(),
       firstManagedCommentDurationMs,
       firstPlanningTurnDurationMs,
       firstPlanningInputTokens,
@@ -947,8 +1000,16 @@ export function rootInstruction(filename, content) {
   return `Create \`${filename}\` at the repository root with exactly \`${normalizedContent}\`. Before changing the repository, ask me to confirm the proposed plan.`;
 }
 
-export function readRootStates(linear, fixtures) {
-  return linear.readRunStates({ fixtures });
+export async function readRootStates(linear, fixtures, monitor) {
+  const states = await linear.readRunStates({ fixtures });
+  if (monitor) {
+    fixtures.forEach((fixture, index) => monitor.observeReadback(
+      fixture.rootId,
+      states[index],
+      { fingerprint: JSON.stringify(states[index]) },
+    ));
+  }
+  return states;
 }
 
 export function planReady(state) {
@@ -1003,17 +1064,22 @@ async function waitForRootCompletion({
   pollIntervalMs,
   turnLane,
   runtimeEvidence,
+  monitor,
   log,
 }) {
-  const progress = createRootProgressWatchdog({
-    rootIssueId: fixture.rootId,
-    turnLane,
-    runtimeEvidence,
-    readGitFacts: () => readGitProgressFacts(git.repositoryRoot),
-    log,
-  });
   const completed = await pollUntil(
-    async () => progress.observe(await linear.readRunState({ fixture })),
+    async () => {
+      const [state, gitFacts] = await Promise.all([
+        linear.readRunState({ fixture }),
+        readGitProgressFacts(git.repositoryRoot),
+      ]);
+      const turnId = monitor.pendingTurnId(fixture.rootId);
+      monitor.observeReadback(fixture.rootId, state, {
+        fingerprint: JSON.stringify({ state, gitFacts }),
+        brokerEffectCount: turnId ? runtimeEvidence.brokerEffectCount(turnId) : 0,
+      });
+      return state;
+    },
     (state) =>
       state.rootState === "In Review" &&
       state.phase === "in-review" &&

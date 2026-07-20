@@ -177,13 +177,13 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
-  assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 20 \* 60_000/u);
-  assert.match(source, /pollIntervalMs = 10_000/u);
+  assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 25 \* 60_000/u);
+  assert.match(source, /pollIntervalMs = 5_000/u);
   assert.match(source, /FIRST_PLANNING_POLL_INTERVAL_MS = 2_000/u);
   assert.match(source, /pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS/u);
   assert.match(source, /firstStartedTurnAt\(fixtures\[0\]\.rootId\)/u);
   assert.doesNotMatch(source, /e2e-dependent\.txt|e2e-yielded\.txt|createBlockerRelation/u);
-  assert.match(source, /rootIssueId: fixture\.rootId/u);
+  assert.match(source, /monitor\.pendingTurnId\(fixture\.rootId\)/u);
   assert.match(conductorSource, /await performer\.cancelAndReap/u);
 });
 
