@@ -74,7 +74,8 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
       const target = mutationTarget(command);
       const issue = scopedIssue(scope, target);
       if (!issue) return rejected(correlation, "linear_target_out_of_scope", "Target is not in the current Root Tree.");
-      if (issue.updated_at !== command.args.expected_remote_version) {
+      if (command.command !== "linear.issue.create_child"
+        && issue.updated_at !== command.args.expected_remote_version) {
         return conflict(correlation, "linear_remote_version_changed", "Target remote version changed.");
       }
       if (await this.options.readGitHead() !== command.args.expected_git_head) {

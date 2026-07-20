@@ -1137,6 +1137,40 @@ test("official SDK adapter serializes Human kind and target without title infere
   assert.equal(outcome.issue.description, "Confirm the input");
 });
 
+test("managed-node read-back accepts Linear-normalized sibling order", async () => {
+  const command = {
+    kind: "create_managed_node",
+    nodeKind: "human",
+    humanKind: "plan_approval",
+    project: {
+      conductorShortHash: "abc123",
+      expectedProjectId: "project-1",
+      expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    parentIssueId: "root-1",
+    managedMarker: "root-1:plan:human-1",
+    order: 0,
+    title: "Approve the plan",
+    description: "Review the plan",
+  };
+  const normalized = issue({
+    id: "human-1",
+    parentId: command.parentIssueId,
+    title: command.title,
+    description: `${command.description}\n\n<!-- symphony managed marker\nmanaged_marker: ${command.managedMarker}\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->`,
+    order: 1,
+  });
+  const sdk = {
+    async issues() { return connection([normalized]); },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const outcome = await adapter.readMutationOutcome(command);
+
+  assert.equal(outcome.issue.issueId, "human-1");
+  assert.equal(outcome.issue.order, 1);
+});
+
 test("official SDK adapter reads back Agent assignee, label, and targeted comment writes", async () => {
   const labels = [];
   const comments = [];

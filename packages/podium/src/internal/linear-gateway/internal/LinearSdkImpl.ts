@@ -605,7 +605,6 @@ export class LinearSdkImpl implements LinearClientInterface {
           issue.parentIssueId === command.parentIssueId &&
           issue.title === command.title &&
           issue.description === command.description &&
-          issue.order === command.order &&
           managedNodeMatches(issue, command)
           ? { issue }
           : undefined;

@@ -103,14 +103,87 @@ test("linear.read reuses its single fresh Root scope snapshot", async () => {
   assert.equal(scopeReads, 1);
 });
 
-function brokerFor(linear: LinearGatewayInterface) {
+test("create-child tolerates Conductor-owned Root version churn without weakening other mutations", async () => {
+  const create = gateway({
+    async readFreshRootScope() {
+      return {
+        root_issue_id: "root-1", conductor_id: "conductor-1",
+        performer_id: "conversation-1", terminal: false,
+        issues: [{ issue_id: "root-1", updated_at: "version-after-conductor-maintenance" }],
+      };
+    },
+  });
+
+  const createResult = await brokerFor(create.value).execute({
+    ...envelope,
+    command: "linear.issue.create_child",
+    args: {
+      parent_issue_id: "root-1",
+      kind: "human",
+      title: "Approve the plan",
+      description: "Review the proposed implementation plan.",
+      write_id: "plan-approval-1",
+      expected_remote_version: "version-observed-by-performer",
+      expected_git_head: "abc123",
+    },
+  });
+
+  assert.equal(createResult.status, "applied");
+  assert.equal(create.mutations(), 1);
+
+  const staleHead = gateway({
+    async readFreshRootScope() {
+      return {
+        root_issue_id: "root-1", conductor_id: "conductor-1",
+        performer_id: "conversation-1", terminal: false,
+        issues: [{ issue_id: "root-1", updated_at: "version-after-conductor-maintenance" }],
+      };
+    },
+  });
+  const staleHeadResult = await brokerFor(staleHead.value, "new-head").execute({
+    ...envelope,
+    command: "linear.issue.create_child",
+    args: {
+      parent_issue_id: "root-1", kind: "work", title: "Implement",
+      description: "Implement the approved plan.", write_id: "work-1",
+      expected_remote_version: "version-observed-by-performer",
+      expected_git_head: "abc123",
+    },
+  });
+  assert.equal(staleHeadResult.status, "conflict");
+  assert.equal(staleHead.mutations(), 0);
+
+  const update = gateway({
+    async readFreshRootScope() {
+      return {
+        root_issue_id: "root-1", conductor_id: "conductor-1",
+        performer_id: "conversation-1", terminal: false,
+        issues: [
+          { issue_id: "root-1", updated_at: "version-1" },
+          { issue_id: "child-1", updated_at: "version-after-conductor-maintenance", parent_issue_id: "root-1" },
+        ],
+      };
+    },
+  });
+
+  const updateResult = await brokerFor(update.value).execute({
+    ...envelope,
+    command: "linear.status.set",
+    args: writeArgs("child-1"),
+  });
+
+  assert.equal(updateResult.status, "conflict");
+  assert.equal(update.mutations(), 0);
+});
+
+function brokerFor(linear: LinearGatewayInterface, gitHead = "abc123") {
   return new ScopedAgentCommandBrokerImpl({
     conductorId: "conductor-1",
     turnId: "turn-1",
     rootIssueId: "root-1",
     performerId: "conversation-1",
     linear,
-    async readGitHead() { return "abc123"; },
+    async readGitHead() { return gitHead; },
   });
 }
 
