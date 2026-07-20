@@ -58,7 +58,7 @@ Settings
 - Runtime日志属于Conductor Detail；
 - 错误进入对应Root或Conductor页面，并汇总到Overview；
 - Human Node和Plan Approval Node属于Work Detail中的`NextActionView`；
-- Root Gate是Harness工作步骤，不是用户单独管理的对象；
+- Root Gate child属于Work Detail中的Harness工作事实，不增加独立Root Gate页面；
 - Delivery是Root Detail的一部分。
 - Performer Profile属于Conductor Detail，不增加独立Agent或Profiles顶层页面。
 

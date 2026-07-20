@@ -92,15 +92,17 @@ Completion evidence是Linear/Git事实，不是Conductor Leaf checkpoint或Resul
 
 ## 6. Root Gate与delivery
 
-Root Agent在最新Tree/Git上执行Root Gate。失败时写findings并创建/重开Rework child，不push或创建PR。
-通过时调用：
+Root Agent在最新Tree/Git上创建或复用唯一的`[Root Gate]` Work child，并执行fresh Gate。Gate child
+description必须包含Root Issue规范中定义的五项固定Markdown checklist；只有五项都被更新为`[x]`
+并read-back确认后，才可继续交付。失败时保留未勾选项、写findings并创建/重开Rework child，不push
+或创建PR。通过时调用：
 
 ```text
 symphony root deliver ...
 ```
 
-Conductor在命令时重新验证Root ownership/state、blockers、Tree completion evidence、Git HEAD、checks和
-已有delivery。交付顺序：
+Conductor在命令时重新验证Root ownership/state、blockers、Tree completion evidence、Gate child的
+完整checked checklist、Git HEAD、checks和已有delivery。交付顺序：
 
 ```text
 find/reuse existing PR for deterministic head

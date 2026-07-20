@@ -101,6 +101,7 @@ baseBranch
 | Plan Approval Node | `PlanApprovalNodeView` | Root级固定Human Node，批准当前Plan |
 | Planned Input Node | `PlannedInputNodeView` | Plan预先要求的Human输入 |
 | Runtime Input Node | `RuntimeInputNodeView` | Root Turn运行时创建的Human输入 |
+| Root Gate Node | `RootGateNodeView` | 唯一的`[Root Gate]` managed Work child，保存严格Markdown checklist和read-back事实 |
 | Root Gate Rework Node | `RootGateReworkNodeView` | 唯一的`[Rework] Root Gate Findings` Work Leaf |
 | Planned Workflow Node | `PlannedWorkflowNode` | Root Agent Plan通过broker创建/reconcile的Linear节点 |
 
@@ -273,8 +274,8 @@ V3只有Root-scoped业务Turn。Plan、Work、Human、Root Gate、Rework和Deliv
 commands推进，不是Performer Result variants。V4 role只约束Root内child Turns；V5只扩展Provider
 Backend。
 
-只使用`Root Gate`，不使用没有范围的`Gate`作为领域对象。`Gate`可以在同一段已经明确
-Root Gate后作为自然语言简写。
+只使用`Root Gate`，不使用没有范围的`Gate`作为领域对象。`Root Gate Node`是Linear Tree中的
+managed Work child，不是新的Conductor dispatch unit或Performer Turn variant。
 
 ### 9.1 Performer Profile
 
@@ -453,7 +454,7 @@ delivery、Ready for review、Action required等用户语言；这些label不是
 | Work Item、Task | Work Node、Work Leaf或Work Group |
 | Agent Config、Agent Profile（代码类型） | Performer Profile |
 | Human Action（领域类型） | Human Node |
-| Gate（独立领域对象） | Root Gate |
+| Gate（无范围的独立领域对象） | Root Gate Node |
 | next action（代码类型） | `RootDispatchAssessment`或`NextActionView` |
 | safe/runtime/operator view（代码类型） | 具体`*View`名称 |
 | `PullRequestInterface` | `RootDeliveryInterface` |

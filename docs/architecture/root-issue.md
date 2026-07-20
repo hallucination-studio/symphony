@@ -24,7 +24,7 @@ RootRunView
 1 pinned performer_profile_id
 1 delivery branch
 1 worktree
-1 Root Gate requirement
+0..1 managed `[Root Gate]` Work child
 ```
 
 Leaf不对应独立Conversation、worktree、dispatch、attempt或recovery checkpoint。Plan、Work、Human、
@@ -165,6 +165,8 @@ LinearIssueNodeSnapshot
 - 普通Sub Issue默认是Work Node；
 - Plan创建的Human Node带closed Managed Marker和`[Human Action]` title prefix；
 - Human Node必须是叶子；
+- Root Gate是一个managed Work Node，title必须以`[Root Gate]`开头，marker必须是
+  `<root_issue_id>:root-gate`，description必须包含本Root声明的完整Gate checklist；
 - 有children的Work Node是Work Group，只组织范围；
 - 没有children的Work Node是Work Leaf；
 - Canceled节点及其subtree不再执行；
@@ -202,7 +204,9 @@ walk children in Linear sibling order
 -> descend through Work Groups
 -> stop at the first unresolved Human leaf
 -> otherwise work on the first incomplete Work leaf
--> when no incomplete leaf remains, perform Root Gate
+-> when no incomplete Work/Human remains, create or resume the Root Gate Work child
+-> check every declared Gate checklist item and read it back as checked
+-> only then deliver the Root
 ```
 
 这是Harness给Agent的确定性工作规则，不是Conductor生成的Leaf dispatch。Conductor不保存Queue、
@@ -262,13 +266,30 @@ context规则约束。
 
 ## 9. Root Gate与Rework
 
-当非Canceled Tree中没有未完成Work/Human时，Root Agent必须对整个Root目标、Tree、Git diff、
-commits和checks执行fresh Root Gate。Root Gate不是独立Issue、Performer Turn variant或Conductor
-phase。
+当非Canceled Tree中没有未完成Work/Human时，Root Agent必须创建或复用唯一的`[Root Gate]` managed
+Work child，并对整个Root目标、Tree、Git diff、commits和checks执行fresh Root Gate。Root Gate仍
+不是Performer Turn variant或Conductor phase；它必须作为Linear Tree中的可读、可read-back的Sub Issue
+存在。
+
+Gate child description必须包含以下严格、可解析的Markdown checklist，项目顺序和文字不可改变：
+
+```markdown
+## Root Gate Checklist
+- [ ] `root-facts`: Root目标和最新Root facts仍然一致
+- [ ] `work-evidence`: 每个有效Work child都有匹配的completion evidence
+- [ ] `git-checks`: 声明的Git checks通过，且worktree状态符合交付要求
+- [ ] `blockers`: 所有Root blocker都处于Done或Canceled
+- [ ] `delivery`: 当前commit和delivery branch满足Root delivery precondition
+```
+
+只有每一项都由Root Agent在本次fresh检查后更新为`[x]`，并通过Linear read-back确认顺序、
+文本和Root parent都正确，Gate child才可进入Done；Gate checklist缺失、重复、乱序、未知项或
+任何未勾选项都使Gate失败。任何Gate child都不得由E2E fixture预置。
 
 Gate失败：
 
 - 在Root写可读findings；
+- 保留Gate child及其未通过的checkbox；
 - 创建或重开一个`[Rework] Root Gate Findings` Work child；
 - 保留已经完成的Work和Git事实；
 - 结束Turn，等待该Rework按正常Tree顺序处理。
@@ -277,6 +298,7 @@ Gate通过：
 
 - 确认所有有效Work completion evidence仍匹配；
 - 把仍在In Review的有效Work置为Done；
+- read-back确认Gate child的五个checklist item均为`[x]`；
 - 调用closed `symphony root deliver` command。
 
 Gate结论不保存为本地checkpoint。Gate通过后若在delivery前崩溃，新Conversation或新Turn必须从
@@ -365,7 +387,8 @@ Root ownership冲突、多个In Progress Work或Git identity冲突才需要opera
 4. Work Group不执行；Canceled subtree不执行。
 5. V3单writer下最多一个Agent-owned Work Leaf处于In Progress。
 6. Plan、Human、Work、Gate、Rework和Delivery都必须在Linear/Git上留下人可理解的事实。
-7. Root Gate审核整个Root，不是独立Performer Turn或持久phase。
+7. Root Gate审核整个Root，并以唯一的managed `[Root Gate]` Work child留下严格
+   Markdown checklist事实；它不是独立Performer Turn或持久phase。
 8. current `performer_id`只表达Root Conversation continuation，可以通过Root retry替换。
 9. Root retry保留全部Linear/Git事实并拒绝旧Conversation副作用。
 10. waiting/working/failed/delivered投影必须带客观evidence和freshness；Agent summary不是状态依据。
