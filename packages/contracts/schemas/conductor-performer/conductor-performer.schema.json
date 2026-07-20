@@ -256,22 +256,22 @@
       "additionalProperties": false,
       "required": [
         "kind",
-        "request_fd",
-        "response_fd"
+        "metadata_path",
+        "request_path",
+        "response_path"
       ],
       "properties": {
         "kind": {
-          "const": "inherited_framed_channel"
+          "const": "workspace_framed_channel"
         },
-        "request_fd": {
-          "type": "integer",
-          "minimum": 3,
-          "maximum": 1024
+        "metadata_path": {
+          "const": ".symphony/agent-command/metadata.json"
         },
-        "response_fd": {
-          "type": "integer",
-          "minimum": 3,
-          "maximum": 1024
+        "request_path": {
+          "const": ".symphony/agent-command/request.fifo"
+        },
+        "response_path": {
+          "const": ".symphony/agent-command/response.fifo"
         }
       }
     },

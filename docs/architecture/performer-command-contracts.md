@@ -95,13 +95,20 @@ RootTurnLimits
 - `execution_policy`是Provider-neutral sandbox mode和command allowlist/denylist快照；
 - `root_context`包含完整且有界的Root、Issue Tree、comments/relations和Git摘要；
 - `context_digest`只保护当前输入/输出关联，不持久化为Revision或checkpoint；
-- `command_channel`是Conductor创建的private、turn-scoped broker channel描述，不包含credential；
+- `command_channel`是Conductor批准、Performer在当前Root worktree内创建的private、turn-scoped
+  broker channel描述，不包含credential；
 - `workspace_root`必须是当前Root的deterministic worktree；
 - `turn_limits`的四个上限同时生效，任一字段都不能省略或由另一字段替代；
 
 Agent可以通过broker读取或修改Root Tree、提交当前Root worktree、请求delivery。每个command都有
 独立remote/Git precondition和read-back；Turn启动时的`root_context`不能让旧snapshot通过最新
 precondition。
+
+`workspace_framed_channel`只允许closed schema规定的workspace-relative metadata、request FIFO和
+response FIFO路径。Performer在Provider Turn启动前创建并验证channel，只在该channel和Conductor
+private process pipes之间转发closed frame，不执行command、不保存workflow state，也不成为mutation
+authority。Turn结束、取消或失败时必须关闭并删除全部artifact。absolute path、`..`、symlink、
+regular file、credential或可跨Turn复用的capability都不能成为channel。
 
 ## 4. Root Turn Result
 

@@ -3,6 +3,26 @@
   "$id": "https://symphony.local/contracts/agent-command.schema.json",
   "title": "Agent Command Protocol V1",
   "$defs": {
+    "AgentCommandChannelMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "turn_id",
+        "root_issue_id",
+        "performer_id",
+        "request_path",
+        "response_path"
+      ],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "request_path": { "const": ".symphony/agent-command/request.fifo" },
+        "response_path": { "const": ".symphony/agent-command/response.fifo" }
+      }
+    },
     "EmptyArgs": {
       "type": "object",
       "additionalProperties": false,

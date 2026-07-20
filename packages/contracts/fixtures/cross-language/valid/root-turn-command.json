@@ -10,7 +10,12 @@
     "execution_policy": { "sandbox_mode": "workspace_write", "command_allowlist": [], "command_denylist": [] },
     "root_context": { "json": "{}", "markdown": "## trusted_harness" },
     "context_digest": "abc123",
-    "command_channel": { "kind": "inherited_framed_channel", "request_fd": 3, "response_fd": 4 },
+    "command_channel": {
+      "kind": "workspace_framed_channel",
+      "metadata_path": ".symphony/agent-command/metadata.json",
+      "request_path": ".symphony/agent-command/request.fifo",
+      "response_path": ".symphony/agent-command/response.fifo"
+    },
     "workspace_root": "/workspace/root-1",
     "started_at": "2026-07-19T11:00:00Z",
     "turn_limits": { "max_wall_time_ms": 600000, "max_context_bytes": 1048576, "max_broker_calls": 100, "max_mutations": 20 }

@@ -245,6 +245,18 @@ test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", 
   assert.deepEqual(schema.$defs.RootTurnLimits.required, [
     "max_wall_time_ms", "max_context_bytes", "max_broker_calls", "max_mutations",
   ]);
+  assert.deepEqual(schema.$defs.RootCommandChannel, {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "metadata_path", "request_path", "response_path"],
+    properties: {
+      kind: { const: "workspace_framed_channel" },
+      metadata_path: { const: ".symphony/agent-command/metadata.json" },
+      request_path: { const: ".symphony/agent-command/request.fifo" },
+      response_path: { const: ".symphony/agent-command/response.fifo" },
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(schema.$defs.RootCommandChannel), /request_fd|response_fd/u);
   assert.equal(schema.$defs.RootTurnResult.properties.turn_usage.$ref, "#/$defs/RootTurnUsage");
   for (const forbidden of ["next_state", "target_issue_id", "work_issue_id", "commit", "pull_request"]) {
     assert.equal(schema.$defs.RootTurnResult.properties[forbidden], undefined);

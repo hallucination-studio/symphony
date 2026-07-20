@@ -115,6 +115,11 @@ RootTurnCommand
 Root Turn 总是基于dispatch前fresh读取的Root、完整且有界的Issue Tree、相关comments/relations和
 Git snapshot。memory cache只能减少重复读取，不能决定mutation或业务完成。
 
+Agent command从Root worktree内固定的`workspace_framed_channel`进入Performer。Performer只验证并
+转发closed frame到Conductor private broker pipe；所有Linear/Git/delivery authority、budget、
+precondition和read-back仍属于Conductor。Conversation bootstrap仍不接收workspace或channel，首个
+Root Turn在Provider执行前才创建workspace-local channel metadata与FIFO pair。
+
 `turn_limits`在launch前校验context bytes，在运行中限制wall time、broker calls和mutation数量。
 Provider token只能在一次完整Provider Turn返回后观察和记账，不能作为精确的中途interrupt点。
 broker或mutation上限可以拒绝新的command；wall deadline取消整个Root Turn。无论正常完成还是取消，

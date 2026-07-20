@@ -55,9 +55,10 @@ def root_command(tmp_path):
         },
         "context_digest": "digest-1",
         "command_channel": {
-            "kind": "inherited_framed_channel",
-            "request_fd": 7,
-            "response_fd": 8,
+            "kind": "workspace_framed_channel",
+            "metadata_path": ".symphony/agent-command/metadata.json",
+            "request_path": ".symphony/agent-command/request.fifo",
+            "response_path": ".symphony/agent-command/response.fifo",
         },
         "workspace_root": str(tmp_path),
         "started_at": now.isoformat(),

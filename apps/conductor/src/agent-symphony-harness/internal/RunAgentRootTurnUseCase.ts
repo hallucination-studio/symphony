@@ -168,7 +168,10 @@ function rootTurnCommand(
     root_context: { json: context.json, markdown: context.markdown },
     context_digest: context.contextDigest,
     command_channel: {
-      kind: "inherited_framed_channel", request_fd: 3, response_fd: 4,
+      kind: "workspace_framed_channel",
+      metadata_path: ".symphony/agent-command/metadata.json",
+      request_path: ".symphony/agent-command/request.fifo",
+      response_path: ".symphony/agent-command/response.fifo",
     },
     workspace_root: view.gitWorkspace!.worktreePath,
     started_at: startedAt,

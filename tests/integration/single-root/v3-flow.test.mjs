@@ -390,8 +390,10 @@ function rootTurnCommand(workspaceRoot) { return {
   execution_policy: { sandbox_mode: "workspace_write", command_allowlist: [],
     command_denylist: [] },
   root_context: { json: '{"root":"root-1"}', markdown: "# Root" },
-  context_digest: "digest-1", command_channel: { kind: "inherited_framed_channel",
-    request_fd: 3, response_fd: 4 }, workspace_root: workspaceRoot,
+  context_digest: "digest-1", command_channel: { kind: "workspace_framed_channel",
+    metadata_path: ".symphony/agent-command/metadata.json",
+    request_path: ".symphony/agent-command/request.fifo",
+    response_path: ".symphony/agent-command/response.fifo" }, workspace_root: workspaceRoot,
   started_at: "2026-07-19T00:00:00Z", turn_limits: { max_wall_time_ms: 60_000,
     max_context_bytes: 1_024, max_broker_calls: 10, max_mutations: 2 },
 }; }

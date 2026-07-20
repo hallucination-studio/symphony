@@ -1,0 +1,8 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RootCommandChannel",
+  "value": {
+    "kind": "inherited_framed_channel",
+    "request_fd": 3,
+    "response_fd": 4
+  }
+}
