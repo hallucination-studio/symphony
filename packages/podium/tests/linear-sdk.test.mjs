@@ -93,6 +93,117 @@ test("official SDK adapter maps each Podium credential kind to the correct Autho
   assert.deepEqual(observed, ["Bearer oauth-canary", "development-canary"]);
 });
 
+test("physical SDK requests report sanitized request and complexity windows", async (t) => {
+  const observations = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    const { query } = JSON.parse(init.body);
+    const headers = {
+      "content-type": "application/json",
+      "x-ratelimit-requests-limit": "1000",
+      "x-ratelimit-requests-remaining": "998",
+      "x-ratelimit-requests-reset": "60",
+      "x-ratelimit-complexity-limit": "250000",
+      "x-ratelimit-complexity-remaining": "249950",
+      "x-ratelimit-complexity-reset": "60",
+    };
+    if (query.includes("Organization")) {
+      return new Response(JSON.stringify({ data: {
+        organization: { id: "organization-1", projectStatuses: [] },
+      } }), {
+        status: 200,
+        headers,
+      });
+    }
+    return new Response(JSON.stringify({ data: {
+      projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+    } }), { status: 200, headers });
+  });
+
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "secret-canary" },
+    "organization-1",
+    undefined,
+    {
+      correlationId: () => "correlation-1",
+      now: (() => {
+        let now = 100;
+        return () => now++;
+      })(),
+      observe: (observation) => observations.push(observation),
+    },
+  );
+  await adapter.listProjects({ limit: 1 });
+
+  assert.equal(observations.length, 2);
+  for (const observation of observations) {
+    assert.equal(observation.correlationId, "correlation-1");
+    assert.equal(observation.status, 200);
+    assert.equal(observation.durationMs, 1);
+    assert.deepEqual(observation.requestWindow, { limit: 1000, remaining: 998, reset: 60 });
+    assert.deepEqual(observation.complexityWindow, { limit: 250000, remaining: 249950, reset: 60 });
+    assert.deepEqual(Object.keys(observation).sort(), [
+      "complexityWindow", "correlationId", "durationMs", "operation", "requestWindow", "status",
+    ]);
+    assert.doesNotMatch(JSON.stringify(observation), /secret-canary|authorization|variables|query|Issue content/iu);
+  }
+});
+
+test("physical SDK requests report sanitized 429 metadata", async (t) => {
+  const observations = [];
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    JSON.stringify({ errors: [{ message: "private upstream detail", extensions: { type: "Ratelimited" } }] }),
+    {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "x-ratelimit-requests-limit": "1000",
+        "x-ratelimit-requests-remaining": "0",
+        "x-ratelimit-requests-reset": "42",
+      },
+    },
+  ));
+  const adapter = new LinearSdkImpl(
+    { kind: "development_token", token: "secret-canary", delegateActorId: "app-user" },
+    "organization-1",
+    undefined,
+    {
+      correlationId: () => "correlation-429",
+      now: () => 100,
+      observe: (observation) => observations.push(observation),
+    },
+  );
+
+  await assert.rejects(adapter.listProjects({ limit: 1 }));
+
+  assert.deepEqual(observations, [{
+    operation: "organization",
+    correlationId: "correlation-429",
+    durationMs: 0,
+    status: 429,
+    requestWindow: { limit: 1000, remaining: 0, reset: 42 },
+  }]);
+  assert.doesNotMatch(JSON.stringify(observations), /secret-canary|private upstream detail|authorization/iu);
+});
+
+test("physical SDK transport checks its installation permit before fetch", async (t) => {
+  let fetches = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    fetches += 1;
+    throw new Error("fetch should not run");
+  });
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" }, "organization-1", undefined,
+    {
+      correlationId: () => "correlation-1", now: () => 0,
+      permit: () => { throw new Error("linear_request_capacity_reserved"); },
+      observe: () => undefined,
+    },
+  );
+
+  await assert.rejects(adapter.listProjects({ limit: 1 }), /linear_request_capacity_reserved/iu);
+  assert.equal(fetches, 0);
+});
+
 test("development-token SDK uses the persisted app user for Root delegation", async () => {
   const root = issue({ id: "root-1", delegateId: "app-user" });
   const sdk = {
@@ -109,6 +220,106 @@ test("development-token SDK uses the persisted app user for Root delegation", as
 
   const roots = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
   assert.equal(roots.items[0].isDelegatedToSymphony, true);
+});
+
+test("metadata lookups use exact server-side name filters", async () => {
+  const observed = {};
+  const phaseLabel = {
+    id: "phase-label",
+    name: "symphony:run/working",
+    isGroup: false,
+    archivedAt: undefined,
+    retiredById: undefined,
+    teamId: "team-1",
+    organization: Promise.resolve({ id: "organization-1" }),
+  };
+  const root = issue({ id: "root-1" });
+  root.labels = async () => connection([]);
+  const sdk = {
+    projectLabels: async (input) => {
+      observed.projectLabels = input;
+      return connection([]);
+    },
+    issue: async () => root,
+    issueLabels: async (input) => {
+      observed.issueLabels = input;
+      return connection([phaseLabel]);
+    },
+    issueAddLabel: async () => ({ success: true }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  assert.deepEqual(await adapter.readProjectResolution({ conductorShortHash: "abc123" }), {
+    kind: "unbound",
+  });
+  await adapter.executeMutation({
+    kind: "replace_root_phase_label",
+    project: {
+      conductorShortHash: "abc123",
+      expectedProjectId: "project-1",
+      expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    precondition: {
+      expectedIssueId: "root-1",
+      expectedUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    phase: "working",
+  });
+
+  assert.deepEqual(observed.projectLabels, {
+    first: 3,
+    includeArchived: false,
+    filter: { name: { eq: "symphony:conductor/abc123" }, isGroup: { eq: false } },
+  });
+  assert.deepEqual(observed.issueLabels, {
+    first: 3,
+    includeArchived: false,
+    filter: { name: { eq: "symphony:run/working" }, isGroup: { eq: false } },
+  });
+});
+
+test("workflow state lookup uses an exact server-side name filter", async () => {
+  let stateLookup;
+  const root = issue({ id: "root-1" });
+  root.team = Promise.resolve({
+    states: async (input) => {
+      stateLookup = input;
+      return connection([{ id: "state-progress", name: "In Progress" }]);
+    },
+  });
+  const sdk = {
+    issue: async () => root,
+    updateIssue: async () => ({ success: true }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  await adapter.executeMutation({
+    kind: "update_issue_state",
+    project: {
+      conductorShortHash: "abc123",
+      expectedProjectId: "project-1",
+      expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    precondition: {
+      expectedIssueId: "root-1",
+      expectedUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    state: "In Progress",
+  });
+
+  assert.deepEqual(stateLookup, {
+    first: 2,
+    includeArchived: false,
+    filter: { name: { eq: "In Progress" } },
+  });
 });
 
 test("Root scheduling maps every Linear priority and preserves Root sort order", async () => {
@@ -146,6 +357,118 @@ test("Root scheduling maps every Linear priority and preserves Root sort order",
       { order: 14.5, priority: "low", blockers: [] },
     ],
   );
+});
+
+test("Root scheduling batches one and 250 Root headers with one physical fact query per page", async () => {
+  for (const rootCount of [1, 250]) {
+    const roots = Array.from({ length: rootCount }, (_, index) => {
+      const root = issue({ id: `root-${index}`, priority: index % 5, order: index });
+      Object.defineProperties(root, {
+        state: { get() { throw new Error("per-Root state read forbidden"); } },
+      });
+      root.comments = async () => { throw new Error("per-Root comment read forbidden"); };
+      root.inverseRelations = async () => { throw new Error("per-Root relation read forbidden"); };
+      return root;
+    });
+    let batchReads = 0;
+    const sdk = {
+      project: async () => ({ issues: async () => connection(roots) }),
+      client: {
+        async rawRequest(_query, variables) {
+          batchReads += 1;
+          assert.equal(variables.rootIds.length, rootCount);
+          return { data: {
+            viewer: { id: "app-user" },
+            issues: {
+              nodes: roots.map((root) => ({
+                id: root.id,
+                identifier: root.identifier,
+                title: root.title,
+                description: root.description,
+                priority: root.priority,
+                sortOrder: root.sortOrder,
+                updatedAt: root.updatedAt.toISOString(),
+                project: { id: root.projectId },
+                parent: null,
+                delegate: { id: "app-user" },
+                state: { name: "Todo" },
+                comments: { nodes: [], pageInfo: { hasNextPage: false } },
+                inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+              })),
+              pageInfo: { hasNextPage: false },
+            },
+          } };
+        },
+      },
+    };
+    const adapter = new LinearSdkImpl(
+      { kind: "oauth", token: "token" },
+      "organization-1",
+      sdk,
+    );
+
+    const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+
+    assert.equal(result.items.length, rootCount);
+    assert.equal(batchReads, 1);
+  }
+});
+
+test("Root scheduling batch preserves managed comments and blocker facts", async () => {
+  const primary = v3PrimaryComment();
+  const root = issue({ id: "root-1", priority: 2, order: 3 });
+  const sdk = {
+    project: async () => ({ issues: async () => connection([root]) }),
+    client: {
+      async rawRequest(query, variables) {
+        assert.match(query, /comments\(first: 2, filter:/u);
+        assert.equal(variables.commentMarker, "<!-- symphony root\n");
+        return { data: {
+          viewer: { id: "app-user" },
+          issues: { nodes: [{
+            id: "root-1",
+            identifier: "ROOT-1",
+            title: "Title",
+            description: "Description",
+            priority: 2,
+            sortOrder: 3,
+            updatedAt: "2026-07-16T00:00:00Z",
+            project: { id: "project-1" },
+            parent: null,
+            delegate: { id: "app-user" },
+            state: { name: "In Progress" },
+            comments: { nodes: [{
+              id: "primary-1",
+              body: primary,
+              updatedAt: "2026-07-16T00:00:00Z",
+              issue: { id: "root-1" },
+            }], pageInfo: { hasNextPage: false } },
+            inverseRelations: { nodes: [{
+              type: "blocks",
+              issue: { id: "blocker-1", state: { name: "Todo" } },
+              relatedIssue: { id: "root-1" },
+            }], pageInfo: { hasNextPage: false } },
+          }], pageInfo: { hasNextPage: false } },
+        } };
+      },
+    },
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+
+  assert.equal(result.items[0].isDelegatedToSymphony, true);
+  assert.equal(result.items[0].issue.state, "In Progress");
+  assert.equal(result.items[0].rootManagedComments[0].body, primary);
+  assert.deepEqual(result.items[0].blockers, [{
+    sourceIssueId: "root-1",
+    targetIssueId: "blocker-1",
+    targetState: "Todo",
+  }]);
 });
 
 test("Root scheduling reads candidate facts with bounded concurrency", async () => {
@@ -437,6 +760,280 @@ test("official SDK adapter reads each lazy issue state exactly once", async () =
 
   assert.equal(tree.nodes[0].state, "Todo");
   assert.equal(stateReads, 1);
+});
+
+test("complete Issue Trees batch physical reads by depth instead of node count", async () => {
+  for (const childCount of [1, 100]) {
+    const calls = [];
+    const children = Array.from({ length: childCount }, (_, index) => ({
+      id: `work-${index}`,
+      identifier: `WORK-${String(index).padStart(3, "0")}`,
+      title: `Work ${index}`,
+      description: "",
+      sortOrder: childCount - index,
+      subIssueSortOrder: childCount - index,
+      updatedAt: "2026-07-16T00:00:00Z",
+      project: { id: "project-1" },
+      parent: { id: "root-1" },
+      state: { name: "Todo" },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    }));
+    const root = {
+      id: "root-1",
+      identifier: "ROOT-1",
+      title: "Root",
+      description: "",
+      sortOrder: 1,
+      updatedAt: "2026-07-16T00:00:00Z",
+      project: { id: "project-1" },
+      parent: null,
+      state: { name: "Todo" },
+      labels: { nodes: [], pageInfo: { hasNextPage: false } },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    };
+    const sdk = {
+      async issue() { throw new Error("per-node issue read forbidden"); },
+      client: {
+        async rawRequest(query, variables) {
+          calls.push({ query, variables });
+          if (variables.rootIssueId) return { data: { issue: root } };
+          const nodes = variables.parentIds.includes("root-1") ? children : [];
+          return { data: { issues: {
+            nodes,
+            pageInfo: { hasNextPage: false, endCursor: null },
+          } } };
+        },
+      },
+    };
+    const adapter = new LinearSdkImpl(
+      { kind: "oauth", token: "token" },
+      "organization-1",
+      sdk,
+    );
+
+    const tree = await adapter.getIssueTree({
+      projectId: "project-1",
+      rootIssueId: "root-1",
+      limit: 250,
+    });
+
+    assert.equal(calls.length, 3);
+    assert.match(calls[0].query, /query SymphonyIssueTreeRoot/u);
+    assert.match(calls[1].query, /query SymphonyIssueTreeChildren/u);
+    assert.deepEqual(
+      tree.nodes.slice(1).map(({ issueId }) => issueId),
+      children.toSorted((left, right) =>
+        left.subIssueSortOrder - right.subIssueSortOrder ||
+          left.identifier.localeCompare(right.identifier),
+      ).map(({ id }) => id),
+    );
+  }
+});
+
+test("complete Issue Tree batches preserve depth-first ordering and Human answers", async () => {
+  const humanDescription = "Approve\n\n<!-- symphony managed marker\nmanaged_marker: root-1:human\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->";
+  const facts = {
+    "root-1": [{
+      id: "work-b", identifier: "WORK-B", title: "B", description: "",
+      sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:00Z",
+      project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    }, {
+      id: "work-a", identifier: "WORK-A", title: "A", description: "",
+      sortOrder: 1, subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:00Z",
+      project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    }],
+    "work-a": [{
+      id: "human-1", identifier: "HUMAN-1", title: "Approve", description: humanDescription,
+      sortOrder: 1, subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:00Z",
+      project: { id: "project-1" }, parent: { id: "work-a" }, state: { name: "Done" },
+      comments: { nodes: [{ id: "answer-1", body: "  Approved  ", updatedAt: "2026-07-17T00:00:00Z", issue: { id: "human-1" } }], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    }],
+  };
+  let calls = 0;
+  const sdk = { client: { async rawRequest(_query, variables) {
+    calls += 1;
+    if (variables.rootIssueId) return { data: { issue: {
+      id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+      updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+      state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    } } };
+    return { data: { issues: {
+      nodes: variables.parentIds.flatMap((id) => facts[id] ?? []),
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } };
+  } } };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const tree = await adapter.getIssueTree({ projectId: "project-1", rootIssueId: "root-1", limit: 250 });
+
+  assert.equal(calls, 4);
+  assert.deepEqual(tree.nodes.map(({ issueId, depth }) => [issueId, depth]), [
+    ["root-1", 0], ["work-a", 1], ["human-1", 2], ["work-b", 1],
+  ]);
+  assert.deepEqual(tree.humanAnswers, [{
+    humanIssueId: "human-1", commentId: "answer-1", answer: "Approved",
+    updatedAt: "2026-07-17T00:00:00.000Z",
+  }]);
+});
+
+test("complete Issue Tree batches fail closed on incomplete nested connections", async () => {
+  const sdk = { client: { async rawRequest(_query, variables) {
+    if (variables.rootIssueId) return { data: { issue: {
+      id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+      updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+      state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: true } },
+      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    } } };
+    throw new Error("unexpected child read");
+  } } };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await assert.rejects(
+    adapter.getIssueTree({ projectId: "project-1", rootIssueId: "root-1", limit: 250 }),
+    /linear_tree_batch_incomplete/u,
+  );
+});
+
+test("complete Issue Tree breadth pagination is bounded and rejects cursor ambiguity", async () => {
+  const root = {
+    id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const children = Array.from({ length: 251 }, (_, index) => ({
+    id: `work-${index}`, identifier: `WORK-${index}`, title: "Work", description: "",
+    sortOrder: index, subIssueSortOrder: index, updatedAt: "2026-07-16T00:00:00Z",
+    project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  }));
+  let calls = 0;
+  const sdk = { client: { async rawRequest(_query, variables) {
+    calls += 1;
+    if (variables.rootIssueId) return { data: { issue: root } };
+    if (!variables.parentIds.includes("root-1")) {
+      return { data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+    }
+    return { data: { issues: variables.cursor
+      ? { nodes: children.slice(250), pageInfo: { hasNextPage: false, endCursor: null } }
+      : { nodes: children.slice(0, 250), pageInfo: { hasNextPage: true, endCursor: "page-2" } } } };
+  } } };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const tree = await adapter.getIssueTree({ projectId: "project-1", rootIssueId: "root-1", limit: 250 });
+
+  assert.equal(tree.nodes.length, 252);
+  assert.equal(calls, 4);
+
+  const ambiguousSdk = { client: { async rawRequest(_query, variables) {
+    if (variables.rootIssueId) return { data: { issue: root } };
+    return { data: { issues: {
+      nodes: [], pageInfo: { hasNextPage: true, endCursor: "same-cursor" },
+    } } };
+  } } };
+  const ambiguousAdapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" }, "organization-1", ambiguousSdk,
+  );
+  await assert.rejects(
+    ambiguousAdapter.getIssueTree({ projectId: "project-1", rootIssueId: "root-1", limit: 250 }),
+    /linear_tree_batch_incomplete/u,
+  );
+});
+
+test("complete Issue Tree batches enforce ancestry and maximum depth", async () => {
+  const root = {
+    id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const adapterFor = (childFor) => new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    { client: { async rawRequest(_query, variables) {
+      if (variables.rootIssueId) return { data: { issue: root } };
+      const child = childFor(variables.parentIds[0]);
+      return { data: { issues: {
+        nodes: child ? [child] : [], pageInfo: { hasNextPage: false, endCursor: null },
+      } } };
+    } } },
+  );
+  const fact = (id, parentId) => ({
+    id, identifier: id.toUpperCase(), title: id, description: "", sortOrder: 1,
+    subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:00Z",
+    project: { id: "project-1" }, parent: { id: parentId }, state: { name: "Todo" },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  });
+
+  await assert.rejects(
+    adapterFor(() => fact("work-1", "wrong-parent")).getIssueTree({
+      projectId: "project-1", rootIssueId: "root-1", limit: 250,
+    }),
+    /linear_tree_batch_invalid/u,
+  );
+  await assert.rejects(
+    adapterFor((parentId) => {
+      const depth = parentId === "root-1" ? 1 : Number(parentId.slice(5)) + 1;
+      return depth <= 33 ? fact(`work-${depth}`, parentId) : undefined;
+    }).getIssueTree({ projectId: "project-1", rootIssueId: "root-1", limit: 250 }),
+    /linear_tree_bounds_exceeded/u,
+  );
+});
+
+test("compact Root scope reads only authority and bounded Issue versions", async () => {
+  const queries = [];
+  const sdk = {
+    async issue() { throw new Error("lazy issue read forbidden"); },
+    client: { async rawRequest(query, variables) {
+      queries.push(query);
+      if (variables.rootIssueId) return { data: { issue: {
+        id: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z",
+        project: { id: "project-1" }, parent: null, state: { name: "In Progress" },
+        comments: { nodes: [{
+          id: "primary-1", body: v3PrimaryComment("conversation-1"),
+          updatedAt: "2026-07-20T00:00:00Z", issue: { id: "root-1" },
+        }], pageInfo: { hasNextPage: false } },
+      } } };
+      const nodes = variables.parentIds.includes("root-1") ? [{
+        id: "work-1", identifier: "SYM-2", updatedAt: "2026-07-20T00:00:01Z",
+        project: { id: "project-1" }, parent: { id: "root-1" },
+      }] : [];
+      return { data: { issues: {
+        nodes, pageInfo: { hasNextPage: false, endCursor: null },
+      } } };
+    } },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const scope = await adapter.getRootScope({ projectId: "project-1", rootIssueId: "root-1" });
+
+  assert.equal(queries.length, 3);
+  assert.match(queries[0], /query SymphonyRootScopeRoot/u);
+  assert.match(queries[1], /query SymphonyRootScopeChildren/u);
+  assert.doesNotMatch(queries[1], /description|labels|comments|inverseRelations|body/iu);
+  assert.deepEqual(scope, {
+    rootIssueId: "root-1", conductorId: "conductor-1", performerId: "conversation-1",
+    terminal: false,
+    issues: [
+      { issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00.000Z" },
+      { issueId: "work-1", identifier: "SYM-2", parentIssueId: "root-1", updatedAt: "2026-07-20T00:00:01.000Z" },
+    ],
+    observedAt: scope.observedAt,
+  });
 });
 
 test("official SDK adapter creates a managed node and proves it by exact Marker read-back", async () => {

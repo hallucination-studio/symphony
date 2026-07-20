@@ -4,7 +4,6 @@ import test from "node:test";
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 import { PodiumClientServicesImpl } from "../dist/internal/composition/PodiumClientServicesImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
-import { LinearRequestBudget } from "../dist/internal/linear-gateway/LinearRequestBudget.js";
 
 function project() {
   return {
@@ -14,55 +13,11 @@ function project() {
   };
 }
 
-test("request budget prioritizes control and mutation without starving workflow reads", async () => {
-  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2 });
-  const order = [];
-  let release;
-  const blocker = budget.run("observation", () => new Promise((resolve) => {
-    release = resolve;
-  }));
-  await Promise.resolve();
-  const observation = budget.run("observation", async () => { order.push("observation"); });
-  const workflow = budget.run("workflow-read", async () => { order.push("workflow"); });
-  const mutation = budget.run("mutation", async () => { order.push("mutation"); });
-  const control = budget.run("control", async () => { order.push("control"); });
-  const mutationTwo = budget.run("mutation", async () => { order.push("mutation-2"); });
-  release();
-  await Promise.all([blocker, observation, workflow, mutation, control, mutationTwo]);
-  assert.deepEqual(order, ["control", "mutation", "workflow", "mutation-2", "observation"]);
-});
-
-test("request budget rejects work after its bounded admission deadline", async () => {
-  let now = 0;
-  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2,
-    now: () => now });
-  let release;
-  const blocker = budget.run("control", () => new Promise((resolve) => { release = resolve; }));
-  await Promise.resolve();
-  const queued = budget.run("workflow-read", async () => undefined, { deadlineAtMs: 10 });
-  now = 11;
-  release();
-  await blocker;
-  await assert.rejects(queued, /linear_request_budget_exhausted/);
-});
-
-test("request budget bounds active work without releasing its concurrency slot", async () => {
-  const budget = new LinearRequestBudget({ maxConcurrent: 1, maxHighPriorityBurst: 2 });
-  let release;
-  let queuedStarted = false;
-  const active = budget.run("workflow-read", () => new Promise((resolve) => {
-    release = resolve;
-  }), { deadlineAtMs: Date.now() + 10 });
-  const queued = budget.run("control", async () => { queuedStarted = true; });
-
-  await assert.rejects(active, /linear_request_budget_exhausted/);
-  assert.equal(queuedStarted, false);
-  release();
-  await queued;
-  assert.equal(queuedStarted, true);
-});
-
-async function createConductorServices(linearSdk, onObservation = () => undefined) {
+async function createConductorServices(
+  linearSdk,
+  onObservation = () => undefined,
+  onLinearObserver = () => undefined,
+) {
   const binding = {
     bindingId: "binding-1",
     conductorId: "conductor-1",
@@ -88,7 +43,10 @@ async function createConductorServices(linearSdk, onObservation = () => undefine
     {
       now: () => "2026-07-16T00:00:00Z",
       sleep: async () => undefined,
-      createLinearSdk: () => linearSdk,
+      createLinearSdk: (_installation, observe) => {
+        onLinearObserver(observe);
+        return linearSdk;
+      },
     },
   );
   await services.handle({
@@ -125,6 +83,58 @@ test("Runtime Problem observations preserve only closed correlation fields", asy
   assert.equal(observation.problem.code, "linear_rate_limited");
   assert.equal(observation.problem.turnId, "turn-1");
   assert.equal(observation.problem.performerProfileId, "profile-1");
+});
+
+test("installation broker coalesces identical concurrent Podium reads", async () => {
+  let reads = 0;
+  let release;
+  const services = await createConductorServices({
+    async getRootScope() {
+      reads += 1;
+      await new Promise((resolve) => { release = resolve; });
+      return {
+        rootIssueId: "root-1", conductorId: "conductor-1", terminal: false,
+        issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
+        observedAt: "2026-07-20T00:00:01Z",
+      };
+    },
+  });
+  const body = { kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1" };
+  const first = services.handle(body);
+  const shared = services.handle(body);
+  await Promise.resolve();
+
+  assert.equal(reads, 1);
+  release();
+  assert.deepEqual(await first, await shared);
+});
+
+test("physical rate observations reserve installation capacity from background reads", async () => {
+  let observe;
+  let usageReads = 0;
+  const services = await createConductorServices({
+    async getRootScope() { return {
+      rootIssueId: "root-1", conductorId: "conductor-1", terminal: false,
+      issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
+      observedAt: "2026-07-20T00:00:01Z",
+    }; },
+    async listRootUsage() { usageReads += 1; return { items: [], pageInfo: { hasNextPage: false } }; },
+  }, undefined, (value) => { observe = value; });
+  await services.handle({
+    kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1",
+  });
+  observe({
+    operation: "SymphonyRootScopeRoot", correlationId: "correlation-1", durationMs: 1,
+    status: 200,
+    requestWindow: { limit: 1000, remaining: 750, reset: 60 },
+    complexityWindow: { limit: 250000, remaining: 187500, reset: 60 },
+  });
+
+  await assert.rejects(
+    services.handle({ kind: "list_root_usage", project_id: "project-1", page: { limit: 250 } }),
+    /linear_request_capacity_reserved/u,
+  );
+  assert.equal(usageReads, 0);
 });
 
 test("mutation conflict rereads and never executes stale state", async () => {
@@ -560,6 +570,63 @@ test("issue tree rejects invalid Root managed-state facts", async () => {
     handler.getCompleteIssueTree("project-1", "root-1"),
     /linear_root_phase_labels_invalid/,
   );
+});
+
+test("compact Root scope validates authority and issue ancestry without reading a complete Tree", async () => {
+  let treeReads = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async getRootScope() {
+        return {
+          rootIssueId: "root-1",
+          conductorId: "conductor-1",
+          performerId: "conversation-1",
+          terminal: false,
+          issues: [
+            { issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" },
+            { issueId: "work-1", identifier: "SYM-2", parentIssueId: "root-1", updatedAt: "2026-07-20T00:00:01Z" },
+          ],
+          observedAt: "2026-07-20T00:00:02Z",
+        };
+      },
+      async getIssueTree() { treeReads += 1; throw new Error("complete Tree read forbidden"); },
+    },
+    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+  );
+
+  const scope = await handler.getRootScope("project-1", "root-1");
+
+  assert.equal(treeReads, 0);
+  assert.equal(scope.issues.length, 2);
+  assert.equal(scope.performerId, "conversation-1");
+});
+
+test("Podium-Conductor compact Root scope omits workflow bodies and complete Tree reads", async () => {
+  let treeReads = 0;
+  const services = await createConductorServices({
+    async getRootScope() {
+      return {
+        rootIssueId: "root-1", conductorId: "conductor-1", performerId: "conversation-1",
+        terminal: false,
+        issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
+        observedAt: "2026-07-20T00:00:01Z",
+      };
+    },
+    async getIssueTree() { treeReads += 1; throw new Error("complete Tree read forbidden"); },
+  });
+
+  const result = await services.handle({
+    kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1",
+  });
+
+  assert.equal(treeReads, 0);
+  assert.deepEqual(result, {
+    kind: "root_scope", root_issue_id: "root-1", conductor_id: "conductor-1",
+    performer_id: "conversation-1", terminal: false,
+    issues: [{ issue_id: "root-1", identifier: "SYM-1", updated_at: "2026-07-20T00:00:00Z" }],
+    observed_at: "2026-07-20T00:00:01Z",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /description|comment|label|answer|authorization/iu);
 });
 
 test("affected Root detail projects its sanitized scheduling observation", async () => {

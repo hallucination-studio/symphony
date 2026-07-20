@@ -108,6 +108,23 @@ export interface LinearClientInterface {
     pageInfo: PageInfo;
   }>;
 
+  getRootScope(input: {
+    projectId: string;
+    rootIssueId: string;
+  }): Promise<{
+    rootIssueId: string;
+    conductorId: string;
+    performerId?: string;
+    terminal: boolean;
+    issues: Array<{
+      issueId: string;
+      identifier: string;
+      parentIssueId?: string;
+      updatedAt: string;
+    }>;
+    observedAt: string;
+  }>;
+
   listRootUsage(input: {
     projectId: string;
     cursor?: string;

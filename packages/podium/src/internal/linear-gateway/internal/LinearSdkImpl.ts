@@ -26,6 +26,96 @@ const MAX_ROOT_COMMENTS = 4_096;
 const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
+const ROOT_HEADER_MARKER = "<!-- symphony root\n";
+const ROOT_HEADER_FACTS_QUERY = `
+  query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!) {
+    viewer { id }
+    issues(first: 250, filter: { id: { in: $rootIds } }) {
+      nodes {
+        id identifier title description priority sortOrder updatedAt
+        project { id }
+        parent { id }
+        delegate { id }
+        state { name }
+        comments(first: 2, filter: { body: { contains: $commentMarker } }) {
+          nodes { id body updatedAt issue { id } }
+          pageInfo { hasNextPage }
+        }
+        inverseRelations(first: 250) {
+          nodes {
+            type
+            issue { id state { name } }
+            relatedIssue { id }
+          }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { hasNextPage }
+    }
+  }
+`;
+const ISSUE_TREE_ROOT_QUERY = `
+  query SymphonyIssueTreeRoot($rootIssueId: ID!, $commentMarker: String!) {
+    issue(id: $rootIssueId) {
+      id identifier title description sortOrder updatedAt
+      project { id }
+      parent { id }
+      state { name }
+      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+      comments(first: 2, filter: { body: { contains: $commentMarker } }) {
+        nodes { id body updatedAt issue { id } }
+        pageInfo { hasNextPage }
+      }
+      inverseRelations(first: 250) {
+        nodes { type issue { id state { name } } relatedIssue { id } }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+const ISSUE_TREE_CHILDREN_QUERY = `
+  query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
+    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
+      nodes {
+        id identifier title description sortOrder subIssueSortOrder updatedAt
+        project { id }
+        parent { id }
+        state { name }
+        comments(first: 64) {
+          nodes { id body updatedAt issue { id } }
+          pageInfo { hasNextPage }
+        }
+        inverseRelations(first: 250) {
+          nodes { type issue { id state { name } } relatedIssue { id } }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+const ROOT_SCOPE_ROOT_QUERY = `
+  query SymphonyRootScopeRoot($rootIssueId: ID!, $commentMarker: String!) {
+    issue(id: $rootIssueId) {
+      id identifier updatedAt
+      project { id }
+      parent { id }
+      state { name }
+      comments(first: 2, filter: { body: { contains: $commentMarker } }) {
+        nodes { id body updatedAt issue { id } }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+const ROOT_SCOPE_CHILDREN_QUERY = `
+  query SymphonyRootScopeChildren($parentIds: [ID!]!, $cursor: String) {
+    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
+      nodes { id identifier updatedAt project { id } parent { id } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
 const ROOT_MARKER_START = "<!-- symphony root\n";
 const TURN_EVENT_MARKER =
   /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
@@ -42,6 +132,124 @@ export type LinearSdkCredential =
   | { kind: "oauth"; token: string }
   | { kind: "development_token"; token: string; delegateActorId: string };
 
+export interface LinearRequestWindowObservation {
+  limit?: number;
+  remaining?: number;
+  reset?: number;
+}
+
+export interface LinearPhysicalRequestObservation {
+  operation: string;
+  correlationId: string;
+  durationMs: number;
+  status?: number;
+  requestWindow?: LinearRequestWindowObservation;
+  complexityWindow?: LinearRequestWindowObservation;
+}
+
+export interface LinearRequestObservationOptions {
+  correlationId(): string;
+  now(): number;
+  permit?(): void;
+  observe(observation: LinearPhysicalRequestObservation): void;
+}
+
+interface RootHeaderFactsData {
+  viewer: { id: string };
+  issues: {
+    nodes: RootHeaderFact[];
+    pageInfo: { hasNextPage: boolean };
+  };
+}
+
+interface RootHeaderFact {
+  id: string;
+  identifier: string;
+  title: string;
+  description?: string | null;
+  priority: number;
+  sortOrder: number;
+  updatedAt: string;
+  project?: { id: string } | null;
+  parent?: { id: string } | null;
+  delegate?: { id: string } | null;
+  state: { name: string };
+  comments: {
+    nodes: Array<{
+      id: string;
+      body: string;
+      updatedAt: string;
+      issue: { id: string };
+    }>;
+    pageInfo: { hasNextPage: boolean };
+  };
+  inverseRelations: {
+    nodes: Array<{
+      type: string;
+      issue?: { id: string; state: { name: string } } | null;
+      relatedIssue?: { id: string } | null;
+    }>;
+    pageInfo: { hasNextPage: boolean };
+  };
+}
+
+interface IssueTreeFact {
+  id: string;
+  identifier: string;
+  title: string;
+  description?: string | null;
+  sortOrder: number;
+  subIssueSortOrder?: number | null;
+  updatedAt: string;
+  project?: { id: string } | null;
+  parent?: { id: string } | null;
+  state: { name: string };
+  comments: {
+    nodes: Array<{
+      id: string;
+      body: string;
+      updatedAt: string;
+      issue: { id: string };
+    }>;
+    pageInfo: { hasNextPage: boolean };
+  };
+  inverseRelations: RootHeaderFact["inverseRelations"];
+}
+
+interface IssueTreeRootFact extends IssueTreeFact {
+  labels: {
+    nodes: Array<{ name: string }>;
+    pageInfo: { hasNextPage: boolean };
+  };
+}
+
+interface IssueTreeRootData { issue?: IssueTreeRootFact | null }
+interface IssueTreeChildrenData {
+  issues: {
+    nodes: IssueTreeFact[];
+    pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+  };
+}
+
+interface RootScopeIssueFact {
+  id: string;
+  identifier: string;
+  updatedAt: string;
+  project?: { id: string } | null;
+  parent?: { id: string } | null;
+}
+interface RootScopeRootFact extends RootScopeIssueFact {
+  state: { name: string };
+  comments: IssueTreeFact["comments"];
+}
+interface RootScopeRootData { issue?: RootScopeRootFact | null }
+interface RootScopeChildrenData {
+  issues: {
+    nodes: RootScopeIssueFact[];
+    pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+  };
+}
+
 export class LinearSdkImpl implements LinearClientInterface {
   readonly #client: LinearClient;
   readonly #delegateActorId: string | undefined;
@@ -50,8 +258,9 @@ export class LinearSdkImpl implements LinearClientInterface {
     credential: LinearSdkCredential,
     private readonly organizationId: string,
     client?: LinearClient,
+    observation?: LinearRequestObservationOptions,
   ) {
-    this.#client = client ?? new LinearClient(clientOptions(credential));
+    this.#client = client ?? observedClient(credential, observation);
     this.#delegateActorId = credential.kind === "development_token"
       ? credential.delegateActorId
       : undefined;
@@ -367,7 +576,11 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #stateId(issue: Issue, state: LinearIssueState): Promise<string> {
     if (!issue.team) throw new Error("linear_issue_team_missing");
     const team = await issue.team;
-    const states = await allNodes(team.states({ first: PAGE_LIMIT }), 64);
+    const states = await allNodes(team.states({
+      first: 2,
+      includeArchived: false,
+      filter: { name: { eq: state } },
+    }), 2);
     const matches = states.filter(({ name }) => name === state);
     if (matches.length !== 1) throw new Error("linear_state_ambiguous");
     return matches[0]!.id;
@@ -517,7 +730,6 @@ export class LinearSdkImpl implements LinearClientInterface {
       first: input.limit,
       ...(input.cursor ? { after: input.cursor } : {}),
     });
-    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const roots = page.nodes.flatMap((issue) => {
       if (issue.projectId !== input.projectId) {
         throw new Error("linear_root_project_mismatch");
@@ -526,6 +738,9 @@ export class LinearSdkImpl implements LinearClientInterface {
         ? []
         : [{ issue, priority: linearPriority(issue.priority) }];
     });
+    const batched = await this.#batchedRootHeaders(input.projectId, roots);
+    if (batched) return { items: batched, pageInfo: pageInfo(page.pageInfo) };
+    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const items = await mapConcurrent(
       roots,
       ROOT_READ_CONCURRENCY,
@@ -545,6 +760,83 @@ export class LinearSdkImpl implements LinearClientInterface {
       },
     );
     return { items, pageInfo: pageInfo(page.pageInfo) };
+  }
+
+  async #batchedRootHeaders(
+    projectId: string,
+    roots: Array<{ issue: Issue; priority: LinearPriority }>,
+  ): Promise<RootIssueValue[] | undefined> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest || roots.length === 0) return roots.length === 0 ? [] : undefined;
+    const response = await rawRequest<RootHeaderFactsData, {
+      rootIds: string[];
+      commentMarker: string;
+    }>(ROOT_HEADER_FACTS_QUERY, {
+      rootIds: roots.map(({ issue }) => issue.id),
+      commentMarker: ROOT_HEADER_MARKER,
+    });
+    const data = response.data;
+    if (!data || data.issues.pageInfo.hasNextPage) {
+      throw new Error("linear_root_header_batch_incomplete");
+    }
+    const factsById = new Map(data.issues.nodes.map((fact) => [fact.id, fact]));
+    if (factsById.size !== roots.length) {
+      throw new Error("linear_root_header_batch_incomplete");
+    }
+    const delegateActorId = this.#delegateActorId ?? data.viewer.id;
+    return roots.map(({ issue }) => {
+      const fact = factsById.get(issue.id);
+      if (!fact || fact.project?.id !== projectId || fact.parent !== null) {
+        throw new Error("linear_root_header_batch_invalid");
+      }
+      if (fact.comments.pageInfo.hasNextPage || fact.comments.nodes.length > 2) {
+        throw new Error("linear_root_comments_too_many");
+      }
+      if (fact.inverseRelations.pageInfo.hasNextPage) {
+        throw new Error("linear_root_relations_too_many");
+      }
+      const rootManagedComments = fact.comments.nodes.flatMap((comment) => {
+        if (comment.issue.id !== fact.id) {
+          throw new Error("linear_root_comment_identity_mismatch");
+        }
+        if (!isRootManagedComment(comment.body)) return [];
+        return [{
+          commentId: comment.id,
+          issueId: fact.id,
+          updatedAt: timestampValue(comment.updatedAt),
+          managedMarker: rootCommentMarker(fact.id),
+          body: comment.body,
+        }];
+      });
+      const blockers = fact.inverseRelations.nodes.flatMap((relation) => {
+        if (relation.type !== "blocks") return [];
+        if (!relation.issue || relation.relatedIssue?.id !== fact.id || relation.issue.id === fact.id) {
+          throw new Error("linear_blocker_relation_invalid");
+        }
+        return [{
+          sourceIssueId: fact.id,
+          targetIssueId: relation.issue.id,
+          targetState: linearIssueState(relation.issue.state.name),
+        }];
+      });
+      return {
+        issue: {
+          issueId: fact.id,
+          identifier: fact.identifier,
+          projectId,
+          state: linearIssueState(fact.state.name),
+          order: fact.sortOrder,
+          depth: 0,
+          title: fact.title,
+          description: parseManagedDescription(fact.description ?? "").businessDescription,
+          updatedAt: timestampValue(fact.updatedAt),
+        },
+        isDelegatedToSymphony: fact.delegate?.id === delegateActorId,
+        priority: linearPriority(fact.priority),
+        blockers,
+        rootManagedComments,
+      };
+    });
   }
 
   async getIssueTree(input: {
@@ -572,6 +864,8 @@ export class LinearSdkImpl implements LinearClientInterface {
     pageInfo: PageInfo;
   }> {
     if (input.cursor) throw new Error("linear_tree_cursor_invalid");
+    const batched = await this.#batchedIssueTree(input.projectId, input.rootIssueId);
+    if (batched) return batched;
     const root = await this.#client.issue(input.rootIssueId);
     if (root.projectId !== input.projectId || root.parentId) {
       throw new Error("linear_tree_root_invalid");
@@ -593,6 +887,233 @@ export class LinearSdkImpl implements LinearClientInterface {
       humanAnswers: await this.#humanAnswers(nodes),
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false },
+    };
+  }
+
+  async #batchedIssueTree(projectId: string, rootIssueId: string) {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) return undefined;
+    const rootResponse = await rawRequest<IssueTreeRootData, {
+      rootIssueId: string;
+      commentMarker: string;
+    }>(ISSUE_TREE_ROOT_QUERY, { rootIssueId, commentMarker: ROOT_HEADER_MARKER });
+    const root = rootResponse.data?.issue;
+    if (!root || root.id !== rootIssueId || root.project?.id !== projectId || root.parent !== null) {
+      throw new Error("linear_tree_root_invalid");
+    }
+    if (
+      root.labels.pageInfo.hasNextPage ||
+      root.comments.pageInfo.hasNextPage ||
+      root.inverseRelations.pageInfo.hasNextPage
+    ) {
+      throw new Error("linear_tree_batch_incomplete");
+    }
+    validateTreeRelations(root);
+
+    const facts = new Map<string, { fact: IssueTreeFact; depth: number }>([
+      [root.id, { fact: root, depth: 0 }],
+    ]);
+    const childrenByParent = new Map<string, IssueTreeFact[]>();
+    let parentIds = [root.id];
+    let childDepth = 1;
+    while (parentIds.length > 0) {
+      const parentSet = new Set(parentIds);
+      const depthFacts: IssueTreeFact[] = [];
+      let cursor: string | undefined;
+      const seenCursors = new Set<string>();
+      do {
+        const response = await rawRequest<IssueTreeChildrenData, {
+          parentIds: string[];
+          cursor?: string;
+        }>(ISSUE_TREE_CHILDREN_QUERY, {
+          parentIds,
+          ...(cursor ? { cursor } : {}),
+        });
+        const page = response.data?.issues;
+        if (!page) throw new Error("linear_tree_batch_incomplete");
+        for (const fact of page.nodes) {
+          if (
+            fact.project?.id !== projectId ||
+            !fact.parent ||
+            !parentSet.has(fact.parent.id)
+          ) {
+            throw new Error("linear_tree_batch_invalid");
+          }
+          if (
+            fact.comments.pageInfo.hasNextPage ||
+            fact.inverseRelations.pageInfo.hasNextPage
+          ) {
+            throw new Error("linear_tree_batch_incomplete");
+          }
+          if (facts.has(fact.id)) throw new Error("linear_tree_batch_ambiguous");
+          if (childDepth > 32 || facts.size >= MAX_TREE_NODES) {
+            throw new Error("linear_tree_bounds_exceeded");
+          }
+          validateTreeRelations(fact);
+          facts.set(fact.id, { fact, depth: childDepth });
+          depthFacts.push(fact);
+          const siblings = childrenByParent.get(fact.parent.id) ?? [];
+          siblings.push(fact);
+          childrenByParent.set(fact.parent.id, siblings);
+        }
+        if (!page.pageInfo.hasNextPage) {
+          cursor = undefined;
+          break;
+        }
+        const nextCursor = page.pageInfo.endCursor;
+        if (!nextCursor || seenCursors.has(nextCursor)) {
+          throw new Error("linear_tree_batch_incomplete");
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      } while (cursor);
+      parentIds = depthFacts.map(({ id }) => id);
+      childDepth += 1;
+    }
+
+    for (const siblings of childrenByParent.values()) siblings.sort(compareTreeFacts);
+    const nodes: LinearIssueValue[] = [];
+    const append = (id: string) => {
+      const entry = facts.get(id);
+      if (!entry) throw new Error("linear_tree_batch_incomplete");
+      nodes.push(treeFactValue(entry.fact, entry.depth));
+      for (const child of childrenByParent.get(id) ?? []) append(child.id);
+    };
+    append(root.id);
+
+    const rootPhaseLabels = root.labels.nodes
+      .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
+      .map(({ name }) => name.slice(ROOT_PHASE_PREFIX.length));
+    if (rootPhaseLabels.length > 2) throw new Error("linear_root_phase_labels_too_many");
+    const rootManagedComments = root.comments.nodes.flatMap((comment) => {
+      if (comment.issue.id !== root.id) throw new Error("linear_root_comment_identity_mismatch");
+      if (!isRootManagedComment(comment.body)) return [];
+      return [{
+        commentId: comment.id,
+        issueId: root.id,
+        updatedAt: timestampValue(comment.updatedAt),
+        managedMarker: rootCommentMarker(root.id),
+        body: comment.body,
+      }];
+    });
+    const humanAnswers = nodes.flatMap((node) => {
+      if (node.nodeKind !== "human" || node.state !== "Done") return [];
+      const fact = facts.get(node.issueId)!.fact;
+      return fact.comments.nodes.flatMap((comment) => {
+        if (comment.issue.id !== node.issueId) {
+          throw new Error("linear_human_answer_identity_mismatch");
+        }
+        const answer = comment.body.trim();
+        return answer ? [{
+          humanIssueId: node.issueId,
+          commentId: comment.id,
+          answer,
+          updatedAt: timestampValue(comment.updatedAt),
+        }] : [];
+      });
+    });
+    return {
+      nodes,
+      rootPhaseLabels,
+      rootManagedComments,
+      humanAnswers,
+      observedAt: new Date().toISOString(),
+      pageInfo: { hasNextPage: false as const },
+    };
+  }
+
+  async getRootScope(input: { projectId: string; rootIssueId: string }) {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) throw new Error("linear_root_scope_transport_unavailable");
+    const rootResponse = await rawRequest<RootScopeRootData, {
+      rootIssueId: string;
+      commentMarker: string;
+    }>(ROOT_SCOPE_ROOT_QUERY, {
+      rootIssueId: input.rootIssueId,
+      commentMarker: ROOT_HEADER_MARKER,
+    });
+    const root = rootResponse.data?.issue;
+    if (
+      !root || root.id !== input.rootIssueId ||
+      root.project?.id !== input.projectId || root.parent !== null
+    ) {
+      throw new Error("linear_root_scope_root_invalid");
+    }
+    if (root.comments.pageInfo.hasNextPage || root.comments.nodes.length > 1) {
+      throw new Error("linear_root_scope_authority_ambiguous");
+    }
+    const comment = root.comments.nodes[0];
+    if (comment && comment.issue.id !== root.id) {
+      throw new Error("linear_root_comment_identity_mismatch");
+    }
+    const authority = comment
+      ? parseRootScopeAuthority(comment.body)
+      : { conductorId: "unclaimed" };
+    const issues: Array<{
+      issueId: string;
+      identifier: string;
+      parentIssueId?: string;
+      updatedAt: string;
+    }> = [{
+      issueId: root.id,
+      identifier: root.identifier,
+      updatedAt: timestampValue(root.updatedAt),
+    }];
+    const seenIds = new Set([root.id]);
+    let parentIds = [root.id];
+    while (parentIds.length > 0) {
+      const parentSet = new Set(parentIds);
+      const nextParentIds: string[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const response = await rawRequest<RootScopeChildrenData, {
+          parentIds: string[];
+          cursor?: string;
+        }>(ROOT_SCOPE_CHILDREN_QUERY, {
+          parentIds,
+          ...(cursor ? { cursor } : {}),
+        });
+        const page = response.data?.issues;
+        if (!page) throw new Error("linear_root_scope_incomplete");
+        for (const fact of page.nodes) {
+          if (
+            fact.project?.id !== input.projectId || !fact.parent ||
+            !parentSet.has(fact.parent.id)
+          ) {
+            throw new Error("linear_root_scope_issue_invalid");
+          }
+          if (seenIds.has(fact.id)) throw new Error("linear_root_scope_ambiguous");
+          if (issues.length >= MAX_TREE_NODES) throw new Error("linear_tree_bounds_exceeded");
+          seenIds.add(fact.id);
+          nextParentIds.push(fact.id);
+          issues.push({
+            issueId: fact.id,
+            identifier: fact.identifier,
+            parentIssueId: fact.parent.id,
+            updatedAt: timestampValue(fact.updatedAt),
+          });
+        }
+        if (!page.pageInfo.hasNextPage) {
+          cursor = undefined;
+          break;
+        }
+        const nextCursor = page.pageInfo.endCursor;
+        if (!nextCursor || seenCursors.has(nextCursor)) {
+          throw new Error("linear_root_scope_incomplete");
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      } while (cursor);
+      parentIds = nextParentIds;
+    }
+    const state = linearIssueState(root.state.name);
+    return {
+      rootIssueId: root.id,
+      ...authority,
+      terminal: state === "Done" || state === "Canceled",
+      issues,
+      observedAt: new Date().toISOString(),
     };
   }
 
@@ -745,8 +1266,12 @@ export class LinearSdkImpl implements LinearClientInterface {
 
   async #projectLabelsNamed(name: string): Promise<ProjectLabel[]> {
     const labels = await allNodes(
-      this.#client.projectLabels({ first: PAGE_LIMIT }),
-      256,
+      this.#client.projectLabels({
+        first: 3,
+        includeArchived: false,
+        filter: { name: { eq: name }, isGroup: { eq: false } },
+      }),
+      3,
     );
     const matches = labels.filter(
       (label) =>
@@ -787,8 +1312,12 @@ export class LinearSdkImpl implements LinearClientInterface {
     teamId?: string,
   ): Promise<IssueLabel> {
     const labels = await allNodes(
-      this.#client.issueLabels({ first: PAGE_LIMIT }),
-      512,
+      this.#client.issueLabels({
+        first: 3,
+        includeArchived: false,
+        filter: { name: { eq: name }, isGroup: { eq: false } },
+      }),
+      3,
     );
     const matches = labels.filter(
       (label) =>
@@ -846,6 +1375,157 @@ function clientOptions(credential: LinearSdkCredential):
     : { apiKey: credential.token };
 }
 
+function observedClient(
+  credential: LinearSdkCredential,
+  observation: LinearRequestObservationOptions | undefined,
+): LinearClient {
+  const client = new LinearClient(clientOptions(credential));
+  if (!observation) return client;
+  const graphQLClient = client.client;
+  const rawRequest = graphQLClient.rawRequest.bind(graphQLClient);
+  graphQLClient.request = async function requestWithObservation<
+    Data,
+    Variables extends Record<string, unknown>,
+  >(
+    document: string,
+    variables?: Variables,
+    headers?: RequestInit["headers"],
+  ): Promise<Data> {
+    const response = await observeRequest(
+      document,
+      observation,
+      () => rawRequest<Data, Variables>(document, variables, headers),
+    );
+    if (response.data === undefined) throw new Error("linear_response_data_missing");
+    return response.data;
+  };
+  graphQLClient.rawRequest = async (query, variables, headers) => observeRequest(
+    query,
+    observation,
+    () => rawRequest(query, variables, headers),
+  );
+  return client;
+}
+
+async function observeRequest<Result>(
+  document: string,
+  observation: LinearRequestObservationOptions,
+  request: () => Promise<Result>,
+): Promise<Result> {
+  observation.permit?.();
+  const startedAt = observation.now();
+  const correlationId = observation.correlationId();
+  try {
+    const result = await request();
+    const response = responseMetadata(result);
+    observation.observe(requestObservation(
+      document,
+      correlationId,
+      observation.now() - startedAt,
+      response.status,
+      response.headers,
+    ));
+    return result;
+  } catch (error) {
+    const response = errorResponseMetadata(error);
+    observation.observe(requestObservation(
+      document,
+      correlationId,
+      observation.now() - startedAt,
+      response.status,
+      response.headers,
+    ));
+    throw error;
+  }
+}
+
+function requestObservation(
+  document: string,
+  correlationId: string,
+  durationMs: number,
+  status: number | undefined,
+  headers: Headers | undefined,
+): LinearPhysicalRequestObservation {
+  const requestWindow = rateWindow(headers, "x-ratelimit-requests");
+  const complexityWindow = rateWindow(headers, "x-ratelimit-complexity");
+  return {
+    operation: operationName(document),
+    correlationId,
+    durationMs: Math.max(0, durationMs),
+    ...(status === undefined ? {} : { status }),
+    ...(requestWindow ? { requestWindow } : {}),
+    ...(complexityWindow ? { complexityWindow } : {}),
+  };
+}
+
+function responseMetadata(value: unknown): {
+  status?: number;
+  headers?: Headers;
+} {
+  if (value === null || typeof value !== "object") return {};
+  const record = value as Record<string, unknown>;
+  return {
+    ...(typeof record.status === "number" ? { status: record.status } : {}),
+    ...(record.headers instanceof Headers ? { headers: record.headers } : {}),
+  };
+}
+
+function errorResponseMetadata(error: unknown): {
+  status?: number;
+  headers?: Headers;
+} {
+  const record = errorRecord(error);
+  const direct = responseMetadata(error);
+  const response = responseMetadata(record.response);
+  const rawResponse = responseMetadata(errorRecord(record.raw).response);
+  return {
+    ...(direct.status ?? response.status ?? rawResponse.status) === undefined
+      ? {}
+      : { status: direct.status ?? response.status ?? rawResponse.status },
+    ...(direct.headers ?? response.headers ?? rawResponse.headers) === undefined
+      ? {}
+      : { headers: direct.headers ?? response.headers ?? rawResponse.headers },
+  };
+}
+
+function rateWindow(
+  headers: Headers | undefined,
+  prefix: string,
+): LinearRequestWindowObservation | undefined {
+  if (!headers) return undefined;
+  const limit = nonnegativeHeader(headers, `${prefix}-limit`);
+  const remaining = nonnegativeHeader(headers, `${prefix}-remaining`);
+  const reset = nonnegativeHeader(headers, `${prefix}-reset`);
+  if (limit === undefined && remaining === undefined && reset === undefined) {
+    return undefined;
+  }
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    ...(remaining === undefined ? {} : { remaining }),
+    ...(reset === undefined ? {} : { reset }),
+  };
+}
+
+function nonnegativeHeader(headers: Headers, name: string): number | undefined {
+  const value = headers.get(name);
+  if (value === null || !/^(?:0|[1-9][0-9]{0,15})$/.test(value)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function operationName(document: string): string {
+  return document.match(/\b(?:query|mutation)\s+([A-Za-z][A-Za-z0-9_]{0,127})\b/u)?.[1]
+    ?? "unknown";
+}
+
+function errorRecord(error: unknown): Record<string, unknown> {
+  return error !== null && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+}
+
 async function collectTree(
   issue: Issue,
   projectId: string,
@@ -867,6 +1547,44 @@ async function collectTree(
   for (const child of children) {
     if (child.parentId !== issue.id) throw new Error("linear_parent_mismatch");
     await collectTree(child, projectId, depth + 1, output);
+  }
+}
+
+function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
+  return (left.subIssueSortOrder ?? left.sortOrder) -
+      (right.subIssueSortOrder ?? right.sortOrder) ||
+    left.identifier.localeCompare(right.identifier);
+}
+
+function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
+  const managed = parseManagedDescription(fact.description ?? "");
+  return {
+    issueId: fact.id,
+    identifier: fact.identifier,
+    ...(fact.project ? { projectId: fact.project.id } : {}),
+    ...(fact.parent ? { parentIssueId: fact.parent.id } : {}),
+    state: linearIssueState(fact.state.name),
+    order: fact.subIssueSortOrder ?? fact.sortOrder,
+    depth,
+    title: fact.title,
+    description: managed.businessDescription,
+    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
+    ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
+    ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
+    ...(managed.origin ? { origin: managed.origin } : {}),
+    ...(managed.completedInputHash ? { completedInputHash: managed.completedInputHash } : {}),
+    ...(managed.targetIssueId ? { targetIssueId: managed.targetIssueId } : {}),
+    updatedAt: timestampValue(fact.updatedAt),
+  };
+}
+
+function validateTreeRelations(fact: IssueTreeFact): void {
+  for (const relation of fact.inverseRelations.nodes) {
+    if (relation.type !== "blocks") continue;
+    if (!relation.issue || relation.relatedIssue?.id !== fact.id || relation.issue.id === fact.id) {
+      throw new Error("linear_blocker_relation_invalid");
+    }
+    linearIssueState(relation.issue.state.name);
   }
 }
 
@@ -1013,6 +1731,41 @@ function isRootManagedComment(body: string): boolean {
   return body.startsWith("Symphony\n") && marker > 0 && body.endsWith("\n-->");
 }
 
+function parseRootScopeAuthority(body: string): {
+  conductorId: string;
+  performerId?: string;
+} {
+  if (!isRootManagedComment(body)) throw new Error("linear_root_scope_authority_invalid");
+  const markerStart = body.lastIndexOf(ROOT_MARKER_START);
+  const fields = new Map<string, string>();
+  const allowed = new Set([
+    "conductor_id", "performer_profile_id", "performer_id", "delivery_branch",
+    "pull_request", "retry_blocked", "retry_expected_performer_id",
+    "retry_failure_code", "retry_observed_at",
+  ]);
+  for (const line of body.slice(markerStart + ROOT_MARKER_START.length, -4).split("\n")) {
+    const separator = line.indexOf(":");
+    if (separator < 1) throw new Error("linear_root_scope_authority_invalid");
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!allowed.has(key) || fields.has(key) || value.length > 1_024) {
+      throw new Error("linear_root_scope_authority_invalid");
+    }
+    fields.set(key, value);
+  }
+  if (fields.size !== allowed.size) throw new Error("linear_root_scope_authority_invalid");
+  const conductorId = fields.get("conductor_id")!;
+  const performerId = fields.get("performer_id")!;
+  const identifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+  if (!identifier.test(conductorId) || (performerId !== "none" && !identifier.test(performerId))) {
+    throw new Error("linear_root_scope_authority_invalid");
+  }
+  return {
+    conductorId,
+    ...(performerId === "none" ? {} : { performerId }),
+  };
+}
+
 function linearIssueState(value: string): LinearIssueState {
   if (
     value === "Todo" ||
@@ -1116,6 +1869,12 @@ function pageInfo(value: {
     hasNextPage: value.hasNextPage,
     ...(value.endCursor ? { endCursor: value.endCursor } : {}),
   };
+}
+
+function timestampValue(value: string): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new Error("linear_timestamp_invalid");
+  return parsed.toISOString();
 }
 
 function ambiguousError(message: string) {

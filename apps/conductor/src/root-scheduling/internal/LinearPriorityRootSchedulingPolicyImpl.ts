@@ -28,4 +28,10 @@ implements RootSchedulingPolicyInterface {
     });
     return { orderedEligible, blocked: result.blocked };
   }
+
+  strictlyOutranksBoundary(candidate: DiscoveredRoot, boundary: DiscoveredRoot) {
+    const priority = PRIORITY_ORDER[candidate.priority] - PRIORITY_ORDER[boundary.priority];
+    if (priority !== 0) return priority < 0;
+    return candidate.order < boundary.order;
+  }
 }

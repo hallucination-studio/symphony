@@ -1,8 +1,12 @@
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
-import { LinearRequestBudget, type LinearRequestClass } from "../linear-gateway/LinearRequestBudget.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
+import {
+  LinearRequestBrokerImpl,
+  type InstallationRequestClass,
+} from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
+import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
 import type {
   LinearIssueState,
   LinearIssueValue,
@@ -15,7 +19,7 @@ type Body = Record<string, JsonValue> & { kind: string };
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   #activeInstanceId: string | undefined;
-  readonly #linearRequests = new LinearRequestBudget({
+  readonly #linearRequests = new LinearRequestBrokerImpl({
     maxConcurrent: 8,
     maxHighPriorityBurst: 4,
   });
@@ -25,7 +29,11 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     private readonly options: {
       now(): string;
       sleep(delayMs: number): Promise<void>;
-      createLinearSdk(installation: LinearInstallation): LinearClientInterface;
+      createLinearSdk(
+        installation: LinearInstallation,
+        observe: (observation: LinearPhysicalRequestObservation) => void,
+        permit: () => void,
+      ): LinearClientInterface;
     },
   ) {}
 
@@ -69,8 +77,11 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       binding.linearInstallationId,
     );
     if (!installation) throw new Error("linear_installation_missing");
+    const classification = requestClass(body.kind);
     const gateway = new LinearGatewayProtocolHandlerImpl(
-      this.options.createLinearSdk(installation),
+      this.options.createLinearSdk(installation, (observation) => {
+        this.#linearRequests.observe(observation);
+      }, () => this.#linearRequests.assertPermit(classification)),
       {
         maxAttempts: 4,
         baseDelayMs: 250,
@@ -79,7 +90,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         sleep: this.options.sleep,
       },
     );
-    return this.#linearRequests.run(requestClass(body.kind), async () => {
+    return this.#linearRequests.run(classification, async () => {
       switch (body.kind) {
       case "resolve_conductor_project":
         return this.#resolveProject(gateway, body);
@@ -87,6 +98,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         return this.#listRoots(gateway, body);
       case "get_issue_tree":
         return this.#getTree(gateway, body);
+      case "get_root_scope":
+        return this.#getRootScope(gateway, body);
       case "list_root_usage":
         return this.#listUsage(gateway, body);
       case "create_managed_node":
@@ -105,7 +118,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       default:
         throw new Error("conductor_request_unsupported");
       }
-    }, { deadlineAtMs: Date.now() + 30_000 });
+    }, {
+      deadlineAtMs: Date.now() + 30_000,
+      ...(classification === "mutation" ? {} : {
+        coalesceKey: JSON.stringify(body),
+      }),
+    });
   }
 
   #runtime(body: Body): JsonValue {
@@ -313,12 +331,36 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       page_info: { has_next_page: false },
     };
   }
+
+  async #getRootScope(
+    gateway: LinearGatewayProtocolHandlerImpl,
+    body: Body,
+  ): Promise<JsonValue> {
+    const scope = await gateway.getRootScope(
+      requiredString(body.project_id, "linear_project_id_missing"),
+      requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
+    );
+    return {
+      kind: "root_scope",
+      root_issue_id: scope.rootIssueId,
+      conductor_id: scope.conductorId,
+      ...(scope.performerId ? { performer_id: scope.performerId } : {}),
+      terminal: scope.terminal,
+      issues: scope.issues.map((issue) => ({
+        issue_id: issue.issueId,
+        identifier: issue.identifier,
+        ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
+        updated_at: issue.updatedAt,
+      })),
+      observed_at: scope.observedAt,
+    };
+  }
 }
 
-function requestClass(kind: string): LinearRequestClass {
+function requestClass(kind: string): InstallationRequestClass {
   if (kind === "resolve_conductor_project") return "control";
-  if (kind === "get_issue_tree" || kind === "list_root_issues") return "workflow-read";
-  if (kind === "list_root_usage") return "observation";
+  if (kind === "get_issue_tree" || kind === "get_root_scope" || kind === "list_root_issues") return "workflow";
+  if (kind === "list_root_usage") return "background";
   return "mutation";
 }
 

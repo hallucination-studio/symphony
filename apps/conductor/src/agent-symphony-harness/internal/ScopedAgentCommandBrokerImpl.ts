@@ -49,7 +49,7 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
       const reason = this.#scopeRejection(command, scope);
       if (reason) return rejected(correlation, reason, "Command authority changed; read the current Root facts.");
       if (command.command.startsWith("git.") || command.command === "root.deliver") {
-        return this.#executeGitOrDelivery(command);
+        return this.#executeGitOrDelivery(command, scope);
       }
       if (command.command === "linear.read") {
         const args = command.args;
@@ -61,6 +61,7 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
           rootIssueId: command.root_issue_id,
           issueId,
           include: requiredStrings(args.include),
+          scope,
           ...(typeof args.cursor === "string" ? { cursor: args.cursor } : {}),
           ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
         });
@@ -113,7 +114,10 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
     }
   }
 
-  async #executeGitOrDelivery(command: AgentCommand): Promise<AgentCommandResult> {
+  async #executeGitOrDelivery(
+    command: AgentCommand,
+    scope: LinearRootScopeSnapshot,
+  ): Promise<AgentCommandResult> {
     const correlation = envelope(command);
     const { git, workspace } = this.options;
     if (!git || !workspace) return rejected(correlation, "git_workspace_unavailable", "Root Git workspace is unavailable.");
@@ -132,10 +136,7 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
     }
     if (command.command === "git.commit") {
       const targetId = requiredString(command.args.issue_id);
-      const current = await this.options.linear.readFreshRootScope(this.options.rootIssueId);
-      const reason = this.#scopeRejection(command, current);
-      if (reason) return rejected(correlation, reason, "Command authority changed before commit.");
-      const issue = scopedIssue(current, targetId);
+      const issue = scopedIssue(scope, targetId);
       if (!issue) return rejected(correlation, "linear_target_out_of_scope", "Commit Issue is outside the current Root Tree.");
       if (issue.updated_at !== command.args.expected_remote_version) return conflict(correlation, "linear_remote_version_changed", "Commit Issue version changed.");
       const expectedHead = requiredString(command.args.expected_head);
@@ -146,7 +147,7 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
           workspace,
           rootIssueId: command.root_issue_id,
           issueId: targetId,
-          allowedIssueIds: current.issues.map(({ issue_id }) => issue_id),
+          allowedIssueIds: scope.issues.map(({ issue_id }) => issue_id),
           issueIdentifier: issue.identifier ?? issue.issue_id,
           expectedHead,
         });
@@ -166,10 +167,7 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
     const delivery = this.options.delivery;
     const context = this.options.deliveryContext;
     if (!delivery || !context) return rejected(correlation, "root_delivery_unavailable", "Root delivery is unavailable.");
-    const current = await this.options.linear.readFreshRootScope(this.options.rootIssueId);
-    const reason = this.#scopeRejection(command, current);
-    if (reason) return rejected(correlation, reason, "Command authority changed before delivery.");
-    const root = scopedIssue(current, command.root_issue_id);
+    const root = scopedIssue(scope, command.root_issue_id);
     if (!root || root.updated_at !== command.args.expected_root_version) return conflict(correlation, "linear_remote_version_changed", "Root version changed.");
     const expectedHead = requiredString(command.args.expected_head);
     if (await this.options.readGitHead() !== expectedHead) return conflict(correlation, "git_head_changed", "Root worktree HEAD changed.");

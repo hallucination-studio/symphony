@@ -5,6 +5,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 
 import { V3ConductorRuntime } from "./composition/ConductorRuntime.js";
+import { conductorCycleDelayMs } from "./composition/ConductorCycleDelayPolicy.js";
 import { AgentRootContextBuilder } from "./agent-symphony-harness/internal/AgentRootContextBuilder.js";
 import { AgentSymphonyHarnessImpl } from "./agent-symphony-harness/internal/AgentSymphonyHarnessImpl.js";
 import { RootConversationLifecycle } from "./agent-symphony-harness/internal/RootConversationLifecycle.js";
@@ -302,7 +303,7 @@ export async function runConductor(environment = process.env): Promise<void> {
   process.once("SIGINT", stop);
   try {
     while (!stopping) {
-      await runtime.cycle();
+      const disposition = await runtime.cycle();
       await report({
         kind: "conductor_heartbeat",
         binding_id: config.bindingId,
@@ -314,7 +315,11 @@ export async function runConductor(environment = process.env): Promise<void> {
         binding_id: config.bindingId,
         instance_id: config.instanceId,
       });
-      await delay(config.cycleDelayMs);
+      await delay(conductorCycleDelayMs({
+        disposition,
+        baseDelayMs: config.cycleDelayMs,
+        random: Math.random,
+      }));
     }
   } finally {
     await performerLane.cancelAndReap(1_000);

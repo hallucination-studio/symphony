@@ -115,6 +115,9 @@ test("verdict rejects missing broker, runtime, and V3 durable evidence", () => {
     ["request_budget_verified", { stepDurationsMs: {} }],
     ["request_budget_verified", { stepRequestCounts: {} }],
     ["request_budget_verified", { discoveryTreeRequests: 3 }],
+    ["request_budget_verified", { physicalRequestCount: 500 }],
+    ["request_budget_verified", { physicalRequest429Count: 1 }],
+    ["request_budget_verified", { complexityWindowEnd: undefined }],
     ["work_completed", { workNodeCount: 0, allWorkDone: false }],
     ["root_gate_passed", { reworkCount: 1, phase: "reworking" }],
     ["branch_delivered", { deliveredMarkerReadBack: false }],
@@ -207,6 +210,13 @@ function passingEvidence() {
         root_completion: 100 },
       stepRequestCounts: { multi_root_scheduling: { list_root_issues: 2 },
         root_completion: { get_issue_tree: 3 } },
+      physicalRequestCount: 499,
+      physicalRequestCounts: { CoreLivePreflight: 10, SymphonyRootHeaderFacts: 489 },
+      physicalRequest429Count: 0,
+      requestWindowStart: { limit: 1000, remaining: 999, reset: 60 },
+      requestWindowEnd: { limit: 1000, remaining: 500, reset: 60 },
+      complexityWindowStart: { limit: 250000, remaining: 249900, reset: 60 },
+      complexityWindowEnd: { limit: 250000, remaining: 200000, reset: 60 },
     };
     if (step === "conversation_pointer_verified") return {
       step, status: "passed", pointerReadBack: true, firstTurnUsedPointer: true,

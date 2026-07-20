@@ -101,6 +101,13 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
   let discoveryTreeRequests = 0;
   let activeStep;
   let totalRequests = 0;
+  let physicalRequestCount = 0;
+  let physicalRequest429Count = 0;
+  const physicalRequestCounts = {};
+  let requestWindowStart;
+  let requestWindowEnd;
+  let complexityWindowStart;
+  let complexityWindowEnd;
   return Object.freeze({
     log(event) {
       log(event);
@@ -122,6 +129,23 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
           const counts = stepRequestCounts[activeStep] ?? {};
           counts[event.request_kind] = (counts[event.request_kind] ?? 0) + 1;
           stepRequestCounts[activeStep] = counts;
+        }
+      } else if (event?.event === "linear_physical_request"
+        && typeof event.operation === "string"
+        && /^[A-Za-z][A-Za-z0-9_]{0,127}$/u.test(event.operation)) {
+        physicalRequestCount += 1;
+        physicalRequestCounts[event.operation] =
+          (physicalRequestCounts[event.operation] ?? 0) + 1;
+        if (event.status === 429) physicalRequest429Count += 1;
+        const requestWindow = rateWindowSnapshot(event.requestWindow);
+        if (requestWindow) {
+          requestWindowStart ??= requestWindow;
+          requestWindowEnd = requestWindow;
+        }
+        const complexityWindow = rateWindowSnapshot(event.complexityWindow);
+        if (complexityWindow) {
+          complexityWindowStart ??= complexityWindow;
+          complexityWindowEnd = complexityWindow;
         }
       } else if (event?.event === "e2e_child_log" && event.component === "conductor"
         && typeof event.message === "string") {
@@ -163,9 +187,28 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
         totalDiscoveryListPages,
         discoveryTreeRequests,
         totalRequests,
+        physicalRequestCount,
+        physicalRequestCounts: Object.freeze({ ...physicalRequestCounts }),
+        physicalRequest429Count,
+        ...(requestWindowStart ? { requestWindowStart: Object.freeze({ ...requestWindowStart }) } : {}),
+        ...(requestWindowEnd ? { requestWindowEnd: Object.freeze({ ...requestWindowEnd }) } : {}),
+        ...(complexityWindowStart
+          ? { complexityWindowStart: Object.freeze({ ...complexityWindowStart }) } : {}),
+        ...(complexityWindowEnd
+          ? { complexityWindowEnd: Object.freeze({ ...complexityWindowEnd }) } : {}),
       });
     },
   });
+}
+
+function rateWindowSnapshot(value) {
+  if (value === null || typeof value !== "object") return undefined;
+  const limit = nonNegativeInteger(value.limit);
+  const remaining = nonNegativeInteger(value.remaining);
+  const reset = nonNegativeInteger(value.reset);
+  if (limit === undefined || limit === 0 || remaining === undefined || remaining > limit ||
+      reset === undefined) return undefined;
+  return { limit, remaining, reset };
 }
 
 function nonNegativeInteger(value) {
@@ -218,7 +261,13 @@ export async function runCoreLiveE2E({
     scope = await createRunScope({ runId });
     const git = await createRunScopedGitFixture({ runId, parentDirectory: scope.root });
     log({ event: "e2e_step_started", step: "stale_reconciliation" });
-    await linear.reconcileStaleRuns({ lock, currentRunId: runId });
+    await linear.reconcileStaleRuns({
+      lock,
+      currentRunId: runId,
+      ...(config.linear.projectSlugId
+        ? { retainedProjectId: config.linear.projectSlugId }
+        : {}),
+    });
     assertRunActive(deadline);
     log({ event: "e2e_step_completed", step: "stale_reconciliation" });
     log({ event: "e2e_step_started", step: "project_created" });
@@ -249,7 +298,7 @@ export async function runCoreLiveE2E({
     });
     assertRunActive(deadline);
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
-    const podium = await createProductionPodiumConductorOwner({ databasePath });
+    const podium = await createProductionPodiumConductorOwner({ databasePath, log });
 
     log({ event: "e2e_step_started", step: "root_created" });
     const blocker = await linear.createRoot({
@@ -513,13 +562,6 @@ export async function runCoreLiveE2E({
       timeline_event_count: eventKeys.length,
     });
 
-    const requests = runtimeEvidence.evidence();
-    evidence.push({
-      step: "request_budget_verified",
-      status: "passed",
-      ...requests,
-    });
-
     result = Object.freeze({
       status: "passed",
       runId,
@@ -550,7 +592,20 @@ export async function runCoreLiveE2E({
 
   const finalResult = await finalizeCoreLiveResult({
     result,
-    cleanup: () => cleanupCoreLiveResources({ harness, linear, lock, runId, project, scope }, { log }),
+    cleanup: () => cleanupCoreLiveResources({
+      harness,
+      linear,
+      lock,
+      runId,
+      project,
+      fixtures,
+      scope,
+    }, { log }),
+    finalEvidence: () => ({
+      step: "request_budget_verified",
+      status: "passed",
+      ...runtimeEvidence.evidence(),
+    }),
     write: (value) => writeEvidence(runId, value, config.secrets),
   });
   if (finalResult.status === "failed") throw stableError(finalResult.reason);
@@ -559,7 +614,7 @@ export async function runCoreLiveE2E({
 }
 
 export async function cleanupCoreLiveResources(
-  { harness, linear, lock, runId, project, scope },
+  { harness, linear, lock, runId, project, fixtures = [], scope },
   { cleanupScope = cleanupRunScope, log = () => {} } = {},
 ) {
   const failures = [];
@@ -573,6 +628,9 @@ export async function cleanupCoreLiveResources(
       marker: project.marker,
       ...(typeof project.retainProject === "boolean"
         ? { retainProject: project.retainProject }
+        : {}),
+      ...(project.retainProject
+        ? { rootIds: fixtures.map(({ rootId }) => rootId) }
         : {}),
     })],
     [Boolean(scope), "run_scope", "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
@@ -592,13 +650,15 @@ export async function cleanupCoreLiveResources(
   return Object.freeze(failures);
 }
 
-export async function finalizeCoreLiveResult({ result, cleanup, write }) {
+export async function finalizeCoreLiveResult({ result, cleanup, finalEvidence, write }) {
   const cleanupFailures = await cleanup();
   const cleanupPassed = cleanupFailures.length === 0;
+  const completedEvidence = finalEvidence ? [await finalEvidence()] : [];
   let finalResult = {
     ...result,
     evidence: [
       ...result.evidence,
+      ...completedEvidence,
       { step: "cleanup_completed", status: cleanupPassed ? "passed" : "failed" },
     ],
   };
@@ -733,10 +793,8 @@ function boundedRootName(runId, role) {
   return `${runId.slice(0, 48)} ${role}`;
 }
 
-function readRootStates(linear, fixtures) {
-  return Promise.all(
-    fixtures.map((fixture) => linear.readRunState({ fixture })),
-  );
+export function readRootStates(linear, fixtures) {
+  return linear.readRunStates({ fixtures });
 }
 
 function planReady(state) {

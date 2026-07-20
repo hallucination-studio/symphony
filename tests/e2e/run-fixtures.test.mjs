@@ -57,14 +57,18 @@ test("Linear fixture logs sanitized GraphQL failure details by operation", async
   });
 
   await assert.rejects(operator.preflight(), /linear_fixture_http_400/u);
-  assert.deepEqual(events, [{
+  assert.equal(events[0].event, "linear_physical_request");
+  assert.equal(events[0].operation, "CoreLivePreflight");
+  assert.equal(events[0].status, 400);
+  assert.equal(Number.isSafeInteger(events[0].durationMs), true);
+  assert.deepEqual(events[1], {
     event: "e2e_linear_graphql_failed",
     operation: "CoreLivePreflight",
     http_status: 400,
     error_codes: ["INPUT_ERROR"],
     error_messages: ["Cannot delegate [REDACTED]"],
     error_paths: ["issueCreate"],
-  }]);
+  });
 });
 
 test("Linear fixture logs a bounded sanitized non-JSON response body", async () => {
@@ -80,12 +84,15 @@ test("Linear fixture logs a bounded sanitized non-JSON response body", async () 
   });
 
   await assert.rejects(operator.preflight(), /linear_fixture_response_invalid/u);
-  assert.equal(events[0].event, "e2e_linear_response_invalid");
+  assert.equal(events[0].event, "linear_physical_request");
   assert.equal(events[0].operation, "CoreLivePreflight");
-  assert.equal(events[0].http_status, 503);
-  assert.equal(events[0].content_type, "text/plain; charset=utf-8");
-  assert.match(events[0].response_body, /^upstream unavailable \[REDACTED\]/u);
-  assert.equal(events[0].response_body.length, 4_096);
+  assert.equal(events[0].status, 503);
+  const invalid = events.find(({ event }) => event === "e2e_linear_response_invalid");
+  assert.equal(invalid.operation, "CoreLivePreflight");
+  assert.equal(invalid.http_status, 503);
+  assert.equal(invalid.content_type, "text/plain; charset=utf-8");
+  assert.match(invalid.response_body, /^upstream unavailable \[REDACTED\]/u);
+  assert.equal(invalid.response_body.length, 4_096);
 });
 
 test("Linear fixture rejects an ambiguous Application app user before mutation", async () => {
@@ -280,6 +287,9 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
           },
         },
       } });
+      if (request.query.includes("CoreLiveRetainedProjectIssues")) return response({ data: {
+        project: { issues: { nodes: [], pageInfo: { hasNextPage: false } } },
+      } });
       if (request.query.includes("CoreLiveDeleteLabel")) return response({ data: {
         projectLabelDelete: { success: true },
       } });
@@ -306,6 +316,7 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
     "CoreLiveLabel",
     "CoreLiveAttachLabel",
     "CoreLiveAttachedLabelReadback",
+    "CoreLiveRetainedProjectIssues",
     "CoreLiveDeleteLabel",
   ]);
 });
@@ -409,6 +420,116 @@ test("Linear cleanup archives every Project issue and attempts every target afte
   ]);
 });
 
+test("retained Project cleanup archives only exact run-owned Root Trees", async () => {
+  const archived = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.query.includes("CoreLiveRetainedProjectIssues")) return response({ data: {
+        project: { issues: { nodes: [
+          { id: "root-1", title: "[Core Live E2E] run-1 blocker", description: managedMarker("run-1"), parent: null },
+          { id: "child-1", title: "Work", description: "managed work", parent: { id: "root-1" } },
+          { id: "foreign-marker", title: "Human issue", description: managedMarker("run-1"), parent: null },
+          { id: "foreign-title", title: "[Core Live E2E] run-1 copied", description: "not managed", parent: null },
+          { id: "other-run", title: "[Core Live E2E] old-run blocker", description: managedMarker("old-run"), parent: null },
+        ], pageInfo: { hasNextPage: false } } },
+      } });
+      if (request.query.includes("CoreLiveArchiveIssue")) {
+        archived.push(request.variables.issueId);
+        return response({ data: { issueArchive: { success: true } } });
+      }
+      return response({ data: { projectLabelDelete: { success: true } } });
+    },
+  });
+
+  assert.deepEqual(await operator.cleanup({
+    lock: { runId: "run-1", released: false },
+    runId: "run-1",
+    projectId: "project-1",
+    labelId: "label-1",
+    marker: managedMarker("run-1"),
+    retainProject: true,
+    rootIds: ["root-1"],
+  }), { archivedProjectCount: 0, archivedRootCount: 1, deletedLabelCount: 1 });
+  assert.deepEqual(archived, ["child-1", "root-1"]);
+});
+
+test("retained Project reconciliation removes stale marked Root Trees and preserves foreign Issues", async () => {
+  const archived = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.query.includes("CoreLiveManagedResources")) return response({ data: {
+        projects: { nodes: [], pageInfo: { hasNextPage: false } },
+        projectLabels: { nodes: [], pageInfo: { hasNextPage: false } },
+      } });
+      if (request.query.includes("CoreLiveRetainedProjectIssues")) return response({ data: {
+        project: { issues: { nodes: [
+          { id: "stale-root", title: "[Core Live E2E] old-run blocker", description: managedMarker("old-run"), parent: null },
+          { id: "stale-child", title: "Work", description: "managed work", parent: { id: "stale-root" } },
+          { id: "current-root", title: "[Core Live E2E] run-1 blocker", description: managedMarker("run-1"), parent: null },
+          { id: "foreign", title: "Normal issue", description: managedMarker("old-run"), parent: null },
+        ], pageInfo: { hasNextPage: false } } },
+      } });
+      archived.push(request.variables.issueId);
+      return response({ data: { issueArchive: { success: true } } });
+    },
+  });
+
+  assert.deepEqual(await operator.reconcileStaleRuns({
+    lock: { runId: "run-1", released: false },
+    currentRunId: "run-1",
+    retainedProjectId: "project-1",
+  }), { archivedProjectCount: 0, archivedRootCount: 1, deletedLabelCount: 0 });
+  assert.deepEqual(archived, ["stale-child", "stale-root"]);
+});
+
+test("five retained Project cleanups do not grow the next Root header count", async () => {
+  const issues = [{
+    id: "foreign-root",
+    title: "Product Root",
+    description: "unmanaged",
+    parent: null,
+  }];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.query.includes("CoreLiveRetainedProjectIssues")) return response({ data: {
+        project: { issues: { nodes: issues, pageInfo: { hasNextPage: false } } },
+      } });
+      if (request.query.includes("CoreLiveArchiveIssue")) {
+        const index = issues.findIndex(({ id }) => id === request.variables.issueId);
+        if (index >= 0) issues.splice(index, 1);
+        return response({ data: { issueArchive: { success: index >= 0 } } });
+      }
+      return response({ data: { projectLabelDelete: { success: true } } });
+    },
+  });
+
+  for (let run = 1; run <= 5; run += 1) {
+    const runId = `run-${run}`;
+    const rootId = `root-${run}`;
+    const childId = `child-${run}`;
+    issues.push(
+      { id: rootId, title: `[Core Live E2E] ${runId} blocker`, description: managedMarker(runId), parent: null },
+      { id: childId, title: "Work", description: "managed work", parent: { id: rootId } },
+    );
+    await operator.cleanup({
+      lock: { runId, released: false },
+      runId,
+      projectId: "project-1",
+      labelId: `label-${run}`,
+      marker: managedMarker(runId),
+      retainProject: true,
+      rootIds: [rootId],
+    });
+    assert.deepEqual(issues.map(({ id }) => id), ["foreign-root"]);
+  }
+});
+
 test("run state and Plan approval map only Linear facts", async () => {
   let approved = false;
   const operator = createRunScopedLinearOperator({
@@ -462,6 +583,51 @@ test("run state and Plan approval map only Linear facts", async () => {
   });
   assert.equal(after.approvalState, "Done");
   assert.equal(after.phase, "working");
+});
+
+test("batched run states use one Project snapshot and isolate each Root Tree", async () => {
+  let requests = 0;
+  const root = (id, phase) => ({
+    id,
+    title: id,
+    description: "",
+    parent: null,
+    state: { name: "In Progress" },
+    labels: { nodes: [{ name: `symphony:run/${phase}` }], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+  });
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      requests += 1;
+      const request = JSON.parse(init.body);
+      assert.match(request.query, /CoreLiveRunStates/u);
+      assert.deepEqual(request.variables, { projectId: "project-1" });
+      return response({ data: { project: { issues: {
+        nodes: [
+          root("root-1", "working"),
+          root("root-2", "awaiting-human"),
+          { id: "work-1", title: "Work one", description: "kind: work", parent: { id: "root-1" }, state: { name: "Done" } },
+          { id: "approval-2", title: "Approval", description: "human_kind: plan_approval", parent: { id: "root-2" }, state: { name: "Todo" } },
+        ],
+        pageInfo: { hasNextPage: false },
+      } } } });
+    },
+  });
+  const fixtures = [
+    { rootId: "root-1", projectId: "project-1" },
+    { rootId: "root-2", projectId: "project-1" },
+  ];
+
+  const states = await operator.readRunStates({ fixtures });
+
+  assert.equal(requests, 1);
+  assert.equal(states[0].phase, "working");
+  assert.deepEqual(states[0].workStates, ["Done"]);
+  assert.equal(states[0].approvalId, undefined);
+  assert.equal(states[1].phase, "awaiting-human");
+  assert.deepEqual(states[1].workStates, []);
+  assert.equal(states[1].approvalId, "approval-2");
 });
 
 test("Linear fixture returns only sanitized Root comment evidence", async () => {

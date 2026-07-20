@@ -3,6 +3,8 @@ import type {
   LinearTreeContextInterface,
   LinearTreeContextSnapshot,
 } from "../api/LinearTreeContextInterface.js";
+import type { JsonValue } from "@symphony/contracts";
+import type { V3RootRunView } from "../../root-workflow/api/Models.js";
 
 export interface BoundedContextSection<T> {
   items: T[];
@@ -32,6 +34,29 @@ export class BoundedLinearTreeContextImpl {
       ancestors: bound("ancestors", snapshot.ancestors),
       comments: bound("comments", snapshot.comments),
       relations: bound("relations", snapshot.relations),
+    };
+  }
+
+  fromView(view: V3RootRunView): BoundedLinearTreeContext {
+    return {
+      root: bound("root", {
+        items: [view.root as unknown as JsonValue], cap: 1,
+        hasMore: false, includeErrors: [],
+      }),
+      tree: bound("tree", {
+        items: view.workflowNodes as unknown as JsonValue[], cap: 512,
+        hasMore: !view.workflowTreeComplete, includeErrors: [],
+      }),
+      ancestors: bound("ancestors", {
+        items: [], cap: 32, hasMore: false, includeErrors: [],
+      }),
+      comments: bound("comments", {
+        items: [], cap: 128, hasMore: false, includeErrors: [],
+      }),
+      relations: bound("relations", {
+        items: view.blockerRelations as unknown as JsonValue[], cap: 512,
+        hasMore: false, includeErrors: [],
+      }),
     };
   }
 }

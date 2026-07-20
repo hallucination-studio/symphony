@@ -21,7 +21,7 @@ interface RootTurnProfile {
 interface RootTurnDependencies {
   reconstruct(rootIssueId: string): Promise<V3RootRunView>;
   context: {
-    build(input: { rootIssueId: string; git: {
+    build(input: { rootIssueId: string; view: V3RootRunView; git: {
       items: JsonValue[]; cap: number; hasMore: boolean;
       includeErrors: Array<{ code: string; sanitized_reason: string }>;
     } }): Promise<{
@@ -86,6 +86,7 @@ export class RunAgentRootTurnUseCase {
     }
     const context = await this.dependencies.context.build({
       rootIssueId,
+      view,
       git: {
         items: [{
           branch: workspace.branch,

@@ -1,0 +1,18 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/RootScopeResult",
+  "value": {
+    "kind": "root_scope",
+    "root_issue_id": "root-1",
+    "conductor_id": "conductor-1",
+    "terminal": false,
+    "issues": [
+      {
+        "issue_id": "root-1",
+        "identifier": "SYM-1",
+        "updated_at": "2026-07-20T00:00:00Z",
+        "authorization_header": "forbidden"
+      }
+    ],
+    "observed_at": "2026-07-20T00:00:02Z"
+  }
+}

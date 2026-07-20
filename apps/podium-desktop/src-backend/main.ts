@@ -185,6 +185,12 @@ async function createProductionComposition({
 }): Promise<PodiumBackendComposition> {
   const conductorOwner = createPodiumConductorServices({
     databasePath: path.join(dataRoot, "podium.db"),
+    observeLinearRequest: (observation) => {
+      process.stderr.write(`${JSON.stringify({
+        event: "linear_physical_request",
+        ...observation,
+      })}\n`);
+    },
   });
   let clientOwner: ReturnType<typeof createPodiumClientServices> | undefined;
   return {

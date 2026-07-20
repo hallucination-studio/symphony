@@ -68,7 +68,7 @@ export function createRunScopedLinearOperator({
       });
     },
 
-    async reconcileStaleRuns({ lock, currentRunId }) {
+    async reconcileStaleRuns({ lock, currentRunId, retainedProjectId }) {
       assertLock(lock, currentRunId);
       const data = await graphql(`
         query CoreLiveManagedResources {
@@ -96,8 +96,15 @@ export function createRunScopedLinearOperator({
         ...staleProjects.map((project) => () => archiveManagedProject(project.id)),
         ...staleLabels.map((label) => () => deleteProjectLabel(label.id)),
       ]);
+      const archivedRootCount = retainedProjectId
+        ? await archiveRetainedRootTrees({
+            projectId: retainedProjectId,
+            excludeRunId: currentRunId,
+          })
+        : undefined;
       return Object.freeze({
         archivedProjectCount: staleProjects.length,
+        ...(archivedRootCount === undefined ? {} : { archivedRootCount }),
         deletedLabelCount: staleLabels.length,
       });
     },
@@ -380,43 +387,37 @@ export function createRunScopedLinearOperator({
           }
         }
       `, { rootId: fixture.rootId, projectId: fixture.projectId });
-      const labels = connection(data.issue?.labels, "linear_fixture_state_invalid");
-      const comments = connection(data.issue?.comments, "linear_fixture_state_invalid");
       const issues = connection(data.project?.issues, "linear_fixture_state_invalid");
-      const treeIssueIds = new Set([fixture.rootId]);
-      let added;
-      do {
-        added = false;
-        for (const issue of issues) {
-          if (!treeIssueIds.has(issue.id) && treeIssueIds.has(issue.parent?.id)) {
-            treeIssueIds.add(issue.id);
-            added = true;
+      return runState(fixture, data.issue, issues);
+    },
+
+    async readRunStates({ fixtures }) {
+      if (!Array.isArray(fixtures) || fixtures.length === 0 ||
+          new Set(fixtures.map(({ rootId }) => rootId)).size !== fixtures.length ||
+          new Set(fixtures.map(({ projectId }) => projectId)).size !== 1) {
+        throw stableError("linear_fixture_states_invalid");
+      }
+      const projectId = fixtures[0].projectId;
+      const data = await graphql(`
+        query CoreLiveRunStates($projectId: String!) {
+          project(id: $projectId) {
+            issues(first: 250) {
+              nodes {
+                id title description parent { id } state { name }
+                labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+                comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
+              }
+              pageInfo { hasNextPage }
+            }
           }
         }
-      } while (added);
-      const treeIssues = issues.filter(({ id }) => id !== fixture.rootId && treeIssueIds.has(id));
-      const approval = treeIssues.find(({ description }) =>
-        typeof description === "string" && description.includes("human_kind: plan_approval"));
-      const work = treeIssues.filter(({ description }) =>
-        typeof description === "string" && description.includes("kind: work"));
-      const managedComment = comments.map(({ body }) => body)
-        .find((body) => typeof body === "string" && body.startsWith("Symphony\n") &&
-          body.includes(ROOT_COMMENT_MARKER) && body.endsWith("\n-->"));
-      const phaseLabels = labels.map(({ name }) => name).filter((name) => name.startsWith("symphony:run/"));
-      return Object.freeze({
-        rootState: data.issue?.state?.name,
-        phase: phaseLabels.length === 1 ? phaseLabels[0].slice("symphony:run/".length) : undefined,
-        approvalId: approval?.id,
-        approvalState: approval?.state?.name,
-        planApprovalCount: treeIssues.filter(({ description }) =>
-          typeof description === "string" && description.includes("human_kind: plan_approval")).length,
-        treeMatches: Boolean(approval?.parent?.id === fixture.rootId) &&
-          work.length > 0 && work.every(({ parent }) => Boolean(parent?.id)),
-        workStates: work.map(({ state }) => state?.name),
-        performerId: field(managedComment, "performer_id"),
-        deliveryBranch: field(managedComment, "delivery_branch"),
-        reworkCount: work.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
-      });
+      `, { projectId });
+      const issues = connection(data.project?.issues, "linear_fixture_states_invalid");
+      return Object.freeze(fixtures.map((fixture) => {
+        const root = issues.find(({ id }) => id === fixture.rootId);
+        if (!root) throw stableError("linear_fixture_state_invalid");
+        return runState(fixture, root, issues);
+      }));
     },
 
     async readRootCommentEvidence({ fixture }) {
@@ -491,17 +492,35 @@ export function createRunScopedLinearOperator({
       return this.readRunState({ fixture });
     },
 
-    async cleanup({ lock, runId, projectId, labelId, marker, retainProject = false }) {
+    async cleanup({
+      lock,
+      runId,
+      projectId,
+      labelId,
+      marker,
+      retainProject = false,
+      rootIds,
+    }) {
       assertLock(lock, runId);
       if (marker !== managedMarker(runId) || !projectId || !labelId) {
         throw stableError("linear_fixture_cleanup_target_invalid");
       }
+      let archivedRootCount = 0;
       await attemptAll([
-        ...(!retainProject ? [() => archiveManagedProject(projectId)] : []),
+        ...(!retainProject
+          ? [() => archiveManagedProject(projectId)]
+          : [async () => {
+              archivedRootCount = await archiveRetainedRootTrees({
+                projectId,
+                runId,
+                rootIds,
+              });
+            }]),
         () => deleteProjectLabel(labelId),
       ]);
       return Object.freeze({
         archivedProjectCount: retainProject ? 0 : 1,
+        ...(retainProject ? { archivedRootCount } : {}),
         deletedLabelCount: 1,
       });
     },
@@ -563,6 +582,62 @@ export function createRunScopedLinearOperator({
     if (firstFailure) throw firstFailure;
   }
 
+  async function archiveRetainedRootTrees({
+    projectId,
+    runId,
+    excludeRunId,
+    rootIds,
+  }) {
+    const data = await graphql(`
+      query CoreLiveRetainedProjectIssues($projectId: String!) {
+        project(id: $projectId) {
+          issues(first: 250) {
+            nodes { id title description parent { id } }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+    `, { projectId });
+    const issues = connection(
+      data.project?.issues,
+      "linear_fixture_retained_project_issues_invalid",
+    );
+    const expectedRootIds = rootIds === undefined ? undefined : new Set(rootIds);
+    if (expectedRootIds && (expectedRootIds.size !== rootIds.length || expectedRootIds.size === 0)) {
+      throw stableError("linear_fixture_cleanup_root_identity_invalid");
+    }
+    const roots = issues.filter((issue) => {
+      const owner = managedRunId(issue.description);
+      return issue.parent === null &&
+        typeof issue.id === "string" &&
+        typeof issue.title === "string" &&
+        issue.title.startsWith("[Core Live E2E] ") &&
+        (runId === undefined ? owner !== undefined && owner !== excludeRunId : owner === runId) &&
+        (expectedRootIds === undefined || expectedRootIds.has(issue.id));
+    });
+    if (
+      expectedRootIds &&
+      (roots.length !== expectedRootIds.size || roots.some(({ id }) => !expectedRootIds.has(id)))
+    ) {
+      throw stableError("linear_fixture_cleanup_root_identity_invalid");
+    }
+    const selected = new Set(roots.map(({ id }) => id));
+    let changed;
+    do {
+      changed = false;
+      for (const issue of issues) {
+        if (!selected.has(issue.id) && selected.has(issue.parent?.id)) {
+          selected.add(issue.id);
+          changed = true;
+        }
+      }
+    } while (changed);
+    const selectedIssues = issues.filter(({ id }) => selected.has(id));
+    selectedIssues.sort((left, right) => issueDepth(right, issues) - issueDepth(left, issues));
+    await attemptAll(selectedIssues.map(({ id }) => () => archiveIssue(id)));
+    return roots.length;
+  }
+
   async function archiveIssue(issueId) {
     const data = await graphql(`
       mutation CoreLiveArchiveIssue($issueId: String!) {
@@ -596,6 +671,7 @@ export function createRunScopedLinearOperator({
 
   async function graphql(query, variables = {}) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
+    const startedAt = Date.now();
     let response;
     try {
       response = await fetch(LINEAR_GRAPHQL_URL, {
@@ -604,9 +680,21 @@ export function createRunScopedLinearOperator({
         body: JSON.stringify({ query, variables }),
       });
     } catch {
+      log({
+        event: "linear_physical_request",
+        operation,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
       log({ event: "e2e_linear_request_failed", operation });
       throw stableError("linear_fixture_request_failed");
     }
+    log({
+      event: "linear_physical_request",
+      operation,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      ...(Number.isSafeInteger(response.status) ? { status: response.status } : {}),
+      ...rateWindowEvidence(response.headers),
+    });
     let body;
     let responseText;
     try {
@@ -640,6 +728,33 @@ export function createRunScopedLinearOperator({
       throw stableError("linear_fixture_graphql_failed");
     }
     return body.data;
+  }
+
+  function rateWindowEvidence(headers) {
+    const requestWindow = rateWindow(headers, "x-ratelimit-requests");
+    const complexityWindow = rateWindow(headers, "x-ratelimit-complexity");
+    return {
+      ...(requestWindow ? { requestWindow } : {}),
+      ...(complexityWindow ? { complexityWindow } : {}),
+    };
+  }
+
+  function rateWindow(headers, prefix) {
+    const limit = nonnegativeHeader(headers, `${prefix}-limit`);
+    const remaining = nonnegativeHeader(headers, `${prefix}-remaining`);
+    const reset = nonnegativeHeader(headers, `${prefix}-reset`);
+    return limit === undefined || remaining === undefined || reset === undefined
+      ? undefined
+      : { limit, remaining, reset };
+  }
+
+  function nonnegativeHeader(headers, name) {
+    const value = headers?.get?.(name);
+    if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,15})$/u.test(value)) {
+      return undefined;
+    }
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
   }
 }
 
@@ -761,6 +876,61 @@ function assertRelatedFixtures(runId, first, second) {
 function connection(value, code) {
   if (!Array.isArray(value?.nodes) || value.pageInfo?.hasNextPage !== false) throw stableError(code);
   return value.nodes;
+}
+
+function runState(fixture, root, issues) {
+  if (root?.id !== fixture.rootId) throw stableError("linear_fixture_state_invalid");
+  const labels = connection(root.labels, "linear_fixture_state_invalid");
+  const comments = connection(root.comments, "linear_fixture_state_invalid");
+  const treeIssueIds = new Set([fixture.rootId]);
+  let added;
+  do {
+    added = false;
+    for (const issue of issues) {
+      if (!treeIssueIds.has(issue.id) && treeIssueIds.has(issue.parent?.id)) {
+        treeIssueIds.add(issue.id);
+        added = true;
+      }
+    }
+  } while (added);
+  const treeIssues = issues.filter(({ id }) => id !== fixture.rootId && treeIssueIds.has(id));
+  const approval = treeIssues.find(({ description }) =>
+    typeof description === "string" && description.includes("human_kind: plan_approval"));
+  const work = treeIssues.filter(({ description }) =>
+    typeof description === "string" && description.includes("kind: work"));
+  const managedComment = comments.map(({ body }) => body)
+    .find((body) => typeof body === "string" && body.startsWith("Symphony\n") &&
+      body.includes(ROOT_COMMENT_MARKER) && body.endsWith("\n-->"));
+  const phaseLabels = labels.map(({ name }) => name)
+    .filter((name) => name.startsWith("symphony:run/"));
+  return Object.freeze({
+    rootState: root.state?.name,
+    phase: phaseLabels.length === 1 ? phaseLabels[0].slice("symphony:run/".length) : undefined,
+    approvalId: approval?.id,
+    approvalState: approval?.state?.name,
+    planApprovalCount: treeIssues.filter(({ description }) =>
+      typeof description === "string" && description.includes("human_kind: plan_approval")).length,
+    treeMatches: Boolean(approval?.parent?.id === fixture.rootId) &&
+      work.length > 0 && work.every(({ parent }) => Boolean(parent?.id)),
+    workStates: work.map(({ state }) => state?.name),
+    performerId: field(managedComment, "performer_id"),
+    deliveryBranch: field(managedComment, "delivery_branch"),
+    reworkCount: work.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
+  });
+}
+
+function issueDepth(issue, issues) {
+  const byId = new Map(issues.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set([issue.id]);
+  let depth = 0;
+  let parentId = issue.parent?.id;
+  while (parentId) {
+    if (visited.has(parentId)) throw stableError("linear_fixture_issue_parent_cycle");
+    visited.add(parentId);
+    depth += 1;
+    parentId = byId.get(parentId)?.parent?.id;
+  }
+  return depth;
 }
 
 async function attemptAll(actions) {

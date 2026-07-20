@@ -50,6 +50,22 @@ test("V3 gateway discovery evidence measures an actual nested Tree request", asy
     getIssueTreeCount: 1 }]);
 });
 
+test("fresh Root scope uses the compact Podium query without reconstructing a Tree", async () => {
+  const requests: string[] = [];
+  const gateway = createGateway(async (body) => {
+    requests.push(body.kind as string);
+    if (body.kind === "resolve_conductor_project") return resolved();
+    if (body.kind === "get_root_scope") return scopeResult();
+    throw new Error("complete Tree read forbidden");
+  });
+  await gateway.resolveProject();
+
+  const scope = await gateway.readFreshRootScope("root-1");
+
+  assert.equal(scope.performer_id, "conversation-1");
+  assert.deepEqual(requests, ["resolve_conductor_project", "get_root_scope"]);
+});
+
 test("V3 gateway claim uses exact Root CAS and closed Primary Comment", async () => {
   let mutation: Record<string, unknown> | undefined;
   const gateway = createGateway(async (body) => {
@@ -159,6 +175,12 @@ function treePage(comments = [comment()]) { return { kind: "issue_tree_page", tr
     managed_marker: "root-1:work-1" }], root_phase_labels: [],
   root_managed_comments: comments, human_answers: [], observed_at: now },
   page_info: { has_next_page: false } }; }
+
+function scopeResult() { return { kind: "root_scope", root_issue_id: "root-1",
+  conductor_id: "conductor-1", performer_id: "conversation-1", terminal: false,
+  issues: [{ issue_id: "root-1", identifier: "SYM-1", updated_at: now },
+    { issue_id: "work-1", identifier: "SYM-2", parent_issue_id: "root-1",
+      updated_at: now }], observed_at: now }; }
 
 function root(issueId = "root-1") { return { issue_id: issueId,
   identifier: issueId.toUpperCase(), project_id: "project-1", state: "In Progress",

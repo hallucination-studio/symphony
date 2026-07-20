@@ -9,7 +9,27 @@ import {
   createTurnLaneTracker,
   finalizeCoreLiveResult,
   pollUntil,
+  readRootStates,
 } from "../../tools/e2e/core-live-runner.mjs";
+
+test("one poll tick batches every fixture into one Project state read", async () => {
+  const calls = [];
+  const fixtures = [
+    { rootId: "root-1", projectId: "project-1" },
+    { rootId: "root-2", projectId: "project-1" },
+    { rootId: "root-3", projectId: "project-1" },
+  ];
+  const expected = fixtures.map(({ rootId }) => ({ rootState: rootId }));
+  const states = await readRootStates({
+    async readRunStates(input) {
+      calls.push(input);
+      return expected;
+    },
+  }, fixtures);
+
+  assert.deepEqual(states, expected);
+  assert.deepEqual(calls, [{ fixtures }]);
+});
 
 test("runtime evidence reports bounded step durations and private Linear request counts", () => {
   let now = 10;
@@ -17,6 +37,16 @@ test("runtime evidence reports bounded step durations and private Linear request
   tracker.log({ event: "e2e_step_started", step: "discovery" });
   tracker.log({ event: "e2e_conductor_request", request_kind: "list_root_issues" });
   tracker.log({ event: "e2e_conductor_request", request_kind: "get_issue_tree" });
+  tracker.log({
+    event: "linear_physical_request", operation: "CoreLivePreflight", status: 200,
+    requestWindow: { limit: 1000, remaining: 999, reset: 60 },
+    complexityWindow: { limit: 250000, remaining: 249900, reset: 60 },
+  });
+  tracker.log({
+    event: "linear_physical_request", operation: "SymphonyRootHeaderFacts", status: 200,
+    requestWindow: { limit: 1000, remaining: 998, reset: 60 },
+    complexityWindow: { limit: 250000, remaining: 249800, reset: 60 },
+  });
   tracker.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
     event: "agent_broker_result", command: "git.commit", status: "applied",
     root_issue_id: "root-1", turn_id: "turn-1", performer_id: "conversation-1",
@@ -38,6 +68,13 @@ test("runtime evidence reports bounded step durations and private Linear request
     totalDiscoveryListPages: 2,
     discoveryTreeRequests: 0,
     totalRequests: 2,
+    physicalRequestCount: 2,
+    physicalRequestCounts: { CoreLivePreflight: 1, SymphonyRootHeaderFacts: 1 },
+    physicalRequest429Count: 0,
+    requestWindowStart: { limit: 1000, remaining: 999, reset: 60 },
+    requestWindowEnd: { limit: 1000, remaining: 998, reset: 60 },
+    complexityWindowStart: { limit: 250000, remaining: 249900, reset: 60 },
+    complexityWindowEnd: { limit: 250000, remaining: 249800, reset: 60 },
   });
 });
 
@@ -191,20 +228,27 @@ test("core live final evidence is written after cleanup and cleanup can fail a p
       events.push("cleanup");
       return ["e2e_linear_cleanup_failed"];
     },
+    async finalEvidence() {
+      events.push("final-evidence");
+      return { step: "request_budget_verified", status: "passed", physicalRequestCount: 12 };
+    },
     async write(finalResult) {
       events.push("write");
       written = finalResult;
     },
   });
 
-  assert.deepEqual(events, ["cleanup", "write"]);
+  assert.deepEqual(events, ["cleanup", "final-evidence", "write"]);
   assert.deepEqual(result, written);
   assert.deepEqual(result, {
     status: "failed",
     runId: "run-1",
     reason: "e2e_linear_cleanup_failed",
     cleanupFailures: ["e2e_linear_cleanup_failed"],
-    evidence: [{ step: "cleanup_completed", status: "failed" }],
+    evidence: [
+      { step: "request_budget_verified", status: "passed", physicalRequestCount: 12 },
+      { step: "cleanup_completed", status: "failed" },
+    ],
   });
 });
 

@@ -25,6 +25,10 @@ export {
   createPodiumConductorServices,
   type PodiumConductorServiceOwner,
 } from "./createPodiumConductorServices.js";
+export type {
+  LinearPhysicalRequestObservation,
+  LinearRequestWindowObservation,
+} from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 export {
   createPodiumClientServices,
   type PodiumClientServiceOwner,

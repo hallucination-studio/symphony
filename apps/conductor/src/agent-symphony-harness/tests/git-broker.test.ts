@@ -47,6 +47,43 @@ test("delivery broker delegates only after fresh scoped validation", async () =>
   assert.equal(deliveries, 1);
 });
 
+test("commit and delivery each perform exactly one fresh Root scope read", async () => {
+  for (const command of [
+    { ...correlation, command: "git.commit", args: {
+      issue_id: "child-1", expected_remote_version: "version-2", expected_head: "abc123",
+    } },
+    { ...correlation, command: "root.deliver", args: {
+      expected_head: "abc123", expected_root_version: "version-1",
+    } },
+  ]) {
+    let scopeReads = 0;
+    const broker = createBroker({
+      linear: {
+        async readFreshRootScope() {
+          scopeReads += 1;
+          return { root_issue_id: "root-1", conductor_id: "conductor-1",
+            performer_id: "conversation-1", terminal: false,
+            issues: [{ issue_id: "root-1", updated_at: "version-1" },
+              { issue_id: "child-1", identifier: "SYM-2", parent_issue_id: "root-1",
+                updated_at: "version-2" }] };
+        },
+        async read() { return {}; },
+        async mutate() { return { kind: "applied" as const, summary: "ok" }; },
+      },
+      git: {
+        async inspect() { throw new Error("unused"); }, async diff() { throw new Error("unused"); },
+        async checks() { throw new Error("unused"); },
+        async commit() { return { kind: "committed" as const, commit: "def456" }; },
+      },
+      delivery: { async deliver() { return { kind: "remote_branch" as const,
+        branch: workspace.branch }; } },
+    });
+
+    assert.equal((await broker.execute(command)).status, "applied");
+    assert.equal(scopeReads, 1);
+  }
+});
+
 test("command limit rejects new broker and mutation requests", async () => {
   const budget = new TurnCommandBudget({ maxBrokerCalls: 2, maxMutations: 0 });
   const broker = createBroker({ budget });

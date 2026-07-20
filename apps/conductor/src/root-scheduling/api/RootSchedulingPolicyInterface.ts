@@ -10,4 +10,5 @@ export interface RootSchedulingResult {
 
 export interface RootSchedulingPolicyInterface {
   evaluate(roots: readonly DiscoveredRoot[]): RootSchedulingResult;
+  strictlyOutranksBoundary(candidate: DiscoveredRoot, boundary: DiscoveredRoot): boolean;
 }

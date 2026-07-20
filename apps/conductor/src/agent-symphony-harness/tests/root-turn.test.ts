@@ -63,17 +63,29 @@ test("Root Turn process failure read-backs facts before recording failure", asyn
   assert.deepEqual(order, ["read", "read", "observe"]);
 });
 
+test("Root Turn context reuses the dispatch-fresh Root view", async () => {
+  const dispatchView = rootView();
+  let contextView: V3RootRunView | undefined;
+  await createUseCase({
+    view: dispatchView,
+    onContextView(value) { contextView = value; },
+  }).run("root-1");
+
+  assert.equal(contextView, dispatchView);
+});
+
 function createUseCase(options: {
   view?: V3RootRunView;
   onRead?(): void;
   onProcess?(): void;
   onObserve?(): void;
   onCommand?(value: unknown): void;
+  onContextView?(value: V3RootRunView | undefined): void;
   processFailure?: boolean;
 }) {
   return new RunAgentRootTurnUseCase({
     reconstruct: async () => { options.onRead?.(); return options.view ?? rootView(); },
-    context: { async build() { return {
+    context: { async build(input) { options.onContextView?.(input.view); return {
       json: "{}", markdown: "# Root", contextBytes: 6, contextDigest: "digest-1",
     }; } },
     profiles: { async get() { return {

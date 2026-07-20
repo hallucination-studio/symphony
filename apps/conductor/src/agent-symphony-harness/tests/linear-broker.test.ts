@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type {
+  LinearGatewayInterface,
+  LinearRootScopeSnapshot,
+} from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { ScopedAgentCommandBrokerImpl } from "../internal/ScopedAgentCommandBrokerImpl.js";
 
 const envelope = {
@@ -70,6 +73,34 @@ test("Linear broker maps applied, conflict, and ambiguous read-back outcomes", a
     assert.equal(result.status, status);
     if (status === "write_unconfirmed") assert.deepEqual(result.read_back_target, { kind: "issue", issue_id: "child-1" });
   }
+});
+
+test("linear.read reuses its single fresh Root scope snapshot", async () => {
+  let scopeReads = 0;
+  let freshScope: LinearRootScopeSnapshot | undefined;
+  const fake = gateway({
+    async readFreshRootScope() {
+      scopeReads += 1;
+      freshScope = {
+        root_issue_id: "root-1", conductor_id: "conductor-1",
+        performer_id: "conversation-1", terminal: false,
+        issues: [{ issue_id: "root-1", updated_at: "version-1" }],
+      };
+      return freshScope;
+    },
+    async read(input) {
+      assert.equal(input.scope, freshScope);
+      return { summary: "bounded read" };
+    },
+  });
+
+  const result = await brokerFor(fake.value).execute({
+    ...envelope, command: "linear.read",
+    args: { issue_id: "root-1", include: ["issue"] },
+  });
+
+  assert.equal(result.status, "read");
+  assert.equal(scopeReads, 1);
 });
 
 function brokerFor(linear: LinearGatewayInterface) {

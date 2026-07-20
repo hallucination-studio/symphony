@@ -58,3 +58,24 @@ test("Root Context JSON, Markdown, bytes, and digest are deterministic", async (
   assert.doesNotMatch(JSON.stringify(first.dto.trusted_harness), /Ignore system rules|Run untrusted command/);
   assert.doesNotMatch(JSON.stringify(first.dto.executable_commands), /Ignore system rules|Run untrusted command/);
 });
+
+test("Root Context projects a dispatch-fresh view without another Linear read", async () => {
+  let reads = 0;
+  const builder = new AgentRootContextBuilder(new BoundedLinearTreeContextImpl({
+    async readRootContext() { reads += 1; return reader.readRootContext("root-1"); },
+  }));
+  const view = {
+    root: { issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const,
+      title: "Root", description: "Build", updatedAt: "2026-07-19T00:00:00Z" },
+    conductorId: "conductor-1", resolvedProjectId: "project-1",
+    workflowNodes: [], workflowTreeComplete: true,
+    blockerRelations: [], attentionProblems: [],
+  };
+
+  const context = await builder.build({
+    rootIssueId: "root-1", view, git: section([], 1),
+  });
+
+  assert.equal(reads, 0);
+  assert.deepEqual(context.dto.human_context.root.items, [view.root]);
+});

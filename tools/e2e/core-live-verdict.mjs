@@ -96,6 +96,14 @@ export function evaluateCoreLiveEvidence(result) {
     Number.isSafeInteger(runtimeBudget?.totalDiscoveryListPages) &&
     runtimeBudget.totalDiscoveryListPages > 0 &&
     runtimeBudget?.discoveryTreeRequests === 0 &&
+    Number.isSafeInteger(runtimeBudget?.physicalRequestCount) &&
+    runtimeBudget.physicalRequestCount > 0 && runtimeBudget.physicalRequestCount < 500 &&
+    runtimeBudget?.physicalRequest429Count === 0 &&
+    physicalRequestCountsValid(runtimeBudget) &&
+    rateWindowValid(runtimeBudget?.requestWindowStart) &&
+    rateWindowValid(runtimeBudget?.requestWindowEnd) &&
+    rateWindowValid(runtimeBudget?.complexityWindowStart) &&
+    rateWindowValid(runtimeBudget?.complexityWindowEnd) &&
     runtimeBudget?.stepDurationsMs &&
     ["conductor_handshake", "multi_root_scheduling", "root_completion"]
       .every((step) => Number.isSafeInteger(runtimeBudget.stepDurationsMs[step])
@@ -153,6 +161,25 @@ export function evaluateCoreLiveEvidence(result) {
     runtimeBudgetVerified,
     v3FactsVerified,
   });
+}
+
+function physicalRequestCountsValid(runtimeBudget) {
+  const counts = runtimeBudget?.physicalRequestCounts;
+  if (counts === null || typeof counts !== "object" || Array.isArray(counts)) return false;
+  const entries = Object.entries(counts);
+  return entries.length > 0 && entries.every(([operation, count]) =>
+    /^[A-Za-z][A-Za-z0-9_]{0,127}$/u.test(operation) &&
+    Number.isSafeInteger(count) && count > 0) &&
+    entries.reduce((total, [, count]) => total + count, 0) ===
+      runtimeBudget.physicalRequestCount;
+}
+
+function rateWindowValid(value) {
+  return value !== null && typeof value === "object" &&
+    Number.isSafeInteger(value.limit) && value.limit > 0 &&
+    Number.isSafeInteger(value.remaining) && value.remaining >= 0 &&
+    value.remaining <= value.limit &&
+    Number.isSafeInteger(value.reset) && value.reset >= 0;
 }
 
 export function coreLiveStepIds() {

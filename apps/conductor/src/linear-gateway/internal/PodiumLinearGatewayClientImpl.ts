@@ -114,12 +114,22 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
   }
 
   async listRoots(projectId: string) {
+    const roots: DiscoveredRoot[] = [];
+    for await (const page of this.listRootPages(projectId)) roots.push(...page.roots);
+    return roots;
+  }
+
+  async *listRootPages(projectId: string): AsyncGenerator<{
+    roots: DiscoveredRoot[];
+    hasNextPage: boolean;
+    ordering: "unsupported";
+  }> {
     this.#assertProject(projectId);
     if (this.#activeDiscovery) throw new Error("linear_discovery_overlap");
     const discovery = { rootHeaderCount: 0, listPageCount: 0, getIssueTreeCount: 0 };
+    let rootCount = 0;
     this.#activeDiscovery = discovery;
     try {
-    const roots: DiscoveredRoot[] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
     do {
@@ -135,6 +145,7 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
       );
       if (response.kind !== "root_issues_page") throw protocolError(response);
       const items = array(response.items, "linear_roots_invalid");
+      const roots: DiscoveredRoot[] = [];
       for (const value of items) {
         const item = record(value);
         const issue = wireIssue(item.issue);
@@ -166,7 +177,8 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
         };
         roots.push(discovered);
         this.#rootBlockers.set(discovered.issueId, discovered.blockers);
-        if (roots.length > 512) throw new Error("linear_roots_too_many");
+        rootCount += 1;
+        if (rootCount > 512) throw new Error("linear_roots_too_many");
       }
       const pageInfo = record(response.page_info);
       const hasNextPage = boolean(
@@ -180,11 +192,11 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
         if (cursors.has(cursor)) throw new Error("linear_page_cursor_repeated");
         cursors.add(cursor);
       }
+      yield { roots, hasNextPage, ordering: "unsupported" };
     } while (cursor);
-    discovery.rootHeaderCount = roots.length;
-    this.options.observeDiscovery?.({ ...discovery });
-    return roots;
     } finally {
+      discovery.rootHeaderCount = rootCount;
+      this.options.observeDiscovery?.({ ...discovery });
       this.#activeDiscovery = undefined;
     }
   }
@@ -232,28 +244,46 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
   }
 
   async readFreshRootScope(rootIssueId: string): Promise<LinearRootScopeSnapshot> {
-    const view = await this.reconstructV3(rootIssueId);
+    if (!this.#projectId) throw new Error("linear_project_not_resolved");
+    const response = record(await this.#request({
+      kind: "get_root_scope",
+      project_id: this.#projectId,
+      root_issue_id: rootIssueId,
+    }));
+    if (response.kind !== "root_scope") throw protocolError(response);
+    const responseRootId = string(response.root_issue_id, "linear_root_scope_invalid");
+    if (responseRootId !== rootIssueId) throw new Error("linear_root_scope_invalid");
+    const issues = array(response.issues, "linear_root_scope_invalid").map((value) => {
+      const issue = record(value);
+      return {
+        issue_id: string(issue.issue_id, "linear_root_scope_invalid"),
+        identifier: string(issue.identifier, "linear_root_scope_invalid"),
+        updated_at: string(issue.updated_at, "linear_root_scope_invalid"),
+        ...(issue.parent_issue_id === undefined ? {} : {
+          parent_issue_id: string(issue.parent_issue_id, "linear_root_scope_invalid"),
+        }),
+      };
+    });
     return {
       root_issue_id: rootIssueId,
-      conductor_id: view.managedComment?.conductorId ?? "unclaimed",
-      ...(view.managedComment?.performerId
-        ? { performer_id: view.managedComment.performerId } : {}),
-      terminal: view.root.state === "Done" || view.root.state === "Canceled",
-      issues: [{ issue_id: view.root.issueId, identifier: view.root.identifier,
-        updated_at: view.root.updatedAt }, ...view.workflowNodes.map((issue) => ({
-        issue_id: issue.issueId, identifier: issue.identifier,
-        updated_at: issue.updatedAt,
-        parent_issue_id: issue.parentIssueId ?? rootIssueId,
-      }))],
+      conductor_id: string(response.conductor_id, "linear_root_scope_invalid"),
+      ...(response.performer_id === undefined ? {} : {
+        performer_id: string(response.performer_id, "linear_root_scope_invalid"),
+      }),
+      terminal: boolean(response.terminal, "linear_root_scope_invalid"),
+      issues,
     };
   }
 
   async read(input: {
     rootIssueId: string; issueId: string; include: string[];
+    scope: LinearRootScopeSnapshot;
     cursor?: string; limit?: number;
   }): Promise<JsonValue> {
-    const scope = await this.readFreshRootScope(input.rootIssueId);
-    const issue = scope.issues.find(({ issue_id }) => issue_id === input.issueId);
+    if (input.scope.root_issue_id !== input.rootIssueId) {
+      throw new Error("linear_root_scope_invalid");
+    }
+    const issue = input.scope.issues.find(({ issue_id }) => issue_id === input.issueId);
     if (!issue) throw new Error("linear_target_out_of_scope");
     return { issue, include: input.include.slice(0, 16) } as unknown as JsonValue;
   }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { JsonValue } from "@symphony/contracts";
 import type { BoundedContextSection } from "../../linear-tree/internal/BoundedLinearTreeContextImpl.js";
 import { BoundedLinearTreeContextImpl } from "../../linear-tree/internal/BoundedLinearTreeContextImpl.js";
+import type { V3RootRunView } from "../../root-workflow/api/Models.js";
 import {
   agentCommandCatalog,
   agentCommandExamples,
@@ -18,8 +19,14 @@ interface GitContextSection {
 export class AgentRootContextBuilder {
   constructor(private readonly linear: BoundedLinearTreeContextImpl) {}
 
-  async build(input: { rootIssueId: string; git: GitContextSection }) {
-    const linear = await this.linear.read(input.rootIssueId);
+  async build(input: {
+    rootIssueId: string;
+    view?: V3RootRunView;
+    git: GitContextSection;
+  }) {
+    const linear = input.view
+      ? this.linear.fromView(input.view)
+      : await this.linear.read(input.rootIssueId);
     const dto = {
       trusted_harness: {
         root_objective: "Advance the current Root using only fresh Linear and Git facts.",

@@ -30,6 +30,7 @@ export interface LinearGatewayInterface {
     rootIssueId: string;
     issueId: string;
     include: string[];
+    scope: LinearRootScopeSnapshot;
     cursor?: string;
     limit?: number;
   }): Promise<JsonValue>;

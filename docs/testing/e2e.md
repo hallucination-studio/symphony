@@ -118,8 +118,9 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
     `in-review` phase；
 11. 从交付 branch 读取目标文件并核对精确 marker；
 12. 终止全部子进程；temporary 模式清理由本 run marker 管理的 Project 内 issues、
-    Project、Project Label 和本地资源，retained 模式保留 Project 与全部 issues、只
-    删除本 run Project Label；所有 cleanup 完成后才写入最终脱敏 evidence。
+    Project、Project Label 和本地资源；retained 模式保留 Project 和外部 Issues，
+    仅 archive 同时匹配 Project、run marker、标题前缀和已记录 Root identity 的本 run
+    Root Trees，并删除本 run Project Label；所有 cleanup 完成后才写入最终脱敏 evidence。
 
 任何 startup、protocol、process exit、timeout、cleanup 或 secret audit 失败都使
 场景失败。不得以 dry-run、合成 observation、mock SDK 输出或“blocked artifact”
@@ -171,12 +172,12 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 - `SYMPHONY_E2E_CODEX_MODEL`。
 
 可选输入 `SYMPHONY_E2E_PROJECT_SLUG_ID` 启用 retained Project 模式：runner
-解析并使用该现有 Project，不创建或 archive Project，不 archive 其中任何既有或
-本 run 创建的 issue。Project 中原有 Roots 继续按真实 Conductor 规则参与调度；
-runner verdict 只观察本 run marker Root 的 descendants。结束时只删除本 run 创建的
-Conductor Project Label，并清理进程与本地资源。该模式用于 debug、样式检查和
-benchmark；不得在运行前停用或清理已有 Roots，它们作为真实负载参与调度，并可能
-增加本 run Root 的等待时间。
+解析并使用该现有 Project，不创建或 archive Project，也不 archive 不属于 E2E run
+的 Issue。Project 中原有 Roots 继续按真实 Conductor 规则参与调度；runner verdict
+只观察本 run marker Root 的 descendants。结束时按 descendant-first 顺序 archive
+本 run 精确拥有的 Root Trees，删除本 run 创建的 Conductor Project Label，并清理
+进程与本地资源。该模式用于 debug、样式检查和 benchmark；不得在运行前停用或清理
+外部 Roots，它们作为真实负载参与调度，并可能增加本 run Root 的等待时间。
 
 未配置该变量时使用默认 temporary Project 模式：每次创建独立 Project，结束时按
 issues → Project → Project Label 的依赖顺序完整 archive/delete。
@@ -215,10 +216,12 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
   `e2e_run_timeout` 并停止后续 mutation，异常文本归一化为稳定 code；
 - cleanup 必须幂等；temporary 模式只 archive/delete 精确匹配当前 managed marker
   的资源，并按 Project 内 issues → Project → Project Label 的顺序处理 Linear 依赖；
-  retained 模式不得 archive Project 或其中任何 issue；
+  retained 模式不得 archive Project 或外部 Issue，只能 archive 同时匹配 Project、
+  run marker、`[Core Live E2E] ` 标题前缀和 Root identity 的本 run Root Trees；
   `cleanup_completed` 是 live verdict 的必需证据，任一 cleanup 失败都会使其失败；
 - 下次运行在 mutation 前 reconcile 同一测试 authority 留下的 stale temporary run
-  和 Project Label，不清理 retained Project 中的 Roots；
+  和 Project Label，并只清理 retained Project 中带其他精确 E2E run marker 的 stale
+  Root Trees；
 - runner 必须在成功和失败路径有界关闭 Podium、Conductor、Performer 和 IPC。
 
 ## 8. 完成标准
@@ -231,5 +234,7 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
   `in-review`；
 - secret scan、focused checks、`make lint`、`make typecheck`、`make test-all` 和
   `make build` 全部通过；
+- `request_budget_verified` 在 cleanup 后统计完整运行，物理 Linear 请求少于 500、
+  429 数量为零，并包含 request 与 GraphQL complexity 窗口的首末脱敏快照；
 - 旧 alternate E2E runtime、fake composition、temporary Store 和 hermetic
   workflow automation 已删除，仅保留不宣称 workflow coverage 的 Desktop smoke。
