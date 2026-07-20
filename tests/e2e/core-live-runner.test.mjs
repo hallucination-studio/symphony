@@ -35,20 +35,20 @@ test("one poll tick batches every fixture into one Project state read", async ()
   assert.deepEqual(calls, [{ fixtures }]);
 });
 
-test("core live Root instructions require a Human Plan Approval before execution", () => {
+test("core live Root instructions create Plan children through the Root Agent", () => {
   const instruction = rootInstruction("e2e-yielded.txt", "run-1:yielded\n");
-  assert.match(instruction, /exactly one Work child and one Human Plan Approval child/u);
-  assert.match(instruction, /one planning Turn/u);
-  assert.match(instruction, /Root already contains exactly one Work child and one Human Plan Approval child/u);
-  assert.match(instruction, /use only linear\.status\.set/u);
+  assert.match(instruction, /create exactly one Work child/u);
+  assert.match(instruction, /exactly one Human child/u);
+  assert.match(instruction, /planning Turn/u);
+  assert.match(instruction, /linear\.issue\.create_child/u);
   assert.match(instruction, /minimum necessary broker commands/u);
-  assert.doesNotMatch(instruction, /linear\.issue\.create_child/u);
-  assert.match(instruction, /copy its current issue\.updated_at and Git HEAD verbatim/u);
+  assert.match(instruction, /<root_issue_id>:work/u);
+  assert.match(instruction, /<root_issue_id>:plan-approval/u);
   assert.match(instruction, /titled "\[Human Action\] Approve Plan"/u);
   assert.match(instruction, /plan_approval managed marker/u);
   assert.match(instruction, /Do not inspect files or edit the workspace during planning/u);
-  assert.match(instruction, /use linear\.status\.set to set it to In Progress/u);
-  assert.match(instruction, /then end the planning Turn/u);
+  assert.match(instruction, /linear\.status\.set to set that Human child to In Progress/u);
+  assert.match(instruction, /end the planning Turn/u);
   assert.match(instruction, /Do not edit, commit, or deliver during the planning Turn/u);
   assert.match(instruction, /only after the Human Plan Approval child is Done/u);
 });
@@ -58,20 +58,24 @@ test("plan readiness uses Linear workflow facts when the activity label is absen
     phase: undefined,
     approvalState: "In Progress",
     planApprovalCount: 1,
+    gateCount: 0,
     treeMatches: true,
     workStates: ["Todo"],
     performerId: "conversation-1",
   }), true);
 });
 
-test("root scheduling readiness uses pre-seeded Linear workflow facts", () => {
+test("root scheduling readiness requires a childless blocked Root", () => {
   assert.equal(rootUntouched({
     phase: "root-todo",
     rootState: "Todo",
     approvalState: "Todo",
-    planApprovalCount: 1,
-    treeMatches: true,
-    workStates: ["Todo"],
+    planApprovalCount: 0,
+    childCount: 0,
+    gateCount: 0,
+    treeMatches: false,
+    workStates: [],
+    managedCommentPresent: false,
     performerId: undefined,
   }), true);
   assert.equal(rootUntouched({
@@ -172,7 +176,9 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /phase === "in-review"/u);
   assert.match(source, /e2e-dependent\.txt/u);
   assert.match(source, /createBlockerRelation/u);
-  assert.match(source, /linear\.seedPlan/u);
+  assert.doesNotMatch(source, /linear\.seedPlan/u);
+  assert.match(source, /create exactly one Work child/u);
+  assert.match(source, /gateChecklistChecked/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
   assert.match(source, /readRootCommentEvidence/u);
   assert.match(source, /root_comments_verified/u);

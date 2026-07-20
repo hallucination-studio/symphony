@@ -664,11 +664,15 @@ test("run state and Plan approval map only Linear facts", async () => {
     approvalId: "approval-1",
     approvalState: "In Progress",
     planApprovalCount: 1,
+    childCount: 2,
     treeMatches: true,
     workStates: ["Todo"],
+    managedCommentPresent: true,
     performerId: "conversation-1",
     deliveryBranch: "symphony/runs/run-1",
     reworkCount: 0,
+    gateCount: 0,
+    gateChecklistChecked: false,
   });
   const after = await operator.approvePlan({
     lock: { runId: "run-1", released: false },

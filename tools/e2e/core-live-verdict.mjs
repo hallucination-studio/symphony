@@ -77,6 +77,9 @@ export function evaluateCoreLiveEvidence(result) {
   const multiRootSchedulingVerified =
     blocker?.blockerPlanned === true &&
     blocker?.dependentUntouched === true &&
+    blocker?.dependentChildCount === 0 &&
+    blocker?.dependentManagedCommentAbsent === true &&
+    blocker?.dependentPerformerAbsent === true &&
     humanYield?.waitingRootUnchanged === true &&
     humanYield?.yieldedRootPlanned === true &&
     priorityRefresh?.newWinnerSelected === true &&
@@ -149,7 +152,9 @@ export function evaluateCoreLiveEvidence(result) {
     brokerWrites.appliedCommands.some((command) =>
       typeof command === "string" && command.startsWith("linear.")) &&
     Number.isSafeInteger(work?.workNodeCount) && work.workNodeCount > 0 &&
+    work?.planCreatedByBroker === true &&
     work?.allWorkDone === true && gate?.reworkCount === 0 &&
+    gate?.gateCount === 1 && gate?.checklistChecked === true &&
     gate?.phase === "in-review" && delivery?.branchCount === 1 &&
     delivery?.deliveredMarkerReadBack === true &&
     typeof delivery?.deliveryBranch === "string" &&

@@ -12,6 +12,14 @@ const ROOT_COMMENT_MARKER = "<!-- symphony root\n";
 const TIMELINE_MARKER = /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/u;
 const TIMELINE_HEADING = /^\*\*Performer (warning|error|Turn completed) \([^\n]{1,160}\)\*\*/u;
 const MAX_COMMENT_LENGTH = 16_384;
+const ROOT_GATE_TITLE = "[Root Gate] Acceptance Checklist";
+const ROOT_GATE_CHECKS = Object.freeze([
+  ["root-facts", "Root目标和最新Root facts仍然一致"],
+  ["work-evidence", "每个有效Work child都有匹配的completion evidence"],
+  ["git-checks", "声明的Git checks通过，且worktree状态符合交付要求"],
+  ["blockers", "所有Root blocker都处于Done或Canceled"],
+  ["delivery", "当前commit和delivery branch满足Root delivery precondition"],
+]);
 
 export function createRunScopedLinearOperator({
   developmentToken,
@@ -975,6 +983,10 @@ function runState(fixture, root, issues) {
     typeof description === "string" && description.includes("human_kind: plan_approval"));
   const work = treeIssues.filter(({ description }) =>
     typeof description === "string" && description.includes("kind: work"));
+  const gateNodes = treeIssues.filter(({ title, parent }) =>
+    title === ROOT_GATE_TITLE && parent?.id === fixture.rootId);
+  const gateChecklistChecked = gateNodes.length === 1 &&
+    gateNodes[0].description === rootGateIssueDescription(fixture.rootId, true);
   const managedComment = comments.map(({ body }) => body)
     .find((body) => typeof body === "string" && body.startsWith("Symphony\n") &&
       body.includes(ROOT_COMMENT_MARKER) && body.endsWith("\n-->"));
@@ -988,14 +1000,29 @@ function runState(fixture, root, issues) {
     approvalState: approval?.state?.name,
     planApprovalCount: treeIssues.filter(({ description }) =>
       typeof description === "string" && description.includes("human_kind: plan_approval")).length,
+    childCount: treeIssues.length,
     treeMatches: Boolean(approval?.parent?.id === fixture.rootId) &&
       work.length > 0 && work.every(({ parent }) => Boolean(parent?.id)),
     workStates: work.map(({ state }) => state?.name),
+    managedCommentPresent: managedComment !== undefined,
     performerId: field(managedComment, "performer_id"),
     ...(providerInputTokens === undefined ? {} : { providerInputTokens }),
     deliveryBranch: field(managedComment, "delivery_branch"),
     reworkCount: work.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
+    gateCount: gateNodes.length,
+    gateChecklistChecked,
   });
+}
+
+function rootGateIssueDescription(rootId, checked) {
+  const description = [
+    "## Root Gate Checklist",
+    ...ROOT_GATE_CHECKS.map(([id, text]) =>
+      "- [" + (checked ? "x" : " ") + "] \`" + id + "\`: " + text),
+  ].join("\n");
+  return description + "\n\n<!-- symphony managed marker\nmanaged_marker: " +
+    rootId + ":root-gate\n-->\n\n<!-- symphony work metadata\nkind: work\n" +
+    "origin: symphony\ncompleted_input_hash: none\n-->";
 }
 
 function issueDepth(issue, issues) {

@@ -28,6 +28,14 @@ const FIRST_MANAGED_COMMENT_BUDGET_MS = 30_000;
 const FIRST_PLANNING_TURN_BUDGET_MS = 120_000;
 const FIRST_PLANNING_INPUT_TOKEN_BUDGET = 300_000;
 const FIRST_PLANNING_POLL_INTERVAL_MS = 2_000;
+const ROOT_GATE_TITLE = "[Root Gate] Acceptance Checklist";
+const ROOT_GATE_CHECKS = Object.freeze([
+  ["root-facts", "Root目标和最新Root facts仍然一致"],
+  ["work-evidence", "每个有效Work child都有匹配的completion evidence"],
+  ["git-checks", "声明的Git checks通过，且worktree状态符合交付要求"],
+  ["blockers", "所有Root blocker都处于Done或Canceled"],
+  ["delivery", "当前commit和delivery branch满足Root delivery precondition"],
+]);
 
 export function createTurnLaneTracker(log, now = Date.now) {
   const active = new Set();
@@ -420,9 +428,6 @@ export async function runCoreLiveE2E({
     });
     fixtures = [blocker, yielded, dependent];
     await linear.createBlockerRelation({ lock, runId, blocker, dependent });
-    await Promise.all(fixtures.map((fixture) => linear.seedPlan({
-      lock, runId, fixture, preflight,
-    })));
     assertRunActive(deadline);
     evidence.push({
       step: "root_created",
@@ -530,11 +535,18 @@ export async function runCoreLiveE2E({
         blockerPlan.performerId,
       ),
     });
+    const blockedDependentState = await linear.readRunState({ fixture: dependent });
+    if (!rootUntouched(blockedDependentState)) {
+      throw stableError("e2e_blocked_root_mutated");
+    }
     evidence.push({
       step: "blocker_order_verified",
       status: "passed",
       blockerPlanned: true,
       dependentUntouched: true,
+      dependentChildCount: blockedDependentState.childCount,
+      dependentManagedCommentAbsent: blockedDependentState.managedCommentPresent === false,
+      dependentPerformerAbsent: blockedDependentState.performerId === undefined,
     });
 
     const [waitingBlocker, yieldedPlan] = await pollUntil(
@@ -655,9 +667,13 @@ export async function runCoreLiveE2E({
     evidence.push(
       { step: "work_completed", status: "passed",
         workNodeCount: yieldedCompleted.workStates.length,
-        allWorkDone: yieldedCompleted.workStates.every((state) => state === "Done") },
+        allWorkDone: yieldedCompleted.workStates.every((state) => state === "Done"),
+        planCreatedByBroker: appliedBrokerCommands.filter((command) =>
+          command === "linear.issue.create_child").length >= 2 },
       { step: "root_gate_passed", status: "passed",
         reworkCount: yieldedCompleted.reworkCount,
+        gateCount: yieldedCompleted.gateCount,
+        checklistChecked: yieldedCompleted.gateChecklistChecked,
         phase: yieldedCompleted.phase },
       {
         step: "branch_delivered",
@@ -993,12 +1009,18 @@ export function rootInstruction(filename, content) {
     `Create a file named ${filename} at the repository root.`,
     `Its content must be exactly ${JSON.stringify(content)}.`,
     "Make no other changes.",
-    "Planning phase: The Root already contains exactly one Work child and one Human Plan Approval child. In one planning Turn, use only linear.status.set; use linear.read only if the current facts do not identify the exact child, and do not create or add children.",
+    "Planning phase: If current Root facts show an unresolved blocker, do not claim the Root, create children, or run a Plan; end the Turn without mutation.",
+    "For an eligible Root with no workflow children, create exactly one Work child titled \"[Work] Create marker\" and exactly one Human child titled \"[Human Action] Approve Plan\" through linear.issue.create_child, using managed markers <root_issue_id>:work and <root_issue_id>:plan-approval, then read back both children and end the planning Turn.",
+    "Copy the Human child issue.updated_at and current Git HEAD from fresh facts, use linear.status.set to set that Human child to In Progress, read back the applied result, and then end the planning Turn.",
     "Use the minimum necessary broker commands and do not explain the plan in prose.",
     "Do not inspect files or edit the workspace during planning; do not run shell commands, create the requested file, commit, or deliver until after approval.",
-    "Find the exact child titled \"[Human Action] Approve Plan\" with the plan_approval managed marker, copy its current issue.updated_at and Git HEAD verbatim, then use linear.status.set to set it to In Progress; wait for applied or already_applied, then end the planning Turn.",
+    "The Human child must use the plan_approval managed marker and remain Todo until the human approval action changes it to Done.",
     "Do not edit, commit, or deliver during the planning Turn or while the Human child is In Progress.",
-    "Execution phase: only after the Human Plan Approval child is Done, perform the Work, mark it Done, commit, and deliver.",
+    "Execution phase: only after the Human Plan Approval child is Done, perform the Work, mark it Done, and commit.",
+    "After Work and Human children are resolved, create exactly one " + ROOT_GATE_TITLE +
+      " Work child with marker <root_issue_id>:root-gate and this exact unchecked checklist: " +
+      rootGateDescription(false) + ". Run fresh Git checks, update the same Gate child to this exact checked checklist: " +
+      rootGateDescription(true) + ", read it back, then deliver through root.deliver.",
   ].join(" ");
 }
 
@@ -1014,6 +1036,7 @@ export function planReady(state) {
   return state?.approvalState === "In Progress" &&
     state.planApprovalCount === 1 &&
     state.treeMatches === true &&
+    state.gateCount === 0 &&
     rootWorkUntouched(state) &&
     Boolean(state.performerId);
 }
@@ -1021,9 +1044,11 @@ export function planReady(state) {
 export function rootUntouched(state) {
   return state?.rootState === "Todo" &&
     state.approvalState === "Todo" &&
-    state.planApprovalCount === 1 &&
-    state.treeMatches === true &&
-    rootWorkUntouched(state) &&
+    state.planApprovalCount === 0 &&
+    state.childCount === 0 &&
+    state.gateCount === 0 &&
+    state.treeMatches === false &&
+    state.managedCommentPresent === false &&
     state.performerId === undefined;
 }
 
@@ -1031,6 +1056,13 @@ function rootWorkUntouched(state) {
   return Array.isArray(state?.workStates) &&
     state.workStates.length > 0 &&
     state.workStates.every((value) => value === "Todo" || value === "Canceled");
+}
+
+function rootGateDescription(checked) {
+  return [
+    "## Root Gate Checklist",
+    ...ROOT_GATE_CHECKS.map(([id, text]) => `- [${checked ? "x" : " "}] \`${id}\`: ${text}`),
+  ].join("\n");
 }
 
 function rootAdvancedPastApproval(state) {
@@ -1074,7 +1106,9 @@ async function waitForRootCompletion({
   }
   if (
     completed.reworkCount !== 0 ||
-    completed.workStates.some((state) => state !== "Done")
+    completed.workStates.some((state) => state !== "Done") ||
+    completed.gateCount !== 1 ||
+    completed.gateChecklistChecked !== true
   ) {
     throw stableError("e2e_workflow_incomplete");
   }

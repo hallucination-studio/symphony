@@ -222,6 +222,9 @@ function passingEvidence() {
       status: "passed",
       blockerPlanned: true,
       dependentUntouched: true,
+      dependentChildCount: 0,
+      dependentManagedCommentAbsent: true,
+      dependentPerformerAbsent: true,
     };
     if (step === "human_yield_verified") return {
       step,
@@ -278,10 +281,12 @@ function passingEvidence() {
       appliedCommands: ["linear.status.set", "git.commit", "root.deliver"],
     };
     if (step === "work_completed") return {
-      step, status: "passed", workNodeCount: 1, allWorkDone: true,
+      step, status: "passed", workNodeCount: 1, planCreatedByBroker: true,
+      allWorkDone: true,
     };
     if (step === "root_gate_passed") return {
-      step, status: "passed", reworkCount: 0, phase: "in-review",
+      step, status: "passed", reworkCount: 0, gateCount: 1,
+      checklistChecked: true, phase: "in-review",
     };
     if (step === "branch_delivered") return {
       step, status: "passed", branchCount: 1,
