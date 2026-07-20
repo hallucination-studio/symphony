@@ -728,7 +728,21 @@ export async function runCoreLiveE2E({
       evidence,
     });
   } catch (error) {
-    result = { status: "failed", runId, reason: sanitize(error), evidence };
+    result = {
+      status: "failed",
+      runId,
+      reason: sanitize(error),
+      ...(project
+        ? {
+            projectMode: project.retainProject ? "retained" : "temporary",
+            projectSlugId: project.projectSlugId,
+          }
+        : {}),
+      ...(fixtures.length > 0
+        ? { rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier) }
+        : {}),
+      evidence,
+    };
     log({ event: "e2e_run_failed", reason: result.reason });
   }
 
@@ -750,7 +764,10 @@ export async function runCoreLiveE2E({
       project,
       fixtures,
       scope,
-    }, { log }),
+    }, {
+      log,
+      skipLinearCleanup: environment.SYMPHONY_E2E_SKIP_LINEAR_CLEANUP === "1",
+    }),
     finalEvidence: () => ({
       step: "request_budget_verified",
       status: "passed",
@@ -758,6 +775,9 @@ export async function runCoreLiveE2E({
       firstManagedCommentDurationMs,
       firstPlanningTurnDurationMs,
       firstPlanningInputTokens,
+      linearCleanup: environment.SYMPHONY_E2E_SKIP_LINEAR_CLEANUP === "1"
+        ? "skipped"
+        : "completed",
     }),
     write: (value) => writeEvidence(runId, value, config.secrets),
   });
@@ -768,24 +788,36 @@ export async function runCoreLiveE2E({
 
 export async function cleanupCoreLiveResources(
   { harness, linear, lock, runId, project, fixtures = [], scope },
-  { cleanupScope = cleanupRunScope, log = () => {} } = {},
+  {
+    cleanupScope = cleanupRunScope,
+    log = () => {},
+    skipLinearCleanup = false,
+  } = {},
 ) {
   const failures = [];
+  if (skipLinearCleanup && project) {
+    log({
+      event: "e2e_linear_cleanup_skipped",
+      project_slug_id: project.projectSlugId,
+    });
+  }
   const actions = [
     [Boolean(harness), "conductor", "e2e_conductor_cleanup_failed", () => harness.close()],
-    [Boolean(project), "linear", "e2e_linear_cleanup_failed", () => linear.cleanup({
-      lock,
-      runId,
-      projectId: project.projectId,
-      labelId: project.labelId,
-      marker: project.marker,
-      ...(typeof project.retainProject === "boolean"
-        ? { retainProject: project.retainProject }
-        : {}),
-      ...(project.retainProject
-        ? { rootIds: fixtures.map(({ rootId }) => rootId) }
-        : {}),
-    })],
+    ...(!skipLinearCleanup
+      ? [[Boolean(project), "linear", "e2e_linear_cleanup_failed", () => linear.cleanup({
+          lock,
+          runId,
+          projectId: project.projectId,
+          labelId: project.labelId,
+          marker: project.marker,
+          ...(typeof project.retainProject === "boolean"
+            ? { retainProject: project.retainProject }
+            : {}),
+          ...(project.retainProject
+            ? { rootIds: fixtures.map(({ rootId }) => rootId) }
+            : {}),
+        })]]
+      : []),
     [Boolean(scope), "run_scope", "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
     [Boolean(lock), "lock", "e2e_lock_release_failed", () => lock.release()],
   ];

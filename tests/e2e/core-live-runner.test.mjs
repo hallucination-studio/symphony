@@ -395,6 +395,48 @@ test("core live cleanup attempts every acquired resource and reports stable fail
   ]);
 });
 
+test("core live cleanup can retain Linear resources while releasing local resources", async () => {
+  const attempts = [];
+  const events = [];
+  const failures = await cleanupCoreLiveResources({
+    harness: { async close() { attempts.push("harness"); } },
+    linear: { async cleanup() { attempts.push("linear"); } },
+    lock: { async release() { attempts.push("lock"); } },
+    runId: "run-1",
+    project: { projectSlugId: "project-slug-1" },
+    scope: { root: "/private/run-scope" },
+  }, {
+    skipLinearCleanup: true,
+    async cleanupScope(scope) { attempts.push(["scope", scope]); },
+    log(event) { events.push(event); },
+  });
+
+  assert.deepEqual(attempts, ["harness", ["scope", { root: "/private/run-scope" }], "lock"]);
+  assert.deepEqual(events, [{
+    event: "e2e_linear_cleanup_skipped",
+    project_slug_id: "project-slug-1",
+  }, {
+    event: "e2e_cleanup_started",
+    resource: "conductor",
+  }, {
+    event: "e2e_cleanup_completed",
+    resource: "conductor",
+  }, {
+    event: "e2e_cleanup_started",
+    resource: "run_scope",
+  }, {
+    event: "e2e_cleanup_completed",
+    resource: "run_scope",
+  }, {
+    event: "e2e_cleanup_started",
+    resource: "lock",
+  }, {
+    event: "e2e_cleanup_completed",
+    resource: "lock",
+  }]);
+  assert.deepEqual(failures, []);
+});
+
 test("core live final evidence is written after cleanup and cleanup can fail a passed scenario", async () => {
   const events = [];
   let written;
