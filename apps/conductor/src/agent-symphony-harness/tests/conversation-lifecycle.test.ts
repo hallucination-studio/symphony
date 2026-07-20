@@ -41,13 +41,16 @@ test("Conversation pointer CAS conflict reaps the orphan bootstrap", async () =>
 
 test("claim persists and reads back the exact Conversation pointer before a Turn permit", async () => {
   let persistedPerformerId: string | undefined;
+  let bootstrapWorkspace: string | undefined;
   const lifecycle = createLifecycle({
     onClaim: (performerId) => { persistedPerformerId = performerId; },
+    onBootstrapWorkspace: (workspaceRoot) => { bootstrapWorkspace = workspaceRoot; },
   });
 
   const result = await lifecycle.claim(unclaimedView());
 
   assert.equal(persistedPerformerId, "conversation-1");
+  assert.equal(bootstrapWorkspace, "/worktrees/root-1");
   assert.deepEqual(result, {
     kind: "ready",
     permit: {
@@ -86,6 +89,7 @@ function createLifecycle(options: {
   freshView?: V3RootRunView;
   onWorkspace?(): void;
   onBootstrap?(): void;
+  onBootstrapWorkspace?(workspaceRoot: string): void;
   onClaim?(performerId: string): void;
   onReconstruct?(): void;
   onAbandon?(performerId: string): void;
@@ -121,8 +125,9 @@ function createLifecycle(options: {
       },
     },
     performer: {
-      async openRootConversation() {
+      async openRootConversation(input) {
         options.onBootstrap?.();
+        options.onBootstrapWorkspace?.(input.workspaceRoot);
         return { result: {
           protocol_version: "1", request_id: "bootstrap-1",
           performer_profile_id: "profile-1", performer_id: "conversation-1",

@@ -7,20 +7,61 @@ import { RootConversationLifecycle } from "../internal/RootConversationLifecycle
 test("Conversation retry replaces the exact stale pointer and preserves Root facts", async () => {
   let expectedPointer: string | undefined;
   let replacementPointer: string | undefined;
+  const events: string[] = [];
   const lifecycle = retryLifecycle({
     onReplace(expected, replacement) {
       expectedPointer = expected;
       replacementPointer = replacement;
     },
+    onWorkspace: () => { events.push("workspace"); },
+    onBootstrap: () => { events.push("bootstrap"); },
   });
 
   const result = await lifecycle.retry(claimedView(), "conversation-1");
 
   assert.equal(expectedPointer, "conversation-1");
   assert.equal(replacementPointer, "conversation-2");
+  assert.deepEqual(events, ["workspace", "bootstrap"]);
   assert.equal(result.kind, "ready");
   assert.deepEqual(claimedView().workflowNodes, []);
   assert.equal("attempt" in (result as object), false);
+});
+
+test("Conversation retry uses the newly ensured Root workspace even when read-back omits it", async () => {
+  const view = claimedView();
+  delete view.gitWorkspace;
+  let bootstrapWorkspace: string | undefined;
+  const lifecycle = retryLifecycle({
+    onBootstrapWorkspace: (workspaceRoot) => { bootstrapWorkspace = workspaceRoot; },
+  });
+
+  const result = await lifecycle.retry(view, "conversation-1");
+
+  assert.equal(result.kind, "ready");
+  assert.equal(bootstrapWorkspace, "/worktrees/root-1");
+  assert.deepEqual(result.permit.workspace, {
+    branch: "symphony/runs/sym-1",
+    worktreePath: "/worktrees/root-1",
+    rootIssueId: "root-1",
+  });
+});
+
+test("Conversation retry fails closed on a Root or branch-mismatched ensured workspace", async () => {
+  let bootstrapCalls = 0;
+  const lifecycle = retryLifecycle({
+    workspace: {
+      branch: "symphony/runs/other-root",
+      worktreePath: "/worktrees/root-1",
+      rootIssueId: "root-1",
+    },
+    onBootstrap: () => { bootstrapCalls += 1; },
+  });
+
+  await assert.rejects(
+    lifecycle.retry(claimedView(), "conversation-1"),
+    /git_workspace_identity_conflict/u,
+  );
+  assert.equal(bootstrapCalls, 0);
 });
 
 test("stale Conversation retry is rejected before bootstrap", async () => {
@@ -119,12 +160,15 @@ test("acknowledge rejects stale observation and terminal Root without mutation",
 function retryLifecycle(options: {
   bootstrapFailure?: boolean;
   onBootstrap?(): void;
+  onBootstrapWorkspace?(workspaceRoot: string): void;
+  onWorkspace?(): void;
   onReplace?(expected: string | undefined, replacement: string): void;
   onBlock?(block: object): void;
   onTimeline?(): void;
   onClear?(): void;
   reconstructCleared?: boolean;
   terminalBlocked?: boolean;
+  workspace?: { branch: string; worktreePath: string; rootIssueId?: string };
 } = {}) {
   let reconstructCalls = 0;
   return new RootConversationLifecycle({
@@ -136,10 +180,14 @@ function retryLifecycle(options: {
       async fixedReadyProfile() { return profile(); },
     },
     workspaces: { async ensureWorkspace() {
-      return { branch: "symphony/runs/sym-1", worktreePath: "/worktrees/root-1", rootIssueId: "root-1" };
+      options.onWorkspace?.();
+      return options.workspace ?? {
+        branch: "symphony/runs/sym-1", worktreePath: "/worktrees/root-1", rootIssueId: "root-1",
+      };
     } },
-    performer: { async openRootConversation() {
+    performer: { async openRootConversation(input) {
       options.onBootstrap?.();
+      options.onBootstrapWorkspace?.(input.workspaceRoot);
       return { result: options.bootstrapFailure ? {
         protocol_version: "1", request_id: "retry-1", performer_profile_id: "profile-1",
         error_code: "provider_auth_unavailable", sanitized_reason: "Profile authentication unavailable.",

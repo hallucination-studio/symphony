@@ -54,6 +54,7 @@ test("Performer bootstrap returns its pointer and stays alive for the first Root
 
   const output = await processBoundary.openRootConversation({
     profileId: "profile-1",
+    workspaceRoot: runtimeRoot,
     command: {
       protocol_version: "1",
       request_id: "request-1",
@@ -72,7 +73,7 @@ test("Performer bootstrap returns its pointer and stays alive for the first Root
   assert.equal(processBoundary.hasPendingBootstrap("profile-1"), true);
   assert.equal(processBoundary.hasPendingBootstrap("profile-2"), false);
   assert.deepEqual(deadlines, [300_000]);
-  assert.equal(invocation?.workingDirectory, undefined);
+  assert.equal(invocation?.workingDirectory, runtimeRoot);
   assert.equal(invocation?.extraPipeCount, 2);
   const requestIndex = invocation!.arguments.indexOf("--open-conversation-request-path");
   const request = JSON.parse(await readFile(invocation!.arguments[requestIndex + 1]!, "utf8"));
@@ -90,6 +91,37 @@ test("Performer bootstrap returns its pointer and stays alive for the first Root
   assert.equal(processExited, true);
   assert.equal(processBoundary.hasPendingBootstrap("profile-1"), false);
   assert.deepEqual(deadlines, [300_000, 1_000, 60_000]);
+});
+
+test("Performer bootstrap rejects an invalid workspace before process launch", async () => {
+  const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-invalid-workspace-"));
+  let spawned = false;
+  const process = createProcess(runtimeRoot, {
+    async run() {
+      spawned = true;
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  await assert.rejects(
+    process.openRootConversation({
+      profileId: "profile-1",
+      workspaceRoot: path.join(runtimeRoot, "missing-worktree"),
+      command: {
+        protocol_version: "1",
+        request_id: "request-invalid-workspace",
+        performer_profile_id: "profile-1",
+        codex_turn_settings: {
+          model: "gpt-5.2-codex",
+          reasoning_effort: "high",
+          is_fast_mode_enabled: false,
+        },
+        hard_deadline_at: "2026-07-19T00:01:00Z",
+      },
+    }),
+    /performer_workspace_invalid/u,
+  );
+  assert.equal(spawned, false);
 });
 
 test("Performer process sends Root context only after protocol readiness", async () => {

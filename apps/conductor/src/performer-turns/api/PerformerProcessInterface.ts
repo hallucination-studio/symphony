@@ -17,6 +17,7 @@ export interface PerformerProcessInterface {
   openRootConversation(input: {
     profileId: string;
     command: JsonValue;
+    workspaceRoot: string;
   }): Promise<{ result: JsonValue }>;
   abandonRootConversation(performerId: string): Promise<void>;
   runRootTurn(input: PerformerRootTurnInput): Promise<{ result: JsonValue }>;

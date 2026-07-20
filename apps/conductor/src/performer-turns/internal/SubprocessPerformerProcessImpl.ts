@@ -7,7 +7,7 @@ import {
   decodeConductorPerformerRootTurnResult,
   type JsonValue,
 } from "@symphony/contracts";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 
@@ -55,7 +55,12 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
     return this.#pendingBootstrap?.profileId === profileId;
   }
 
-  async openRootConversation(input: { profileId: string; command: JsonValue }) {
+  async openRootConversation(input: {
+    profileId: string;
+    command: JsonValue;
+    workspaceRoot: string;
+  }) {
+    await assertWorkspaceRoot(input.workspaceRoot);
     const command = decodeConductorPerformerOpenRootConversationCommand(
       input.command,
     ) as unknown as JsonRecord;
@@ -90,6 +95,7 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
         this.options.environment(input.profileId),
         this.options.executable,
       ),
+      workingDirectory: input.workspaceRoot,
       deadlineMs: this.options.startupDeadlineMs,
       startupDeadlineMs: this.options.startupDeadlineMs,
       extraPipeCount: 2,
@@ -288,6 +294,22 @@ async function waitForJson(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`${prefix}_timeout`);
+}
+
+async function assertWorkspaceRoot(workspaceRoot: string): Promise<void> {
+  if (!workspaceRoot || workspaceRoot.includes("\0") || !path.isAbsolute(workspaceRoot)) {
+    throw new Error("performer_workspace_invalid");
+  }
+  try {
+    if (!(await stat(workspaceRoot)).isDirectory()) {
+      throw new Error("performer_workspace_invalid");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "performer_workspace_invalid") {
+      throw error;
+    }
+    throw new Error("performer_workspace_invalid");
+  }
 }
 
 function turnEnvironment(

@@ -1,4 +1,5 @@
 import type { JsonValue } from "@symphony/contracts";
+import path from "node:path";
 
 import type { GitWorkspace } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerProcessInterface } from "../../performer-turns/api/PerformerProcessInterface.js";
@@ -103,15 +104,19 @@ export class RootConversationLifecycle {
     if (!profile || profile.readiness !== "ready") {
       return { kind: "rejected", reason: "performer_profile_not_ready" };
     }
-    const workspace = await this.dependencies.workspaces.ensureWorkspace({
-      rootIssueId: view.root.issueId,
-      rootIdentifier: view.root.identifier,
-      baseBranch: this.dependencies.baseBranch,
-    });
+    const workspace = validatedWorkspace(
+      await this.dependencies.workspaces.ensureWorkspace({
+        rootIssueId: view.root.issueId,
+        rootIdentifier: view.root.identifier,
+        baseBranch: this.dependencies.baseBranch,
+      }),
+      view,
+    );
     const requestId = this.dependencies.requestId();
     const startedAt = this.dependencies.now();
     const bootstrap = await this.dependencies.performer.openRootConversation({
       profileId: profile.profileId,
+      workspaceRoot: workspace.worktreePath,
       command: {
         protocol_version: "1",
         request_id: requestId,
@@ -188,10 +193,19 @@ export class RootConversationLifecycle {
       || profile.profileId !== managed.performerProfileId) {
       return { kind: "rejected", reason: "performer_profile_not_ready" };
     }
+    const workspace = validatedWorkspace(
+      await this.dependencies.workspaces.ensureWorkspace({
+        rootIssueId: view.root.issueId,
+        rootIdentifier: view.root.identifier,
+        baseBranch: this.dependencies.baseBranch,
+      }),
+      view,
+    );
     const requestId = this.dependencies.requestId();
     const observedAt = this.dependencies.now();
     const bootstrap = await this.dependencies.performer.openRootConversation({
       profileId: profile.profileId,
+      workspaceRoot: workspace.worktreePath,
       command: openCommand(
         profile,
         requestId,
@@ -247,7 +261,7 @@ export class RootConversationLifecycle {
       return { kind: "abandoned", reason: "root_conversation_replace_conflict" };
     }
     const fresh = await this.dependencies.claims.reconstruct(view.root.issueId);
-    if (!replacementReadBackMatches(fresh, view, profile.profileId, performerId)) {
+    if (!replacementReadBackMatches(fresh, view, profile.profileId, performerId, workspace)) {
       await this.dependencies.performer.abandonRootConversation?.(performerId);
       return { kind: "abandoned", reason: "root_conversation_read_back_mismatch" };
     }
@@ -257,11 +271,7 @@ export class RootConversationLifecycle {
         rootIssueId: view.root.issueId,
         performerProfileId: profile.profileId,
         performerId,
-        workspace: {
-          branch: fresh.gitWorkspace!.branch,
-          worktreePath: fresh.gitWorkspace!.worktreePath,
-          rootIssueId: view.root.issueId,
-        },
+        workspace,
       },
     };
   }
@@ -367,6 +377,7 @@ function replacementReadBackMatches(
   original: V3RootRunView,
   profileId: string,
   performerId: string,
+  workspace: GitWorkspace,
 ): boolean {
   return fresh.root.issueId === original.root.issueId
     && fresh.root.state !== "Done"
@@ -378,8 +389,19 @@ function replacementReadBackMatches(
     && fresh.managedComment.retryBlock === undefined
     && fresh.profile?.profileId === profileId
     && fresh.profile.readiness === "ready"
-    && fresh.gitWorkspace?.branch === original.gitWorkspace?.branch
-    && fresh.gitWorkspace?.worktreePath === original.gitWorkspace?.worktreePath;
+    && fresh.gitWorkspace?.branch === workspace.branch
+    && fresh.gitWorkspace?.worktreePath === workspace.worktreePath;
+}
+
+function validatedWorkspace(viewWorkspace: GitWorkspace, view: V3RootRunView): GitWorkspace {
+  const expectedBranch = `symphony/runs/${view.root.identifier.toLowerCase()}`;
+  if (viewWorkspace.rootIssueId !== view.root.issueId
+    || viewWorkspace.branch !== expectedBranch
+    || !path.isAbsolute(viewWorkspace.worktreePath)
+    || viewWorkspace.worktreePath.includes("\0")) {
+    throw new Error("git_workspace_identity_conflict");
+  }
+  return viewWorkspace;
 }
 
 function claimReadBackMatches(
