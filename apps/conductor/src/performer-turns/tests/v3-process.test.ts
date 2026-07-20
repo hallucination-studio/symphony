@@ -69,6 +69,8 @@ test("Performer bootstrap returns its pointer and stays alive for the first Root
 
   assert.equal((output.result as { performer_id: string }).performer_id, "conversation-1");
   assert.equal(processExited, false);
+  assert.equal(processBoundary.hasPendingBootstrap("profile-1"), true);
+  assert.equal(processBoundary.hasPendingBootstrap("profile-2"), false);
   assert.deepEqual(deadlines, [300_000]);
   assert.equal(invocation?.workingDirectory, undefined);
   assert.equal(invocation?.extraPipeCount, 2);
@@ -86,6 +88,7 @@ test("Performer bootstrap returns its pointer and stays alive for the first Root
   });
   assert.equal((turn.result as { result_kind: string }).result_kind, "root_turn_completed");
   assert.equal(processExited, true);
+  assert.equal(processBoundary.hasPendingBootstrap("profile-1"), false);
   assert.deepEqual(deadlines, [300_000, 1_000, 60_000]);
 });
 

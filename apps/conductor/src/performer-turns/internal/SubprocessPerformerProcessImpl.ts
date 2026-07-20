@@ -51,6 +51,10 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
     },
   ) {}
 
+  hasPendingBootstrap(profileId: string) {
+    return this.#pendingBootstrap?.profileId === profileId;
+  }
+
   async openRootConversation(input: { profileId: string; command: JsonValue }) {
     const command = decodeConductorPerformerOpenRootConversationCommand(
       input.command,

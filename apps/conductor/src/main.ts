@@ -61,6 +61,16 @@ export async function runConductor(environment = process.env): Promise<void> {
       deadlineMs: 120_000,
     },
   );
+  const performer = new SubprocessPerformerProcessImpl(performerLane, {
+    runtimeRoot: path.join(config.dataRoot, "turns"),
+    executable: config.performerExecutable,
+    environment: (profileId) => performerProcessEnvironment(
+      config.codexBaseUrl,
+      { CODEX_HOME: profiles.codexHome(profileId) },
+    ),
+    startupDeadlineMs: 120_000,
+    cancellationGraceMs: 1_000,
+  });
   let stopping = false;
   const runtimeHandlers: { retry?: RootRetryBlockCommandHandler } = {};
   const protocol = new InheritedProtocolClient(input, output, {
@@ -109,6 +119,7 @@ export async function runConductor(environment = process.env): Promise<void> {
           head: snapshot.head, status: snapshot.status.items };
       },
       async profileReadiness(profileId) {
+        if (performer.hasPendingBootstrap(profileId)) return "ready";
         const result = await profileControl.status(profileId);
         const readiness = result.readiness;
         if (
@@ -122,16 +133,6 @@ export async function runConductor(environment = process.env): Promise<void> {
       },
     },
   );
-  const performer = new SubprocessPerformerProcessImpl(performerLane, {
-      runtimeRoot: path.join(config.dataRoot, "turns"),
-      executable: config.performerExecutable,
-      environment: (profileId) => performerProcessEnvironment(
-        config.codexBaseUrl,
-        { CODEX_HOME: profiles.codexHome(profileId) },
-      ),
-      startupDeadlineMs: 120_000,
-      cancellationGraceMs: 1_000,
-  });
   const readyProfile = async (profileId?: string) => {
     const file = await profiles.list();
     const id = profileId ?? file.activeProfileId;
