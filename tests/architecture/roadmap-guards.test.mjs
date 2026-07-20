@@ -167,4 +167,11 @@ test("safe explanatory vocabulary does not trigger implementation guards", () =>
     ),
     [],
   );
+  assert.deepEqual(
+    inspectAuthoredFile(
+      "apps/conductor/src/agent-symphony-harness/internal/RootConversationLifecycle.ts",
+      "interface RootWorkspaceEvidence { rootIssueId: string; }",
+    ),
+    [],
+  );
 });
