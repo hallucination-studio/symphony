@@ -193,6 +193,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         performerId, linear: gateway, git, delivery,
         ...(workspace ? { workspace } : {}),
         readGitHead: async () => (await git.inspect(workspace!)).head,
+        readFreshRootView: () => gateway.reconstructV3(view.root.issueId),
         deliveryContext: { baseBranch: config.baseBranch, title: view.root.title,
           body: view.root.description, treeDigest: digest(view.workflowNodes),
           checksDigest: digest([]) },

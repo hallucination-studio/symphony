@@ -2,6 +2,8 @@ import type { JsonValue } from "@symphony/contracts";
 import type { LinearGatewayInterface, LinearRootScopeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { GitWorkspace, GitWorkspaceInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { RootDeliveryInterface } from "../../root-delivery/api/RootDeliveryInterface.js";
+import type { V3RootRunView } from "../../root-workflow/api/Models.js";
+import { validateRootGateNodes } from "../../root-workflow/internal/RootGateChecklist.js";
 import type { AgentCommandBrokerInterface, AgentCommandResult } from "../api/AgentCommandBrokerInterface.js";
 import { dispatchAgentCommand, parseAgentCommand, type AgentCommand } from "./AgentCommandRegistry.js";
 import { TurnCommandBudget } from "./TurnCommandBudget.js";
@@ -23,6 +25,7 @@ interface BrokerOptions {
     treeDigest: string;
     checksDigest: string;
   };
+  readFreshRootView?: () => Promise<V3RootRunView>;
   budget?: TurnCommandBudget;
 }
 
@@ -171,6 +174,21 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
     if (!root || root.updated_at !== command.args.expected_root_version) return conflict(correlation, "linear_remote_version_changed", "Root version changed.");
     const expectedHead = requiredString(command.args.expected_head);
     if (await this.options.readGitHead() !== expectedHead) return conflict(correlation, "git_head_changed", "Root worktree HEAD changed.");
+    if (!this.options.readFreshRootView) {
+      return rejected(correlation, "root_gate_unverified", "Root Gate facts are unavailable.");
+    }
+    const freshView = await this.options.readFreshRootView();
+    if (freshView.root.issueId !== command.root_issue_id ||
+        freshView.root.updatedAt !== command.args.expected_root_version ||
+        !freshView.workflowTreeComplete) {
+      return conflict(correlation, "root_gate_facts_changed", "Root Gate facts changed before delivery.");
+    }
+    const gateError = validateRootGateNodes(
+      command.root_issue_id,
+      freshView.workflowNodes,
+      true,
+    );
+    if (gateError) return rejected(correlation, gateError, "Root Gate checklist is not confirmed.");
     const result = await delivery.deliver({
       rootIssueId: command.root_issue_id,
       workspace,
