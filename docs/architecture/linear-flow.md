@@ -93,7 +93,9 @@ connection续页。两者分别计数，不能用protocol调用数推断physical
 
 Podium可以在单次操作或rate-limit窗口内做bounded request coalescing和memory cache以减少读取。
 compact command-specific fresh read可以只返回ownership、current Conversation、terminal和bounded scope
-事实，但缓存与compact read都只优化I/O；不能替代dispatch完整事实，不能决定Root readiness、mutation
+identity/version facts；当Agent需要寻址scope内节点时，可以附带closed native state、node kind和human kind，
+但不返回description、managed marker、SDK object或任意metadata。缓存与compact read都只优化I/O；
+不能替代dispatch完整事实，不能决定Root readiness、mutation
 scope、current Conversation、remote precondition或业务完成。mutation及其semantic read-back始终使用
 last-responsible-point fresh facts。
 

@@ -112,7 +112,7 @@ const ROOT_SCOPE_ROOT_QUERY = `
 const ROOT_SCOPE_CHILDREN_QUERY = `
   query SymphonyRootScopeChildren($parentIds: [ID!]!, $cursor: String) {
     issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
-      nodes { id identifier updatedAt project { id } parent { id } }
+      nodes { id identifier updatedAt description state { name } project { id } parent { id } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -236,11 +236,12 @@ interface RootScopeIssueFact {
   id: string;
   identifier: string;
   updatedAt: string;
+  description?: string | null;
+  state: { name: string };
   project?: { id: string } | null;
   parent?: { id: string } | null;
 }
 interface RootScopeRootFact extends RootScopeIssueFact {
-  state: { name: string };
   comments: IssueTreeFact["comments"];
 }
 interface RootScopeRootData { issue?: RootScopeRootFact | null }
@@ -1060,6 +1061,9 @@ export class LinearSdkImpl implements LinearClientInterface {
       issueId: string;
       identifier: string;
       parentIssueId?: string;
+      state?: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
+      nodeKind?: "work" | "human";
+      humanKind?: "plan_approval" | "planned_input" | "runtime_input";
       updatedAt: string;
     }> = [{
       issueId: root.id,
@@ -1094,10 +1098,14 @@ export class LinearSdkImpl implements LinearClientInterface {
           if (issues.length >= MAX_TREE_NODES) throw new Error("linear_tree_bounds_exceeded");
           seenIds.add(fact.id);
           nextParentIds.push(fact.id);
+          const managed = parseManagedDescription(fact.description ?? "");
           issues.push({
             issueId: fact.id,
             identifier: fact.identifier,
             parentIssueId: fact.parent.id,
+            state: linearIssueState(fact.state.name),
+            ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
+            ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
             updatedAt: timestampValue(fact.updatedAt),
           });
         }

@@ -120,6 +120,9 @@ export interface LinearClientInterface {
       issueId: string;
       identifier: string;
       parentIssueId?: string;
+      state?: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
+      nodeKind?: "work" | "human";
+      humanKind?: "plan_approval" | "planned_input" | "runtime_input";
       updatedAt: string;
     }>;
     observedAt: string;

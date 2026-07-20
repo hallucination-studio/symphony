@@ -401,6 +401,11 @@
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
         "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "node_kind": { "enum": ["work", "human"] },
+        "human_kind": {
+          "enum": ["plan_approval", "planned_input", "runtime_input"]
+        },
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },

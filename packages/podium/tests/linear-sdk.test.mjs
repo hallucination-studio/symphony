@@ -1016,6 +1016,7 @@ test("compact Root scope reads only authority and bounded Issue versions", async
       }
       const nodes = variables.parentIds.includes("root-1") ? [{
         id: "work-1", identifier: "SYM-2", updatedAt: "2026-07-20T00:00:01Z",
+        description: "", state: { name: "Todo" },
         project: { id: "project-1" }, parent: { id: "root-1" },
       }] : [];
       return { data: { issues: {
@@ -1030,13 +1031,13 @@ test("compact Root scope reads only authority and bounded Issue versions", async
   assert.equal(queries.length, 3);
   assert.match(queries[0], /query SymphonyRootScopeRoot/u);
   assert.match(queries[1], /query SymphonyRootScopeChildren/u);
-  assert.doesNotMatch(queries[1], /description|labels|comments|inverseRelations|body/iu);
+  assert.doesNotMatch(queries[1], /labels|comments|inverseRelations|body/iu);
   assert.deepEqual(scope, {
     rootIssueId: "root-1", conductorId: "conductor-1", performerId: "conversation-1",
     terminal: false,
     issues: [
       { issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00.000Z" },
-      { issueId: "work-1", identifier: "SYM-2", parentIssueId: "root-1", updatedAt: "2026-07-20T00:00:01.000Z" },
+      { issueId: "work-1", identifier: "SYM-2", parentIssueId: "root-1", state: "Todo", updatedAt: "2026-07-20T00:00:01.000Z" },
     ],
     observedAt: scope.observedAt,
   });

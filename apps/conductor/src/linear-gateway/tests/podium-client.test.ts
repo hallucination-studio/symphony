@@ -66,6 +66,30 @@ test("fresh Root scope uses the compact Podium query without reconstructing a Tr
   assert.deepEqual(requests, ["resolve_conductor_project", "get_root_scope"]);
 });
 
+test("Agent Linear read returns requested direct children from the fresh Root scope", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    if (body.kind === "get_root_scope") return scopeResult();
+    throw new Error("complete Tree read forbidden");
+  });
+  await gateway.resolveProject();
+  const scope = await gateway.readFreshRootScope("root-1");
+
+  assert.deepEqual(await gateway.read({
+    rootIssueId: "root-1",
+    issueId: "root-1",
+    include: ["issue", "children"],
+    scope,
+  }), {
+    issue: { issue_id: "root-1", identifier: "SYM-1", updated_at: now },
+    children: [{ issue_id: "work-1", identifier: "SYM-2",
+      parent_issue_id: "root-1", state: "Todo", node_kind: "work",
+      updated_at: now }, { issue_id: "human-1", identifier: "SYM-3",
+      parent_issue_id: "root-1", state: "Todo", node_kind: "human",
+      human_kind: "plan_approval", updated_at: now }],
+  });
+});
+
 test("V3 gateway claim uses exact Root CAS and closed Primary Comment", async () => {
   let mutation: Record<string, unknown> | undefined;
   const gateway = createGateway(async (body) => {
@@ -180,6 +204,9 @@ function scopeResult() { return { kind: "root_scope", root_issue_id: "root-1",
   conductor_id: "conductor-1", performer_id: "conversation-1", terminal: false,
   issues: [{ issue_id: "root-1", identifier: "SYM-1", updated_at: now },
     { issue_id: "work-1", identifier: "SYM-2", parent_issue_id: "root-1",
+      state: "Todo", node_kind: "work", updated_at: now },
+    { issue_id: "human-1", identifier: "SYM-3", parent_issue_id: "root-1",
+      state: "Todo", node_kind: "human", human_kind: "plan_approval",
       updated_at: now }], observed_at: now }; }
 
 function root(issueId = "root-1") { return { issue_id: issueId,

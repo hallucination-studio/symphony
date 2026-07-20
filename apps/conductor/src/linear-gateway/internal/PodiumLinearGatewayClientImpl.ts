@@ -262,6 +262,15 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
         ...(issue.parent_issue_id === undefined ? {} : {
           parent_issue_id: string(issue.parent_issue_id, "linear_root_scope_invalid"),
         }),
+        ...(issue.state === undefined ? {} : {
+          state: linearIssueState(issue.state),
+        }),
+        ...(issue.node_kind === undefined ? {} : {
+          node_kind: rootScopeNodeKind(issue.node_kind),
+        }),
+        ...(issue.human_kind === undefined ? {} : {
+          human_kind: rootScopeHumanKind(issue.human_kind),
+        }),
       };
     });
     return {
@@ -285,7 +294,12 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
     }
     const issue = input.scope.issues.find(({ issue_id }) => issue_id === input.issueId);
     if (!issue) throw new Error("linear_target_out_of_scope");
-    return { issue, include: input.include.slice(0, 16) } as unknown as JsonValue;
+    return {
+      issue,
+      ...(input.include.includes("children") ? {
+        children: input.scope.issues.filter(({ parent_issue_id }) => parent_issue_id === input.issueId),
+      } : {}),
+    } as unknown as JsonValue;
   }
 
   async readRootContext(rootIssueId: string) {
@@ -669,6 +683,20 @@ function linearIssueState(value: JsonValue | undefined): LinearIssueState {
     return value;
   }
   throw new Error("linear_issue_state_invalid");
+}
+
+function rootScopeNodeKind(value: JsonValue): "work" | "human" {
+  if (value === "work" || value === "human") return value;
+  throw new Error("linear_root_scope_invalid");
+}
+
+function rootScopeHumanKind(
+  value: JsonValue,
+): "plan_approval" | "planned_input" | "runtime_input" {
+  if (value === "plan_approval" || value === "planned_input" || value === "runtime_input") {
+    return value;
+  }
+  throw new Error("linear_root_scope_invalid");
 }
 
 function protocolError(response: Record<string, JsonValue>): Error {

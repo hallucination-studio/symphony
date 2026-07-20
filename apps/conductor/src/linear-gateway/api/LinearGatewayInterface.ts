@@ -10,6 +10,9 @@ export interface LinearRootScopeSnapshot {
     identifier?: string;
     updated_at: string;
     parent_issue_id?: string;
+    state?: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
+    node_kind?: "work" | "human";
+    human_kind?: "plan_approval" | "planned_input" | "runtime_input";
   }>;
 }
 
