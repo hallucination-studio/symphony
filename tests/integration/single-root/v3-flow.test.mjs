@@ -13,6 +13,7 @@ import { AgentRootContextBuilder } from "../../../apps/conductor/dist/agent-symp
 import { BoundedLinearTreeContextImpl } from "../../../apps/conductor/dist/linear-tree/internal/BoundedLinearTreeContextImpl.js";
 import { GlobalPerformerLane } from "../../../apps/conductor/dist/performer-turns/internal/GlobalPerformerLane.js";
 import { SubprocessPerformerProcessImpl } from "../../../apps/conductor/dist/performer-turns/internal/SubprocessPerformerProcessImpl.js";
+import { createRootGateDescription, ROOT_GATE_TITLE } from "../../../apps/conductor/dist/root-workflow/internal/RootGateChecklist.js";
 
 test("one Root persists its Conversation before one V3 business Turn", async () => {
   const order = [];
@@ -24,7 +25,11 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
     conductorId: "conductor-1", baseBranch: "main", now: () => "2026-07-19T00:00:00Z",
     requestId: () => "open-1", bootstrapDeadlineMs: 60_000,
     profiles: { async activeReadyProfile() { return profile(); } },
-    workspaces: { async ensureWorkspace() { order.push("workspace"); return rootWorkspace; } },
+    workspaces: {
+      async ensureWorkspace() { order.push("workspace"); return rootWorkspace; },
+      async inspect(workspace) { order.push("workspace-inspect");
+        return { branch: workspace.branch, head: "abc" }; },
+    },
     performer: { async openRootConversation(input) {
       order.push("bootstrap");
       return performer.openRootConversation(input);
@@ -60,6 +65,7 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
         return { kind: "applied", summary: "read back" };
       },
     },
+    readFreshRootView: async () => view,
     async readGitHead() { return "abc"; }, workspace: rootWorkspace,
     git: {
       async commit() { writes.push("git.commit"); return { kind: "committed", commit: "def" }; },
@@ -117,6 +123,7 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
     kind: "not_started", readiness: "waiting_human",
   });
   view.workflowNodes = [{ ...humanNode("Done"), answer: "Approved" }];
+  view.workflowNodes.push(rootGateNode());
   assert.equal((await turns.run("root-1")).kind, "completed");
   assert.deepEqual(turnResults[1].turn_usage, {
     wall_time_ms: 1, context_bytes: turnResults[1].turn_usage.context_bytes,
@@ -139,7 +146,7 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
     { kind: "work", title: "Implementation" },
     { kind: "rework", title: "[Rework] Root Gate Findings" },
   ]);
-  assert.deepEqual(order, ["workspace", "bootstrap", "cas", "claim-read-back",
+  assert.deepEqual(order, ["workspace", "workspace-inspect", "bootstrap", "cas", "claim-read-back",
     "turn-read", "context", "turn-process", "turn-read", "observe",
     "turn-read", "turn-read", "context", "turn-process", "turn-read", "observe"]);
   assert.deepEqual(writes, [
@@ -162,6 +169,8 @@ test("one Root rejects stale retry and clears only its acknowledged Retry Block"
     profiles: { async fixedReadyProfile() { return profile(); } },
     workspaces: { async ensureWorkspace() {
       return { ...workspace(), worktreePath: runtimeRoot };
+    }, async inspect(workspace) {
+      return { branch: workspace.branch, head: "abc" };
     } },
     performer,
     claims: {
@@ -300,6 +309,12 @@ function humanNode(state) {
     updatedAt: "2026-07-19T00:00:02Z", origin: "symphony",
     managedMarker: "human-write" };
 }
+function rootGateNode() {
+  return { issueId: "gate-1", identifier: "SYM-3", parentIssueId: "root-1",
+    siblingOrder: 1, kind: "work", state: "Done", title: ROOT_GATE_TITLE,
+    description: createRootGateDescription(true), updatedAt: "2026-07-19T00:00:03Z",
+    origin: "symphony", managedMarker: "root-1:root-gate" };
+}
 function contextSection(items, cap) {
   return { items, cap, hasMore: false, includeErrors: [] };
 }
@@ -327,7 +342,7 @@ function claimedView() { const view = rootView(); view.root.state = "In Progress
 function blockedView(retryBlock) { const view = claimedView();
   view.managedComment = { ...view.managedComment, retryBlock }; return view; }
 function rootView() { return { root: { issueId: "root-1", identifier: "SYM-1",
-  state: "Todo", title: "Build V3", description: "", updatedAt: "2026-07-19T00:00:00Z" },
+  state: "Todo", title: "Build V3", description: "", updatedAt: "version-1" },
   conductorId: "conductor-1", resolvedProjectId: "project-1",
   profile: { profileId: "profile-1", readiness: "ready" }, workflowNodes: [],
   workflowTreeComplete: true, blockerRelations: [], attentionProblems: [] }; }
