@@ -15,6 +15,7 @@ import { coreLiveStepIds, evaluateCoreLiveEvidence } from "./core-live-verdict.m
 import { acquireGlobalLock, coreLiveLockRoot, lockPathForConfig } from "./global-lock.mjs";
 import { createE2ELogger } from "./logging.mjs";
 import { createCoreLiveMonitor } from "./core-live-monitor.mjs";
+import { readRootGitEvidence } from "./git-evidence.mjs";
 import {
   cleanupRunScope,
   createRunScope,
@@ -596,11 +597,14 @@ export async function runCoreLiveE2E({
     const completedRoots = [];
     for (const [index, plan] of planningStates.entries()) {
       const [, filename, expected] = rootInputs[index];
+      const inputDescription = rootInstruction(filename, expected);
       monitor.startBoundary("rootCompletion", fixtures[index].rootId);
       completedRoots.push(await waitForRootCompletion({
         linear,
         fixture: fixtures[index],
         plan,
+        priority: rootInputs[index][3],
+        inputDescription,
         git,
         filename,
         expected,
@@ -617,6 +621,37 @@ export async function runCoreLiveE2E({
     }
     monitor.completeBoundary("allRoots");
     const completedRoot = completedRoots[completedRoots.length - 1];
+    const expectedRootOrder = fixtures
+      .map(({ rootId }, index) => ({ rootId, priority: rootInputs[index][3] }))
+      .sort((left, right) => left.priority - right.priority)
+      .map(({ rootId }) => rootId);
+    const monitorFacts = monitor.evidence();
+    if (!sameArray(monitorFacts.planningOrder, expectedRootOrder) ||
+        !sameArray(monitorFacts.executionOrder, expectedRootOrder)) {
+      throw stableError("e2e_root_priority_order_invalid");
+    }
+    if (completedRoots.length !== fixtures.length ||
+        new Set(completedRoots.map(({ completionEvidence }) => completionEvidence.root_issue_id)).size !== fixtures.length) {
+      throw stableError("e2e_root_completion_evidence_mismatch");
+    }
+    const completionRecords = completedRoots.map(({ completionEvidence }) => completionEvidence);
+    const uniqueEvidenceValues = (field) =>
+      new Set(completionRecords.map((record) => record[field])).size === completionRecords.length;
+    if (!uniqueEvidenceValues("workspace_id") || !uniqueEvidenceValues("delivery_branch") ||
+        !uniqueEvidenceValues("delivery_head") ||
+        new Set(completionRecords.flatMap((record) => record.work_issue_ids)).size !==
+          completionRecords.reduce((total, record) => total + record.work_issue_ids.length, 0) ||
+        !uniqueEvidenceValues("human_issue_id") || !uniqueEvidenceValues("gate_issue_id")) {
+      throw stableError("e2e_root_completion_evidence_mismatch");
+    }
+    evidence.push({
+      step: "root_completion_evidence",
+      status: "passed",
+      rootCount: completedRoots.length,
+      roots: completionRecords,
+      planningOrder: monitorFacts.planningOrder,
+      executionOrder: monitorFacts.executionOrder,
+    });
     const laneEvidence = turnLane.evidence();
     if (
       laneEvidence.activeTurnCount !== 0 ||
@@ -650,27 +685,56 @@ export async function runCoreLiveE2E({
     if (!linearReadBack || !gitReadBack || !deliveryReadBack) {
       throw stableError("e2e_broker_write_evidence_missing");
     }
+    const brokerRootFacts = completedRoots.map((completed, index) => {
+      const rootIssueId = fixtures[index].rootId;
+      const rootResults = correlatedBrokerResults.filter((item) => item.rootIssueId === rootIssueId);
+      const rootCommandsByTurn = Map.groupBy(rootResults, ({ turnId }) => turnId);
+      const rootDeliveryTurn = [...rootCommandsByTurn.entries()].find(([, commands]) =>
+        commands.some(({ command }) => command === "git.commit") &&
+        commands.some(({ command }) => command === "root.deliver"));
+      const commands = rootResults.map(({ command }) => command);
+      return {
+        rootIssueId,
+        performerId: completed.performerId,
+        linearReadBack: commands.some((command) => command.startsWith("linear.")),
+        gitReadBack: rootDeliveryTurn?.[1].some(({ command }) => command === "git.commit") === true,
+        deliveryReadBack: rootDeliveryTurn?.[1].some(({ command }) => command === "root.deliver") === true,
+        correlatedTurnIds: [...rootCommandsByTurn.keys()],
+      };
+    });
+    if (!brokerRootFacts.every(({ linearReadBack: linear, gitReadBack: git, deliveryReadBack: delivery }) =>
+      linear && git && delivery)) {
+      throw stableError("e2e_broker_write_evidence_missing");
+    }
     evidence.push(
       { step: "work_completed", status: "passed",
-        workNodeCount: completedRoots.reduce((total, completed) => total + completed.workStates.length, 0),
-        allWorkDone: completedRoots.every((completed) =>
-          completed.workStates.every((state) => state === "Done")),
+        workNodeCount: completedRoots.reduce((total, completed) =>
+          total + completed.completionEvidence.work_issue_ids.length, 0),
+        allWorkDone: completedRoots.every(({ completionEvidence }) =>
+          completionEvidence.work_issue_ids.length > 0),
         planCreatedByBroker: appliedBrokerCommands.filter((command) =>
           command === "linear.issue.create_child").length >= 2 },
       { step: "root_gate_passed", status: "passed",
         reworkCount: completedRoots.reduce((total, completed) => total + completed.reworkCount, 0),
-        gateCount: completedRoots.reduce((total, completed) => total + completed.gateCount, 0),
-        checklistChecked: completedRoots.every((completed) => completed.gateChecklistChecked),
+        gateCount: completedRoots.filter(({ completionEvidence }) =>
+          completionEvidence.gate_issue_id).length,
+        checklistChecked: completedRoots.every(({ completionEvidence }) =>
+          completionEvidence.gate_all_checked),
         phase: completedRoot.phase },
       {
         step: "branch_delivered",
         status: "passed",
-        branchCount: 1,
+        branchCount: completedRoots.length,
         deliveryBranch: completedRoot.deliveryBranch,
-        deliveredMarkerReadBack: true,
+        deliveryBranches: completedRoots.map(({ completionEvidence }) =>
+          completionEvidence.delivery_branch),
+        deliveredMarkerReadBack: completedRoots.every(({ gitEvidence }) =>
+          gitEvidence.changedPaths.length === 1),
       },
       { step: "linear_in_review", status: "passed",
-        rootState: completedRoot.rootState, phase: completedRoot.phase },
+        rootState: completedRoot.rootState, phase: completedRoot.phase,
+        rootCount: completedRoots.filter(({ rootState, phase }) =>
+          rootState === "In Review" && phase === "in-review").length },
       { step: "broker_writes_verified", status: "passed",
         linearReadBack, gitReadBack, deliveryReadBack,
         rootIssueId: fixtures[fixtures.length - 1].rootId,
@@ -681,6 +745,7 @@ export async function runCoreLiveE2E({
           turnId,
           commands: [...new Set(commands.map(({ command }) => command))],
         })),
+        rootFacts: brokerRootFacts,
         appliedCommands: [...new Set(appliedBrokerCommands)] },
     );
     log({ event: "e2e_step_completed", step: "root_completion" });
@@ -1021,6 +1086,73 @@ export function planReady(state) {
     Boolean(state.performerId);
 }
 
+export function createRootCompletionEvidence({
+  fixture,
+  priority,
+  inputDescription,
+  filename,
+  expectedContent,
+  planningTurnIds,
+  executionTurnIds,
+  performerId,
+  workspace,
+  delivery,
+  state,
+  gitEvidence,
+} = {}) {
+  const gateCheckIds = ROOT_GATE_CHECKS.map(([id]) => id);
+  if (!safeEvidenceId(fixture?.rootId) || !safeEvidenceId(fixture?.rootIdentifier) ||
+      !Number.isSafeInteger(priority) || priority < 1 || priority > 3 ||
+      typeof inputDescription !== "string" || typeof filename !== "string" ||
+      typeof expectedContent !== "string" || !safeEvidenceId(performerId) ||
+      !Array.isArray(planningTurnIds) || planningTurnIds.length === 0 ||
+      !planningTurnIds.every(safeEvidenceId) || !Array.isArray(executionTurnIds) ||
+      executionTurnIds.length === 0 || !executionTurnIds.every(safeEvidenceId) ||
+      state?.rootDescription !== inputDescription || state.rootState !== "In Review" ||
+      state.phase !== "in-review" || state.performerId !== performerId ||
+      !Array.isArray(state.workIssueIds) || state.workIssueIds.length === 0 ||
+      new Set(state.workIssueIds).size !== state.workIssueIds.length ||
+      !state.workIssueIds.every(safeEvidenceId) ||
+      !Array.isArray(state.workStates) || state.workStates.length !== state.workIssueIds.length ||
+      !state.workStates.every((value) => value === "Done") || !safeEvidenceId(state.humanIssueId) ||
+      !safeEvidenceId(state.gateIssueId) || !sameArray(state.gateCheckIds, gateCheckIds) ||
+      state.gateChecklistChecked !== true || !safeEvidenceId(workspace?.workspaceId) ||
+      !safeEvidenceBranch(workspace?.branch) || !safeEvidenceSha(workspace?.baselineHead) ||
+      !["local_branch", "remote_branch", "pull_request"].includes(delivery?.kind) ||
+      !safeEvidenceBranch(delivery?.branch) ||
+      !safeEvidenceSha(delivery?.head) || state.deliveryBranch !== delivery.branch ||
+      workspace.branch !== delivery.branch || !gitEvidence ||
+      gitEvidence.branch !== workspace.branch || gitEvidence.baselineHead !== workspace.baselineHead ||
+      gitEvidence.head !== delivery.head || gitEvidence.cleanStatus !== true ||
+      gitEvidence.commonGitDirValid !== true || gitEvidence.commitCount < 1 ||
+      !sameArray(gitEvidence.changedPaths, [filename]) ||
+      !/^[0-9a-f]{64}$/u.test(gitEvidence.outputDigest ?? "")) {
+    throw stableError("e2e_root_completion_evidence_mismatch");
+  }
+  return Object.freeze({
+    root_issue_id: fixture.rootId,
+    root_identifier: fixture.rootIdentifier,
+    priority,
+    input_description_digest: createHash("sha256").update(inputDescription, "utf8").digest("hex"),
+    planning_turn_ids: [...planningTurnIds],
+    execution_turn_ids: [...executionTurnIds],
+    performer_id: performerId,
+    workspace_id: workspace.workspaceId,
+    delivery_kind: delivery.kind,
+    delivery_branch: delivery.branch,
+    delivery_head: delivery.head,
+    work_issue_ids: [...state.workIssueIds],
+    human_issue_id: state.humanIssueId,
+    gate_issue_id: state.gateIssueId,
+    gate_check_ids: [...state.gateCheckIds],
+    gate_all_checked: true,
+    changed_paths: [...gitEvidence.changedPaths],
+    output_digest: gitEvidence.outputDigest,
+    root_state: state.rootState,
+    phase: state.phase,
+  });
+}
+
 export function rootUntouched(state) {
   return state?.rootState === "Todo" &&
     state.approvalState === "Todo" &&
@@ -1045,6 +1177,23 @@ function rootGateDescription(checked) {
   ].join("\n");
 }
 
+function safeEvidenceId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
+}
+
+function safeEvidenceBranch(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u.test(value);
+}
+
+function safeEvidenceSha(value) {
+  return typeof value === "string" && /^[0-9a-f]{40}$/u.test(value);
+}
+
+function sameArray(left, right) {
+  return Array.isArray(left) && left.length === right.length &&
+    left.every((value, index) => value === right[index]);
+}
+
 function rootAdvancedPastApproval(state) {
   return state?.phase === "working" ||
     state?.phase === "gating" ||
@@ -1066,6 +1215,8 @@ async function waitForRootCompletion({
   runtimeEvidence,
   monitor,
   log,
+  priority,
+  inputDescription,
 }) {
   const completed = await pollUntil(
     async () => {
@@ -1097,13 +1248,34 @@ async function waitForRootCompletion({
   ) {
     throw stableError("e2e_workflow_incomplete");
   }
-  const delivered = await readDeliveredMarker(
-    git.repositoryRoot,
-    completed.deliveryBranch,
-    filename,
+  const monitorRoot = monitor.evidence().roots.find(
+    (root) => root.rootIssueId === fixture.rootId,
   );
-  if (delivered !== expected) throw stableError("e2e_delivery_marker_mismatch");
-  return completed;
+  if (!monitorRoot?.workspace || !monitorRoot.delivery) {
+    throw stableError("e2e_root_completion_evidence_mismatch");
+  }
+  const gitEvidence = await readRootGitEvidence({
+    repositoryRoot: git.repositoryRoot,
+    branch: monitorRoot.delivery.branch,
+    baselineHead: monitorRoot.workspace.baselineHead,
+    filename,
+    expectedContent: expected,
+  });
+  const completionEvidence = createRootCompletionEvidence({
+    fixture,
+    priority,
+    inputDescription,
+    filename,
+    expectedContent: expected,
+    planningTurnIds: monitorRoot.planningTurnIds,
+    executionTurnIds: monitorRoot.executionTurnIds,
+    performerId: completed.performerId,
+    workspace: monitorRoot.workspace,
+    delivery: monitorRoot.delivery,
+    state: completed,
+    gitEvidence,
+  });
+  return { ...completed, gitEvidence, monitorRoot, completionEvidence };
 }
 
 async function readGitProgressFacts(repositoryRoot) {

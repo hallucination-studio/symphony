@@ -592,11 +592,14 @@ test("batched run states use one Project snapshot and isolate each Root Tree", a
 
   assert.equal(requests, 1);
   assert.equal(states[0].phase, "working");
+  assert.deepEqual(states[0].workIssueIds, ["work-1"]);
   assert.deepEqual(states[0].workStates, ["Done"]);
   assert.equal(states[0].approvalId, undefined);
   assert.equal(states[1].phase, "awaiting-human");
   assert.deepEqual(states[1].workStates, []);
   assert.equal(states[1].approvalId, "approval-2");
+  assert.equal(states[1].humanIssueId, "approval-2");
+  assert.deepEqual(states[1].gateCheckIds, []);
 });
 
 test("Linear fixture returns only sanitized Root comment evidence", async () => {

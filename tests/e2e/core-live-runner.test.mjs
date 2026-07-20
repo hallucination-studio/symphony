@@ -8,6 +8,7 @@ import {
   createRootProgressWatchdog,
   createRuntimeEvidenceTracker,
   createTurnLaneTracker,
+  createRootCompletionEvidence,
   finalizeCoreLiveResult,
   planReady,
   pollUntil,
@@ -15,6 +16,93 @@ import {
   rootUntouched,
   rootInstruction,
 } from "../../tools/e2e/core-live-runner.mjs";
+
+test("Root completion evidence binds each Root to its own workspace, output, Gate, and delivery", () => {
+  const evidence = createRootCompletionEvidence({
+    fixture: { rootId: "root-high", rootIdentifier: "SYM-1" },
+    priority: 1,
+    inputDescription: "Create `e2e-high.txt` at the repository root with exactly `high-priority root`. Before changing the repository, ask me to confirm the proposed plan.",
+    filename: "e2e-high.txt",
+    expectedContent: "high-priority root\n",
+    planningTurnIds: ["turn-plan-high"],
+    executionTurnIds: ["turn-execute-high"],
+    performerId: "conversation-high",
+    workspace: {
+      workspaceId: "root-high",
+      branch: "symphony/runs/sym-1",
+      baselineHead: "a".repeat(40),
+    },
+    delivery: {
+      kind: "local_branch",
+      branch: "symphony/runs/sym-1",
+      head: "b".repeat(40),
+    },
+    state: {
+      rootState: "In Review",
+      phase: "in-review",
+      rootDescription: "Create `e2e-high.txt` at the repository root with exactly `high-priority root`. Before changing the repository, ask me to confirm the proposed plan.",
+      performerId: "conversation-high",
+      deliveryBranch: "symphony/runs/sym-1",
+      workIssueIds: ["work-high"],
+      workStates: ["Done"],
+      humanIssueId: "human-high",
+      gateIssueId: "gate-high",
+      gateCheckIds: ["root-facts", "work-evidence", "git-checks", "blockers", "delivery"],
+      gateChecklistChecked: true,
+    },
+    gitEvidence: {
+      branch: "symphony/runs/sym-1",
+      baselineHead: "a".repeat(40),
+      head: "b".repeat(40),
+      changedPaths: ["e2e-high.txt"],
+      outputDigest: "d".repeat(64),
+      cleanStatus: true,
+      commitCount: 1,
+      commonGitDirValid: true,
+    },
+  });
+
+  assert.deepEqual(evidence, {
+    root_issue_id: "root-high",
+    root_identifier: "SYM-1",
+    priority: 1,
+    input_description_digest: "ecb2ee2eaaa742cee30c08f6a30c10c2c35cbea53392918e5a5c7f163d2f7d53",
+    planning_turn_ids: ["turn-plan-high"],
+    execution_turn_ids: ["turn-execute-high"],
+    performer_id: "conversation-high",
+    workspace_id: "root-high",
+    delivery_kind: "local_branch",
+    delivery_branch: "symphony/runs/sym-1",
+    delivery_head: "b".repeat(40),
+    work_issue_ids: ["work-high"],
+    human_issue_id: "human-high",
+    gate_issue_id: "gate-high",
+    gate_check_ids: ["root-facts", "work-evidence", "git-checks", "blockers", "delivery"],
+    gate_all_checked: true,
+    changed_paths: ["e2e-high.txt"],
+    output_digest: "d".repeat(64),
+    root_state: "In Review",
+    phase: "in-review",
+  });
+
+  assert.throws(
+    () => createRootCompletionEvidence({
+      fixture: { rootId: "root-high", rootIdentifier: "SYM-1" },
+      priority: 1,
+      inputDescription: "Create `e2e-high.txt` at the repository root with exactly `high-priority root`. Before changing the repository, ask me to confirm the proposed plan.",
+      filename: "e2e-high.txt",
+      expectedContent: "high-priority root\n",
+      planningTurnIds: ["turn-plan-high"],
+      executionTurnIds: ["turn-execute-high"],
+      performerId: "conversation-high",
+      workspace: { workspaceId: "root-low", branch: "symphony/runs/sym-3", baselineHead: "a".repeat(40) },
+      delivery: { kind: "local_branch", branch: "symphony/runs/sym-3", head: "b".repeat(40) },
+      state: { rootState: "In Review", phase: "in-review", rootDescription: "wrong" },
+      gitEvidence: { branch: "symphony/runs/sym-3", baselineHead: "a".repeat(40), head: "b".repeat(40), changedPaths: ["e2e-low.txt"], outputDigest: "d".repeat(64), cleanStatus: true, commitCount: 1, commonGitDirValid: true },
+    }),
+    /e2e_root_completion_evidence_mismatch/u,
+  );
+});
 
 test("one poll tick batches every fixture into one Project state read", async () => {
   const calls = [];
@@ -169,6 +257,11 @@ test("core live topology uses production boundaries and state-based completion",
   assert.doesNotMatch(source, /seedPlan|createBlockerRelation|updateRootScheduling|completeRoot|approvePlan/u);
   assert.match(source, /gateChecklistChecked/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
+  assert.match(source, /readRootGitEvidence/u);
+  assert.match(source, /createRootCompletionEvidence/u);
+  assert.match(source, /root_completion_evidence/u);
+  assert.match(source, /monitorFacts\.executionOrder/u);
+  assert.match(source, /rootFacts: brokerRootFacts/u);
   assert.match(source, /readRootCommentEvidence/u);
   assert.match(source, /root_comments_verified/u);
   const conductorSource = await readFile("apps/conductor/src/main.ts", "utf8");

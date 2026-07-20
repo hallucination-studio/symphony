@@ -306,6 +306,7 @@ export function createRunScopedLinearOperator({
         query CoreLiveRunState($rootId: String!, $projectId: String!) {
           issue(id: $rootId) {
             id
+            description
             state { name }
             labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
             comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
@@ -953,6 +954,8 @@ function runState(fixture, root, issues) {
     typeof description === "string" && description.includes("kind: work"));
   const gateNodes = treeIssues.filter(({ title, parent }) =>
     title === ROOT_GATE_TITLE && parent?.id === fixture.rootId);
+  const gateIssueId = gateNodes.length === 1 ? gateNodes[0].id : undefined;
+  const workNodes = work.filter(({ id }) => id !== gateIssueId);
   const gateChecklistChecked = gateNodes.length === 1 &&
     gateNodes[0].description === rootGateIssueDescription(fixture.rootId, true);
   const managedComment = comments.map(({ body }) => body)
@@ -971,12 +974,17 @@ function runState(fixture, root, issues) {
     childCount: treeIssues.length,
     treeMatches: Boolean(approval?.parent?.id === fixture.rootId) &&
       work.length > 0 && work.every(({ parent }) => Boolean(parent?.id)),
-    workStates: work.map(({ state }) => state?.name),
+    rootDescription: root.description,
+    workIssueIds: workNodes.map(({ id }) => id),
+    workStates: workNodes.map(({ state }) => state?.name),
+    humanIssueId: approval?.id,
+    gateIssueId,
+    gateCheckIds: gateNodes.length === 1 ? rootGateCheckIds(gateNodes[0].description) : [],
     managedCommentPresent: managedComment !== undefined,
     performerId: field(managedComment, "performer_id"),
     ...(providerInputTokens === undefined ? {} : { providerInputTokens }),
     deliveryBranch: field(managedComment, "delivery_branch"),
-    reworkCount: work.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
+    reworkCount: workNodes.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
     gateCount: gateNodes.length,
     gateChecklistChecked,
   });
@@ -991,6 +999,14 @@ function rootGateIssueDescription(rootId, checked) {
   return description + "\n\n<!-- symphony managed marker\nmanaged_marker: " +
     rootId + ":root-gate\n-->\n\n<!-- symphony work metadata\nkind: work\n" +
     "origin: symphony\ncompleted_input_hash: none\n-->";
+}
+
+function rootGateCheckIds(description) {
+  if (typeof description !== "string") return [];
+  return description.split("\n")
+    .slice(1, ROOT_GATE_CHECKS.length + 1)
+    .map((line) => line.match(/^- \[[ x]\] `([A-Za-z0-9][A-Za-z0-9._-]{0,63})`:/u)?.[1])
+    .filter((id) => id !== undefined);
 }
 
 function issueDepth(issue, issues) {
