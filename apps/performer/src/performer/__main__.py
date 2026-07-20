@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl, create_sdk
+from performer.command_broker.workspace_channel import WorkspaceCommandChannel
 from performer.contracts import validate
 from performer.conversation_protocol.host import ConversationFileHost
 from performer.events.event_mapper import root_turn_event
@@ -72,9 +73,10 @@ def main() -> None:
         )):
             raise SystemExit("invalid first Root Turn command correlation")
         _install_turn_environment(command)
-        RootTurnFileHost(_OpenedRootTurnRuntime(backend).run).run_command(
-            command, Path(start["result_path"]), args.event_sequence_start + 1
-        )
+        with WorkspaceCommandChannel(command):
+            RootTurnFileHost(_OpenedRootTurnRuntime(backend).run).run_command(
+                command, Path(start["result_path"]), args.event_sequence_start + 1
+            )
         return
     correlation = [args.turn_id, args.root_issue_id, args.performer_profile_id,
                    args.performer_id, args.context_digest]
@@ -88,10 +90,11 @@ def main() -> None:
         print(json.dumps(root_turn_event(ready, args.event_sequence_start,
                                          {"kind": "protocol_ready"}),
                          separators=(",", ":")), flush=True)
-        command = json.loads(sys.stdin.read())
-        RootTurnFileHost(RootTurnRuntime(backend).run).run_command(
-            command, args.root_turn_result_path, args.event_sequence_start + 1
-        )
+        command = validate("RootTurnCommand", json.loads(sys.stdin.read()))
+        with WorkspaceCommandChannel(command):
+            RootTurnFileHost(RootTurnRuntime(backend).run).run_command(
+                command, args.root_turn_result_path, args.event_sequence_start + 1
+            )
         return
     parser.error("a V3 conversation or Root Turn command is required")
 
