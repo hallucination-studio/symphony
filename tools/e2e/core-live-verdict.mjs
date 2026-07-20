@@ -11,6 +11,7 @@ const REQUIRED_STEPS = Object.freeze([
   "single_turn_lane_verified",
   "plan_ready",
   "plan_approved",
+  "root_completion_evidence",
   "work_completed",
   "root_gate_passed",
   "branch_delivered",
@@ -20,6 +21,22 @@ const REQUIRED_STEPS = Object.freeze([
   "request_budget_verified",
   "cleanup_completed",
 ]);
+const ROOT_GATE_CHECK_IDS = Object.freeze([
+  "root-facts",
+  "work-evidence",
+  "git-checks",
+  "blockers",
+  "delivery",
+]);
+const ROOT_FILES_BY_PRIORITY = Object.freeze({
+  1: "e2e-high.txt",
+  2: "e2e-medium.txt",
+  3: "e2e-low.txt",
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
+const SHA = /^[0-9a-f]{40}$/u;
+const DIGEST = /^[0-9a-f]{64}$/u;
 
 export function evaluateCoreLiveEvidence(result) {
   const evidence = new Map(
@@ -73,6 +90,12 @@ export function evaluateCoreLiveEvidence(result) {
     : [];
   const deliveryTurnGroup = correlatedTurnGroups.find(
     (group) => group?.turnId === brokerWrites?.deliveryTurnId,
+  );
+  const rootCompletion = evidence.get("root_completion_evidence");
+  const rootCompletionVerified = verifyRootCompletionEvidence(rootCompletion);
+  const brokerRootFactsVerified = verifyBrokerRootFacts(
+    brokerWrites?.rootFacts,
+    rootCompletion?.roots,
   );
   const multiRootSchedulingVerified =
     blocker?.blockerPlanned === true &&
@@ -154,11 +177,12 @@ export function evaluateCoreLiveEvidence(result) {
     Number.isSafeInteger(work?.workNodeCount) && work.workNodeCount > 0 &&
     work?.planCreatedByBroker === true &&
     work?.allWorkDone === true && gate?.reworkCount === 0 &&
-    gate?.gateCount === 1 && gate?.checklistChecked === true &&
-    gate?.phase === "in-review" && delivery?.branchCount === 1 &&
+    gate?.gateCount === 3 && gate?.checklistChecked === true &&
+    gate?.phase === "in-review" && delivery?.branchCount === 3 &&
     delivery?.deliveredMarkerReadBack === true &&
     typeof delivery?.deliveryBranch === "string" &&
-    linearReview?.rootState === "In Review" && linearReview?.phase === "in-review";
+    linearReview?.rootState === "In Review" && linearReview?.phase === "in-review" &&
+    rootCompletionVerified && brokerRootFactsVerified;
   return Object.freeze({
     verdict:
       missing.length === 0 &&
@@ -174,8 +198,75 @@ export function evaluateCoreLiveEvidence(result) {
     rootCommentsVerified,
     multiRootSchedulingVerified,
     runtimeBudgetVerified,
+    rootCompletionVerified,
     v3FactsVerified,
   });
+}
+
+function verifyRootCompletionEvidence(value) {
+  if (value?.status !== "passed" || value.rootCount !== 3 ||
+      !Array.isArray(value.roots) || value.roots.length !== 3 ||
+      !sameArray(value.planningOrder, value.executionOrder)) return false;
+  const roots = [...value.roots].sort((left, right) => (left?.priority ?? 99) - (right?.priority ?? 99));
+  const rootIds = roots.map((root) => root?.root_issue_id);
+  if (!sameArray(value.planningOrder, rootIds) || !sameArray(value.executionOrder, rootIds) ||
+      new Set(rootIds).size !== 3 ||
+      !roots.every((root, index) => validRootRecord(root, index + 1))) return false;
+  return [
+    "workspace_id",
+    "delivery_branch",
+    "delivery_head",
+    "human_issue_id",
+    "gate_issue_id",
+  ].every((field) => new Set(roots.map((root) => root[field])).size === 3) &&
+    new Set(roots.flatMap((root) => root.work_issue_ids)).size ===
+      roots.reduce((total, root) => total + root.work_issue_ids.length, 0);
+}
+
+function validRootRecord(root, priority) {
+  const startedAt = Date.parse(root?.started_at ?? "");
+  const completedAt = Date.parse(root?.completed_at ?? "");
+  const deliveryUrlValid = root?.delivery_kind === "pull_request"
+    ? /^https:\/\/[A-Za-z0-9.-]{1,253}(?:\/[A-Za-z0-9._:/-]{0,512})?$/u.test(root.pull_request_url ?? "")
+    : root?.pull_request_url === undefined;
+  return root?.priority === priority && SAFE_ID.test(root.root_issue_id ?? "") &&
+    SAFE_ID.test(root.root_identifier ?? "") && DIGEST.test(root.input_description_digest ?? "") &&
+    Array.isArray(root.planning_turn_ids) && root.planning_turn_ids.length > 0 &&
+    root.planning_turn_ids.every((turnId) => SAFE_ID.test(turnId)) &&
+    Array.isArray(root.execution_turn_ids) && root.execution_turn_ids.length > 0 &&
+    root.execution_turn_ids.every((turnId) => SAFE_ID.test(turnId)) &&
+    SAFE_ID.test(root.performer_id ?? "") && SAFE_ID.test(root.workspace_id ?? "") &&
+    ["local_branch", "remote_branch", "pull_request"].includes(root.delivery_kind) &&
+    SAFE_BRANCH.test(root.delivery_branch ?? "") && SHA.test(root.delivery_head ?? "") &&
+    Array.isArray(root.work_issue_ids) && root.work_issue_ids.length > 0 &&
+    root.work_issue_ids.every((issueId) => SAFE_ID.test(issueId)) &&
+    SAFE_ID.test(root.human_issue_id ?? "") && SAFE_ID.test(root.gate_issue_id ?? "") &&
+    sameArray(root.gate_check_ids, ROOT_GATE_CHECK_IDS) && root.gate_all_checked === true &&
+    sameArray(root.changed_paths, [ROOT_FILES_BY_PRIORITY[priority]]) &&
+    DIGEST.test(root.output_digest ?? "") && root.root_state === "In Review" &&
+    root.phase === "in-review" && deliveryUrlValid && Number.isSafeInteger(startedAt) &&
+    Number.isSafeInteger(completedAt) && completedAt >= startedAt &&
+    Number.isSafeInteger(root.duration_ms) && root.duration_ms === completedAt - startedAt;
+}
+
+function verifyBrokerRootFacts(facts, roots) {
+  if (!Array.isArray(facts) || facts.length !== 3 || !Array.isArray(roots) || roots.length !== 3) {
+    return false;
+  }
+  const rootById = new Map(roots.map((root) => [root.root_issue_id, root]));
+  return new Set(facts.map((fact) => fact?.rootIssueId)).size === 3 && facts.every((fact) => {
+    const root = rootById.get(fact?.rootIssueId);
+    return root && fact.performerId === root.performer_id &&
+      fact.linearReadBack === true && fact.gitReadBack === true &&
+      fact.deliveryReadBack === true && fact.planCreatedByBroker === true &&
+      Array.isArray(fact.correlatedTurnIds) && fact.correlatedTurnIds.length > 0 &&
+      fact.correlatedTurnIds.every((turnId) => SAFE_ID.test(turnId));
+  });
+}
+
+function sameArray(left, right) {
+  return Array.isArray(left) && left.length === right.length &&
+    left.every((value, index) => value === right[index]);
 }
 
 function physicalRequestCountsValid(runtimeBudget) {

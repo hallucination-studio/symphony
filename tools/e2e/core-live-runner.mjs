@@ -598,6 +598,7 @@ export async function runCoreLiveE2E({
     for (const [index, plan] of planningStates.entries()) {
       const [, filename, expected] = rootInputs[index];
       const inputDescription = rootInstruction(filename, expected);
+      const startedAt = new Date().toISOString();
       monitor.startBoundary("rootCompletion", fixtures[index].rootId);
       completedRoots.push(await waitForRootCompletion({
         linear,
@@ -608,6 +609,7 @@ export async function runCoreLiveE2E({
         git,
         filename,
         expected,
+        startedAt,
         deadline,
         pollIntervalMs,
         turnLane,
@@ -699,6 +701,7 @@ export async function runCoreLiveE2E({
         linearReadBack: commands.some((command) => command.startsWith("linear.")),
         gitReadBack: rootDeliveryTurn?.[1].some(({ command }) => command === "git.commit") === true,
         deliveryReadBack: rootDeliveryTurn?.[1].some(({ command }) => command === "root.deliver") === true,
+        planCreatedByBroker: commands.includes("linear.issue.create_child"),
         correlatedTurnIds: [...rootCommandsByTurn.keys()],
       };
     });
@@ -1092,6 +1095,8 @@ export function createRootCompletionEvidence({
   inputDescription,
   filename,
   expectedContent,
+  startedAt,
+  completedAt,
   planningTurnIds,
   executionTurnIds,
   performerId,
@@ -1101,6 +1106,11 @@ export function createRootCompletionEvidence({
   gitEvidence,
 } = {}) {
   const gateCheckIds = ROOT_GATE_CHECKS.map(([id]) => id);
+  const startedMs = Date.parse(startedAt ?? "");
+  const completedMs = Date.parse(completedAt ?? "");
+  const deliveryUrlValid = delivery?.kind === "pull_request"
+    ? safePullRequestUrl(delivery.pullRequestUrl)
+    : delivery?.pullRequestUrl === undefined;
   if (!safeEvidenceId(fixture?.rootId) || !safeEvidenceId(fixture?.rootIdentifier) ||
       !Number.isSafeInteger(priority) || priority < 1 || priority > 3 ||
       typeof inputDescription !== "string" || typeof filename !== "string" ||
@@ -1126,7 +1136,9 @@ export function createRootCompletionEvidence({
       gitEvidence.head !== delivery.head || gitEvidence.cleanStatus !== true ||
       gitEvidence.commonGitDirValid !== true || gitEvidence.commitCount < 1 ||
       !sameArray(gitEvidence.changedPaths, [filename]) ||
-      !/^[0-9a-f]{64}$/u.test(gitEvidence.outputDigest ?? "")) {
+      !/^[0-9a-f]{64}$/u.test(gitEvidence.outputDigest ?? "") ||
+      !deliveryUrlValid || !Number.isSafeInteger(startedMs) ||
+      !Number.isSafeInteger(completedMs) || completedMs < startedMs) {
     throw stableError("e2e_root_completion_evidence_mismatch");
   }
   return Object.freeze({
@@ -1134,6 +1146,9 @@ export function createRootCompletionEvidence({
     root_identifier: fixture.rootIdentifier,
     priority,
     input_description_digest: createHash("sha256").update(inputDescription, "utf8").digest("hex"),
+    started_at: startedAt,
+    completed_at: completedAt,
+    duration_ms: completedMs - startedMs,
     planning_turn_ids: [...planningTurnIds],
     execution_turn_ids: [...executionTurnIds],
     performer_id: performerId,
@@ -1141,6 +1156,7 @@ export function createRootCompletionEvidence({
     delivery_kind: delivery.kind,
     delivery_branch: delivery.branch,
     delivery_head: delivery.head,
+    ...(delivery.kind === "pull_request" ? { pull_request_url: delivery.pullRequestUrl } : {}),
     work_issue_ids: [...state.workIssueIds],
     human_issue_id: state.humanIssueId,
     gate_issue_id: state.gateIssueId,
@@ -1189,6 +1205,11 @@ function safeEvidenceSha(value) {
   return typeof value === "string" && /^[0-9a-f]{40}$/u.test(value);
 }
 
+function safePullRequestUrl(value) {
+  return typeof value === "string" &&
+    /^https:\/\/[A-Za-z0-9.-]{1,253}(?:\/[A-Za-z0-9._:/-]{0,512})?$/u.test(value);
+}
+
 function sameArray(left, right) {
   return Array.isArray(left) && left.length === right.length &&
     left.every((value, index) => value === right[index]);
@@ -1209,6 +1230,7 @@ async function waitForRootCompletion({
   git,
   filename,
   expected,
+  startedAt,
   deadline,
   pollIntervalMs,
   turnLane,
@@ -1267,6 +1289,8 @@ async function waitForRootCompletion({
     inputDescription,
     filename,
     expectedContent: expected,
+    startedAt,
+    completedAt: new Date().toISOString(),
     planningTurnIds: monitorRoot.planningTurnIds,
     executionTurnIds: monitorRoot.executionTurnIds,
     performerId: completed.performerId,
