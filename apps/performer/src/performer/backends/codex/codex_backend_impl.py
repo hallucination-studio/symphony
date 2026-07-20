@@ -6,7 +6,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from openai_codex import Codex, CodexConfig, Sandbox
+from openai_codex import Codex, CodexConfig, InvalidRequestError, Sandbox
 
 from performer.backends.provider_backend_interface import (
     ProviderBackendError,
@@ -96,6 +96,8 @@ class CodexBackendImpl:
         except ProviderConversationUnavailable:
             raise
         except Exception as exc:
+            if _is_missing_conversation(exc, command["performer_id"]):
+                raise ProviderConversationUnavailable("conversation_not_found") from exc
             raise ProviderBackendError(
                 _provider_failure_reason(exc),
                 code="provider_conversation_resume_failed",
@@ -168,6 +170,17 @@ class CodexBackendImpl:
         account = getattr(response, "account", None)
         root = getattr(account, "root", account)
         return getattr(root, "type", None)
+
+
+def _is_missing_conversation(error: Exception, performer_id: str) -> bool:
+    if not isinstance(error, InvalidRequestError) or error.code != -32600:
+        return False
+    match = re.fullmatch(
+        r"no rollout found for thread id ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})",
+        error.message,
+        flags=re.IGNORECASE,
+    )
+    return match is not None and match.group(1) == performer_id
 
 
 def _execution_sandbox(command: dict[str, Any]) -> Sandbox:

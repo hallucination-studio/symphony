@@ -5,6 +5,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+from openai_codex import InvalidRequestError
 
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl
 from performer.backends.provider_backend_interface import (
@@ -93,6 +94,32 @@ def test_root_turn_preserves_explicit_conversation_loss(root_command):
             raise ProviderConversationUnavailable("conversation_not_found")
     with pytest.raises(ProviderConversationUnavailable):
         CodexBackendImpl(LostConversation()).run_root_turn(root_command)
+
+
+def test_root_turn_maps_exact_missing_rollout_to_conversation_loss(root_command):
+    class MissingRollout(FakeCodex):
+        def thread_resume(self, thread_id, **kwargs):
+            raise InvalidRequestError(
+                -32600,
+                f"no rollout found for thread id {thread_id}",
+            )
+
+    with pytest.raises(ProviderConversationUnavailable) as raised:
+        CodexBackendImpl(MissingRollout()).run_root_turn(root_command)
+    assert raised.value.code == "conversation_not_found"
+
+
+def test_root_turn_does_not_guess_mismatched_rollout_loss(root_command):
+    class DifferentRollout(FakeCodex):
+        def thread_resume(self, thread_id, **kwargs):
+            raise InvalidRequestError(
+                -32600,
+                "no rollout found for thread id another-conversation",
+            )
+
+    with pytest.raises(ProviderBackendError) as raised:
+        CodexBackendImpl(DifferentRollout()).run_root_turn(root_command)
+    assert raised.value.code == "provider_conversation_resume_failed"
 
 
 def test_root_turn_reports_sanitized_resume_failure(root_command):
