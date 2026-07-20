@@ -126,6 +126,12 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 场景失败。不得以 dry-run、合成 observation、mock SDK 输出或“blocked artifact”
 代替步骤成功。
 
+仅在 core live runner 内启用 progress watchdog。completion polling 每次都重新读取
+Linear Root facts、所有本地 worktree 的 HEAD/status 和 branch refs；连续两个已完成
+Turn 同时满足这些事实不变且没有 correlated broker result 时，场景立即以
+`e2e_root_progress_stalled` 失败。任一 broker call、Linear 变化或本地 Git 变化都会
+重置计数；该计数不进入 production Conductor，也不持久化 workflow state。
+
 ## 5. Roadmap V1 覆盖矩阵
 
 状态含义：`covered` 表示 core live 场景应提供真实边界证据；`partially covered`

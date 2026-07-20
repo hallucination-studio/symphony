@@ -86,6 +86,11 @@ export function createTurnLaneTracker(log) {
       return completed.has(turnId) && owner?.rootIssueId === rootIssueId &&
         owner?.performerId === performerId;
     },
+    completedTurns(rootIssueId) {
+      return Object.freeze([...completed].filter(
+        (turnId) => turnOwners.get(turnId)?.rootIssueId === rootIssueId,
+      ));
+    },
   });
 }
 
@@ -197,6 +202,51 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
         ...(complexityWindowEnd
           ? { complexityWindowEnd: Object.freeze({ ...complexityWindowEnd }) } : {}),
       });
+    },
+    brokerCallCount(turnId) {
+      return brokerResults.filter((result) => result.turnId === turnId).length;
+    },
+  });
+}
+
+export function createRootProgressWatchdog({
+  rootIssueId,
+  turnLane,
+  runtimeEvidence,
+  readGitFacts,
+  log = () => undefined,
+  maxStalledTurns = 2,
+}) {
+  const observedTurns = new Set();
+  let previousFacts;
+  let stalledTurns = 0;
+  return Object.freeze({
+    async observe(linearState) {
+      const gitFacts = await readGitFacts();
+      const currentFacts = JSON.stringify({ linearState, gitFacts });
+      const completedTurns = turnLane.completedTurns(rootIssueId)
+        .filter((turnId) => !observedTurns.has(turnId));
+      for (const turnId of completedTurns) {
+        observedTurns.add(turnId);
+        const brokerCalls = runtimeEvidence.brokerCallCount(turnId);
+        const waiting = linearState?.phase === "awaiting-human" ||
+          linearState?.approvalState === "In Progress";
+        if (!waiting && previousFacts === currentFacts && brokerCalls === 0) {
+          stalledTurns += 1;
+        } else {
+          stalledTurns = 0;
+        }
+        if (stalledTurns >= maxStalledTurns) {
+          log({
+            event: "e2e_root_progress_stalled",
+            root_issue_id: rootIssueId,
+            stalled_turn_count: stalledTurns,
+          });
+          throw stableError("e2e_root_progress_stalled");
+        }
+      }
+      previousFacts = currentFacts;
+      return linearState;
     },
   });
 }
@@ -455,6 +505,9 @@ export async function runCoreLiveE2E({
       expected: `${runId}:yielded\n`,
       deadline,
       pollIntervalMs,
+      turnLane,
+      runtimeEvidence,
+      log,
     });
     assertRunActive(deadline);
     await linear.completeRoot({
@@ -843,9 +896,19 @@ async function waitForRootCompletion({
   expected,
   deadline,
   pollIntervalMs,
+  turnLane,
+  runtimeEvidence,
+  log,
 }) {
+  const progress = createRootProgressWatchdog({
+    rootIssueId: fixture.rootIssueId,
+    turnLane,
+    runtimeEvidence,
+    readGitFacts: () => readGitProgressFacts(git.repositoryRoot),
+    log,
+  });
   const completed = await pollUntil(
-    () => linear.readRunState({ fixture }),
+    async () => progress.observe(await linear.readRunState({ fixture })),
     (state) =>
       state.rootState === "In Review" &&
       state.phase === "in-review" &&
@@ -868,6 +931,28 @@ async function waitForRootCompletion({
   );
   if (delivered !== expected) throw stableError("e2e_delivery_marker_mismatch");
   return completed;
+}
+
+async function readGitProgressFacts(repositoryRoot) {
+  const [{ stdout: refs }, { stdout: worktrees }] = await Promise.all([
+    execute("git", ["-C", repositoryRoot, "for-each-ref", "--format=%(refname):%(objectname)",
+      "refs/heads"], { encoding: "utf8", timeout: 15_000 }),
+    execute("git", ["-C", repositoryRoot, "worktree", "list", "--porcelain"],
+      { encoding: "utf8", timeout: 15_000 }),
+  ]);
+  const paths = worktrees.split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
+  const states = await Promise.all(paths.map(async (worktree) => {
+    const [{ stdout: head }, { stdout: status }] = await Promise.all([
+      execute("git", ["-C", worktree, "rev-parse", "HEAD"],
+        { encoding: "utf8", timeout: 15_000 }),
+      execute("git", ["-C", worktree, "status", "--porcelain=v1", "--untracked-files=all"],
+        { encoding: "utf8", timeout: 15_000, maxBuffer: 1_048_576 }),
+    ]);
+    return { head: head.trim(), status: status.trim() };
+  }));
+  return Object.freeze({ refs: refs.trim(), worktrees: Object.freeze(states) });
 }
 
 async function readDeliveredMarker(repositoryRoot, branch, filename) {

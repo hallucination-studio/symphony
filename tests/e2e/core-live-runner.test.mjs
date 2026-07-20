@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   cleanupCoreLiveResources,
+  createRootProgressWatchdog,
   createRuntimeEvidenceTracker,
   createTurnLaneTracker,
   finalizeCoreLiveResult,
@@ -172,6 +173,60 @@ test("Turn lane pointer evidence requires the first Turn to use the read-back Co
   tracker.log(childEvent("turn-current", "turn_started", "root-a", "conversation-current"));
   assert.equal(tracker.observedConversation("root-a", "conversation-current"), false);
   assert.equal(tracker.observedConversation("root-a", "conversation-old"), true);
+});
+
+test("E2E progress watchdog fails after two completed no-effect Turns", async () => {
+  const lane = createTurnLaneTracker(() => {});
+  const runtime = createRuntimeEvidenceTracker(() => {});
+  const events = [];
+  const watchdog = createRootProgressWatchdog({
+    rootIssueId: "root-a", turnLane: lane, runtimeEvidence: runtime,
+    readGitFacts: async () => ({ refs: "main:abc", worktrees: [{ head: "abc", status: "" }] }),
+    log: (event) => events.push(event),
+  });
+  const state = { rootState: "In Progress", phase: "working", workStates: ["Todo"] };
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-a", "turn_started"));
+  lane.log(childEvent("turn-a", "turn_completed"));
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-b", "turn_started", "root-a", "conversation-a"));
+  lane.log(childEvent("turn-b", "turn_completed", "root-a", "conversation-a"));
+  await assert.rejects(watchdog.observe(state), /e2e_root_progress_stalled/u);
+  assert.deepEqual(events, [{
+    event: "e2e_root_progress_stalled", root_issue_id: "root-a", stalled_turn_count: 2,
+  }]);
+});
+
+test("E2E progress watchdog accepts broker, Linear, and local Git progress", async () => {
+  const lane = createTurnLaneTracker(() => {});
+  const runtime = createRuntimeEvidenceTracker(() => {});
+  let gitHead = "abc";
+  const watchdog = createRootProgressWatchdog({
+    rootIssueId: "root-a", turnLane: lane, runtimeEvidence: runtime,
+    readGitFacts: async () => ({ refs: `main:${gitHead}`, worktrees: [] }),
+  });
+  let state = { phase: "working", workStates: ["Todo"] };
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-a", "turn_started"));
+  lane.log(childEvent("turn-a", "turn_completed"));
+  runtime.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
+    event: "agent_broker_result", command: "linear.read", status: "read",
+    root_issue_id: "root-a", turn_id: "turn-a", performer_id: "conversation-a",
+  }) });
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-b", "turn_started", "root-a", "conversation-a"));
+  lane.log(childEvent("turn-b", "turn_completed", "root-a", "conversation-a"));
+  state = { phase: "working", workStates: ["In Progress"] };
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-c", "turn_started", "root-a", "conversation-a"));
+  lane.log(childEvent("turn-c", "turn_completed", "root-a", "conversation-a"));
+  gitHead = "def";
+  await watchdog.observe(state);
+  lane.log(childEvent("turn-d", "turn_started", "root-a", "conversation-a"));
+  lane.log(childEvent("turn-d", "turn_completed", "root-a", "conversation-a"));
+  await watchdog.observe({
+    phase: "awaiting-human", approvalState: "In Progress", workStates: ["In Progress"],
+  });
 });
 
 test("core live cleanup attempts every acquired resource and reports stable failures", async () => {
