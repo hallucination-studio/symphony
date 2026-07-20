@@ -87,3 +87,70 @@ def test_workspace_channel_rejects_a_symlinked_channel_directory(
     finally:
         for descriptor in (request_read, request_write, response_read, response_write):
             os.close(descriptor)
+
+
+def test_workspace_channel_rejects_replaced_fifo_and_cleans_up(
+    root_command: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    command = {**root_command, "workspace_root": str(tmp_path)}
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    try:
+        with WorkspaceCommandChannel(
+            command, request_fd=request_write, response_fd=response_read
+        ):
+            response_path = tmp_path / ".symphony/agent-command/response.fifo"
+            response_path.unlink()
+            response_path.write_text("replacement")
+            os.chmod(response_path, 0o600)
+            with pytest.raises(ValueError, match="agent_command_channel_invalid"):
+                run_command(
+                    ["linear", "read", "--args-json", '{"issue_id":"root-1","include":["issue"]}'],
+                    environment={
+                        "SYMPHONY_AGENT_COMMAND_CATALOG": '{"linear read":"linear.read"}',
+                    },
+                    working_directory=tmp_path,
+                )
+        assert (tmp_path / ".symphony").exists() is False
+    finally:
+        for descriptor in (request_read, request_write, response_read, response_write):
+            os.close(descriptor)
+
+
+def test_workspace_channel_cancellation_releases_cli_without_a_response_writer(
+    root_command: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    command = {**root_command, "workspace_root": str(tmp_path)}
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    failure: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            run_command(
+                ["linear", "read", "--args-json", '{"issue_id":"root-1","include":["issue"]}'],
+                environment={
+                    "SYMPHONY_AGENT_COMMAND_CATALOG": '{"linear read":"linear.read"}',
+                },
+                working_directory=tmp_path,
+            )
+        except BaseException as error:
+            failure.append(error)
+
+    try:
+        with WorkspaceCommandChannel(
+            command, request_fd=request_write, response_fd=response_read
+        ):
+            worker = threading.Thread(target=invoke)
+            worker.start()
+            assert os.read(request_read, 65_537).endswith(b"\n")
+        worker.join(timeout=1)
+        assert worker.is_alive() is False
+        assert isinstance(failure[0], ValueError)
+        assert str(failure[0]) == "agent_command_response_invalid"
+        assert (tmp_path / ".symphony").exists() is False
+    finally:
+        for descriptor in (request_read, request_write, response_read, response_write):
+            os.close(descriptor)

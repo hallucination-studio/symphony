@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -41,8 +41,10 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
   assert.equal((await lifecycle.claim(view)).kind, "ready");
 
   const commands = [];
+  const turnResults = [];
   const writes = [];
   const linearMutations = [];
+  let processFailure;
   const createBroker = (turnId) => new ScopedAgentCommandBrokerImpl({
     conductorId: "conductor-1", turnId, rootIssueId: "root-1",
     performerId: "conversation-1",
@@ -87,7 +89,14 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
             description: "Confirm the plan", write_id: "human-write",
             expected_remote_version: "version-1", expected_git_head: "abc" } });
       }
-      return performer.runRootTurn(input);
+      try {
+        const output = await performer.runRootTurn(input);
+        turnResults.push(output.result);
+        return output;
+      } catch (error) {
+        processFailure = error;
+        throw error;
+      }
     } },
     observe: async () => { order.push("observe"); },
     turnId: (() => { let sequence = 0; return () => `turn-${++sequence}`; })(),
@@ -95,7 +104,13 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
       maxContextBytes: 65_536, maxBrokerCalls: 10, maxMutations: 8 },
   });
   const humanYield = await turns.run("root-1");
-  assert.equal(humanYield.kind, "completed", JSON.stringify(humanYield));
+  assert.equal(humanYield.kind, "completed",
+    `${JSON.stringify(humanYield)} ${String(processFailure)}`);
+  assert.deepEqual(turnResults[0].turn_usage, {
+    wall_time_ms: 1, context_bytes: turnResults[0].turn_usage.context_bytes,
+    provider_tokens: 0, broker_calls: 1, mutations: 0,
+  });
+  await assert.rejects(access(path.join(runtimeRoot, ".symphony")));
   assert.equal(humanYield.result.yield_reason, "waiting_human");
   assert.deepEqual(view.workflowNodes, [humanNode("In Progress")]);
   assert.deepEqual(await turns.run("root-1"), {
@@ -103,6 +118,11 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
   });
   view.workflowNodes = [{ ...humanNode("Done"), answer: "Approved" }];
   assert.equal((await turns.run("root-1")).kind, "completed");
+  assert.deepEqual(turnResults[1].turn_usage, {
+    wall_time_ms: 1, context_bytes: turnResults[1].turn_usage.context_bytes,
+    provider_tokens: 0, broker_calls: 7, mutations: 6,
+  });
+  await assert.rejects(access(path.join(runtimeRoot, ".symphony")));
   assert.equal(commands.length, 2);
   for (const command of commands) decodeConductorPerformerRootTurnCommand(command);
   const resumed = commands[1];
@@ -169,45 +189,10 @@ test("one Root rejects stale retry and clears only its acknowledged Retry Block"
   assert.equal(cleared, 1);
 });
 
-test("a Performer subprocess invokes the installed broker CLI over inherited FDs", async () => {
+test("a Performer subprocess crosses the workspace channel to the installed broker CLI", async () => {
   const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-cli-"));
-  const executable = path.join(runtimeRoot, "fake-performer");
+  const executable = await createWorkspaceChannelPerformer(runtimeRoot);
   await symlink(path.resolve(".venv/bin/symphony"), path.join(runtimeRoot, "symphony"));
-  await writeFile(executable, `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const get = (name) => args[args.indexOf(name) + 1];
-const correlation = { protocol_version: "1", turn_id: get("--turn-id"),
-  root_issue_id: get("--root-issue-id"), performer_profile_id: get("--performer-profile-id"),
-  performer_id: get("--performer-id"), context_digest: get("--context-digest") };
-process.stdout.write(JSON.stringify({ ...correlation, sequence: 0,
-  occurred_at: "2026-07-19T00:00:01Z", body: { kind: "protocol_ready" } }) + "\\n");
-let input = "";
-process.stdin.on("data", (chunk) => input += chunk);
-process.stdin.on("end", () => {
-  const command = JSON.parse(input);
-  process.env.SYMPHONY_TURN_ID = command.turn_id;
-  process.env.SYMPHONY_ROOT_ISSUE_ID = command.root_issue_id;
-  process.env.SYMPHONY_PERFORMER_ID = command.performer_id;
-  const invoked = spawnSync("symphony", ["linear", "status", "set", "--args-json",
-    JSON.stringify({ issue_id: "root-1", status: "In Progress",
-      expected_remote_version: "version-1", expected_git_head: "abc" })],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", 3, 4] });
-  if (invoked.status !== 0) { process.stderr.write(invoked.stderr); process.exit(invoked.status || 1); }
-  const brokerResult = JSON.parse(invoked.stdout);
-  if (brokerResult.status !== "applied") process.exit(3);
-  const result = { ...correlation, result_kind: "root_turn_completed",
-    completed_at: "2026-07-19T00:00:02Z", turn_usage: { wall_time_ms: 1,
-      context_bytes: Buffer.byteLength(command.root_context.json) +
-        Buffer.byteLength(command.root_context.markdown), provider_tokens: 0,
-      broker_calls: 0, mutations: 0 } };
-  const resultPath = get("--root-turn-result-path");
-  fs.writeFileSync(resultPath + ".tmp", JSON.stringify(result));
-  fs.renameSync(resultPath + ".tmp", resultPath);
-});
-`);
-  await chmod(executable, 0o700);
 
   const observed = [];
   const processBoundary = new SubprocessPerformerProcessImpl(new GlobalPerformerLane(), {
@@ -235,6 +220,7 @@ process.stdin.on("end", () => {
   assert.equal(observed[0].command, "linear.status.set");
   assert.deepEqual(output.result.turn_usage, { wall_time_ms: 1, context_bytes: 23,
     provider_tokens: 0, broker_calls: 1, mutations: 1 });
+  await assert.rejects(access(path.join(runtimeRoot, ".symphony")));
 });
 
 function profile() { return { profileId: "profile-1", readiness: "ready",
@@ -249,90 +235,23 @@ function scope() { return { root_issue_id: "root-1", conductor_id: "conductor-1"
     { issue_id: "child-1", parent_issue_id: "root-1", updated_at: "version-2" },
   ] }; }
 async function createFlowPerformer(runtimeRoot) {
-  const executable = path.join(runtimeRoot, "fake-performer");
+  const executable = await createWorkspaceChannelPerformer(runtimeRoot);
   await symlink(path.resolve(".venv/bin/symphony"), path.join(runtimeRoot, "symphony"));
-  await writeFile(executable, `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const get = (name) => args[args.indexOf(name) + 1];
-if (args.includes("--open-conversation-request-path")) {
-  const command = JSON.parse(fs.readFileSync(get("--open-conversation-request-path"), "utf8"));
-  fs.writeFileSync(get("--open-conversation-result-path"), JSON.stringify({
-    protocol_version: command.protocol_version, request_id: command.request_id,
-    performer_profile_id: command.performer_profile_id, performer_id: "conversation-1",
-    completed_at: "2026-07-19T00:00:01Z" }));
-}
-let correlation = args.includes("--open-conversation-request-path") ? undefined : {
-  protocol_version: "1", turn_id: get("--turn-id"), root_issue_id: get("--root-issue-id"),
-  performer_profile_id: get("--performer-profile-id"), performer_id: get("--performer-id"),
-  context_digest: get("--context-digest") };
-let resultPath = get("--root-turn-result-path");
-let input = "";
-let startBuffer = "";
-function ready() {
-  process.stdout.write(JSON.stringify({ ...correlation, sequence: 0,
-    occurred_at: "2026-07-19T00:00:01Z", body: { kind: "protocol_ready" } }) + "\\n");
-}
-if (correlation) ready();
-process.stdin.on("data", (chunk) => {
-  if (correlation) { input += chunk; return; }
-  startBuffer += chunk;
-  const newline = startBuffer.indexOf("\\n");
-  if (newline < 0) return;
-  const start = JSON.parse(startBuffer.slice(0, newline));
-  correlation = { protocol_version: start.protocol_version, turn_id: start.turn_id,
-    root_issue_id: start.root_issue_id, performer_profile_id: start.performer_profile_id,
-    performer_id: start.performer_id, context_digest: start.context_digest };
-  resultPath = start.result_path;
-  input += startBuffer.slice(newline + 1);
-  startBuffer = "";
-  ready();
-});
-process.stdin.on("end", () => {
-  const command = JSON.parse(input);
-  if (!command.root_context.markdown.includes("## trusted_harness") ||
-      !command.root_context.json.includes('"issue_id":"root-1"') ||
-      command.performer_id !== "conversation-1") {
-    process.exit(4);
-  }
-  const awaitingHuman = !command.root_context.json.includes('"answer":"Approved"');
-  const commands = awaitingHuman ? [] : [
-    [["linear", "issue", "create-child"], { parent_issue_id: "root-1", kind: "work",
-      title: "Implementation", description: "Build the change", write_id: "work-write",
-      expected_remote_version: "version-1", expected_git_head: "abc" }],
-    [["linear", "issue", "create-child"], { parent_issue_id: "root-1", kind: "rework",
-      title: "[Rework] Root Gate Findings", description: "Address the failed Gate", write_id: "rework-write",
-      expected_remote_version: "version-1", expected_git_head: "abc" }],
-    [["linear", "status", "set"], { issue_id: "child-1", status: "Done",
-      expected_remote_version: "version-2", expected_git_head: "abc" }],
-    [["linear", "comment", "create"], { issue_id: "child-1",
-      body: "Human approval observed; Work and Gate passed.", write_id: "write-1",
-      expected_remote_version: "version-2", expected_git_head: "abc" }],
-    [["git", "commit"], { issue_id: "child-1", expected_remote_version: "version-2",
-      expected_head: "abc" }],
-    [["root", "deliver"], { expected_root_version: "version-1", expected_head: "abc" }],
-  ];
-  for (const [commandPath, commandArgs] of commands) {
-    const invoked = spawnSync("symphony", [...commandPath, "--args-json",
-      JSON.stringify(commandArgs)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", 3, 4] });
-    if (invoked.status !== 0 || JSON.parse(invoked.stdout).status !== "applied") process.exit(5);
-  }
-  const result = { ...correlation, result_kind: "root_turn_completed",
-    yield_reason: awaitingHuman ? "waiting_human" : "delivered",
-    completed_at: "2026-07-19T00:00:02Z", turn_usage: { wall_time_ms: 1,
-      context_bytes: Buffer.byteLength(command.root_context.json) +
-        Buffer.byteLength(command.root_context.markdown), provider_tokens: 0,
-      broker_calls: 0, mutations: 0 } };
-  fs.writeFileSync(resultPath + ".tmp", JSON.stringify(result));
-  fs.renameSync(resultPath + ".tmp", resultPath);
-});
-`);
-  await chmod(executable, 0o700);
   return new SubprocessPerformerProcessImpl(new GlobalPerformerLane(), {
-    runtimeRoot, executable, environment: () => ({ PATH: process.env.PATH }),
+    runtimeRoot, executable, environment: () => ({ PATH: process.env.PATH,
+      SYMPHONY_TEST_PERFORMER_MODE: "flow" }),
     startupDeadlineMs: 5_000, cancellationGraceMs: 500,
   });
+}
+async function createWorkspaceChannelPerformer(runtimeRoot) {
+  const executable = path.join(runtimeRoot, "fake-performer");
+  const python = path.resolve(".venv/bin/python");
+  const fixture = path.resolve(
+    "tests/integration/single-root/fixtures/workspace-channel-performer.py",
+  );
+  await writeFile(executable, `#!/bin/sh\nexec "${python}" "${fixture}" "$@"\n`);
+  await chmod(executable, 0o700);
+  return executable;
 }
 async function createFailedBootstrapPerformer(runtimeRoot) {
   const executable = path.join(runtimeRoot, "failed-bootstrap-performer");

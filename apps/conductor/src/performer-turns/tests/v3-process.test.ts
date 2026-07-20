@@ -249,7 +249,7 @@ test("Performer process crosses the real readiness and atomic Result boundary", 
   assert.equal((output.result as { result_kind: string }).result_kind, "root_turn_completed");
 });
 
-test("Performer process brokers one private framed command on inherited FDs", async () => {
+test("Performer process brokers one framed command on its private pipes", async () => {
   const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-broker-"));
   const command = rootCommand(runtimeRoot);
   const requests = new PassThrough();
