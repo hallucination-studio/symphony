@@ -273,6 +273,58 @@ export function createRunScopedLinearOperator({
       });
     },
 
+    async seedPlan({ lock, runId, fixture, preflight }) {
+      assertLock(lock, runId);
+      assertRelatedFixtures(runId, fixture, fixture);
+      if (!preflight?.teamId || !preflight?.stateId) {
+        throw stableError("linear_fixture_plan_seed_invalid");
+      }
+      const nodes = [
+        {
+          title: "[Work] Create marker",
+          description: managedPlanWorkDescription(fixture.rootId),
+          subIssueSortOrder: 0,
+        },
+        {
+          title: "[Human Action] Approve Plan",
+          description: managedPlanApprovalDescription(fixture.rootId),
+          subIssueSortOrder: 1,
+        },
+      ];
+      const created = [];
+      for (const node of nodes) {
+        const data = await graphql(`
+          mutation CoreLivePlanNode($input: IssueCreateInput!) {
+            issueCreate(input: $input) {
+              success
+              issue { id title description parent { id } state { name } }
+            }
+          }
+        `, { input: {
+          teamId: preflight.teamId,
+          projectId: fixture.projectId,
+          parentId: fixture.rootId,
+          stateId: preflight.stateId,
+          title: node.title,
+          description: node.description,
+          subIssueSortOrder: node.subIssueSortOrder,
+        } });
+        const issue = data.issueCreate;
+        if (
+          issue?.success !== true ||
+          !issue.issue?.id ||
+          issue.issue.title !== node.title ||
+          issue.issue.description !== node.description ||
+          issue.issue.parent?.id !== fixture.rootId ||
+          issue.issue.state?.name !== "Todo"
+        ) {
+          throw stableError("linear_fixture_plan_seed_failed");
+        }
+        created.push(issue.issue.id);
+      }
+      return Object.freeze({ workId: created[0], approvalId: created[1] });
+    },
+
     async createBlockerRelation({ lock, runId, blocker, dependent }) {
       assertLock(lock, runId);
       assertRelatedFixtures(runId, blocker, dependent);
@@ -671,27 +723,37 @@ export function createRunScopedLinearOperator({
 
   async function graphql(query, variables = {}) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
-    const startedAt = Date.now();
     let response;
-    try {
-      response = await fetch(LINEAR_GRAPHQL_URL, {
-        method: "POST",
-        headers: { authorization: developmentToken, "content-type": "application/json" },
-        body: JSON.stringify({ query, variables }),
-      });
-    } catch {
-      log({
-        event: "linear_physical_request",
-        operation,
-        durationMs: Math.max(0, Date.now() - startedAt),
-      });
-      log({ event: "e2e_linear_request_failed", operation });
-      throw stableError("linear_fixture_request_failed");
+    let responseDurationMs = 0;
+    const attempts = /^\s*query\b/u.test(query) ? 3 : 1;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const startedAt = Date.now();
+      try {
+        response = await fetch(LINEAR_GRAPHQL_URL, {
+          method: "POST",
+          headers: { authorization: developmentToken, "content-type": "application/json" },
+          body: JSON.stringify({ query, variables }),
+        });
+        responseDurationMs = Math.max(0, Date.now() - startedAt);
+      } catch {
+        log({
+          event: "linear_physical_request",
+          operation,
+          durationMs: Math.max(0, Date.now() - startedAt),
+        });
+        if (attempt < attempts) {
+          log({ event: "e2e_linear_request_retry", operation, attempt });
+          continue;
+        }
+        log({ event: "e2e_linear_request_failed", operation });
+        throw stableError("linear_fixture_request_failed");
+      }
+      break;
     }
     log({
       event: "linear_physical_request",
       operation,
-      durationMs: Math.max(0, Date.now() - startedAt),
+      durationMs: responseDurationMs,
       ...(Number.isSafeInteger(response.status) ? { status: response.status } : {}),
       ...rateWindowEvidence(response.headers),
     });
@@ -825,6 +887,14 @@ export function managedMarker(runId) {
   return `<!-- symphony core live e2e\nrun_id: ${runId}\n-->`;
 }
 
+function managedPlanWorkDescription(rootIssueId) {
+  return `Complete the requested file change.\n\n<!-- symphony managed marker\nmanaged_marker: ${rootIssueId}:work\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->`;
+}
+
+function managedPlanApprovalDescription(rootIssueId) {
+  return `Approve the plan before work begins.\n\n<!-- symphony managed marker\nmanaged_marker: ${rootIssueId}:plan-approval\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->`;
+}
+
 function managedRunId(description) {
   if (typeof description !== "string") return undefined;
   return description.match(MARKER)?.[1];
@@ -834,6 +904,13 @@ function field(comment, name) {
   if (typeof comment !== "string") return undefined;
   const match = comment.match(new RegExp(`(?:^|\\n)${name}: ([^\\n]+)`, "u"));
   return match?.[1] && match[1] !== "none" ? match[1] : undefined;
+}
+
+function nonNegativeField(comment, name) {
+  const value = field(comment, name);
+  if (!value || !/^\d+$/u.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function timelineEvidence(body) {
@@ -901,6 +978,7 @@ function runState(fixture, root, issues) {
   const managedComment = comments.map(({ body }) => body)
     .find((body) => typeof body === "string" && body.startsWith("Symphony\n") &&
       body.includes(ROOT_COMMENT_MARKER) && body.endsWith("\n-->"));
+  const providerInputTokens = nonNegativeField(managedComment, "usage_input_tokens");
   const phaseLabels = labels.map(({ name }) => name)
     .filter((name) => name.startsWith("symphony:run/"));
   return Object.freeze({
@@ -914,6 +992,7 @@ function runState(fixture, root, issues) {
       work.length > 0 && work.every(({ parent }) => Boolean(parent?.id)),
     workStates: work.map(({ state }) => state?.name),
     performerId: field(managedComment, "performer_id"),
+    ...(providerInputTokens === undefined ? {} : { providerInputTokens }),
     deliveryBranch: field(managedComment, "delivery_branch"),
     reworkCount: work.filter(({ title }) => title === "[Rework] Root Gate Findings").length,
   });

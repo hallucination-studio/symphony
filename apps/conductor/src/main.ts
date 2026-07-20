@@ -72,6 +72,12 @@ export async function runConductor(environment = process.env): Promise<void> {
     cancellationGraceMs: 1_000,
   });
   let stopping = false;
+  let shutdown: Promise<void> | undefined;
+  const requestStop = () => {
+    stopping = true;
+    shutdown ??= performer.cancelAndReap();
+    return shutdown;
+  };
   const runtimeHandlers: { retry?: RootRetryBlockCommandHandler } = {};
   const protocol = new InheritedProtocolClient(input, output, {
     async handleRequest(body, secret) {
@@ -81,7 +87,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         !Array.isArray(body) &&
         body.kind === "shutdown_conductor"
       ) {
-        stopping = true;
+        await requestStop();
         return { kind: "shutdown_conductor" };
       }
       if (body && typeof body === "object" && !Array.isArray(body)
@@ -198,12 +204,16 @@ export async function runConductor(environment = process.env): Promise<void> {
           try {
             const command = parseAgentCommand(value);
             const output = result as Record<string, JsonValue>;
+            const commandProblem = output.problem && typeof output.problem === "object"
+              && !Array.isArray(output.problem) ? output.problem : undefined;
             logEvent("info", "agent_broker_result", {
               turn_id: turnId,
               root_issue_id: view.root.issueId,
               performer_id: performerId,
               command: command.command,
               status: typeof output.status === "string" ? output.status : "failed",
+              ...(commandProblem && typeof commandProblem.code === "string"
+                ? { problem_code: commandProblem.code } : {}),
             });
           } catch {
             // Invalid model output is rejected by the broker and is not echoed to logs.
@@ -298,7 +308,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     },
   );
   const stop = () => {
-    stopping = true;
+    void requestStop().catch(() => undefined);
   };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
@@ -323,7 +333,7 @@ export async function runConductor(environment = process.env): Promise<void> {
       }));
     }
   } finally {
-    await performerLane.cancelAndReap(1_000);
+    await performer.cancelAndReap();
   }
 }
 

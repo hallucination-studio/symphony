@@ -137,6 +137,50 @@ test("verdict rejects missing broker, runtime, and V3 durable evidence", () => {
   }
 });
 
+test("verdict rejects first managed comment and planning Turn budget violations", () => {
+  const overCommentBudget = passingEvidence().map((item) =>
+    item.step === "request_budget_verified"
+      ? { ...item, firstManagedCommentDurationMs: 30_001 }
+      : item);
+  assert.equal(evaluateCoreLiveEvidence({
+    performerResumed: true,
+    rootState: "In Review",
+    phase: "in-review",
+    deliveryBranch: "symphony/runs/run-1",
+    rootIssueId: "root-1",
+    performerId: "conversation-1",
+    evidence: overCommentBudget,
+  }).verdict, "failed");
+
+  const overPlanningTimeBudget = passingEvidence().map((item) =>
+    item.step === "request_budget_verified"
+      ? { ...item, firstPlanningTurnDurationMs: 120_001 }
+      : item);
+  assert.equal(evaluateCoreLiveEvidence({
+    performerResumed: true,
+    rootState: "In Review",
+    phase: "in-review",
+    deliveryBranch: "symphony/runs/run-1",
+    rootIssueId: "root-1",
+    performerId: "conversation-1",
+    evidence: overPlanningTimeBudget,
+  }).verdict, "failed");
+
+  const overPlanningTokenBudget = passingEvidence().map((item) =>
+    item.step === "request_budget_verified"
+      ? { ...item, firstPlanningInputTokens: 300_001 }
+      : item);
+  assert.equal(evaluateCoreLiveEvidence({
+    performerResumed: true,
+    rootState: "In Review",
+    phase: "in-review",
+    deliveryBranch: "symphony/runs/run-1",
+    rootIssueId: "root-1",
+    performerId: "conversation-1",
+    evidence: overPlanningTokenBudget,
+  }).verdict, "failed");
+});
+
 test("verdict rejects commit and delivery evidence split across Turns", () => {
   const evidence = passingEvidence().map((item) =>
     item.step === "broker_writes_verified"
@@ -213,6 +257,9 @@ function passingEvidence() {
       physicalRequestCount: 499,
       physicalRequestCounts: { CoreLivePreflight: 10, SymphonyRootHeaderFacts: 489 },
       physicalRequest429Count: 0,
+      firstManagedCommentDurationMs: 12_000,
+      firstPlanningTurnDurationMs: 60_000,
+      firstPlanningInputTokens: 100_000,
       requestWindowStart: { limit: 1000, remaining: 999, reset: 60 },
       requestWindowEnd: { limit: 1000, remaining: 500, reset: 60 },
       complexityWindowStart: { limit: 250000, remaining: 249900, reset: 60 },

@@ -71,6 +71,53 @@ test("Linear fixture logs sanitized GraphQL failure details by operation", async
   });
 });
 
+test("Linear fixture retries at most two transient query transport failures", async () => {
+  const events = [];
+  let attempts = 0;
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    applicationClientId: "client-1",
+    log: (event) => events.push(event),
+    fetch: async () => {
+      attempts += 1;
+      if (attempts < 3) throw new TypeError("transient transport failure");
+      return response({ data: preflightData() });
+    },
+  });
+
+  await operator.preflight();
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(events.map(({ event }) => event), [
+    "linear_physical_request",
+    "e2e_linear_request_retry",
+    "linear_physical_request",
+    "e2e_linear_request_retry",
+    "linear_physical_request",
+  ]);
+});
+
+test("Linear fixture does not retry an ambiguously failed mutation", async () => {
+  let attempts = 0;
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    applicationClientId: "client-1",
+    fetch: async () => {
+      attempts += 1;
+      throw new TypeError("ambiguous mutation transport failure");
+    },
+  });
+
+  await assert.rejects(operator.completeRoot({
+    lock: { runId: "run-1", released: false },
+    runId: "run-1",
+    fixture: { runId: "run-1", rootId: "root-1", projectId: "project-1",
+      marker: managedMarker("run-1") },
+    doneStateId: "state-done",
+  }), /linear_fixture_request_failed/u);
+  assert.equal(attempts, 1);
+});
+
 test("Linear fixture logs a bounded sanitized non-JSON response body", async () => {
   const events = [];
   const operator = createRunScopedLinearOperator({
@@ -155,6 +202,55 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
   assert.equal(requests[2].variables.input.delegateId, "actor-1");
   assert.match(requests[2].variables.input.description, /run_id: run-1/u);
   assert.doesNotMatch(JSON.stringify(fixture), /development-secret/u);
+});
+
+test("Linear fixture seeds the exact plan tree with production managed markers", async () => {
+  const requests = [];
+  let nodeNumber = 0;
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requests.push(request);
+      nodeNumber += 1;
+      return response({ data: {
+        issueCreate: {
+          success: true,
+          issue: {
+            id: `node-${nodeNumber}`,
+            parent: { id: "root-1" },
+            state: { name: "Todo" },
+            title: request.variables.input.title,
+            description: request.variables.input.description,
+          },
+        },
+      } });
+    },
+  });
+
+  const plan = await operator.seedPlan({
+    lock: { runId: "run-1", released: false },
+    runId: "run-1",
+    fixture: {
+      runId: "run-1", marker: managedMarker("run-1"), projectId: "project-1", rootId: "root-1",
+    },
+    preflight: { actorId: "actor-1", teamId: "team-1", stateId: "state-todo" },
+  });
+
+  assert.deepEqual(plan, { workId: "node-1", approvalId: "node-2" });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(({ variables }) => variables.input), [
+    {
+      teamId: "team-1", projectId: "project-1", parentId: "root-1", stateId: "state-todo",
+      title: "[Work] Create marker", subIssueSortOrder: 0,
+      description: "Complete the requested file change.\n\n<!-- symphony managed marker\nmanaged_marker: root-1:work\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",
+    },
+    {
+      teamId: "team-1", projectId: "project-1", parentId: "root-1", stateId: "state-todo",
+      title: "[Human Action] Approve Plan", subIssueSortOrder: 1,
+      description: "Approve the plan before work begins.\n\n<!-- symphony managed marker\nmanaged_marker: root-1:plan-approval\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->",
+    },
+  ]);
 });
 
 test("Linear fixture configures multi-Root scheduling only through Linear facts", async () => {
@@ -583,6 +679,36 @@ test("run state and Plan approval map only Linear facts", async () => {
   });
   assert.equal(after.approvalState, "Done");
   assert.equal(after.phase, "working");
+});
+
+test("run state projects Provider input tokens from the managed comment", async () => {
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async () => response({ data: {
+      issue: {
+        id: "root-1",
+        state: { name: "In Progress" },
+        labels: { nodes: [], pageInfo: { hasNextPage: false } },
+        comments: { nodes: [{ body: [
+          "Symphony",
+          "usage_input_tokens: 123",
+          "<!-- symphony root",
+          "conductor_id: conductor-1",
+          "performer_profile_id: profile-1",
+          "performer_id: conversation-1",
+          "delivery_branch: symphony/runs/run-1",
+          "-->",
+        ].join("\n") }], pageInfo: { hasNextPage: false } },
+      },
+      project: { issues: { nodes: [], pageInfo: { hasNextPage: false } } },
+    } }),
+  });
+
+  const state = await operator.readRunState({
+    fixture: { rootId: "root-1", projectId: "project-1" },
+  });
+
+  assert.equal(state.providerInputTokens, 123);
 });
 
 test("batched run states use one Project snapshot and isolate each Root Tree", async () => {

@@ -24,13 +24,20 @@ import {
 const execute = promisify(execFile);
 const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const DEFAULT_RUN_TIMEOUT_MS = 20 * 60_000;
+const FIRST_MANAGED_COMMENT_BUDGET_MS = 30_000;
+const FIRST_PLANNING_TURN_BUDGET_MS = 120_000;
+const FIRST_PLANNING_INPUT_TOKEN_BUDGET = 300_000;
+const FIRST_PLANNING_POLL_INTERVAL_MS = 2_000;
 
-export function createTurnLaneTracker(log) {
+export function createTurnLaneTracker(log, now = Date.now) {
   const active = new Set();
   const observed = new Set();
   const turnOwners = new Map();
   const completed = new Set();
   const firstConversationByRoot = new Map();
+  const firstStartedAtByRoot = new Map();
+  const turnStartedAt = new Map();
+  const firstCompletedTurnDurations = new Map();
   let maxActiveTurns = 0;
   return Object.freeze({
     log(event) {
@@ -52,6 +59,7 @@ export function createTurnLaneTracker(log) {
         !TURN_ID.test(value.turn_id ?? "")
       ) return;
       if (value.event_kind === "turn_started") {
+        const startedAt = now();
         observed.add(value.turn_id);
         if (typeof value.root_issue_id === "string" && typeof value.performer_id === "string" &&
           !turnOwners.has(value.turn_id)) {
@@ -64,11 +72,26 @@ export function createTurnLaneTracker(log) {
           && !firstConversationByRoot.has(value.root_issue_id)) {
           firstConversationByRoot.set(value.root_issue_id, value.performer_id);
         }
+        if (typeof value.root_issue_id === "string" && !firstStartedAtByRoot.has(value.root_issue_id)) {
+          firstStartedAtByRoot.set(value.root_issue_id, startedAt);
+        }
+        turnStartedAt.set(value.turn_id, startedAt);
         active.add(value.turn_id);
         maxActiveTurns = Math.max(maxActiveTurns, active.size);
       } else if (value.event_kind === "turn_completed") {
         active.delete(value.turn_id);
-        if (turnOwners.has(value.turn_id)) completed.add(value.turn_id);
+        const owner = turnOwners.get(value.turn_id);
+        if (owner) {
+          completed.add(value.turn_id);
+          const startedAt = turnStartedAt.get(value.turn_id);
+          if (startedAt !== undefined && !firstCompletedTurnDurations.has(owner.rootIssueId)) {
+            firstCompletedTurnDurations.set(
+              owner.rootIssueId,
+              Math.max(0, Math.round(now() - startedAt)),
+            );
+          }
+        }
+        turnStartedAt.delete(value.turn_id);
       }
     },
     evidence() {
@@ -90,6 +113,12 @@ export function createTurnLaneTracker(log) {
       return Object.freeze([...completed].filter(
         (turnId) => turnOwners.get(turnId)?.rootIssueId === rootIssueId,
       ));
+    },
+    firstCompletedTurnDurationMs(rootIssueId) {
+      return firstCompletedTurnDurations.get(rootIssueId);
+    },
+    firstStartedTurnAt(rootIssueId) {
+      return firstStartedAtByRoot.get(rootIssueId);
     },
   });
 }
@@ -162,7 +191,9 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
             && typeof value.performer_id === "string") {
             brokerResults.push(Object.freeze({ command: value.command, status: value.status,
               rootIssueId: value.root_issue_id, turnId: value.turn_id,
-              performerId: value.performer_id }));
+              performerId: value.performer_id,
+              ...(typeof value.problem_code === "string" ? { problemCode: value.problem_code } : {}),
+            }));
           } else if (value?.event === "root_discovery_evidence") {
             const counts = [value.root_header_count, value.list_page_count,
               value.get_issue_tree_count].map(nonNegativeInteger);
@@ -203,8 +234,9 @@ export function createRuntimeEvidenceTracker(log, now = Date.now) {
           ? { complexityWindowEnd: Object.freeze({ ...complexityWindowEnd }) } : {}),
       });
     },
-    brokerCallCount(turnId) {
-      return brokerResults.filter((result) => result.turnId === turnId).length;
+    brokerEffectCount(turnId) {
+      return brokerResults.filter((result) => result.turnId === turnId
+        && (result.status === "applied" || result.status === "already_applied")).length;
     },
   });
 }
@@ -228,10 +260,10 @@ export function createRootProgressWatchdog({
         .filter((turnId) => !observedTurns.has(turnId));
       for (const turnId of completedTurns) {
         observedTurns.add(turnId);
-        const brokerCalls = runtimeEvidence.brokerCallCount(turnId);
+        const brokerEffects = runtimeEvidence.brokerEffectCount(turnId);
         const waiting = linearState?.phase === "awaiting-human" ||
           linearState?.approvalState === "In Progress";
-        if (!waiting && previousFacts === currentFacts && brokerCalls === 0) {
+        if (!waiting && previousFacts === currentFacts && brokerEffects === 0) {
           stalledTurns += 1;
         } else {
           stalledTurns = 0;
@@ -304,6 +336,9 @@ export async function runCoreLiveE2E({
   let project;
   let fixtures = [];
   let harness;
+  let firstManagedCommentDurationMs;
+  let firstPlanningTurnDurationMs;
+  let firstPlanningInputTokens;
   const evidence = [];
   const ids = runIdentifiers(runId);
   let result;
@@ -351,6 +386,7 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
     const podium = await createProductionPodiumConductorOwner({ databasePath, log });
 
+    log({ event: "e2e_step_started", step: "first_managed_comment" });
     log({ event: "e2e_step_started", step: "root_created" });
     const blocker = await linear.createRoot({
       lock,
@@ -382,9 +418,12 @@ export async function runCoreLiveE2E({
       sortOrder: 30,
       rootInstruction: rootInstruction("e2e-yielded.txt", `${runId}:yielded\n`),
     });
-    await linear.createBlockerRelation({ lock, runId, blocker, dependent });
-    assertRunActive(deadline);
     fixtures = [blocker, yielded, dependent];
+    await linear.createBlockerRelation({ lock, runId, blocker, dependent });
+    await Promise.all(fixtures.map((fixture) => linear.seedPlan({
+      lock, runId, fixture, preflight,
+    })));
+    assertRunActive(deadline);
     evidence.push({
       step: "root_created",
       status: "passed",
@@ -418,19 +457,76 @@ export async function runCoreLiveE2E({
     evidence.push({ step: "profile_active", status: "passed" });
     log({ event: "e2e_step_completed", step: "profile_active" });
 
+    const [firstManagedComment] = await pollUntil(
+      () => readRootStates(linear, [blocker]),
+      ([state]) => Boolean(state?.performerId),
+      { deadline, pollIntervalMs },
+    );
+    log({ event: "e2e_step_completed", step: "first_managed_comment" });
+    firstManagedCommentDurationMs = runtimeEvidence.evidence()
+      .stepDurationsMs.first_managed_comment;
+    if (!Number.isSafeInteger(firstManagedCommentDurationMs)) {
+      throw stableError("e2e_first_managed_comment_evidence_missing");
+    }
+    assertPerformanceBudget(
+      firstManagedCommentDurationMs,
+      FIRST_MANAGED_COMMENT_BUDGET_MS,
+      "e2e_first_managed_comment_budget_exceeded",
+    );
+    evidence.push({
+      step: "first_managed_comment",
+      status: "passed",
+      durationMs: firstManagedCommentDurationMs,
+      performerId: firstManagedComment.performerId,
+    });
+
     log({ event: "e2e_step_started", step: "multi_root_scheduling" });
+    let lastPlanningStateLog;
     const [blockerPlan] = await pollUntil(
       () => readRootStates(linear, [blocker, dependent]),
-      ([blockerState, dependentState]) =>
-        planReady(blockerState) && rootUntouched(dependentState),
-      { deadline, pollIntervalMs },
+      ([blockerState, dependentState]) => {
+        const planningStateLog = JSON.stringify({ blockerState, dependentState });
+        if (planningStateLog !== lastPlanningStateLog) {
+          lastPlanningStateLog = planningStateLog;
+          log({ event: "e2e_planning_state", blockerState, dependentState });
+        }
+        return planReady(blockerState) && rootUntouched(dependentState);
+      },
+      {
+        deadline: () => {
+          const startedAt = turnLane.firstStartedTurnAt(blocker.rootId);
+          const completedDuration = turnLane.firstCompletedTurnDurationMs(blocker.rootId);
+          if (completedDuration !== undefined) {
+            return completedDuration <= FIRST_PLANNING_TURN_BUDGET_MS
+              ? deadline
+              : Date.now();
+          }
+          return startedAt === undefined
+            ? deadline
+            : Math.min(deadline, startedAt + FIRST_PLANNING_TURN_BUDGET_MS);
+        },
+        deadlineError: () => stableError("e2e_first_planning_turn_budget_exceeded"),
+        pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS,
+      },
+    );
+    firstPlanningTurnDurationMs = turnLane.firstCompletedTurnDurationMs(blocker.rootId);
+    firstPlanningInputTokens = blockerPlan.providerInputTokens;
+    assertPerformanceBudget(
+      firstPlanningTurnDurationMs,
+      FIRST_PLANNING_TURN_BUDGET_MS,
+      "e2e_first_planning_turn_budget_exceeded",
+    );
+    assertPerformanceBudget(
+      firstPlanningInputTokens,
+      FIRST_PLANNING_INPUT_TOKEN_BUDGET,
+      "e2e_first_planning_input_token_budget_exceeded",
     );
     evidence.push({
       step: "conversation_pointer_verified",
       status: "passed",
       pointerReadBack: Boolean(blockerPlan.performerId),
       firstTurnUsedPointer: turnLane.observedConversation(
-        blocker.rootIssueId,
+        blocker.rootId,
         blockerPlan.performerId,
       ),
     });
@@ -543,7 +639,7 @@ export async function runCoreLiveE2E({
     const correlatedBrokerResults = runtimeFacts.brokerResults
       .filter(({ status, rootIssueId, performerId, turnId }) =>
         (status === "applied" || status === "already_applied") &&
-        rootIssueId === yielded.rootIssueId && performerId === yieldedCompleted.performerId &&
+        rootIssueId === yielded.rootId && performerId === yieldedCompleted.performerId &&
         turnLane.completedTurn(rootIssueId, performerId, turnId));
     const appliedBrokerCommands = correlatedBrokerResults.map(({ command }) => command);
     const commandsByTurn = Map.groupBy(correlatedBrokerResults, ({ turnId }) => turnId);
@@ -574,7 +670,7 @@ export async function runCoreLiveE2E({
         rootState: yieldedCompleted.rootState, phase: yieldedCompleted.phase },
       { step: "broker_writes_verified", status: "passed",
         linearReadBack, gitReadBack, deliveryReadBack,
-        rootIssueId: yielded.rootIssueId,
+        rootIssueId: yielded.rootId,
         performerId: yieldedCompleted.performerId,
         correlatedTurnIds: [...commandsByTurn.keys()],
         deliveryTurnId: deliveryTurn?.[0],
@@ -622,7 +718,7 @@ export async function runCoreLiveE2E({
       projectMode: project.retainProject ? "retained" : "temporary",
       projectSlugId: project.projectSlugId,
       rootIdentifier: yielded.rootIdentifier,
-      rootIssueId: yielded.rootIssueId,
+      rootIssueId: yielded.rootId,
       profileId: profile.profileId,
       performerId: yieldedCompleted.performerId,
       performerResumed: yieldedCompleted.performerId === yieldedPlan.performerId,
@@ -659,6 +755,9 @@ export async function runCoreLiveE2E({
       step: "request_budget_verified",
       status: "passed",
       ...runtimeEvidence.evidence(),
+      firstManagedCommentDurationMs,
+      firstPlanningTurnDurationMs,
+      firstPlanningInputTokens,
     }),
     write: (value) => writeEvidence(runId, value, config.secrets),
   });
@@ -808,12 +907,16 @@ function runIdentifiers(runId) {
   });
 }
 
-export async function pollUntil(read, accepted, { deadline, pollIntervalMs }) {
+export async function pollUntil(
+  read,
+  accepted,
+  { deadline, deadlineError = () => stableError("e2e_run_timeout"), pollIntervalMs },
+) {
   while (true) {
-    const value = await beforeDeadline(read, deadline);
+    const value = await beforeDeadline(read, deadline, deadlineError);
     if (accepted(value)) return value;
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) throw stableError("e2e_run_timeout");
+    const remainingMs = resolveDeadline(deadline) - Date.now();
+    if (remainingMs <= 0) throw deadlineError();
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
   }
 }
@@ -822,16 +925,23 @@ function assertRunActive(deadline) {
   if (Date.now() >= deadline) throw stableError("e2e_run_timeout");
 }
 
-async function beforeDeadline(action, deadline) {
-  assertRunActive(deadline);
+function assertPerformanceBudget(value, maximum, code) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw stableError(code);
+  }
+}
+
+async function beforeDeadline(action, deadline, deadlineError) {
+  const resolvedDeadline = resolveDeadline(deadline);
+  if (Date.now() >= resolvedDeadline) throw deadlineError();
   let timer;
   try {
     return await Promise.race([
       action(),
       new Promise((_, reject) => {
         timer = setTimeout(
-          () => reject(stableError("e2e_run_timeout")),
-          deadline - Date.now(),
+          () => reject(deadlineError()),
+          resolvedDeadline - Date.now(),
         );
       }),
     ]);
@@ -840,12 +950,23 @@ async function beforeDeadline(action, deadline) {
   }
 }
 
-function rootInstruction(filename, content) {
+function resolveDeadline(deadline) {
+  const resolved = typeof deadline === "function" ? deadline() : deadline;
+  if (!Number.isSafeInteger(resolved)) throw stableError("e2e_run_timeout_invalid");
+  return resolved;
+}
+
+export function rootInstruction(filename, content) {
   return [
     `Create a file named ${filename} at the repository root.`,
     `Its content must be exactly ${JSON.stringify(content)}.`,
     "Make no other changes.",
-    "Create a plan with exactly one Work node that performs this change; do not add a separate verification Work node.",
+    "Planning phase: The Root already contains exactly one Work child and one Human Plan Approval child. In one planning Turn, use only linear.status.set; use linear.read only if the current facts do not identify the exact child, and do not create or add children.",
+    "Use the minimum necessary broker commands and do not explain the plan in prose.",
+    "Do not inspect files or edit the workspace during planning; do not run shell commands, create the requested file, commit, or deliver until after approval.",
+    "Find the exact child titled \"[Human Action] Approve Plan\" with the plan_approval managed marker, copy its current issue.updated_at and Git HEAD verbatim, then use linear.status.set to set it to In Progress; wait for applied or already_applied, then end the planning Turn.",
+    "Do not edit, commit, or deliver during the planning Turn or while the Human child is In Progress.",
+    "Execution phase: only after the Human Plan Approval child is Done, perform the Work, mark it Done, commit, and deliver.",
   ].join(" ");
 }
 
@@ -857,19 +978,20 @@ export function readRootStates(linear, fixtures) {
   return linear.readRunStates({ fixtures });
 }
 
-function planReady(state) {
-  return state?.phase === "awaiting-human" &&
-    state.approvalState === "In Progress" &&
+export function planReady(state) {
+  return state?.approvalState === "In Progress" &&
     state.planApprovalCount === 1 &&
     state.treeMatches === true &&
     rootWorkUntouched(state) &&
     Boolean(state.performerId);
 }
 
-function rootUntouched(state) {
+export function rootUntouched(state) {
   return state?.rootState === "Todo" &&
-    state.phase === undefined &&
-    state.planApprovalCount === 0 &&
+    state.approvalState === "Todo" &&
+    state.planApprovalCount === 1 &&
+    state.treeMatches === true &&
+    rootWorkUntouched(state) &&
     state.performerId === undefined;
 }
 
@@ -901,7 +1023,7 @@ async function waitForRootCompletion({
   log,
 }) {
   const progress = createRootProgressWatchdog({
-    rootIssueId: fixture.rootIssueId,
+    rootIssueId: fixture.rootId,
     turnLane,
     runtimeEvidence,
     readGitFacts: () => readGitProgressFacts(git.repositoryRoot),

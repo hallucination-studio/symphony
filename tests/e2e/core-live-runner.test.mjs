@@ -9,8 +9,11 @@ import {
   createRuntimeEvidenceTracker,
   createTurnLaneTracker,
   finalizeCoreLiveResult,
+  planReady,
   pollUntil,
   readRootStates,
+  rootUntouched,
+  rootInstruction,
 } from "../../tools/e2e/core-live-runner.mjs";
 
 test("one poll tick batches every fixture into one Project state read", async () => {
@@ -30,6 +33,56 @@ test("one poll tick batches every fixture into one Project state read", async ()
 
   assert.deepEqual(states, expected);
   assert.deepEqual(calls, [{ fixtures }]);
+});
+
+test("core live Root instructions require a Human Plan Approval before execution", () => {
+  const instruction = rootInstruction("e2e-yielded.txt", "run-1:yielded\n");
+  assert.match(instruction, /exactly one Work child and one Human Plan Approval child/u);
+  assert.match(instruction, /one planning Turn/u);
+  assert.match(instruction, /Root already contains exactly one Work child and one Human Plan Approval child/u);
+  assert.match(instruction, /use only linear\.status\.set/u);
+  assert.match(instruction, /minimum necessary broker commands/u);
+  assert.doesNotMatch(instruction, /linear\.issue\.create_child/u);
+  assert.match(instruction, /copy its current issue\.updated_at and Git HEAD verbatim/u);
+  assert.match(instruction, /titled "\[Human Action\] Approve Plan"/u);
+  assert.match(instruction, /plan_approval managed marker/u);
+  assert.match(instruction, /Do not inspect files or edit the workspace during planning/u);
+  assert.match(instruction, /use linear\.status\.set to set it to In Progress/u);
+  assert.match(instruction, /then end the planning Turn/u);
+  assert.match(instruction, /Do not edit, commit, or deliver during the planning Turn/u);
+  assert.match(instruction, /only after the Human Plan Approval child is Done/u);
+});
+
+test("plan readiness uses Linear workflow facts when the activity label is absent", () => {
+  assert.equal(planReady({
+    phase: undefined,
+    approvalState: "In Progress",
+    planApprovalCount: 1,
+    treeMatches: true,
+    workStates: ["Todo"],
+    performerId: "conversation-1",
+  }), true);
+});
+
+test("root scheduling readiness uses pre-seeded Linear workflow facts", () => {
+  assert.equal(rootUntouched({
+    phase: "root-todo",
+    rootState: "Todo",
+    approvalState: "Todo",
+    planApprovalCount: 1,
+    treeMatches: true,
+    workStates: ["Todo"],
+    performerId: undefined,
+  }), true);
+  assert.equal(rootUntouched({
+    phase: undefined,
+    rootState: "Todo",
+    approvalState: "Todo",
+    planApprovalCount: 0,
+    treeMatches: false,
+    workStates: [],
+    performerId: undefined,
+  }), false);
 });
 
 test("runtime evidence reports bounded step durations and private Linear request counts", () => {
@@ -53,6 +106,11 @@ test("runtime evidence reports bounded step durations and private Linear request
     root_issue_id: "root-1", turn_id: "turn-1", performer_id: "conversation-1",
   }) });
   tracker.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
+    event: "agent_broker_result", command: "linear.issue.create_child", status: "failed",
+    problem_code: "linear_mutation_failed", root_issue_id: "root-1", turn_id: "turn-1",
+    performer_id: "conversation-1",
+  }) });
+  tracker.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
     event: "root_discovery_evidence", root_header_count: 251,
     list_page_count: 2, get_issue_tree_count: 0,
   }) });
@@ -62,8 +120,12 @@ test("runtime evidence reports bounded step durations and private Linear request
     stepDurationsMs: { discovery: 25 },
     requestCounts: { list_root_issues: 1, get_issue_tree: 1 },
     stepRequestCounts: { discovery: { list_root_issues: 1, get_issue_tree: 1 } },
-    brokerResults: [{ command: "git.commit", status: "applied", rootIssueId: "root-1",
-      turnId: "turn-1", performerId: "conversation-1" }],
+    brokerResults: [
+      { command: "git.commit", status: "applied", rootIssueId: "root-1",
+        turnId: "turn-1", performerId: "conversation-1" },
+      { command: "linear.issue.create_child", status: "failed", problemCode: "linear_mutation_failed",
+        rootIssueId: "root-1", turnId: "turn-1", performerId: "conversation-1" },
+    ],
     discoveryObservations: 1,
     maxRootHeaderCount: 251,
     totalDiscoveryListPages: 2,
@@ -110,6 +172,7 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /phase === "in-review"/u);
   assert.match(source, /e2e-dependent\.txt/u);
   assert.match(source, /createBlockerRelation/u);
+  assert.match(source, /linear\.seedPlan/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
   assert.match(source, /readRootCommentEvidence/u);
   assert.match(source, /root_comments_verified/u);
@@ -121,6 +184,12 @@ test("core live topology uses production boundaries and state-based completion",
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
   assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 20 \* 60_000/u);
   assert.match(source, /pollIntervalMs = 10_000/u);
+  assert.match(source, /FIRST_PLANNING_POLL_INTERVAL_MS = 2_000/u);
+  assert.match(source, /pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS/u);
+  assert.match(source, /firstStartedTurnAt\(blocker\.rootId\)/u);
+  assert.doesNotMatch(source, /firstStartedTurnAt\(blocker\.rootIssueId\)/u);
+  assert.match(source, /rootIssueId: fixture\.rootId/u);
+  assert.match(conductorSource, /await performer\.cancelAndReap/u);
 });
 
 test("core live polling rejects an expired run-wide deadline", async () => {
@@ -175,6 +244,36 @@ test("Turn lane pointer evidence requires the first Turn to use the read-back Co
   assert.equal(tracker.observedConversation("root-a", "conversation-old"), true);
 });
 
+test("Turn lane evidence records the first completed Turn duration per Root", () => {
+  let now = 1_000;
+  const tracker = createTurnLaneTracker(() => {}, () => now);
+  tracker.log(childEvent("turn-a", "turn_started", "root-a", "conversation-a"));
+  now = 1_250;
+  tracker.log(childEvent("turn-a", "turn_completed", "root-a", "conversation-a"));
+  tracker.log(childEvent("turn-b", "turn_started", "root-a", "conversation-a"));
+  now = 1_500;
+  tracker.log(childEvent("turn-b", "turn_completed", "root-a", "conversation-a"));
+
+  assert.equal(tracker.firstCompletedTurnDurationMs("root-a"), 250);
+  assert.equal(tracker.firstStartedTurnAt("root-a"), 1_000);
+  assert.equal(tracker.firstCompletedTurnDurationMs("root-b"), undefined);
+});
+
+test("core live polling can fail with a phase-specific deadline", async () => {
+  await assert.rejects(
+    pollUntil(
+      () => new Promise(() => {}),
+      Boolean,
+      {
+        deadline: () => Date.now() + 20,
+        deadlineError: () => new Error("e2e_first_planning_turn_budget_exceeded"),
+        pollIntervalMs: 1,
+      },
+    ),
+    /e2e_first_planning_turn_budget_exceeded/u,
+  );
+});
+
 test("E2E progress watchdog fails after two completed no-effect Turns", async () => {
   const lane = createTurnLaneTracker(() => {});
   const runtime = createRuntimeEvidenceTracker(() => {});
@@ -197,7 +296,7 @@ test("E2E progress watchdog fails after two completed no-effect Turns", async ()
   }]);
 });
 
-test("E2E progress watchdog accepts broker, Linear, and local Git progress", async () => {
+test("E2E progress watchdog accepts applied broker, Linear, and local Git progress", async () => {
   const lane = createTurnLaneTracker(() => {});
   const runtime = createRuntimeEvidenceTracker(() => {});
   let gitHead = "abc";
@@ -210,7 +309,7 @@ test("E2E progress watchdog accepts broker, Linear, and local Git progress", asy
   lane.log(childEvent("turn-a", "turn_started"));
   lane.log(childEvent("turn-a", "turn_completed"));
   runtime.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
-    event: "agent_broker_result", command: "linear.read", status: "read",
+    event: "agent_broker_result", command: "linear.issue.create_child", status: "applied",
     root_issue_id: "root-a", turn_id: "turn-a", performer_id: "conversation-a",
   }) });
   await watchdog.observe(state);
@@ -227,6 +326,27 @@ test("E2E progress watchdog accepts broker, Linear, and local Git progress", asy
   await watchdog.observe({
     phase: "awaiting-human", approvalState: "In Progress", workStates: ["In Progress"],
   });
+});
+
+test("E2E progress watchdog does not treat read-only broker calls as Root progress", async () => {
+  const lane = createTurnLaneTracker(() => {});
+  const runtime = createRuntimeEvidenceTracker(() => {});
+  const watchdog = createRootProgressWatchdog({
+    rootIssueId: "root-a", turnLane: lane, runtimeEvidence: runtime,
+    readGitFacts: async () => ({ refs: "main:abc", worktrees: [] }),
+  });
+  const state = { phase: "planning", approvalState: "Todo", workStates: ["Todo"] };
+  await watchdog.observe(state);
+  for (const turnId of ["turn-a", "turn-b"]) {
+    lane.log(childEvent(turnId, "turn_started", "root-a", "conversation-a"));
+    lane.log(childEvent(turnId, "turn_completed", "root-a", "conversation-a"));
+    runtime.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
+      event: "agent_broker_result", command: "linear.read", status: "read",
+      root_issue_id: "root-a", turn_id: turnId, performer_id: "conversation-a",
+    }) });
+    if (turnId === "turn-a") await watchdog.observe(state);
+  }
+  await assert.rejects(watchdog.observe(state), /e2e_root_progress_stalled/u);
 });
 
 test("core live cleanup attempts every acquired resource and reports stable failures", async () => {

@@ -4,6 +4,7 @@ const REQUIRED_STEPS = Object.freeze([
   "profile_active",
   "conversation_pointer_verified",
   "root_created",
+  "first_managed_comment",
   "blocker_order_verified",
   "human_yield_verified",
   "priority_refresh_verified",
@@ -99,6 +100,15 @@ export function evaluateCoreLiveEvidence(result) {
     Number.isSafeInteger(runtimeBudget?.physicalRequestCount) &&
     runtimeBudget.physicalRequestCount > 0 && runtimeBudget.physicalRequestCount < 500 &&
     runtimeBudget?.physicalRequest429Count === 0 &&
+    Number.isSafeInteger(runtimeBudget?.firstManagedCommentDurationMs) &&
+    runtimeBudget.firstManagedCommentDurationMs >= 0 &&
+    runtimeBudget.firstManagedCommentDurationMs <= 30_000 &&
+    Number.isSafeInteger(runtimeBudget?.firstPlanningTurnDurationMs) &&
+    runtimeBudget.firstPlanningTurnDurationMs >= 0 &&
+    runtimeBudget.firstPlanningTurnDurationMs <= 120_000 &&
+    Number.isSafeInteger(runtimeBudget?.firstPlanningInputTokens) &&
+    runtimeBudget.firstPlanningInputTokens >= 0 &&
+    runtimeBudget.firstPlanningInputTokens <= 300_000 &&
     physicalRequestCountsValid(runtimeBudget) &&
     rateWindowValid(runtimeBudget?.requestWindowStart) &&
     rateWindowValid(runtimeBudget?.requestWindowEnd) &&

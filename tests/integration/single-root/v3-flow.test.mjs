@@ -160,7 +160,9 @@ test("one Root rejects stale retry and clears only its acknowledged Retry Block"
     conductorId: "conductor-1", baseBranch: "main", now: () => "2026-07-19T00:00:03Z",
     requestId: () => "retry-1", bootstrapDeadlineMs: 60_000,
     profiles: { async fixedReadyProfile() { return profile(); } },
-    workspaces: { async ensureWorkspace() { return workspace(); } },
+    workspaces: { async ensureWorkspace() {
+      return { ...workspace(), worktreePath: runtimeRoot };
+    } },
     performer,
     claims: {
       async writeRetryBlock(input) { blocked = input.retryBlock; return "applied"; },
