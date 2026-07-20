@@ -37,20 +37,8 @@ test("one poll tick batches every fixture into one Project state read", async ()
 
 test("core live Root instructions create Plan children through the Root Agent", () => {
   const instruction = rootInstruction("e2e-yielded.txt", "run-1:yielded\n");
-  assert.match(instruction, /create exactly one Work child/u);
-  assert.match(instruction, /exactly one Human child/u);
-  assert.match(instruction, /planning Turn/u);
-  assert.match(instruction, /linear\.issue\.create_child/u);
-  assert.match(instruction, /minimum necessary broker commands/u);
-  assert.match(instruction, /<root_issue_id>:work/u);
-  assert.match(instruction, /<root_issue_id>:plan-approval/u);
-  assert.match(instruction, /titled "\[Human Action\] Approve Plan"/u);
-  assert.match(instruction, /plan_approval managed marker/u);
-  assert.match(instruction, /Do not inspect files or edit the workspace during planning/u);
-  assert.match(instruction, /linear\.status\.set to set that Human child to In Progress/u);
-  assert.match(instruction, /end the planning Turn/u);
-  assert.match(instruction, /Do not edit, commit, or deliver during the planning Turn/u);
-  assert.match(instruction, /only after the Human Plan Approval child is Done/u);
+  assert.equal(instruction, "Create `e2e-yielded.txt` at the repository root with exactly `run-1:yielded`. Before changing the repository, ask me to confirm the proposed plan.");
+  assert.doesNotMatch(instruction, /symphony|linear\.|broker|Gate|workflow|Turn/u);
 });
 
 test("plan readiness uses Linear workflow facts when the activity label is absent", () => {
@@ -174,10 +162,11 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /provisionApiKeyProfile/u);
   assert.match(source, /rootState === "In Review"/u);
   assert.match(source, /phase === "in-review"/u);
-  assert.match(source, /e2e-dependent\.txt/u);
-  assert.match(source, /createBlockerRelation/u);
-  assert.doesNotMatch(source, /linear\.seedPlan/u);
-  assert.match(source, /create exactly one Work child/u);
+  assert.match(source, /createHumanActor/u);
+  assert.match(source, /e2e-high\.txt/u);
+  assert.match(source, /e2e-medium\.txt/u);
+  assert.match(source, /e2e-low\.txt/u);
+  assert.doesNotMatch(source, /seedPlan|createBlockerRelation|updateRootScheduling|completeRoot|approvePlan/u);
   assert.match(source, /gateChecklistChecked/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
   assert.match(source, /readRootCommentEvidence/u);
@@ -192,8 +181,8 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /pollIntervalMs = 10_000/u);
   assert.match(source, /FIRST_PLANNING_POLL_INTERVAL_MS = 2_000/u);
   assert.match(source, /pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS/u);
-  assert.match(source, /firstStartedTurnAt\(blocker\.rootId\)/u);
-  assert.doesNotMatch(source, /firstStartedTurnAt\(blocker\.rootIssueId\)/u);
+  assert.match(source, /firstStartedTurnAt\(fixtures\[0\]\.rootId\)/u);
+  assert.doesNotMatch(source, /e2e-dependent\.txt|e2e-yielded\.txt|createBlockerRelation/u);
   assert.match(source, /rootIssueId: fixture\.rootId/u);
   assert.match(conductorSource, /await performer\.cancelAndReap/u);
 });

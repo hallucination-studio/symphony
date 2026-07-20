@@ -20,6 +20,7 @@ import {
   createRunScopedGitFixture,
   createRunScopedLinearOperator,
 } from "./run-fixtures.mjs";
+import { createHumanActor } from "./human-actor.mjs";
 
 const execute = promisify(execFile);
 const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -394,49 +395,6 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
     const podium = await createProductionPodiumConductorOwner({ databasePath, log });
 
-    log({ event: "e2e_step_started", step: "first_managed_comment" });
-    log({ event: "e2e_step_started", step: "root_created" });
-    const blocker = await linear.createRoot({
-      lock,
-      runId,
-      rootName: boundedRootName(runId, "blocker"),
-      preflight,
-      project,
-      priority: 4,
-      sortOrder: 20,
-      rootInstruction: rootInstruction("e2e-blocker.txt", `${runId}:blocker\n`),
-    });
-    const dependent = await linear.createRoot({
-      lock,
-      runId,
-      rootName: boundedRootName(runId, "dependent"),
-      preflight,
-      project,
-      priority: 1,
-      sortOrder: 10,
-      rootInstruction: rootInstruction("e2e-dependent.txt", `${runId}:dependent\n`),
-    });
-    const yielded = await linear.createRoot({
-      lock,
-      runId,
-      rootName: boundedRootName(runId, "yielded"),
-      preflight,
-      project,
-      priority: 0,
-      sortOrder: 30,
-      rootInstruction: rootInstruction("e2e-yielded.txt", `${runId}:yielded\n`),
-    });
-    fixtures = [blocker, yielded, dependent];
-    await linear.createBlockerRelation({ lock, runId, blocker, dependent });
-    assertRunActive(deadline);
-    evidence.push({
-      step: "root_created",
-      status: "passed",
-      rootCount: fixtures.length,
-      rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
-    });
-    log({ event: "e2e_step_completed", step: "root_created", root_count: fixtures.length });
-
     log({ event: "e2e_step_started", step: "conductor_handshake" });
     harness = await startConductorHarness({
       podium,
@@ -462,8 +420,38 @@ export async function runCoreLiveE2E({
     evidence.push({ step: "profile_active", status: "passed" });
     log({ event: "e2e_step_completed", step: "profile_active" });
 
+    log({ event: "e2e_step_started", step: "root_created" });
+    const rootInputs = [
+      ["Create high-priority marker", "e2e-high.txt", "high-priority root\n", 1],
+      ["Create medium-priority marker", "e2e-medium.txt", "medium-priority root\n", 2],
+      ["Create low-priority marker", "e2e-low.txt", "low-priority root\n", 3],
+    ];
+    for (const [title, filename, content, priority] of rootInputs) {
+      fixtures.push(await linear.createRoot({
+        lock,
+        runId,
+        rootName: title,
+        preflight,
+        project,
+        priority,
+        rootInstruction: rootInstruction(filename, content),
+      }));
+      assertRunActive(deadline);
+    }
+    evidence.push({
+      step: "root_created",
+      status: "passed",
+      rootCount: fixtures.length,
+      rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
+      priorities: rootInputs.map(([, , , priority]) => priority),
+    });
+    log({ event: "e2e_step_completed", step: "root_created", root_count: fixtures.length });
+
+    const humanActor = createHumanActor({ linear });
+    log({ event: "e2e_step_started", step: "first_managed_comment" });
+
     const [firstManagedComment] = await pollUntil(
-      () => readRootStates(linear, [blocker]),
+      () => readRootStates(linear, [fixtures[0]]),
       ([state]) => Boolean(state?.performerId),
       { deadline, pollIntervalMs },
     );
@@ -487,24 +475,22 @@ export async function runCoreLiveE2E({
 
     log({ event: "e2e_step_started", step: "multi_root_scheduling" });
     let lastPlanningStateLog;
-    const [blockerPlan] = await pollUntil(
-      () => readRootStates(linear, [blocker, dependent]),
-      ([blockerState, dependentState]) => {
-        const planningStateLog = JSON.stringify({ blockerState, dependentState });
+    const planningStates = await pollUntil(
+      () => readRootStates(linear, fixtures),
+      (states) => {
+        const planningStateLog = JSON.stringify(states);
         if (planningStateLog !== lastPlanningStateLog) {
           lastPlanningStateLog = planningStateLog;
-          log({ event: "e2e_planning_state", blockerState, dependentState });
+          log({ event: "e2e_planning_state", states });
         }
-        return planReady(blockerState) && rootUntouched(dependentState);
+        return states.every(planReady);
       },
       {
         deadline: () => {
-          const startedAt = turnLane.firstStartedTurnAt(blocker.rootId);
-          const completedDuration = turnLane.firstCompletedTurnDurationMs(blocker.rootId);
+          const startedAt = turnLane.firstStartedTurnAt(fixtures[0].rootId);
+          const completedDuration = turnLane.firstCompletedTurnDurationMs(fixtures[0].rootId);
           if (completedDuration !== undefined) {
-            return completedDuration <= FIRST_PLANNING_TURN_BUDGET_MS
-              ? deadline
-              : Date.now();
+            return completedDuration <= FIRST_PLANNING_TURN_BUDGET_MS ? deadline : Date.now();
           }
           return startedAt === undefined
             ? deadline
@@ -514,8 +500,9 @@ export async function runCoreLiveE2E({
         pollIntervalMs: FIRST_PLANNING_POLL_INTERVAL_MS,
       },
     );
-    firstPlanningTurnDurationMs = turnLane.firstCompletedTurnDurationMs(blocker.rootId);
-    firstPlanningInputTokens = blockerPlan.providerInputTokens;
+    const firstPlan = planningStates[0];
+    firstPlanningTurnDurationMs = turnLane.firstCompletedTurnDurationMs(fixtures[0].rootId);
+    firstPlanningInputTokens = firstPlan.providerInputTokens;
     assertPerformanceBudget(
       firstPlanningTurnDurationMs,
       FIRST_PLANNING_TURN_BUDGET_MS,
@@ -529,110 +516,56 @@ export async function runCoreLiveE2E({
     evidence.push({
       step: "conversation_pointer_verified",
       status: "passed",
-      pointerReadBack: Boolean(blockerPlan.performerId),
+      pointerReadBack: Boolean(firstPlan.performerId),
       firstTurnUsedPointer: turnLane.observedConversation(
-        blocker.rootId,
-        blockerPlan.performerId,
+        fixtures[0].rootId,
+        firstPlan.performerId,
       ),
     });
-    const blockedDependentState = await linear.readRunState({ fixture: dependent });
-    if (!rootUntouched(blockedDependentState)) {
-      throw stableError("e2e_blocked_root_mutated");
-    }
-    evidence.push({
-      step: "blocker_order_verified",
-      status: "passed",
-      blockerPlanned: true,
-      dependentUntouched: true,
-      dependentChildCount: blockedDependentState.childCount,
-      dependentManagedCommentAbsent: blockedDependentState.managedCommentPresent === false,
-      dependentPerformerAbsent: blockedDependentState.performerId === undefined,
-    });
-
-    const [waitingBlocker, yieldedPlan] = await pollUntil(
-      () => readRootStates(linear, [blocker, yielded]),
-      ([blockerState, yieldedState]) =>
-        planReady(blockerState) && planReady(yieldedState),
-      { deadline, pollIntervalMs },
-    );
     evidence.push({
       step: "human_yield_verified",
       status: "passed",
-      waitingRootUnchanged: waitingBlocker.approvalState === "In Progress",
-      yieldedRootPlanned: true,
+      waitingRootCount: planningStates.filter(({ approvalState }) => approvalState === "In Progress").length,
+      allRootsPlanned: planningStates.every(planReady),
     });
-
-    await linear.updateRootScheduling({
-      lock,
-      runId,
-      fixture: yielded,
-      priority: 1,
-      sortOrder: -10,
-    });
-    await Promise.all([
-      linear.approvePlan({
+    evidence.push({ step: "plan_ready", status: "passed", rootCount: planningStates.length });
+    for (const [index, state] of planningStates.entries()) {
+      await humanActor.respondAndComplete({
         lock,
         runId,
-        fixture: blocker,
-        preflight,
-        approvalId: blockerPlan.approvalId,
-      }),
-      linear.approvePlan({
-        lock,
-        runId,
-        fixture: yielded,
-        preflight,
-        approvalId: yieldedPlan.approvalId,
-      }),
-    ]);
+        fixture: { ...fixtures[index], approvalId: state.approvalId },
+        doneStateId: preflight.doneStateId,
+      });
+    }
     assertRunActive(deadline);
-    await pollUntil(
-      () => readRootStates(linear, [blocker, yielded]),
-      ([blockerState, yieldedState]) =>
-        rootWorkUntouched(blockerState) && rootAdvancedPastApproval(yieldedState),
-      {
-        deadline,
-        pollIntervalMs,
-      },
-    );
     evidence.push({
-      step: "priority_refresh_verified",
+      step: "plan_approved",
       status: "passed",
-      newWinnerSelected: true,
-      previousWinnerUntouched: true,
+      rootCount: fixtures.length,
+      humanResponseApplied: true,
     });
     log({ event: "e2e_step_completed", step: "multi_root_scheduling" });
     log({ event: "e2e_step_started", step: "root_completion" });
 
-    const yieldedCompleted = await waitForRootCompletion({
-      linear,
-      fixture: yielded,
-      plan: yieldedPlan,
-      git,
-      filename: "e2e-yielded.txt",
-      expected: `${runId}:yielded\n`,
-      deadline,
-      pollIntervalMs,
-      turnLane,
-      runtimeEvidence,
-      log,
-    });
-    assertRunActive(deadline);
-    await linear.completeRoot({
-      lock,
-      runId,
-      fixture: blocker,
-      doneStateId: preflight.doneStateId,
-    });
-    const dependentPlan = await pollUntil(
-      () => linear.readRunState({ fixture: dependent }),
-      planReady,
-      { deadline, pollIntervalMs },
-    );
-    evidence.push(
-      { step: "plan_ready", status: "passed" },
-      { step: "plan_approved", status: "passed" },
-    );
+    const completedRoots = [];
+    for (const [index, plan] of planningStates.entries()) {
+      const [, filename, expected] = rootInputs[index];
+      completedRoots.push(await waitForRootCompletion({
+        linear,
+        fixture: fixtures[index],
+        plan,
+        git,
+        filename,
+        expected,
+        deadline,
+        pollIntervalMs,
+        turnLane,
+        runtimeEvidence,
+        log,
+      }));
+      assertRunActive(deadline);
+    }
+    const completedRoot = completedRoots[completedRoots.length - 1];
     const laneEvidence = turnLane.evidence();
     if (
       laneEvidence.activeTurnCount !== 0 ||
@@ -651,8 +584,10 @@ export async function runCoreLiveE2E({
     const correlatedBrokerResults = runtimeFacts.brokerResults
       .filter(({ status, rootIssueId, performerId, turnId }) =>
         (status === "applied" || status === "already_applied") &&
-        rootIssueId === yielded.rootId && performerId === yieldedCompleted.performerId &&
-        turnLane.completedTurn(rootIssueId, performerId, turnId));
+        completedRoots.some((completed, index) =>
+          fixtures[index].rootId === rootIssueId &&
+          completed.performerId === performerId &&
+          turnLane.completedTurn(rootIssueId, performerId, turnId)));
     const appliedBrokerCommands = correlatedBrokerResults.map(({ command }) => command);
     const commandsByTurn = Map.groupBy(correlatedBrokerResults, ({ turnId }) => turnId);
     const deliveryTurn = [...commandsByTurn.entries()].find(([, commands]) =>
@@ -666,28 +601,29 @@ export async function runCoreLiveE2E({
     }
     evidence.push(
       { step: "work_completed", status: "passed",
-        workNodeCount: yieldedCompleted.workStates.length,
-        allWorkDone: yieldedCompleted.workStates.every((state) => state === "Done"),
+        workNodeCount: completedRoots.reduce((total, completed) => total + completed.workStates.length, 0),
+        allWorkDone: completedRoots.every((completed) =>
+          completed.workStates.every((state) => state === "Done")),
         planCreatedByBroker: appliedBrokerCommands.filter((command) =>
           command === "linear.issue.create_child").length >= 2 },
       { step: "root_gate_passed", status: "passed",
-        reworkCount: yieldedCompleted.reworkCount,
-        gateCount: yieldedCompleted.gateCount,
-        checklistChecked: yieldedCompleted.gateChecklistChecked,
-        phase: yieldedCompleted.phase },
+        reworkCount: completedRoots.reduce((total, completed) => total + completed.reworkCount, 0),
+        gateCount: completedRoots.reduce((total, completed) => total + completed.gateCount, 0),
+        checklistChecked: completedRoots.every((completed) => completed.gateChecklistChecked),
+        phase: completedRoot.phase },
       {
         step: "branch_delivered",
         status: "passed",
         branchCount: 1,
-        deliveryBranch: yieldedCompleted.deliveryBranch,
+        deliveryBranch: completedRoot.deliveryBranch,
         deliveredMarkerReadBack: true,
       },
       { step: "linear_in_review", status: "passed",
-        rootState: yieldedCompleted.rootState, phase: yieldedCompleted.phase },
+        rootState: completedRoot.rootState, phase: completedRoot.phase },
       { step: "broker_writes_verified", status: "passed",
         linearReadBack, gitReadBack, deliveryReadBack,
-        rootIssueId: yielded.rootId,
-        performerId: yieldedCompleted.performerId,
+        rootIssueId: fixtures[fixtures.length - 1].rootId,
+        performerId: completedRoot.performerId,
         correlatedTurnIds: [...commandsByTurn.keys()],
         deliveryTurnId: deliveryTurn?.[0],
         turnCommands: [...commandsByTurn].map(([turnId, commands]) => ({
@@ -733,14 +669,14 @@ export async function runCoreLiveE2E({
       runId,
       projectMode: project.retainProject ? "retained" : "temporary",
       projectSlugId: project.projectSlugId,
-      rootIdentifier: yielded.rootIdentifier,
-      rootIssueId: yielded.rootId,
+      rootIdentifier: fixtures[fixtures.length - 1].rootIdentifier,
+      rootIssueId: fixtures[fixtures.length - 1].rootId,
       profileId: profile.profileId,
-      performerId: yieldedCompleted.performerId,
-      performerResumed: yieldedCompleted.performerId === yieldedPlan.performerId,
-      rootState: yieldedCompleted.rootState,
-      phase: yieldedCompleted.phase,
-      deliveryBranch: yieldedCompleted.deliveryBranch,
+      performerId: completedRoot.performerId,
+      performerResumed: completedRoot.performerId === planningStates[planningStates.length - 1].performerId,
+      rootState: completedRoot.rootState,
+      phase: completedRoot.phase,
+      deliveryBranch: completedRoot.deliveryBranch,
       evidence,
     });
   } catch (error) {
@@ -826,6 +762,8 @@ export async function cleanupCoreLiveResources(
           projectId: project.projectId,
           labelId: project.labelId,
           marker: project.marker,
+          ...(project.runLabelId ? { runLabelId: project.runLabelId } : {}),
+          ...(project.runLabelName ? { runLabelName: project.runLabelName } : {}),
           ...(typeof project.retainProject === "boolean"
             ? { retainProject: project.retainProject }
             : {}),
@@ -1005,27 +943,8 @@ function resolveDeadline(deadline) {
 }
 
 export function rootInstruction(filename, content) {
-  return [
-    `Create a file named ${filename} at the repository root.`,
-    `Its content must be exactly ${JSON.stringify(content)}.`,
-    "Make no other changes.",
-    "Planning phase: If current Root facts show an unresolved blocker, do not claim the Root, create children, or run a Plan; end the Turn without mutation.",
-    "For an eligible Root with no workflow children, create exactly one Work child titled \"[Work] Create marker\" and exactly one Human child titled \"[Human Action] Approve Plan\" through linear.issue.create_child, using managed markers <root_issue_id>:work and <root_issue_id>:plan-approval, then read back both children and end the planning Turn.",
-    "Copy the Human child issue.updated_at and current Git HEAD from fresh facts, use linear.status.set to set that Human child to In Progress, read back the applied result, and then end the planning Turn.",
-    "Use the minimum necessary broker commands and do not explain the plan in prose.",
-    "Do not inspect files or edit the workspace during planning; do not run shell commands, create the requested file, commit, or deliver until after approval.",
-    "The Human child must use the plan_approval managed marker and remain Todo until the human approval action changes it to Done.",
-    "Do not edit, commit, or deliver during the planning Turn or while the Human child is In Progress.",
-    "Execution phase: only after the Human Plan Approval child is Done, perform the Work, mark it Done, and commit.",
-    "After Work and Human children are resolved, create exactly one " + ROOT_GATE_TITLE +
-      " Work child with marker <root_issue_id>:root-gate and this exact unchecked checklist: " +
-      rootGateDescription(false) + ". Run fresh Git checks, update the same Gate child to this exact checked checklist: " +
-      rootGateDescription(true) + ", read it back, then deliver through root.deliver.",
-  ].join(" ");
-}
-
-function boundedRootName(runId, role) {
-  return `${runId.slice(0, 48)} ${role}`;
+  const normalizedContent = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return `Create \`${filename}\` at the repository root with exactly \`${normalizedContent}\`. Before changing the repository, ask me to confirm the proposed plan.`;
 }
 
 export function readRootStates(linear, fixtures) {

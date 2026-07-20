@@ -97,27 +97,6 @@ test("Linear fixture retries at most two transient query transport failures", as
   ]);
 });
 
-test("Linear fixture does not retry an ambiguously failed mutation", async () => {
-  let attempts = 0;
-  const operator = createRunScopedLinearOperator({
-    developmentToken: "development-secret",
-    applicationClientId: "client-1",
-    fetch: async () => {
-      attempts += 1;
-      throw new TypeError("ambiguous mutation transport failure");
-    },
-  });
-
-  await assert.rejects(operator.completeRoot({
-    lock: { runId: "run-1", released: false },
-    runId: "run-1",
-    fixture: { runId: "run-1", rootId: "root-1", projectId: "project-1",
-      marker: managedMarker("run-1") },
-    doneStateId: "state-done",
-  }), /linear_fixture_request_failed/u);
-  assert.equal(attempts, 1);
-});
-
 test("Linear fixture logs a bounded sanitized non-JSON response body", async () => {
   const events = [];
   const operator = createRunScopedLinearOperator({
@@ -167,6 +146,9 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
       requests.push(request);
+      if (request.query.includes("CoreLiveRunLabel")) return response({ data: {
+        issueLabelCreate: { success: true, issueLabel: { id: "run-label-1", name: "symphony:e2e/run-1" } },
+      } });
       if (request.query.includes("CoreLiveLabel")) return response({ data: {
         projectLabelCreate: { success: true, projectLabel: { id: "label-1", name: "symphony:conductor/abc123def456" } },
       } });
@@ -196,158 +178,66 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
   assert.equal(fixture.labelId, "label-1");
   assert.deepEqual(requests.map(({ query }) =>
     query.match(/CoreLive(?:Label|Project|Root)/u)?.[0]), [
-    "CoreLiveLabel", "CoreLiveProject", "CoreLiveRoot",
+    "CoreLiveLabel", undefined, "CoreLiveProject", "CoreLiveRoot",
   ]);
-  assert.deepEqual(requests[1].variables.input.labelIds, ["label-1"]);
-  assert.equal(requests[2].variables.input.delegateId, "actor-1");
-  assert.match(requests[2].variables.input.description, /run_id: run-1/u);
+  assert.deepEqual(requests[2].variables.input.labelIds, ["label-1"]);
+  assert.equal(requests[3].variables.input.delegateId, "actor-1");
+  assert.equal(requests[3].variables.input.title, "run-1");
+  assert.equal(requests[3].variables.input.description, "Create e2e-result.txt containing run-1 exactly.");
   assert.doesNotMatch(JSON.stringify(fixture), /development-secret/u);
 });
 
-test("Linear fixture seeds the exact plan tree with production managed markers", async () => {
-  const requests = [];
-  let nodeNumber = 0;
+test("Linear fixture Root creation preserves user-owned title and description exactly", async () => {
+  let rootInput;
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
-      requests.push(request);
-      nodeNumber += 1;
-      return response({ data: {
-        issueCreate: {
-          success: true,
-          issue: {
-            id: `node-${nodeNumber}`,
-            parent: { id: "root-1" },
-            state: { name: "Todo" },
-            title: request.variables.input.title,
-            description: request.variables.input.description,
-          },
-        },
+      if (request.query.includes("CoreLiveRoot")) {
+        rootInput = request.variables.input;
+        return response({ data: {
+          issueCreate: { success: true, issue: { id: "root-1", identifier: "SYM-1" } },
+        } });
+      }
+      if (request.query.includes("CoreLiveLabel")) return response({ data: {
+        projectLabelCreate: { success: true, projectLabel: { id: "label-1", name: "symphony:conductor/abc123def456" } },
       } });
-    },
-  });
-
-  const plan = await operator.seedPlan({
-    lock: { runId: "run-1", released: false },
-    runId: "run-1",
-    fixture: {
-      runId: "run-1", marker: managedMarker("run-1"), projectId: "project-1", rootId: "root-1",
-    },
-    preflight: { actorId: "actor-1", teamId: "team-1", stateId: "state-todo" },
-  });
-
-  assert.deepEqual(plan, { workId: "node-1", approvalId: "node-2" });
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests.map(({ variables }) => variables.input), [
-    {
-      teamId: "team-1", projectId: "project-1", parentId: "root-1", stateId: "state-todo",
-      title: "[Work] Create marker", subIssueSortOrder: 0,
-      description: "Complete the requested file change.\n\n<!-- symphony managed marker\nmanaged_marker: root-1:work\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",
-    },
-    {
-      teamId: "team-1", projectId: "project-1", parentId: "root-1", stateId: "state-todo",
-      title: "[Human Action] Approve Plan", subIssueSortOrder: 1,
-      description: "Approve the plan before work begins.\n\n<!-- symphony managed marker\nmanaged_marker: root-1:plan-approval\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->",
-    },
-  ]);
-});
-
-test("Linear fixture configures multi-Root scheduling only through Linear facts", async () => {
-  const requests = [];
-  const operator = createRunScopedLinearOperator({
-    developmentToken: "development-secret",
-    fetch: async (_url, init) => {
-      const request = JSON.parse(init.body);
-      requests.push(request);
-      if (request.query.includes("CoreLiveRoot")) return response({ data: {
-        issueCreate: { success: true, issue: { id: "root-blocker", identifier: "SYM-10" } },
-      } });
-      if (request.query.includes("CoreLiveBlocker")) return response({ data: {
-        issueRelationCreate: {
-          success: true,
-          issueRelation: {
-            id: "relation-1",
-            type: "blocks",
-            issue: { id: "root-blocker" },
-            relatedIssue: { id: "root-dependent" },
-          },
-        },
-      } });
-      if (request.query.includes("CoreLiveSchedulingUpdate")) return response({ data: {
-        issueUpdate: {
-          success: true,
-          issue: { id: "root-blocker", priority: 1, sortOrder: -10 },
-        },
-      } });
-      if (request.query.includes("CoreLiveCompleteRoot")) return response({ data: {
-        issueUpdate: {
-          success: true,
-          issue: { id: "root-blocker", state: { name: "Done" } },
-        },
+      if (request.query.includes("CoreLiveProject")) return response({ data: {
+        projectCreate: { success: true, project: { id: "project-1", name: "Project", slugId: "slug-1" } },
       } });
       throw new Error("unexpected operation");
     },
   });
-  const lock = { runId: "run-1", released: false };
-  const project = {
-    runId: "run-1",
-    marker: managedMarker("run-1"),
-    projectId: "project-1",
-  };
-  const blocker = await operator.createRoot({
-    lock,
-    runId: "run-1",
-    rootName: "blocker",
-    rootInstruction: "Create blocker.txt.",
-    priority: 4,
-    sortOrder: 20,
-    preflight: { teamId: "team-1", stateId: "state-todo", actorId: "actor-1" },
-    project,
-  });
-  const dependent = { ...blocker, rootId: "root-dependent", rootIdentifier: "SYM-11" };
+  const title = "Create high-priority marker";
+  const description = "Create `e2e-high.txt` at the repository root with exactly `high-priority root`. Before changing the repository, ask me to confirm the proposed plan.";
 
-  await operator.createBlockerRelation({ lock, runId: "run-1", blocker, dependent });
-  await operator.updateRootScheduling({
-    lock,
+  await operator.createRoot({
+    lock: { runId: "run-1", released: false },
     runId: "run-1",
-    fixture: blocker,
+    rootName: title,
+    rootInstruction: description,
     priority: 1,
-    sortOrder: -10,
-  });
-  await operator.completeRoot({
-    lock,
-    runId: "run-1",
-    fixture: blocker,
-    doneStateId: "state-done",
+    preflight: { teamId: "team-1", stateId: "state-todo", actorId: "actor-1" },
+    project: {
+      runId: "run-1", marker: managedMarker("run-1"), projectId: "project-1", labelId: "label-1",
+    },
   });
 
-  assert.deepEqual(requests.map(({ variables }) => variables), [
-    { input: {
-      teamId: "team-1",
-      projectId: "project-1",
-      stateId: "state-todo",
-      delegateId: "actor-1",
-      title: "[Core Live E2E] blocker",
-      description: `Create blocker.txt.\n\n${managedMarker("run-1")}`,
-      priority: 4,
-      sortOrder: 20,
-      preserveSortOrderOnCreate: true,
-    } },
-    { input: {
-      issueId: "root-blocker",
-      relatedIssueId: "root-dependent",
-      type: "blocks",
-    } },
-    {
-      issueId: "root-blocker",
-      input: { priority: 1, sortOrder: -10 },
-    },
-    {
-      issueId: "root-blocker",
-      input: { stateId: "state-done" },
-    },
-  ]);
+  assert.equal(rootInput.title, title);
+  assert.equal(rootInput.description, description);
+  assert.doesNotMatch(rootInput.description, /symphony|run-1|workflow|Gate/u);
+});
+
+test("Linear fixture exposes only Root input, observation, Human input, and cleanup mutations", () => {
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async () => response({ data: {} }),
+  });
+  for (const forbidden of [
+    "seedPlan", "createBlockerRelation", "updateRootScheduling", "completeRoot", "approvePlan",
+  ]) {
+    assert.equal(forbidden in operator, false, `${forbidden} must remain outside the fixture boundary`);
+  }
 });
 
 test("Linear fixture binds a retained Project by slug without creating or archiving it", async () => {
@@ -359,6 +249,9 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
       const request = JSON.parse(init.body);
       requests.push(request);
       operations.push(request.query.match(/CoreLive[A-Za-z]+/u)?.[0]);
+      if (request.query.includes("CoreLiveRunLabel")) return response({ data: {
+        issueLabelCreate: { success: true, issueLabel: { id: "run-label-1", name: "symphony:e2e/run-1" } },
+      } });
       if (request.query.includes("CoreLiveProjectBySlug")) return response({ data: {
         project: {
           id: "retained-project",
@@ -389,6 +282,9 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
       if (request.query.includes("CoreLiveDeleteLabel")) return response({ data: {
         projectLabelDelete: { success: true },
       } });
+      if (request.query.includes("CoreLiveDeleteRunLabel")) return response({ data: {
+        issueLabelDelete: { success: true },
+      } });
       throw new Error("unexpected operation");
     },
   });
@@ -410,10 +306,12 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
   assert.deepEqual(operations, [
     "CoreLiveProjectBySlug",
     "CoreLiveLabel",
+    "CoreLiveRunLabel",
     "CoreLiveAttachLabel",
     "CoreLiveAttachedLabelReadback",
     "CoreLiveRetainedProjectIssues",
     "CoreLiveDeleteLabel",
+    "CoreLiveDeleteRunLabel",
   ]);
 });
 
@@ -624,65 +522,6 @@ test("five retained Project cleanups do not grow the next Root header count", as
     });
     assert.deepEqual(issues.map(({ id }) => id), ["foreign-root"]);
   }
-});
-
-test("run state and Plan approval map only Linear facts", async () => {
-  let approved = false;
-  const operator = createRunScopedLinearOperator({
-    developmentToken: "development-secret",
-    fetch: async (_url, init) => {
-      const request = JSON.parse(init.body);
-      if (request.query.includes("CoreLiveApprove")) {
-        approved = true;
-        assert.deepEqual(request.variables, {
-          issueId: "approval-1",
-          input: { stateId: "state-done" },
-        });
-        return response({ data: { issueUpdate: { success: true, issue: { id: "approval-1" } } } });
-      }
-      return response({ data: {
-        issue: {
-          id: "root-1",
-          state: { name: approved ? "In Progress" : "In Progress" },
-          labels: { nodes: [{ name: approved ? "symphony:run/working" : "symphony:run/awaiting-human" }], pageInfo: { hasNextPage: false } },
-          comments: { nodes: [{ body: "Symphony\nConductor: conductor-1\nPerformer profile: profile-1\nConversation: active\nActivity: none\nEvidence: current Linear and Git read-back\nObserved at: none\nBranch: symphony/runs/run-1\nPull request: none\nCurrent problem: none\n\n<!-- symphony root\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nperformer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\npull_request: none\nretry_blocked: false\nretry_expected_performer_id: none\nretry_failure_code: none\nretry_observed_at: none\n-->" }], pageInfo: { hasNextPage: false } },
-        },
-        project: { issues: { nodes: [
-          { id: "other-approval", title: "Other approval", description: "human_kind: plan_approval", parent: { id: "other-root" }, state: { name: "Done" } },
-          { id: "other-work", title: "Other work", description: "kind: work", parent: { id: "other-root" }, state: { name: "In Progress" } },
-          { id: "approval-1", title: "[Human Action] Approve Plan", description: "human_kind: plan_approval", parent: { id: "root-1" }, state: { name: approved ? "Done" : "In Progress" } },
-          { id: "work-1", title: "Create marker", description: "kind: work", parent: { id: "root-1" }, state: { name: "Todo" } },
-        ], pageInfo: { hasNextPage: false } } },
-      } });
-    },
-  });
-  const fixture = { rootId: "root-1", projectId: "project-1" };
-  const before = await operator.readRunState({ fixture });
-  assert.deepEqual(before, {
-    rootState: "In Progress",
-    phase: "awaiting-human",
-    approvalId: "approval-1",
-    approvalState: "In Progress",
-    planApprovalCount: 1,
-    childCount: 2,
-    treeMatches: true,
-    workStates: ["Todo"],
-    managedCommentPresent: true,
-    performerId: "conversation-1",
-    deliveryBranch: "symphony/runs/run-1",
-    reworkCount: 0,
-    gateCount: 0,
-    gateChecklistChecked: false,
-  });
-  const after = await operator.approvePlan({
-    lock: { runId: "run-1", released: false },
-    runId: "run-1",
-    fixture,
-    preflight: { doneStateId: "state-done" },
-    approvalId: "approval-1",
-  });
-  assert.equal(after.approvalState, "Done");
-  assert.equal(after.phase, "working");
 });
 
 test("run state projects Provider input tokens from the managed comment", async () => {

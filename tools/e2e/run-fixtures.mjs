@@ -132,6 +132,7 @@ export function createRunScopedLinearOperator({
       }
       const marker = managedMarker(runId);
       const labelName = `symphony:conductor/${conductorShortHash}`;
+      const runLabelName = `symphony:e2e/${runId}`;
       const retainedProject = projectSlugId
         ? await resolveRetainedProject(projectSlugId, preflight.teamId)
         : undefined;
@@ -143,6 +144,20 @@ export function createRunScopedLinearOperator({
       const label = labelData.projectLabelCreate;
       if (label?.success !== true || !label.projectLabel?.id || label.projectLabel.name !== labelName) {
         throw stableError("linear_fixture_label_create_failed");
+      }
+      const runLabelData = await graphql(`
+        mutation CoreLiveRunLabel($input: IssueLabelCreateInput!) {
+          issueLabelCreate(input: $input) { success issueLabel { id name } }
+        }
+      `, { input: {
+        name: runLabelName,
+        teamId: preflight.teamId,
+        color: "#5E6AD2",
+        isGroup: false,
+      } });
+      const runLabel = runLabelData.issueLabelCreate;
+      if (runLabel?.success !== true || !runLabel.issueLabel?.id || runLabel.issueLabel.name !== runLabelName) {
+        throw stableError("linear_fixture_run_label_create_failed");
       }
       if (retainedProject) {
         const attachedData = await graphql(`
@@ -197,6 +212,8 @@ export function createRunScopedLinearOperator({
           retainProject: true,
           labelId: label.projectLabel.id,
           labelName,
+          runLabelId: runLabel.issueLabel.id,
+          runLabelName,
           projectId: retainedProject.id,
           projectSlugId: retainedProject.slugId,
           projectName: retainedProject.name,
@@ -224,6 +241,8 @@ export function createRunScopedLinearOperator({
         retainProject: false,
         labelId: label.projectLabel.id,
         labelName,
+        runLabelId: runLabel.issueLabel.id,
+        runLabelName,
         projectId: project.project.id,
         projectSlugId: project.project.slugId,
         projectName: project.project.name,
@@ -262,8 +281,9 @@ export function createRunScopedLinearOperator({
         projectId: project.projectId,
         stateId: preflight.stateId,
         delegateId: preflight.actorId,
-        title: `[Core Live E2E] ${rootName}`,
-        description: `${rootInstruction}\n\n${project.marker}`,
+        title: rootName,
+        description: rootInstruction,
+        ...(project.runLabelId ? { labelIds: [project.runLabelId] } : {}),
         ...(priority === undefined ? {} : { priority }),
         ...(sortOrder === undefined
           ? {}
@@ -279,155 +299,6 @@ export function createRunScopedLinearOperator({
         rootId: issue.issue.id,
         rootIdentifier: issue.issue.identifier,
       });
-    },
-
-    async seedPlan({ lock, runId, fixture, preflight }) {
-      assertLock(lock, runId);
-      assertRelatedFixtures(runId, fixture, fixture);
-      if (!preflight?.teamId || !preflight?.stateId) {
-        throw stableError("linear_fixture_plan_seed_invalid");
-      }
-      const nodes = [
-        {
-          title: "[Work] Create marker",
-          description: managedPlanWorkDescription(fixture.rootId),
-          subIssueSortOrder: 0,
-        },
-        {
-          title: "[Human Action] Approve Plan",
-          description: managedPlanApprovalDescription(fixture.rootId),
-          subIssueSortOrder: 1,
-        },
-      ];
-      const created = [];
-      for (const node of nodes) {
-        const data = await graphql(`
-          mutation CoreLivePlanNode($input: IssueCreateInput!) {
-            issueCreate(input: $input) {
-              success
-              issue { id title description parent { id } state { name } }
-            }
-          }
-        `, { input: {
-          teamId: preflight.teamId,
-          projectId: fixture.projectId,
-          parentId: fixture.rootId,
-          stateId: preflight.stateId,
-          title: node.title,
-          description: node.description,
-          subIssueSortOrder: node.subIssueSortOrder,
-        } });
-        const issue = data.issueCreate;
-        if (
-          issue?.success !== true ||
-          !issue.issue?.id ||
-          issue.issue.title !== node.title ||
-          issue.issue.description !== node.description ||
-          issue.issue.parent?.id !== fixture.rootId ||
-          issue.issue.state?.name !== "Todo"
-        ) {
-          throw stableError("linear_fixture_plan_seed_failed");
-        }
-        created.push(issue.issue.id);
-      }
-      return Object.freeze({ workId: created[0], approvalId: created[1] });
-    },
-
-    async createBlockerRelation({ lock, runId, blocker, dependent }) {
-      assertLock(lock, runId);
-      assertRelatedFixtures(runId, blocker, dependent);
-      const data = await graphql(`
-        mutation CoreLiveBlocker($input: IssueRelationCreateInput!) {
-          issueRelationCreate(input: $input) {
-            success
-            issueRelation {
-              id
-              type
-              issue { id }
-              relatedIssue { id }
-            }
-          }
-        }
-      `, { input: {
-        issueId: blocker.rootId,
-        relatedIssueId: dependent.rootId,
-        type: "blocks",
-      } });
-      const relation = data.issueRelationCreate;
-      if (
-        relation?.success !== true ||
-        relation.issueRelation?.type !== "blocks" ||
-        relation.issueRelation.issue?.id !== blocker.rootId ||
-        relation.issueRelation.relatedIssue?.id !== dependent.rootId
-      ) {
-        throw stableError("linear_fixture_blocker_create_failed");
-      }
-      return Object.freeze({ relationId: relation.issueRelation.id });
-    },
-
-    async updateRootScheduling({ lock, runId, fixture, priority, sortOrder }) {
-      assertLock(lock, runId);
-      assertRelatedFixtures(runId, fixture, fixture);
-      if (
-        !Number.isSafeInteger(priority) || priority < 0 || priority > 4 ||
-        !Number.isFinite(sortOrder)
-      ) {
-        throw stableError("linear_fixture_scheduling_update_invalid");
-      }
-      const data = await graphql(`
-        mutation CoreLiveSchedulingUpdate(
-          $issueId: String!,
-          $input: IssueUpdateInput!
-        ) {
-          issueUpdate(id: $issueId, input: $input) {
-            success
-            issue { id priority sortOrder }
-          }
-        }
-      `, {
-        issueId: fixture.rootId,
-        input: { priority, sortOrder },
-      });
-      const updated = data.issueUpdate;
-      if (
-        updated?.success !== true ||
-        updated.issue?.id !== fixture.rootId ||
-        updated.issue.priority !== priority ||
-        updated.issue.sortOrder !== sortOrder
-      ) {
-        throw stableError("linear_fixture_scheduling_update_failed");
-      }
-      return Object.freeze({ priority, sortOrder });
-    },
-
-    async completeRoot({ lock, runId, fixture, doneStateId }) {
-      assertLock(lock, runId);
-      assertRelatedFixtures(runId, fixture, fixture);
-      if (typeof doneStateId !== "string" || doneStateId.length === 0) {
-        throw stableError("linear_fixture_root_completion_invalid");
-      }
-      const data = await graphql(`
-        mutation CoreLiveCompleteRoot(
-          $issueId: String!,
-          $input: IssueUpdateInput!
-        ) {
-          issueUpdate(id: $issueId, input: $input) {
-            success
-            issue { id state { name } }
-          }
-        }
-      `, {
-        issueId: fixture.rootId,
-        input: { stateId: doneStateId },
-      });
-      if (
-        data.issueUpdate?.success !== true ||
-        data.issueUpdate.issue?.id !== fixture.rootId ||
-        data.issueUpdate.issue.state?.name !== "Done"
-      ) {
-        throw stableError("linear_fixture_root_completion_failed");
-      }
-      return Object.freeze({ rootState: "Done" });
     },
 
     async readRunState({ fixture }) {
@@ -538,18 +409,99 @@ export function createRunScopedLinearOperator({
       });
     },
 
-    async approvePlan({ lock, runId, fixture, preflight, approvalId }) {
+    async readManagedHuman({ lock, runId, fixture }) {
       assertLock(lock, runId);
-      if (!approvalId || !preflight.doneStateId) throw stableError("linear_fixture_approval_invalid");
+      if (!fixture?.rootId || !fixture.projectId) throw stableError("linear_fixture_human_invalid");
       const data = await graphql(`
-        mutation CoreLiveApprove($issueId: String!, $input: IssueUpdateInput!) {
-          issueUpdate(id: $issueId, input: $input) { success issue { id } }
+        query CoreLiveHuman($issueId: String!) {
+          issue(id: $issueId) {
+            id
+            project { id }
+            parent { id }
+            title
+            description
+            updatedAt
+            state { name }
+            comments(first: 64) {
+              nodes { body }
+              pageInfo { hasNextPage }
+            }
+          }
         }
-      `, { issueId: approvalId, input: { stateId: preflight.doneStateId } });
-      if (data.issueUpdate?.success !== true || data.issueUpdate.issue?.id !== approvalId) {
-        throw stableError("linear_fixture_approval_failed");
+      `, { issueId: fixture.approvalId });
+      const issue = data.issue;
+      const comments = connection(issue?.comments, "linear_fixture_human_invalid");
+      const marker = parsePlanApprovalDescription(issue?.description);
+      if (
+        issue?.project?.id !== fixture.projectId ||
+        issue?.parent?.id !== fixture.rootId ||
+        issue?.id !== fixture.approvalId ||
+        issue?.title !== "[Human Action] Approve Plan" ||
+        !marker ||
+        !["Todo", "In Progress"].includes(issue.state?.name) ||
+        typeof issue.updatedAt !== "string"
+      ) {
+        throw stableError("linear_fixture_human_invalid");
       }
-      return this.readRunState({ fixture });
+      return Object.freeze({
+        issueId: issue.id,
+        rootIssueId: fixture.rootId,
+        projectId: issue.project.id,
+        parentIssueId: issue.parent.id,
+        title: issue.title,
+        description: issue.description,
+        managedMarker: marker.managedMarker,
+        kind: "human",
+        humanKind: "plan_approval",
+        state: issue.state.name,
+        remoteVersion: issue.updatedAt,
+        comments,
+      });
+    },
+
+    async postHumanResponse({ lock, runId, fixture, human, body, expectedRemoteVersion }) {
+      assertLock(lock, runId);
+      if (
+        human?.issueId !== fixture?.approvalId ||
+        typeof body !== "string" ||
+        body.length === 0 ||
+        expectedRemoteVersion !== human.remoteVersion
+      ) {
+        throw stableError("linear_fixture_human_mutation_invalid");
+      }
+      const data = await graphql(`
+        mutation CoreLiveHumanComment($input: CommentCreateInput!) {
+          commentCreate(input: $input) { success comment { id body } }
+        }
+      `, { input: { issueId: human.issueId, body } });
+      const comment = data.commentCreate;
+      if (comment?.success !== true || comment.comment?.body !== body || !comment.comment.id) {
+        throw stableError("linear_fixture_human_comment_failed");
+      }
+      return Object.freeze({ commentId: comment.comment.id, body: comment.comment.body });
+    },
+
+    async completeHuman({ lock, runId, fixture, human, expectedRemoteVersion, doneStateId }) {
+      assertLock(lock, runId);
+      if (
+        human?.issueId !== fixture?.approvalId ||
+        expectedRemoteVersion !== human.remoteVersion ||
+        typeof doneStateId !== "string" ||
+        doneStateId.length === 0
+      ) {
+        throw stableError("linear_fixture_human_mutation_invalid");
+      }
+      const data = await graphql(`
+        mutation CoreLiveHumanStatus($issueId: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $issueId, input: $input) { success issue { id state { name } } }
+        }
+      `, { issueId: human.issueId, input: { stateId: doneStateId } });
+      if (data.issueUpdate?.success !== true ||
+          data.issueUpdate.issue?.id !== human.issueId ||
+          data.issueUpdate.issue.state?.name !== "Done") {
+        throw stableError("linear_fixture_human_status_failed");
+      }
+      return Object.freeze({ issueId: human.issueId, state: "Done" });
     },
 
     async cleanup({
@@ -557,6 +509,8 @@ export function createRunScopedLinearOperator({
       runId,
       projectId,
       labelId,
+      runLabelId,
+      runLabelName,
       marker,
       retainProject = false,
       rootIds,
@@ -574,14 +528,17 @@ export function createRunScopedLinearOperator({
                 projectId,
                 runId,
                 rootIds,
+                runLabelName,
               });
             }]),
         () => deleteProjectLabel(labelId),
+        ...(runLabelId ? [() => deleteIssueLabel(runLabelId)] : []),
       ]);
       return Object.freeze({
         archivedProjectCount: retainProject ? 0 : 1,
         ...(retainProject ? { archivedRootCount } : {}),
         deletedLabelCount: 1,
+        ...(runLabelId ? { deletedRunLabelCount: 1 } : {}),
       });
     },
   });
@@ -647,12 +604,16 @@ export function createRunScopedLinearOperator({
     runId,
     excludeRunId,
     rootIds,
+    runLabelName,
   }) {
     const data = await graphql(`
       query CoreLiveRetainedProjectIssues($projectId: String!) {
         project(id: $projectId) {
           issues(first: 250) {
-            nodes { id title description parent { id } }
+            nodes {
+              id title description parent { id }
+              labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+            }
             pageInfo { hasNextPage }
           }
         }
@@ -667,11 +628,13 @@ export function createRunScopedLinearOperator({
       throw stableError("linear_fixture_cleanup_root_identity_invalid");
     }
     const roots = issues.filter((issue) => {
-      const owner = managedRunId(issue.description);
+      const markerOwner = managedRunId(issue.description);
+      const labelOwner = issueRunId(issue, runLabelName);
+      const owner = markerOwner ?? labelOwner;
       return issue.parent === null &&
         typeof issue.id === "string" &&
         typeof issue.title === "string" &&
-        issue.title.startsWith("[Core Live E2E] ") &&
+        (labelOwner !== undefined || issue.title.startsWith("[Core Live E2E] ")) &&
         (runId === undefined ? owner !== undefined && owner !== excludeRunId : owner === runId) &&
         (expectedRootIds === undefined || expectedRootIds.has(issue.id));
     });
@@ -726,6 +689,17 @@ export function createRunScopedLinearOperator({
     `, { labelId });
     if (data.projectLabelDelete?.success !== true) {
       throw stableError("linear_fixture_label_delete_failed");
+    }
+  }
+
+  async function deleteIssueLabel(labelId) {
+    const data = await graphql(`
+      mutation CoreLiveDeleteRunLabel($labelId: String!) {
+        issueLabelDelete(id: $labelId) { success }
+      }
+    `, { labelId });
+    if (data.issueLabelDelete?.success !== true) {
+      throw stableError("linear_fixture_run_label_delete_failed");
     }
   }
 
@@ -828,6 +802,15 @@ export function createRunScopedLinearOperator({
   }
 }
 
+function issueRunId(issue, expectedLabelName) {
+  const labels = Array.isArray(issue?.labels?.nodes) ? issue.labels.nodes : [];
+  const label = labels.find(({ name }) =>
+    typeof name === "string" &&
+    (!expectedLabelName || name === expectedLabelName) &&
+    name.startsWith("symphony:e2e/"));
+  return label ? label.name.slice("symphony:e2e/".length) : undefined;
+}
+
 function redactLinearMessage(value, developmentToken) {
   if (typeof value !== "string") return "unknown";
   return value.replaceAll(developmentToken, "[REDACTED]").slice(0, 4_096);
@@ -895,17 +878,16 @@ export function managedMarker(runId) {
   return `<!-- symphony core live e2e\nrun_id: ${runId}\n-->`;
 }
 
-function managedPlanWorkDescription(rootIssueId) {
-  return `Complete the requested file change.\n\n<!-- symphony managed marker\nmanaged_marker: ${rootIssueId}:work\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->`;
-}
-
-function managedPlanApprovalDescription(rootIssueId) {
-  return `Approve the plan before work begins.\n\n<!-- symphony managed marker\nmanaged_marker: ${rootIssueId}:plan-approval\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->`;
-}
-
 function managedRunId(description) {
   if (typeof description !== "string") return undefined;
   return description.match(MARKER)?.[1];
+}
+
+function parsePlanApprovalDescription(description) {
+  const match = typeof description === "string"
+    ? description.match(/<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->/u)
+    : undefined;
+  return match ? { managedMarker: match[1] } : undefined;
 }
 
 function field(comment, name) {
@@ -942,20 +924,6 @@ function timelineEvidence(body) {
 
 function assertLock(lock, runId) {
   if (!lock || lock.runId !== runId || lock.released === true) throw stableError("e2e_lock_required");
-}
-
-function assertRelatedFixtures(runId, first, second) {
-  if (
-    !first?.rootId ||
-    !second?.rootId ||
-    first.runId !== runId ||
-    second.runId !== runId ||
-    first.projectId !== second.projectId ||
-    first.marker !== managedMarker(runId) ||
-    second.marker !== managedMarker(runId)
-  ) {
-    throw stableError("linear_fixture_root_relation_invalid");
-  }
 }
 
 function connection(value, code) {
