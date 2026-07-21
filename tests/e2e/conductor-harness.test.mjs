@@ -139,6 +139,72 @@ test("real Conductor reports ready with an unbound generated-protocol result", a
   await harness.close();
 });
 
+test("real Conductor can be restarted after an abrupt process exit", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-restart-harness-"));
+  const requests = [];
+  const handler = {
+    async handle(message) {
+      requests.push(message.body?.kind);
+      const body = message.body;
+      let result;
+      if (body.kind === "resolve_conductor_project") {
+        result = { kind: "unbound" };
+      } else {
+        result = {
+          kind: "conductor_runtime_report",
+          binding_id: body.binding_id ?? "binding-1",
+          instance_id: body.instance_id ?? "instance-1",
+          status: body.status ?? "recovering",
+          observed_at: new Date().toISOString(),
+          ...(body.status === "blocked" ? { sanitized_summary: body.sanitized_reason ?? "blocked" } : {}),
+        };
+      }
+      return { ...message, body: result };
+    },
+  };
+  const podium = { handler, observeExit: () => {}, close: () => {} };
+  const environment = (instanceId) => createChildEnvironment({ additions: {
+    SYMPHONY_PRIVATE_IPC_FD: "3",
+    SYMPHONY_INSTANCE_ID: instanceId,
+    SYMPHONY_BINDING_ID: "binding-1",
+    SYMPHONY_CONDUCTOR_ID: "conductor-1",
+    SYMPHONY_CONDUCTOR_SHORT_HASH: "abc123def456",
+    SYMPHONY_LINEAR_INSTALLATION_ID: "development-token:organization-1",
+    SYMPHONY_ORGANIZATION_ID: "organization-1",
+    SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_ROOT: path.join(root, "repository"),
+    SYMPHONY_BASE_BRANCH: "main",
+    SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
+    SYMPHONY_CYCLE_DELAY_MS: "1000",
+  } });
+
+  const first = await startConductorHarness({
+    podium,
+    environment: environment("instance-1"),
+    executable: process.execPath,
+    arguments: ["--import", "tsx", path.resolve("apps/conductor/src/main.ts")],
+    startupTimeoutMs: 5_000,
+    shutdownTimeoutMs: 1_000,
+  });
+  await first.waitForObservation((value) => value.kind === "conductor_runtime_report");
+  const firstExit = await first.terminateAbruptly();
+  assert.equal(firstExit.signal, "SIGKILL");
+
+  const second = await startConductorHarness({
+    podium,
+    environment: environment("instance-2"),
+    executable: process.execPath,
+    arguments: ["--import", "tsx", path.resolve("apps/conductor/src/main.ts")],
+    startupTimeoutMs: 5_000,
+    shutdownTimeoutMs: 1_000,
+  });
+  assert.deepEqual(second.observations[0], { kind: "conductor_handshake" });
+  await second.waitForObservation((value) => value.kind === "conductor_runtime_report");
+  assert.ok(requests.filter((kind) => kind === "conductor_handshake").length >= 2);
+  const secondExit = await second.terminateAbruptly();
+  assert.equal(secondExit.signal, "SIGKILL");
+});
+
 test("harness rejects Linear and Codex token environment variables before spawn", async () => {
   await assert.rejects(
     startConductorHarness({

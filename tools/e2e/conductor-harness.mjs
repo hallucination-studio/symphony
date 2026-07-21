@@ -119,6 +119,13 @@ export async function startConductorHarness({
       await write(channel, `${JSON.stringify(message)}\n`, secret);
       return result.promise;
     },
+    async terminateAbruptly(signal = "SIGKILL") {
+      if (closed) return exit.promise;
+      closed = true;
+      channel.destroy();
+      child.kill(signal);
+      return boundedExit(exit.promise, shutdownTimeoutMs + 1_000);
+    },
     async close() {
       if (closed) return;
       try {
