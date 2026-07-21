@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 
@@ -19,16 +20,24 @@ FIXTURE = Path(__file__).parents[3] / "packages/contracts/fixtures/cross-languag
 
 
 def plan_envelope() -> dict[str, object]:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))["value"]
+    value = json.loads(FIXTURE.read_text(encoding="utf-8"))["value"]
+    now = datetime.now(UTC)
+    value["stage_execution"] = {
+        **value["stage_execution"],
+        "started_at": now.isoformat().replace("+00:00", "Z"),
+        "deadline_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+    }
+    return value
 
 
 def work_envelope() -> dict[str, object]:
     value = plan_envelope()
+    now = datetime.now(UTC)
     value["stage_execution"] = {
         "stage_execution_id": "execution-work-1",
         "stage": "work",
-        "started_at": "2026-07-21T09:00:00Z",
-        "deadline_at": "2026-07-21T10:00:00Z",
+        "started_at": now.isoformat().replace("+00:00", "Z"),
+        "deadline_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
     }
     value["target"] = {
         "root_issue_id": "root-1",
