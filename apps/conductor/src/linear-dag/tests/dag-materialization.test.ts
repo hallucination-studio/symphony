@@ -163,7 +163,8 @@ function issue(issueId: string, kind: "root" | "cycle" | "plan" | "work" | "veri
 }
 
 function comment(issueId: string, managedMarker: string, value: object) {
-  return { comment_id: managedMarker, issue_id: issueId, body: serializeManagedRecord(value), managed_marker: managedMarker, remote_version: `${managedMarker}-version`, updated_at: "2026-07-21T09:00:00Z" };
+  const marker = managedMarker.startsWith("root-1:") ? managedMarker : `root-1:${managedMarker}`;
+  return { comment_id: managedMarker, issue_id: issueId, body: serializeManagedRecord(value), managed_marker: marker, remote_version: `${managedMarker}-version`, updated_at: "2026-07-21T09:00:00Z" };
 }
 
 function apply(tree: LinearWorkflowTreeSnapshot, command: LinearWorkflowMutationCommand): void {

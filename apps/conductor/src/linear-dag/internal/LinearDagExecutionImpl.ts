@@ -1,4 +1,7 @@
 import {
+  createHash,
+} from "node:crypto";
+import {
   decodeConductorPerformerStageResult,
   type JsonValue,
 } from "@symphony/contracts";
@@ -24,6 +27,7 @@ import type { GitWorkspaceInterface } from "../../git-workspaces/api/GitWorkspac
 import type {
   CycleMarker,
   CheckEvidence,
+  ConvergenceRecord,
   ManagedRecord,
   PlanContract,
   ProgressAssessment,
@@ -36,6 +40,12 @@ import type {
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import { acceptVerifyFindings, openFindingSummaries } from "../../root-workflow/internal/FindingPolicy.js";
 import { assessProgress } from "../../root-workflow/internal/ProgressPolicy.js";
+import {
+  assessRootConvergence,
+  DEFAULT_ROOT_CONVERGENCE_POLICY,
+  toConvergenceRecord,
+  type RootConvergencePolicy,
+} from "../../root-workflow/internal/RootConvergencePolicy.js";
 import { DagMaterializer } from "./DagMaterializer.js";
 import { buildRootDagView, currentNodeMarker, RootDagValidationError } from "./RootDagViewBuilder.js";
 import { StageContextBuilder, digest } from "./StageContextBuilder.js";
@@ -43,6 +53,10 @@ import { StageContextBuilder, digest } from "./StageContextBuilder.js";
 type Issue = LinearWorkflowTreeSnapshot["issues"][number];
 type Comment = LinearWorkflowTreeSnapshot["comments"][number];
 type Status = LinearWorkflowTreeSnapshot["status_catalog"][number];
+type ConvergenceGateResult =
+  | { kind: "allow" }
+  | { kind: "mutation_applied"; step: string }
+  | { kind: "blocked"; reason: string };
 
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
 
@@ -51,6 +65,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     private readonly dependencies: LinearDagExecutionDependencies,
     private readonly contextBuilder = new StageContextBuilder(),
     private readonly dagMaterializer = new DagMaterializer(),
+    private readonly convergencePolicy: RootConvergencePolicy = DEFAULT_ROOT_CONVERGENCE_POLICY,
   ) {}
 
   async executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult> {
@@ -141,7 +156,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation> {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
-    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId || root.status_name !== "In Progress") return workBlocked("work_root_not_runnable");
+    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return workBlocked("work_root_not_runnable");
     const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
     let view;
     try {
@@ -150,6 +165,9 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       if (error instanceof RootDagValidationError) return workBlocked(`work_tree_invalid:${error.code}`);
       throw error;
     }
+    const convergence = await this.enforceConvergence(input, tree, view);
+    if (convergence.kind !== "allow") return convergence;
+    if (root.status_name !== "In Progress") return workBlocked("work_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
     if (!cycleView || !["Sealed", "Executing"].includes(cycleView.issue.status_name)) return workBlocked("work_cycle_not_ready");
     const plan = cycleView.nodes.find((node) => node.issue.issue_kind === "plan");
@@ -243,11 +261,14 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   async reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue): Promise<VerifyStageReconciliation> {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
-    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId || root.status_name !== "In Progress") return verifyBlocked("verify_root_not_runnable");
+    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return verifyBlocked("verify_root_not_runnable");
     const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
     let view;
     try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
     catch (error) { if (error instanceof RootDagValidationError) return verifyBlocked(`verify_tree_invalid:${error.code}`); throw error; }
+    const convergence = await this.enforceConvergence(input, tree, view);
+    if (convergence.kind !== "allow") return convergence;
+    if (root.status_name !== "In Progress") return verifyBlocked("verify_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
     if (!cycleView) {
       const terminalCycle = view.cycles.find(({ issue }) => ["Succeeded", "Changes Required", "Inconclusive", "Escalated"].includes(issue.status_name));
@@ -356,6 +377,12 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const cycle = activeCycle(tree, input.rootIssueId);
     if (!cycle) {
       if (root.status_name !== "In Progress") return blocked("root_not_runnable");
+      const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+      let view;
+      try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
+      catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
+      const convergence = await this.enforceConvergence(input, tree, view);
+      if (convergence.kind !== "allow") return convergence;
       const writeId = `${input.rootIssueId}:bootstrap-cycle:create`;
       const marker = `${input.rootIssueId}:cycle:bootstrap`;
       if (tree.issues.some((issue) => issue.managed_marker === marker)) return blocked("cycle_state_unreadable");
@@ -468,12 +495,38 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     const decision = this.dagMaterializer.next({ tree, contract, rootIssueId: input.rootIssueId, projectId: input.projectId, cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id });
     if (decision.kind === "blocked") return blocked(decision.reason);
-    if (decision.kind === "complete") return { kind: "completed", planContractDigest: decision.planContractDigest };
+    if (decision.kind === "complete") {
+      const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+      let view;
+      try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
+      catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
+      const convergence = await this.enforceConvergence(input, tree, view);
+      if (convergence.kind !== "allow") return convergence;
+      return { kind: "completed", planContractDigest: decision.planContractDigest };
+    }
     await this.mutateAndReadBack({
       input, tree, writeId: decision.command.writeId, command: decision.command,
       check: (fresh, outcome) => decision.check(fresh, outcome.targetIssueId),
     });
     return { kind: "mutation_applied", step: decision.step };
+  }
+
+  private async enforceConvergence(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
+    const assessment = assessRootConvergence({
+      view,
+      now: tree.observed_at,
+      policy: this.convergencePolicy,
+      nextStageReservedTotalTokens: input.options.limits.reservedTotalTokens,
+    });
+    if (assessment.decision === "allow") return { kind: "allow" };
+    const record = toConvergenceRecord(input.rootIssueId, tree.observed_at, assessment);
+    const serialized = serializeManagedRecord(record);
+    if (!view.root.records.some((candidate): candidate is ConvergenceRecord => candidate.kind === "convergence" && serializeManagedRecord(candidate) === serialized)) {
+      const writeId = convergenceWriteId(input.rootIssueId, record);
+      await this.appendRecord(input, tree, view.root.issue, writeId, writeId, record);
+      return { kind: "mutation_applied", step: "convergence_decision_persisted" };
+    }
+    return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
   }
 
   private async updateStatus(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {
@@ -666,6 +719,11 @@ function dependencyState(selected: { blockedByIssueIds: string[] }, cycle: { nod
 
 function statusByName(tree: LinearWorkflowTreeSnapshot, name: string): Status | undefined {
   return tree.status_catalog.find((status) => status.name === name);
+}
+
+function convergenceWriteId(rootIssueId: string, record: ConvergenceRecord): string {
+  const digest = createHash("sha256").update(serializeManagedRecord(record)).digest("hex").slice(0, 32);
+  return `${rootIssueId}:convergence:${digest}`;
 }
 
 function workDeadline(input: WorkStageInput): string {

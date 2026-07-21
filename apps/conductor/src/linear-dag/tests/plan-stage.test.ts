@@ -8,6 +8,7 @@ import type { PerformerStageClientInterface } from "../../performer-stage-client
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { buildRootDagView } from "../internal/RootDagViewBuilder.js";
 import { LinearDagExecutionImpl } from "../internal/LinearDagExecutionImpl.js";
+import { DEFAULT_ROOT_CONVERGENCE_POLICY } from "../../root-workflow/internal/RootConvergencePolicy.js";
 
 const rootIssueId = "root-1";
 const now = "2026-07-21T09:00:00Z";
@@ -72,6 +73,25 @@ test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", 
   const retry = await execution.executeBootstrapPlan(input);
   assert.equal(retry.planContractDigest, result.planContractDigest);
   assert.equal(fake.writes.length, writesBeforeRetry);
+});
+
+test("persists a breaker decision before creating a Cycle and stops later dispatch", async () => {
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+  const execution = new LinearDagExecutionImpl(
+    { linear: fake, git: fake.git, performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} } },
+    undefined,
+    undefined,
+    { ...DEFAULT_ROOT_CONVERGENCE_POLICY, deadlineAt: "2026-07-21T08:59:59Z" },
+  );
+  const input = bootstrapInput();
+
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "convergence_decision_persisted" });
+  assert.equal(fake.tree.issues.some((issue) => issue.issue_kind === "cycle"), false);
+  assert.equal(fake.tree.comments.filter((comment) => comment.body.includes('"kind":"convergence"')).length, 1);
+  assert.equal(fake.writes.length, 1);
+
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "blocked", reason: "convergence_deadline_exceeded" });
+  assert.equal(fake.writes.length, 1);
 });
 
 function bootstrapInput() {
