@@ -87,7 +87,6 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
       facts.root_issue_id === command.rootIssueId &&
       (!command.workspace.rootIssueId || command.workspace.rootIssueId === command.rootIssueId) &&
       facts.root_version === expected.root_version &&
-      facts.performer_id === expected.performer_id &&
       !facts.terminal &&
       facts.blocker_issue_ids.length === 0 &&
       facts.tree_digest === expected.tree_digest &&

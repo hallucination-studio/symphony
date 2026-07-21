@@ -15,7 +15,6 @@ export interface ExistingRootDelivery {
 export interface RootDeliveryFacts {
   root_issue_id: string;
   root_version: string;
-  performer_id: string;
   terminal: boolean;
   blocker_issue_ids: string[];
   tree_digest: string;
@@ -41,7 +40,6 @@ export interface RootDeliveryCommand {
   body: string;
   expected: {
     root_version: string;
-    performer_id: string;
     tree_digest: string;
     git_head: string;
     checks_digest: string;

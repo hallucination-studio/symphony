@@ -46,7 +46,7 @@ function command(): RootDeliveryCommand {
     workspace: { branch: "symphony/runs/sym-1", worktreePath: "/worktree", rootIssueId: "root-1" },
     baseBranch: "main", title: "SYM-1 delivery", body: "Bounded delivery summary",
     expected: {
-      root_version: "root-version-1", performer_id: "performer-1", tree_digest: "tree-1", git_head: "abc123", checks_digest: "checks-1",
+      root_version: "root-version-1", tree_digest: "tree-1", git_head: "abc123", checks_digest: "checks-1",
       latest_succeeded_cycle: { issue_id: "cycle-1", verify_result_id: "verify-1", verified_revision: "abc123" },
       owner_generation: "generation-1",
     },

@@ -557,12 +557,12 @@ test("Root usage fails closed when header Primary comments are ambiguous", async
   root.comments = async () => connection([
     {
       id: "primary-1",
-      body: v3PrimaryComment("conversation-1"),
+      body: v3PrimaryComment(),
       updatedAt: new Date("2026-07-16T00:00:00Z"),
     },
     {
       id: "primary-2",
-      body: v3PrimaryComment("conversation-2"),
+      body: v3PrimaryComment(),
       updatedAt: new Date("2026-07-16T00:00:00Z"),
     },
   ]);
@@ -1280,7 +1280,7 @@ test("official SDK adapter upserts the Primary comment by direct id lookup", asy
 
   await adapter.executeMutation(command);
 
-  assert.match(comment.body, /performer_id: conversation-2/u);
+  assert.doesNotMatch(comment.body, /performer_id:/u);
   assert.ok(await adapter.readMutationOutcome(command));
   assert.equal(lookups, 2);
 });
@@ -1402,21 +1402,21 @@ function rootCommentCommand(identity) {
     },
     rootIssueId: "root-1",
     body: identity.commentId
-      ? v3PrimaryComment("conversation-2")
+      ? v3PrimaryComment()
       : `Provider failed.\n\n<!-- symphony turn event\nevent_key: ${identity.eventKey}\n-->`,
     ...identity,
   };
 }
 
-function v3PrimaryComment(performerId = "conversation-1") {
+function v3PrimaryComment() {
   return [
     "Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
     "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
     "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
     "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
-    "performer_profile_id: profile-1", `performer_id: ${performerId}`,
+    "performer_profile_id: profile-1",
     "delivery_branch: symphony/runs/root-1", "pull_request: none", "retry_blocked: false",
-    "retry_expected_performer_id: none", "retry_failure_code: none",
+    "retry_failure_code: none",
     "retry_observed_at: none", "-->",
   ].join("\n");
 }

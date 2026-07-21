@@ -685,7 +685,18 @@ test("affected Root detail projects its sanitized scheduling observation", async
         return {
           nodes: [issue("root-1", "project-1")],
           rootPhaseLabels: ["blocked"],
-          rootManagedComments: [],
+          rootManagedComments: [{
+            commentId: "comment-1", issueId: "root-1", updatedAt: "2026-07-19T00:00:01Z",
+            managedMarker: "root-1:root-comment", body: [
+              "Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
+              "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
+              "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
+              "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
+              "performer_profile_id: profile-1", "delivery_branch: symphony/runs/root-1",
+              "pull_request: none", "retry_blocked: true", "retry_failure_code: none",
+              "retry_observed_at: 2026-07-19T00:00:01Z", "-->",
+            ].join("\n"),
+          }],
           humanAnswers: [],
           observedAt: "2026-07-19T00:00:01Z",
           pageInfo: { hasNextPage: false },
@@ -707,6 +718,7 @@ test("affected Root detail projects its sanitized scheduling observation", async
     summary: "root_dependency_cycle",
     occurred_at: "2026-07-19T00:00:01Z",
   }]);
+  assert.equal(detail.retry_observed_at, "2026-07-19T00:00:01Z");
 });
 
 test("ambiguous update reads back desired remote state before retry", async () => {
@@ -1597,8 +1609,8 @@ function v3PrimaryComment() {
     "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
     "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
     "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
-    "performer_profile_id: profile-1", "performer_id: conversation-1",
+    "performer_profile_id: profile-1",
     "delivery_branch: symphony/runs/root-1", "pull_request: none", "retry_blocked: false",
-    "retry_expected_performer_id: none", "retry_failure_code: none",
+    "retry_failure_code: none",
     "retry_observed_at: none", "-->"].join("\n");
 }

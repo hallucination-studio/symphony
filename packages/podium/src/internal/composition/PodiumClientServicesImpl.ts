@@ -443,8 +443,7 @@ function rootRetryObservedAt(
   if (!marker) return undefined;
   const fields = new Map<string, string>();
   const allowed = new Set([
-    "conductor_id", "performer_profile_id", "performer_id", "delivery_branch",
-    "pull_request", "retry_blocked", "retry_expected_performer_id",
+    "conductor_id", "performer_profile_id", "delivery_branch", "pull_request", "retry_blocked",
     "retry_failure_code", "retry_observed_at",
   ]);
   for (const line of marker[1]!.split("\n")) {

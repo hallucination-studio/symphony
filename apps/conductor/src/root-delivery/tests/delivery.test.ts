@@ -7,7 +7,6 @@ import { GitRootDeliveryImpl } from "../internal/GitRootDeliveryImpl.js";
 const workspace = { branch: "symphony/runs/sym-1", worktreePath: "/worktree", rootIssueId: "root-1" };
 const expected = {
   root_version: "version-1",
-  performer_id: "conversation-1",
   tree_digest: "tree-1",
   git_head: "abc123",
   checks_digest: "checks-1",
@@ -21,7 +20,6 @@ const expected = {
 const baseFacts: RootDeliveryFacts = {
   root_issue_id: "root-1",
   root_version: "version-1",
-  performer_id: "conversation-1",
   terminal: false,
   blocker_issue_ids: [],
   tree_digest: "tree-1",
@@ -40,7 +38,6 @@ const baseFacts: RootDeliveryFacts = {
 test("delivery rejects every stale precondition before push or PR creation", async () => {
   for (const patch of [
     { root_version: "version-2" },
-    { performer_id: "conversation-2" },
     { terminal: true },
     { blocker_issue_ids: ["blocked-by-1"] },
     { tree_digest: "tree-2" },
