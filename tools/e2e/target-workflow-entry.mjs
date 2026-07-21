@@ -76,7 +76,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
         });
     } else if (arguments_.length === 1 && arguments_[0] === "--live-all") {
       runTargetWorkflowLive("all")
-        .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+        .then((result) => {
+          process.stdout.write(`${JSON.stringify(result)}\n`);
+          process.exitCode = targetWorkflowCliExitCode(result);
+        })
         .catch((error) => {
           process.stderr.write(`${JSON.stringify({
             status: isMissingInputConfiguration(error) ? "unverified" : "failed",
@@ -156,6 +159,12 @@ export async function runTargetWorkflowAllLive({
   });
   if (writeEvidence) await persistTargetWorkflowEvidence(result, evidenceDirectory);
   return result;
+}
+
+export function targetWorkflowCliExitCode(result) {
+  if (result?.status === "passed") return 0;
+  if (result?.status === "unverified") return 2;
+  return 1;
 }
 
 async function persistTargetWorkflowEvidence(result, evidenceDirectory) {

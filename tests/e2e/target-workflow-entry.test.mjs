@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { TARGET_WORKFLOW_SCENARIOS } from "../../tools/e2e/target-workflow-verdict.mjs";
 import {
+  targetWorkflowCliExitCode,
   runTargetWorkflowAllLive,
   runTargetWorkflowDryRun,
 } from "../../tools/e2e/target-workflow-entry.mjs";
@@ -123,6 +124,12 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
   assert.deepEqual(result.verdict.missingScenarios, ["repair_escalation"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
+});
+
+test("target workflow CLI returns failure for a recomputed failed all-run verdict", () => {
+  assert.equal(targetWorkflowCliExitCode({ status: "passed" }), 0);
+  assert.equal(targetWorkflowCliExitCode({ status: "failed" }), 1);
+  assert.equal(targetWorkflowCliExitCode({ status: "unverified" }), 2);
 });
 
 test("target workflow all-run reports unverified before creating any scenario", () => {
