@@ -94,8 +94,16 @@ function decodeRootOwnership(o: Record<string, unknown>): RootOwnershipRecord {
 }
 
 function decodeCycleMarker(o: Record<string, unknown>): CycleMarker {
-  fields(o, ["kind", "version", "root_issue_id", "cycle_key", "trigger", "baseline_revision"]);
-  return { kind: "cycle_marker", version: 1, rootIssueId: id(o, "root_issue_id"), cycleKey: id(o, "cycle_key"), trigger: enumValue(o, "trigger", ["initial", "verify_changes", "review_changes"]), baselineRevision: id(o, "baseline_revision") };
+  fields(o, ["kind", "version", "root_issue_id", "cycle_key", "trigger", "baseline_revision", "predecessor_cycle_issue_id", "repair_group_id", "finding_ids", "predecessor_plan_contract_digest", "predecessor_verify_result_id", "predecessor_verified_revision"], ["predecessor_cycle_issue_id", "repair_group_id", "finding_ids", "predecessor_plan_contract_digest", "predecessor_verify_result_id", "predecessor_verified_revision"]);
+  return {
+    kind: "cycle_marker", version: 1, rootIssueId: id(o, "root_issue_id"), cycleKey: id(o, "cycle_key"), trigger: enumValue(o, "trigger", ["initial", "verify_changes", "review_changes"]), baselineRevision: id(o, "baseline_revision"),
+    ...(o.predecessor_cycle_issue_id === undefined ? {} : { predecessorCycleIssueId: id(o, "predecessor_cycle_issue_id") }),
+    ...(o.repair_group_id === undefined ? {} : { repairGroupId: id(o, "repair_group_id") }),
+    ...(o.finding_ids === undefined ? {} : { findingIds: ids(o, "finding_ids") }),
+    ...(o.predecessor_plan_contract_digest === undefined ? {} : { predecessorPlanContractDigest: id(o, "predecessor_plan_contract_digest") }),
+    ...(o.predecessor_verify_result_id === undefined ? {} : { predecessorVerifyResultId: id(o, "predecessor_verify_result_id") }),
+    ...(o.predecessor_verified_revision === undefined ? {} : { predecessorVerifiedRevision: id(o, "predecessor_verified_revision") }),
+  };
 }
 
 function decodeNodeMarker(o: Record<string, unknown>): NodeMarker {
@@ -196,7 +204,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   const record = value as unknown as ManagedRecord;
   const topFields: Record<ManagedRecord["kind"], { allowed: string[]; optional?: string[] }> = {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
-    cycle_marker: { allowed: ["kind", "version", "rootIssueId", "cycleKey", "trigger", "baselineRevision"] },
+    cycle_marker: { allowed: ["kind", "version", "rootIssueId", "cycleKey", "trigger", "baselineRevision", "predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"], optional: ["predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"] },
     node_marker: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "nodeKey", "nodeKind", "planContractDigest"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objectiveSummary", "includedScope", "excludedScope", "acceptanceCriteria", "workNodes", "verifyNode"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
@@ -218,7 +226,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   }
   switch (record.kind) {
     case "root_ownership": return encodeRootOwnership(record);
-    case "cycle_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_key: record.cycleKey, trigger: record.trigger, baseline_revision: record.baselineRevision });
+    case "cycle_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_key: record.cycleKey, trigger: record.trigger, baseline_revision: record.baselineRevision, ...(record.predecessorCycleIssueId === undefined ? {} : { predecessor_cycle_issue_id: record.predecessorCycleIssueId }), ...(record.repairGroupId === undefined ? {} : { repair_group_id: record.repairGroupId }), ...(record.findingIds === undefined ? {} : { finding_ids: record.findingIds }), ...(record.predecessorPlanContractDigest === undefined ? {} : { predecessor_plan_contract_digest: record.predecessorPlanContractDigest }), ...(record.predecessorVerifyResultId === undefined ? {} : { predecessor_verify_result_id: record.predecessorVerifyResultId }), ...(record.predecessorVerifiedRevision === undefined ? {} : { predecessor_verified_revision: record.predecessorVerifiedRevision }) });
     case "node_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_key: record.nodeKey, node_kind: record.nodeKind, plan_contract_digest: record.planContractDigest });
     case "plan_contract": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest, objective_summary: record.objectiveSummary, included_scope: record.includedScope, excluded_scope: record.excludedScope, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion), work_nodes: record.workNodes.map(encodeWorkNode), verify_node: encodeVerifyNode(record.verifyNode) });
     case "stage_execution": return encodeStageExecution(record);

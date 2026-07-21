@@ -28,6 +28,8 @@ import type {
   CycleMarker,
   CheckEvidence,
   ConvergenceRecord,
+  FindingDispositionRecord,
+  FindingRecord,
   ManagedRecord,
   PlanContract,
   ProgressAssessment,
@@ -40,6 +42,7 @@ import type {
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import { acceptVerifyFindings, openFindingSummaries } from "../../root-workflow/internal/FindingPolicy.js";
 import { assessProgress } from "../../root-workflow/internal/ProgressPolicy.js";
+import { groupRepairFindings, type RepairGroup } from "../../root-workflow/internal/RepairGroupingPolicy.js";
 import {
   assessRootConvergence,
   DEFAULT_ROOT_CONVERGENCE_POLICY,
@@ -383,6 +386,30 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
       const convergence = await this.enforceConvergence(input, tree, view);
       if (convergence.kind !== "allow") return convergence;
+      const predecessor = [...view.cycles]
+        .filter(({ issue }) => issue.status_name === "Changes Required")
+        .sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id))
+        .at(-1);
+      const repairGroup = predecessor ? firstRepairGroup(view) : undefined;
+      if (predecessor) {
+        if (!repairGroup) return blocked("repair_findings_missing");
+        const cycleKey = successorCycleKey(predecessor.issue.issue_id, repairGroup.repairGroupId);
+        const marker = `${input.rootIssueId}:cycle:${cycleKey}`;
+        if (tree.issues.some((issue) => issue.managed_marker === marker)) return blocked("cycle_state_unreadable");
+        const writeId = `${input.rootIssueId}:repair-cycle:${cycleKey}:create`;
+        await this.mutateAndReadBack({
+          input,
+          tree,
+          writeId,
+          command: createIssue(input, root, root.remote_version, statuses.get("Draft"), "cycle", `Cycle ${view.cycles.length + 1}: Repair ${repairGroup.repairGroupId}`, root.description, marker, { writeId, order: Math.max(...view.cycles.map(({ issue }) => issue.order), 0) + 1 }),
+          check: (fresh, outcome) => {
+            const issueId = outcomeIssueId(outcome);
+            return fresh.issues.some((issue) => issue.issue_id === issueId && issue.issue_kind === "cycle"
+              && issue.parent_issue_id === root.issue_id && issue.status_name === "Draft" && issue.managed_marker === marker);
+          },
+        });
+        return { kind: "mutation_applied", step: "repair_cycle_created" };
+      }
       const writeId = `${input.rootIssueId}:bootstrap-cycle:create`;
       const marker = `${input.rootIssueId}:cycle:bootstrap`;
       if (tree.issues.some((issue) => issue.managed_marker === marker)) return blocked("cycle_state_unreadable");
@@ -403,6 +430,13 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const records = recordsByIssue(tree.comments);
     const cycleMarker = recordFrom(records, cycle.issue_id, "cycle_marker") as CycleMarker | undefined;
     if (!cycleMarker) {
+      const baselineRevision = await this.dependencies.git.inspect(input.workspace).then((snapshot) => snapshot.head);
+      const repair = repairMarkerForCycle(tree, cycle, records, baselineRevision);
+      if (repair) {
+        await this.appendRecord(input, tree, cycle, `${input.rootIssueId}:cycle:${cycle.issue_id}:marker`, `${input.rootIssueId}:cycle:${cycle.issue_id}:marker`, repair);
+        return { kind: "mutation_applied", step: "cycle_marker_created" };
+      }
+      if (cycle.managed_marker !== `${input.rootIssueId}:cycle:bootstrap`) return blocked("repair_cycle_provenance_missing");
       await this.appendRecord(input, tree, cycle, `${input.rootIssueId}:cycle:${cycle.issue_id}:marker`, `${input.rootIssueId}:cycle:${cycle.issue_id}:marker`, {
         kind: "cycle_marker", version: 1, rootIssueId: input.rootIssueId, cycleKey: "cycle-1", trigger: "initial", baselineRevision: await this.dependencies.git.inspect(input.workspace).then((snapshot) => snapshot.head),
       });
@@ -621,13 +655,73 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   }
 }
 
-function createIssue(input: BootstrapPlanInput, parent: Issue, rootRemoteVersion: string, status: Status | undefined, issueKind: "cycle" | "plan", title: string, description: string, managedMarker: string): LinearWorkflowMutationCommand {
+function createIssue(input: BootstrapPlanInput, parent: Issue, rootRemoteVersion: string, status: Status | undefined, issueKind: "cycle" | "plan", title: string, description: string, managedMarker: string, options: { writeId?: string; order?: number } = {}): LinearWorkflowMutationCommand {
   if (!status) throw new Error(`status_missing:${issueKind}`);
   return {
-    kind: "create_workflow_issue", writeId: `${input.rootIssueId}:bootstrap-${issueKind}:create`, expectedProjectId: input.projectId,
+    kind: "create_workflow_issue", writeId: options.writeId ?? `${input.rootIssueId}:bootstrap-${issueKind}:create`, expectedProjectId: input.projectId,
     rootIssueId: input.rootIssueId, expectedRootRemoteVersion: rootRemoteVersion,
     parentExpectedRemoteVersion: parent.remote_version, parentExpectedStatusId: parent.status_id, parentIssueId: parent.issue_id,
-    issueKind, title, description, statusId: status.status_id, managedMarker,
+    issueKind, title, description, statusId: status.status_id, managedMarker, ...(options.order === undefined ? {} : { order: options.order }),
+  };
+}
+
+function firstRepairGroup(view: ReturnType<typeof buildRootDagView>): RepairGroup | undefined {
+  return repairGroups(view.cycles)[0];
+}
+
+function repairGroups(cycles: Array<{ issue: { issue_id: string; order: number }; records: ManagedRecord[]; nodes: Array<{ records: ManagedRecord[] }> }>): RepairGroup[] {
+  const ordered = [...cycles].sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id));
+  const findings = new Map<string, FindingRecord>();
+  const latestDispositions = new Map<string, FindingDispositionRecord>();
+  for (const cycle of ordered) {
+    for (const record of [...cycle.records, ...cycle.nodes.flatMap((node) => node.records)]) {
+      if (record.kind === "finding") {
+        if (findings.has(record.findingId)) throw new Error("repair_finding_duplicate");
+        findings.set(record.findingId, record);
+      }
+      if (record.kind === "finding_disposition") latestDispositions.set(record.findingId, record);
+    }
+  }
+  return groupRepairFindings([...findings.values()]
+    .filter((finding) => latestDispositions.get(finding.findingId)?.disposition !== "resolved" && latestDispositions.get(finding.findingId)?.disposition !== "waived")
+    .map((finding) => ({ findingId: finding.findingId, affectedScope: finding.affectedScope, acceptanceCriteria: finding.acceptanceCriteria })));
+}
+
+function successorCycleKey(predecessorCycleIssueId: string, repairGroupId: string): string {
+  return `repair:${predecessorCycleIssueId}:${repairGroupId}`;
+}
+
+function repairMarkerForCycle(tree: LinearWorkflowTreeSnapshot, cycle: Issue, records: Map<string, ManagedRecord[]>, baselineRevision: string): CycleMarker | undefined {
+  const prefix = `${tree.root_issue_id}:cycle:`;
+  if (!cycle.managed_marker?.startsWith(prefix)) return undefined;
+  const cycleKey = cycle.managed_marker.slice(prefix.length);
+  const predecessor = tree.issues
+    .filter((issue) => issue.issue_kind === "cycle" && issue.parent_issue_id === tree.root_issue_id && issue.status_name === "Changes Required" && issue.order < cycle.order)
+    .sort((left, right) => right.order - left.order || right.issue_id.localeCompare(left.issue_id))[0];
+  if (!predecessor) return undefined;
+  const rawCycles = tree.issues
+    .filter((issue) => issue.issue_kind === "cycle" && issue.parent_issue_id === tree.root_issue_id)
+    .map((issue) => ({ issue, records: records.get(issue.issue_id) ?? [], nodes: tree.issues.filter((childIssue) => childIssue.parent_issue_id === issue.issue_id).map((childIssue) => ({ records: records.get(childIssue.issue_id) ?? [] })) }));
+  const repairGroup = repairGroups(rawCycles).find((group) => successorCycleKey(predecessor.issue_id, group.repairGroupId) === cycleKey);
+  if (!repairGroup) return undefined;
+  const plan = child(tree, predecessor.issue_id, "plan");
+  const verify = child(tree, predecessor.issue_id, "verify");
+  const planContract = plan && recordFrom(records, plan.issue_id, "plan_contract") as PlanContract | undefined;
+  const verifyResult = verify && latestVerifyResultForIssue(records.get(verify.issue_id) ?? []);
+  if (!planContract || !verifyResult) return undefined;
+  return {
+    kind: "cycle_marker",
+    version: 1,
+    rootIssueId: tree.root_issue_id,
+    cycleKey,
+    trigger: "verify_changes",
+    baselineRevision,
+    predecessorCycleIssueId: predecessor.issue_id,
+    repairGroupId: repairGroup.repairGroupId,
+    findingIds: repairGroup.findingIds,
+    predecessorPlanContractDigest: planContract.planContractDigest,
+    predecessorVerifyResultId: verifyResult.stageExecutionId,
+    predecessorVerifiedRevision: verifyResult.verifiedRevision,
   };
 }
 
@@ -936,6 +1030,12 @@ function latestVerifyResult(records: Map<string, ManagedRecord[]>): VerifyResult
   const executions = new Map([...records.values()].flatMap((values) => values.filter((record): record is StageExecutionRecord => record.kind === "stage_execution")).map((record) => [record.stageExecutionId, record]));
   return [...records.values()].flatMap((values) => values.filter((record): record is VerifyResultRecord => record.kind === "verify_result"))
     .sort((left, right) => (executions.get(left.stageExecutionId)?.startedAt ?? "").localeCompare(executions.get(right.stageExecutionId)?.startedAt ?? "")).at(-1);
+}
+
+function latestVerifyResultForIssue(records: ManagedRecord[]): VerifyResultRecord | undefined {
+  const executions = new Map(records.filter((record): record is StageExecutionRecord => record.kind === "stage_execution").map((record) => [record.stageExecutionId, record]));
+  return records.filter((record): record is VerifyResultRecord => record.kind === "verify_result")
+    .sort((left, right) => (executions.get(left.stageExecutionId)?.startedAt ?? "").localeCompare(executions.get(right.stageExecutionId)?.startedAt ?? "") || left.stageExecutionId.localeCompare(right.stageExecutionId)).at(-1);
 }
 
 function latestResultBefore(records: Map<string, ManagedRecord[]>, stageExecutionId: string): VerifyResultRecord | undefined {

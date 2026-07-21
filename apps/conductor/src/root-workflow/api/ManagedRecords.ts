@@ -53,6 +53,12 @@ export interface CycleMarker {
   cycleKey: string;
   trigger: "initial" | "verify_changes" | "review_changes";
   baselineRevision: string;
+  predecessorCycleIssueId?: string;
+  repairGroupId?: string;
+  findingIds?: string[];
+  predecessorPlanContractDigest?: string;
+  predecessorVerifyResultId?: string;
+  predecessorVerifiedRevision?: string;
 }
 
 export interface NodeMarker {

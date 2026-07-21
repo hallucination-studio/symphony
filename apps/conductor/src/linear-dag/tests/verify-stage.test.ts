@@ -127,6 +127,42 @@ test("escalates a triggered convergence breaker in durable order", async () => {
   assert.equal(gateway.tree.comments.length, writesBeforeRetry);
 });
 
+test("creates one deterministic successor Cycle with repair provenance", async () => {
+  const gateway = new VerifyGateway();
+  prepareRepairTree(gateway.tree);
+  const execution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer: {
+    async runStage() { throw new Error("must_not_run"); },
+    async cancelAndReap() {},
+  } });
+  const input = verifyInput();
+
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "cycle-1")?.status_name, "Changes Required");
+
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "repair_cycle_created" });
+  const successor = gateway.tree.issues.find((issue) => issue.issue_kind === "cycle" && issue.issue_id !== "cycle-1");
+  assert.ok(successor);
+  assert.equal(successor?.status_name, "Draft");
+  assert.equal(gateway.tree.issues.filter((issue) => issue.issue_kind === "cycle").length, 2);
+
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "cycle_marker_created" });
+  const markerComment = gateway.tree.comments.find((comment) => comment.issue_id === successor?.issue_id && comment.body.includes('"kind":"cycle_marker"'));
+  assert.ok(markerComment);
+  const marker = markerComment && parseManagedRecord(markerComment.body);
+  assert.equal(marker?.ok, true);
+  if (!marker?.ok || marker.value.kind !== "cycle_marker") throw new Error("successor_marker_missing");
+  assert.equal(marker.value.trigger, "verify_changes");
+  assert.equal(marker.value.predecessorCycleIssueId, "cycle-1");
+  assert.equal(marker.value.predecessorPlanContractDigest, "digest-1");
+  assert.equal(marker.value.predecessorVerifyResultId?.startsWith("verify-execution-"), true);
+  assert.equal(marker.value.predecessorVerifiedRevision, "commit-1");
+  assert.ok(marker.value.findingIds);
+  assert.equal(marker.value.findingIds.length, 1);
+  assert.equal(marker.value.repairGroupId?.startsWith("repair-group:"), true);
+
+  await execution.reconcileRoot(input);
+  assert.equal(gateway.tree.issues.filter((issue) => issue.issue_kind === "cycle").length, 2);
+});
+
 function verifyInput(): VerifyStageInput {
   return {
     rootIssueId: "root-1", projectId: "project-1",
@@ -138,6 +174,25 @@ function verifyInput(): VerifyStageInput {
       instructionSetId: "verify-v1", stageInstructions: "Verify the immutable artifact.", now: () => "2026-07-21T09:00:00Z", stageId: (_root, _cycle, attempt) => `verify-execution-${attempt}`,
     },
   };
+}
+
+function prepareRepairTree(tree: LinearWorkflowTreeSnapshot): void {
+  const status = (name: string) => tree.status_catalog.find((candidate) => candidate.name === name)!;
+  for (const issueId of ["verify-1"]) {
+    const issue = tree.issues.find((candidate) => candidate.issue_id === issueId)!;
+    const next = status("Done");
+    Object.assign(issue, { status_id: next.status_id, status_name: next.name, status_category: next.category, status_position: next.position });
+  }
+  const cycle = tree.issues.find((issue) => issue.issue_id === "cycle-1")!;
+  const changesRequired = status("Changes Required");
+  Object.assign(cycle, { status_id: changesRequired.status_id, status_name: changesRequired.name, status_category: changesRequired.category, status_position: changesRequired.position });
+  tree.comments.push(
+    comment("verify-1", "verify-execution", { kind: "stage_execution", version: 1, stageExecutionId: "verify-execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", stage: "verify", planContractDigest: "digest-1", contextDigest: "verify-digest", sourceManifest: [], coverage: { isComplete: true, omissions: [] }, instructionSetId: "verify-v1", executionPolicyId: "policy-1", limits: { maxContextBytes: 1, maxResultBytes: 1, maxWallTimeMs: 1, maxToolCalls: 1, maxCommandDurationMs: 1, reservedTotalTokens: 10, maxOutputTokens: 1 }, repositoryRevision: "commit-1", startedAt: "2026-07-21T08:00:00Z", deadlineAt: "2026-07-21T09:00:00Z" }),
+    comment("verify-1", "verify-terminal", { kind: "stage_terminal", version: 1, stageExecutionId: "verify-execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", stage: "verify", contextDigest: "verify-digest", outcome: "completed", completedAt: "2026-07-21T08:30:00Z", summary: "Verify found a repair.", usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 } }),
+    comment("verify-1", "verify-result", { kind: "verify_result", version: 1, stageExecutionId: "verify-execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", conclusion: "changes_required", criteriaResults: [{ criterionKey: "verify", outcome: "failed", summary: "Repair required." }], checks: [], verifiedRevision: "commit-1" }),
+    comment("verify-1", "finding-1", { kind: "finding", version: 1, findingId: "finding:verify-execution-1:1", sourceVerifyId: "verify-execution-1", category: "code", severity: "high", evidence: [{ evidenceId: "evidence-1", sourceKind: "criterion", sourceId: "verify", summary: "Repair the verified issue.", artifactRevision: "commit-1" }], affectedScope: [{ scopeKind: "repository_path", identity: "apps/conductor" }], retryable: true, suggestedRemediation: ["Repair the verified issue."], acceptanceCriteria: [{ criterionKey: "repair", statement: "The issue is repaired.", verificationMethod: "verify" }] }),
+    comment("cycle-1", "progress-1", { kind: "progress_assessment", version: 1, rootIssueId: "root-1", previousVerifyId: "verify-none", currentVerifyId: "verify-execution-1", resolvedFindingIds: [], previousPassedCriterionKeys: [], currentPassedCriterionKeys: [], previousPassedCheckKeys: [], currentPassedCheckKeys: [], isProgress: false }),
+  );
 }
 
 class VerifyGateway implements LinearGatewayInterface {
@@ -156,6 +211,13 @@ class VerifyGateway implements LinearGatewayInterface {
   async read(): Promise<never> { throw new Error("unused"); }
   async mutate(): Promise<never> { throw new Error("unused"); }
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
+    if (command.kind === "create_workflow_issue") {
+      const id = "cycle-2";
+      const parent = this.tree.issues.find((issue) => issue.issue_id === command.parentIssueId)!;
+      const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId)!;
+      this.tree.issues.push({ issue_id: id, identifier: id.toUpperCase(), project_id: command.expectedProjectId, parent_issue_id: parent.issue_id, status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, order: command.order ?? this.tree.issues.length, depth: parent.depth + 1, title: command.title, description: command.description, managed_marker: command.managedMarker, issue_kind: command.issueKind, remote_version: `${id}-version`, updated_at: this.tree.observed_at });
+      return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: id, remoteVersion: `${id}-version` } };
+    }
     if (command.kind === "update_workflow_issue") {
       const issue = this.tree.issues.find((candidate) => candidate.issue_id === command.target.targetIssueId)!;
       const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId)!;
