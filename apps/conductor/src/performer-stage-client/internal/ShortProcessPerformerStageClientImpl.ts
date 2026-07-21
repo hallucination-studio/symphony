@@ -359,8 +359,22 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
     if (process.platform !== "win32") process.kill(-child.pid, signal);
     else child.kill(signal);
   } catch (error) {
-    if (!(error instanceof Error && "code" in error
-      && (error as NodeJS.ErrnoException).code === "ESRCH")) throw error;
+    const code = error instanceof Error && "code" in error
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+    if (code === "ESRCH") return;
+    if (process.platform !== "win32" && code === "EPERM") {
+      try {
+        child.kill(signal);
+        return;
+      } catch (fallbackError) {
+        const fallbackCode = fallbackError instanceof Error && "code" in fallbackError
+          ? (fallbackError as NodeJS.ErrnoException).code
+          : undefined;
+        if (fallbackCode === "ESRCH") return;
+      }
+    }
+    throw error;
   }
 }
 
