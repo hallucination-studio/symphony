@@ -309,12 +309,20 @@ test("requires a fresh Human answer before resuming Work and injects it only int
   const result = await suspendWork(gateway, execution);
 
   assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "blocked", reason: "work_root_not_runnable" });
-  restoreRootAfterHumanAnswer(gateway);
-  gateway.tree.comments.push({ comment_id: "human-answer-1", issue_id: readyWorkIssueId, body: "Preserve the current compatibility behavior.", remote_version: "human-answer-1-version", updated_at: "2026-07-21T09:03:00Z" });
+  const serializedLinearTree = JSON.stringify(gateway.tree);
+  const restartedGateway = new WorkGateway(JSON.parse(serializedLinearTree) as LinearWorkflowTreeSnapshot, gateway.git);
+  const restarted = new LinearDagExecutionImpl({
+    linear: restartedGateway,
+    git: restartedGateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "blocked", reason: "work_root_not_runnable" });
+  restoreRootAfterHumanAnswer(restartedGateway);
+  restartedGateway.tree.comments.push({ comment_id: "human-answer-1", issue_id: readyWorkIssueId, body: "Preserve the current compatibility behavior.", remote_version: "human-answer-1-version", updated_at: "2026-07-21T09:03:00Z" });
 
-  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
-  const resumedExecution = latestExecution(gateway);
-  const ready = await execution.reconcileWork(workInput(), undefined, undefined, resumedExecution.stageExecutionId);
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const resumedExecution = latestExecution(restartedGateway);
+  const ready = await restarted.reconcileWork(workInput(), undefined, undefined, resumedExecution.stageExecutionId);
   assert.equal(ready.kind, "stage_ready");
   if (ready.kind !== "stage_ready") throw new Error("work_stage_not_ready");
   const workflowContext = (ready.envelope as Record<string, JsonValue>).workflow_context as Record<string, JsonValue>;
@@ -377,14 +385,21 @@ test("converges a partially canceled Root on the next reconciliation", async () 
   });
 
   assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_cycle" });
-  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === cycleIssueId)?.status_name, "Canceled");
-  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
-  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === readyWorkIssueId)?.status_name, "Canceled");
-  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
-  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === blockedWorkIssueId)?.status_name, "Canceled");
-  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
-  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === verifyIssueId)?.status_name, "Canceled");
-  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "convergence_decision_persisted" });
+  const serializedLinearTree = JSON.stringify(gateway.tree);
+  const restartedGateway = new WorkGateway(JSON.parse(serializedLinearTree) as LinearWorkflowTreeSnapshot, gateway.git);
+  const restarted = new LinearDagExecutionImpl({
+    linear: restartedGateway,
+    git: restartedGateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+  assert.equal(restartedGateway.tree.issues.find((issue) => issue.issue_id === cycleIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(restartedGateway.tree.issues.find((issue) => issue.issue_id === readyWorkIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(restartedGateway.tree.issues.find((issue) => issue.issue_id === blockedWorkIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(restartedGateway.tree.issues.find((issue) => issue.issue_id === verifyIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await restarted.reconcileWork(workInput()), { kind: "mutation_applied", step: "convergence_decision_persisted" });
 });
 
 function workInput(): WorkStageInput {
