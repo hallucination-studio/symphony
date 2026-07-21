@@ -12,12 +12,6 @@ def validate(name: str, value: Any) -> Any:
         return decode_contract(f"{BASE}{name}", value)
     except (TypeError, ValueError) as exc:
         labels = {
-            "OpenRootConversationCommand": "Open Root Conversation command",
-            "OpenRootConversationResult": "Open Root Conversation result",
-            "FirstRootTurnStart": "First Root Turn start",
-            "RootTurnCommand": "Root Turn command",
-            "RootTurnResult": "Root Turn result",
-            "RootTurnEvent": "Root Turn event",
             "PerformerProfileControlMetadata": "Performer Profile control metadata",
             "PerformerProfileControlResult": "Performer Profile control result",
             "StageContextEnvelope": "Stage context envelope",
