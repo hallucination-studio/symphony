@@ -14,6 +14,7 @@ import type {
 import {
   DEFAULT_ROOT_CONVERGENCE_POLICY,
   assessRootConvergence,
+  toConvergenceRecord,
 } from "../internal/RootConvergencePolicy.js";
 
 test("rebuilds cycle, finding, no-progress, and token facts from the full Root history", () => {
@@ -89,6 +90,25 @@ test("trips token, deadline, and cancellation breakers with explicit trigger pre
   assert.equal(assessRootConvergence({ view, now: "2026-07-21T10:00:00Z", nextStageReservedTotalTokens: 1, policy }).trigger, "deadline_exceeded");
   assert.equal(assessRootConvergence({ view: { ...view, root: { ...view.root, issue: { ...view.root.issue, status_name: "Canceled" } } }, now: "2026-07-21T08:00:00Z", nextStageReservedTotalTokens: 1, policy }).trigger, "root_canceled");
   assert.equal(assessRootConvergence({ view, now: "2026-07-21T08:00:00Z", nextStageReservedTotalTokens: 11, policy }).trigger, "token_budget");
+});
+
+test("projects an assessment into a closed durable convergence record", () => {
+  const assessment = assessRootConvergence({
+    view: rootView([]),
+    now: "2026-07-21T10:00:00Z",
+    policy: { ...DEFAULT_ROOT_CONVERGENCE_POLICY, maxCyclesPerRoot: 1 },
+  });
+
+  assert.deepEqual(toConvergenceRecord("root-1", "2026-07-21T10:00:00Z", assessment), {
+    kind: "convergence",
+    version: 1,
+    rootIssueId: "root-1",
+    observedAt: "2026-07-21T10:00:00Z",
+    policy: assessment.policy,
+    view: assessment.view,
+    trigger: "none",
+    decision: "allow",
+  });
 });
 
 function rootView(cycles: RootCycleView[]): RootDagView {

@@ -247,6 +247,7 @@ const records: ManagedRecord[] = [
       isDeadlineExceeded: false,
       rootIsCanceled: false,
     },
+    trigger: "none",
     decision: "allow",
   },
 ];
@@ -274,6 +275,16 @@ test("managed record codecs reject unknown fields and malformed marker framing",
   assert.deepEqual(parseManagedRecord(`${serialized}\nextra`), {
     ok: false,
     error: "managed_record_marker_invalid",
+  });
+});
+
+test("convergence records require a closed trigger", () => {
+  const serialized = serializeManagedRecord(records.find(({ kind }) => kind === "convergence")!);
+  const payload = JSON.parse(serialized.slice("<!-- symphony managed-record\n".length, -"\n-->".length));
+  delete payload.trigger;
+  assert.deepEqual(parseManagedRecord(`<!-- symphony managed-record\n${JSON.stringify(payload)}\n-->`), {
+    ok: false,
+    error: "managed_record_required_field:trigger",
   });
 });
 

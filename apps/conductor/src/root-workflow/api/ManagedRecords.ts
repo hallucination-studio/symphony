@@ -230,6 +230,15 @@ export interface ProgressAssessment {
   isProgress: boolean;
 }
 
+export type ConvergenceTrigger =
+  | "none"
+  | "root_canceled"
+  | "deadline_exceeded"
+  | "max_cycles_per_root"
+  | "max_same_open_finding_cycles"
+  | "max_consecutive_no_progress"
+  | "token_budget";
+
 export interface ConvergenceRecord {
   kind: "convergence";
   version: ManagedRecordVersion;
@@ -251,6 +260,7 @@ export interface ConvergenceRecord {
     isDeadlineExceeded: boolean;
     rootIsCanceled: boolean;
   };
+  trigger: ConvergenceTrigger;
   decision: "allow" | "escalate" | "canceled";
 }
 

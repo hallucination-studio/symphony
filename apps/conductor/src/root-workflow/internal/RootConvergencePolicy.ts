@@ -12,14 +12,7 @@ import type {
 
 export type RootConvergencePolicy = ConvergenceRecord["policy"];
 export type RootConvergenceView = ConvergenceRecord["view"];
-export type RootConvergenceTrigger =
-  | "none"
-  | "root_canceled"
-  | "deadline_exceeded"
-  | "max_cycles_per_root"
-  | "max_same_open_finding_cycles"
-  | "max_consecutive_no_progress"
-  | "token_budget";
+export type RootConvergenceTrigger = ConvergenceRecord["trigger"];
 
 export interface RootConvergenceAssessment {
   policy: RootConvergencePolicy;
@@ -33,6 +26,19 @@ export interface RootConvergenceInput {
   now: string;
   policy?: RootConvergencePolicy;
   nextStageReservedTotalTokens?: number;
+}
+
+export function toConvergenceRecord(rootIssueId: string, observedAt: string, assessment: RootConvergenceAssessment): ConvergenceRecord {
+  return {
+    kind: "convergence",
+    version: 1,
+    rootIssueId,
+    observedAt,
+    policy: assessment.policy,
+    view: assessment.view,
+    trigger: assessment.trigger,
+    decision: assessment.decision,
+  };
 }
 
 export const DEFAULT_ROOT_CONVERGENCE_POLICY: RootConvergencePolicy = {
