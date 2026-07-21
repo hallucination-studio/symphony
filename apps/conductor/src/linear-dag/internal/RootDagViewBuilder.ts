@@ -180,7 +180,7 @@ function readManagedRecords(comments: Comment[], issueById: Map<string, Issue>, 
     const recordRootIssueId = recordRoot(record);
     if (recordRootIssueId !== undefined && recordRootIssueId !== rootIssueId) fail("managed_record_root_mismatch");
     const issue = issueById.get(comment.issue_id)!;
-    if (!recordTargetMatches(record, issue) || !recordReferencesCurrentTree(record, issueById)) fail(`${record.kind}_target_invalid`);
+    if (!recordTargetMatches(record, issue) || !recordReferencesCurrentTree(record, issueById, issue)) fail(`${record.kind}_target_invalid`);
     const values = result.get(comment.issue_id) ?? [];
     values.push(record);
     result.set(comment.issue_id, values);
@@ -196,16 +196,20 @@ function recordTargetMatches(record: ManagedRecord, issue: Issue): boolean {
   if (record.kind === "stage_execution" || record.kind === "stage_terminal") return issue.issue_kind === record.stage && record.nodeIssueId === issue.issue_id && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "work_completion") return issue.issue_kind === "work" && record.nodeIssueId === issue.issue_id && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "human_action") return issue.issue_kind === "root";
-  if (record.kind === "finding" || record.kind === "finding_disposition") return issue.issue_kind === "verify";
+  if (record.kind === "finding" || record.kind === "finding_disposition" || record.kind === "verify_result") return issue.issue_kind === "verify";
   if (record.kind === "progress_assessment") return issue.issue_kind === "cycle";
   return issue.issue_kind === "root";
 }
 
-function recordReferencesCurrentTree(record: ManagedRecord, issueById: Map<string, Issue>): boolean {
+function recordReferencesCurrentTree(record: ManagedRecord, issueById: Map<string, Issue>, issue: Issue): boolean {
   if (record.kind === "human_action") {
     const target = issueById.get(record.nodeIssueId);
     return target !== undefined && ["plan", "work", "verify"].includes(target.issue_kind ?? "")
       && target.parent_issue_id === record.cycleIssueId;
+  }
+  if (record.kind === "verify_result") {
+    return issue.issue_kind === "verify" && record.nodeIssueId === issue.issue_id
+      && issue.parent_issue_id === record.cycleIssueId;
   }
   return true;
 }
@@ -220,6 +224,7 @@ function recordRoot(record: ManagedRecord): string | undefined {
     case "stage_terminal":
     case "work_completion":
     case "human_action":
+    case "verify_result":
     case "progress_assessment":
     case "convergence":
       return record.rootIssueId;

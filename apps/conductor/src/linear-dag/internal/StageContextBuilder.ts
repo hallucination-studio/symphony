@@ -59,6 +59,25 @@ export interface WorkStageContextBuildResult {
   executionRecord: StageExecutionRecord;
 }
 
+export interface VerifyStageContextBuildInput {
+  tree: LinearWorkflowTreeSnapshot;
+  cycle: Issue;
+  plan: Issue;
+  verify: Issue;
+  contract: PlanContract;
+  workspace: GitWorkspace;
+  git: GitWorkspaceInterface;
+  stageExecutionId: string;
+  startedAt: string;
+  deadlineAt: string;
+  options: BootstrapPlanOptions;
+}
+
+export interface VerifyStageContextBuildResult {
+  envelope: JsonValue;
+  executionRecord: StageExecutionRecord;
+}
+
 export class StageContextBuilder {
   async build(input: PlanStageContextBuildInput): Promise<PlanStageContextBuildResult> {
     const { tree, cycle, plan, options } = input;
@@ -299,6 +318,54 @@ export class StageContextBuilder {
       },
     };
   }
+
+  async buildVerify(input: VerifyStageContextBuildInput): Promise<VerifyStageContextBuildResult> {
+    const { tree, cycle, plan, verify, contract, options } = input;
+    const root = tree.issues.find((issue) => issue.issue_id === tree.root_issue_id);
+    if (!root || cycle.parent_issue_id !== root.issue_id || plan.parent_issue_id !== cycle.issue_id || verify.parent_issue_id !== cycle.issue_id || verify.issue_kind !== "verify") throw new Error("verify_context_target_invalid");
+    const records = readRecords(tree.comments);
+    const cycleMarker = oneRecord(records.get(cycle.issue_id) ?? [], "cycle_marker") as CycleMarker | undefined;
+    if (!cycleMarker) throw new Error("verify_context_cycle_marker_missing");
+    const gitSnapshot = await input.git.inspect(input.workspace);
+    if (gitSnapshot.status.partial || gitSnapshot.status.has_more || gitSnapshot.status.items.length > 0) throw new Error("verify_context_git_dirty");
+    const diff = await input.git.diff(input.workspace, { fromRevision: cycleMarker.baselineRevision, toRevision: gitSnapshot.head });
+    if (diff.partial || diff.bytes > 65_536) throw new Error("verify_context_diff_exceeded");
+    const findings = [...records.values()].flatMap((values) => values.filter((record): record is FindingRecord => record.kind === "finding"));
+    const dispositions = [...records.values()].flatMap((values) => values.filter((record): record is FindingDispositionRecord => record.kind === "finding_disposition"));
+    const latestDispositions = new Map(dispositions.map((record) => [record.findingId, record]));
+    const priorOpenFindings = findings.filter((finding) => latestDispositions.get(finding.findingId)?.disposition !== "resolved" && latestDispositions.get(finding.findingId)?.disposition !== "waived")
+      .map((finding) => ({ finding_id: finding.findingId, category: finding.category, severity: finding.severity, summary: finding.evidence[0]?.summary ?? "Open finding." }));
+    const workFacts = tree.issues.filter((issue) => issue.issue_kind === "work" && issue.parent_issue_id === cycle.issue_id).map((work) => {
+      const completion = (records.get(work.issue_id) ?? []).find((record): record is Extract<ManagedRecord, { kind: "work_completion" }> => record.kind === "work_completion");
+      if (!completion) throw new Error("verify_context_work_evidence_missing");
+      return { work_key: completion.workKey, completion_summary: completion.summary, changed_paths: completion.changedPaths, checks: completion.checks.map(encodeCheck), commit_revision: completion.commitRevision };
+    });
+    const priorAttempts = [...records.values()].flatMap((values) => values.filter((record): record is StageTerminalRecord => record.kind === "stage_terminal" && record.stage !== "plan")
+      .map((record) => ({ attempt_key: record.stageExecutionId, summary: record.summary, outcome: record.outcome })));
+    const workflowContext = {
+      root_contract: { objective: root.description, acceptance_criteria: contract.acceptanceCriteria.map(toCriterion) },
+      approved_plan: { included_scope: contract.includedScope, excluded_scope: contract.excludedScope, acceptance_criteria: contract.acceptanceCriteria.map(toCriterion), verify_contract: { acceptance_criteria: contract.verifyNode.acceptanceCriteria.map(toCriterion), required_checks: contract.verifyNode.requiredChecks.map((check) => check.commandOrMethod) } },
+      work_evidence: workFacts,
+      prior_open_findings: priorOpenFindings,
+      prior_attempts: priorAttempts,
+      artifact: { baseline_revision: cycleMarker.baselineRevision, target_revision: gitSnapshot.head, changed_paths: diffEntries(diff.text).map((entry) => entry.relative_path) },
+      required_checks: contract.verifyNode.requiredChecks.map((check) => ({ check_key: check.checkKey, command_or_method: check.commandOrMethod, outcome: "not_run", summary: check.summary, artifact_revision: gitSnapshot.head })),
+      delivery_preconditions: ["artifact_clean", "target_revision_read_back"],
+    };
+    const stageSources = verifySources(tree, root, cycle, plan, verify, gitSnapshot, options);
+    const repositoryInstructions = (options.repositoryInstructions ?? []).map((instruction) => ({ relative_path: instruction.relativePath, content_digest: instruction.contentDigest, content: instruction.content }));
+    const envelopeWithoutDigest = {
+      protocol_version: "1", stage_execution: { stage_execution_id: input.stageExecutionId, stage: "verify", started_at: input.startedAt, deadline_at: input.deadlineAt },
+      target: { root_issue_id: root.issue_id, cycle_issue_id: cycle.issue_id, node_issue_id: verify.issue_id, plan_contract_digest: contract.planContractDigest }, source_manifest: stageSources, coverage: { is_complete: true, omissions: [] },
+      instruction_bundle: { stage_instruction_set_id: options.instructionSetId, stage_instructions: options.stageInstructions, output_schema: "StageResult.outcome=verify_completed", repository_instructions: repositoryInstructions }, workflow_context: workflowContext,
+      repository_context: { repository_identity: options.repositoryIdentity, base_branch: options.baseBranch, workspace_revision: gitSnapshot.head, baseline_revision: gitSnapshot.head, status_summary: statusSummary(gitSnapshot), relevant_paths: await topLevelPaths(input.workspace.worktreePath), workspace_access: "read_only" },
+      execution_policy: { performer_profile_id: options.performerProfileId, model_settings: { model: options.modelSettings.model, reasoning_effort: options.modelSettings.reasoningEffort, is_fast_mode_enabled: options.modelSettings.isFastModeEnabled }, sandbox_mode: "read_only", allowed_tools: ["read", "shell"], denied_tools: ["linear", "write", "git_commit", "delivery"], network_policy: "restricted" },
+      limits: { max_context_bytes: options.limits.maxContextBytes, max_result_bytes: options.limits.maxResultBytes, max_wall_time_ms: options.limits.maxWallTimeMs, max_tool_calls: options.limits.maxToolCalls, max_command_duration_ms: options.limits.maxCommandDurationMs, reserved_total_tokens: options.limits.reservedTotalTokens, max_output_tokens: options.limits.maxOutputTokens },
+    };
+    const contextDigest = digest(envelopeWithoutDigest);
+    const envelope = decodeConductorPerformerStageContextEnvelope({ ...envelopeWithoutDigest, context_digest: contextDigest } as unknown as JsonValue) as JsonValue;
+    return { envelope, executionRecord: { kind: "stage_execution", version: 1, stageExecutionId: input.stageExecutionId, rootIssueId: root.issue_id, cycleIssueId: cycle.issue_id, nodeIssueId: verify.issue_id, stage: "verify", planContractDigest: contract.planContractDigest, contextDigest, sourceManifest: stageSources.map((source) => ({ sourceKind: source.source_kind, sourceId: source.source_id, versionOrDigest: source.version_or_digest })), coverage: { isComplete: true, omissions: [] }, instructionSetId: options.instructionSetId, executionPolicyId: `${options.performerProfileId}:${options.modelSettings.model}`, limits: options.limits, repositoryRevision: gitSnapshot.head, startedAt: input.startedAt, deadlineAt: input.deadlineAt } };
+  }
 }
 
 export function digest(value: unknown): string {
@@ -388,6 +455,17 @@ function workSources(
   for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   return result;
 }
+
+function verifySources(tree: LinearWorkflowTreeSnapshot, root: Issue, cycle: Issue, plan: Issue, verify: Issue, git: GitWorkspaceSnapshot, options: BootstrapPlanOptions) {
+  const result: Array<{ source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction"; source_id: string; version_or_digest: string }> = [
+    { source_kind: "linear_issue", source_id: root.issue_id, version_or_digest: root.remote_version }, { source_kind: "linear_issue", source_id: cycle.issue_id, version_or_digest: cycle.remote_version }, { source_kind: "linear_issue", source_id: plan.issue_id, version_or_digest: plan.remote_version }, { source_kind: "linear_issue", source_id: verify.issue_id, version_or_digest: verify.remote_version }, { source_kind: "git", source_id: `git:verify:${git.head}`, version_or_digest: digest(git) },
+  ];
+  for (const relation of tree.relations) result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
+  return result;
+}
+
+function encodeCheck(check: { checkKey: string; commandOrMethod: string; outcome: string; summary: string; artifactRevision: string }) { return { check_key: check.checkKey, command_or_method: check.commandOrMethod, outcome: check.outcome, summary: check.summary, artifact_revision: check.artifactRevision }; }
 
 function contentRecords(comments: Comment[]) {
   return comments.filter((comment) => !comment.managed_marker).map((comment) => ({

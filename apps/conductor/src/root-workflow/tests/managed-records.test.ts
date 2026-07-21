@@ -199,6 +199,18 @@ const records: ManagedRecord[] = [
     }],
   },
   {
+    kind: "verify_result",
+    version: 1,
+    stageExecutionId: "verify-2",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "verify-node-1",
+    conclusion: "passed",
+    criteriaResults: [{ criterionKey: "build", outcome: "passed", summary: "Build passed." }],
+    checks: [{ checkKey: "typecheck", commandOrMethod: "typecheck", outcome: "passed", summary: "Typecheck passed.", artifactRevision: "git-result-2" }],
+    verifiedRevision: "git-result-2",
+  },
+  {
     kind: "progress_assessment",
     version: 1,
     rootIssueId: "root-1",

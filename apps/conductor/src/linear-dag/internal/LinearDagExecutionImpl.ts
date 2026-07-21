@@ -12,6 +12,9 @@ import type {
   WorkStageExecutionResult,
   WorkStageInput,
   WorkStageReconciliation,
+  VerifyStageExecutionResult,
+  VerifyStageInput,
+  VerifyStageReconciliation,
 } from "../api/LinearDagExecutionInterface.js";
 import type {
   LinearWorkflowMutationCommand,
@@ -23,12 +26,16 @@ import type {
   CheckEvidence,
   ManagedRecord,
   PlanContract,
+  ProgressAssessment,
   StageExecutionRecord,
   StageTerminalRecord,
   StageUsage,
+  VerifyResultRecord,
   WorkCompletionRecord,
 } from "../../root-workflow/api/ManagedRecords.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
+import { acceptVerifyFindings, openFindingSummaries } from "../../root-workflow/internal/FindingPolicy.js";
+import { assessProgress } from "../../root-workflow/internal/ProgressPolicy.js";
 import { DagMaterializer } from "./DagMaterializer.js";
 import { buildRootDagView, currentNodeMarker, RootDagValidationError } from "./RootDagViewBuilder.js";
 import { StageContextBuilder, digest } from "./StageContextBuilder.js";
@@ -109,6 +116,26 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       return next;
     }
     throw new Error("work_stage_reconciliation_limit_exceeded");
+  }
+
+  async executeVerifyStage(input: VerifyStageInput): Promise<VerifyStageExecutionResult> {
+    let stageResult: JsonValue | undefined;
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      const next = await this.reconcileVerify(input, stageResult);
+      if (next.kind === "stage_ready") {
+        try {
+          stageResult = (await this.dependencies.performer.runStage({ envelope: next.envelope, workspaceRoot: input.workspace.worktreePath })).result;
+        } catch (error) {
+          await this.dependencies.performer.cancelAndReap();
+          throw error;
+        }
+        continue;
+      }
+      if (next.kind === "mutation_applied") continue;
+      if (next.kind === "blocked") throw new Error(next.reason);
+      return next;
+    }
+    throw new Error("verify_stage_reconciliation_limit_exceeded");
   }
 
   async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation> {
@@ -211,6 +238,114 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     };
     await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:completion:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:completion:${latestExecution.stageExecutionId}`, completionRecord);
     return { kind: "mutation_applied", step: "work_completion_persisted" };
+  }
+
+  async reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue): Promise<VerifyStageReconciliation> {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
+    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId || root.status_name !== "In Progress") return verifyBlocked("verify_root_not_runnable");
+    const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+    let view;
+    try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
+    catch (error) { if (error instanceof RootDagValidationError) return verifyBlocked(`verify_tree_invalid:${error.code}`); throw error; }
+    const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
+    if (!cycleView) {
+      const terminalCycle = view.cycles.find(({ issue }) => ["Succeeded", "Changes Required", "Inconclusive", "Escalated"].includes(issue.status_name));
+      const terminalVerify = terminalCycle?.nodes.find((node) => node.issue.issue_kind === "verify");
+      const terminalResult = terminalVerify && terminalVerify.records.find((record): record is VerifyResultRecord => record.kind === "verify_result");
+      if (terminalCycle && terminalVerify && terminalResult) return { kind: "completed", cycleIssueId: terminalCycle.issue.issue_id, verifyIssueId: terminalVerify.issue.issue_id, conclusion: terminalResult.conclusion };
+      return verifyBlocked("verify_cycle_not_ready");
+    }
+    if (!["Sealed", "Executing", "Verifying", "Inconclusive", "Escalated"].includes(cycleView.issue.status_name)) return verifyBlocked("verify_cycle_not_ready");
+    const plan = cycleView.nodes.find((node) => node.issue.issue_kind === "plan");
+    const verify = cycleView.nodes.find((node) => node.issue.issue_kind === "verify");
+    const contract = cycleView.planContract;
+    if (!plan || !verify || !contract || plan.issue.status_name !== "Done") return verifyBlocked("verify_plan_not_complete");
+    if (cycleView.nodes.filter((node) => node.issue.issue_kind === "work").some((node) => node.issue.status_name !== "Done" || !node.records.some((record) => record.kind === "work_completion"))) return verifyBlocked("verify_work_not_complete");
+    const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
+    if (["Sealed", "Executing"].includes(cycleView.issue.status_name)) {
+      await this.updateStatus(input, tree, cycleView.issue, statuses.get("Verifying"), "cycle_verifying");
+      return { kind: "mutation_applied", step: "cycle_verifying" };
+    }
+    if (verify.issue.status_name === "Todo") {
+      await this.updateStatus(input, tree, verify.issue, statuses.get("In Progress"), "verify_in_progress");
+      return { kind: "mutation_applied", step: "verify_in_progress" };
+    }
+    if (!["In Progress", "Done"].includes(verify.issue.status_name)) return verifyBlocked("verify_node_state_invalid");
+    const records = recordsByIssue(tree.comments);
+    const latestExecution = latestExecutionRecord(records.get(verify.issue.issue_id) ?? []);
+    const latestTerminal = latestTerminalRecord(records.get(verify.issue.issue_id) ?? []);
+    const latestResult = latestVerifyResult(records);
+    const currentResult = latestExecution && (records.get(verify.issue.issue_id) ?? []).find((record): record is VerifyResultRecord => record.kind === "verify_result" && record.stageExecutionId === latestExecution.stageExecutionId);
+    if (currentResult && stageResult === undefined && verify.issue.status_name !== "Done") return verifyBlocked("verify_result_records_incomplete");
+    if (!currentResult || (stageResult !== undefined && verify.issue.status_name !== "Done")) {
+      if (stageResult === undefined) {
+        if (latestTerminal?.outcome === "completed" && !currentResult) return verifyBlocked("verify_result_missing");
+        if (currentResult) return verifyBlocked("verify_result_records_incomplete");
+        const stageAttempt = (records.get(verify.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1;
+        const startedAt = input.options.now?.() ?? new Date().toISOString();
+        const stageExecutionId = latestExecution && !latestTerminal ? latestExecution.stageExecutionId : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, stageAttempt) ?? `${input.rootIssueId}:verify:${cycleView.issue.issue_id}:${stageAttempt}`;
+        const built = await this.contextBuilder.buildVerify({ tree, cycle: cycleView.issue, plan: plan.issue, verify: verify.issue, contract, workspace: input.workspace, git: this.dependencies.git, stageExecutionId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString(), options: input.options });
+        if (latestExecution && !latestTerminal) {
+          if (latestExecution.contextDigest !== built.executionRecord.contextDigest) return verifyBlocked("verify_execution_context_changed");
+          return { kind: "stage_ready", step: "verify", envelope: built.envelope };
+        }
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:execution:${stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:execution:${stageExecutionId}`, built.executionRecord);
+        return { kind: "mutation_applied", step: "verify_execution_created" };
+      }
+      if (!latestExecution) return verifyBlocked("verify_execution_missing");
+      const validated = validateVerifyResult(stageResult, latestExecution, contract, gitSnapshot.head);
+      if (!latestTerminal) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromVerify(latestExecution, validated));
+        return { kind: "mutation_applied", step: "verify_stage_terminal" };
+      }
+      if (latestTerminal.outcome !== "completed") return verifyBlocked("verify_stage_not_completed");
+      const findingRecords = allFindingRecords(records);
+      const dispositionRecords = allDispositionRecords(records);
+      const accepted = acceptVerifyFindings({ sourceVerifyId: latestExecution.stageExecutionId, artifactRevision: validated.verifiedRevision, priorOpenFindings: openFindingSummaries(findingRecords, dispositionRecords), newFindings: validated.newFindings, dispositions: validated.dispositions });
+      const previous = latestResultBefore(records, latestExecution.stageExecutionId);
+      const currentPassedCriterionKeys = validated.criteriaResults.filter((criterion) => criterion.outcome === "passed").map((criterion) => criterion.criterionKey);
+      const currentPassedCheckKeys = validated.checks.filter((check) => check.outcome === "passed").map((check) => check.checkKey);
+      const progress: ProgressAssessment = {
+        kind: "progress_assessment", version: 1, rootIssueId: input.rootIssueId, previousVerifyId: previous?.stageExecutionId ?? "verify-none", currentVerifyId: latestExecution.stageExecutionId,
+        resolvedFindingIds: accepted.dispositions.filter((disposition) => disposition.disposition === "resolved").map((disposition) => disposition.findingId), previousPassedCriterionKeys: previous?.criteriaResults.filter((criterion) => criterion.outcome === "passed").map((criterion) => criterion.criterionKey) ?? [], currentPassedCriterionKeys,
+        previousPassedCheckKeys: previous?.checks.filter((check) => check.outcome === "passed").map((check) => check.checkKey) ?? [], currentPassedCheckKeys,
+        isProgress: assessProgress({ resolvedFindingIds: accepted.dispositions.filter((disposition) => disposition.disposition === "resolved").map((disposition) => disposition.findingId), previousPassedCriterionKeys: previous?.criteriaResults.filter((criterion) => criterion.outcome === "passed").map((criterion) => criterion.criterionKey) ?? [], currentPassedCriterionKeys, previousPassedCheckKeys: previous?.checks.filter((check) => check.outcome === "passed").map((check) => check.checkKey) ?? [], currentPassedCheckKeys }),
+      };
+      const verifyRecord: VerifyResultRecord = { kind: "verify_result", version: 1, stageExecutionId: latestExecution.stageExecutionId, rootIssueId: input.rootIssueId, cycleIssueId: cycleView.issue.issue_id, nodeIssueId: verify.issue.issue_id, conclusion: validated.conclusion, criteriaResults: validated.criteriaResults, checks: validated.checks, verifiedRevision: validated.verifiedRevision };
+      if (!records.get(verify.issue.issue_id)?.some((record) => record.kind === "verify_result" && record.stageExecutionId === latestExecution.stageExecutionId)) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:result:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:result:${latestExecution.stageExecutionId}`, verifyRecord);
+        return { kind: "mutation_applied", step: "verify_result_persisted" };
+      }
+      const missingFinding = accepted.newFindings.find((finding) => !records.get(verify.issue.issue_id)?.some((record) => record.kind === "finding" && record.findingId === finding.findingId));
+      if (missingFinding) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:finding:${missingFinding.findingId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:finding:${missingFinding.findingId}`, missingFinding);
+        return { kind: "mutation_applied", step: "verify_finding_persisted" };
+      }
+      const missingDisposition = accepted.dispositions.find((disposition) => !records.get(verify.issue.issue_id)?.some((record) => record.kind === "finding_disposition" && record.findingId === disposition.findingId && record.sourceVerifyId === disposition.sourceVerifyId));
+      if (missingDisposition) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:disposition:${missingDisposition.findingId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:disposition:${missingDisposition.findingId}`, missingDisposition);
+        return { kind: "mutation_applied", step: "verify_disposition_persisted" };
+      }
+      if (!records.get(cycleView.issue.issue_id)?.some((record) => record.kind === "progress_assessment" && record.currentVerifyId === latestExecution.stageExecutionId)) {
+        await this.appendRecord(input, tree, cycleView.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:progress:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:progress:${latestExecution.stageExecutionId}`, progress);
+        return { kind: "mutation_applied", step: "verify_progress_persisted" };
+      }
+      await this.updateStatus(input, tree, verify.issue, statuses.get("Done"), "verify_done");
+      return { kind: "mutation_applied", step: "verify_done" };
+    }
+    if (verify.issue.status_name !== "Done") {
+      await this.updateStatus(input, tree, verify.issue, statuses.get("Done"), "verify_done");
+      return { kind: "mutation_applied", step: "verify_done" };
+    }
+    const conclusion = currentResult?.conclusion ?? latestResult?.conclusion;
+    if (!conclusion) return verifyBlocked("verify_result_missing");
+    const targetState = conclusion === "passed" ? "Succeeded" : conclusion === "changes_required" ? "Changes Required" : conclusion === "inconclusive" ? "Inconclusive" : "Escalated";
+    if (cycleView.issue.status_name !== targetState) {
+      await this.updateStatus(input, tree, cycleView.issue, statuses.get(targetState), `cycle_${targetState.toLowerCase().replaceAll(" ", "_")}`);
+      return { kind: "mutation_applied", step: `cycle_${targetState.toLowerCase().replaceAll(" ", "_")}` };
+    }
+    return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, verifyIssueId: verify.issue.issue_id, conclusion };
   }
 
   async reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation> {
@@ -610,6 +745,56 @@ function validateWorkResult(value: JsonValue, execution: StageExecutionRecord): 
   return { completedAt: typeof result.completed_at === "string" ? result.completed_at : "", usage, summary: outcome.summary, changedPaths: outcome.changed_paths as string[], checks, observedWorkspaceRevision: outcome.observed_workspace_revision };
 }
 
+interface ValidatedVerifyResult {
+  completedAt: string;
+  usage: StageUsage;
+  conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human";
+  criteriaResults: Array<{ criterionKey: string; outcome: "passed" | "failed" | "not_run"; summary: string }>;
+  checks: CheckEvidence[];
+  newFindings: Array<{ category: "product" | "code" | "test" | "infra" | "requirement" | "policy"; severity: "critical" | "high" | "medium" | "low"; summary: string }>;
+  dispositions: Array<{ findingId: string; disposition: "resolved" | "still_open" | "waived" | "rejected" }>;
+  verifiedRevision: string;
+}
+
+function validateVerifyResult(value: JsonValue | undefined, execution: StageExecutionRecord, contract: PlanContract, currentRevision: string): ValidatedVerifyResult {
+  let result: JsonValue;
+  try { result = decodeConductorPerformerStageResult(value as JsonValue) as JsonValue; } catch { throw new Error("verify_result_invalid"); }
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("verify_result_invalid");
+  if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== "verify" || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error("verify_result_correlation_invalid");
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "verify_completed") throw new Error("verify_result_not_completed");
+  const outcome = result.outcome as Record<string, JsonValue>;
+  if (outcome.verified_revision !== execution.repositoryRevision || outcome.verified_revision !== currentRevision) throw new Error("verify_revision_invalid");
+  if (!Array.isArray(outcome.criteria_results) || !Array.isArray(outcome.checks) || !Array.isArray(outcome.new_findings) || !Array.isArray(outcome.finding_dispositions)) throw new Error("verify_result_shape_invalid");
+  const criteriaResults = outcome.criteria_results.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.criterion_key !== "string" || !["passed", "failed", "not_run"].includes(entry.outcome as string) || typeof entry.summary !== "string") throw new Error("verify_criteria_invalid");
+    return { criterionKey: entry.criterion_key, outcome: entry.outcome as "passed" | "failed" | "not_run", summary: entry.summary };
+  });
+  const expectedCriteria = new Set(contract.verifyNode.acceptanceCriteria.map((criterion) => criterion.criterionKey));
+  if (new Set(criteriaResults.map((criterion) => criterion.criterionKey)).size !== criteriaResults.length || criteriaResults.length !== expectedCriteria.size || criteriaResults.some((criterion) => !expectedCriteria.has(criterion.criterionKey))) throw new Error("verify_criteria_invalid");
+  const checks = outcome.checks.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.check_key !== "string" || typeof entry.command_or_method !== "string" || !["passed", "failed", "not_run"].includes(entry.outcome as string) || typeof entry.summary !== "string" || entry.artifact_revision !== execution.repositoryRevision) throw new Error("verify_checks_invalid");
+    return { checkKey: entry.check_key, commandOrMethod: entry.command_or_method, outcome: entry.outcome as CheckEvidence["outcome"], summary: entry.summary, artifactRevision: entry.artifact_revision };
+  });
+  if (new Set(checks.map((check) => check.checkKey)).size !== checks.length) throw new Error("verify_checks_invalid");
+  const requiredCheckKeys = new Set(contract.verifyNode.requiredChecks.map((check) => check.checkKey));
+  if ([...requiredCheckKeys].some((key) => !checks.some((check) => check.checkKey === key && check.outcome === "passed"))) throw new Error("verify_required_check_missing");
+  const newFindings = outcome.new_findings.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.category !== "string" || typeof entry.severity !== "string" || typeof entry.summary !== "string") throw new Error("verify_finding_invalid");
+    return { category: entry.category as ValidatedVerifyResult["newFindings"][number]["category"], severity: entry.severity as ValidatedVerifyResult["newFindings"][number]["severity"], summary: entry.summary };
+  });
+  const dispositions = outcome.finding_dispositions.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.finding_id !== "string" || !["resolved", "still_open", "waived", "rejected"].includes(entry.disposition as string)) throw new Error("verify_disposition_invalid");
+    return { findingId: entry.finding_id, disposition: entry.disposition as ValidatedVerifyResult["dispositions"][number]["disposition"] };
+  });
+  const conclusion = outcome.conclusion;
+  if (!["passed", "changes_required", "inconclusive", "escalate_human"].includes(conclusion as string)) throw new Error("verify_conclusion_invalid");
+  if (conclusion === "passed" && (criteriaResults.some((criterion) => criterion.outcome !== "passed") || checks.some((check) => check.outcome !== "passed"))) throw new Error("verify_passed_evidence_invalid");
+  if (conclusion === "changes_required" && newFindings.length === 0 && !dispositions.some((disposition) => disposition.disposition === "still_open")) throw new Error("verify_changes_finding_missing");
+  const usageValue = result.usage;
+  const usage: StageUsage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue) ? { inputTokens: numberValue(usageValue.input_tokens), cachedInputTokens: numberValue(usageValue.cached_input_tokens), outputTokens: numberValue(usageValue.output_tokens), reasoningOutputTokens: numberValue(usageValue.reasoning_output_tokens), totalTokens: numberValue(usageValue.total_tokens) } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  return { completedAt: typeof result.completed_at === "string" ? result.completed_at : "", usage, conclusion: conclusion as ValidatedVerifyResult["conclusion"], criteriaResults, checks, newFindings, dispositions, verifiedRevision: execution.repositoryRevision };
+}
+
 async function validateWorkGit(git: GitWorkspaceInterface, workspace: WorkStageInput["workspace"], execution: StageExecutionRecord, result: ValidatedWorkResult, contract: PlanContract): Promise<void> {
   if (result.observedWorkspaceRevision !== execution.repositoryRevision) throw new Error("work_result_revision_invalid");
   if (new Set(result.changedPaths).size !== result.changedPaths.length) throw new Error("work_result_paths_duplicate");
@@ -639,6 +824,30 @@ function stageTerminal(execution: StageExecutionRecord, result: { completedAt: s
     cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
     outcome: "completed", completedAt: result.completedAt, summary: result.summary ?? "Plan Contract produced.", usage: result.usage,
   };
+}
+
+function stageTerminalFromVerify(execution: StageExecutionRecord, result: ValidatedVerifyResult): StageTerminalRecord {
+  return stageTerminal(execution, { completedAt: result.completedAt, usage: result.usage, summary: `Verify concluded ${result.conclusion}.` });
+}
+
+function allFindingRecords(records: Map<string, ManagedRecord[]>): import("../../root-workflow/api/ManagedRecords.js").FindingRecord[] {
+  return [...records.values()].flatMap((values) => values.filter((record): record is import("../../root-workflow/api/ManagedRecords.js").FindingRecord => record.kind === "finding"));
+}
+
+function allDispositionRecords(records: Map<string, ManagedRecord[]>): import("../../root-workflow/api/ManagedRecords.js").FindingDispositionRecord[] {
+  return [...records.values()].flatMap((values) => values.filter((record): record is import("../../root-workflow/api/ManagedRecords.js").FindingDispositionRecord => record.kind === "finding_disposition"));
+}
+
+function latestVerifyResult(records: Map<string, ManagedRecord[]>): VerifyResultRecord | undefined {
+  const executions = new Map([...records.values()].flatMap((values) => values.filter((record): record is StageExecutionRecord => record.kind === "stage_execution")).map((record) => [record.stageExecutionId, record]));
+  return [...records.values()].flatMap((values) => values.filter((record): record is VerifyResultRecord => record.kind === "verify_result"))
+    .sort((left, right) => (executions.get(left.stageExecutionId)?.startedAt ?? "").localeCompare(executions.get(right.stageExecutionId)?.startedAt ?? "")).at(-1);
+}
+
+function latestResultBefore(records: Map<string, ManagedRecord[]>, stageExecutionId: string): VerifyResultRecord | undefined {
+  const executions = new Map([...records.values()].flatMap((values) => values.filter((record): record is StageExecutionRecord => record.kind === "stage_execution")).map((record) => [record.stageExecutionId, record]));
+  return [...records.values()].flatMap((values) => values.filter((record): record is VerifyResultRecord => record.kind === "verify_result" && record.stageExecutionId !== stageExecutionId))
+    .sort((left, right) => (executions.get(left.stageExecutionId)?.startedAt ?? "").localeCompare(executions.get(right.stageExecutionId)?.startedAt ?? "")).at(-1);
 }
 
 function managedPlanContract(rootIssueId: string, cycleIssueId: string, value: Record<string, JsonValue>): PlanContract {
@@ -696,5 +905,9 @@ function blocked(reason: string): BootstrapPlanReconciliation {
 }
 
 function workBlocked(reason: string): WorkStageReconciliation {
+  return { kind: "blocked", reason };
+}
+
+function verifyBlocked(reason: string): VerifyStageReconciliation {
   return { kind: "blocked", reason };
 }

@@ -20,6 +20,7 @@ import type {
   StageTerminalRecord,
   StageUsage,
   VerifyNodeContract,
+  VerifyResultRecord,
   WorkNodeContract,
   WorkCompletionRecord,
 } from "../api/ManagedRecords.js";
@@ -76,6 +77,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "human_action": return decodeHumanAction(object);
     case "finding": return decodeFinding(object);
     case "finding_disposition": return decodeFindingDisposition(object);
+    case "verify_result": return decodeVerifyResult(object);
     case "progress_assessment": return decodeProgressAssessment(object);
     case "convergence": return decodeConvergence(object);
     default: fail("managed_record_kind_invalid");
@@ -154,6 +156,16 @@ function decodeFindingDisposition(o: Record<string, unknown>): FindingDispositio
   return { kind: "finding_disposition", version: 1, findingId: id(o, "finding_id"), sourceVerifyId: id(o, "source_verify_id"), disposition: enumValue(o, "disposition", ["still_open", "resolved", "waived"]), evidence: array(o, "evidence", decodeFindingEvidence) };
 }
 
+function decodeVerifyResult(o: Record<string, unknown>): VerifyResultRecord {
+  fields(o, ["kind", "version", "stage_execution_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "conclusion", "criteria_results", "checks", "verified_revision"]);
+  return {
+    kind: "verify_result", version: 1, stageExecutionId: id(o, "stage_execution_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"),
+    conclusion: enumValue(o, "conclusion", ["passed", "changes_required", "inconclusive", "escalate_human"]),
+    criteriaResults: array(o, "criteria_results", (entry) => { fields(entry, ["criterion_key", "outcome", "summary"]); return { criterionKey: id(entry, "criterion_key"), outcome: enumValue(entry, "outcome", ["passed", "failed", "not_run"]), summary: text(entry, "summary") }; }),
+    checks: array(o, "checks", decodeCheck), verifiedRevision: id(o, "verified_revision"),
+  };
+}
+
 function decodeProgressAssessment(o: Record<string, unknown>): ProgressAssessment {
   fields(o, ["kind", "version", "root_issue_id", "previous_verify_id", "current_verify_id", "resolved_finding_ids", "previous_passed_criterion_keys", "current_passed_criterion_keys", "previous_passed_check_keys", "current_passed_check_keys", "is_progress"]);
   return { kind: "progress_assessment", version: 1, rootIssueId: id(o, "root_issue_id"), previousVerifyId: id(o, "previous_verify_id"), currentVerifyId: id(o, "current_verify_id"), resolvedFindingIds: ids(o, "resolved_finding_ids"), previousPassedCriterionKeys: ids(o, "previous_passed_criterion_keys"), currentPassedCriterionKeys: ids(o, "current_passed_criterion_keys"), previousPassedCheckKeys: ids(o, "previous_passed_check_keys"), currentPassedCheckKeys: ids(o, "current_passed_check_keys"), isProgress: bool(o, "is_progress") };
@@ -193,6 +205,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     human_action: { allowed: ["kind", "version", "actionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "requestKind", "questionOrProposal", "reason", "impact", "contextDigest", "expectedRootRemoteVersion"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
     finding_disposition: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "disposition", "evidence"] },
+    verify_result: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "conclusion", "criteriaResults", "checks", "verifiedRevision"] },
     progress_assessment: { allowed: ["kind", "version", "rootIssueId", "previousVerifyId", "currentVerifyId", "resolvedFindingIds", "previousPassedCriterionKeys", "currentPassedCriterionKeys", "previousPassedCheckKeys", "currentPassedCheckKeys", "isProgress"] },
     convergence: { allowed: ["kind", "version", "rootIssueId", "observedAt", "policy", "view", "decision"] },
   };
@@ -214,6 +227,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "human_action": return encodeSimple(record, { action_id: record.actionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, request_kind: record.requestKind, question_or_proposal: record.questionOrProposal, reason: record.reason, impact: record.impact, context_digest: record.contextDigest, expected_root_remote_version: record.expectedRootRemoteVersion });
     case "finding": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, category: record.category, severity: record.severity, evidence: record.evidence.map(encodeFindingEvidence), affected_scope: record.affectedScope.map(encodeAffectedScope), retryable: record.retryable, suggested_remediation: record.suggestedRemediation, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion) });
     case "finding_disposition": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, disposition: record.disposition, evidence: record.evidence.map(encodeFindingEvidence) });
+    case "verify_result": return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, conclusion: record.conclusion, criteria_results: record.criteriaResults.map((criterion) => { recordFields(criterion, ["criterionKey", "outcome", "summary"]); return { criterion_key: criterion.criterionKey, outcome: criterion.outcome, summary: criterion.summary }; }), checks: record.checks.map(encodeCheck), verified_revision: record.verifiedRevision });
     case "progress_assessment": return encodeSimple(record, { root_issue_id: record.rootIssueId, previous_verify_id: record.previousVerifyId, current_verify_id: record.currentVerifyId, resolved_finding_ids: record.resolvedFindingIds, previous_passed_criterion_keys: record.previousPassedCriterionKeys, current_passed_criterion_keys: record.currentPassedCriterionKeys, previous_passed_check_keys: record.previousPassedCheckKeys, current_passed_check_keys: record.currentPassedCheckKeys, is_progress: record.isProgress });
     case "convergence": return encodeSimple(record, { root_issue_id: record.rootIssueId, observed_at: record.observedAt, policy: { max_cycles_per_root: record.policy.maxCyclesPerRoot, max_same_open_finding_cycles: record.policy.maxSameOpenFindingCycles, max_consecutive_no_progress: record.policy.maxConsecutiveNoProgress, max_total_tokens: record.policy.maxTotalTokens, deadline_at: record.policy.deadlineAt }, view: { cycle_count: record.view.cycleCount, open_finding_persistence: record.view.openFindingPersistence.map((entry) => { recordFields(entry, ["findingId", "openCycleCount"]); return { finding_id: entry.findingId, open_cycle_count: entry.openCycleCount }; }), consecutive_no_progress: record.view.consecutiveNoProgress, settled_tokens: record.view.settledTokens, open_token_reservations: record.view.openTokenReservations.map((entry) => { recordFields(entry, ["stageExecutionId", "reservedTotalTokens"]); return { stage_execution_id: entry.stageExecutionId, reserved_total_tokens: entry.reservedTotalTokens }; }), is_deadline_exceeded: record.view.isDeadlineExceeded, root_is_canceled: record.view.rootIsCanceled }, decision: record.decision });
   }

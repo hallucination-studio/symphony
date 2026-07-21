@@ -203,6 +203,19 @@ export interface FindingDispositionRecord {
   evidence: FindingEvidence[];
 }
 
+export interface VerifyResultRecord {
+  kind: "verify_result";
+  version: ManagedRecordVersion;
+  stageExecutionId: string;
+  rootIssueId: string;
+  cycleIssueId: string;
+  nodeIssueId: string;
+  conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human";
+  criteriaResults: Array<{ criterionKey: string; outcome: "passed" | "failed" | "not_run"; summary: string }>;
+  checks: CheckEvidence[];
+  verifiedRevision: string;
+}
+
 export interface ProgressAssessment {
   kind: "progress_assessment";
   version: ManagedRecordVersion;
@@ -252,5 +265,6 @@ export type ManagedRecord =
   | HumanActionRecord
   | FindingRecord
   | FindingDispositionRecord
+  | VerifyResultRecord
   | ProgressAssessment
   | ConvergenceRecord;
