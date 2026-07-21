@@ -220,7 +220,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(selected.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(selected.issue.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
-    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+    if (stageResult === undefined && latestExecution && !currentTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
       await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Work execution ended without a terminal result and will be retried."));
       return { kind: "mutation_applied", step: "work_orphaned_execution_terminal" };
     }
@@ -363,7 +363,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(verify.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(verify.issue.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
-    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+    if (stageResult === undefined && latestExecution && !currentTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
       await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Verify execution ended without a terminal result and will be retried."));
       return { kind: "mutation_applied", step: "verify_orphaned_execution_terminal" };
     }
@@ -600,7 +600,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(plan.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(plan.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
-    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+    if (stageResult === undefined && latestExecution && !currentTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
       await this.appendRecord(input, tree, plan, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Plan execution ended without a terminal result and will be retried."));
       return { kind: "mutation_applied", step: "plan_orphaned_execution_terminal" };
     }

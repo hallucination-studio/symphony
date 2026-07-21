@@ -113,6 +113,50 @@ test("persists one suspended Plan action and releases the Stage", async () => {
   assert.equal(performerCalls, 1);
 });
 
+test("resumes a suspended Plan with a fresh execution and Linear review input", async () => {
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+  const execution = new LinearDagExecutionImpl({
+    linear: fake,
+    git: fake.git,
+    performer: {
+      async runStage(input) {
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+        return { result: {
+          protocol_version: "1", stage_execution_id: stageExecution.stage_execution_id, stage: "plan",
+          root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest, completed_at: now,
+          usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+          outcome: { kind: "suspended", request_kind: "needs_info", question_or_proposal: "Clarify the target behavior.", reason: "The requirement is ambiguous.", impact: "The Plan cannot be bounded without an answer." },
+        } as unknown as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+  const input = bootstrapInput();
+  const suspended = await execution.executeBootstrapPlan(input);
+  assert.equal(suspended.kind, "awaiting_human");
+
+  const firstExecution = fake.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "plan");
+  assert.equal(firstExecution?.ok, true);
+  if (!firstExecution?.ok || firstExecution.value.kind !== "stage_execution") throw new Error("plan_execution_missing");
+  const firstContextDigest = firstExecution.value.contextDigest;
+
+  restorePlanRootAfterHumanAnswer(fake);
+  fake.tree.comments.push({ comment_id: "human-answer-1", issue_id: "plan-1", body: "Target the existing workflow behavior.", remote_version: "human-answer-1-version", updated_at: "2026-07-21T09:03:00Z" });
+
+  const ready = await execution.reconcileRoot(input);
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("plan_stage_not_ready");
+  const envelope = ready.envelope as Record<string, JsonValue>;
+  const workflowContext = envelope.workflow_context as Record<string, JsonValue>;
+  const reviewInputs = workflowContext.review_inputs as JsonValue[];
+  assert.equal(reviewInputs.some((record) => record && typeof record === "object" && !Array.isArray(record) && record.text === "Target the existing workflow behavior."), true);
+  assert.notEqual(envelope.context_digest, firstContextDigest);
+  assert.equal((envelope.stage_execution as Record<string, JsonValue>).stage_execution_id, "root-1:plan:execution-2");
+});
+
 test("reconciles an orphaned Plan execution into a fresh retry", async () => {
   const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
   const performer: PerformerStageClientInterface = {
@@ -136,6 +180,9 @@ test("reconciles an orphaned Plan execution into a fresh retry", async () => {
   if (retryReady.kind !== "stage_ready") throw new Error("plan_retry_not_ready");
   const retryExecutionId = ((retryReady.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id;
   assert.notEqual(retryExecutionId, firstExecutionId);
+
+  const restartedAgain = new LinearDagExecutionImpl({ linear: fake, git: fake.git, performer });
+  assert.deepEqual(await restartedAgain.reconcileRoot(input), { kind: "mutation_applied", step: "plan_orphaned_execution_terminal" });
 
   const terminal = fake.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === firstExecutionId);
   assert.equal(terminal?.ok, true);
@@ -207,6 +254,12 @@ function bootstrapInput() {
       stageId: (_root: string, _cycle: string, attempt: number) => `root-1:plan:execution-${attempt}`,
     },
   };
+}
+
+function restorePlanRootAfterHumanAnswer(fake: FakeLinearGateway): void {
+  const root = fake.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+  const status = fake.tree.status_catalog.find((candidate) => candidate.name === "In Progress")!;
+  Object.assign(root, { status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, remote_version: "root-version-after-human" });
 }
 
 class FakeLinearGateway implements LinearGatewayInterface {

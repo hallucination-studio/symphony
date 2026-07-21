@@ -114,6 +114,9 @@ test("reconciles an orphaned Verify execution into a fresh retry", async () => {
   if (ready.kind !== "stage_ready") throw new Error("verify_retry_not_ready");
   assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id, retryExecutionId);
 
+  const restartedAgain = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
+  assert.deepEqual(await restartedAgain.reconcileVerify(input), { kind: "mutation_applied", step: "verify_orphaned_execution_terminal" });
+
   const orphanTerminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => {
     if (!record.ok || record.value.kind !== "stage_terminal") return false;
     return record.value.stageExecutionId === firstExecutionId;
@@ -123,6 +126,51 @@ test("reconciles an orphaned Verify execution into a fresh retry", async () => {
   assert.equal(orphanTerminal.value.outcome, "failed");
   assert.equal(orphanTerminal.value.failureCode, "orphaned_execution");
   assert.equal(orphanTerminal.value.usage.totalTokens, input.options.limits.reservedTotalTokens);
+});
+
+test("resumes a suspended Verify with a fresh execution identity", async () => {
+  const gateway = new VerifyGateway();
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: {
+      async runStage(input) {
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+        return { result: {
+          protocol_version: "1", stage_execution_id: stageExecution.stage_execution_id, stage: "verify",
+          root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest, completed_at: "2026-07-21T09:02:00Z",
+          usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+          outcome: { kind: "suspended", request_kind: "needs_approval", question_or_proposal: "Approve the verification basis.", reason: "The verification basis needs human confirmation.", impact: "Verify cannot conclude until the basis is approved." },
+        } as unknown as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+  const input = verifyInput();
+  const suspended = await execution.executeVerifyStage(input);
+  assert.equal(suspended.kind, "awaiting_human");
+
+  const firstExecution = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "verify");
+  assert.equal(firstExecution?.ok, true);
+  if (!firstExecution?.ok || firstExecution.value.kind !== "stage_execution") throw new Error("verify_execution_missing");
+  const firstExecutionId = firstExecution.value.stageExecutionId;
+
+  restoreVerifyRootAfterHumanAnswer(gateway);
+  gateway.tree.comments.push({ comment_id: "human-answer-1", issue_id: "verify-1", body: "Approve the verification basis for the current artifact.", remote_version: "human-answer-1-version", updated_at: "2026-07-21T09:03:00Z" });
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+  const retryExecution = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).filter((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "verify").at(-1);
+  assert.equal(retryExecution?.ok, true);
+  if (!retryExecution?.ok || retryExecution.value.kind !== "stage_execution") throw new Error("verify_retry_execution_missing");
+  assert.notEqual(retryExecution.value.stageExecutionId, firstExecutionId);
+
+  const ready = await execution.reconcileVerify(input, undefined, retryExecution.value.stageExecutionId);
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("verify_stage_not_ready");
+  assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id, retryExecution.value.stageExecutionId);
 });
 
 test("rejects a Verify result for a changed revision before persisting terminal evidence", async () => {
@@ -294,6 +342,12 @@ function verifyInput(): VerifyStageInput {
       instructionSetId: "verify-v1", stageInstructions: "Verify the immutable artifact.", now: () => "2026-07-21T09:00:00Z", stageId: (_root, _cycle, attempt) => `verify-execution-${attempt}`,
     },
   };
+}
+
+function restoreVerifyRootAfterHumanAnswer(gateway: VerifyGateway): void {
+  const root = gateway.tree.issues.find((issue) => issue.issue_id === "root-1")!;
+  const status = gateway.tree.status_catalog.find((candidate) => candidate.name === "In Progress")!;
+  Object.assign(root, { status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, remote_version: "root-version-after-human" });
 }
 
 function prepareRepairTree(tree: LinearWorkflowTreeSnapshot): void {
