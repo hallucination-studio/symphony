@@ -173,6 +173,64 @@ export interface RootUsageValue {
   observedAt: string;
 }
 
+export type WorkflowStatusCategory =
+  | "backlog"
+  | "unstarted"
+  | "started"
+  | "completed"
+  | "canceled";
+
+export interface WorkflowStatusValue {
+  statusId: string;
+  name: string;
+  category: WorkflowStatusCategory;
+  position: number;
+}
+
+export interface WorkflowIssueValue {
+  issueId: string;
+  identifier: string;
+  projectId: string;
+  parentIssueId?: string;
+  statusId: string;
+  statusName: string;
+  statusCategory: WorkflowStatusCategory;
+  statusPosition: number;
+  order: number;
+  depth: number;
+  title: string;
+  description: string;
+  managedMarker?: string;
+  issueKind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
+  remoteVersion: string;
+  updatedAt: string;
+}
+
+export interface WorkflowCommentValue {
+  commentId: string;
+  issueId: string;
+  body: string;
+  managedMarker?: string;
+  remoteVersion: string;
+  updatedAt: string;
+}
+
+export interface WorkflowRelationValue {
+  relationId: string;
+  relationKind: "blocks" | "blocked_by" | "triggered_by";
+  sourceIssueId: string;
+  targetIssueId: string;
+}
+
+export interface WorkflowRootTreeValue {
+  rootIssueId: string;
+  statusCatalog: WorkflowStatusValue[];
+  issues: WorkflowIssueValue[];
+  comments: WorkflowCommentValue[];
+  relations: WorkflowRelationValue[];
+  observedAt: string;
+}
+
 export type LinearMutationResult =
   | { kind: "applied"; issue?: LinearIssueValue }
   | { kind: "already_applied"; issue?: LinearIssueValue }

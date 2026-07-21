@@ -66,6 +66,69 @@ test("fresh Root scope uses the compact Podium query without reconstructing a Tr
   assert.deepEqual(requests, ["resolve_conductor_project", "get_root_scope"]);
 });
 
+test("workflow tree request preserves correlation and bounded Linear facts", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    requests.push(body);
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return workflowTreePage();
+  });
+
+  await gateway.resolveProject();
+  const tree = await gateway.readWorkflowIssueTree("root-1");
+
+  assert.deepEqual(requests, [
+    { kind: "resolve_conductor_project", conductor_short_hash: "abc123" },
+    {
+      kind: "get_workflow_issue_tree",
+      conductor_short_hash: "abc123",
+      expected_project_id: "project-1",
+      root_issue_id: "root-1",
+    },
+  ]);
+  assert.equal(tree.root_issue_id, "root-1");
+  assert.equal(tree.issues[1]?.managed_marker, "root-1:work-1");
+  assert.equal(tree.comments[0]?.managed_marker, "root-1:status");
+  assert.deepEqual(tree.relations[0], {
+    relation_id: "relation-1",
+    relation_kind: "blocks",
+    source_issue_id: "work-1",
+    target_issue_id: "root-1",
+  });
+});
+
+test("workflow tree decoder rejects duplicate, foreign, and dangling facts", async () => {
+  const malformed = [
+    ["duplicate issue IDs", (tree: ReturnType<typeof workflowTree>) => {
+      tree.issues.push({ ...tree.issues[0]! });
+    }],
+    ["cross-project issues", (tree: ReturnType<typeof workflowTree>) => {
+      tree.issues[1]!.project_id = "project-foreign";
+    }],
+    ["dangling comments", (tree: ReturnType<typeof workflowTree>) => {
+      tree.comments[0]!.issue_id = "missing-issue";
+    }],
+    ["dangling relations", (tree: ReturnType<typeof workflowTree>) => {
+      tree.relations[0]!.target_issue_id = "missing-issue";
+    }],
+  ] as const;
+
+  for (const [label, mutate] of malformed) {
+    const gateway = createGateway(async (body) => {
+      if (body.kind === "resolve_conductor_project") return resolved();
+      const tree = workflowTree();
+      mutate(tree);
+      return workflowTreePage(tree);
+    });
+    await gateway.resolveProject();
+    await assert.rejects(
+      gateway.readWorkflowIssueTree("root-1"),
+      (error: unknown) => error instanceof Error && error.message.startsWith("linear_workflow_"),
+      label,
+    );
+  }
+});
+
 test("Agent Linear read returns requested direct children from the fresh Root scope", async () => {
   const gateway = createGateway(async (body) => {
     if (body.kind === "resolve_conductor_project") return resolved();
@@ -199,6 +262,44 @@ function treePage(comments = [comment()]) { return { kind: "issue_tree_page", tr
     managed_marker: "root-1:work-1" }], root_phase_labels: [],
   root_managed_comments: comments, human_answers: [], observed_at: now },
   page_info: { has_next_page: false } }; }
+
+function workflowTreePage(tree = workflowTree()) {
+  return { kind: "workflow_issue_tree", tree };
+}
+
+function workflowTree() {
+  return {
+    root_issue_id: "root-1",
+    status_catalog: [
+      { status_id: "status-progress", name: "In Progress", category: "started" as const, position: 2 },
+      { status_id: "status-todo", name: "Todo", category: "unstarted" as const, position: 1 },
+    ],
+    issues: [
+      {
+        issue_id: "root-1", identifier: "SYM-1", project_id: "project-1",
+        status_id: "status-progress", status_name: "In Progress", status_category: "started" as const,
+        status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it",
+        issue_kind: "root" as const, remote_version: now, updated_at: now,
+      },
+      {
+        issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1",
+        status_id: "status-todo", status_name: "Todo", status_category: "unstarted" as const,
+        status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it",
+        managed_marker: "root-1:work-1", issue_kind: "work" as const,
+        remote_version: now, updated_at: now,
+      },
+    ],
+    comments: [{
+      comment_id: "comment-1", issue_id: "root-1", body: "Root status.",
+      managed_marker: "root-1:status", remote_version: now, updated_at: now,
+    }],
+    relations: [{
+      relation_id: "relation-1", relation_kind: "blocks" as const,
+      source_issue_id: "work-1", target_issue_id: "root-1",
+    }],
+    observed_at: now,
+  };
+}
 
 function scopeResult() { return { kind: "root_scope", root_issue_id: "root-1",
   conductor_id: "conductor-1", performer_id: "conversation-1", terminal: false,

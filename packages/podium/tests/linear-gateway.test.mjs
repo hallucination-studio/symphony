@@ -572,6 +572,39 @@ test("issue tree rejects invalid Root managed-state facts", async () => {
   );
 });
 
+test("workflow Issue Tree validates status identity, comments, relations, and scope", async () => {
+  const valid = workflowTree("project-1");
+  const invalid = [
+    { ...valid, statusCatalog: [...valid.statusCatalog, { ...valid.statusCatalog[0] }] },
+    { ...valid, issues: [...valid.issues, { ...valid.issues[0] }] },
+    { ...valid, issues: [{ ...valid.issues[0], projectId: "project-foreign" }, valid.issues[1]] },
+    { ...valid, comments: [{ ...valid.comments[0], issueId: "missing-issue" }] },
+    { ...valid, relations: [{ ...valid.relations[0], targetIssueId: "missing-issue" }] },
+  ];
+  for (const tree of invalid) {
+    const handler = new LinearGatewayProtocolHandlerImpl(
+      { async getWorkflowIssueTree() { return tree; } },
+      { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+    );
+    await assert.rejects(
+      handler.getWorkflowIssueTree("project-1", "root-1"),
+      /linear_workflow_/u,
+    );
+  }
+});
+
+test("workflow Issue Tree preserves the bounded read-back projection", async () => {
+  const tree = workflowTree("project-1");
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    { async getWorkflowIssueTree() { return tree; } },
+    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+  );
+  assert.deepEqual(
+    await handler.getWorkflowIssueTree("project-1", "root-1"),
+    tree,
+  );
+});
+
 test("compact Root scope validates authority and issue ancestry without reading a complete Tree", async () => {
   let treeReads = 0;
   const handler = new LinearGatewayProtocolHandlerImpl(
@@ -627,6 +660,39 @@ test("Podium-Conductor compact Root scope omits workflow bodies and complete Tre
     observed_at: "2026-07-20T00:00:01Z",
   });
   assert.doesNotMatch(JSON.stringify(result), /description|comment|label|answer|authorization/iu);
+});
+
+test("Podium-Conductor exposes the correlated workflow Tree route and rejects hash drift", async () => {
+  let reads = 0;
+  const services = await createConductorServices({
+    async getWorkflowIssueTree(input) {
+      reads += 1;
+      assert.deepEqual(input, { projectId: "project-1", rootIssueId: "root-1" });
+      return workflowTree("project-1");
+    },
+  });
+
+  const result = await services.handle({
+    kind: "get_workflow_issue_tree",
+    conductor_short_hash: "abc123",
+    expected_project_id: "project-1",
+    root_issue_id: "root-1",
+  });
+
+  assert.equal(result.kind, "workflow_issue_tree");
+  assert.equal(result.tree.issues.length, 2);
+  assert.equal(result.tree.relations[0].relation_id, "relation-1");
+  assert.equal(reads, 1);
+  await assert.rejects(
+    services.handle({
+      kind: "get_workflow_issue_tree",
+      conductor_short_hash: "wrong-hash",
+      expected_project_id: "project-1",
+      root_issue_id: "root-1",
+    }),
+    /linear_conductor_short_hash_mismatch/u,
+  );
+  assert.equal(reads, 1);
 });
 
 test("affected Root detail projects its sanitized scheduling observation", async () => {
@@ -1388,6 +1454,23 @@ function issue(issueId, projectId) {
     title: "Title",
     description: "",
     updatedAt: "2026-07-16T00:00:00Z",
+  };
+}
+
+function workflowTree(projectId) {
+  return {
+    rootIssueId: "root-1",
+    statusCatalog: [
+      { statusId: "status-progress", name: "In Progress", category: "started", position: 2 },
+      { statusId: "status-todo", name: "Todo", category: "unstarted", position: 1 },
+    ],
+    issues: [
+      { ...issue("root-1", projectId), statusId: "status-progress", statusName: "In Progress", statusCategory: "started", statusPosition: 2, depth: 0, remoteVersion: "2026-07-16T00:00:00Z" },
+      { ...issue("work-1", projectId), parentIssueId: "root-1", statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted", statusPosition: 1, depth: 1, remoteVersion: "2026-07-16T00:00:00Z" },
+    ],
+    comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
+    relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
+    observedAt: "2026-07-16T00:00:02Z",
   };
 }
 

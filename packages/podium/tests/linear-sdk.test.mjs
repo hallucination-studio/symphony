@@ -888,6 +888,57 @@ test("complete Issue Tree batches preserve depth-first ordering and Human answer
   }]);
 });
 
+test("workflow Issue Tree maps every bounded comment, relation, and Team status", async () => {
+  const root = {
+    id: "root-1", identifier: "ROOT-1", title: "Root", description: "Root description",
+    sortOrder: 1, updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    state: { name: "In Progress" },
+    labels: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [{ id: "comment-root", body: "Root status", updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" } }], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }], pageInfo: { hasNextPage: false } },
+  };
+  const child = {
+    id: "work-1", identifier: "WORK-1", title: "Work", description: "Work description",
+    sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:02Z",
+    project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    comments: { nodes: [{ id: "comment-work", body: "Progress\n\n<!-- symphony agent write\nwrite_id: write-1\n-->", updatedAt: "2026-07-16T00:00:03Z", issue: { id: "work-1" } }], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const sdk = {
+    async issue() {
+      return {
+        projectId: "project-1",
+        team: Promise.resolve({ states: async () => connection([
+          { id: "state-progress", name: "In Progress", type: "started", position: 2 },
+          { id: "state-todo", name: "Todo", type: "unstarted", position: 1 },
+        ]) }),
+      };
+    },
+    client: { async rawRequest(_query, variables) {
+      if (variables.rootIssueId) return { data: { issue: root } };
+      return { data: { issues: {
+        nodes: variables.parentIds.includes("root-1") ? [child] : [],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      } } };
+    } },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const tree = await adapter.getWorkflowIssueTree({ projectId: "project-1", rootIssueId: "root-1" });
+
+  assert.deepEqual(tree.statusCatalog, [
+    { statusId: "state-progress", name: "In Progress", category: "started", position: 2 },
+    { statusId: "state-todo", name: "Todo", category: "unstarted", position: 1 },
+  ]);
+  assert.deepEqual(tree.comments.map(({ commentId, issueId, managedMarker }) => ({ commentId, issueId, managedMarker })), [
+    { commentId: "comment-root", issueId: "root-1", managedMarker: undefined },
+    { commentId: "comment-work", issueId: "work-1", managedMarker: "write-1" },
+  ]);
+  assert.deepEqual(tree.relations, [{
+    relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
+  }]);
+});
+
 test("complete Issue Tree batches fail closed on incomplete nested connections", async () => {
   const sdk = { client: { async rawRequest(_query, variables) {
     if (variables.rootIssueId) return { data: { issue: {

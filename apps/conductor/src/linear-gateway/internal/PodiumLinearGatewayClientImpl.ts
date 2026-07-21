@@ -1,5 +1,9 @@
 import type { V3RuntimeGateway } from "../../composition/ConductorRuntime.js";
-import type { LinearGatewayInterface, LinearRootScopeSnapshot } from "../api/LinearGatewayInterface.js";
+import type {
+  LinearGatewayInterface,
+  LinearRootScopeSnapshot,
+  LinearWorkflowTreeSnapshot,
+} from "../api/LinearGatewayInterface.js";
 import type { PerformerProfileStoreInterface } from "../../performer-profiles/api/PerformerProfileStoreInterface.js";
 import type {
   DiscoveredRoot,
@@ -282,6 +286,18 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
       terminal: boolean(response.terminal, "linear_root_scope_invalid"),
       issues,
     };
+  }
+
+  async readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot> {
+    if (!this.#projectId) throw new Error("linear_project_not_resolved");
+    const response = record(await this.#request({
+      kind: "get_workflow_issue_tree",
+      conductor_short_hash: this.conductorShortHash,
+      expected_project_id: this.#projectId,
+      root_issue_id: rootIssueId,
+    }));
+    if (response.kind !== "workflow_issue_tree") throw protocolError(response);
+    return workflowTree(record(response.tree), rootIssueId, this.#projectId);
   }
 
   async read(input: {
@@ -634,6 +650,11 @@ function string(value: JsonValue | undefined, code: string): string {
   return value;
 }
 
+function number(value: JsonValue | undefined, code: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(code);
+  return value;
+}
+
 function boolean(value: JsonValue | undefined, code: string): boolean {
   if (typeof value !== "boolean") throw new Error(code);
   return value;
@@ -683,6 +704,152 @@ function linearIssueState(value: JsonValue | undefined): LinearIssueState {
     return value;
   }
   throw new Error("linear_issue_state_invalid");
+}
+
+function workflowTree(
+  value: Record<string, JsonValue>,
+  rootIssueId: string,
+  projectId: string,
+): LinearWorkflowTreeSnapshot {
+  const root = string(value.root_issue_id, "linear_workflow_root_invalid");
+  const statuses = array(value.status_catalog, "linear_workflow_status_catalog_invalid").map((item) => {
+    const status = record(item);
+    return {
+      status_id: string(status.status_id, "linear_workflow_status_invalid"),
+      name: string(status.name, "linear_workflow_status_invalid"),
+      category: workflowStatusCategory(status.category),
+      position: number(status.position, "linear_workflow_status_invalid"),
+    };
+  });
+  if (statuses.length === 0 || statuses.length > 64) {
+    throw new Error("linear_workflow_status_catalog_invalid");
+  }
+  const statusIds = new Set<string>();
+  const statusNames = new Set<string>();
+  const statusById = new Map(statuses.map((status) => [status.status_id, status]));
+  for (const status of statuses) {
+    if (statusIds.has(status.status_id) || statusNames.has(status.name)) {
+      throw new Error("linear_workflow_status_catalog_ambiguous");
+    }
+    statusIds.add(status.status_id);
+    statusNames.add(status.name);
+  }
+  const issues = array(value.issues, "linear_workflow_issues_invalid").map((item) => {
+    const issue = record(item);
+    return {
+      issue_id: string(issue.issue_id, "linear_workflow_issue_invalid"),
+      identifier: string(issue.identifier, "linear_workflow_issue_invalid"),
+      project_id: string(issue.project_id, "linear_workflow_issue_invalid"),
+      ...(issue.parent_issue_id === undefined ? {} : { parent_issue_id: string(issue.parent_issue_id, "linear_workflow_issue_invalid") }),
+      status_id: string(issue.status_id, "linear_workflow_issue_invalid"),
+      status_name: string(issue.status_name, "linear_workflow_issue_invalid"),
+      status_category: workflowStatusCategory(issue.status_category),
+      status_position: number(issue.status_position, "linear_workflow_issue_invalid"),
+      order: number(issue.order, "linear_workflow_issue_invalid"),
+      depth: number(issue.depth, "linear_workflow_issue_invalid"),
+      title: string(issue.title, "linear_workflow_issue_invalid"),
+      description: string(issue.description, "linear_workflow_issue_invalid"),
+      ...(issue.managed_marker === undefined ? {} : { managed_marker: string(issue.managed_marker, "linear_workflow_issue_invalid") }),
+      ...(issue.issue_kind === undefined ? {} : { issue_kind: workflowIssueKind(issue.issue_kind) }),
+      remote_version: string(issue.remote_version, "linear_workflow_issue_invalid"),
+      updated_at: string(issue.updated_at, "linear_workflow_issue_invalid"),
+    };
+  });
+  if (issues.length === 0 || issues.length > 512) {
+    throw new Error("linear_workflow_issues_invalid");
+  }
+  const issueIds = new Set<string>();
+  for (const issue of issues) {
+    const status = statusById.get(issue.status_id);
+    if (
+      issueIds.has(issue.issue_id) ||
+      issue.project_id !== projectId ||
+      !statusIds.has(issue.status_id) ||
+      issue.status_name !== status?.name ||
+      issue.status_category !== status?.category ||
+      issue.status_position !== status?.position ||
+      !Number.isInteger(issue.depth) ||
+      issue.depth < 0 ||
+      issue.depth > 32
+    ) {
+      throw new Error("linear_workflow_issue_invalid");
+    }
+    issueIds.add(issue.issue_id);
+  }
+  const comments = array(value.comments, "linear_workflow_comments_invalid").map((item) => {
+    const comment = record(item);
+    return {
+      comment_id: string(comment.comment_id, "linear_workflow_comment_invalid"),
+      issue_id: string(comment.issue_id, "linear_workflow_comment_invalid"),
+      body: string(comment.body, "linear_workflow_comment_invalid"),
+      ...(comment.managed_marker === undefined ? {} : { managed_marker: string(comment.managed_marker, "linear_workflow_comment_invalid") }),
+      remote_version: string(comment.remote_version, "linear_workflow_comment_invalid"),
+      updated_at: string(comment.updated_at, "linear_workflow_comment_invalid"),
+    };
+  });
+  if (comments.length > 4_096) throw new Error("linear_workflow_comments_invalid");
+  const commentIds = new Set<string>();
+  for (const comment of comments) {
+    if (commentIds.has(comment.comment_id) || !issueIds.has(comment.issue_id)) {
+      throw new Error("linear_workflow_comment_invalid");
+    }
+    commentIds.add(comment.comment_id);
+  }
+  const relations = array(value.relations, "linear_workflow_relations_invalid").map((item) => {
+    const relation = record(item);
+    return {
+      relation_id: string(relation.relation_id, "linear_workflow_relation_invalid"),
+      relation_kind: workflowRelationKind(relation.relation_kind),
+      source_issue_id: string(relation.source_issue_id, "linear_workflow_relation_invalid"),
+      target_issue_id: string(relation.target_issue_id, "linear_workflow_relation_invalid"),
+    };
+  });
+  if (relations.length > 1_024) throw new Error("linear_workflow_relations_invalid");
+  const relationIds = new Set<string>();
+  for (const relation of relations) {
+    if (
+      relationIds.has(relation.relation_id) ||
+      !issueIds.has(relation.source_issue_id) ||
+      !issueIds.has(relation.target_issue_id) ||
+      relation.source_issue_id === relation.target_issue_id
+    ) {
+      throw new Error("linear_workflow_relation_invalid");
+    }
+    relationIds.add(relation.relation_id);
+  }
+  const rootIssue = issues.find(({ issue_id }) => issue_id === rootIssueId);
+  if (
+    root !== rootIssueId ||
+    !rootIssue ||
+    rootIssue.depth !== 0 ||
+    rootIssue.parent_issue_id !== undefined ||
+    issues.some((issue) => issue.project_id !== projectId)
+  ) {
+    throw new Error("linear_workflow_tree_scope_invalid");
+  }
+  return {
+    root_issue_id: root,
+    status_catalog: statuses,
+    issues,
+    comments,
+    relations,
+    observed_at: string(value.observed_at, "linear_workflow_tree_invalid"),
+  };
+}
+
+function workflowStatusCategory(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["status_catalog"][number]["category"] {
+  if (value === "backlog" || value === "unstarted" || value === "started" || value === "completed" || value === "canceled") return value;
+  throw new Error("linear_workflow_status_category_invalid");
+}
+
+function workflowIssueKind(value: JsonValue | undefined): NonNullable<LinearWorkflowTreeSnapshot["issues"][number]["issue_kind"]> {
+  if (value === "root" || value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") return value;
+  throw new Error("linear_workflow_issue_kind_invalid");
+}
+
+function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {
+  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") return value;
+  throw new Error("linear_workflow_relation_kind_invalid");
 }
 
 function rootScopeNodeKind(value: JsonValue): "work" | "human" {

@@ -98,6 +98,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         return this.#listRoots(gateway, body);
       case "get_issue_tree":
         return this.#getTree(gateway, body);
+      case "get_workflow_issue_tree":
+        return this.#getWorkflowTree(gateway, body);
       case "get_root_scope":
         return this.#getRootScope(gateway, body);
       case "list_root_usage":
@@ -329,6 +331,69 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         observed_at: usage.observedAt,
       })),
       page_info: { has_next_page: false },
+    };
+  }
+
+  async #getWorkflowTree(
+    gateway: LinearGatewayProtocolHandlerImpl,
+    body: Body,
+  ): Promise<JsonValue> {
+    const conductorShortHash = requiredString(
+      body.conductor_short_hash,
+      "linear_conductor_short_hash_missing",
+    );
+    const binding = this.store.getConductorBinding();
+    if (!binding || binding.conductorShortHash !== conductorShortHash) {
+      throw new Error("linear_conductor_short_hash_mismatch");
+    }
+    const tree = await gateway.getWorkflowIssueTree(
+      requiredString(body.expected_project_id, "linear_project_id_missing"),
+      requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
+    );
+    return {
+      kind: "workflow_issue_tree",
+      tree: {
+        root_issue_id: tree.rootIssueId,
+        status_catalog: tree.statusCatalog.map((status) => ({
+          status_id: status.statusId,
+          name: status.name,
+          category: status.category,
+          position: status.position,
+        })),
+        issues: tree.issues.map((issue) => ({
+          issue_id: issue.issueId,
+          identifier: issue.identifier,
+          project_id: issue.projectId,
+          ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
+          status_id: issue.statusId,
+          status_name: issue.statusName,
+          status_category: issue.statusCategory,
+          status_position: issue.statusPosition,
+          order: issue.order,
+          depth: issue.depth,
+          title: issue.title,
+          description: issue.description,
+          ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
+          ...(issue.issueKind ? { issue_kind: issue.issueKind } : {}),
+          remote_version: issue.remoteVersion,
+          updated_at: issue.updatedAt,
+        })),
+        comments: tree.comments.map((comment) => ({
+          comment_id: comment.commentId,
+          issue_id: comment.issueId,
+          body: comment.body,
+          ...(comment.managedMarker ? { managed_marker: comment.managedMarker } : {}),
+          remote_version: comment.remoteVersion,
+          updated_at: comment.updatedAt,
+        })),
+        relations: tree.relations.map((relation) => ({
+          relation_id: relation.relationId,
+          relation_kind: relation.relationKind,
+          source_issue_id: relation.sourceIssueId,
+          target_issue_id: relation.targetIssueId,
+        })),
+        observed_at: tree.observedAt,
+      },
     };
   }
 

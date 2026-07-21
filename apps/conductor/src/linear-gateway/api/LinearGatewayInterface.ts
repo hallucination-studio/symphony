@@ -16,6 +16,49 @@ export interface LinearRootScopeSnapshot {
   }>;
 }
 
+export interface LinearWorkflowTreeSnapshot {
+  root_issue_id: string;
+  status_catalog: Array<{
+    status_id: string;
+    name: string;
+    category: "backlog" | "unstarted" | "started" | "completed" | "canceled";
+    position: number;
+  }>;
+  issues: Array<{
+    issue_id: string;
+    identifier: string;
+    project_id: string;
+    parent_issue_id?: string;
+    status_id: string;
+    status_name: string;
+    status_category: "backlog" | "unstarted" | "started" | "completed" | "canceled";
+    status_position: number;
+    order: number;
+    depth: number;
+    title: string;
+    description: string;
+    managed_marker?: string;
+    issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
+    remote_version: string;
+    updated_at: string;
+  }>;
+  comments: Array<{
+    comment_id: string;
+    issue_id: string;
+    body: string;
+    managed_marker?: string;
+    remote_version: string;
+    updated_at: string;
+  }>;
+  relations: Array<{
+    relation_id: string;
+    relation_kind: "blocks" | "blocked_by" | "triggered_by";
+    source_issue_id: string;
+    target_issue_id: string;
+  }>;
+  observed_at: string;
+}
+
 export type LinearAgentMutationOutcome =
   | { kind: "applied"; summary: string }
   | { kind: "already_applied"; summary: string }
@@ -29,6 +72,7 @@ export type LinearAgentMutationOutcome =
 
 export interface LinearGatewayInterface {
   readFreshRootScope(rootIssueId: string): Promise<LinearRootScopeSnapshot>;
+  readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot>;
   read(input: {
     rootIssueId: string;
     issueId: string;

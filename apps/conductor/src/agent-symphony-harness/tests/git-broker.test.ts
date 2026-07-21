@@ -97,6 +97,14 @@ test("commit and delivery each perform exactly one fresh Root scope read", async
               { issue_id: "child-1", identifier: "SYM-2", parent_issue_id: "root-1",
                 updated_at: "version-2" }] };
         },
+        async readWorkflowIssueTree() {
+          return {
+            root_issue_id: "root-1",
+            status_catalog: [{ status_id: "status-todo", name: "Todo", category: "unstarted" as const, position: 1 }],
+            issues: [{ issue_id: "root-1", identifier: "ROOT-1", project_id: "project-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted" as const, status_position: 1, order: 0, depth: 0, title: "Root", description: "", remote_version: "version-1", updated_at: "2026-07-21T00:00:00Z" }],
+            comments: [], relations: [], observed_at: "2026-07-21T00:00:00Z",
+          };
+        },
         async read() { return {}; },
         async mutate() { return { kind: "applied" as const, summary: "ok" }; },
       },
@@ -129,6 +137,14 @@ function createBroker(overrides: Record<string, unknown> = {}) {
     conductorId: "conductor-1", turnId: "turn-1", rootIssueId: "root-1", performerId: "conversation-1",
     linear: {
       async readFreshRootScope() { return { root_issue_id: "root-1", conductor_id: "conductor-1", performer_id: "conversation-1", terminal: false, issues: [{ issue_id: "root-1", updated_at: "version-1" }, { issue_id: "child-1", parent_issue_id: "root-1", updated_at: "version-2" }] }; },
+      async readWorkflowIssueTree() {
+        return {
+          root_issue_id: "root-1",
+          status_catalog: [{ status_id: "status-todo", name: "Todo", category: "unstarted" as const, position: 1 }],
+          issues: [{ issue_id: "root-1", identifier: "ROOT-1", project_id: "project-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted" as const, status_position: 1, order: 0, depth: 0, title: "Root", description: "", remote_version: "version-1", updated_at: "2026-07-21T00:00:00Z" }],
+          comments: [], relations: [], observed_at: "2026-07-21T00:00:00Z",
+        };
+      },
       async read() { return {}; }, async mutate() { return { kind: "applied" as const, summary: "ok" }; },
     },
     readGitHead: async () => "abc123",

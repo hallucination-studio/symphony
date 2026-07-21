@@ -104,9 +104,16 @@ export interface LinearClientInterface {
       answer: string;
       updatedAt: string;
     }>;
+    comments: import("../types.js").WorkflowCommentValue[];
+    relations: import("../types.js").WorkflowRelationValue[];
     observedAt: string;
     pageInfo: PageInfo;
   }>;
+
+  getWorkflowIssueTree(input: {
+    projectId: string;
+    rootIssueId: string;
+  }): Promise<import("../types.js").WorkflowRootTreeValue>;
 
   getRootScope(input: {
     projectId: string;

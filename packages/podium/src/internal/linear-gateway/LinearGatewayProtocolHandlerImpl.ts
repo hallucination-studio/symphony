@@ -314,6 +314,114 @@ export class LinearGatewayProtocolHandlerImpl {
     };
   }
 
+  async getWorkflowIssueTree(projectId: string, rootIssueId: string) {
+    const tree = await this.client.getWorkflowIssueTree({ projectId, rootIssueId });
+    if (
+      tree.rootIssueId !== rootIssueId ||
+      !timestamp(tree.observedAt) ||
+      tree.statusCatalog.length === 0 ||
+      tree.statusCatalog.length > 64 ||
+      tree.issues.length === 0 ||
+      tree.issues.length > MAX_TREE_NODES ||
+      tree.comments.length > 4_096 ||
+      tree.relations.length > 1_024
+    ) {
+      throw new Error("linear_workflow_tree_invalid");
+    }
+    const statusIds = new Set<string>();
+    const statusNames = new Set<string>();
+    const statusById = new Map<string, (typeof tree.statusCatalog)[number]>();
+    for (const status of tree.statusCatalog) {
+      if (
+        !identifier(status.statusId, 128) ||
+        !shortText(status.name) ||
+        !workflowStatusCategory(status.category) ||
+        !Number.isFinite(status.position) ||
+        statusIds.has(status.statusId) ||
+        statusNames.has(status.name)
+      ) {
+        throw new Error("linear_workflow_status_catalog_invalid");
+      }
+      statusIds.add(status.statusId);
+      statusNames.add(status.name);
+      statusById.set(status.statusId, status);
+    }
+    const issueIds = new Set<string>();
+    for (const issue of tree.issues) {
+      if (
+        !identifier(issue.issueId, 128) ||
+        !shortText(issue.identifier) ||
+        issue.projectId !== projectId ||
+        !statusIds.has(issue.statusId) ||
+        !shortText(issue.statusName) ||
+        !workflowStatusCategory(issue.statusCategory) ||
+        !Number.isFinite(issue.statusPosition) ||
+        !Number.isFinite(issue.order) ||
+        !Number.isInteger(issue.depth) ||
+        issue.depth < 0 ||
+        issue.depth > 32 ||
+        !shortText(issue.title) ||
+        !boundedText(issue.description) ||
+        !identifier(issue.remoteVersion, 512) ||
+        !timestamp(issue.updatedAt) ||
+        (issue.parentIssueId !== undefined &&
+          (!identifier(issue.parentIssueId, 128) || issue.parentIssueId === issue.issueId)) ||
+        issueIds.has(issue.issueId)
+      ) {
+        throw new Error("linear_workflow_issue_invalid");
+      }
+      const status = statusById.get(issue.statusId);
+      if (
+        !status ||
+        issue.statusName !== status.name ||
+        issue.statusCategory !== status.category ||
+        issue.statusPosition !== status.position
+      ) {
+        throw new Error("linear_workflow_issue_status_invalid");
+      }
+      issueIds.add(issue.issueId);
+    }
+    if (!issueIds.has(rootIssueId)) throw new Error("linear_workflow_root_missing");
+    const root = tree.issues.find(({ issueId }) => issueId === rootIssueId);
+    if (!root || root.depth !== 0 || root.parentIssueId !== undefined) {
+      throw new Error("linear_workflow_root_invalid");
+    }
+    for (const issue of tree.issues) {
+      if (issue.parentIssueId !== undefined && !issueIds.has(issue.parentIssueId)) {
+        throw new Error("linear_workflow_parent_invalid");
+      }
+    }
+    const commentIds = new Set<string>();
+    for (const comment of tree.comments) {
+      if (
+        !identifier(comment.commentId, 128) ||
+        !issueIds.has(comment.issueId) ||
+        !boundedText(comment.body) ||
+        !identifier(comment.remoteVersion, 512) ||
+        !timestamp(comment.updatedAt) ||
+        commentIds.has(comment.commentId)
+      ) {
+        throw new Error("linear_workflow_comment_invalid");
+      }
+      commentIds.add(comment.commentId);
+    }
+    const relationIds = new Set<string>();
+    for (const relation of tree.relations) {
+      if (
+        !identifier(relation.relationId, 128) ||
+        !workflowRelationKind(relation.relationKind) ||
+        !issueIds.has(relation.sourceIssueId) ||
+        !issueIds.has(relation.targetIssueId) ||
+        relation.sourceIssueId === relation.targetIssueId ||
+        relationIds.has(relation.relationId)
+      ) {
+        throw new Error("linear_workflow_relation_invalid");
+      }
+      relationIds.add(relation.relationId);
+    }
+    return tree;
+  }
+
   async getRootScope(projectId: string, rootIssueId: string) {
     const scope = await this.client.getRootScope({ projectId, rootIssueId });
     if (
@@ -684,6 +792,14 @@ function identifier(value: string | undefined, maximum: number): boolean {
   );
 }
 
+function shortText(value: string | undefined): boolean {
+  return typeof value === "string" && codePointLength(value) > 0 && codePointLength(value) <= 256;
+}
+
+function boundedText(value: string | undefined): boolean {
+  return typeof value === "string" && codePointLength(value) <= 16_384;
+}
+
 function timestamp(value: string | undefined): boolean {
   return (
     typeof value === "string" &&
@@ -711,6 +827,15 @@ function linearPriority(value: string | undefined): boolean {
     value === "low" ||
     value === "no_priority"
   );
+}
+
+function workflowStatusCategory(value: string | undefined): boolean {
+  return value === "backlog" || value === "unstarted" || value === "started" ||
+    value === "completed" || value === "canceled";
+}
+
+function workflowRelationKind(value: string | undefined): boolean {
+  return value === "blocks" || value === "blocked_by" || value === "triggered_by";
 }
 
 function rootPhase(value: string): boolean {

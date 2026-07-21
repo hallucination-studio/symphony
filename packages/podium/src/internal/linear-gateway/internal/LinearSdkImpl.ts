@@ -19,6 +19,8 @@ import type {
   LinearPriority,
   RootIssueValue,
   RootUsageValue,
+  WorkflowCommentValue,
+  WorkflowRelationValue,
 } from "../types.js";
 
 const PAGE_LIMIT = 250;
@@ -74,6 +76,25 @@ const ISSUE_TREE_ROOT_QUERY = `
     }
   }
 `;
+const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
+  query SymphonyIssueTreeRoot($rootIssueId: String!) {
+    issue(id: $rootIssueId) {
+      id identifier title description sortOrder updatedAt
+      project { id }
+      parent { id }
+      state { name }
+      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+      comments(first: 64) {
+        nodes { id body updatedAt issue { id } }
+        pageInfo { hasNextPage }
+      }
+      inverseRelations(first: 250) {
+        nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
 const ISSUE_TREE_CHILDREN_QUERY = `
   query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
     issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
@@ -88,6 +109,27 @@ const ISSUE_TREE_CHILDREN_QUERY = `
         }
         inverseRelations(first: 250) {
           nodes { type issue { id state { name } } relatedIssue { id } }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
+  query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
+    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
+      nodes {
+        id identifier title description sortOrder subIssueSortOrder updatedAt
+        project { id }
+        parent { id }
+        state { name }
+        comments(first: 64) {
+          nodes { id body updatedAt issue { id } }
+          pageInfo { hasNextPage }
+        }
+        inverseRelations(first: 250) {
+          nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
           pageInfo { hasNextPage }
         }
       }
@@ -186,9 +228,10 @@ interface RootHeaderFact {
   };
   inverseRelations: {
     nodes: Array<{
+      id?: string | null;
       type: string;
-      issue?: { id: string; state: { name: string } } | null;
-      relatedIssue?: { id: string } | null;
+      issue?: { id: string; state: { name: string }; project?: { id: string } | null } | null;
+      relatedIssue?: { id: string; project?: { id: string } | null } | null;
     }>;
     pageInfo: { hasNextPage: boolean };
   };
@@ -867,18 +910,21 @@ export class LinearSdkImpl implements LinearClientInterface {
       answer: string;
       updatedAt: string;
     }>;
+    comments: WorkflowCommentValue[];
+    relations: WorkflowRelationValue[];
     observedAt: string;
     pageInfo: PageInfo;
   }> {
     if (input.cursor) throw new Error("linear_tree_cursor_invalid");
-    const batched = await this.#batchedIssueTree(input.projectId, input.rootIssueId);
+    const batched = await this.#batchedIssueTree(input.projectId, input.rootIssueId, false);
     if (batched) return batched;
     const root = await this.#client.issue(input.rootIssueId);
     if (root.projectId !== input.projectId || root.parentId) {
       throw new Error("linear_tree_root_invalid");
     }
     const nodes: LinearIssueValue[] = [];
-    await collectTree(root, input.projectId, 0, nodes);
+    const workflowFacts: Issue[] = [];
+    await collectTree(root, input.projectId, 0, nodes, workflowFacts);
     const labels = await allNodes(root.labels({ first: PAGE_LIMIT }), 64);
     const rootPhaseLabels = labels
       .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
@@ -892,18 +938,27 @@ export class LinearSdkImpl implements LinearClientInterface {
       rootPhaseLabels,
       rootManagedComments,
       humanAnswers: await this.#humanAnswers(nodes),
+      comments: await workflowCommentsFromIssues(workflowFacts),
+      relations: await workflowRelationsFromIssues(workflowFacts, input.projectId),
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false },
     };
   }
 
-  async #batchedIssueTree(projectId: string, rootIssueId: string) {
+  async #batchedIssueTree(
+    projectId: string,
+    rootIssueId: string,
+    workflow = false,
+  ) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
     const rootResponse = await rawRequest<IssueTreeRootData, {
       rootIssueId: string;
-      commentMarker: string;
-    }>(ISSUE_TREE_ROOT_QUERY, { rootIssueId, commentMarker: ROOT_HEADER_MARKER });
+      commentMarker?: string;
+    }>(
+      workflow ? WORKFLOW_ISSUE_TREE_ROOT_QUERY : ISSUE_TREE_ROOT_QUERY,
+      workflow ? { rootIssueId } : { rootIssueId, commentMarker: ROOT_HEADER_MARKER },
+    );
     const root = rootResponse.data?.issue;
     if (!root || root.id !== rootIssueId || root.project?.id !== projectId || root.parent !== null) {
       throw new Error("linear_tree_root_invalid");
@@ -932,7 +987,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         const response = await rawRequest<IssueTreeChildrenData, {
           parentIds: string[];
           cursor?: string;
-        }>(ISSUE_TREE_CHILDREN_QUERY, {
+        }>(workflow ? WORKFLOW_ISSUE_TREE_CHILDREN_QUERY : ISSUE_TREE_CHILDREN_QUERY, {
           parentIds,
           ...(cursor ? { cursor } : {}),
         });
@@ -1019,13 +1074,110 @@ export class LinearSdkImpl implements LinearClientInterface {
         }] : [];
       });
     });
+    const comments = [...facts.values()].flatMap(({ fact }) =>
+      fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id)),
+    );
+    if (workflow && comments.length > MAX_ROOT_COMMENTS) {
+      throw new Error("linear_workflow_comments_too_many");
+    }
+    const relations = workflow ? workflowRelationValues(facts, projectId) : [];
+    if (relations.length > 1_024) {
+      throw new Error("linear_workflow_relations_too_many");
+    }
     return {
       nodes,
       rootPhaseLabels,
       rootManagedComments,
       humanAnswers,
+      comments,
+      relations,
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false as const },
+    };
+  }
+
+  async getWorkflowIssueTree(input: { projectId: string; rootIssueId: string }) {
+    const tree = await this.#batchedIssueTree(
+      input.projectId,
+      input.rootIssueId,
+      true,
+    ) ?? await this.getIssueTree({ ...input, limit: PAGE_LIMIT });
+    const root = await this.#client.issue(input.rootIssueId);
+    if (root.projectId !== input.projectId) {
+      throw new Error("linear_workflow_tree_project_mismatch");
+    }
+    const team = await root.team;
+    if (!team) throw new Error("linear_workflow_status_catalog_missing");
+    const states = await allNodes(team.states({ first: 64 }), 64);
+    const statusCatalog = states.map((state) => {
+      const value = state as unknown as {
+        id?: unknown;
+        name?: unknown;
+        type?: unknown;
+        position?: unknown;
+      };
+      if (
+        typeof value.id !== "string" ||
+        typeof value.name !== "string" ||
+        typeof value.type !== "string" ||
+        typeof value.position !== "number"
+      ) {
+        throw new Error("linear_workflow_status_catalog_invalid");
+      }
+      return {
+        statusId: value.id,
+        name: value.name,
+        category: workflowStatusCategory(value.type),
+        position: value.position,
+      };
+    });
+    const statusByName = new Map(statusCatalog.map((status) => [status.name, status]));
+    const issues = tree.nodes.map((issue) => {
+      const status = issue.state ? statusByName.get(issue.state) : undefined;
+      if (!status || !issue.projectId || issue.order === undefined || issue.depth === undefined
+        || !issue.title || issue.description === undefined) {
+        throw new Error("linear_workflow_issue_invalid");
+      }
+      return {
+        issueId: issue.issueId,
+        identifier: issue.identifier ?? issue.issueId,
+        projectId: issue.projectId,
+        ...(issue.parentIssueId ? { parentIssueId: issue.parentIssueId } : {}),
+        statusId: status.statusId,
+        statusName: status.name,
+        statusCategory: status.category,
+        statusPosition: status.position,
+        order: issue.order,
+        depth: issue.depth,
+        title: issue.title,
+        description: issue.description,
+        ...(issue.managedMarker ? { managedMarker: issue.managedMarker } : {}),
+        ...(issue.issueId === input.rootIssueId
+          ? { issueKind: "root" as const }
+          : issue.nodeKind === "work"
+            ? { issueKind: "work" as const }
+            : issue.nodeKind === "human"
+              ? { issueKind: "human" as const }
+              : {}),
+        remoteVersion: issue.updatedAt,
+        updatedAt: issue.updatedAt,
+      };
+    });
+    const comments = tree.comments.map((comment) => ({
+      commentId: comment.commentId,
+      issueId: comment.issueId,
+      body: comment.body,
+      ...(comment.managedMarker ? { managedMarker: comment.managedMarker } : {}),
+      remoteVersion: comment.updatedAt,
+      updatedAt: comment.updatedAt,
+    }));
+    return {
+      rootIssueId: input.rootIssueId,
+      statusCatalog,
+      issues,
+      comments,
+      relations: tree.relations,
+      observedAt: tree.observedAt,
     };
   }
 
@@ -1545,12 +1697,14 @@ async function collectTree(
   projectId: string,
   depth: number,
   output: LinearIssueValue[],
+  workflowFacts?: Issue[],
 ): Promise<void> {
   if (depth > 32 || output.length >= MAX_TREE_NODES) {
     throw new Error("linear_tree_bounds_exceeded");
   }
   if (issue.projectId !== projectId) throw new Error("linear_project_mismatch");
   output.push(await issueValue(issue, depth));
+  workflowFacts?.push(issue);
   const children = await allNodes(issue.children({ first: PAGE_LIMIT }), MAX_TREE_NODES);
   children.sort(
     (left, right) =>
@@ -1560,8 +1714,133 @@ async function collectTree(
   );
   for (const child of children) {
     if (child.parentId !== issue.id) throw new Error("linear_parent_mismatch");
-    await collectTree(child, projectId, depth + 1, output);
+    await collectTree(child, projectId, depth + 1, output, workflowFacts);
   }
+}
+
+async function workflowCommentsFromIssues(
+  issues: Issue[],
+): Promise<WorkflowCommentValue[]> {
+  const comments: WorkflowCommentValue[] = [];
+  for (const issue of issues) {
+    const values = await allNodes(issue.comments({ first: PAGE_LIMIT }), MAX_ROOT_COMMENTS);
+    for (const comment of values) {
+      if (comment.issueId !== issue.id) throw new Error("linear_workflow_comment_identity_mismatch");
+      comments.push(workflowCommentValue(comment, issue.id));
+    }
+  }
+  return comments;
+}
+
+async function workflowRelationsFromIssues(
+  issues: Issue[],
+  projectId: string,
+): Promise<WorkflowRelationValue[]> {
+  const issueIds = new Set(issues.map(({ id }) => id));
+  const relations: WorkflowRelationValue[] = [];
+  const relationIds = new Set<string>();
+  for (const issue of issues) {
+    const values = await allNodes(issue.inverseRelations({ first: PAGE_LIMIT }), MAX_TREE_NODES);
+    for (const relation of values) {
+      const relationKind = workflowRelationKindValue(relation.type);
+      if (!relationKind) continue;
+      if (
+        !relation.id ||
+        !relation.issueId ||
+        relation.relatedIssueId !== issue.id ||
+        relation.issueId === issue.id ||
+        relationIds.has(relation.id)
+      ) {
+        throw new Error("linear_workflow_relation_invalid");
+      }
+      const source = await relation.issue;
+      if (!source || source.id !== relation.issueId || source.projectId !== projectId) {
+        throw new Error("linear_workflow_relation_project_invalid");
+      }
+      if (!issueIds.has(source.id)) continue;
+      relationIds.add(relation.id);
+      relations.push({
+        relationId: relation.id,
+        relationKind,
+        sourceIssueId: source.id,
+        targetIssueId: issue.id,
+      });
+    }
+  }
+  return relations;
+}
+
+function workflowCommentValue(
+  comment: { id: string; issue?: unknown; issueId?: string | null; body: string; updatedAt: string | Date },
+  issueId: string,
+): WorkflowCommentValue {
+  const commentIssue = comment.issue as { id?: unknown } | undefined;
+  if (
+    (comment.issueId !== undefined && comment.issueId !== issueId) ||
+    (commentIssue !== undefined && commentIssue.id !== issueId)
+  ) {
+    throw new Error("linear_workflow_comment_identity_mismatch");
+  }
+  const managedMarker = commentManagedMarker(comment.body, issueId);
+  return {
+    commentId: comment.id,
+    issueId,
+    body: comment.body,
+    ...(managedMarker ? { managedMarker } : {}),
+    remoteVersion: timestampValue(comment.updatedAt),
+    updatedAt: timestampValue(comment.updatedAt),
+  };
+}
+
+function workflowRelationValues(
+  facts: Map<string, { fact: IssueTreeFact; depth: number }>,
+  projectId: string,
+): WorkflowRelationValue[] {
+  const issueIds = new Set(facts.keys());
+  const relations: WorkflowRelationValue[] = [];
+  const relationIds = new Set<string>();
+  for (const { fact } of facts.values()) {
+    for (const relation of fact.inverseRelations.nodes) {
+      const relationKind = workflowRelationKindValue(relation.type);
+      if (!relationKind) continue;
+      if (
+        !relation.id ||
+        !relation.issue ||
+        !relation.relatedIssue ||
+        relation.relatedIssue.id !== fact.id ||
+        relation.issue.id === fact.id ||
+        relation.issue.project?.id !== projectId ||
+        relation.relatedIssue.project?.id !== projectId ||
+        relationIds.has(relation.id)
+      ) {
+        throw new Error("linear_workflow_relation_invalid");
+      }
+      if (!issueIds.has(relation.issue.id)) continue;
+      relationIds.add(relation.id);
+      relations.push({
+        relationId: relation.id,
+        relationKind,
+        sourceIssueId: relation.issue.id,
+        targetIssueId: relation.relatedIssue.id,
+      });
+    }
+  }
+  return relations;
+}
+
+function workflowRelationKindValue(
+  value: string,
+): WorkflowRelationValue["relationKind"] | undefined {
+  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") {
+    return value;
+  }
+  return undefined;
+}
+
+function commentManagedMarker(body: string, issueId: string): string | undefined {
+  if (isRootManagedComment(body)) return rootCommentMarker(issueId);
+  return body.match(AGENT_WRITE_MARKER)?.[1]
+    ?? body.match(TURN_EVENT_MARKER)?.[1];
 }
 
 function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
@@ -1810,6 +2089,22 @@ function linearPriority(value: number): LinearPriority {
   }
 }
 
+function workflowStatusCategory(value: string):
+  | "backlog"
+  | "unstarted"
+  | "started"
+  | "completed"
+  | "canceled" {
+  if (
+    value === "backlog" ||
+    value === "unstarted" ||
+    value === "started" ||
+    value === "completed" ||
+    value === "canceled"
+  ) return value;
+  throw new Error("linear_workflow_status_category_invalid");
+}
+
 async function blockerValues(issue: Issue): Promise<LinearBlockerValue[]> {
   const relations = await allNodes(
     issue.inverseRelations({ first: PAGE_LIMIT }),
@@ -1885,7 +2180,7 @@ function pageInfo(value: {
   };
 }
 
-function timestampValue(value: string): string {
+function timestampValue(value: string | Date): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) throw new Error("linear_timestamp_invalid");
   return parsed.toISOString();

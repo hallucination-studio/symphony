@@ -30,6 +30,23 @@ function gateway(overrides: Partial<LinearGatewayInterface> = {}) {
         ],
       };
     },
+    async readWorkflowIssueTree() {
+      return {
+        root_issue_id: "root-1",
+        status_catalog: [{
+          status_id: "status-todo", name: "Todo", category: "unstarted" as const, position: 1,
+        }],
+        issues: [{
+          issue_id: "root-1", identifier: "ROOT-1", project_id: "project-1",
+          status_id: "status-todo", status_name: "Todo", status_category: "unstarted" as const,
+          status_position: 1, order: 0, depth: 0, title: "Root", description: "",
+          remote_version: "version-1", updated_at: "2026-07-21T00:00:00Z",
+        }],
+        comments: [],
+        relations: [],
+        observed_at: "2026-07-21T00:00:00Z",
+      };
+    },
     async read() { return { summary: "bounded read" }; },
     async mutate() { mutations += 1; return { kind: "applied", summary: "applied" }; },
     ...overrides,
