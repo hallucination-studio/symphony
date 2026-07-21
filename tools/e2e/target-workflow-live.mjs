@@ -113,8 +113,7 @@ export async function readTargetProjectConfiguration({
         teamId: team.id,
         todo: states.find(({ name }) => name === "Todo")?.id,
         done: states.find(({ name }) => name === "Done")?.id,
-        workflowCatalogComplete: Object.entries(TARGET_WORKFLOW_STATUS_CATEGORIES).every(([name, category]) =>
-          states.some((state) => state.name === name && state.type === category)),
+        workflowCatalogComplete: isCompleteTargetWorkflowCatalog(states),
       };
     })
     .filter(({ teamId, todo, done }) => SAFE_ID.test(teamId ?? "") && SAFE_ID.test(todo ?? "") && SAFE_ID.test(done ?? ""));
@@ -141,6 +140,22 @@ export async function readTargetProjectConfiguration({
       description: "Target live success Root.",
     }),
   });
+}
+
+function isCompleteTargetWorkflowCatalog(states) {
+  if (!Array.isArray(states) || states.length !== Object.keys(TARGET_WORKFLOW_STATUS_CATEGORIES).length) return false;
+  const ids = new Set();
+  const names = new Set();
+  for (const state of states) {
+    if (!SAFE_ID.test(state?.id ?? "") || typeof state.name !== "string" || typeof state.type !== "string" ||
+        ids.has(state.id) || names.has(state.name)) {
+      return false;
+    }
+    ids.add(state.id);
+    names.add(state.name);
+  }
+  return Object.entries(TARGET_WORKFLOW_STATUS_CATEGORIES).every(([name, category]) =>
+    states.some((state) => state.name === name && state.type === category));
 }
 
 export async function ensureTargetConductorProjectLabel({

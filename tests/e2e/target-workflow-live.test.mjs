@@ -98,6 +98,33 @@ test("target project configuration rejects an incomplete retained workflow catal
   );
 });
 
+test("target project configuration rejects a duplicate retained workflow status", async () => {
+  const states = targetWorkflowStates();
+  states.push({ id: "duplicate-todo", name: "Todo", type: "unstarted" });
+  await assert.rejects(
+    readTargetProjectConfiguration({
+      developmentToken: "development-input",
+      clientId: "client-1",
+      projectSlugId: "project-1",
+      fetch: async () => response({ data: {
+        organization: { id: "organization-1" },
+        applicationInfo: { name: "Symphony" },
+        users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
+        project: {
+          id: "project-1", name: "Retained Target", slugId: "project-1", updatedAt: "2026-07-22T00:00:00Z",
+          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
+        },
+        teams: { nodes: [{
+          id: "team-1",
+          states: { nodes: states, pageInfo: { hasNextPage: false } },
+        }], pageInfo: { hasNextPage: false } },
+      } }),
+      log: () => {},
+    }),
+    /target_live_workflow_catalog_incomplete/u,
+  );
+});
+
 test("target live success composes setup, production boundary, Git observation, and scope cleanup", async () => {
   const events = [];
   const facts = { root: { rootIssueId: "root-1", projectId: "project-1" } };
