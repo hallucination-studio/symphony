@@ -10,7 +10,8 @@ credentialed all-run 顺序执行五个相互独立的场景：
 
 1. `success`：外部 Root、Bootstrap Plan、审批、sealed Work/Verify DAG、Work 和 Verify。
 2. `repair_escalation`：真实 Finding disposition 和 Root convergence breaker。
-3. `restart_recovery`：Conductor 重启后从 Linear/Git 重建同一 Human action，并拒绝 stale result。
+3. `restart_recovery`：Conductor 重启后从 Linear/Git 重建同一 Human action；stale-result
+   rejection 必须由真实 Performer late-result probe 提供。
 4. `delivery`：Verify immutable revision 与 Linear delivery read-back 一致。
 5. `scheduling`：从 Linear Root priority、state 和 blocker relation 读取单 writer 选择。
 
@@ -66,6 +67,11 @@ read-only adapters 投影为闭合 facts DTO。
 拒绝缺失 correlation、stale result、错误 revision、未检查 convergence breaker、错误
 blocker 选择、cleanup 未完成和 secret leak。单场景失败不会跳过其余场景，最终状态仍为
 `failed`。
+
+当前仓库没有 credentialed retained run。Restart boundary 已覆盖真实 Conductor 的重启、
+Linear/Git 重建和 Human correlation，但不会把 provider simulation 冒充 stale-result
+evidence；因此在 T12 late-result probe 尚未接入 target all-run 前，`restart_recovery`
+和整体 verdict 必须保持未接受/失败。
 
 ## Cleanup
 
