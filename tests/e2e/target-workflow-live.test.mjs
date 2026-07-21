@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ensureTargetConductorProjectLabel,
   readTargetProjectConfiguration,
+  runTargetDeliveryLive,
   runTargetRepairLive,
   runTargetSuccessLive,
 } from "../../tools/e2e/target-workflow-live.mjs";
@@ -133,6 +134,54 @@ test("target live repair composes setup, repair boundary, Git observation, and s
     status: "passed", scenario: "repair_escalation", runId: "target-repair-live",
     rootIssueId: "root-1", projectId: "project-1", facts,
   });
+  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.equal(JSON.stringify(result).includes("linear-secret"), false);
+  assert.equal(JSON.stringify(result).includes("codex-secret"), false);
+});
+
+test("target live delivery keeps the boundary through durable delivery read-back", async () => {
+  const events = [];
+  const config = {
+    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+    codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+  };
+  const facts = {
+    root: { rootIssueId: "root-1", projectId: "project-1" },
+    stageExecutions: [{ stage: "verify", nodeIssueId: "verify-1", gitHead: "a".repeat(40) }],
+  };
+  const result = await runTargetDeliveryLive({
+    config,
+    environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-delivery-live" },
+    dependencies: {
+      createScope: async (input) => { events.push(["scope", input]); return {
+        runId: input.runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
+        codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
+      }; },
+      createGitFixture: async () => { events.push(["git"]); return {
+        repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "b".repeat(40),
+      }; },
+      readProjectConfiguration: async () => { events.push(["project"]); return {
+        organizationId: "organization-1", delegateActorId: "actor-1",
+        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
+      }; },
+      ensureConductorLabel: async () => { events.push(["label"]); },
+      runDeliveryBoundary: async (input) => {
+        events.push(["boundary", input]);
+        const deliveryInput = input.deliveryInput({ success: { facts }, runner: {} });
+        assert.equal(deliveryInput.verifyIssueId, "verify-1");
+        assert.equal(input.boundaryInput.environment.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
+        return { success: { facts }, delivery: { delivery: {
+          kind: "local_branch", branch: "symphony/runs/root-1", head: "a".repeat(40), verifiedAgainst: "verify-1", readBack: true,
+        } } };
+      },
+      cleanupScope: async () => { events.push(["cleanup"]); },
+    },
+  });
+  assert.equal(result.status, "passed");
+  assert.equal(result.scenario, "delivery");
+  assert.equal(result.delivery.readBack, true);
   assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
