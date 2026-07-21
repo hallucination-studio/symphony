@@ -31,6 +31,23 @@ test("returns waiting_human and terminal assessments from Root facts", () => {
   assert.deepEqual(policy.assess(terminal), { rootIssueId: "root-1", readiness: "terminal" });
 });
 
+test("stops dispatch when the Root cycle convergence limit is reached", () => {
+  const view = buildRootDagView(input("Succeeded", "Done", undefined, "Done", false, "In Progress"));
+  const historicalCycle = (cycleId: string, order: number) => ({
+    ...view.cycles[0]!,
+    issue: { ...view.cycles[0]!.issue, issue_id: cycleId, order },
+    records: [],
+    nodes: view.cycles[0]!.nodes.map((node) => ({ ...node, records: [] })),
+  });
+  view.cycles = [
+    historicalCycle("cycle-1", 1),
+    historicalCycle("cycle-2", 2),
+    historicalCycle("cycle-3", 3),
+  ];
+
+  assert.deepEqual(policy.assess(view), { rootIssueId: "root-1", readiness: "needs_attention", sanitizedReason: "convergence_max_cycles_per_root" });
+});
+
 function input(cycleStatus: string, planStatus: string, workStatus?: string, verifyStatus?: string, dependencies = false, rootStatus = "In Progress") {
   const statuses = catalog();
   const status = (name: string) => statuses.find((candidate) => candidate.name === name)!;

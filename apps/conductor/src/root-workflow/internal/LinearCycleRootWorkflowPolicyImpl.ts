@@ -4,16 +4,25 @@ import type {
   RootDispatchAssessment,
   RootWorkflowPolicyInterface,
 } from "../api/RootWorkflowPolicyInterface.js";
+import {
+  assessRootConvergence,
+  DEFAULT_ROOT_CONVERGENCE_POLICY,
+  type RootConvergencePolicy,
+} from "./RootConvergencePolicy.js";
 
 const terminalRootStates = new Set(["Done", "Canceled"]);
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
 
 export class LinearCycleRootWorkflowPolicyImpl implements RootWorkflowPolicyInterface {
+  constructor(private readonly convergencePolicy: RootConvergencePolicy = DEFAULT_ROOT_CONVERGENCE_POLICY) {}
+
   assess(view: RootDagView): RootDispatchAssessment {
     const base = { rootIssueId: view.root.issue.issue_id };
     const rootState = view.root.issue.status_name;
     if (terminalRootStates.has(rootState)) return { ...base, readiness: "terminal" };
     if (rootState === "Needs Approval" || rootState === "Needs Info") return { ...base, readiness: "waiting_human" };
+    const convergence = assessRootConvergence({ view, now: view.observedAt, policy: this.convergencePolicy });
+    if (convergence.decision !== "allow") return attention(base, `convergence_${convergence.trigger}`);
     const activeCycles = view.cycles.filter(({ issue }) => !terminalCycleStates.has(issue.status_name));
     if (activeCycles.length === 0) return rootState === "In Review" ? { ...base, readiness: "terminal" } : { ...base, readiness: "runnable" };
     const cycle = activeCycles[0]!;
