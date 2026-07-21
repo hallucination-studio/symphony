@@ -163,6 +163,23 @@ test("creates one deterministic successor Cycle with repair provenance", async (
   assert.equal(gateway.tree.issues.filter((issue) => issue.issue_kind === "cycle").length, 2);
 });
 
+test("creates a Root approval when a breaker reaches a terminal repair Cycle", async () => {
+  const gateway = new VerifyGateway();
+  prepareRepairTree(gateway.tree);
+  const execution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer: {
+    async runStage() { throw new Error("must_not_run"); },
+    async cancelAndReap() {},
+  } }, undefined, undefined, { ...DEFAULT_ROOT_CONVERGENCE_POLICY, maxCyclesPerRoot: 1 });
+  const input = verifyInput();
+
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "convergence_decision_persisted" });
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "convergence_human_action_created" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "cycle-1")?.status_name, "Changes Required");
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "mutation_applied", step: "convergence_root_needs_approval" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "root-1")?.status_name, "Needs Approval");
+  assert.deepEqual(await execution.reconcileRoot(input), { kind: "blocked", reason: "convergence_max_cycles_per_root" });
+});
+
 function verifyInput(): VerifyStageInput {
   return {
     rootIssueId: "root-1", projectId: "project-1",

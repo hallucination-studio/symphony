@@ -406,8 +406,10 @@ function validateRootHumanState(root: Issue, rootRecords: ManagedRecord[], cycle
   const planInReview = activeCycle?.nodes.find((node) => node.issue.issue_kind === "plan" && node.issue.status_name === "In Review");
   if (planInReview && (!["Needs Approval", "In Progress"].includes(root.status_name)
     || !actions.some((action) => action.requestKind === "needs_approval" && action.nodeIssueId === planInReview.issue.issue_id))) fail("pending_human_action_mismatch");
-  if (["Needs Approval", "Needs Info"].includes(root.status_name)
-    && (!activeCycle || !actions.some((action) => action.cycleIssueId === activeCycle.issue.issue_id))) fail("pending_human_action_mismatch");
+  if (["Needs Approval", "Needs Info"].includes(root.status_name)) {
+    const actionCycle = activeCycle ?? cycles.find((cycle) => actions.some((action) => action.cycleIssueId === cycle.issue.issue_id));
+    if (!actionCycle) fail("pending_human_action_mismatch");
+  }
 }
 
 function validateGit(git: GitWorkspaceSnapshot, workspace: GitWorkspace, root: Issue, rootRecords: ManagedRecord[]): void {

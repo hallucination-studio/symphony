@@ -379,13 +379,13 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
     const cycle = activeCycle(tree, input.rootIssueId);
     if (!cycle) {
-      if (root.status_name !== "In Progress") return blocked("root_not_runnable");
       const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
       let view;
       try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
       catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
       const convergence = await this.enforceConvergence(input, tree, view);
       if (convergence.kind !== "allow") return convergence;
+      if (root.status_name !== "In Progress") return blocked("root_not_runnable");
       const predecessor = [...view.cycles]
         .filter(({ issue }) => issue.status_name === "Changes Required")
         .sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id))
@@ -562,10 +562,14 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     if (assessment.decision !== "escalate") return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
 
-    const cycle = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
+    const active = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
+    const cycle = active ?? [...view.cycles]
+      .filter(({ issue }) => issue.status_name === "Changes Required")
+      .sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id))
+      .at(-1);
     if (!cycle) return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
     const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
-    if (cycle.issue.status_name !== "Escalated") {
+    if (active && cycle.issue.status_name !== "Escalated") {
       await this.updateStatus(input, tree, cycle.issue, statuses.get("Escalated"), "convergence_cycle_escalated");
       return { kind: "mutation_applied", step: "convergence_cycle_escalated" };
     }
