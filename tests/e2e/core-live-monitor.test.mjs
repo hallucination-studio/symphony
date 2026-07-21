@@ -121,6 +121,38 @@ test("monitor correlates workspace and delivery events without accepting another
   assert.equal("worktreePath" in monitor.evidence().roots[0], false);
 });
 
+test("monitor starts workspace deadline only after a Root is selected", () => {
+  let now = 0;
+  const monitor = createCoreLiveMonitor({
+    roots: [
+      { rootIssueId: "root-high", priority: 1 },
+      { rootIssueId: "root-medium", priority: 2 },
+    ],
+    now: () => now,
+    deadlines: { run: 1_000, workspaceReady: 10 },
+  });
+
+  now = 100;
+  assert.doesNotThrow(() => monitor.checkDeadlines());
+  monitor.observeEvent({ event: "root_selected", root_issue_id: "root-high" });
+  now = 109;
+  assert.doesNotThrow(() => monitor.checkDeadlines());
+  monitor.observeEvent({
+    event: "workspace_ready",
+    root_issue_id: "root-high",
+    root_identifier: "SYM-1",
+    branch: "symphony/runs/sym-1",
+    workspace_id: "root-high",
+    baseline_head: "abc123",
+  });
+
+  now = 200;
+  assert.doesNotThrow(() => monitor.checkDeadlines());
+  monitor.observeEvent({ event: "root_selected", root_issue_id: "root-medium" });
+  now = 210;
+  assert.throws(() => monitor.checkDeadlines(), /e2e_workspace_ready_timeout/u);
+});
+
 test("monitor watchdog fails after two no-effect Turns and recovers on progress", () => {
   let now = 100;
   const monitor = createCoreLiveMonitor({

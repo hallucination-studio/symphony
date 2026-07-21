@@ -153,6 +153,12 @@ export async function runConductor(environment = process.env): Promise<void> {
     bootstrapDeadlineMs: 120_000,
     profiles: { activeReadyProfile: () => readyProfile(), fixedReadyProfile: readyProfile },
     workspaces: git, performer,
+    onRootSelected(evidence) {
+      logEvent("info", "root_selected", {
+        root_issue_id: evidence.rootIssueId,
+        root_identifier: evidence.rootIdentifier,
+      });
+    },
     onWorkspaceReady(evidence) {
       logEvent("info", "workspace_ready", {
         root_issue_id: evidence.rootIssueId,

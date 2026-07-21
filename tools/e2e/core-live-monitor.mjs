@@ -94,6 +94,7 @@ export function createCoreLiveMonitor({
       planningTurns: [],
       executionTurns: [],
       noEffectTurns: 0,
+      workspaceSelected: false,
       pendingTurn: undefined,
       lastCompletedTurn: undefined,
       lastCompletedFingerprint: undefined,
@@ -150,11 +151,19 @@ export function createCoreLiveMonitor({
       progress(record);
       return;
     }
+    if (event.event === "root_selected") {
+      const record = recordFor(event.root_issue_id);
+      if (record.workspaceSelected) throw monitorError("e2e_root_selection_invalid");
+      record.workspaceSelected = true;
+      startBoundary("workspaceReady", record.rootIssueId);
+      return;
+    }
     if (event.event !== "e2e_child_log" || event.component !== "conductor"
       || typeof event.message !== "string") return;
     let value;
     try { value = JSON.parse(event.message); } catch { return; }
-    if (value?.event === "workspace_ready" || value?.event === "delivery_completed") {
+    if (value?.event === "root_selected" || value?.event === "workspace_ready"
+      || value?.event === "delivery_completed") {
       observeEvent(value);
       return;
     }

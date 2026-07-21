@@ -424,7 +424,6 @@ export async function runCoreLiveE2E({
       assertRunActive(deadline);
     }
     monitor.startBoundary("rootDiscovery");
-    fixtures.forEach(({ rootId }) => monitor.startBoundary("workspaceReady", rootId));
     monitor.registerRoots(fixtures.map(({ rootId }, index) => ({
       rootIssueId: rootId,
       priority: rootInputs[index][3],

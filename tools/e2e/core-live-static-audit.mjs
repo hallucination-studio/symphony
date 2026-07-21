@@ -23,6 +23,7 @@ const REQUIRED = Object.freeze([
   ["git_commit_readback", "gitEvidence", /rev-list.*--count/su],
   ["git_common_dir_readback", "gitEvidence", /commonGitDirValid/u],
   ["conductor_workspace_event", "conductor", /workspace_ready/u],
+  ["conductor_root_selected_event", "conductor", /root_selected/u],
   ["conductor_turn_event", "conductor", /performer_turn_event/u],
   ["conductor_broker_event", "conductor", /agent_broker_result/u],
   ["conductor_bounded_shutdown", "conductor", /cancelAndReap/u],

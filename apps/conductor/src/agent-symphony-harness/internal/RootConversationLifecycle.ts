@@ -37,6 +37,7 @@ interface ClaimDependencies {
     }): Promise<GitWorkspace>;
     inspect(workspace: GitWorkspace): Promise<{ head: string; branch: string }>;
   };
+  onRootSelected?(evidence: RootSelectionEvidence): void;
   onWorkspaceReady?(evidence: RootWorkspaceEvidence): void;
   performer: Pick<PerformerProcessInterface, "openRootConversation">
     & Partial<Pick<PerformerProcessInterface, "abandonRootConversation">>;
@@ -92,6 +93,11 @@ export interface RootWorkspaceEvidence {
   baselineHead: string;
 }
 
+export interface RootSelectionEvidence {
+  rootIssueId: string;
+  rootIdentifier: string;
+}
+
 export interface RootTurnPermit {
   rootIssueId: string;
   performerProfileId: string;
@@ -114,6 +120,10 @@ export class RootConversationLifecycle {
     if (!profile || profile.readiness !== "ready") {
       return { kind: "rejected", reason: "performer_profile_not_ready" };
     }
+    this.dependencies.onRootSelected?.({
+      rootIssueId: view.root.issueId,
+      rootIdentifier: view.root.identifier,
+    });
     const workspace = validatedWorkspace(
       await this.dependencies.workspaces.ensureWorkspace({
         rootIssueId: view.root.issueId,

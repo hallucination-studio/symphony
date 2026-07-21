@@ -78,6 +78,17 @@ test("claim persists and reads back the exact Conversation pointer before a Turn
   });
 });
 
+test("claim reports Root selection before workspace creation", async () => {
+  const events: string[] = [];
+  const lifecycle = createLifecycle({
+    onRootSelected: () => { events.push("root-selected"); },
+    onWorkspace: () => { events.push("workspace"); },
+  });
+
+  assert.equal((await lifecycle.claim(unclaimedView())).kind, "ready");
+  assert.deepEqual(events, ["root-selected", "workspace"]);
+});
+
 test("claim abandons a permit when fresh ownership or pointer facts changed", async () => {
   const lifecycle = createLifecycle({
     freshView: {
@@ -109,6 +120,7 @@ function createLifecycle(options: {
     workspaceId: string;
     baselineHead: string;
   }): void;
+  onRootSelected?(value: { rootIssueId: string; rootIdentifier: string }): void;
   onClaim?(performerId: string): void;
   onReconstruct?(): void;
   onAbandon?(performerId: string): void;
@@ -120,6 +132,7 @@ function createLifecycle(options: {
     requestId: () => "bootstrap-1",
     bootstrapDeadlineMs: 60_000,
     ...(options.onWorkspaceReady ? { onWorkspaceReady: options.onWorkspaceReady } : {}),
+    ...(options.onRootSelected ? { onRootSelected: options.onRootSelected } : {}),
     profiles: {
       async activeReadyProfile() {
         return options.profileReadiness === "login-required"
