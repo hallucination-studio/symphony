@@ -32,3 +32,19 @@ test("core live source audit rejects runner workflow helpers and missing per-Roo
   assert.ok(failures.includes("runner_git_evidence"));
   assert.ok(failures.includes("runner_forbidden_workflow_helper"));
 });
+
+test("core live source audit requires Root inputs before Conductor startup", async () => {
+  const current = await sources();
+  assert.equal(
+    auditCoreLiveSources(current).failures.includes("runner_root_inputs_before_conductor"),
+    false,
+  );
+  const reordered = auditCoreLiveSources({
+    ...current,
+    runner: current.runner.replace(
+      "fixtures.push(await linear.createRoot",
+      "harness = await startConductorHarness({ fixtures.push(await linear.createRoot",
+    ),
+  });
+  assert.equal(reordered.failures.includes("runner_root_inputs_before_conductor"), true);
+});

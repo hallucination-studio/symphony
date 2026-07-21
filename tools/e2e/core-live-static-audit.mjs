@@ -26,6 +26,7 @@ const REQUIRED = Object.freeze([
   ["conductor_turn_event", "conductor", /performer_turn_event/u],
   ["conductor_broker_event", "conductor", /agent_broker_result/u],
   ["conductor_bounded_shutdown", "conductor", /cancelAndReap/u],
+  ["conductor_initial_poll", "conductor", /while \(!stopping\) \{\s+const disposition = await runtime\.cycle\(\);/su],
 ]);
 
 export function auditCoreLiveSources(sources = {}) {
@@ -46,6 +47,12 @@ export function auditCoreLiveSources(sources = {}) {
   if (/SYMPHONY_E2E_LINEAR_DEV_TOKEN|SYMPHONY_CODEX_API_KEY/u.test(runner) ||
       /worktreePath/u.test(monitor) || /worktreePath/u.test(gitEvidence)) {
     failures.push("secret_or_path_leak_boundary");
+  }
+  const rootInputOffset = runner.indexOf("fixtures.push(await linear.createRoot");
+  const conductorStartupOffset = runner.indexOf("harness = await startConductorHarness");
+  if (rootInputOffset < 0 || conductorStartupOffset < 0 ||
+      rootInputOffset > conductorStartupOffset) {
+    failures.push("runner_root_inputs_before_conductor");
   }
   return Object.freeze({ passed: failures.length === 0, failures: Object.freeze([...failures]) });
 }

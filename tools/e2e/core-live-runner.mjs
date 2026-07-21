@@ -405,6 +405,39 @@ export async function runCoreLiveE2E({
       project_mode: project.retainProject ? "retained" : "temporary",
     });
 
+    log({ event: "e2e_step_started", step: "root_created" });
+    const rootInputs = [
+      ["Create high-priority marker", "e2e-high.txt", "high-priority root\n", 1],
+      ["Create medium-priority marker", "e2e-medium.txt", "medium-priority root\n", 2],
+      ["Create low-priority marker", "e2e-low.txt", "low-priority root\n", 3],
+    ];
+    for (const [title, filename, content, priority] of rootInputs) {
+      fixtures.push(await linear.createRoot({
+        lock,
+        runId,
+        rootName: title,
+        preflight,
+        project,
+        priority,
+        rootInstruction: rootInstruction(filename, content),
+      }));
+      assertRunActive(deadline);
+    }
+    monitor.startBoundary("rootDiscovery");
+    fixtures.forEach(({ rootId }) => monitor.startBoundary("workspaceReady", rootId));
+    monitor.registerRoots(fixtures.map(({ rootId }, index) => ({
+      rootIssueId: rootId,
+      priority: rootInputs[index][3],
+    })));
+    evidence.push({
+      step: "root_created",
+      status: "passed",
+      rootCount: fixtures.length,
+      rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
+      priorities: rootInputs.map(([, , , priority]) => priority),
+    });
+    log({ event: "e2e_step_completed", step: "root_created", root_count: fixtures.length });
+
     log({ event: "e2e_step_started", step: "podium_bootstrap" });
     const databasePath = path.join(scope.appDataRoot, "podium.db");
     const installation = await bootstrapPodiumState({
@@ -447,39 +480,6 @@ export async function runCoreLiveE2E({
     assertRunActive(deadline);
     evidence.push({ step: "profile_active", status: "passed" });
     log({ event: "e2e_step_completed", step: "profile_active" });
-
-    log({ event: "e2e_step_started", step: "root_created" });
-    const rootInputs = [
-      ["Create high-priority marker", "e2e-high.txt", "high-priority root\n", 1],
-      ["Create medium-priority marker", "e2e-medium.txt", "medium-priority root\n", 2],
-      ["Create low-priority marker", "e2e-low.txt", "low-priority root\n", 3],
-    ];
-    for (const [title, filename, content, priority] of rootInputs) {
-      fixtures.push(await linear.createRoot({
-        lock,
-        runId,
-        rootName: title,
-        preflight,
-        project,
-        priority,
-        rootInstruction: rootInstruction(filename, content),
-      }));
-      assertRunActive(deadline);
-    }
-    monitor.startBoundary("rootDiscovery");
-    fixtures.forEach(({ rootId }) => monitor.startBoundary("workspaceReady", rootId));
-    monitor.registerRoots(fixtures.map(({ rootId }, index) => ({
-      rootIssueId: rootId,
-      priority: rootInputs[index][3],
-    })));
-    evidence.push({
-      step: "root_created",
-      status: "passed",
-      rootCount: fixtures.length,
-      rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
-      priorities: rootInputs.map(([, , , priority]) => priority),
-    });
-    log({ event: "e2e_step_completed", step: "root_created", root_count: fixtures.length });
 
     const humanActor = createHumanActor({ linear });
     log({ event: "e2e_step_started", step: "first_managed_comment" });
