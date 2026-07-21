@@ -122,6 +122,61 @@ test("real Conductor resumes suspended Work only with a fresh Human answer", asy
   assert.equal(invocations[1].resolved_human_input[0].target_context_digest, invocations[0].context_digest);
 });
 
+for (const rootStatus of ["Done", "Canceled"]) {
+test(`real Conductor rejects a late Work result after Root becomes ${rootStatus}`, async () => {
+  await runLateResultRecovery(rootStatus);
+});
+}
+
+async function runLateResultRecovery(rootStatus) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-stale-result-recovery-"));
+  const repositoryRoot = path.join(root, "repository");
+  const dataRoot = path.join(root, "conductor");
+  const statePath = path.join(root, "linear-tree.json");
+  const stageMarkerPath = path.join(dataRoot, "performer-profiles", "profile-1", "codex-home", "stage-starts.jsonl");
+  await createRepository(repositoryRoot);
+  const revision = (await run("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
+  await writeProfile(dataRoot);
+  await writeFile(statePath, JSON.stringify(serializedWorkTree(revision), null, 2));
+  const performer = await writePerformer(root, "stale");
+  const boundary = createSerializedWorkflowBoundary({ statePath });
+  const podium = { handler: boundary.handler, observeExit: () => {}, close: () => {} };
+  const environment = (instanceId) => createChildEnvironment({ additions: {
+    SYMPHONY_PRIVATE_IPC_FD: "3",
+    SYMPHONY_INSTANCE_ID: instanceId,
+    SYMPHONY_BINDING_ID: "binding-1",
+    SYMPHONY_CONDUCTOR_ID: "conductor-1",
+    SYMPHONY_CONDUCTOR_SHORT_HASH: "abc123def456",
+    SYMPHONY_LINEAR_INSTALLATION_ID: "serialized-fixture:organization-1",
+    SYMPHONY_ORGANIZATION_ID: "organization-1",
+    SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_ROOT: repositoryRoot,
+    SYMPHONY_BASE_BRANCH: "main",
+    SYMPHONY_CONDUCTOR_DATA_ROOT: dataRoot,
+    SYMPHONY_PERFORMER_EXECUTABLE: performer,
+    SYMPHONY_CYCLE_DELAY_MS: "1000",
+  } });
+
+  const first = await startConductor(environment("instance-1"), podium);
+  try {
+    await waitForStage(stageMarkerPath);
+    const mutationCountBeforeLateResult = boundary.mutationKinds.length;
+    await setRootStatus(statePath, rootStatus);
+    await waitForStageMarker(stageMarkerPath, (entry) => entry.result_written === true);
+    const recovery = await first.waitForObservation((observation) => observation.kind === "conductor_runtime_report" && observation.status === "recovering");
+    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_needs_attention");
+
+    const finalTree = JSON.parse(await readFile(statePath, "utf8"));
+    const records = finalTree.comments.map((comment) => comment.body);
+    assert.equal(finalTree.issues.find(({ issue_id }) => issue_id === "root-1")?.status_name, rootStatus);
+    assert.equal(records.some((body) => body.includes('"kind":"stage_terminal"')), false);
+    assert.equal(records.some((body) => body.includes('"kind":"work_completion"')), false);
+    assert.equal(boundary.mutationKinds.slice(mutationCountBeforeLateResult).includes("update_workflow_issue"), false);
+  } finally {
+    await first.terminateAbruptly();
+  }
+}
+
 async function startConductor(environment, podium) {
   return startConductorHarness({
     podium,
@@ -203,6 +258,17 @@ if (args.includes("--profile-control")) {
       usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
       outcome: { kind: "work_completed", summary: "Resumed after the Human answer.", changed_paths: [], checks: [], observed_workspace_revision: workspaceRevision },
     }));
+  } else if (mode === "stale") {
+    setTimeout(() => {
+      fs.writeFileSync(resultPath, JSON.stringify({
+        protocol_version: request.protocol_version, stage_execution_id: execution.stage_execution_id, stage: execution.stage,
+        root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+        context_digest: request.context_digest, completed_at: "2026-07-22T00:00:00.000Z",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+        outcome: { kind: "work_completed", summary: "Late result from the old execution.", changed_paths: [], checks: [], observed_workspace_revision: workspaceRevision },
+      }));
+      fs.appendFileSync(marker, JSON.stringify({ stage_execution_id: execution.stage_execution_id, result_written: true }) + "\\n");
+    }, 500);
   } else if (firstInvocation) {
     setInterval(() => {}, 1_000);
   } else {
@@ -286,6 +352,30 @@ async function waitForStage(markerPath) {
     } catch { return undefined; }
   });
   return value;
+}
+
+async function waitForStageMarker(markerPath, predicate) {
+  return waitFor(async () => {
+    try {
+      const lines = (await readFile(markerPath, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      return lines.find(predicate);
+    } catch { return undefined; }
+  });
+}
+
+async function setRootStatus(statePath, statusName) {
+  const tree = JSON.parse(await readFile(statePath, "utf8"));
+  const root = tree.issues.find(({ issue_id }) => issue_id === "root-1");
+  const status = tree.status_catalog.find(({ name }) => name === statusName);
+  if (!root || !status) throw new Error("root_terminal_fixture_invalid");
+  Object.assign(root, {
+    status_id: status.status_id,
+    status_name: status.name,
+    status_category: status.category,
+    status_position: status.position,
+    remote_version: "root-terminal-version",
+  });
+  await writeFile(statePath, JSON.stringify(tree, null, 2), "utf8");
 }
 
 async function waitForTree(statePath, predicate) {
