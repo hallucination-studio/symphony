@@ -37,6 +37,7 @@ export async function startTargetProductionBoundary({
   let installation;
   let podium;
   let harness;
+  let restartCount = 0;
   try {
     installation = validateInstallation(await services.bootstrapInstallation({
       databasePath,
@@ -70,6 +71,23 @@ export async function startTargetProductionBoundary({
     let closed = false;
     return Object.freeze({
       runner,
+      async restart(input) {
+        if (closed) throw new Error("target_production_closed");
+        validateRestartInput(input);
+        const previous = harness;
+        const exit = await previous.terminateAbruptly?.();
+        if (exit && typeof exit !== "object") throw new Error("target_production_restart_exit_invalid");
+        restartCount += 1;
+        const instanceId = `${environment.SYMPHONY_INSTANCE_ID ?? binding.bindingId}-restart-${restartCount}`;
+        const nextEnvironment = { ...environment, SYMPHONY_INSTANCE_ID: instanceId };
+        try {
+          harness = await services.startConductor({ podium, environment: nextEnvironment, log });
+        } catch (error) {
+          await closeQuietly(() => podium.close(), log);
+          throw stableError(error);
+        }
+        return Object.freeze({ restarted: true, instanceId });
+      },
       async close() {
         if (closed) return;
         closed = true;
@@ -148,6 +166,15 @@ function validateInput({ developmentToken, codexApiKey, databasePath, project, b
   if (!environment || typeof environment !== "object" ||
       [...SECRET_ENVIRONMENT_KEYS].some((key) => environment[key] !== undefined)) {
     throw new Error("target_production_secret_environment_forbidden");
+  }
+}
+
+function validateRestartInput(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !SAFE_ID.test(value.rootIssueId ?? "") || !SAFE_ID.test(value.cycleIssueId ?? "") ||
+      !SAFE_ID.test(value.nodeIssueId ?? "") || !SAFE_ID.test(value.actionId ?? "") ||
+      !/^[0-9a-f]{64}$/u.test(value.contextDigest ?? "")) {
+    throw new Error("target_production_restart_input_invalid");
   }
 }
 

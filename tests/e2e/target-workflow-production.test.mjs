@@ -58,7 +58,7 @@ test("target production boundary composes real boundary adapters without leaking
     },
   });
 
-  assert.deepEqual(Object.keys(result).sort(), ["close", "runner"]);
+  assert.deepEqual(Object.keys(result).sort(), ["close", "restart", "runner"]);
   assert.equal(result.runner, runner);
   assert.equal(events.map(([kind]) => kind).join(","), [
     "bootstrapInstallation", "savePodiumState", "createPodiumOwner", "startConductor", "provisionProfile",
@@ -96,4 +96,47 @@ test("target production boundary cleans the Podium owner when Conductor startup 
     /conductor_start_failed/u,
   );
   assert.deepEqual(events.slice(-1).map(([kind]) => kind), ["podiumClose"]);
+});
+
+test("target production boundary restarts Conductor with a fresh secret-free instance", async () => {
+  const events = [];
+  let starts = 0;
+  const result = await startTargetProductionBoundary({
+    developmentToken: "linear-development-token",
+    codexApiKey: "codex-api-key",
+    databasePath: "/tmp/podium.db",
+    project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+    binding: {
+      bindingId: "binding-1", conductorId: "conductor-1", conductorShortHash: "hash-1",
+      repositoryHandle: "repository-1", repositoryRoot: "/tmp/repository", baseBranch: "main",
+    },
+    delegateActorId: "actor-1",
+    environment: { SYMPHONY_INSTANCE_ID: "instance-1", PATH: "/usr/bin" },
+    fetch: () => {},
+    log: () => {},
+    dependencies: {
+      ...dependencies(events),
+      async startConductor(input) {
+        starts += 1;
+        events.push(["startConductor", input]);
+        return {
+          async terminateAbruptly() { events.push(["terminate", input.environment.SYMPHONY_INSTANCE_ID]); return { signal: "SIGKILL" }; },
+          close() { events.push(["conductorClose", input.environment.SYMPHONY_INSTANCE_ID]); },
+        };
+      },
+    },
+    createRunner() { return { marker: "runner" }; },
+  });
+
+  const restart = await result.restart({
+    rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
+    actionId: "action-1", contextDigest: "a".repeat(64),
+  });
+  assert.deepEqual(restart, { restarted: true, instanceId: "instance-1-restart-1" });
+  assert.equal(starts, 2);
+  assert.equal(events.at(-1)[1].SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
+  assert.equal(events.at(-1)[1].SYMPHONY_E2E_CODEX_API_KEY, undefined);
+  await result.close();
+  assert.deepEqual(events.filter(([kind]) => kind === "terminate"), [["terminate", "instance-1"]]);
+  assert.deepEqual(events.filter(([kind]) => kind === "conductorClose"), [["conductorClose", "instance-1-restart-1"]]);
 });
