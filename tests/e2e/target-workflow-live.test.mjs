@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ensureTargetConductorProjectLabel,
   readTargetProjectConfiguration,
+  runTargetRepairLive,
   runTargetSuccessLive,
 } from "../../tools/e2e/target-workflow-live.mjs";
 
@@ -81,6 +82,57 @@ test("target live success composes setup, production boundary, Git observation, 
   });
 
   assert.deepEqual(result, { status: "passed", scenario: "success", runId: "target-live", rootIssueId: "root-1", projectId: "project-1", facts });
+  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.equal(JSON.stringify(result).includes("linear-secret"), false);
+  assert.equal(JSON.stringify(result).includes("codex-secret"), false);
+});
+
+test("target live repair composes setup, repair boundary, Git observation, and scope cleanup", async () => {
+  const events = [];
+  const facts = {
+    root: { rootIssueId: "root-1", projectId: "project-1" },
+    repairEscalation: {
+      findingId: "finding-1", sourceVerifyId: "verify-2", disposition: "escalated",
+      breaker: { checked: true, decision: "escalate", cycleCount: 2, maxCycles: 2, openFindingCount: 1 },
+    },
+  };
+  const config = {
+    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+    codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+  };
+  const result = await runTargetRepairLive({
+    config,
+    environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-repair-live" },
+    dependencies: {
+      createScope: async (input) => { events.push(["scope", input]); return {
+        runId: input.runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
+        codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
+      }; },
+      createGitFixture: async ({ scope }) => { events.push(["git", scope]); return {
+        repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "a".repeat(40),
+      }; },
+      readProjectConfiguration: async () => { events.push(["project"]); return {
+        organizationId: "organization-1", delegateActorId: "actor-1",
+        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
+      }; },
+      ensureConductorLabel: async (input) => { events.push(["label", input]); },
+      runRepairBoundary: async (input) => {
+        events.push(["boundary", input]);
+        assert.equal(input.boundaryInput.codexApiKey, "codex-secret");
+        assert.equal(input.boundaryInput.environment.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
+        assert.equal(input.repairInput.rootInput.title, "Target live repair escalation");
+        return { facts };
+      },
+      cleanupScope: async (scope) => { events.push(["cleanup", scope]); },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: "passed", scenario: "repair_escalation", runId: "target-repair-live",
+    rootIssueId: "root-1", projectId: "project-1", facts,
+  });
   assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
