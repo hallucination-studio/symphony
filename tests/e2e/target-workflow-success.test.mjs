@@ -8,6 +8,7 @@ test("target success orchestration creates, approves, and returns only durable f
   let pendingReads = 0;
   let factsReads = 0;
   let gitHead = "a".repeat(40);
+  const observationPhases = [];
   const facts = {
     root: { projectId: "project-1", rootIssueId: "root-1" },
     plan: {}, stageExecutions: [], progress: {},
@@ -44,9 +45,12 @@ test("target success orchestration creates, approves, and returns only durable f
     runner,
     rootInput: { title: "Target success" },
     observationInput: { git: { head: gitHead, branch: "symphony/runs/root-1" } },
-    readObservationInput: async () => ({
+    readObservationInput: async ({ phase }) => {
+      observationPhases.push(phase);
+      return {
       git: { head: gitHead, branch: "symphony/runs/root-1" },
-    }),
+      };
+    },
     humanResponseBody: "Approved for implementation.",
     timeoutMs: 1_000,
     pollIntervalMs: 0,
@@ -64,6 +68,7 @@ test("target success orchestration creates, approves, and returns only durable f
   assert.deepEqual(calls.filter(([kind]) => kind === "observeRoot").map(([, input]) => input.git.head), [
     "b".repeat(40), "b".repeat(40),
   ]);
+  assert.deepEqual(observationPhases, ["pending_human", "pending_human", "durable_facts", "durable_facts"]);
   assert.equal(Object.hasOwn(result, "snapshot"), false);
 });
 

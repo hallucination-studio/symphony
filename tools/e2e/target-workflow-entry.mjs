@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
+import { isMissingInputConfiguration, loadE2EConfig } from "./config.mjs";
 import { TARGET_WORKFLOW_SCENARIOS } from "./target-workflow-verdict.mjs";
 import { auditTargetWorkflowSources } from "./target-workflow-static-audit.mjs";
+import { runTargetSuccessLive } from "./target-workflow-live.mjs";
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
@@ -31,8 +33,21 @@ export async function runTargetWorkflowDryRun({ readSource = readFile } = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const arguments_ = process.argv.slice(2);
   if (arguments_.length !== 1 || arguments_[0] !== "--dry-run") {
-    process.stderr.write('{"status":"failed","reason":"target_entry_argument_invalid"}\n');
-    process.exitCode = 2;
+    if (arguments_.length === 1 && arguments_[0] === "--live-success") {
+      runTargetWorkflowLive()
+        .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+        .catch((error) => {
+          process.stderr.write(`${JSON.stringify({
+            status: isMissingInputConfiguration(error) ? "unverified" : "failed",
+            reason: stableReason(error),
+            ...(Array.isArray(error?.issues) ? { issues: error.issues } : {}),
+          })}\n`);
+          process.exitCode = 2;
+        });
+    } else {
+      process.stderr.write('{"status":"failed","reason":"target_entry_argument_invalid"}\n');
+      process.exitCode = 2;
+    }
   } else {
     runTargetWorkflowDryRun()
       .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
@@ -44,6 +59,17 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
         process.exitCode = 2;
       });
   }
+}
+
+async function runTargetWorkflowLive() {
+  const config = loadE2EConfig();
+  if (!config.linear.projectSlugId) {
+    const error = new Error("e2e_configuration_invalid");
+    error.code = "e2e_configuration_invalid";
+    error.issues = ["target_project_slug_id_missing"];
+    throw error;
+  }
+  return runTargetSuccessLive({ config });
 }
 
 function stableReason(error) {

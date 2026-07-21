@@ -37,13 +37,14 @@ export async function runTargetSuccessScenario({
   validateDependencies({ runner, observationInput, humanResponseBody, timeoutMs, pollIntervalMs, sleep, now, onProgress, readObservationInput });
   const deadline = now() + timeoutMs;
   const created = validateRootResult(await runner.createRoot(rootInput));
-  const readInput = async () => Object.freeze({
+  const readInput = async (phase) => Object.freeze({
     rootIssueId: created.rootIssueId,
     projectId: created.projectId,
     git: Object.freeze(validateObservationInput(
       await readObservationInput(Object.freeze({
         rootIssueId: created.rootIssueId,
         projectId: created.projectId,
+        phase,
       })),
     ).git),
   });
@@ -58,7 +59,7 @@ export async function runTargetSuccessScenario({
     read: async () => {
       try {
         return validatePendingObservation(
-          await runner.observePendingHuman(await readInput()),
+          await runner.observePendingHuman(await readInput("pending_human")),
           created.rootIssueId,
         );
       } catch (error) {
@@ -89,7 +90,7 @@ export async function runTargetSuccessScenario({
     read: async () => {
       try {
         return validateFactsObservation(
-          await runner.observeRoot(await readInput()),
+          await runner.observeRoot(await readInput("durable_facts")),
           created,
         );
       } catch (error) {

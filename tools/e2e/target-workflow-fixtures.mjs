@@ -83,16 +83,15 @@ export async function createTargetGitFixture({ scope } = {}) {
 
 export async function readTargetGitObservation({ repositoryRoot, branch, worktreePath } = {}) {
   if (typeof repositoryRoot !== "string" || repositoryRoot.length === 0 ||
-      !BRANCH.test(branch ?? "") ||
+      (branch !== undefined && !BRANCH.test(branch)) ||
       (worktreePath !== undefined && (typeof worktreePath !== "string" || worktreePath.length === 0))) {
     throw stableError("target_git_observation_input_invalid");
   }
   const targetPath = worktreePath ?? repositoryRoot;
   try {
-    const [repositoryIdentity, targetIdentity, commonGitDir, targetCommonGitDir, branchResult, headResult, statusResult] =
+    const [repositoryIdentity, commonGitDir, targetCommonGitDir, branchResult, headResult, statusResult] =
       await Promise.all([
         realpath(repositoryRoot),
-        realpath(targetPath),
         git(repositoryRoot, ["rev-parse", "--git-common-dir"]),
         git(targetPath, ["rev-parse", "--git-common-dir"]),
         git(targetPath, ["branch", "--show-current"]),
@@ -103,7 +102,8 @@ export async function readTargetGitObservation({ repositoryRoot, branch, worktre
     const head = headResult.stdout.trim();
     const commonRoot = await realpath(resolveGitPath(repositoryRoot, commonGitDir.stdout.trim()));
     const targetCommonRoot = await realpath(resolveGitPath(targetPath, targetCommonGitDir.stdout.trim()));
-    if (observedBranch !== branch || !SHA.test(head) || statusResult.stdout.trim() !== "" ||
+    if ((branch !== undefined && observedBranch !== branch) || !BRANCH.test(observedBranch) ||
+        !SHA.test(head) || statusResult.stdout.trim() !== "" ||
         commonRoot !== targetCommonRoot) {
       throw stableError("target_git_observation_mismatch");
     }
