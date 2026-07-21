@@ -102,6 +102,16 @@ test("approved Roadmap 2 scheduling vocabulary is inside the active boundary", (
   }
 });
 
+test("retired Conductor turn observation surfaces are rejected", () => {
+  assertViolationCases([
+    [
+      "apps/conductor/src/composition/PerformerTurnObservation.ts",
+      "export type PerformerTurnObservation = unknown;",
+      "retired_conductor_surface",
+    ],
+  ]);
+});
+
 test("approved managed evidence vocabulary is inside the active boundary", () => {
   for (const [file, source] of [
     ["apps/conductor/src/root-workflow/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
