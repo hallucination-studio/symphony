@@ -69,6 +69,59 @@ test("real Conductor ends an orphaned Work execution and creates a fresh retry a
   assert.equal((await run("git", ["-C", worktree, "status", "--porcelain"])).stdout, "");
 });
 
+test("real Conductor resumes suspended Work only with a fresh Human answer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-human-recovery-"));
+  const repositoryRoot = path.join(root, "repository");
+  const dataRoot = path.join(root, "conductor");
+  const statePath = path.join(root, "linear-tree.json");
+  const invocationPath = path.join(dataRoot, "performer-profiles", "profile-1", "codex-home", "human-invocations.jsonl");
+  await createRepository(repositoryRoot);
+  const revision = (await run("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
+  await writeProfile(dataRoot);
+  await writeFile(statePath, JSON.stringify(serializedWorkTree(revision), null, 2));
+  const performer = await writePerformer(root, "human");
+  const boundary = createSerializedWorkflowBoundary({ statePath });
+  const podium = { handler: boundary.handler, observeExit: () => {}, close: () => {} };
+  const environment = (instanceId) => createChildEnvironment({ additions: {
+    SYMPHONY_PRIVATE_IPC_FD: "3",
+    SYMPHONY_INSTANCE_ID: instanceId,
+    SYMPHONY_BINDING_ID: "binding-1",
+    SYMPHONY_CONDUCTOR_ID: "conductor-1",
+    SYMPHONY_CONDUCTOR_SHORT_HASH: "abc123def456",
+    SYMPHONY_LINEAR_INSTALLATION_ID: "serialized-fixture:organization-1",
+    SYMPHONY_ORGANIZATION_ID: "organization-1",
+    SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_ROOT: repositoryRoot,
+    SYMPHONY_BASE_BRANCH: "main",
+    SYMPHONY_CONDUCTOR_DATA_ROOT: dataRoot,
+    SYMPHONY_PERFORMER_EXECUTABLE: performer,
+    SYMPHONY_CYCLE_DELAY_MS: "1000",
+  } });
+
+  const first = await startConductor(environment("instance-1"), podium);
+  await waitForTree(statePath, (tree) => {
+    const records = tree.comments.map((comment) => comment.body);
+    return tree.issues.find(({ issue_id }) => issue_id === "root-1")?.status_name === "Needs Info"
+      && records.some((body) => body.includes('"kind":"human_action"'))
+      && records.some((body) => body.includes('"outcome":"suspended"'));
+  });
+  assert.equal((await first.terminateAbruptly()).signal, "SIGKILL");
+
+  await answerHuman(statePath);
+  const second = await startConductor(environment("instance-2"), podium);
+  await waitForTree(statePath, (tree) => tree.issues.find(({ issue_id }) => issue_id === "work-1")?.status_name === "Done");
+  assert.equal((await second.terminateAbruptly()).signal, "SIGKILL");
+
+  const invocations = (await readFile(invocationPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(invocations.length, 2);
+  assert.notEqual(invocations[0].stage_execution_id, invocations[1].stage_execution_id);
+  assert.notEqual(invocations[0].context_digest, invocations[1].context_digest);
+  assert.deepEqual(invocations[0].resolved_human_input, []);
+  assert.equal(invocations[1].resolved_human_input.length, 1);
+  assert.equal(invocations[1].resolved_human_input[0].answer_or_decision.text, "Preserve the current compatibility behavior.");
+  assert.equal(invocations[1].resolved_human_input[0].target_context_digest, invocations[0].context_digest);
+});
+
 async function startConductor(environment, podium) {
   return startConductorHarness({
     podium,
@@ -103,12 +156,13 @@ async function writeProfile(dataRoot) {
   }, null, 2));
 }
 
-async function writePerformer(root) {
+async function writePerformer(root, mode = "orphan") {
   const script = path.join(root, "performer-fixture.cjs");
   const executable = path.join(root, "performer-fixture");
   await writeFile(script, `
 const fs = require("node:fs");
 const path = require("node:path");
+const mode = ${JSON.stringify(mode)};
 const args = process.argv.slice(2);
 if (args.includes("--profile-control")) {
   let data = "";
@@ -124,11 +178,32 @@ if (args.includes("--profile-control")) {
   const workspaceRevision = request.repository_context.workspace_revision;
   const execution = request.stage_execution;
   const target = request.target;
-  const marker = path.join(process.env.CODEX_HOME, "stage-starts.jsonl");
+  const marker = path.join(process.env.CODEX_HOME, mode === "human" ? "human-invocations.jsonl" : "stage-starts.jsonl");
   const firstInvocation = !fs.existsSync(marker);
   fs.mkdirSync(path.dirname(marker), { recursive: true });
-  fs.appendFileSync(marker, JSON.stringify({ pid: process.pid, stage_execution_id: execution.stage_execution_id }) + "\\n");
-  if (firstInvocation) {
+  fs.appendFileSync(marker, JSON.stringify({
+    pid: process.pid,
+    stage_execution_id: execution.stage_execution_id,
+    context_digest: request.context_digest,
+    resolved_human_input: request.workflow_context.resolved_human_input,
+  }) + "\\n");
+  if (mode === "human" && firstInvocation) {
+    fs.writeFileSync(resultPath, JSON.stringify({
+      protocol_version: request.protocol_version, stage_execution_id: execution.stage_execution_id, stage: execution.stage,
+      root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+      context_digest: request.context_digest, completed_at: "2026-07-22T00:00:00.000Z",
+      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+      outcome: { kind: "suspended", request_kind: "needs_info", question_or_proposal: "Please confirm the compatibility behavior.", reason: "The compatibility behavior is ambiguous.", impact: "Work cannot continue until it is confirmed." },
+    }));
+  } else if (mode === "human") {
+    fs.writeFileSync(resultPath, JSON.stringify({
+      protocol_version: request.protocol_version, stage_execution_id: execution.stage_execution_id, stage: execution.stage,
+      root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+      context_digest: request.context_digest, completed_at: "2026-07-22T00:00:02.000Z",
+      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+      outcome: { kind: "work_completed", summary: "Resumed after the Human answer.", changed_paths: [], checks: [], observed_workspace_revision: workspaceRevision },
+    }));
+  } else if (firstInvocation) {
     setInterval(() => {}, 1_000);
   } else {
     const changedPath = "apps/conductor/recovered.txt";
@@ -148,6 +223,28 @@ if (args.includes("--profile-control")) {
   await writeFile(executable, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`, { encoding: "utf8", mode: 0o700 });
   await chmod(executable, 0o700);
   return executable;
+}
+
+async function answerHuman(statePath) {
+  const tree = JSON.parse(await readFile(statePath, "utf8"));
+  const root = tree.issues.find(({ issue_id }) => issue_id === "root-1");
+  const status = tree.status_catalog.find(({ name }) => name === "In Progress");
+  if (!root || !status) throw new Error("human_answer_root_missing");
+  Object.assign(root, {
+    status_id: status.status_id,
+    status_name: status.name,
+    status_category: status.category,
+    status_position: status.position,
+    remote_version: "human-answer-root-version",
+  });
+  tree.comments.push({
+    comment_id: "human-answer-1",
+    issue_id: "work-1",
+    body: "Preserve the current compatibility behavior.",
+    remote_version: "human-answer-1-version",
+    updated_at: "2026-07-22T00:00:01.000Z",
+  });
+  await writeFile(statePath, JSON.stringify(tree, null, 2), "utf8");
 }
 
 function serializedWorkTree(revision) {
@@ -192,7 +289,13 @@ async function waitForStage(markerPath) {
 }
 
 async function waitForTree(statePath, predicate) {
-  await waitFor(async () => predicate(JSON.parse(await readFile(statePath, "utf8"))));
+  await waitFor(async () => {
+    try {
+      return predicate(JSON.parse(await readFile(statePath, "utf8")));
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function waitFor(read) {
