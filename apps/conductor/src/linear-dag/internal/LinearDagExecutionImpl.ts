@@ -172,6 +172,8 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       if (error instanceof RootDagValidationError) return workBlocked(`work_tree_invalid:${error.code}`);
       throw error;
     }
+    const cancellation = await this.reconcileRootCancellation(input, tree, view);
+    if (cancellation.kind !== "allow") return cancellation;
     const convergence = await this.enforceConvergence(input, tree, view);
     if (convergence.kind !== "allow") return convergence;
     if (root.status_name !== "In Progress" && !(stageResult !== undefined && resultKind(stageResult) === "suspended")) return workBlocked("work_root_not_runnable");
@@ -312,6 +314,8 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     let view;
     try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
     catch (error) { if (error instanceof RootDagValidationError) return verifyBlocked(`verify_tree_invalid:${error.code}`); throw error; }
+    const cancellation = await this.reconcileRootCancellation(input, tree, view);
+    if (cancellation.kind !== "allow") return cancellation;
     const convergence = await this.enforceConvergence(input, tree, view);
     if (convergence.kind !== "allow") return convergence;
     if (root.status_name !== "In Progress") return verifyBlocked("verify_root_not_runnable");
@@ -421,6 +425,14 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return blocked("root_read_back_invalid");
     const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
     if (terminalResultReason) return blocked(terminalResultReason);
+    if (root.status_name === "Canceled") {
+      const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+      let view;
+      try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
+      catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
+      const cancellation = await this.reconcileRootCancellation(input, tree, view);
+      if (cancellation.kind !== "allow") return cancellation;
+    }
     const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
     const cycle = activeCycle(tree, input.rootIssueId);
     if (!cycle) {
@@ -646,6 +658,27 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (view.root.issue.status_name !== "In Progress") return { kind: "blocked", reason: "convergence_root_state_invalid" };
     await this.updateStatus(input, tree, view.root.issue, statuses.get("Needs Approval"), "convergence_root_needs_approval");
     return { kind: "mutation_applied", step: "convergence_root_needs_approval" };
+  }
+
+  private async reconcileRootCancellation(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
+    if (view.root.issue.status_name !== "Canceled") return { kind: "allow" };
+    const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
+    const activeCycle = view.cycles
+      .filter(({ issue }) => !terminalCycleStates.has(issue.status_name))
+      .sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id))[0];
+    if (activeCycle) {
+      await this.updateStatus(input, tree, activeCycle.issue, statuses.get("Canceled"), "root_cancel_cycle");
+      return { kind: "mutation_applied", step: "root_cancel_cycle" };
+    }
+    const pendingNode = view.cycles
+      .flatMap((cycle) => cycle.nodes.map((node) => ({ cycle, node })))
+      .filter(({ node }) => !["Done", "Canceled", "Failed"].includes(node.issue.status_name))
+      .sort((left, right) => left.cycle.issue.order - right.cycle.issue.order || left.node.issue.order - right.node.issue.order || left.node.issue.issue_id.localeCompare(right.node.issue.issue_id))[0];
+    if (pendingNode) {
+      await this.updateStatus(input, tree, pendingNode.node.issue, statuses.get("Canceled"), "root_cancel_node");
+      return { kind: "mutation_applied", step: "root_cancel_node" };
+    }
+    return { kind: "allow" };
   }
 
   private async updateStatus(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {

@@ -278,6 +278,28 @@ test("settles missing Work usage at the reserved token ceiling", async () => {
   assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
 });
 
+test("converges a partially canceled Root on the next reconciliation", async () => {
+  const gateway = new WorkGateway(workTree());
+  const root = gateway.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+  const canceled = gateway.tree.status_catalog.find((candidate) => candidate.name === "Canceled")!;
+  Object.assign(root, { status_id: canceled.status_id, status_name: canceled.name, status_category: canceled.category, status_position: canceled.position });
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_cycle" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === cycleIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === readyWorkIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === blockedWorkIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "root_cancel_node" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === verifyIssueId)?.status_name, "Canceled");
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "convergence_decision_persisted" });
+});
+
 function workInput(): WorkStageInput {
   return {
     rootIssueId,
