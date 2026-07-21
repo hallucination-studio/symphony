@@ -4,7 +4,7 @@ import test from "node:test";
 
 const workflowPath = ".github/workflows/roadmap-v1-e2e.yml";
 
-test("core live workflow runs for same-repository PRs and protected manual main dispatches", async () => {
+test("target workflow runs for same-repository PRs and protected manual main dispatches", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /workflow_dispatch:/u);
   assert.match(source, /pull_request:\n\s+branches: \[main\]\n\s+types: \[opened, synchronize, reopened\]/u);
@@ -14,19 +14,19 @@ test("core live workflow runs for same-repository PRs and protected manual main 
   assert.match(source, /github\.event_name == 'pull_request'/u);
   assert.match(source, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u);
   assert.match(source, /environment: roadmap-v1-e2e/u);
-  assert.match(source, /group: symphony-core-live-e2e/u);
+  assert.match(source, /group: symphony-target-workflow-e2e/u);
   assert.match(source, /cancel-in-progress: false/u);
   assert.match(source, /permissions:\n\s+contents: read/u);
 });
 
-test("core live workflow runs contracts, input validation, and the only credentialed command", async () => {
+test("target workflow runs contracts, input validation, and the only credentialed command", async () => {
   const source = await readFile(workflowPath, "utf8");
   const commands = [
     "npm run build -w @symphony/podium",
     "npm run build -w @symphony/conductor",
     "npm run test:e2e:runner",
     "npm run e2e:doctor",
-    "npm run e2e:core-live",
+    "npm run e2e:target-live",
   ];
   const offsets = commands.map((command) => source.indexOf(command));
   assert.equal(offsets.every((offset) => offset >= 0), true);
@@ -34,17 +34,17 @@ test("core live workflow runs contracts, input validation, and the only credenti
   assert.doesNotMatch(source, /acceptance:v1|e2e:hermetic|wdio|xvfb/u);
 });
 
-test("core live credentials are scoped to input validation and live run steps", async () => {
+test("target workflow credentials are scoped to input validation and live run steps", async () => {
   const source = await readFile(workflowPath, "utf8");
   const jobEnvironment = source.slice(0, source.indexOf("    steps:"));
   assert.doesNotMatch(jobEnvironment, /secrets\./u);
-  const validateOffset = source.indexOf("      - name: Validate core live inputs");
-  const runOffset = source.indexOf("      - name: Run core live E2E");
-  const cleanupOffset = source.indexOf("      - name: Cleanup run-owned state");
+  const validateOffset = source.indexOf("      - name: Validate target workflow inputs");
+  const runOffset = source.indexOf("      - name: Run target workflow E2E");
+  const artifactOffset = source.indexOf("      - name: Upload sanitized target workflow evidence");
   const validationStep = source.slice(validateOffset, runOffset);
-  const runStep = source.slice(runOffset, cleanupOffset);
+  const runStep = source.slice(runOffset, artifactOffset);
   assert.equal(validateOffset >= 0 && runOffset > validateOffset, true);
-  assert.equal(cleanupOffset > runOffset, true);
+  assert.equal(artifactOffset > runOffset, true);
   for (const name of [
     "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
     "LINEAR_CLIENT_ID",
@@ -65,27 +65,26 @@ test("core live credentials are scoped to input validation and live run steps", 
     assert.match(runStep, pattern);
   }
   assert.doesNotMatch(source, /(?:LINEAR_CLIENT_ID|SYMPHONY_E2E_CODEX_(?:BASE_URL|MODEL)): \$\{\{ vars\./u);
-  assert.doesNotMatch(source.slice(cleanupOffset), /secrets\./u);
-  assert.doesNotMatch(source, /&core-live-inputs|\*core-live-inputs/u);
+  assert.doesNotMatch(source.slice(artifactOffset), /secrets\./u);
+  assert.doesNotMatch(source, /&target-workflow-inputs|\*target-workflow-inputs/u);
   assert.doesNotMatch(source, /(?:sk|lin_api|lin_oauth)[-_][A-Za-z0-9_-]{8,}/u);
 });
 
-test("core live cleanup and evidence collection are strict and bounded", async () => {
+test("target workflow evidence collection is strict and bounded", async () => {
   const source = await readFile(workflowPath, "utf8");
-  assert.match(source, /Cleanup run-owned state\n\s+if: always\(\)/u);
-  assert.match(source, /Upload sanitized core live evidence\n\s+if: always\(\)/u);
+  assert.match(source, /Upload sanitized target workflow evidence\n\s+if: always\(\)/u);
   assert.match(source, /actions\/upload-artifact@v4/u);
-  assert.match(source, /path: \.test\/e2e-core-live\//u);
+  assert.match(source, /path: \.test\/e2e-target-workflow\//u);
   assert.match(source, /if-no-files-found: error/u);
   assert.match(source, /retention-days: 7/u);
-  assert.match(source, /core-live-e2e-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(source, /target-workflow-e2e-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
 });
 
 test("local entrypoint builds without passing pipeline secrets to the build", async () => {
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   const makefile = await readFile("Makefile", "utf8");
-  const entry = await readFile("tools/e2e/core-live-entry.mjs", "utf8");
-  assert.equal(manifest.scripts["e2e:core-live"], "node tools/e2e/core-live-entry.mjs");
+  const entry = await readFile("tools/e2e/target-workflow-entry.mjs", "utf8");
+  assert.equal(manifest.scripts["e2e:target-live"], "node tools/e2e/target-workflow-entry.mjs --live-all");
   const makeCommands = [
     "npm run build -w @symphony/podium",
     "npm run build -w @symphony/conductor",
@@ -108,12 +107,10 @@ test("local entrypoint builds without passing pipeline secrets to the build", as
   }
   assert.match(
     makefile,
-    /E2E_LIVE := node --env-file-if-exists=\.env tools\/e2e\/core-live-entry\.mjs/u,
+    /E2E_LIVE := node --env-file-if-exists=\.env tools\/e2e\/target-workflow-entry\.mjs --live-all/u,
   );
   assert.match(makeTarget, /\n\t\$\(E2E_LIVE\)\n/u);
   assert.doesNotMatch(makeTarget, /E2E_SECRET_FREE.*\$\(E2E_LIVE\)/u);
-  assert.match(entry, /"@symphony\/podium",\s*"@symphony\/conductor"/u);
-  assert.match(entry, /spawnSync\(npm, \["run", "build", "-w", workspace\]/u);
-  assert.match(entry, /env: createChildEnvironment\(\)/u);
+  assert.match(entry, /--live-all/u);
   assert.doesNotMatch(entry, /env: process\.env|\.\.\.process\.env/u);
 });

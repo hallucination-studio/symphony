@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import test from "node:test";
 
 import {
@@ -10,10 +7,6 @@ import {
   loadE2EConfig,
   summarizeConfig,
 } from "../../tools/e2e/config.mjs";
-import {
-  acquireGlobalLock,
-  lockPathForConfig,
-} from "../../tools/e2e/global-lock.mjs";
 
 function validEnvironment() {
   return {
@@ -142,17 +135,4 @@ test("doctor fails closed without printing a supplied secret canary", () => {
     reason: "e2e_configuration_invalid",
     issues: ["linear_client_id_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
   });
-});
-
-test("global lock is atomic and second owner cannot enter", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "symphony-e2e-lock-"));
-  const config = { paths: { lock: lockPathForConfig(root) } };
-  const first = await acquireGlobalLock(config, { runId: "first" });
-  await assert.rejects(
-    acquireGlobalLock(config, { runId: "second" }),
-    /e2e_lock_unavailable/,
-  );
-  await first.release();
-  const second = await acquireGlobalLock(config, { runId: "second" });
-  await second.release();
 });

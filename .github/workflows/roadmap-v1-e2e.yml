@@ -1,4 +1,4 @@
-name: Core Live E2E
+name: Target Workflow Live E2E
 
 on:
   workflow_dispatch:
@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: symphony-core-live-e2e
+  group: symphony-target-workflow-e2e
   cancel-in-progress: false
 
 jobs:
-  core-live:
+  target-workflow-live:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     environment: roadmap-v1-e2e
@@ -38,7 +38,7 @@ jobs:
           npm run build -w @symphony/conductor
       - name: Verify runner contracts without credentials
         run: npm run test:e2e:runner
-      - name: Validate core live inputs
+      - name: Validate target workflow inputs
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
           LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
@@ -48,7 +48,7 @@ jobs:
           SYMPHONY_E2E_CODEX_MODEL: ${{ secrets.SYMPHONY_E2E_CODEX_MODEL }}
           SYMPHONY_E2E_CODEX_ALLOWED_HOSTS: ${{ vars.SYMPHONY_E2E_CODEX_ALLOWED_HOSTS }}
         run: npm run e2e:doctor
-      - name: Run core live E2E
+      - name: Run target workflow E2E
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
           LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
@@ -57,15 +57,12 @@ jobs:
           SYMPHONY_E2E_CODEX_BASE_URL: ${{ secrets.SYMPHONY_E2E_CODEX_BASE_URL }}
           SYMPHONY_E2E_CODEX_MODEL: ${{ secrets.SYMPHONY_E2E_CODEX_MODEL }}
           SYMPHONY_E2E_CODEX_ALLOWED_HOSTS: ${{ vars.SYMPHONY_E2E_CODEX_ALLOWED_HOSTS }}
-        run: npm run e2e:core-live
-      - name: Cleanup run-owned state
-        if: always()
-        run: npm run e2e:cleanup
-      - name: Upload sanitized core live evidence
+        run: npm run e2e:target-live
+      - name: Upload sanitized target workflow evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: core-live-e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .test/e2e-core-live/
+          name: target-workflow-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .test/e2e-target-workflow/
           if-no-files-found: error
           retention-days: 7

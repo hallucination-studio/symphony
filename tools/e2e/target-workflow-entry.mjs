@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { isMissingInputConfiguration, loadE2EConfig } from "./config.mjs";
@@ -121,6 +122,8 @@ export async function runTargetWorkflowAllLive({
   config,
   environment = process.env,
   runScenario = defaultRunScenario,
+  writeEvidence = true,
+  evidenceDirectory,
 } = {}) {
   if (!config?.linear?.projectSlugId) throw stableError("target_all_configuration_invalid");
   if (!environment || typeof environment !== "object" || typeof runScenario !== "function") {
@@ -145,12 +148,29 @@ export async function runTargetWorkflowAllLive({
   const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true }, {
     secrets: [config.secrets?.linearDevToken, config.secrets?.codexApiKey],
   });
-  return Object.freeze({
+  const result = Object.freeze({
     status: evaluated.verdict.verdict,
     runId: environment.SYMPHONY_E2E_RUN_ID,
     evidence: evaluated.evidence,
     verdict: evaluated.verdict,
   });
+  if (writeEvidence) await persistTargetWorkflowEvidence(result, evidenceDirectory);
+  return result;
+}
+
+async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
+  const runId = result.runId;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId ?? "")) {
+    throw stableError("target_all_run_id_invalid");
+  }
+  const directory = evidenceDirectory ?? path.resolve(".test", "e2e-target-workflow", runId);
+  if (typeof directory !== "string" || directory.length === 0) throw stableError("target_all_evidence_path_invalid");
+  try {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(directory, "verdict.json"), `${JSON.stringify(result)}\n`, { mode: 0o600 });
+  } catch {
+    throw stableError("target_all_evidence_write_failed");
+  }
 }
 
 async function defaultRunScenario(scenario, input) {

@@ -10,7 +10,7 @@ test("Profile provisioning uses only closed commands and a bounded secret frame"
   const secret = new TextEncoder().encode("codex-secret-canary");
   const summary = (readiness, isActive = false) => ({
     profile_id: "profile-1",
-    display_name: "Core live E2E",
+    display_name: "Target workflow E2E",
     authentication_method: "api_key",
     codex_turn_settings: {
       model: "codex-test-model",

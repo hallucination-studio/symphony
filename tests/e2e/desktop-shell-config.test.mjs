@@ -60,7 +60,7 @@ test("Desktop shell smoke uses production entrypoints without workflow credentia
   assert.doesNotMatch(makefile, /turn-request-path/u);
 });
 
-test("quality workflow keeps Desktop shell evidence separate from core live evidence", async () => {
+test("quality workflow keeps Desktop shell evidence separate from target workflow evidence", async () => {
   const workflow = await readFile(".github/workflows/quality.yml", "utf8");
   const smokeJob = workflow.slice(workflow.indexOf("  desktop-shell-smoke:"));
   assert.match(smokeJob, /oven-sh\/setup-bun@v2/u);
@@ -76,7 +76,7 @@ test("quality workflow keeps Desktop shell evidence separate from core live evid
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
   assert.match(smokeJob, /\.test\/e2e-desktop-shell\//u);
   assert.match(smokeJob, /name: desktop-shell-smoke-/u);
-  assert.doesNotMatch(smokeJob, /e2e-hermetic|e2e-core-live|secrets\./u);
+  assert.doesNotMatch(smokeJob, /e2e-hermetic|core-live|secrets\./u);
 });
 
 test("quality workflow uses the repository-pinned Rust toolchain", async () => {

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { evaluateCoreLiveEvidence } from "../../tools/e2e/core-live-verdict.mjs";
+import { evaluateTargetWorkflowEvidence } from "../../tools/e2e/target-workflow-verdict.mjs";
 import {
   observeDesktopShell,
   runDesktopShellSmoke,
@@ -19,7 +19,7 @@ const PASSED_OBSERVATION = Object.freeze({
   podium_backend_responded: true,
 });
 
-test("Desktop shell verdict cannot satisfy the core live contract", () => {
+test("Desktop shell verdict cannot satisfy the target workflow contract", () => {
   const verdict = createDesktopShellVerdict({
     runId: "desktop-run-1",
     observation: PASSED_OBSERVATION,
@@ -36,7 +36,7 @@ test("Desktop shell verdict cannot satisfy the core live contract", () => {
       webview_loaded: true,
     },
   });
-  assert.equal(evaluateCoreLiveEvidence(verdict).verdict, "failed");
+  assert.equal(evaluateTargetWorkflowEvidence(verdict).verdict, "failed");
 });
 
 test("Desktop shell runner uses an isolated secret-free process and writes bounded evidence", async (t) => {

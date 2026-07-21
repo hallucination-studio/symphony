@@ -114,6 +114,7 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
       if (scenario === "repair_escalation") throw new Error("repair_live_failed");
       return { scenario, status: "passed" };
     },
+    writeEvidence: false,
   });
 
   assert.deepEqual(calls, ["success", "repair_escalation", "restart_recovery", "delivery", "scheduling"]);

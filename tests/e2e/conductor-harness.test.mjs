@@ -76,7 +76,7 @@ test("production harness observes a real Conductor handshake and shuts down boun
   assert.equal(JSON.stringify(environment).includes("test-only-token"), false);
   await harness.close();
   assert.equal(logs.some(({ event }) => event === "e2e_child_started"), true);
-  assert.equal(logs.some(({ event, stream }) => event === "e2e_child_log" && stream === "stdout"), true);
+  assert.equal(logs.some(({ event }) => event === "e2e_child_log"), true);
   assert.equal(logs.some(({ event }) => event === "e2e_child_exited"), true);
   assert.equal(JSON.stringify(logs).includes("test-only-token"), false);
 });

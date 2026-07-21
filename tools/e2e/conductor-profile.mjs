@@ -5,7 +5,7 @@ export async function provisionApiKeyProfile({
   conductorId,
   model,
   apiKey,
-  displayName = "Core live E2E",
+  displayName = "Target workflow E2E",
   reasoningEffort = "medium",
   wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   log = () => {},

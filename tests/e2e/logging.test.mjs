@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createE2ELogger } from "../../tools/e2e/logging.mjs";
 
-test("core live logs are correlated structured lines with recursive secret redaction", () => {
+test("target workflow logs are correlated structured lines with recursive secret redaction", () => {
   const lines = [];
   const log = createE2ELogger({
     runId: "run-1",
