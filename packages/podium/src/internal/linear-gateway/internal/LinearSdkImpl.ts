@@ -2172,6 +2172,7 @@ function workflowStatusCategory(value: string):
     value === "completed" ||
     value === "canceled"
   ) return value;
+  if (value === "duplicate") return "canceled";
   throw new Error("linear_workflow_status_category_invalid");
 }
 

@@ -911,6 +911,7 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
         team: Promise.resolve({ states: async () => connection([
           { id: "state-progress", name: "In Progress", type: "started", position: 2 },
           { id: "state-todo", name: "Todo", type: "unstarted", position: 1 },
+          { id: "state-duplicate", name: "Duplicate", type: "duplicate", position: 3 },
         ]) }),
       };
     },
@@ -929,6 +930,7 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   assert.deepEqual(tree.statusCatalog, [
     { statusId: "state-progress", name: "In Progress", category: "started", position: 2 },
     { statusId: "state-todo", name: "Todo", category: "unstarted", position: 1 },
+    { statusId: "state-duplicate", name: "Duplicate", category: "canceled", position: 3 },
   ]);
   assert.deepEqual(tree.comments.map(({ commentId, issueId, managedMarker }) => ({ commentId, issueId, managedMarker })), [
     { commentId: "comment-root", issueId: "root-1", managedMarker: undefined },
