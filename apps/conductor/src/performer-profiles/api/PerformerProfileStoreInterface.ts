@@ -6,15 +6,15 @@ export type ReasoningEffort =
   | "high"
   | "xhigh";
 
-export interface AgentCommandRule {
+export interface ExecutionCommandRule {
   executable: string;
   argvPrefix: string[];
 }
 
 export interface AgentExecutionPolicy {
   sandboxMode: "read_only" | "workspace_write" | "unrestricted";
-  commandAllowlist: AgentCommandRule[];
-  commandDenylist: AgentCommandRule[];
+  commandAllowlist: ExecutionCommandRule[];
+  commandDenylist: ExecutionCommandRule[];
 }
 
 export interface PerformerProfile {
@@ -62,7 +62,7 @@ export function agentCommandAllowed(
   executable: string,
   argv: string[],
 ): boolean {
-  const matches = (rule: AgentCommandRule) =>
+  const matches = (rule: ExecutionCommandRule) =>
     rule.executable === executable &&
     rule.argvPrefix.every((value, index) => argv[index] === value);
   if (policy.commandDenylist.some(matches)) return false;

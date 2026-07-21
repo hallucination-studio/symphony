@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PerformerProfileControlProcessImpl } from "../internal/PerformerProfileControlProcessImpl.js";
-import type { PerformerInvocation } from "../../performer-turns/internal/GlobalPerformerLane.js";
+import type { SerializedPerformerProcessRunnerInterface } from "../internal/SerializedPerformerProcessRunnerImpl.js";
 
 test("Profile control uses the isolated CODEX_HOME and clears API Key frames", async () => {
-  let invocation: PerformerInvocation | undefined;
+  let invocation: Parameters<SerializedPerformerProcessRunnerInterface["run"]>[0] | undefined;
   const secret = new Uint8Array([11, 22, 33]);
   const control = new PerformerProfileControlProcessImpl(
     {
-      async run(value: PerformerInvocation) {
+      async run(value) {
         invocation = value;
         return {
           stdout: `${JSON.stringify({

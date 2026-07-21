@@ -182,6 +182,16 @@ export function inspectAuthoredFile(file, source) {
   }
 
   if (role === "conductor") {
+    const retiredConductorPattern = /(?:agent-symphony-harness|performer-turns|root[-_]?gate|\bV3\b|\bConversation\b|RootTurn|AgentCommand)/u;
+    if (retiredConductorPattern.test(normalizedFile) || retiredConductorPattern.test(source)) {
+      violations.push(
+        violation(
+          normalizedFile,
+          "retired_conductor_surface",
+          "Conductor must not expose retired Harness, Turn, Gate, Conversation, or command vocabulary",
+        ),
+      );
+    }
     if (
       /(?:database|sqlite|workflow[-_]?db|checkpoint|operation[-_]?journal|dispatch[-_]?queue)/i.test(
         normalizedFile,

@@ -85,10 +85,8 @@ export async function runConductor(environment = process.env): Promise<void> {
   const gateway = new PodiumLinearGatewayClientImpl(
     config.conductorShortHash,
     protocol,
-    profiles,
     {
       timeoutMs: 30_000,
-      conductorId: config.conductorId,
       observeDiscovery(evidence) {
         logEvent("info", "root_discovery_evidence", {
           root_header_count: String(evidence.rootHeaderCount),
@@ -96,7 +94,6 @@ export async function runConductor(environment = process.env): Promise<void> {
           get_issue_tree_count: String(evidence.getIssueTreeCount),
         });
       },
-      profileReadiness: (profileId) => profileReadiness(profileControl, performer, profileId),
     },
   );
   const workspaceFor = (root: DiscoveredRoot) => ({

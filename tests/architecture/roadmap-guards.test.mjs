@@ -105,7 +105,7 @@ test("approved Roadmap 2 scheduling vocabulary is inside the active boundary", (
 test("approved managed evidence vocabulary is inside the active boundary", () => {
   for (const [file, source] of [
     ["apps/conductor/src/root-workflow/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
-    ["apps/conductor/src/agent-symphony-harness/internal/RootConversationLifecycle.ts", "interface RootSelectionEvidence {}"],
+    ["apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts", "interface RootSelectionEvidence {}"],
   ]) {
     assert.deepEqual(inspectAuthoredFile(file, source), []);
   }
@@ -181,9 +181,20 @@ test("safe explanatory vocabulary does not trigger implementation guards", () =>
   );
   assert.deepEqual(
     inspectAuthoredFile(
-      "apps/conductor/src/agent-symphony-harness/internal/RootConversationLifecycle.ts",
+      "apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts",
       "interface RootWorkspaceEvidence { rootIssueId: string; }",
     ),
     [],
   );
+});
+
+test("negative controls reject retired Conductor paths and vocabulary", () => {
+  for (const [file, source] of [
+    ["apps/conductor/src/agent-symphony-harness/internal/retired.ts", "export const value = 1;"],
+    ["apps/conductor/src/target.ts", "export type Retired = \"V3\";"],
+    ["apps/conductor/src/target.ts", "export interface RootTurnInput {}"],
+    ["apps/conductor/src/target.ts", "export interface AgentCommand {}"],
+  ]) {
+    assert.ok(inspectAuthoredFile(file, source).some(({ code }) => code === "retired_conductor_surface"));
+  }
 });
