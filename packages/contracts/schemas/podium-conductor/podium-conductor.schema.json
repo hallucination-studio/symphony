@@ -692,6 +692,302 @@
         "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
+    "WorkflowStatusCategory": {
+      "enum": ["backlog", "unstarted", "started", "completed", "canceled"]
+    },
+    "WorkflowStatusSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status_id", "name", "category", "position"],
+      "properties": {
+        "status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "category": { "$ref": "#/$defs/WorkflowStatusCategory" },
+        "position": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 }
+      }
+    },
+    "WorkflowIssueSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "identifier",
+        "project_id",
+        "status_id",
+        "status_name",
+        "status_category",
+        "status_position",
+        "order",
+        "depth",
+        "title",
+        "description",
+        "remote_version",
+        "updated_at"
+      ],
+      "properties": {
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "status_category": { "$ref": "#/$defs/WorkflowStatusCategory" },
+        "status_position": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human"] },
+        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "WorkflowCommentSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comment_id", "issue_id", "body", "remote_version", "updated_at"],
+      "properties": {
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "WorkflowRelationSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation_id", "relation_kind", "source_issue_id", "target_issue_id"],
+      "properties": {
+        "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "relation_kind": { "enum": ["blocks", "blocked_by", "triggered_by"] },
+        "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "WorkflowRootTreeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_issue_id",
+        "status_catalog",
+        "issues",
+        "comments",
+        "relations",
+        "observed_at"
+      ],
+      "properties": {
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status_catalog": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/WorkflowStatusSnapshot" }
+        },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/WorkflowIssueSnapshot" }
+        },
+        "comments": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/WorkflowCommentSnapshot" }
+        },
+        "relations": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/WorkflowRelationSnapshot" }
+        },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "GetWorkflowIssueTreeQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_short_hash", "expected_project_id", "root_issue_id"],
+      "properties": {
+        "kind": { "const": "get_workflow_issue_tree" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "WorkflowIssueTreeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "tree"],
+      "properties": {
+        "kind": { "const": "workflow_issue_tree" },
+        "tree": { "$ref": "#/$defs/WorkflowRootTreeSnapshot" }
+      }
+    },
+    "WorkflowMutationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_issue_id", "expected_remote_version"],
+      "properties": {
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "expected_status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "CreateWorkflowIssueCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "write_id",
+        "conductor_short_hash",
+        "expected_project_id",
+        "root_issue_id",
+        "expected_root_remote_version",
+        "parent_expected_remote_version",
+        "parent_expected_status_id",
+        "parent_issue_id",
+        "issue_kind",
+        "title",
+        "description",
+        "status_id",
+        "managed_marker"
+      ],
+      "properties": {
+        "kind": { "const": "create_workflow_issue" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "parent_expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "parent_expected_status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_kind": { "enum": ["cycle", "plan", "work", "verify", "human"] },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 }
+      }
+    },
+    "UpdateWorkflowIssueCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "status_id", "title", "description"],
+      "properties": {
+        "kind": { "const": "update_workflow_issue" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target": { "$ref": "#/$defs/WorkflowMutationTarget" },
+        "status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "AppendWorkflowCommentCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "body"],
+      "properties": {
+        "kind": { "const": "append_workflow_comment" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target": { "$ref": "#/$defs/WorkflowMutationTarget" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "CreateWorkflowRelationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "source_issue_id", "source_expected_remote_version", "target_issue_id", "target_expected_remote_version", "relation_kind"],
+      "properties": {
+        "kind": { "const": "create_workflow_relation" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "relation_kind": { "enum": ["blocks", "blocked_by", "triggered_by"] }
+      }
+    },
+    "WorkflowMutationCommand": {
+      "oneOf": [
+        { "$ref": "#/$defs/CreateWorkflowIssueCommand" },
+        { "$ref": "#/$defs/UpdateWorkflowIssueCommand" },
+        { "$ref": "#/$defs/AppendWorkflowCommentCommand" },
+        { "$ref": "#/$defs/CreateWorkflowRelationCommand" }
+      ]
+    },
+    "WorkflowMutationReadBack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["write_id", "target_issue_id", "remote_version"],
+      "properties": {
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+      }
+    },
+    "WorkflowMutationResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "read_back"],
+          "properties": {
+            "kind": { "const": "applied" },
+            "read_back": { "$ref": "#/$defs/WorkflowMutationReadBack" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "read_back"],
+          "properties": {
+            "kind": { "const": "already_applied" },
+            "read_back": { "$ref": "#/$defs/WorkflowMutationReadBack" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "read_back_target"],
+          "properties": {
+            "kind": { "const": "write_unconfirmed" },
+            "read_back_target": { "$ref": "#/$defs/WorkflowMutationReadBack" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "precondition_conflict" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error"],
+          "properties": {
+            "kind": { "const": "failed" },
+            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+          }
+        }
+      ]
+    },
     "LinearMutationCommand": {
       "oneOf": [
         { "$ref": "#/$defs/CreateManagedNodeCommand" },
@@ -904,14 +1200,18 @@
         { "$ref": "#/$defs/ListRootIssuesQuery" },
         { "$ref": "#/$defs/GetIssueTreeQuery" },
         { "$ref": "#/$defs/GetRootScopeQuery" },
+        { "$ref": "#/$defs/GetWorkflowIssueTreeQuery" },
         { "$ref": "#/$defs/ListRootUsageQuery" },
         { "$ref": "#/$defs/ProjectResolutionResult" },
         { "$ref": "#/$defs/RootIssuesPageResult" },
         { "$ref": "#/$defs/IssueTreePageResult" },
         { "$ref": "#/$defs/RootScopeResult" },
+        { "$ref": "#/$defs/WorkflowIssueTreeResult" },
         { "$ref": "#/$defs/RootUsagePageResult" },
         { "$ref": "#/$defs/LinearMutationCommand" },
         { "$ref": "#/$defs/LinearMutationResult" },
+        { "$ref": "#/$defs/WorkflowMutationCommand" },
+        { "$ref": "#/$defs/WorkflowMutationResult" },
         { "$ref": "#/$defs/ProfileRelayMetadata" },
         { "$ref": "#/$defs/ProfileRelayResult" },
         { "$ref": "#/$defs/AcknowledgeRootRetryBlockCommand" },

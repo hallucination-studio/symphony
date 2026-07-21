@@ -1,0 +1,65 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/WorkflowRootTreeSnapshot",
+  "value": {
+    "root_issue_id": "root-1",
+    "status_catalog": [
+      { "status_id": "status-todo", "name": "Todo", "category": "unstarted", "position": 1 },
+      { "status_id": "status-progress", "name": "In Progress", "category": "started", "position": 2 }
+    ],
+    "issues": [
+      {
+        "issue_id": "root-1",
+        "identifier": "SYM-1",
+        "project_id": "project-1",
+        "status_id": "status-progress",
+        "status_name": "In Progress",
+        "status_category": "started",
+        "status_position": 2,
+        "order": 0,
+        "depth": 0,
+        "title": "Root",
+        "description": "Build the target workflow.",
+        "issue_kind": "root",
+        "remote_version": "2026-07-21T09:00:00Z",
+        "updated_at": "2026-07-21T09:00:00Z"
+      },
+      {
+        "issue_id": "work-1",
+        "identifier": "SYM-2",
+        "project_id": "project-1",
+        "parent_issue_id": "root-1",
+        "status_id": "status-todo",
+        "status_name": "Todo",
+        "status_category": "unstarted",
+        "status_position": 1,
+        "order": 1,
+        "depth": 1,
+        "title": "Implement gateway",
+        "description": "Implement the bounded gateway.",
+        "managed_marker": "root-1:work-1",
+        "issue_kind": "work",
+        "remote_version": "2026-07-21T09:01:00Z",
+        "updated_at": "2026-07-21T09:01:00Z"
+      }
+    ],
+    "comments": [
+      {
+        "comment_id": "comment-1",
+        "issue_id": "root-1",
+        "body": "Root status.",
+        "managed_marker": "root-1:status",
+        "remote_version": "2026-07-21T09:00:01Z",
+        "updated_at": "2026-07-21T09:00:01Z"
+      }
+    ],
+    "relations": [
+      {
+        "relation_id": "relation-1",
+        "relation_kind": "blocks",
+        "source_issue_id": "work-1",
+        "target_issue_id": "root-1"
+      }
+    ],
+    "observed_at": "2026-07-21T09:02:00Z"
+  }
+}

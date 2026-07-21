@@ -1,0 +1,12 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/WorkflowRootTreeSnapshot",
+  "value": {
+    "root_issue_id": "root-1",
+    "status_catalog": [],
+    "issues": [],
+    "comments": [],
+    "relations": [],
+    "observed_at": "2026-07-21T09:02:00Z",
+    "metadata": { "should_not_cross_boundary": true }
+  }
+}

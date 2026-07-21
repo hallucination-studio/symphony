@@ -285,6 +285,48 @@ test("Stage Wire is closed, correlated, and covers each terminal outcome", async
   assert.equal(schema.$defs.StageLimits.properties.reservation, undefined);
 });
 
+test("workflow gateway contracts expose catalog, complete Tree facts, and stable writes", async () => {
+  const schema = await loadSchema("podium-conductor");
+
+  const status = schema.$defs.WorkflowStatusSnapshot;
+  assert.deepEqual(status.required, ["status_id", "name", "category", "position"]);
+  assert.deepEqual(schema.$defs.WorkflowStatusCategory.enum, [
+    "backlog", "unstarted", "started", "completed", "canceled",
+  ]);
+
+  const tree = schema.$defs.WorkflowRootTreeSnapshot;
+  assert.deepEqual(tree.required, [
+    "root_issue_id", "status_catalog", "issues", "comments", "relations", "observed_at",
+  ]);
+  assert.equal(schema.$defs.WorkflowIssueSnapshot.properties.remote_version.$ref,
+    "common.schema.json#/$defs/OpaqueIdentifier");
+  assert.equal(schema.$defs.WorkflowCommentSnapshot.properties.remote_version.$ref,
+    "common.schema.json#/$defs/OpaqueIdentifier");
+  assert.equal(schema.$defs.WorkflowRelationSnapshot.additionalProperties, false);
+
+  assert.deepEqual(schema.$defs.WorkflowMutationCommand.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/CreateWorkflowIssueCommand",
+    "#/$defs/UpdateWorkflowIssueCommand",
+    "#/$defs/AppendWorkflowCommentCommand",
+    "#/$defs/CreateWorkflowRelationCommand",
+  ]);
+  for (const name of [
+    "CreateWorkflowIssueCommand",
+    "UpdateWorkflowIssueCommand",
+    "AppendWorkflowCommentCommand",
+    "CreateWorkflowRelationCommand",
+  ]) {
+    assert.ok(schema.$defs[name].required.includes("write_id"), name);
+    assert.ok(schema.$defs[name].required.includes("conductor_short_hash"), name);
+    assert.ok(schema.$defs[name].required.includes("expected_project_id"), name);
+    assert.ok(schema.$defs[name].required.includes("root_issue_id"), name);
+    assert.ok(schema.$defs[name].required.includes("expected_root_remote_version"), name);
+  }
+  assert.deepEqual(schema.$defs.WorkflowMutationResult.oneOf.map(({ properties }) => properties.kind.const), [
+    "applied", "already_applied", "write_unconfirmed", "precondition_conflict", "failed",
+  ]);
+});
+
 test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", async () => {
   const schema = await loadSchema("conductor-performer");
   const bootstrap = schema.$defs.OpenRootConversationCommand;
