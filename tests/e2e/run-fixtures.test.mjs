@@ -180,6 +180,11 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
     query.match(/CoreLive(?:Label|Project|Root)/u)?.[0]), [
     "CoreLiveLabel", undefined, "CoreLiveProject", "CoreLiveRoot",
   ]);
+  assert.deepEqual(requests[1].variables.input, {
+    name: "symphony:e2e/run-1",
+    color: "#5E6AD2",
+    isGroup: false,
+  });
   assert.deepEqual(requests[2].variables.input.labelIds, ["label-1"]);
   assert.equal(requests[3].variables.input.delegateId, "actor-1");
   assert.equal(requests[3].variables.input.title, "run-1");

@@ -151,7 +151,6 @@ export function createRunScopedLinearOperator({
         }
       `, { input: {
         name: runLabelName,
-        teamId: preflight.teamId,
         color: "#5E6AD2",
         isGroup: false,
       } });
