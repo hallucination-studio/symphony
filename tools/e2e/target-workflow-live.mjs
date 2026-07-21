@@ -99,7 +99,7 @@ export async function readTargetProjectConfiguration({
     .filter(({ teamId, todo, done }) => SAFE_ID.test(teamId ?? "") && SAFE_ID.test(todo ?? "") && SAFE_ID.test(done ?? ""));
   if (data.organization?.id === undefined || !SAFE_ID.test(data.organization.id) ||
       appUsers.length !== 1 || !SAFE_ID.test(appUsers[0]?.id ?? "") ||
-      !project || project.id !== projectSlugId || project.slugId !== projectSlugId ||
+      !project || !SAFE_ID.test(project.id ?? "") || project.slugId !== projectSlugId ||
       typeof project.name !== "string" || project.name.length === 0 || typeof project.updatedAt !== "string" ||
       candidates.length !== 1) {
     throw stableError("target_live_project_configuration_invalid");

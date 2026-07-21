@@ -48,6 +48,31 @@ test("target project configuration selects one retained Project team and app act
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
 });
 
+test("target project configuration accepts a Linear project id returned for a slug lookup", async () => {
+  const result = await readTargetProjectConfiguration({
+    developmentToken: "linear-secret",
+    clientId: "client-1",
+    projectSlugId: "project-slug-1",
+    fetch: async () => response({ data: {
+      organization: { id: "organization-1" },
+      applicationInfo: { name: "Symphony" },
+      users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
+      project: {
+        id: "project-internal-1", name: "Retained Target", slugId: "project-slug-1", updatedAt: "2026-07-22T00:00:00Z",
+        teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
+      },
+      teams: { nodes: [{
+        id: "team-1",
+        states: { nodes: [{ id: "todo-1", name: "Todo" }, { id: "done-1", name: "Done" }], pageInfo: { hasNextPage: false } },
+      }], pageInfo: { hasNextPage: false } },
+    } }),
+    log: () => {},
+  });
+
+  assert.equal(result.project.projectId, "project-internal-1");
+  assert.equal(result.rootInput.projectId, "project-internal-1");
+});
+
 test("target live success composes setup, production boundary, Git observation, and scope cleanup", async () => {
   const events = [];
   const facts = { root: { rootIssueId: "root-1", projectId: "project-1" } };
