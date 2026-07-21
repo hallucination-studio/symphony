@@ -198,3 +198,15 @@ test("negative controls reject retired Conductor paths and vocabulary", () => {
     assert.ok(inspectAuthoredFile(file, source).some(({ code }) => code === "retired_conductor_surface"));
   }
 });
+
+test("negative controls reject retired Performer paths and protocol vocabulary", () => {
+  for (const [file, source] of [
+    ["apps/performer/src/performer/root_turn/retired.py", "value = 1"],
+    ["apps/performer/src/performer/target.py", "class RootTurnRuntime: pass"],
+    ["apps/performer/src/performer/target.py", "class AgentCommandClient: pass"],
+    ["packages/contracts/schemas/conductor-performer/retired.schema.json", "Protocol V3"],
+    ["packages/contracts/schemas/conductor-performer/retired.schema.json", "RootTurnResult"],
+  ]) {
+    assert.ok(inspectAuthoredFile(file, source).some(({ code }) => code === "retired_performer_surface"));
+  }
+});

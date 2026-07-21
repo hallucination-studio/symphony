@@ -11,7 +11,7 @@ from performer.backends.provider_backend_interface import (
     ProviderBackendError,
     ProviderBackendInterface,
     ProviderStageCanceled,
-    ProviderTurnDeadlineExpired,
+    ProviderStageDeadlineExpired,
 )
 from performer.contracts import validate
 
@@ -65,7 +65,7 @@ class StageExecutionRuntime:
             result = self._result(envelope, {
                 "kind": "canceled", "sanitized_reason": error.sanitized_reason,
             })
-        except ProviderTurnDeadlineExpired:
+        except ProviderStageDeadlineExpired:
             result = self._result(envelope, {
                 "kind": "canceled", "sanitized_reason": "The Stage deadline expired.",
             })
@@ -200,7 +200,7 @@ def _deadline_seconds(envelope: dict[str, Any], now: datetime) -> float:
     remaining = (deadline - now).total_seconds()
     configured = envelope["limits"]["max_wall_time_ms"] / 1000
     if remaining <= 0:
-        raise ProviderTurnDeadlineExpired
+        raise ProviderStageDeadlineExpired
     return min(configured, remaining)
 
 
@@ -237,4 +237,4 @@ class _wall_timeout:
 
     @staticmethod
     def _expire(*_: object) -> None:
-        raise ProviderTurnDeadlineExpired
+        raise ProviderStageDeadlineExpired

@@ -1,9 +1,0 @@
-{
-  "schema": "conductor-performer.schema.json#/$defs/RootCommandChannel",
-  "value": {
-    "kind": "workspace_framed_channel",
-    "metadata_path": "../metadata.json",
-    "request_path": ".symphony/agent-command/request.fifo",
-    "response_path": ".symphony/agent-command/response.fifo"
-  }
-}

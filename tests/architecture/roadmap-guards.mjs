@@ -216,6 +216,22 @@ export function inspectAuthoredFile(file, source) {
     }
   }
 
+  const retiredPerformerPattern = /(?:conversation[-_]?protocol|root[-_]?turn|command[-_]?broker|OpenRootConversation|RootTurn|AgentCommand|agent-command|root[-_]?conversation|Protocol V3)/u;
+  if (
+    (role === "performer" &&
+      (retiredPerformerPattern.test(normalizedFile) || retiredPerformerPattern.test(source))) ||
+    (normalizedFile.startsWith("packages/contracts/schemas/conductor-performer/") &&
+      (retiredPerformerPattern.test(normalizedFile) || retiredPerformerPattern.test(source)))
+  ) {
+    violations.push(
+      violation(
+        normalizedFile,
+        "retired_performer_surface",
+        "Performer and the Stage schema must not expose retired Conversation, Turn, or Agent Command surfaces",
+      ),
+    );
+  }
+
   if (
     /(?:readFile|readFileSync|open|read_to_string)[\s\S]{0,300}(?:auth\.json|config\.toml|CODEX_HOME)/.test(
       source,
