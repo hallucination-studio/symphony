@@ -22,14 +22,14 @@
 | 具体实现 | `*Impl` | `LinearSdkImpl` |
 | 改变状态的输入 | `*Command` | `UpdateIssueStateCommand` |
 | 读取输入 | `*Query` | `GetIssueTreeQuery` |
-| 封闭结果 | `*Result` | `RootTurnCompletedResult` |
+| 封闭结果 | `*Result` | `WorkStageResult` |
 | 结构化失败 | `*Error` | `ProtocolError` |
 | 可丢弃观察 | `*Event` | `PerformerHeartbeatEvent` |
 | 外部事实副本 | `*Snapshot` | `LinearIssueTreeSnapshot` |
 | 组合后的当前视图 | `*View` | `RootRunView` |
 | 模块间纯决策边界 | `*PolicyInterface` | `RootSchedulingPolicyInterface` |
 | 模块内纯规则 | `*Policy` | `LinearPriorityPolicy` |
-| 应用编排 | `*UseCase` | `RunAgentRootTurnUseCase` |
+| 应用编排 | `*UseCase` | `RunRootStageUseCase` |
 | 跨进程封闭协议 | `*Protocol` | `LinearGatewayProtocol` |
 
 禁止把`Manager`、`Service`、`Helper`、`Utils`作为默认命名。只有当领域本身就叫Service时才允许使用。
@@ -89,9 +89,9 @@ Linear OAuth/credential只能出现在Podium。Codex credential由SDK保存在Pr
 linear-gateway
 root-discovery
 root-scheduling
-linear-tree
-agent-symphony-harness
-performer-turns
+root-workflow
+linear-dag
+performer-stage-client
 performer-profiles
 git-workspaces
 root-delivery
@@ -99,13 +99,16 @@ runtime-reporting
 ```
 
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
-`RootRunView`和`LinearIssueTreeSnapshot`只存在于内存。
+`RootDagView`和`LinearIssueTreeSnapshot`只存在于内存。
 
-`agent-symphony-harness`拥有`AgentSymphonyHarnessInterface`和
-`AgentCommandBrokerInterface`。Context builder、command registry、schema validation和具体broker
-实现留在该模块internal；其他Conductor模块不能另建Agent command入口。`root-scheduling`只处理
-Root readiness和Root排序；`linear-tree`只验证、规范化和裁剪Root context，二者都不能选择
-current Leaf或生成Plan/Work/Gate directive。
+`root-workflow`拥有`RootWorkflowPolicyInterface`，只从fresh Linear status/Cycle Tree/Git派生一个closed
+业务decision；`linear-dag`拥有`LinearDagExecutionInterface`，负责验证status、bootstrap/approved Plan Contract和
+ready node、构造stage-specific context、调用
+Performer并materialize Result。`performer-stage-client`拥有
+`PerformerStageClientInterface`和caller-side
+Wire transport；Performer没有反向Conductor client。完整边界只由
+[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。`root-scheduling`只处理跨Root
+readiness和排序；`root-workflow`不调用Performer，`linear-dag`不决定successor Cycle或delivery。
 
 Conductor可以保存`PerformerProfile`明文配置文件，但不能读取或修改Profile
 `CODEX_HOME`中的Codex-owned文件。Profile配置文件不是数据库。
@@ -123,10 +126,9 @@ SDK逻辑。
 模块：
 
 ```text
-conversation_protocol
-root_turn
+stage_protocol
+stage_execution
 profile_control
-events
 backends
 ```
 
@@ -139,7 +141,7 @@ backends/<provider>/<Provider>BackendImpl.py
 `ProviderBackendInterface`和registry属于Performer内部，不进入跨角色contracts。
 `CodexTurnSettings`是批准的产品DTO；Codex SDK类型、login handle、auth/account payload
 和SDK参数映射仍只能存在于`CodexBackendImpl`。
-Turn Command可以携带`CodexTurnSettings`；不能携带任意Provider config map。
+`StageContextEnvelope.execution_policy`可以携带`CodexTurnSettings`；不能携带任意Provider config map。
 
 ### Podium Desktop
 
@@ -160,7 +162,7 @@ contracts/
 
 每条Protocol有独立schema和generated types。Schema只包含：
 
-- closed Command/Query/Result/Event和Protocol envelope；
+- closed Command/Query/Request/Response/Result/Event和Protocol envelope；
 - ID、时间、枚举、有界文本；
 - 明确版本。
 - secret input metadata；API Key值使用独立bounded secret frame。
@@ -180,8 +182,10 @@ TypeScript：
 
 ```text
 LinearGatewayInterface.ts
-AgentSymphonyHarnessInterface.ts
-AgentSymphonyHarnessImpl.ts
+RootWorkflowPolicyInterface.ts
+LinearDagExecutionInterface.ts
+LinearDagExecutionImpl.ts
+PerformerStageClientInterface.ts
 PodiumLinearGatewayClientImpl.ts
 LinearGatewayProtocolHandlerImpl.ts
 GetIssueTreeQuery.ts
@@ -193,8 +197,8 @@ Python：
 ```text
 provider_backend_interface.py
 codex_backend_impl.py
-root_turn_command.py
-root_turn_completed_result.py
+execute_work_request.py
+work_stage_result.py
 ```
 
 语言内遵守各自惯例，但类型后缀保持一致。缩写只使用产品已确认词汇，例如`OAuth`、`SDK`、`PR`。

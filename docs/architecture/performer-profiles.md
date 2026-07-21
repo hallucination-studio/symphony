@@ -14,10 +14,10 @@ Profiles，以及Conductor、Performer和Codex SDK之间的所有权边界。
 - Desktop通过Podium发出Profile Command；Podium只做瞬时转发和View组合，active Profile由
   Conductor验证并持久化；
 - Profile切换不重启Conductor，下一次Root claim立即使用新active Profile；
-- Root固定使用claim时的Profile；Conversation loss时仍用该Profile执行Root-level retry；
+- Root固定使用claim时的Profile；每个Stage用该Profile创建fresh Provider context；
 - model、reasoning effort和Fast由Conductor保存为产品设置，并由Performer映射为SDK参数；
 - sandbox mode和command allowlist/denylist由Conductor保存，并由Performer映射为Provider-native策略；
-- Token使用量来自完整Codex SDK Turn Result；完成数量来自Linear Root事实。
+- Token使用量来自完整Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
 
 ## 2. Canonical模型
 
@@ -266,11 +266,11 @@ Fast必须按当前认证方式和SDK公开能力解释：
 - ChatGPT Profile只有在当前账号和所选model支持Codex Fast时才允许开启；
 - API Key Profile在V1显示为`Unavailable`，`isFastModeEnabled`必须为`false`；
 - Symphony不把API Key的其他priority/service-tier计费能力冒充为Codex Fast；
-- SDK在Turn启动时仍可拒绝已失效的model/Fast组合，错误必须作为Profile/Turn设置错误
+- SDK在Stage启动时仍可拒绝已失效的model/Fast组合，错误必须作为Profile/Stage设置错误
   可见，不能自动换model或关闭Fast。
 
-Profile设置在每个Turn启动时重新读取。编辑当前Root所固定Profile的model、reasoning、Fast或
-execution policy后，无需重启Conductor，下一Performer Turn使用新设置；当前Turn不被抢占。
+Profile设置在每个Stage启动时重新读取。编辑当前Root所固定Profile的model、reasoning、Fast或
+execution policy后，无需重启Conductor，下一个Stage使用新设置；当前Stage不被抢占。
 
 ## 9. Readiness
 
@@ -293,7 +293,7 @@ invalid
 
 Update在持久化前验证closed字段、认证方式约束和当前Backend adapter支持的参数；
 失败时返回Error而不破坏原来的ready Profile。model是否对当前账号可用不通过额外
-Check Turn预检，最终由真实Turn中的SDK调用确认。
+额外Provider预检，最终由真实Stage中的SDK调用确认。
 
 只有`ready` Profile可以被activate或启动新的Root。
 
@@ -302,77 +302,21 @@ Conductor启动后刷新所有已保存Profile的状态；`GetPerformerProfilesQ
 status后再返回View。readiness和account label只存在于当前进程内，重启时重新读取。
 active Profile未确认ready前不claim新的Root。
 
-## 10. Active Profile与实时切换
+## 10. Active Profile与Stage调用
 
-Conductor在`profiles.json`中只保存一个：
+Conductor在`profiles.json`保存一个`activeProfileId`。新Root claim时把ready active Profile固定到
+Root Primary Status Comment；切换active Profile只影响之后claim的Root，不抢占active Stage。
 
-```text
-activeProfileId
-```
+每个Plan、Work和Verify Stage都使用该Profile的`CODEX_HOME`创建fresh Provider context。Profile只
+复用认证、Provider设置和SDK cache，不保存Root conversation或Stage continuation。Stage契约只由
+[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
 
-`ActivatePerformerProfileCommand`：
-
-1. 确认Profile存在且`ready`；
-2. 原子替换`activeProfileId`；
-3. Conductor立即向Desktop报告新的active Profile；
-4. 不重启Conductor或Performer常驻进程；
-5. 不抢占当前Turn。
-
-Profile Create/Update/Activate不启动SDK，可以在业务Turn运行时提交。Login和Status需要
-启动Performer control process，必须等待Conductor的当前业务Turn结束。
-
-新Root首次claim时，把active Profile写入Root Primary Status Comment：
-
-```text
-performer_profile_id: <profile-id>
-```
-
-Root得到`performer_id`后，始终使用该`performer_profile_id`对应的`CODEX_HOME`。
-切换active Profile只影响之后claim的Root。
-
-原因是Codex Conversation和session state属于创建它的`CODEX_HOME`。目标架构不跨
-Profile复制session，也不把同一个Root迁移到另一个Profile。只有Provider明确报告current
-Conversation不可恢复时，Conductor才使用同一Profile创建新Conversation并重新调度整个Root。
-
-因此“实时切换”定义为：
-
-- Desktop选择后立即生效；
-- 不需要重启任何Runtime；
-- 下一个新Root使用新Profile；
-- 当前Turn继续；
-- 已有Root保持Profile稳定；Conversation正常resume，失效时按Root-level retry替换。
-
-## 11. Turn契约
-
-每个Turn增加：
-
-```text
-performer_profile_id
-```
-
-Conductor通过该ID解析Profile目录和`CodexTurnSettings`，然后启动Performer：
-
-```text
-CODEX_HOME=<profile codex-home>
-RootTurnCommand.performer_profile_id=<profile-id>
-RootTurnCommand.codex_turn_settings=<current settings>
-RootTurnCommand.execution_policy=<current policy>
-```
-
-Result必须回显`performer_profile_id`。Result、Root Primary Status Comment、原始Command和
-该Command解析出的Profile目录任一不匹配时，Conductor拒绝Result；校验不读取当前
-`activeProfileId`。
-
-`CodexTurnSettings`是显式批准的closed产品DTO，不是SDK config或任意Provider map。
-`CODEX_HOME`绝对路径通过受控process environment传入，不进入Linear、Desktop View或
-日志。
-
-## 12. Token与完成数量
+## 11. Token usage
 
 Performer把Codex SDK的Turn usage归一化为：
 
 ```text
-PerformerTurnUsageSnapshot
+StageUsageSnapshot
   input_tokens
   cached_input_tokens
   output_tokens
@@ -383,7 +327,8 @@ PerformerTurnUsageSnapshot
 `cached_input_tokens`是`input_tokens`的子集，`total_tokens`按SDK语义或
 `input_tokens + output_tokens`计算，不能把cached token重复相加。
 
-每个有效Turn Result可以携带`usage`。Conductor把Root累计值写入Root Primary Status Comment：
+每个有效Stage Result可以携带`usage`。Conductor先把settlement写入matching Stage execution managed comment，
+再从完整Root execution history重建累计值；Root Primary Status Comment只投影观察值：
 
 ```text
 usage_input_tokens
@@ -391,46 +336,29 @@ usage_cached_input_tokens
 usage_output_tokens
 usage_reasoning_output_tokens
 usage_total_tokens
-last_usage_turn_id
+last_usage_stage_execution_id
 ```
 
-`last_usage_turn_id`防止同一个Result重复累计。Root已经Done/Canceled或Result correlation
-失效时，不为记录指标而绕过Root终止规则。
+`last_usage_stage_execution_id`防止同一个Result重复结算。Root已经Done/Canceled或Result correlation
+失效时，不为记录usage而绕过Root终止规则。
 
-Result应用时先完成最新Linear/Git read-back和全部correlation校验，再尝试累计usage，
-最后重新评估Root。usage写入失败只产生可见warning，不阻止Root后续工作或交付；
-因此该指标明确允许少计。
+Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
+settlement写入失败时，Stage启动前的Linear token reservation继续全额计入，不能因少计而绕过Root
+convergence gate；Primary投影写入失败只产生可见warning。
 
-Conductor通过`ListRootUsageQuery`分页读取自己拥有的managed Roots并产生：
+Desktop只显示当前Stage完整Result携带的usage，不设计跨Root累计数量或实时token推测。Conductor可以在
+Root managed comment中投影已接受Result的累计usage。Workflow gate读取execution settlements和open
+reservations，不读取Desktop或Primary projection。
 
-```text
-PerformerUsageView
-  inputTokens
-  cachedInputTokens
-  outputTokens
-  reasoningOutputTokens
-  totalTokens
-  completedRootCount
-  observedAt
-  isStale
-```
+SDK actual usage是operator-facing observation，不是账单；Root token budget correctness由保守reservation保证：
 
-`completedRootCount`表示已由Symphony交付、当前为In Review或Done的Roots数量。
-Podium只汇总各Conductor的`PerformerUsageView`，不保存计数。
+- Performer在SDK usage返回前崩溃时可能缺失，此时reservation不释放；
+- 货币成本、ChatGPT credits或Fast multiplier只可作为telemetry，不参与Workflow gate；
+- actual usage可以降低reservation后的charged amount，但不能增加Root token budget或覆盖deadline/cycle breaker。
 
-Turn进行中，Desktop可以用`PerformerUsageUpdatedEvent`刷新当前Turn的临时数值；Turn
-完成后以Result累计值替换。Event不累计、不持久化，Desktop或Conductor重启后只从
-Linear中的Root累计值恢复。
+## 12. Desktop
 
-Usage是operator-facing、best-effort指标，不是账单：
-
-- Performer在SDK usage返回前崩溃时可能缺失；
-- 不计算货币成本、ChatGPT credits或Fast multiplier；
-- 不作为Root、Work、Gate或调度决策输入。
-
-## 13. Desktop
-
-顶层仍只有Overview、Work、Conductors和Settings。
+顶层只有Overview、Conductors和Settings。
 
 Conductor Detail增加`Performer Profiles`区域：
 
@@ -446,10 +374,10 @@ Conductor Detail增加`Performer Profiles`区域：
 
 API Key保存后只显示`Configured`，不能重新显示或复制原值。
 
-如果当前Turn使用的Profile和active Profile不同，Desktop同时显示：
+如果当前Stage使用的Profile和active Profile不同，Desktop同时显示：
 
 ```text
-Current Turn Profile
+Current Stage Profile
 Active Profile for new Roots
 ```
 
@@ -461,7 +389,7 @@ Overview增加两个低密度指标：
 Conductor Detail显示该Conductor的usage breakdown；Root Detail显示该Root的Profile和
 token usage。指标必须带`observedAt`和stale状态。
 
-## 14. 错误与恢复
+## 13. 错误与恢复
 
 | 错误 | 行为 |
 |---|---|
@@ -478,7 +406,7 @@ token usage。指标必须带`observedAt`和stale状态。
 本轮不提供删除Profile Command，因此不会正常产生“固定Profile被移除”；该错误只防御
 磁盘损坏或人工删除。
 
-## 15. 不变量
+## 14. 不变量
 
 1. 每个Performer Profile有独立`CODEX_HOME`。
 2. Codex SDK是登录、account、auth持久化和Provider设置解释的唯一所有者。
@@ -487,16 +415,16 @@ token usage。指标必须带`observedAt`和stale状态。
 5. Conductor只保存Profile业务字段和active Profile ID。
 6. API Key只通过secret pipe进入Performer SDK。
 7. 只有ready Profile可以处理新Root。
-8. active Profile切换不抢占Turn，也不迁移已有Root Profile。
-9. 同一Root固定一个`performer_profile_id`，最多一个current `performer_id`；ID只能通过Root-level retry替换。
+8. active Profile切换不抢占Stage，也不迁移已有Root Profile。
+9. 同一Root固定一个`performer_profile_id`；Profile复用认证和设置，不复用Provider conversation。
 10. model、reasoning和Fast只通过SDK public API生效。
 11. sandbox和command policy只通过SDK public API生效，Symphony不实现动态授权引擎。
-12. Token usage不参与Workflow决策，也不宣称账单精度。
+12. SDK usage不宣称账单精度；Root token budget只由Linear reservation与validated settlement机械执行。
 13. 当前只允许`backendKind: codex`。
 14. `backendKind`和`authenticationMethod`创建后不可修改。
 15. Podium发起或转发active选择，但只有Conductor可以提交active Profile事实。
 
-## 16. 官方技术依据
+## 15. 官方技术依据
 
 - [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
 - [Codex Authentication](https://learn.chatgpt.com/docs/auth)

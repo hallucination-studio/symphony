@@ -57,25 +57,23 @@ apps/conductor/
     │   │   └── RootSchedulingPolicyInterface.ts
     │   └── internal/
     │       └── LinearPriorityRootSchedulingPolicyImpl.ts
-    ├── linear-tree/
+    ├── root-workflow/
     │   ├── api/
-    │   │   └── LinearTreeContextInterface.ts
+    │   │   └── RootWorkflowPolicyInterface.ts
     │   └── internal/
-    │       └── BoundedLinearTreeContextImpl.ts
-    ├── agent-symphony-harness/
+    │       └── LinearCycleRootWorkflowPolicyImpl.ts
+    ├── linear-dag/
     │   ├── api/
-    │   │   ├── AgentSymphonyHarnessInterface.ts
-    │   │   └── AgentCommandBrokerInterface.ts
+    │   │   └── LinearDagExecutionInterface.ts
     │   └── internal/
-    │       ├── AgentSymphonyHarnessImpl.ts
-    │       ├── AgentRootContextBuilder.ts
-    │       ├── ScopedAgentCommandBrokerImpl.ts
-    │       └── RunAgentRootTurnUseCase.ts
-    ├── performer-turns/
+    │       ├── LinearDagExecutionImpl.ts
+    │       ├── StageContextBuilder.ts
+    │       └── ReconcileRootUseCase.ts
+    ├── performer-stage-client/
     │   ├── api/
-    │   │   └── PerformerProcessInterface.ts
+    │   │   └── PerformerStageClientInterface.ts
     │   └── internal/
-    │       └── SubprocessPerformerProcessImpl.ts
+    │       └── ShortProcessPerformerStageClientImpl.ts
     ├── performer-profiles/
     │   ├── api/
     │   │   ├── PerformerProfile.ts
@@ -135,10 +133,9 @@ apps/performer/
 └── src/performer/
     ├── __main__.py
     ├── composition/
-    ├── conversation_protocol/
-    ├── root_turn/
+    ├── stage_protocol/
+    ├── stage_execution/
     ├── profile_control/
-    ├── events/
     └── backends/
         ├── provider_backend_interface.py
         ├── registry.py
@@ -146,7 +143,7 @@ apps/performer/
             └── codex_backend_impl.py
 ```
 
-Performer app提供Turn和Profile control两个process入口。Provider SDK只允许在对应
+Performer app提供Stage execution和Profile control入口。Provider SDK只允许在对应
 backend目录中导入。
 
 ## 5. Podium类库

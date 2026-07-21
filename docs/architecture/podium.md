@@ -20,9 +20,9 @@ Podium不拥有：
 
 - Workflow Tree解释；
 - Root Activity投影或Root readiness派生；
-- Root scheduling、Root内部Leaf解释和Root Gate；
+- Root scheduling、Stage选择和Verify；
 - Git worktree/branch/PR；
-- Provider SDK或performer_id解释；
+- Provider SDK、StageWire或Provider thread解释；
 - Performer Profile、Codex auth、API Key或`CODEX_HOME`持久化；
 - Conductor workflow database。
 
@@ -51,7 +51,7 @@ packages/podium/src/
 | `linear-gateway` | closed Linear query/mutation |
 | `performer-profile-relay` | 把Desktop Profile Command转发给目标Conductor，不保存payload |
 | `runtime-observations` | Conductor health |
-| `desktop-views` | 组合Overview、Work、Conductor和Settings所需的named Desktop View |
+| `desktop-views` | 组合Overview、Conductor和Settings所需的named Desktop View |
 
 ## 3. Linear Gateway
 
@@ -70,6 +70,7 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - resolve Resolved Conductor Project by Conductor Project Label；
 - list Roots；
 - fetch complete Issue Tree；
+- fetch resolved Team workflow status catalog；
 - read Priority/blocker/order/comments；
 - execute closed Issue mutation；
 - execute `LinearMutationCommand`；
@@ -79,7 +80,8 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 
 每个Project级mutation必须携带`conductor_short_hash + expected_project_id`和Project
 remote precondition。修改已有Issue、Comment或Label时还携带目标对象的
-`expected_updated_at`、预期state/parent和Managed Marker。任一precondition不匹配时
+`expected_updated_at`、预期status ID/parent和Managed Marker。Podium校验SDK response shape，Conductor
+解释status category、Issue kind和allowed transition。任一precondition不匹配时
 fail closed，不执行mutation，并返回封闭conflict Result供Conductor重新读取。
 
 ## 4. Credential
@@ -146,8 +148,8 @@ Label；一个Conductor Project Label必须最多出现在一个Project。
   runtime observation；
 - OAuth attempt。
 
-不保存权威project_id、Root、Issue Tree、polling checkpoint、dispatch、performer_id、
-Performer Profile、active Profile、Codex credential、usage、Gate或delivery。
+不保存权威project_id、Root、Issue Tree、polling checkpoint、dispatch、Stage Result、
+Performer Profile、active Profile、Codex credential、usage、Verify或delivery。
 
 ## 7. 接口
 
