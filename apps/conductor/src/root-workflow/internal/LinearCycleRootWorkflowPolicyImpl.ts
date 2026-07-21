@@ -21,7 +21,7 @@ export class LinearCycleRootWorkflowPolicyImpl implements RootWorkflowPolicyInte
     if (!plan) return attention(base, "plan_node_missing");
     if (["Draft", "Planning"].includes(cycle.issue.status_name)) {
       if (["Todo", "In Progress"].includes(plan.issue.status_name)) return runnable(base);
-      if (plan.issue.status_name === "In Review") return { ...base, readiness: "waiting_human" };
+      if (plan.issue.status_name === "In Review") return rootState === "In Progress" ? runnable(base) : { ...base, readiness: "waiting_human" };
       return attention(base, "plan_state_not_dispatchable");
     }
     if (!["Sealed", "Executing", "Verifying", "Inconclusive", "Escalated"].includes(cycle.issue.status_name)) {

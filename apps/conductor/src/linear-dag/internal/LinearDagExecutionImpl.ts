@@ -23,6 +23,8 @@ import type {
   StageUsage,
 } from "../../root-workflow/api/ManagedRecords.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
+import { DagMaterializer } from "./DagMaterializer.js";
+import { currentNodeMarker } from "./RootDagViewBuilder.js";
 import { StageContextBuilder, digest } from "./StageContextBuilder.js";
 
 type Issue = LinearWorkflowTreeSnapshot["issues"][number];
@@ -35,6 +37,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   constructor(
     private readonly dependencies: LinearDagExecutionDependencies,
     private readonly contextBuilder = new StageContextBuilder(),
+    private readonly dagMaterializer = new DagMaterializer(),
   ) {}
 
   async executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult> {
@@ -62,7 +65,14 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         return { kind: "awaiting_approval", cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id, planContractDigest: contract.planContractDigest };
       }
       if (next.kind === "blocked") throw new Error(next.reason);
-      if (next.kind === "completed") throw new Error("bootstrap_plan_unexpected_terminal_state");
+      if (next.kind === "completed") {
+        const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+        const cycle = activeCycle(tree, input.rootIssueId);
+        const plan = cycle && child(tree, cycle.issue_id, "plan");
+        const contract = plan && recordFrom(recordsByIssue(tree.comments), plan.issue_id, "plan_contract") as PlanContract | undefined;
+        if (!cycle || !plan || !contract) throw new Error("bootstrap_plan_sealed_read_back_incomplete");
+        return { kind: "sealed", cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id, planContractDigest: contract.planContractDigest };
+      }
       if (next.kind === "mutation_applied") continue;
     }
     throw new Error("bootstrap_plan_reconciliation_limit_exceeded");
@@ -119,7 +129,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       });
       return { kind: "mutation_applied", step: "bootstrap_plan_created" };
     }
-    if (!recordFrom(records, plan.issue_id, "node_marker")) {
+    if (!currentNodeMarker(records.get(plan.issue_id) ?? [])) {
       await this.appendRecord(input, tree, plan, `${input.rootIssueId}:plan:${plan.issue_id}:marker`, `${input.rootIssueId}:plan:${plan.issue_id}:marker`, {
         kind: "node_marker", version: 1, rootIssueId: input.rootIssueId, cycleIssueId: cycle.issue_id, nodeKey: "plan-1", nodeKind: "plan", planContractDigest: "pending-plan-contract",
       });
@@ -136,7 +146,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (root.status_name === "Needs Approval" && plan.status_name === "In Review") {
       return { kind: "waiting_human", step: "plan_approval" };
     }
-    if (plan.status_name !== "In Progress" && plan.status_name !== "In Review") return blocked("bootstrap_plan_state_invalid");
+    if (!["In Progress", "In Review", "Done"].includes(plan.status_name)) return blocked("bootstrap_plan_state_invalid");
 
     const contract = recordFrom(records, plan.issue_id, "plan_contract") as PlanContract | undefined;
     const latestExecution = latestExecutionRecord(records.get(plan.issue_id) ?? []);
@@ -180,11 +190,20 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       });
       return { kind: "mutation_applied", step: "plan_approval_requested" };
     }
-    if (root.status_name !== "Needs Approval") {
+    if (root.status_name === "Needs Approval") return { kind: "waiting_human", step: "plan_approval" };
+    if (root.status_name !== "In Progress") return blocked("plan_approval_read_back_invalid");
+    if (approval.expectedRootRemoteVersion === root.remote_version) {
       await this.updateStatus(input, tree, root, statuses.get("Needs Approval"), "root_needs_approval");
       return { kind: "mutation_applied", step: "root_needs_approval" };
     }
-    return { kind: "waiting_human", step: "plan_approval" };
+    const decision = this.dagMaterializer.next({ tree, contract, rootIssueId: input.rootIssueId, projectId: input.projectId, cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id });
+    if (decision.kind === "blocked") return blocked(decision.reason);
+    if (decision.kind === "complete") return { kind: "completed", planContractDigest: decision.planContractDigest };
+    await this.mutateAndReadBack({
+      input, tree, writeId: decision.command.writeId, command: decision.command,
+      check: (fresh, outcome) => decision.check(fresh, outcome.targetIssueId),
+    });
+    return { kind: "mutation_applied", step: decision.step };
   }
 
   private async updateStatus(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {

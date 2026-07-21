@@ -55,7 +55,7 @@ export type BootstrapPlanReconciliation =
   | { kind: "blocked"; reason: string };
 
 export interface BootstrapPlanExecutionResult {
-  kind: "awaiting_approval";
+  kind: "awaiting_approval" | "sealed";
   cycleIssueId: string;
   planIssueId: string;
   planContractDigest: string;

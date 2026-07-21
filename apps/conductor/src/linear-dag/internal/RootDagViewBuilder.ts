@@ -261,7 +261,7 @@ function buildNode(
 ): RootDagNodeView {
   if (issue.issue_kind !== "plan" && issue.issue_kind !== "work" && issue.issue_kind !== "verify") fail("node_kind_invalid");
   const records = recordsByIssue.get(issue.issue_id) ?? [];
-  const marker = oneRecord(records, "node_marker", "node_marker_duplicate") as NodeMarker | undefined;
+  const marker = currentNodeMarker(records, issue.issue_kind);
   if (!marker) fail("node_marker_missing");
   if (marker.rootIssueId !== rootIssueId || marker.cycleIssueId !== cycle.issue_id || marker.nodeKind !== issue.issue_kind) fail("node_marker_target_invalid");
   const blockedByIssueIds = relations.flatMap((relation) => {
@@ -279,10 +279,13 @@ function buildNode(
 function validateCycleShape(issue: Issue, nodes: RootDagNodeView[], planContract?: PlanContract): void {
   const plan = nodes.find((node) => node.issue.issue_kind === "plan")!;
   const executionNodes = nodes.filter((node) => node.issue.issue_kind === "work" || node.issue.issue_kind === "verify");
-  if (issue.status_name === "Draft" || issue.status_name === "Planning") {
-    if (executionNodes.length > 0) fail("partial_cycle_materialization");
-    if (issue.status_name === "Draft" && plan.issue.status_name !== "Todo") fail("cycle_transition_invalid");
-    if (issue.status_name === "Planning" && !["Todo", "In Progress", "In Review"].includes(plan.issue.status_name)) fail("cycle_transition_invalid");
+  if (issue.status_name === "Draft") {
+    if (executionNodes.length > 0 || plan.issue.status_name !== "Todo") fail("partial_cycle_materialization");
+    return;
+  }
+  if (issue.status_name === "Planning") {
+    if (!planContract && executionNodes.length > 0) fail("partial_cycle_materialization");
+    if (!["Todo", "In Progress", "In Review", "Done"].includes(plan.issue.status_name)) fail("cycle_transition_invalid");
     return;
   }
   if (!planContract && issue.status_name !== "Canceled") fail("plan_contract_missing");
@@ -303,25 +306,30 @@ function validatePlanContract(nodes: RootDagNodeView[], contract: PlanContract |
   // T8 must replace this placeholder before the Cycle can leave Planning.
   if (cycleState === "Planning" && plan.marker.planContractDigest === "pending-plan-contract") return;
   if (plan.marker.planContractDigest !== contract.planContractDigest) fail("plan_contract_digest_mismatch");
+  if (plan.marker.nodeKey !== "plan-1") fail("plan_contract_node_mismatch");
   const workKeys = new Set(contract.workNodes.map((node) => node.workKey));
   if (workKeys.size !== contract.workNodes.length) fail("plan_contract_duplicate_key");
   for (const node of nodes) {
     if (node.marker.planContractDigest !== contract.planContractDigest) fail("node_plan_contract_digest_mismatch");
     if (node.issue.issue_kind === "work" && !workKeys.has(node.marker.nodeKey)) fail("plan_contract_node_mismatch");
   }
-  if (["Draft", "Planning"].includes(cycleState)) return;
+  if (cycleState === "Draft") return;
+  if (cycleState === "Planning" && plan.issue.status_name !== "Done") return;
   const workNodes = nodes.filter((node) => node.issue.issue_kind === "work");
-  const nodeByKey = new Map(nodes.map((node) => [node.marker.nodeKey, node]));
+  const verifyNodes = nodes.filter((node) => node.issue.issue_kind === "verify");
+  if (workNodes.length !== contract.workNodes.length || verifyNodes.length !== 1) fail("plan_contract_node_count_mismatch");
+  const nodeByKey = new Map(nodes.filter((node) => node.issue.issue_kind !== "plan").map((node) => [node.marker.nodeKey, node]));
+  const expectedKeys = new Set([...contract.workNodes.map((node) => node.workKey), "verify-1"]);
+  if (nodeByKey.size !== expectedKeys.size || [...expectedKeys].some((key) => !nodeByKey.has(key))) fail("plan_contract_node_mismatch");
   for (const workContract of contract.workNodes) {
     const work = nodeByKey.get(workContract.workKey);
-    if (!work || !work.blockedByIssueIds.includes(plan.issue.issue_id)) fail("plan_dependency_relation_missing");
-    for (const dependencyKey of workContract.dependencyWorkKeys) {
-      const dependency = nodeByKey.get(dependencyKey);
-      if (!dependency || !work.blockedByIssueIds.includes(dependency.issue.issue_id)) fail("plan_dependency_relation_missing");
-    }
+    const expectedDependencyIds = new Set([plan.issue.issue_id]);
+    if (workContract.dependencyWorkKeys.some((dependencyKey) => !nodeByKey.has(dependencyKey))) fail("plan_dependency_relation_missing");
+    for (const dependencyKey of workContract.dependencyWorkKeys) expectedDependencyIds.add(nodeByKey.get(dependencyKey)!.issue.issue_id);
+    if (!work || work.blockedByIssueIds.length !== expectedDependencyIds.size || [...expectedDependencyIds].some((dependencyId) => !work.blockedByIssueIds.includes(dependencyId))) fail("plan_dependency_relation_missing");
   }
   const verify = nodes.find((node) => node.issue.issue_kind === "verify");
-  if (verify && workNodes.some((work) => !verify.blockedByIssueIds.includes(work.issue.issue_id))) fail("verify_dependency_relation_missing");
+  if (!verify || verify.blockedByIssueIds.length !== workNodes.length || workNodes.some((work) => !verify.blockedByIssueIds.includes(work.issue.issue_id))) fail("verify_dependency_relation_missing");
 }
 
 function validateRelations(relations: Relation[], issueById: Map<string, Issue>, rootIssueId: string): Relation[] {
@@ -389,7 +397,7 @@ function validateRootHumanState(root: Issue, rootRecords: ManagedRecord[], cycle
   if (activeCycle && root.status_name === "Todo") fail("root_cycle_state_conflict");
   if (activeCycle && root.status_name === "In Review") fail("root_cycle_state_conflict");
   const planInReview = activeCycle?.nodes.find((node) => node.issue.issue_kind === "plan" && node.issue.status_name === "In Review");
-  if (planInReview && (root.status_name !== "Needs Approval"
+  if (planInReview && (!["Needs Approval", "In Progress"].includes(root.status_name)
     || !actions.some((action) => action.requestKind === "needs_approval" && action.nodeIssueId === planInReview.issue.issue_id))) fail("pending_human_action_mismatch");
   if (["Needs Approval", "Needs Info"].includes(root.status_name)
     && (!activeCycle || !actions.some((action) => action.cycleIssueId === activeCycle.issue.issue_id))) fail("pending_human_action_mismatch");
@@ -418,6 +426,20 @@ function oneRecord(records: ManagedRecord[], kind: ManagedRecord["kind"], duplic
   const matches = records.filter((record) => record.kind === kind);
   if (matches.length > 1) fail(duplicateCode);
   return matches[0];
+}
+
+export function currentNodeMarker(records: ManagedRecord[], nodeKind: NodeMarker["nodeKind"] = "plan"): NodeMarker | undefined {
+  const markers = records.filter((record): record is NodeMarker => record.kind === "node_marker");
+  if (markers.length === 0) return undefined;
+  if (nodeKind !== "plan") {
+    if (markers.length > 1) fail("node_marker_duplicate");
+    return markers[0];
+  }
+  const resolved = markers.filter((marker) => marker.planContractDigest !== "pending-plan-contract");
+  const pending = markers.filter((marker) => marker.planContractDigest === "pending-plan-contract");
+  if (resolved.length > 1 || pending.length > 1) fail("node_marker_duplicate");
+  if (resolved.length === 1) return resolved[0];
+  return pending[0];
 }
 
 function fail(code: string): never {
