@@ -259,10 +259,12 @@ test("restarts after a real Performer exit using a real Git worktree", async () 
 
   await assert.rejects(execution.executeWorkStage(input), /performer_stage_result_missing/u);
 
-  const restarted = new LinearDagExecutionImpl({ linear: gateway, git, performer });
+  const serializedLinearTree = JSON.stringify(gateway.tree);
+  const restartedGateway = new WorkGateway(JSON.parse(serializedLinearTree) as LinearWorkflowTreeSnapshot, git);
+  const restarted = new LinearDagExecutionImpl({ linear: restartedGateway, git, performer });
   assert.deepEqual(await restarted.reconcileWork(input), { kind: "mutation_applied", step: "work_orphaned_execution_terminal" });
   assert.deepEqual(await restarted.reconcileWork(input), { kind: "mutation_applied", step: "work_execution_created" });
-  const retry = latestExecution(gateway);
+  const retry = latestExecution(restartedGateway);
   const ready = await restarted.reconcileWork(input, undefined, undefined, retry.stageExecutionId);
   assert.equal(ready.kind, "stage_ready");
   assert.equal((await git.inspect(workspace)).status.items.length, 0);
