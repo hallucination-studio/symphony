@@ -32,6 +32,7 @@ implements RootSchedulingPolicyInterface {
   strictlyOutranksBoundary(candidate: DiscoveredRoot, boundary: DiscoveredRoot) {
     const priority = PRIORITY_ORDER[candidate.priority] - PRIORITY_ORDER[boundary.priority];
     if (priority !== 0) return priority < 0;
-    return candidate.order < boundary.order;
+    if (candidate.order !== boundary.order) return candidate.order < boundary.order;
+    return candidate.identifier < boundary.identifier;
   }
 }

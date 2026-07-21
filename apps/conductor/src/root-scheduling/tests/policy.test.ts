@@ -86,6 +86,12 @@ test("Root scheduling excludes self-cycles and every member of a multi-Root cycl
   );
 });
 
+test("Root paging boundary comparison includes identifier ties", () => {
+  const policy = new LinearPriorityRootSchedulingPolicyImpl();
+  assert.equal(policy.strictlyOutranksBoundary(root("a", "high", 1, "SYM-10"), root("z", "high", 1, "SYM-20")), true);
+  assert.equal(policy.strictlyOutranksBoundary(root("z", "high", 1, "SYM-20"), root("a", "high", 1, "SYM-10")), false);
+});
+
 function root(
   issueId: string,
   priority: "urgent" | "high" | "normal" | "low" | "no_priority",

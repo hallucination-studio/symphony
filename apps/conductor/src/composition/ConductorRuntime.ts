@@ -2,6 +2,7 @@ import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy
 import type { AgentSymphonyHarnessInterface } from "../agent-symphony-harness/api/AgentSymphonyHarnessInterface.js";
 import type { RootSchedulingPolicyInterface } from "../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import type { DiscoveredRoot, V3RootRunView } from "../root-workflow/api/index.js";
+import type { RootDagView, RootWorkflowPolicyInterface } from "../root-workflow/api/RootWorkflowPolicyInterface.js";
 import type { ConductorCycleDisposition } from "./ConductorCycleDelayPolicy.js";
 
 export interface V3RuntimeGateway {
@@ -123,6 +124,75 @@ export class V3ConductorRuntime {
       if (!page.hasNextPage) return current;
     }
     throw new Error("linear_root_pages_incomplete");
+  }
+}
+
+export interface LinearWorkflowRuntimeGateway {
+  resolveProject(): Promise<
+    | { kind: "resolved"; projectId: string }
+    | { kind: "unbound" | "ambiguous" | "label_conflict" }
+  >;
+  listRoots(projectId: string): Promise<DiscoveredRoot[]>;
+  readRootDag(rootIssueId: string): Promise<RootDagView>;
+}
+
+export interface LinearWorkflowStageDispatcher {
+  dispatch(input: { root: DiscoveredRoot; view: RootDagView }): Promise<"progress" | "waiting-human" | "needs-attention">;
+}
+
+export class LinearConductorRuntime {
+  constructor(
+    private readonly conductorId: string,
+    private readonly gateway: LinearWorkflowRuntimeGateway,
+    private readonly scheduling: RootSchedulingPolicyInterface,
+    private readonly workflow: RootWorkflowPolicyInterface,
+    private readonly dispatcher: LinearWorkflowStageDispatcher,
+    private readonly reporter: RuntimeReporter,
+  ) {}
+
+  async cycle(): Promise<ConductorCycleDisposition> {
+    try {
+      const project = await this.gateway.resolveProject();
+      if (project.kind !== "resolved") {
+        await this.reporter.report({ status: "blocked", sanitizedReason: `project_${project.kind}` });
+        return "needs-attention";
+      }
+      const roots = discoverCurrentRoots({
+        projectId: project.projectId,
+        roots: await this.gateway.listRoots(project.projectId),
+        conductorId: this.conductorId,
+      });
+      const scheduled = this.scheduling.evaluate(roots);
+      let waitingHuman = false;
+      let needsAttention = scheduled.blocked.length > 0;
+      for (const root of scheduled.orderedEligible) {
+        const view = await this.gateway.readRootDag(root.issueId);
+        const assessment = this.workflow.assess(view);
+        if (assessment.readiness === "waiting_human") {
+          waitingHuman = true;
+          continue;
+        }
+        if (assessment.readiness !== "runnable") {
+          needsAttention ||= assessment.readiness === "needs_attention";
+          continue;
+        }
+        const result = await this.dispatcher.dispatch({ root, view });
+        await this.reporter.report({
+          status: result === "needs-attention" ? "blocked" : "ready",
+          rootId: root.issueId,
+          ...(result === "needs-attention" ? { sanitizedReason: "root_stage_dispatch_needs_attention" } : {}),
+        });
+        if (result === "progress") return "progress";
+        waitingHuman ||= result === "waiting-human";
+        needsAttention ||= result === "needs-attention";
+      }
+      await this.reporter.report({ status: "ready" });
+      if (waitingHuman) return "waiting-human";
+      return needsAttention || roots.length > 0 ? "needs-attention" : "empty";
+    } catch (error) {
+      await this.reporter.report({ status: "blocked", sanitizedReason: sanitize(error) });
+      return "needs-attention";
+    }
   }
 }
 
