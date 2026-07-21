@@ -1,5 +1,5 @@
 export type RuntimeProblemScope =
-  | "application" | "binding" | "root" | "turn" | "profile" | "workspace";
+  | "application" | "binding" | "root" | "stage" | "profile" | "workspace";
 
 export interface RuntimeProblemInput {
   code: string;
@@ -8,7 +8,6 @@ export interface RuntimeProblemInput {
   reason: string;
   actionRequired?: string;
   rootIssueId?: string;
-  turnId?: string;
   performerProfileId?: string;
 }
 

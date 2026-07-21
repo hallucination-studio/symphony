@@ -109,6 +109,11 @@ test("retired Conductor turn observation surfaces are rejected", () => {
       "export type PerformerTurnObservation = unknown;",
       "retired_conductor_surface",
     ],
+    [
+      "apps/conductor/src/runtime-reporting/internal/RuntimeConvergence.ts",
+      "export function applyCorrelatedTurnResult() {}",
+      "retired_conductor_surface",
+    ],
   ]);
 });
 

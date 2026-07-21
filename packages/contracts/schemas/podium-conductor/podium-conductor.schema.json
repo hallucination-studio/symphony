@@ -82,14 +82,13 @@
       "required": ["code", "scope", "severity", "sanitized_reason", "first_observed_at", "last_observed_at"],
       "properties": {
         "code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "scope": { "enum": ["application", "binding", "root", "turn", "profile", "workspace"] },
+        "scope": { "enum": ["application", "binding", "root", "stage", "profile", "workspace"] },
         "severity": { "enum": ["warning", "error"] },
         "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "action_required": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "first_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
         "last_observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },

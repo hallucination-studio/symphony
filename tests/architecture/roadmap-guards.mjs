@@ -182,7 +182,7 @@ export function inspectAuthoredFile(file, source) {
   }
 
   if (role === "conductor") {
-    const retiredConductorPattern = /(?:agent-symphony-harness|performer-turns|PerformerTurnObservation|root[-_]?gate|\bV3\b|\bConversation\b|RootTurn|AgentCommand)/u;
+    const retiredConductorPattern = /(?:agent-symphony-harness|performer-turns|PerformerTurnObservation|RuntimeConvergence|root[-_]?gate|\bV3\b|\bConversation\b|RootTurn|AgentCommand)/u;
     if (retiredConductorPattern.test(normalizedFile) || retiredConductorPattern.test(source)) {
       violations.push(
         violation(

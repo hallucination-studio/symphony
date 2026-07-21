@@ -12,9 +12,9 @@ test("Runtime Problem is correlated, bounded, and strips credentials", async () 
   });
 
   await reporter.problem({
-    code: "linear_rate_limited", scope: "turn", severity: "error",
+    code: "linear_rate_limited", scope: "stage", severity: "error",
     reason: "Authorization: Bearer secret-token failed for sk-secret",
-    rootIssueId: "root-1", turnId: "turn-1", performerProfileId: "profile-1",
+    rootIssueId: "root-1", performerProfileId: "profile-1",
     actionRequired: "Retry after Linear recovers.",
   });
 
@@ -24,12 +24,12 @@ test("Runtime Problem is correlated, bounded, and strips credentials", async () 
     sanitized_summary: "Authorization: [REDACTED] failed for [REDACTED]",
     observed_at: "2026-07-19T00:00:00Z",
     runtime_problem: {
-      code: "linear_rate_limited", scope: "turn", severity: "error",
+      code: "linear_rate_limited", scope: "stage", severity: "error",
       sanitized_reason: "Authorization: [REDACTED] failed for [REDACTED]",
       action_required: "Retry after Linear recovers.",
       first_observed_at: "2026-07-19T00:00:00Z",
       last_observed_at: "2026-07-19T00:00:00Z",
-      root_issue_id: "root-1", turn_id: "turn-1", performer_profile_id: "profile-1",
+      root_issue_id: "root-1", performer_profile_id: "profile-1",
     },
   }]);
 });

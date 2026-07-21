@@ -74,14 +74,13 @@ test("Runtime Problem observations preserve only closed correlation fields", asy
     status: "recovering", observed_at: "2026-07-19T00:00:00Z",
     sanitized_summary: "Linear rate limited.",
     runtime_problem: {
-      code: "linear_rate_limited", scope: "turn", severity: "error",
+      code: "linear_rate_limited", scope: "stage", severity: "error",
       sanitized_reason: "Linear rate limited.", action_required: "Retry later.",
       first_observed_at: "2026-07-19T00:00:00Z", last_observed_at: "2026-07-19T00:00:00Z",
-      root_issue_id: "root-1", turn_id: "turn-1", performer_profile_id: "profile-1",
+      root_issue_id: "root-1", performer_profile_id: "profile-1",
     },
   });
   assert.equal(observation.problem.code, "linear_rate_limited");
-  assert.equal(observation.problem.turnId, "turn-1");
   assert.equal(observation.problem.performerProfileId, "profile-1");
 });
 

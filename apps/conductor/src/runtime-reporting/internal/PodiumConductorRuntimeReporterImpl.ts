@@ -52,7 +52,6 @@ export class PodiumConductorRuntimeReporterImpl implements ConductorRuntimeRepor
         ...(input.actionRequired ? { action_required: sanitize(input.actionRequired) } : {}),
         first_observed_at: observedAt, last_observed_at: observedAt,
         ...(input.rootIssueId ? { root_issue_id: input.rootIssueId } : {}),
-        ...(input.turnId ? { turn_id: input.turnId } : {}),
         ...(input.performerProfileId
           ? { performer_profile_id: input.performerProfileId } : {}),
       },

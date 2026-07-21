@@ -68,14 +68,13 @@ export interface RuntimeObservation {
 
 export interface RuntimeProblem {
   code: string;
-  scope: "application" | "binding" | "root" | "turn" | "profile" | "workspace";
+  scope: "application" | "binding" | "root" | "stage" | "profile" | "workspace";
   severity: "warning" | "error";
   sanitizedReason: string;
   actionRequired?: string;
   firstObservedAt: string;
   lastObservedAt: string;
   rootIssueId?: string;
-  turnId?: string;
   performerProfileId?: string;
 }
 

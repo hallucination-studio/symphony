@@ -813,20 +813,19 @@ function runtimeProblem(value: JsonValue) {
   const problem = recordValue(value, "runtime_problem_invalid");
   const scope = requiredString(problem.scope, "runtime_problem_scope_invalid");
   const severity = requiredString(problem.severity, "runtime_problem_severity_invalid");
-  if (!(["application", "binding", "root", "turn", "profile", "workspace"] as string[])
+  if (!(["application", "binding", "root", "stage", "profile", "workspace"] as string[])
     .includes(scope) || (severity !== "warning" && severity !== "error")) {
     throw new Error("runtime_problem_invalid");
   }
   return {
     code: requiredString(problem.code, "runtime_problem_code_invalid"),
-    scope: scope as "application" | "binding" | "root" | "turn" | "profile" | "workspace",
+    scope: scope as "application" | "binding" | "root" | "stage" | "profile" | "workspace",
     severity: severity as "warning" | "error",
     sanitizedReason: requiredString(problem.sanitized_reason, "runtime_problem_reason_invalid"),
     firstObservedAt: requiredString(problem.first_observed_at, "runtime_problem_first_invalid"),
     lastObservedAt: requiredString(problem.last_observed_at, "runtime_problem_last_invalid"),
     ...(typeof problem.action_required === "string" ? { actionRequired: problem.action_required } : {}),
     ...(typeof problem.root_issue_id === "string" ? { rootIssueId: problem.root_issue_id } : {}),
-    ...(typeof problem.turn_id === "string" ? { turnId: problem.turn_id } : {}),
     ...(typeof problem.performer_profile_id === "string"
       ? { performerProfileId: problem.performer_profile_id } : {}),
   };
