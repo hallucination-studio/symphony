@@ -87,6 +87,9 @@ export function projectTargetWorkflowFacts(snapshot) {
   if (!workIds.every((id) => workStages.some((stage) => stage.nodeIssueId === id))) {
     throw new Error("target_facts_work_incomplete");
   }
+  const repairEscalation = projectRepairEscalation(
+    records, input.rootIssueId, verify.id, verifyStage.executionId,
+  );
   return Object.freeze({
     root: Object.freeze({
       projectId: input.projectId,
@@ -113,6 +116,7 @@ export function projectTargetWorkflowFacts(snapshot) {
       completedWorkNodes: workStages.filter((stage) => stage.result === "completed").length,
       sourceExecutionIds: Object.freeze(workStages.filter((stage) => stage.result === "completed").map((stage) => stage.executionId)),
     }),
+    ...(repairEscalation ? { repairEscalation } : {}),
     ...(delivery ? { delivery: projectDelivery(delivery, verifyResult) } : {}),
   });
 }
@@ -164,11 +168,54 @@ function parseRecords(comments) {
     }
     if (!record || typeof record !== "object" || record.version !== 1 || ![
       "cycle_marker", "plan_contract", "stage_execution", "stage_terminal", "work_completion",
-      "human_action", "verify_result", "delivery",
+      "human_action", "verify_result", "delivery", "finding", "finding_disposition",
+      "progress_assessment", "convergence",
     ].includes(record.kind)) {
       throw new Error("target_facts_record_invalid");
     }
     return { issueId: comment.issueId, record };
+  });
+}
+
+function projectRepairEscalation(records, rootIssueId, verifyIssueId, verifyExecutionId) {
+  const findings = records.filter(({ issueId, record }) => issueId === verifyIssueId &&
+    record.kind === "finding" && record.source_verify_id === verifyExecutionId);
+  const dispositions = records.filter(({ issueId, record }) => issueId === verifyIssueId &&
+    record.kind === "finding_disposition" && record.source_verify_id === verifyExecutionId);
+  const convergenceRecords = records
+    .filter(({ issueId, record }) => issueId === rootIssueId && record.kind === "convergence")
+    .map(({ record }) => record)
+    .sort((left, right) => String(left.observed_at).localeCompare(String(right.observed_at)));
+  const convergence = convergenceRecords.at(-1);
+  if (!convergence || convergence.decision !== "escalate") return undefined;
+  if (findings.length !== 1 || dispositions.length !== 1 ||
+      dispositions[0].record.finding_id !== findings[0].record.finding_id ||
+      dispositions[0].record.disposition !== "still_open") {
+    throw new Error("target_facts_repair_correlation_invalid");
+  }
+  const view = convergence.view;
+  const policy = convergence.policy;
+  if (convergence.version !== 1 || convergence.root_issue_id !== rootIssueId ||
+      !isSafeId(findings[0].record.finding_id) || !isSafeId(findings[0].record.source_verify_id) ||
+      !Number.isSafeInteger(view?.cycle_count) || !Number.isSafeInteger(policy?.max_cycles_per_root) ||
+      view.cycle_count < policy.max_cycles_per_root ||
+      !Array.isArray(view.open_finding_persistence) ||
+      !view.open_finding_persistence.some((entry) => entry?.finding_id === findings[0].record.finding_id &&
+        Number.isSafeInteger(entry.open_cycle_count) && entry.open_cycle_count > 0)) {
+    throw new Error("target_facts_repair_breaker_invalid");
+  }
+  return Object.freeze({
+    findingId: findings[0].record.finding_id,
+    sourceVerifyId: verifyIssueId,
+    disposition: "escalated",
+    breaker: Object.freeze({
+      checked: true,
+      decision: "escalate",
+      cycleCount: view.cycle_count,
+      maxCycles: policy.max_cycles_per_root,
+      openFindingCount: view.open_finding_persistence.filter((entry) =>
+        Number.isSafeInteger(entry?.open_cycle_count) && entry.open_cycle_count > 0).length,
+    }),
   });
 }
 

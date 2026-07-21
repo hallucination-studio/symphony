@@ -108,6 +108,52 @@ test("target facts reject unversioned records and stale Work or Verify revisions
   assert.throws(() => projectTargetWorkflowFacts(wrongVerifyTarget), /target_facts_verify_result_invalid/u);
 });
 
+test("target facts project correlated repair escalation from durable records", () => {
+  const repair = snapshot();
+  repair.comments.push(
+    comment("verify-1", "finding-1", {
+      kind: "finding", version: 1, finding_id: "finding-1", source_verify_id: "verify-execution-1",
+      category: "code", severity: "high", evidence: [], affected_scope: [], retryable: true,
+      suggested_remediation: ["Repair the failing implementation."], acceptance_criteria: [],
+    }),
+    comment("verify-1", "finding-disposition-1", {
+      kind: "finding_disposition", version: 1, finding_id: "finding-1",
+      source_verify_id: "verify-execution-1", disposition: "still_open", evidence: [],
+    }),
+    comment("root-1", "convergence-1", {
+      kind: "convergence", version: 1, root_issue_id: "root-1",
+      observed_at: "2026-07-22T00:00:05Z",
+      policy: {
+        max_cycles_per_root: 2, max_same_open_finding_cycles: 2,
+        max_consecutive_no_progress: 2, max_total_tokens: 1000,
+        deadline_at: "2026-07-23T00:00:00Z",
+      },
+      view: {
+        cycle_count: 2,
+        open_finding_persistence: [{ finding_id: "finding-1", open_cycle_count: 2 }],
+        consecutive_no_progress: 2, settled_tokens: 100,
+        open_token_reservations: [], is_deadline_exceeded: false, root_is_canceled: false,
+      },
+      trigger: "max_cycles_per_root", decision: "escalate",
+    }),
+  );
+
+  const facts = projectTargetWorkflowFacts(repair);
+
+  assert.deepEqual(facts.repairEscalation, {
+    findingId: "finding-1",
+    sourceVerifyId: "verify-1",
+    disposition: "escalated",
+    breaker: {
+      checked: true,
+      decision: "escalate",
+      cycleCount: 2,
+      maxCycles: 2,
+      openFindingCount: 1,
+    },
+  });
+});
+
 function snapshot() {
   const workRevision = "b".repeat(40);
   return {

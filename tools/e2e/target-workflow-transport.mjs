@@ -8,7 +8,7 @@ const MAX_RELATIONS = 1_024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
 const IGNORED_RECORD_KINDS = new Set([
-  "root_ownership", "finding", "finding_disposition", "progress_assessment", "convergence",
+  "root_ownership",
 ]);
 
 const PROJECT_ISSUES_QUERY = `

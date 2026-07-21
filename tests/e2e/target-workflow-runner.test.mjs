@@ -82,6 +82,10 @@ test("target runner rejects an invalid durable-facts projection", async () => {
   for (const facts of [
     {},
     { root: { rootIssueId: "root-1", projectId: "project-1" }, plan: {}, stageExecutions: [], progress: {}, metadata: {} },
+    {
+      root: { rootIssueId: "root-1", projectId: "project-1" }, plan: {}, stageExecutions: [], progress: {},
+      repairEscalation: { findingId: "finding-1", breaker: {}, rawRecord: "must-not-cross" },
+    },
   ]) {
     const runner = createTargetWorkflowRunner({
       externalInputs: { createRoot() {}, appendHumanResponse() {} },
