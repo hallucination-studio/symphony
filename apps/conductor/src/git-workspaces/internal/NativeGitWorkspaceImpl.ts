@@ -63,16 +63,21 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
     };
   }
 
-  async diff(workspace: GitWorkspace, options: { staged?: boolean; path?: string } = {}) {
+  async diff(workspace: GitWorkspace, options: { staged?: boolean; path?: string; fromRevision?: string; toRevision?: string } = {}) {
     await this.#assertWorkspaceIdentity(workspace);
     if (options.path !== undefined && !safeRelativePath(options.path)) {
       throw new Error("git_diff_path_out_of_scope");
+    }
+    if ((options.fromRevision !== undefined && !safeRevision(options.fromRevision))
+      || (options.toRevision !== undefined && !safeRevision(options.toRevision))) {
+      throw new Error("git_diff_revision_invalid");
     }
     const result = await runCommand("git", [
       "-C",
       workspace.worktreePath,
       "diff",
       "--no-ext-diff",
+      ...(options.fromRevision === undefined ? [] : [options.fromRevision, options.toRevision ?? "HEAD"]),
       ...(options.staged ? ["--cached"] : []),
       ...(options.path ? ["--", options.path] : []),
     ]);
@@ -267,4 +272,8 @@ function truncateUtf8(value: string, cap: number): string {
 function safeRelativePath(value: string) {
   if (!value || value.includes("\0") || path.isAbsolute(value)) return false;
   return !value.split(/[\\/]/u).some((part) => part === "..");
+}
+
+function safeRevision(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(value);
 }

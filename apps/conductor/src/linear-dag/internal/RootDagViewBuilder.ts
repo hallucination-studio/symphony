@@ -299,6 +299,9 @@ function validatePlanContract(nodes: RootDagNodeView[], contract: PlanContract |
   if (!contract) return;
   if (contract.cycleIssueId !== cycleIssueId) fail("plan_contract_target_invalid");
   const plan = nodes.find((node) => node.issue.issue_kind === "plan")!;
+  // The append-only Bootstrap Plan marker cannot know the Performer result yet.
+  // T8 must replace this placeholder before the Cycle can leave Planning.
+  if (cycleState === "Planning" && plan.marker.planContractDigest === "pending-plan-contract") return;
   if (plan.marker.planContractDigest !== contract.planContractDigest) fail("plan_contract_digest_mismatch");
   const workKeys = new Set(contract.workNodes.map((node) => node.workKey));
   if (workKeys.size !== contract.workNodes.length) fail("plan_contract_duplicate_key");
