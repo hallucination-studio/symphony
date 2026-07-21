@@ -98,6 +98,36 @@ test("recovers partial writes, seals only after the exact graph, and is idempote
   assert.deepEqual(retry, { kind: "complete", planContractDigest: digest });
 });
 
+test("rebuilds partial materialization from serialized Linear facts between writes", async () => {
+  const contract = planContract([{ workKey: "one", dependencyWorkKeys: [] }]);
+  const input = materializationInput();
+  const initialTree = approvedTree();
+  initialTree.comments.push(comment(planIssueId, "contract-record", contract));
+  let serializedTree = JSON.stringify(initialTree);
+  const writes: string[] = [];
+  let result: Awaited<ReturnType<LinearDagExecutionImpl["reconcileRoot"]>>;
+
+  for (let restart = 0; restart < 20; restart += 1) {
+    const gateway = new MaterializationGateway(JSON.parse(serializedTree) as LinearWorkflowTreeSnapshot);
+    const execution = new LinearDagExecutionImpl({
+      linear: gateway,
+      git: gateway.git,
+      performer: { async runStage() { throw new Error("unused"); }, async cancelAndReap() {} },
+    });
+    result = await execution.reconcileRoot(input);
+    if (result.kind === "completed") break;
+    assert.equal(result.kind, "mutation_applied");
+    writes.push(result.step);
+    serializedTree = JSON.stringify(gateway.tree);
+  }
+
+  assert.deepEqual(writes.slice(-2), ["plan_done", "cycle_sealed"]);
+  const rebuilt = JSON.parse(serializedTree) as LinearWorkflowTreeSnapshot;
+  assert.equal(rebuilt.issues.find((issue) => issue.issue_id === planIssueId)?.status_name, "Done");
+  assert.equal(rebuilt.issues.find((issue) => issue.issue_id === cycleIssueId)?.status_name, "Sealed");
+  assert.equal(isExactMaterialization(rebuilt, contract, rootIssueId, cycleIssueId, planIssueId), true);
+});
+
 test("reconciliation performs one read-backed mutation per step before sealing", async () => {
   const tree = approvedTree();
   const contract = planContract([{ workKey: "one", dependencyWorkKeys: [] }]);
