@@ -249,6 +249,35 @@ test("requires a fresh Human answer before resuming Work and injects it only int
   assert.equal((envelope.stage_execution as Record<string, JsonValue>).stage_execution_id, "work-execution-2");
 });
 
+test("settles missing Work usage at the reserved token ceiling", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: {
+      async runStage(input) {
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        gateway.gitState.dirtyPaths = ["apps/conductor/src/changed.ts"];
+        return { result: {
+          protocol_version: "1", stage_execution_id: (envelope.stage_execution as Record<string, JsonValue>).stage_execution_id,
+          stage: "work", root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest, completed_at: "2026-07-21T09:01:00Z",
+          outcome: { kind: "work_completed", summary: "Completed without usage telemetry.", changed_paths: ["apps/conductor/src/changed.ts"], checks: [], observed_workspace_revision: "head-1",
+          },
+        } as unknown as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+
+  await execution.executeWorkStage(workInput());
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal");
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("stage_terminal_fixture_invalid");
+  assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
+});
+
 function workInput(): WorkStageInput {
   return {
     rootIssueId,

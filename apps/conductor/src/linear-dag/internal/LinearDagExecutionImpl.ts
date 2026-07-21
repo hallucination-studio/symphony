@@ -852,13 +852,13 @@ function validateSuspendedResult(value: JsonValue, execution: StageExecutionReco
     || typeof outcome.question_or_proposal !== "string" || typeof outcome.reason !== "string" || typeof outcome.impact !== "string") throw new Error(`${stage}_suspension_shape_invalid`);
   return {
     completedAt: typeof result.completed_at === "string" ? result.completed_at : "",
-    usage: stageUsage(result.usage), requestKind: outcome.request_kind as "needs_info" | "needs_approval",
+    usage: stageUsage(result.usage, execution.limits.reservedTotalTokens), requestKind: outcome.request_kind as "needs_info" | "needs_approval",
     questionOrProposal: outcome.question_or_proposal, reason: outcome.reason, impact: outcome.impact,
   };
 }
 
-function stageUsage(value: JsonValue | undefined): StageUsage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+function stageUsage(value: JsonValue | undefined, reservedTotalTokens = 0): StageUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: reservedTotalTokens };
   return { inputTokens: numberValue(value.input_tokens), cachedInputTokens: numberValue(value.cached_input_tokens), outputTokens: numberValue(value.output_tokens), reasoningOutputTokens: numberValue(value.reasoning_output_tokens), totalTokens: numberValue(value.total_tokens) };
 }
 
@@ -912,10 +912,7 @@ function validatePlanResult(value: JsonValue, execution: StageExecutionRecord): 
   }
   assertAcyclic(dependencies);
   const completedAt = typeof result.completed_at === "string" ? result.completed_at : "";
-  const usageValue = result.usage;
-  const usage: StageUsage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue) ? {
-    inputTokens: numberValue(usageValue.input_tokens), cachedInputTokens: numberValue(usageValue.cached_input_tokens), outputTokens: numberValue(usageValue.output_tokens), reasoningOutputTokens: numberValue(usageValue.reasoning_output_tokens), totalTokens: numberValue(usageValue.total_tokens),
-  } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  const usage = stageUsage(result.usage, execution.limits.reservedTotalTokens);
   return { planContract, completedAt, usage };
 }
 
@@ -1037,10 +1034,7 @@ function validateWorkResult(value: JsonValue, execution: StageExecutionRecord): 
       artifactRevision: value.artifact_revision,
     };
   });
-  const usageValue = result.usage;
-  const usage: StageUsage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue) ? {
-    inputTokens: numberValue(usageValue.input_tokens), cachedInputTokens: numberValue(usageValue.cached_input_tokens), outputTokens: numberValue(usageValue.output_tokens), reasoningOutputTokens: numberValue(usageValue.reasoning_output_tokens), totalTokens: numberValue(usageValue.total_tokens),
-  } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  const usage = stageUsage(result.usage, execution.limits.reservedTotalTokens);
   return { completedAt: typeof result.completed_at === "string" ? result.completed_at : "", usage, summary: outcome.summary, changedPaths: outcome.changed_paths as string[], checks, observedWorkspaceRevision: outcome.observed_workspace_revision };
 }
 
@@ -1089,8 +1083,7 @@ function validateVerifyResult(value: JsonValue | undefined, execution: StageExec
   if (!["passed", "changes_required", "inconclusive", "escalate_human"].includes(conclusion as string)) throw new Error("verify_conclusion_invalid");
   if (conclusion === "passed" && (criteriaResults.some((criterion) => criterion.outcome !== "passed") || checks.some((check) => check.outcome !== "passed"))) throw new Error("verify_passed_evidence_invalid");
   if (conclusion === "changes_required" && newFindings.length === 0 && !dispositions.some((disposition) => disposition.disposition === "still_open")) throw new Error("verify_changes_finding_missing");
-  const usageValue = result.usage;
-  const usage: StageUsage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue) ? { inputTokens: numberValue(usageValue.input_tokens), cachedInputTokens: numberValue(usageValue.cached_input_tokens), outputTokens: numberValue(usageValue.output_tokens), reasoningOutputTokens: numberValue(usageValue.reasoning_output_tokens), totalTokens: numberValue(usageValue.total_tokens) } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  const usage = stageUsage(result.usage, execution.limits.reservedTotalTokens);
   return { completedAt: typeof result.completed_at === "string" ? result.completed_at : "", usage, conclusion: conclusion as ValidatedVerifyResult["conclusion"], criteriaResults, checks, newFindings, dispositions, verifiedRevision: execution.repositoryRevision };
 }
 
