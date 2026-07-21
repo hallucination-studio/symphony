@@ -1,7 +1,6 @@
 import { decodeConductorPerformerPerformerProfileControlResult } from "@symphony/contracts";
 
 import type { FilePerformerProfileStoreImpl } from "./FilePerformerProfileStoreImpl.js";
-import type { GlobalPerformerLane } from "../../performer-turns/internal/GlobalPerformerLane.js";
 
 type JsonValue =
   | null
@@ -13,7 +12,15 @@ type JsonValue =
 
 export class PerformerProfileControlProcessImpl {
   constructor(
-    private readonly lane: Pick<GlobalPerformerLane, "run">,
+    private readonly lane: {
+      run(input: {
+        executable: string;
+        arguments: string[];
+        environment: NodeJS.ProcessEnv;
+        deadlineMs: number;
+        stdin?: Uint8Array;
+      }): Promise<{ stdout: string; stderr: string }>;
+    },
     private readonly profiles: Pick<FilePerformerProfileStoreImpl, "codexHome">,
     private readonly options: {
       executable: string;
