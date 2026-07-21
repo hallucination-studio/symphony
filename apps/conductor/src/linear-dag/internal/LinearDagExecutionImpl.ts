@@ -315,6 +315,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (!latestExecution) return workBlocked("work_execution_missing");
     const validated = validateWorkResult(stageResult, latestExecution);
     if (!currentTerminal) {
+      await validateWorkGit(this.dependencies.git, input.workspace, latestExecution, validated, contract);
       await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminal(latestExecution, validated));
       return { kind: "mutation_applied", step: "work_stage_terminal" };
     }

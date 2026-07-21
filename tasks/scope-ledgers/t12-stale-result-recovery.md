@@ -5,7 +5,8 @@
 - Exercise the real Conductor entrypoint and real Performer fixture against a
   serialized Linear workflow Tree and a real Git repository/worktree.
 - Start a Work Stage, change the Root to each terminal state (`Done` and
-  `Canceled`) while the Stage is active, and deliver the old result afterward.
+  `Canceled`) or change its Git baseline while the Stage is active, and deliver
+  the old result afterward.
 - Record evidence that terminal Root facts reject the result before durable
   terminal or completion evidence is written.
 
@@ -14,7 +15,8 @@
 - The real Performer writes a valid but late result from the old execution.
 - Conductor reports a sanitized recovery problem and does not append a
   `stage_terminal` or `work_completion` record, mutate workflow state, or
-  commit the stale result.
+  commit the stale result, including when the Git baseline changes while the
+  Root remains runnable.
 - The test uses separate process state and serialized boundary reads, and
   leaves no live Stage process after cleanup.
 
@@ -31,5 +33,4 @@ None.
 
 ## deferred_ideas
 
-- Add real-process stale-result coverage for a changed precondition while the
-  Root remains non-terminal.
+None.

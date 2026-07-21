@@ -128,6 +128,57 @@ test(`real Conductor rejects a late Work result after Root becomes ${rootStatus}
 });
 }
 
+test("real Conductor rejects a late Work result after the Git baseline changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-precondition-result-recovery-"));
+  const repositoryRoot = path.join(root, "repository");
+  const dataRoot = path.join(root, "conductor");
+  const statePath = path.join(root, "linear-tree.json");
+  const stageMarkerPath = path.join(dataRoot, "performer-profiles", "profile-1", "codex-home", "stage-starts.jsonl");
+  await createRepository(repositoryRoot);
+  const revision = (await run("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
+  await writeProfile(dataRoot);
+  await writeFile(statePath, JSON.stringify(serializedWorkTree(revision), null, 2));
+  const performer = await writePerformer(root, "stale");
+  const boundary = createSerializedWorkflowBoundary({ statePath });
+  const podium = { handler: boundary.handler, observeExit: () => {}, close: () => {} };
+  const environment = createChildEnvironment({ additions: {
+    SYMPHONY_PRIVATE_IPC_FD: "3",
+    SYMPHONY_INSTANCE_ID: "instance-1",
+    SYMPHONY_BINDING_ID: "binding-1",
+    SYMPHONY_CONDUCTOR_ID: "conductor-1",
+    SYMPHONY_CONDUCTOR_SHORT_HASH: "abc123def456",
+    SYMPHONY_LINEAR_INSTALLATION_ID: "serialized-fixture:organization-1",
+    SYMPHONY_ORGANIZATION_ID: "organization-1",
+    SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_ROOT: repositoryRoot,
+    SYMPHONY_BASE_BRANCH: "main",
+    SYMPHONY_CONDUCTOR_DATA_ROOT: dataRoot,
+    SYMPHONY_PERFORMER_EXECUTABLE: performer,
+    SYMPHONY_CYCLE_DELAY_MS: "1000",
+  } });
+
+  const first = await startConductor(environment, podium);
+  try {
+    await waitForStage(stageMarkerPath);
+    const mutationCountBeforeLateResult = boundary.mutationKinds.length;
+    const worktree = path.join(dataRoot, "worktrees", "root-1");
+    await run("git", ["-C", worktree, "commit", "--allow-empty", "-m", "external precondition change"]);
+    await waitForStageMarker(stageMarkerPath, (entry) => entry.result_written === true);
+    const recovery = await first.waitForObservation((observation) => observation.kind === "conductor_runtime_report" && observation.status === "recovering");
+    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_needs_attention");
+
+    const finalTree = JSON.parse(await readFile(statePath, "utf8"));
+    const records = finalTree.comments.map((comment) => comment.body);
+    assert.equal(finalTree.issues.find(({ issue_id }) => issue_id === "root-1")?.status_name, "In Progress");
+    assert.equal(finalTree.issues.find(({ issue_id }) => issue_id === "work-1")?.status_name, "In Progress");
+    assert.equal(records.some((body) => body.includes('"kind":"stage_terminal"')), false);
+    assert.equal(records.some((body) => body.includes('"kind":"work_completion"')), false);
+    assert.equal(boundary.mutationKinds.slice(mutationCountBeforeLateResult).includes("update_workflow_issue"), false);
+  } finally {
+    await first.terminateAbruptly();
+  }
+});
+
 async function runLateResultRecovery(rootStatus) {
   const root = await mkdtemp(path.join(os.tmpdir(), "symphony-stale-result-recovery-"));
   const repositoryRoot = path.join(root, "repository");
