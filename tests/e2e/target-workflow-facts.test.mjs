@@ -234,6 +234,62 @@ test("target facts reject a pending Human action from a terminal non-current Cyc
   );
 });
 
+test("target facts select the one active successor Cycle and ignore predecessor evidence", () => {
+  const successor = successorSnapshot({ cycleState: "Executing" });
+
+  const facts = projectTargetWorkflowFacts(successor);
+
+  assert.equal(facts.root.cycleIssueId, "cycle-2");
+  assert.equal(facts.root.planIssueId, "plan-2");
+  assert.equal(facts.root.finalVerifyId, "verify-execution-2");
+  assert.deepEqual(facts.plan.workNodeIds, ["work-2"]);
+  assert.equal(facts.stageExecutions.length, 3);
+  assert.ok(facts.stageExecutions.every(({ cycleIssueId }) => cycleIssueId === "cycle-2"));
+  assert.deepEqual(facts.delivery, {
+    kind: "local_branch",
+    branch: "symphony/runs/root-1",
+    head: "b".repeat(40),
+    verifiedAgainst: "verify-2",
+    readBack: true,
+  });
+});
+
+test("target facts select the unique terminal successor Cycle when no Cycle is active", () => {
+  const successor = successorSnapshot({ cycleState: "Succeeded" });
+  successor.issues = successor.issues.map((issue) => issue.id === "root-1"
+    ? { ...issue, state: "In Review" }
+    : issue);
+
+  const facts = projectTargetWorkflowFacts(successor);
+
+  assert.equal(facts.root.cycleIssueId, "cycle-2");
+  assert.equal(facts.root.finalVerifyId, "verify-execution-2");
+});
+
+test("target facts reject a broken or ambiguous Cycle predecessor chain", () => {
+  const broken = successorSnapshot({ cycleState: "Succeeded" });
+  broken.issues = broken.issues.map((issue) => issue.id === "root-1"
+    ? { ...issue, state: "In Review" }
+    : issue);
+  broken.comments = broken.comments.map((entry) => entry.id === "cycle-marker-2"
+    ? comment("cycle-2", "cycle-marker-2-broken", {
+      ...record(entry), predecessor_cycle: { cycle_issue_id: "missing-cycle" },
+    })
+    : entry);
+  assert.throws(() => projectTargetWorkflowFacts(broken), /target_facts_cycle_invalid/u);
+
+  const ambiguous = successorSnapshot({ cycleState: "Succeeded" });
+  ambiguous.issues = ambiguous.issues.map((issue) => issue.id === "root-1"
+    ? { ...issue, state: "In Review" }
+    : issue).concat(issue("cycle-3", "cycle", "Succeeded", "root-1"));
+  ambiguous.comments = ambiguous.comments.concat(comment("cycle-3", "cycle-marker-3", {
+    kind: "cycle_marker", version: 1, root_issue_id: "root-1", cycle_key: "cycle-3",
+    trigger: "verify_changes", baseline_revision: "b".repeat(40),
+    predecessor_cycle: { cycle_issue_id: "cycle-1" },
+  }));
+  assert.throws(() => projectTargetWorkflowFacts(ambiguous), /target_facts_cycle_invalid/u);
+});
+
 function snapshot() {
   const workRevision = "b".repeat(40);
   return {
@@ -296,6 +352,65 @@ function snapshot() {
   };
 }
 
+function successorSnapshot({ cycleState }) {
+  const successor = snapshot();
+  successor.issues = successor.issues.concat(
+    issue("cycle-2", "cycle", cycleState, "root-1"),
+    issue("plan-2", "plan", "Done", "cycle-2"),
+    issue("work-2", "work", "Done", "cycle-2", "work-key-2"),
+    issue("verify-2", "verify", "Done", "cycle-2"),
+  );
+  successor.relations = successor.relations.concat(
+    { relationKind: "blocks", sourceIssueId: "plan-2", targetIssueId: "work-2" },
+    { relationKind: "blocks", sourceIssueId: "work-2", targetIssueId: "verify-2" },
+  );
+  const workRevision = "b".repeat(40);
+  successor.comments = successor.comments.concat(
+    comment("cycle-2", "cycle-marker-2", {
+      kind: "cycle_marker", version: 1, root_issue_id: "root-1", cycle_key: "cycle-2",
+      trigger: "verify_changes", baseline_revision: workRevision,
+      predecessor_cycle: { cycle_issue_id: "cycle-1" },
+    }),
+    comment("plan-2", "plan-contract-2", {
+      kind: "plan_contract", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-2",
+      plan_contract_digest: "e".repeat(64), objective_summary: "Repair it.",
+      included_scope: ["apps"], excluded_scope: [], acceptance_criteria: [],
+      work_nodes: [{ work_key: "work-key-2", title: "Repair", description: "Repair.", acceptance_criteria: [], dependency_work_keys: [] }],
+      verify_node: { title: "Verify repair", acceptance_criteria: [], required_checks: [] },
+    }),
+    comment("plan-2", "plan-execution-2", execution("plan-execution-2", "plan", "plan-2", "e".repeat(64), workRevision, "cycle-2")),
+    comment("plan-2", "plan-terminal-2", terminal("plan-execution-2", "plan", "plan-2", "e".repeat(64), "cycle-2")),
+    comment("work-2", "work-execution-2", execution("work-execution-2", "work", "work-2", "f".repeat(64), workRevision, "cycle-2", "e".repeat(64))),
+    comment("work-2", "work-terminal-2", terminal("work-execution-2", "work", "work-2", "f".repeat(64), "cycle-2")),
+    comment("work-2", "work-completion-2", {
+      kind: "work_completion", version: 1, stage_execution_id: "work-execution-2",
+      root_issue_id: "root-1", cycle_issue_id: "cycle-2", node_issue_id: "work-2",
+      work_key: "work-key-2", context_digest: "f".repeat(64), summary: "Repaired.",
+      changed_paths: ["apps/example.ts"], checks: [], commit_revision: workRevision,
+    }),
+    comment("verify-2", "verify-execution-2", execution("verify-execution-2", "verify", "verify-2", "1".repeat(64), workRevision, "cycle-2", "e".repeat(64))),
+    comment("verify-2", "verify-terminal-2", terminal("verify-execution-2", "verify", "verify-2", "1".repeat(64), "cycle-2")),
+    comment("verify-2", "verify-result-2", {
+      kind: "verify_result", version: 1, stage_execution_id: "verify-execution-2",
+      root_issue_id: "root-1", cycle_issue_id: "cycle-2", node_issue_id: "verify-2",
+      conclusion: "passed", criteria_results: [], checks: [], verified_revision: workRevision,
+    }),
+    comment("root-1", "approval-action-2", {
+      kind: "human_action", version: 1, action_id: "approval-2", root_issue_id: "root-1",
+      cycle_issue_id: "cycle-2", node_issue_id: "plan-2", request_kind: "needs_approval",
+      question_or_proposal: "Approve repair.", reason: "Review repair.", impact: "Proceed.",
+      context_digest: "e".repeat(64), expected_root_remote_version: "root-version-2",
+    }),
+    comment("root-1", "delivery-2", {
+      kind: "delivery", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-2",
+      verify_result_id: "verify-execution-2", verified_revision: workRevision,
+      delivery_kind: "local_branch", delivery_branch: "symphony/runs/root-1",
+      delivered_at: "2026-07-22T00:00:08Z",
+    }),
+  );
+  return successor;
+}
+
 function issue(id, kind, state, parentIssueId, nodeKey) {
   return { id, projectId: "project-1", kind, state, ...(parentIssueId ? { parentIssueId } : {}), ...(nodeKey ? { nodeKey } : {}) };
 }
@@ -308,11 +423,11 @@ function record(commentValue) {
   return JSON.parse(commentValue.body.slice("<!-- symphony managed-record\n".length, -"\n-->".length));
 }
 
-function execution(id, stage, node, context, revision) {
+function execution(id, stage, node, context, revision, cycleIssueId = "cycle-1", planContractDigest = "d".repeat(64)) {
   return {
     kind: "stage_execution", version: 1, stage_execution_id: id,
-    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: node, stage,
-    ...(stage === "plan" ? {} : { plan_contract_digest: "d".repeat(64) }),
+    root_issue_id: "root-1", cycle_issue_id: cycleIssueId, node_issue_id: node, stage,
+    ...(stage === "plan" ? {} : { plan_contract_digest: planContractDigest }),
     context_digest: context, source_manifest: [],
     coverage: { is_complete: true, omissions: [] }, instruction_set_id: `${stage}-v1`,
     execution_policy_id: "policy-1",
@@ -323,10 +438,10 @@ function execution(id, stage, node, context, revision) {
   };
 }
 
-function terminal(id, stage, node, context) {
+function terminal(id, stage, node, context, cycleIssueId = "cycle-1") {
   return {
     kind: "stage_terminal", version: 1, stage_execution_id: id,
-    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: node, stage,
+    root_issue_id: "root-1", cycle_issue_id: cycleIssueId, node_issue_id: node, stage,
     context_digest: context, outcome: "completed", completed_at: "2026-07-22T00:00:02Z",
     summary: "Completed.", usage: { input_tokens: 1, cached_input_tokens: 0,
       output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },

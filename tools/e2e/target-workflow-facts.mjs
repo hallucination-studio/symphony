@@ -15,10 +15,10 @@ export function projectTargetWorkflowFacts(snapshot) {
   const records = parseRecords(input.comments);
   const root = issues.get(input.rootIssueId);
   const cycles = input.issues.filter((issue) => issue.kind === "cycle" && issue.parentIssueId === input.rootIssueId);
-  if (!root || root.kind !== "root" || root.projectId !== input.projectId || cycles.length !== 1) {
+  if (!root || root.kind !== "root" || root.projectId !== input.projectId || cycles.length < 1) {
     throw new Error("target_facts_cycle_invalid");
   }
-  const cycle = cycles[0];
+  const cycle = selectCurrentCycle(cycles, records, input.rootIssueId);
   const cycleRecords = records.filter(({ issueId }) => issueId === cycle.id);
   const cycleMarker = one(cycleRecords, "cycle_marker");
   if (cycleMarker.root_issue_id !== input.rootIssueId || cycleMarker.cycle_key !== cycle.id ||
@@ -47,9 +47,10 @@ export function projectTargetWorkflowFacts(snapshot) {
   }
   const workKeys = new Map(workIssues.map((issue) => [issue.id, issue.nodeKey ?? issue.id]));
   const approval = records.filter(({ issueId, record }) => issueId === input.rootIssueId &&
-    record.kind === "human_action" && record.request_kind === "needs_approval");
+    record.kind === "human_action" && record.request_kind === "needs_approval" &&
+    record.cycle_issue_id === cycle.id);
   const planStage = records.find(({ record }) => record.kind === "stage_execution" &&
-    record.stage === "plan" && record.node_issue_id === plan.id);
+    record.cycle_issue_id === cycle.id && record.stage === "plan" && record.node_issue_id === plan.id);
   if (approval.length === 1 && (!planStage || !sameCorrelation(approval[0].record, {
     root_issue_id: input.rootIssueId,
     cycle_issue_id: cycle.id,
@@ -59,10 +60,14 @@ export function projectTargetWorkflowFacts(snapshot) {
   }))) {
     throw new Error("target_facts_human_action_invalid");
   }
-  const stages = records.filter(({ record }) => record.kind === "stage_execution");
-  const terminals = records.filter(({ record }) => record.kind === "stage_terminal");
-  const completions = records.filter(({ record }) => record.kind === "work_completion");
-  const results = records.filter(({ record }) => record.kind === "verify_result");
+  const stages = records.filter(({ record }) => record.kind === "stage_execution" &&
+    record.cycle_issue_id === cycle.id);
+  const terminals = records.filter(({ record }) => record.kind === "stage_terminal" &&
+    record.cycle_issue_id === cycle.id);
+  const completions = records.filter(({ record }) => record.kind === "work_completion" &&
+    record.cycle_issue_id === cycle.id);
+  const results = records.filter(({ record }) => record.kind === "verify_result" &&
+    record.cycle_issue_id === cycle.id);
   const stageExecutions = stages.map(({ issueId, record }) => stageEvidence(
     issueId, record, terminals, completions, results, input, cycle.id, plan.id, workIssues, verify.id,
     planContract.plan_contract_digest, workKeys,
@@ -72,8 +77,10 @@ export function projectTargetWorkflowFacts(snapshot) {
       stageExecutions.filter(({ stage }) => stage === "work").length < 1) {
     throw new Error("target_facts_stage_shape_invalid");
   }
-  const verifyResult = one(records.filter(({ issueId }) => issueId === verify.id), "verify_result");
-  const delivery = oneOptional(records.filter(({ issueId }) => issueId === input.rootIssueId), "delivery");
+  const verifyResult = one(records.filter(({ issueId, record }) => issueId === verify.id &&
+    record.cycle_issue_id === cycle.id), "verify_result");
+  const delivery = oneOptional(records.filter(({ issueId, record }) => issueId === input.rootIssueId &&
+    record.cycle_issue_id === cycle.id), "delivery");
   const verifyStage = stageExecutions.find((stage) => stage.stage === "verify" && stage.nodeIssueId === verify.id);
   if (!verifyStage || verifyResult.stage_execution_id !== verifyStage.executionId ||
       verifyResult.verified_revision !== input.git.head) {
@@ -140,8 +147,16 @@ export function projectTargetWorkflowPendingHuman(snapshot) {
   if (activeCycles.length !== 1) throw new Error("target_facts_human_cycle_invalid");
   const currentCycle = activeCycles[0];
   const records = parseRecords(input.comments);
-  const actions = records.filter(({ issueId, record }) => issueId === input.rootIssueId &&
+  const allActions = records.filter(({ issueId, record }) => issueId === input.rootIssueId &&
     record.kind === "human_action");
+  const actions = allActions.filter(({ record }) =>
+    record.cycle_issue_id === currentCycle.id);
+  if (actions.length === 0 && allActions.length > 0) {
+    throw new Error("target_facts_human_cycle_invalid");
+  }
+  if (actions.length > 1) {
+    throw new Error("target_facts_duplicate_human_action");
+  }
   if (actions.length !== 1) {
     throw new Error(actions.length > 1
       ? "target_facts_duplicate_human_action"
@@ -177,6 +192,58 @@ export function projectTargetWorkflowPendingHuman(snapshot) {
     actionId: action.action_id,
     contextDigest: action.context_digest,
   });
+}
+
+function selectCurrentCycle(cycles, records, rootIssueId) {
+  const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
+  const predecessorById = new Map();
+  const childrenById = new Map(cycles.map((cycle) => [cycle.id, []]));
+
+  for (const cycle of cycles) {
+    const cycleRecords = records.filter(({ issueId }) => issueId === cycle.id);
+    const marker = one(cycleRecords, "cycle_marker");
+    if (marker.root_issue_id !== rootIssueId || marker.cycle_key !== cycle.id ||
+        !isSha(marker.baseline_revision)) {
+      throw new Error("target_facts_cycle_invalid");
+    }
+    const predecessor = marker.predecessor_cycle;
+    if (predecessor === undefined) continue;
+    if (!predecessor || typeof predecessor !== "object" || Array.isArray(predecessor) ||
+        !isSafeId(predecessor.cycle_issue_id) || predecessor.cycle_issue_id === cycle.id ||
+        !cycleById.has(predecessor.cycle_issue_id)) {
+      throw new Error("target_facts_cycle_invalid");
+    }
+    predecessorById.set(cycle.id, predecessor.cycle_issue_id);
+    childrenById.get(predecessor.cycle_issue_id).push(cycle.id);
+  }
+
+  if (cycles.filter((cycle) => !predecessorById.has(cycle.id)).length !== 1 ||
+      [...childrenById.values()].some((children) => children.length > 1)) {
+    throw new Error("target_facts_cycle_invalid");
+  }
+  for (const cycle of cycles) {
+    const seen = new Set();
+    let current = cycle.id;
+    while (predecessorById.has(current)) {
+      if (seen.has(current)) throw new Error("target_facts_cycle_invalid");
+      seen.add(current);
+      current = predecessorById.get(current);
+    }
+    if (!cycleById.has(current)) throw new Error("target_facts_cycle_invalid");
+  }
+
+  const activeCycles = cycles.filter((cycle) => ACTIVE_CYCLE_STATES.has(cycle.state));
+  if (activeCycles.length > 1) throw new Error("target_facts_cycle_invalid");
+  if (activeCycles.length === 1) {
+    if (childrenById.get(activeCycles[0].id).length > 0) {
+      throw new Error("target_facts_cycle_invalid");
+    }
+    return activeCycles[0];
+  }
+
+  const terminalLeaves = cycles.filter((cycle) => childrenById.get(cycle.id).length === 0);
+  if (terminalLeaves.length !== 1) throw new Error("target_facts_cycle_invalid");
+  return terminalLeaves[0];
 }
 
 function validateSnapshot(snapshot) {
@@ -361,11 +428,22 @@ function sameCorrelation(left, right) {
 }
 
 function exactDag(relations, planIssueId, workIssueIds, verifyIssueId) {
+  const currentIssueIds = new Set([planIssueId, ...workIssueIds, verifyIssueId]);
+  const scopedRelations = [];
+  for (const relation of relations) {
+    const touchesCurrentCycle = currentIssueIds.has(relation.sourceIssueId) ||
+      currentIssueIds.has(relation.targetIssueId);
+    if (!touchesCurrentCycle) continue;
+    if (!currentIssueIds.has(relation.sourceIssueId) || !currentIssueIds.has(relation.targetIssueId)) {
+      return false;
+    }
+    scopedRelations.push(relation);
+  }
   const expected = [
     ...workIssueIds.map((issueId) => `${planIssueId}:blocks:${issueId}`),
     ...workIssueIds.map((issueId) => `${issueId}:blocks:${verifyIssueId}`),
   ];
-  const actual = relations.map((relation) =>
+  const actual = scopedRelations.map((relation) =>
     `${relation.sourceIssueId}:${relation.relationKind}:${relation.targetIssueId}`);
   return actual.length === expected.length && new Set(actual).size === actual.length &&
     expected.every((key) => actual.includes(key));
