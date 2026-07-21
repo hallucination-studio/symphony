@@ -23,19 +23,25 @@ This file contains the repository-wide working rules for coding agents.
   Conductor, and Performer.
 - Podium Desktop, Podium, and Conductor target TypeScript; Performer remains a
   Python process; the Desktop host uses Tauri/Rust.
-- Linear Issue Tree is workflow authority. Conductor must not introduce a
-  workflow database, queue, checkpoint store, or mirrored Work Node state.
+- Linear custom statuses, Issue Tree, and managed records are workflow
+  authority. Conductor must not introduce a workflow database, queue,
+  checkpoint store, or mirrored Work Node state.
 - Podium owns Linear OAuth, tokens, project catalog, bindings, the Linear SDK,
   and `podium.db`. Linear SDK types and credentials must not cross into
   Conductor.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
   root state from Linear and Git, schedules Root Issues, manages one Git
-  worktree per Root, and launches one Performer process per Root Turn. Leaves
-  remain visible work structure inside the Root and are not dispatch units.
-- Performer exclusively owns Provider SDK integrations and resumes the
-  Root conversation through the current opaque `performer_id`. If that
-  conversation is unavailable, Conductor preserves Linear/Git facts and
-  retries the entire Root with a new conversation.
+  worktree per Root, and selects Plan, one Work sub-issue, or Verify for each
+  Stage invocation. Work sub-issues remain visible structure inside the Root
+  and are not cross-Root dispatch units.
+- Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
+  Team workflow. Findings, attempts, budgets, progress, and Human overrides
+  are durable Linear facts; Root-level convergence limits are mechanical and
+  survive every Conductor or Performer restart.
+- Conductor creates and owns each Stage Wire and calls Performer. Performer
+  exclusively owns Provider SDK integrations and uses a fresh isolated
+  Provider context for Plan, each Work invocation, and Verify. Performer never
+  calls Conductor or resumes workflow from a durable conversation pointer.
 - Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
   directories, and are controlled through the approved profile-control
   boundary. Symphony must not read or rewrite Codex-owned configuration files.
