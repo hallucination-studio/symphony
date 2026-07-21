@@ -1547,3 +1547,109 @@ test("Project label assignment rejects a Conductor label already attached elsewh
   );
   assert.equal(additions, 0);
 });
+
+test("workflow SDK mutations keep managed markers and use the explicit status and relation inputs", async () => {
+  const parent = issue({ id: "root-1" });
+  let createdInput;
+  let updatedInput;
+  let commentInput;
+  let relationInput;
+  parent.team = Promise.resolve({
+    states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
+  });
+  const work = issue({ id: "work-1", parentId: "root-1" });
+  parent.children = async () => connection([work]);
+  const sdk = {
+    issue: async (issueId) => issueId === "root-1" ? parent : work,
+    async createIssue(input) {
+      createdInput = input;
+      return { success: true, issueId: "cycle-1" };
+    },
+    async updateIssue(_issueId, input) { updatedInput = input; },
+    async createComment(input) { commentInput = input; },
+    async createIssueRelation(input) { relationInput = input; return { success: true }; },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await adapter.executeWorkflowMutation({
+    kind: "create_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    parentExpectedRemoteVersion: "parent-version", parentExpectedStatusId: "state-todo",
+    parentIssueId: "root-1", issueKind: "cycle", title: "Cycle", description: "Plan it",
+    statusId: "state-todo", managedMarker: "cycle-marker", order: 3,
+  });
+  assert.equal(createdInput.stateId, "state-todo");
+  assert.equal(createdInput.subIssueSortOrder, 3);
+  assert.match(createdInput.description, /managed_marker: cycle-marker/u);
+  assert.match(createdInput.description, /issue_kind: cycle/u);
+
+  await adapter.executeWorkflowMutation({
+    kind: "append_workflow_comment", writeId: "write-2", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "root-1", expectedRemoteVersion: "root-version" }, body: "Progress",
+  });
+  assert.equal(commentInput.issueId, "root-1");
+  assert.match(commentInput.body, /symphony workflow write/u);
+
+  await adapter.executeWorkflowMutation({
+    kind: "create_workflow_relation", writeId: "write-3", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    sourceIssueId: "work-1", sourceExpectedRemoteVersion: "work-version",
+    targetIssueId: "root-1", targetExpectedRemoteVersion: "root-version", relationKind: "blocks",
+  });
+  assert.deepEqual(relationInput, { issueId: "work-1", relatedIssueId: "root-1", type: "blocks" });
+
+  const targetIssue = issue({
+    id: "work-1", parentId: "root-1", title: "Work",
+    description: "Work description\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->",
+  });
+  const targetRootIssue = issue({ id: "root-1" });
+  targetRootIssue.team = Promise.resolve({
+    states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
+  });
+  targetRootIssue.children = async () => connection([targetIssue]);
+  const targetAdapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (issueId) => issueId === "root-1" ? targetRootIssue : targetIssue,
+    async updateIssue(_issueId, input) { updatedInput = input; },
+  });
+  const target = await targetAdapter.readWorkflowMutationTarget("work-1");
+  assert.deepEqual(target, {
+    issueId: "work-1", projectId: "project-1", updatedAt: "2026-07-16T00:00:00.000Z",
+    parentIssueId: "root-1", statusId: "state-todo", title: "Work",
+    description: "Work description", managedMarker: "work-marker", workflowKind: "work",
+  });
+  await targetAdapter.executeWorkflowMutation({
+    kind: "update_workflow_issue", writeId: "write-4", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt, expectedManagedMarker: "work-marker" },
+    statusId: "state-todo", title: "Updated work", description: "Updated description",
+  });
+  assert.equal(updatedInput.title, "Updated work");
+  assert.match(updatedInput.description, /managed_marker: work-marker/u);
+});
+
+test("workflow SDK mutations reject targets outside the requested Root tree", async () => {
+  let writes = 0;
+  const root = issue({ id: "root-1" });
+  const foreign = issue({ id: "foreign-1", title: "Updated", description: "Description" });
+  root.team = Promise.resolve({
+    states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
+  });
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (issueId) => issueId === "root-1" ? root : foreign,
+    async updateIssue() { writes += 1; },
+  });
+
+  const command = {
+    kind: "update_workflow_issue", writeId: "write-foreign", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "foreign-1", expectedRemoteVersion: "foreign-version" },
+    statusId: "state-todo", title: "Updated", description: "Description",
+  };
+  await assert.rejects(
+    adapter.executeWorkflowMutation(command),
+    /linear_precondition_conflict/u,
+  );
+  assert.equal(await adapter.readWorkflowMutationOutcome(command), undefined);
+  assert.equal(writes, 0);
+});

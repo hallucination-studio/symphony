@@ -220,6 +220,36 @@ test("V3 gateway maps every public Agent Linear write to a closed Podium mutatio
   assert.equal(mutations[4]?.write_id, "write-2");
 });
 
+test("workflow gateway serializes a closed mutation and validates its read-back result", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    requests.push(body);
+    return {
+      kind: "applied",
+      read_back: { write_id: "write-1", target_issue_id: "work-1", remote_version: now },
+    };
+  });
+  await gateway.resolveProject();
+
+  const result = await gateway.mutateWorkflow({
+    kind: "update_workflow_issue", writeId: "write-1", expectedProjectId: "project-1",
+    rootIssueId: "root-1", expectedRootRemoteVersion: now,
+    target: { targetIssueId: "work-1", expectedRemoteVersion: now },
+    statusId: "status-progress", title: "Updated", description: "Description",
+  });
+
+  assert.deepEqual(result, { kind: "applied", readBack: {
+    writeId: "write-1", targetIssueId: "work-1", remoteVersion: now,
+  } });
+  assert.deepEqual(requests[0], {
+    kind: "update_workflow_issue", write_id: "write-1", conductor_short_hash: "abc123",
+    expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
+    target: { target_issue_id: "work-1", expected_remote_version: now },
+    status_id: "status-progress", title: "Updated", description: "Description",
+  });
+});
+
 function createGateway(
   request: (body: Record<string, unknown>) => Promise<unknown>,
   observeDiscovery?: (evidence: {

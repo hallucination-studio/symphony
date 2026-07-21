@@ -115,6 +115,18 @@ export interface LinearClientInterface {
     rootIssueId: string;
   }): Promise<import("../types.js").WorkflowRootTreeValue>;
 
+  readWorkflowMutationTarget(
+    issueId: string,
+  ): Promise<import("../types.js").WorkflowMutationTargetValue | undefined>;
+
+  executeWorkflowMutation(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<void>;
+
+  readWorkflowMutationOutcome(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<import("../types.js").WorkflowMutationReadBack | undefined>;
+
   getRootScope(input: {
     projectId: string;
     rootIssueId: string;

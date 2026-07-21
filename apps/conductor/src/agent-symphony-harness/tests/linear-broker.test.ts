@@ -49,6 +49,7 @@ function gateway(overrides: Partial<LinearGatewayInterface> = {}) {
     },
     async read() { return { summary: "bounded read" }; },
     async mutate() { mutations += 1; return { kind: "applied", summary: "applied" }; },
+    async mutateWorkflow() { return { kind: "precondition_conflict" }; },
     ...overrides,
   };
   return { value, mutations: () => mutations };

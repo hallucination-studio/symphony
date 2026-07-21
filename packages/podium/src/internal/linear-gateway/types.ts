@@ -139,6 +139,7 @@ export interface LinearIssueValue {
   title?: string;
   description?: string;
   managedMarker?: string;
+  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
   nodeKind?: "work" | "human";
   humanKind?: "plan_approval" | "planned_input" | "runtime_input";
   origin?: "user" | "symphony";
@@ -230,6 +231,85 @@ export interface WorkflowRootTreeValue {
   relations: WorkflowRelationValue[];
   observedAt: string;
 }
+
+export interface WorkflowMutationTargetValue {
+  issueId: string;
+  projectId: string;
+  updatedAt: string;
+  parentIssueId?: string;
+  statusId: string;
+  title: string;
+  description: string;
+  managedMarker?: string;
+  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
+}
+
+interface WorkflowMutationBase {
+  writeId: string;
+  conductorShortHash: string;
+  expectedProjectId: string;
+  rootIssueId: string;
+  expectedRootRemoteVersion: string;
+}
+
+export type WorkflowMutationCommand =
+  | (WorkflowMutationBase & {
+      kind: "create_workflow_issue";
+      parentExpectedRemoteVersion: string;
+      parentExpectedStatusId: string;
+      parentIssueId: string;
+      issueKind: "cycle" | "plan" | "work" | "verify" | "human";
+      title: string;
+      description: string;
+      statusId: string;
+      managedMarker: string;
+      order?: number;
+    })
+  | (WorkflowMutationBase & {
+      kind: "update_workflow_issue";
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+      };
+      statusId: string;
+      title: string;
+      description: string;
+    })
+  | (WorkflowMutationBase & {
+      kind: "append_workflow_comment";
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+      };
+      body: string;
+    })
+  | (WorkflowMutationBase & {
+      kind: "create_workflow_relation";
+      sourceIssueId: string;
+      sourceExpectedRemoteVersion: string;
+      targetIssueId: string;
+      targetExpectedRemoteVersion: string;
+      relationKind: "blocks" | "blocked_by" | "triggered_by";
+    });
+
+export interface WorkflowMutationReadBack {
+  writeId: string;
+  targetIssueId: string;
+  remoteVersion: string;
+}
+
+export type WorkflowMutationResult =
+  | { kind: "applied"; readBack: WorkflowMutationReadBack }
+  | { kind: "already_applied"; readBack: WorkflowMutationReadBack }
+  | { kind: "write_unconfirmed"; readBackTarget: WorkflowMutationReadBack }
+  | { kind: "precondition_conflict" }
+  | { kind: "failed"; error: ProtocolError };
 
 export type LinearMutationResult =
   | { kind: "applied"; issue?: LinearIssueValue }

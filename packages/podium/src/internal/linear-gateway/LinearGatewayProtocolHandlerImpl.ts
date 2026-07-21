@@ -3,6 +3,8 @@ import type { LinearClientInterface } from "./api/LinearClientInterface.js";
 import type {
   LinearMutationCommand,
   LinearMutationResult,
+  WorkflowMutationCommand,
+  WorkflowMutationResult,
   RemotePrecondition,
   RootIssueValue,
   RootUsageValue,
@@ -591,6 +593,159 @@ export class LinearGatewayProtocolHandlerImpl {
     };
   }
 
+  async mutateWorkflow(
+    command: WorkflowMutationCommand,
+  ): Promise<WorkflowMutationResult> {
+    let readBackBeforeRetry = false;
+    for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt += 1) {
+      let mutationAttempted = false;
+      try {
+        if (readBackBeforeRetry) {
+          const outcome = await this.client.readWorkflowMutationOutcome(command);
+          if (outcome) return { kind: "already_applied", readBack: outcome };
+          readBackBeforeRetry = false;
+        }
+        const idempotentOutcome = await this.#checkWorkflowIdempotentOutcome(command);
+        if (idempotentOutcome) return idempotentOutcome;
+        const preconditionFailure = await this.#checkWorkflowPreconditions(command);
+        if (preconditionFailure) return preconditionFailure;
+        mutationAttempted = true;
+        await this.client.executeWorkflowMutation(command);
+        const readBack = await this.client.readWorkflowMutationOutcome(command);
+        if (!readBack) {
+          const error = new Error("linear_workflow_mutation_read_back_mismatch") as Error & {
+            retryable: boolean;
+            ambiguous: boolean;
+          };
+          error.retryable = true;
+          error.ambiguous = true;
+          throw error;
+        }
+        return { kind: "applied", readBack };
+      } catch (error) {
+        const record = errorRecord(error);
+        if (record.preconditionConflict === true) {
+          return { kind: "precondition_conflict" };
+        }
+        const classification = errorClass(error);
+        const isRetryable = record.retryable === true || retryableLinearErrors.has(classification);
+        const isAmbiguous = record.ambiguous === true || ambiguousLinearErrors.has(classification);
+        if (isAmbiguous && mutationAttempted) {
+          readBackBeforeRetry = true;
+          try {
+            const outcome = await this.client.readWorkflowMutationOutcome(command);
+            if (outcome) return { kind: "already_applied", readBack: outcome };
+          } catch {
+            if (attempt === this.retry.maxAttempts) {
+              return this.#workflowWriteUnconfirmed(command, error);
+            }
+          }
+          if (attempt === this.retry.maxAttempts) {
+            return this.#workflowWriteUnconfirmed(command, error);
+          }
+        }
+        if (!isRetryable || attempt === this.retry.maxAttempts) {
+          return { kind: "failed", error: protocolFailure(error) };
+        }
+        const retryAfterMs = typeof record.retryAfterMs === "number" &&
+          Number.isFinite(record.retryAfterMs) && record.retryAfterMs >= 0
+          ? record.retryAfterMs : 0;
+        const exponential = this.retry.baseDelayMs * 2 ** (attempt - 1);
+        const jitter = this.retry.random
+          ? Math.floor(exponential * 0.25 * this.retry.random()) : 0;
+        await this.retry.sleep(Math.min(
+          this.retry.maxDelayMs ?? 60_000,
+          Math.max(retryAfterMs, exponential) + jitter,
+        ));
+      }
+    }
+    return { kind: "failed", error: protocolFailure(new Error("Linear retry exhausted.")) };
+  }
+
+  async #checkWorkflowIdempotentOutcome(
+    command: WorkflowMutationCommand,
+  ): Promise<
+    | Extract<WorkflowMutationResult, { kind: "already_applied" }>
+    | Extract<WorkflowMutationResult, { kind: "precondition_conflict" }>
+    | undefined
+  > {
+    const projectFailure = await this.#checkWorkflowProject(command);
+    if (projectFailure) return projectFailure;
+    const outcome = await this.client.readWorkflowMutationOutcome(command);
+    return outcome ? { kind: "already_applied", readBack: outcome } : undefined;
+  }
+
+  async #checkWorkflowPreconditions(
+    command: WorkflowMutationCommand,
+  ): Promise<Extract<WorkflowMutationResult, { kind: "precondition_conflict" }> | undefined> {
+    const projectFailure = await this.#checkWorkflowProject(command);
+    if (projectFailure) return projectFailure;
+    const root = await this.client.readWorkflowMutationTarget(command.rootIssueId);
+    if (!workflowTargetMatches(root, command.expectedProjectId, command.rootIssueId, command.expectedRootRemoteVersion)) {
+      return { kind: "precondition_conflict" };
+    }
+    if (command.kind === "create_workflow_issue") {
+      const parent = await this.client.readWorkflowMutationTarget(command.parentIssueId);
+      return workflowTargetMatches(
+        parent,
+        command.expectedProjectId,
+        command.parentIssueId,
+        command.parentExpectedRemoteVersion,
+      ) && parent?.statusId === command.parentExpectedStatusId
+        ? undefined : { kind: "precondition_conflict" };
+    }
+    if (command.kind === "create_workflow_relation") {
+      const source = await this.client.readWorkflowMutationTarget(command.sourceIssueId);
+      const target = await this.client.readWorkflowMutationTarget(command.targetIssueId);
+      return workflowTargetMatches(source, command.expectedProjectId, command.sourceIssueId, command.sourceExpectedRemoteVersion) &&
+        workflowTargetMatches(target, command.expectedProjectId, command.targetIssueId, command.targetExpectedRemoteVersion)
+        ? undefined : { kind: "precondition_conflict" };
+    }
+    const target = await this.client.readWorkflowMutationTarget(command.target.targetIssueId);
+    return workflowTargetMatches(
+      target,
+      command.expectedProjectId,
+      command.target.targetIssueId,
+      command.target.expectedRemoteVersion,
+    ) &&
+      (command.target.expectedStatusId === undefined || target?.statusId === command.target.expectedStatusId) &&
+      (command.target.expectedParentIssueId === undefined || target?.parentIssueId === command.target.expectedParentIssueId) &&
+      (command.target.expectedManagedMarker === undefined || target?.managedMarker === command.target.expectedManagedMarker)
+      ? undefined : { kind: "precondition_conflict" };
+  }
+
+  async #checkWorkflowProject(
+    command: WorkflowMutationCommand,
+  ): Promise<Extract<WorkflowMutationResult, { kind: "precondition_conflict" }> | undefined> {
+    const resolution = await this.client.readProjectResolution({
+      conductorShortHash: command.conductorShortHash,
+    });
+    return resolution.kind === "resolved" &&
+      resolution.projectId === command.expectedProjectId
+      ? undefined : { kind: "precondition_conflict" };
+  }
+
+  async #workflowWriteUnconfirmed(
+    command: WorkflowMutationCommand,
+    error: unknown,
+  ): Promise<WorkflowMutationResult> {
+    try {
+      const issueId = workflowReadBackIssueId(command);
+      const target = await this.client.readWorkflowMutationTarget(issueId);
+      if (!target) throw new Error("linear_workflow_read_back_target_missing");
+      return {
+        kind: "write_unconfirmed",
+        readBackTarget: {
+          writeId: command.writeId,
+          targetIssueId: target.issueId,
+          remoteVersion: target.updatedAt,
+        },
+      };
+    } catch {
+      return { kind: "failed", error: protocolFailure(error) };
+    }
+  }
+
   async #checkIdempotentOutcome(
     command: LinearMutationCommand,
   ): Promise<LinearMutationResult | undefined> {
@@ -711,6 +866,21 @@ function mutationReadBackTarget(command: LinearMutationCommand) {
     kind: "issue" as const,
     targetId: command.precondition.expectedIssueId,
   };
+}
+
+function workflowTargetMatches(
+  target: Awaited<ReturnType<LinearClientInterface["readWorkflowMutationTarget"]>>,
+  projectId: string,
+  issueId: string,
+  updatedAt: string,
+): boolean {
+  return target?.projectId === projectId && target.issueId === issueId && target.updatedAt === updatedAt;
+}
+
+function workflowReadBackIssueId(command: WorkflowMutationCommand): string {
+  if (command.kind === "create_workflow_issue") return command.parentIssueId;
+  if (command.kind === "create_workflow_relation") return command.sourceIssueId;
+  return command.target.targetIssueId;
 }
 
 function nextCursor(pageInfo: { hasNextPage: boolean; endCursor?: string }): string | undefined {

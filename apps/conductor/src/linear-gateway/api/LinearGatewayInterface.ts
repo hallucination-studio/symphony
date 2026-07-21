@@ -59,6 +59,79 @@ export interface LinearWorkflowTreeSnapshot {
   observed_at: string;
 }
 
+export type LinearWorkflowMutationCommand =
+  | {
+      kind: "create_workflow_issue";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      parentExpectedRemoteVersion: string;
+      parentExpectedStatusId: string;
+      parentIssueId: string;
+      issueKind: "cycle" | "plan" | "work" | "verify" | "human";
+      title: string;
+      description: string;
+      statusId: string;
+      managedMarker: string;
+      order?: number;
+    }
+  | {
+      kind: "update_workflow_issue";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+      };
+      statusId: string;
+      title: string;
+      description: string;
+    }
+  | {
+      kind: "append_workflow_comment";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+      };
+      body: string;
+    }
+  | {
+      kind: "create_workflow_relation";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      sourceIssueId: string;
+      sourceExpectedRemoteVersion: string;
+      targetIssueId: string;
+      targetExpectedRemoteVersion: string;
+      relationKind: "blocks" | "blocked_by" | "triggered_by";
+    };
+
+export type LinearWorkflowMutationOutcome =
+  | { kind: "applied"; readBack: { writeId: string; targetIssueId: string; remoteVersion: string } }
+  | { kind: "already_applied"; readBack: { writeId: string; targetIssueId: string; remoteVersion: string } }
+  | { kind: "write_unconfirmed"; readBackTarget: { writeId: string; targetIssueId: string; remoteVersion: string } }
+  | { kind: "precondition_conflict" }
+  | { kind: "failed"; code: string; summary: string; retryable?: boolean };
+
 export type LinearAgentMutationOutcome =
   | { kind: "applied"; summary: string }
   | { kind: "already_applied"; summary: string }
@@ -73,6 +146,7 @@ export type LinearAgentMutationOutcome =
 export interface LinearGatewayInterface {
   readFreshRootScope(rootIssueId: string): Promise<LinearRootScopeSnapshot>;
   readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot>;
+  mutateWorkflow(input: LinearWorkflowMutationCommand): Promise<LinearWorkflowMutationOutcome>;
   read(input: {
     rootIssueId: string;
     issueId: string;

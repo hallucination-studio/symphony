@@ -11,6 +11,7 @@ import type {
   LinearIssueState,
   LinearIssueValue,
   LinearMutationCommand,
+  WorkflowMutationCommand,
 } from "../linear-gateway/types.js";
 import type { LinearInstallation } from "../models.js";
 import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
@@ -116,6 +117,13 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       case "project_root_comment":
         return mutationResult(
           await gateway.mutate(mutationCommand(body)),
+        ) as unknown as JsonValue;
+      case "create_workflow_issue":
+      case "update_workflow_issue":
+      case "append_workflow_comment":
+      case "create_workflow_relation":
+        return workflowMutationResult(
+          await gateway.mutateWorkflow(workflowMutationCommand(body)),
         ) as unknown as JsonValue;
       default:
         throw new Error("conductor_request_unsupported");
@@ -632,6 +640,64 @@ function mutationCommand(body: Body): LinearMutationCommand {
   throw new Error("linear_mutation_kind_unsupported");
 }
 
+function workflowMutationCommand(body: Body): WorkflowMutationCommand {
+  const target = body.target === undefined ? undefined : recordValue(body.target, "linear_workflow_target_invalid");
+  const common = {
+    writeId: requiredString(body.write_id, "linear_workflow_write_id_missing"),
+    conductorShortHash: requiredString(body.conductor_short_hash, "linear_conductor_short_hash_missing"),
+    expectedProjectId: requiredString(body.expected_project_id, "linear_expected_project_id_missing"),
+    rootIssueId: requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
+    expectedRootRemoteVersion: requiredString(body.expected_root_remote_version, "linear_root_version_missing"),
+  };
+  if (body.kind === "create_workflow_issue") {
+    return {
+      ...common,
+      kind: body.kind,
+      parentExpectedRemoteVersion: requiredString(body.parent_expected_remote_version, "linear_workflow_parent_version_missing"),
+      parentExpectedStatusId: requiredString(body.parent_expected_status_id, "linear_workflow_parent_status_missing"),
+      parentIssueId: requiredString(body.parent_issue_id, "linear_workflow_parent_id_missing"),
+      issueKind: workflowIssueKind(body.issue_kind),
+      title: requiredString(body.title, "linear_workflow_title_missing"),
+      description: requiredString(body.description, "linear_workflow_description_missing"),
+      statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
+      managedMarker: requiredString(body.managed_marker, "linear_workflow_marker_missing"),
+      ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
+    };
+  }
+  if (body.kind === "create_workflow_relation") {
+    return {
+      ...common,
+      kind: body.kind,
+      sourceIssueId: requiredString(body.source_issue_id, "linear_workflow_source_id_missing"),
+      sourceExpectedRemoteVersion: requiredString(body.source_expected_remote_version, "linear_workflow_source_version_missing"),
+      targetIssueId: requiredString(body.target_issue_id, "linear_workflow_target_id_missing"),
+      targetExpectedRemoteVersion: requiredString(body.target_expected_remote_version, "linear_workflow_target_version_missing"),
+      relationKind: workflowRelationKind(body.relation_kind),
+    };
+  }
+  if (!target) throw new Error("linear_workflow_target_missing");
+  const targetValue = {
+    targetIssueId: requiredString(target.target_issue_id, "linear_workflow_target_id_missing"),
+    expectedRemoteVersion: requiredString(target.expected_remote_version, "linear_workflow_target_version_missing"),
+    ...(target.expected_status_id === undefined ? {} : { expectedStatusId: requiredString(target.expected_status_id, "linear_workflow_target_status_invalid") }),
+    ...(target.expected_parent_issue_id === undefined ? {} : { expectedParentIssueId: requiredString(target.expected_parent_issue_id, "linear_workflow_target_parent_invalid") }),
+    ...(target.expected_managed_marker === undefined ? {} : { expectedManagedMarker: requiredString(target.expected_managed_marker, "linear_workflow_target_marker_invalid") }),
+  };
+  if (body.kind === "update_workflow_issue") {
+    return {
+      ...common, kind: body.kind, target: targetValue,
+      statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
+      title: requiredString(body.title, "linear_workflow_title_missing"),
+      description: requiredString(body.description, "linear_workflow_description_missing"),
+    };
+  }
+  if (body.kind === "append_workflow_comment") {
+    return { ...common, kind: body.kind, target: targetValue,
+      body: requiredString(body.body, "linear_workflow_comment_body_missing") };
+  }
+  throw new Error("linear_workflow_kind_unsupported");
+}
+
 function rootCommentIdentity(body: Body):
   | { commentId: string; eventKey?: never }
   | { eventKey: string; commentId?: never } {
@@ -643,6 +709,49 @@ function rootCommentIdentity(body: Body):
   return hasCommentId
     ? { commentId: requiredString(body.comment_id, "linear_comment_id_invalid") }
     : { eventKey: requiredString(body.event_key, "linear_event_key_invalid") };
+}
+
+function workflowIssueKind(value: JsonValue | undefined): "cycle" | "plan" | "work" | "verify" | "human" {
+  if (value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") {
+    return value;
+  }
+  throw new Error("linear_workflow_issue_kind_invalid");
+}
+
+function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "triggered_by" {
+  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") return value;
+  throw new Error("linear_workflow_relation_kind_invalid");
+}
+
+function workflowMutationResult(
+  result: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["mutateWorkflow"]>>,
+) {
+  if (result.kind === "failed") {
+    return {
+      kind: result.kind,
+      error: {
+        code: result.error.code,
+        category: result.error.category,
+        sanitized_reason: result.error.sanitizedReason,
+        retryable: result.error.retryable,
+        action_required: result.error.actionRequired,
+        next_action: result.error.nextAction,
+      },
+    };
+  }
+  if (result.kind === "write_unconfirmed") {
+    return { kind: result.kind, read_back_target: {
+      write_id: result.readBackTarget.writeId,
+      target_issue_id: result.readBackTarget.targetIssueId,
+      remote_version: result.readBackTarget.remoteVersion,
+    } };
+  }
+  if (result.kind === "precondition_conflict") return { kind: result.kind };
+  return { kind: result.kind, read_back: {
+    write_id: result.readBack.writeId,
+    target_issue_id: result.readBack.targetIssueId,
+    remote_version: result.readBack.remoteVersion,
+  } };
 }
 
 function mutationResult(result: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["mutate"]>>) {

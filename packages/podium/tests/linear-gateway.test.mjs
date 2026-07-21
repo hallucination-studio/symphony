@@ -1208,6 +1208,86 @@ test("Podium-Conductor maps only the selected Root comment identity", async () =
   ]);
 });
 
+test("Podium-Conductor routes every workflow mutation through the closed service boundary", async () => {
+  const executed = [];
+  const outcomes = new Map();
+  const services = await createConductorServices({
+    async readProjectResolution() {
+      return { kind: "resolved", projectId: "project-1", updatedAt: "project-version" };
+    },
+    async readWorkflowMutationTarget(issueId) {
+      return {
+        issueId,
+        projectId: "project-1",
+        updatedAt: issueId === "root-1" ? "root-version" : "target-version",
+        parentIssueId: issueId === "root-1" ? undefined : "root-1",
+        statusId: "status-todo",
+        title: "Existing",
+        description: "Existing description",
+        managedMarker: issueId === "root-1" ? undefined : "target-marker",
+      };
+    },
+    async readWorkflowMutationOutcome(command) {
+      return outcomes.get(command.writeId);
+    },
+    async executeWorkflowMutation(command) {
+      executed.push(command);
+      outcomes.set(command.writeId, {
+        writeId: command.writeId,
+        targetIssueId: command.kind === "create_workflow_issue"
+          ? "cycle-1"
+          : command.kind === "create_workflow_relation"
+            ? command.sourceIssueId
+            : command.target.targetIssueId,
+        remoteVersion: "written-version",
+      });
+    },
+  });
+
+  const common = {
+    conductor_short_hash: "abc123",
+    expected_project_id: "project-1",
+    root_issue_id: "root-1",
+    expected_root_remote_version: "root-version",
+  };
+  const results = await Promise.all([
+    services.handle({
+      ...common, kind: "create_workflow_issue", write_id: "write-create",
+      parent_expected_remote_version: "root-version", parent_expected_status_id: "status-todo",
+      parent_issue_id: "root-1", issue_kind: "cycle", title: "Cycle", description: "Plan it",
+      status_id: "status-todo", managed_marker: "cycle-marker",
+    }),
+    services.handle({
+      ...common, kind: "update_workflow_issue", write_id: "write-update",
+      target: {
+        target_issue_id: "work-1", expected_remote_version: "target-version",
+        expected_status_id: "status-todo", expected_parent_issue_id: "root-1",
+        expected_managed_marker: "target-marker",
+      },
+      status_id: "status-progress", title: "Updated", description: "Updated description",
+    }),
+    services.handle({
+      ...common, kind: "append_workflow_comment", write_id: "write-comment",
+      target: { target_issue_id: "work-1", expected_remote_version: "target-version" },
+      body: "Progress",
+    }),
+    services.handle({
+      ...common, kind: "create_workflow_relation", write_id: "write-relation",
+      source_issue_id: "work-1", source_expected_remote_version: "target-version",
+      target_issue_id: "root-1", target_expected_remote_version: "root-version",
+      relation_kind: "blocked_by",
+    }),
+  ]);
+
+  assert.deepEqual(results.map((result) => result.kind), ["applied", "applied", "applied", "applied"]);
+  assert.deepEqual(executed.map((command) => command.kind).sort(), [
+    "append_workflow_comment", "create_workflow_issue", "create_workflow_relation", "update_workflow_issue",
+  ]);
+  assert.deepEqual(results.map((result) => result.read_back.target_issue_id).sort(), [
+    "cycle-1", "work-1", "work-1", "work-1",
+  ]);
+});
+
 test("Podium-Conductor rejects mixed Root comment identities", async () => {
   const services = await createConductorServices({});
 
@@ -1441,6 +1521,106 @@ test("ambiguous mutation reads back again after backoff before stale preconditio
   assert.equal(result.kind, "already_applied");
   assert.equal(mutationAttempts, 1);
   assert.equal(outcomeReads, 2);
+});
+
+test("workflow mutation rejects stale Root and target versions before Linear write", async () => {
+  let writes = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return { kind: "resolved", projectId: "project-1", updatedAt: "project-version" };
+      },
+      async readWorkflowMutationTarget(issueId) {
+        return issueId === "root-1"
+          ? { issueId, projectId: "project-1", updatedAt: "root-new" }
+          : { issueId, projectId: "project-1", updatedAt: "target-version", statusId: "status-todo" };
+      },
+      async readWorkflowMutationOutcome() { return undefined; },
+      async executeWorkflowMutation() { writes += 1; },
+      async readMutationTarget() { throw new Error("legacy path should not be used"); },
+      async executeMutation() { throw new Error("legacy path should not be used"); },
+      async readMutationOutcome() { throw new Error("legacy path should not be used"); },
+    },
+    { sleep: async () => undefined, maxAttempts: 2, baseDelayMs: 10 },
+  );
+
+  const result = await handler.mutateWorkflow({
+    kind: "update_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-old",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version", expectedStatusId: "status-todo" },
+    statusId: "status-progress", title: "Updated", description: "Description",
+  });
+
+  assert.deepEqual(result, { kind: "precondition_conflict" });
+  assert.equal(writes, 0);
+});
+
+test("workflow mutation proves stable write idempotency with semantic read-back", async () => {
+  let writes = 0;
+  const readBack = { writeId: "write-1", targetIssueId: "work-1", remoteVersion: "target-new" };
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return { kind: "resolved", projectId: "project-1", updatedAt: "project-version" };
+      },
+      async readWorkflowMutationTarget(issueId) {
+        return { issueId, projectId: "project-1", updatedAt: issueId === "root-1" ? "root-version" : "target-version", statusId: "status-todo" };
+      },
+      async readWorkflowMutationOutcome() { return readBack; },
+      async executeWorkflowMutation() { writes += 1; },
+      async readMutationTarget() { throw new Error("legacy path should not be used"); },
+      async executeMutation() { throw new Error("legacy path should not be used"); },
+      async readMutationOutcome() { throw new Error("legacy path should not be used"); },
+    },
+    { sleep: async () => undefined, maxAttempts: 2, baseDelayMs: 10 },
+  );
+
+  const result = await handler.mutateWorkflow({
+    kind: "update_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version" },
+    statusId: "status-progress", title: "Updated", description: "Description",
+  });
+
+  assert.deepEqual(result, { kind: "already_applied", readBack });
+  assert.equal(writes, 0);
+});
+
+test("ambiguous workflow writes return a closed read-back target", async () => {
+  let writes = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return { kind: "resolved", projectId: "project-1", updatedAt: "project-version" };
+      },
+      async readWorkflowMutationTarget(issueId) {
+        return { issueId, projectId: "project-1", updatedAt: issueId === "root-1" ? "root-version" : "target-version", statusId: "status-todo" };
+      },
+      async readWorkflowMutationOutcome() { return undefined; },
+      async executeWorkflowMutation() {
+        writes += 1;
+        const error = new Error("connection lost after workflow write");
+        error.retryable = true;
+        error.ambiguous = true;
+        throw error;
+      },
+      async readMutationTarget() { throw new Error("legacy path should not be used"); },
+      async executeMutation() { throw new Error("legacy path should not be used"); },
+      async readMutationOutcome() { throw new Error("legacy path should not be used"); },
+    },
+    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+  );
+
+  const result = await handler.mutateWorkflow({
+    kind: "append_workflow_comment", writeId: "write-1", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version" }, body: "Progress",
+  });
+
+  assert.deepEqual(result, { kind: "write_unconfirmed", readBackTarget: {
+    writeId: "write-1", targetIssueId: "work-1", remoteVersion: "target-version",
+  } });
+  assert.equal(writes, 1);
 });
 
 function issue(issueId, projectId) {

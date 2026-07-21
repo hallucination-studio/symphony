@@ -160,6 +160,10 @@ const ROOT_SCOPE_CHILDREN_QUERY = `
   }
 `;
 const ROOT_MARKER_START = "<!-- symphony root\n";
+const WORKFLOW_ISSUE_MARKER =
+  /\n*<!-- symphony workflow issue\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nissue_kind: (cycle|plan|work|verify|human)\n-->\s*$/;
+const WORKFLOW_WRITE_MARKER =
+  /\n*<!-- symphony workflow write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const TURN_EVENT_MARKER =
   /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
 const AGENT_WRITE_MARKER =
@@ -1154,6 +1158,8 @@ export class LinearSdkImpl implements LinearClientInterface {
         ...(issue.managedMarker ? { managedMarker: issue.managedMarker } : {}),
         ...(issue.issueId === input.rootIssueId
           ? { issueKind: "root" as const }
+          : issue.workflowKind
+            ? { issueKind: issue.workflowKind }
           : issue.nodeKind === "work"
             ? { issueKind: "work" as const }
             : issue.nodeKind === "human"
@@ -1179,6 +1185,190 @@ export class LinearSdkImpl implements LinearClientInterface {
       relations: tree.relations,
       observedAt: tree.observedAt,
     };
+  }
+
+  async readWorkflowMutationTarget(issueId: string) {
+    const issue = await this.#client.issue(issueId);
+    return workflowMutationTargetValue(issue);
+  }
+
+  async executeWorkflowMutation(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<void> {
+    await this.#assertWorkflowMutationScope(command);
+    switch (command.kind) {
+      case "create_workflow_issue": {
+        const parent = await this.#client.issue(command.parentIssueId);
+        if (parent.projectId !== command.expectedProjectId || !parent.teamId) {
+          throw new Error("linear_workflow_parent_invalid");
+        }
+        await this.#workflowStatusId(parent, command.statusId);
+        const payload = await this.#client.createIssue({
+          teamId: parent.teamId,
+          projectId: command.expectedProjectId,
+          parentId: parent.id,
+          title: command.title,
+          description: serializeWorkflowIssueDescription(
+            command.description,
+            command.managedMarker,
+            command.issueKind,
+          ),
+          stateId: command.statusId,
+          ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
+        });
+        if (!payload.success || !payload.issueId) {
+          throw new Error("linear_workflow_issue_create_failed");
+        }
+        return;
+      }
+      case "update_workflow_issue": {
+        const issue = await this.#client.issue(command.target.targetIssueId);
+        if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
+        const current = await workflowMutationTargetValue(issue);
+        if (command.target.expectedManagedMarker !== undefined &&
+          current.managedMarker !== command.target.expectedManagedMarker) {
+          throw preconditionConflictError();
+        }
+        await this.#workflowStatusId(issue, command.statusId);
+        await this.#client.updateIssue(issue.id, {
+          title: command.title,
+          description: serializeWorkflowIssueDescription(
+            command.description,
+            current.managedMarker,
+            workflowIssueKindForUpdate(current),
+          ),
+          stateId: command.statusId,
+        });
+        return;
+      }
+      case "append_workflow_comment": {
+        const issue = await this.#client.issue(command.target.targetIssueId);
+        if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
+        await this.#client.createComment({
+          issueId: issue.id,
+          body: serializeWorkflowComment(command.body, command.writeId),
+        });
+        return;
+      }
+      case "create_workflow_relation": {
+        const source = await this.#client.issue(command.sourceIssueId);
+        const target = await this.#client.issue(command.targetIssueId);
+        if (source.projectId !== command.expectedProjectId || target.projectId !== command.expectedProjectId) {
+          throw new Error("linear_workflow_relation_project_invalid");
+        }
+        if (command.relationKind === "triggered_by") {
+          throw new Error("linear_workflow_relation_kind_unsupported");
+        }
+        const issueId = command.relationKind === "blocks" ? source.id : target.id;
+        const relatedIssueId = command.relationKind === "blocks" ? target.id : source.id;
+        const payload = await this.#client.createIssueRelation({
+          issueId,
+          relatedIssueId,
+          type: "blocks" as Parameters<LinearClient["createIssueRelation"]>[0]["type"],
+        });
+        if (!payload.success) throw new Error("linear_workflow_relation_create_failed");
+        return;
+      }
+    }
+  }
+
+  async #assertWorkflowMutationScope(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<void> {
+    const tree = await this.getWorkflowIssueTree({
+      projectId: command.expectedProjectId,
+      rootIssueId: command.rootIssueId,
+    });
+    const issueIds = new Set(tree.issues.map((issue) => issue.issueId));
+    const targetIds = command.kind === "create_workflow_issue"
+      ? [command.parentIssueId]
+      : command.kind === "create_workflow_relation"
+        ? [command.sourceIssueId, command.targetIssueId]
+        : [command.target.targetIssueId];
+    if (tree.rootIssueId !== command.rootIssueId ||
+      !issueIds.has(command.rootIssueId) ||
+      targetIds.some((issueId) => !issueIds.has(issueId))) {
+      throw preconditionConflictError();
+    }
+  }
+
+  async readWorkflowMutationOutcome(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<import("../types.js").WorkflowMutationReadBack | undefined> {
+    if (command.kind === "create_workflow_issue") {
+      const tree = await this.getWorkflowIssueTree({
+        projectId: command.expectedProjectId,
+        rootIssueId: command.rootIssueId,
+      });
+      const matches = tree.issues.filter((issue) => issue.managedMarker === command.managedMarker);
+      if (matches.length > 1) throw new Error("linear_workflow_marker_ambiguous");
+      const issue = matches[0];
+      if (!issue) return undefined;
+      if (issue.projectId !== command.expectedProjectId ||
+        issue.parentIssueId !== command.parentIssueId || issue.statusId !== command.statusId ||
+        issue.title !== command.title || issue.description !== command.description) {
+        throw preconditionConflictError();
+      }
+      return { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.remoteVersion };
+    }
+    if (command.kind === "update_workflow_issue") {
+      const tree = await this.getWorkflowIssueTree({
+        projectId: command.expectedProjectId,
+        rootIssueId: command.rootIssueId,
+      });
+      const issue = tree.issues.find(({ issueId }) => issueId === command.target.targetIssueId);
+      return issue && issue.projectId === command.expectedProjectId &&
+        issue.statusId === command.statusId && issue.title === command.title &&
+        issue.description === command.description &&
+        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId) &&
+        (command.target.expectedManagedMarker === undefined ||
+          issue.managedMarker === command.target.expectedManagedMarker)
+        ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt }
+        : undefined;
+    }
+    if (command.kind === "append_workflow_comment") {
+      const tree = await this.getWorkflowIssueTree({
+        projectId: command.expectedProjectId,
+        rootIssueId: command.rootIssueId,
+      });
+      const matches = tree.comments.filter((comment) =>
+        comment.issueId === command.target.targetIssueId &&
+        comment.managedMarker === command.writeId,
+      );
+      if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
+      const comment = matches[0];
+      return comment && comment.body === serializeWorkflowComment(command.body, command.writeId)
+        ? { writeId: command.writeId, targetIssueId: comment.issueId, remoteVersion: comment.remoteVersion }
+        : undefined;
+    }
+    const tree = await this.getWorkflowIssueTree({
+      projectId: command.expectedProjectId,
+      rootIssueId: command.rootIssueId,
+    });
+    const sourceIssueId = command.relationKind === "blocked_by"
+      ? command.targetIssueId : command.sourceIssueId;
+    const targetIssueId = command.relationKind === "blocked_by"
+      ? command.sourceIssueId : command.targetIssueId;
+    const relation = tree.relations.find((value) =>
+      value.relationKind === command.relationKind ||
+      (command.relationKind === "blocked_by" && value.relationKind === "blocks")
+        ? value.sourceIssueId === sourceIssueId && value.targetIssueId === targetIssueId
+        : false,
+    );
+    if (!relation) return undefined;
+    const source = await this.readWorkflowMutationTarget(command.sourceIssueId);
+    return source
+      ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: source.updatedAt }
+      : undefined;
+  }
+
+  async #workflowStatusId(issue: Issue, statusId: string): Promise<void> {
+    if (!issue.team) throw new Error("linear_workflow_team_missing");
+    const team = await issue.team;
+    const states = await allNodes(team.states({ first: 64 }), 64);
+    if (states.filter((state) => state.id === statusId).length !== 1) {
+      throw new Error("linear_workflow_status_invalid");
+    }
   }
 
   async getRootScope(input: { projectId: string; rootIssueId: string }) {
@@ -1840,7 +2030,45 @@ function workflowRelationKindValue(
 function commentManagedMarker(body: string, issueId: string): string | undefined {
   if (isRootManagedComment(body)) return rootCommentMarker(issueId);
   return body.match(AGENT_WRITE_MARKER)?.[1]
+    ?? body.match(WORKFLOW_WRITE_MARKER)?.[1]
     ?? body.match(TURN_EVENT_MARKER)?.[1];
+}
+
+async function workflowMutationTargetValue(issue: Issue) {
+  const state = await issue.state;
+  if (!state || !issue.projectId) throw new Error("linear_workflow_target_invalid");
+  const managed = parseManagedDescription(issue.description ?? "");
+  return {
+    issueId: issue.id,
+    projectId: issue.projectId,
+    updatedAt: timestampValue(issue.updatedAt),
+    ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
+    statusId: state.id,
+    title: issue.title,
+    description: managed.businessDescription,
+    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
+    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
+  };
+}
+
+function serializeWorkflowIssueDescription(
+  description: string,
+  managedMarker: string | undefined,
+  issueKind: "cycle" | "plan" | "work" | "verify" | "human" | undefined,
+) {
+  return managedMarker && issueKind
+    ? `${description.trim()}\n\n<!-- symphony workflow issue\nmanaged_marker: ${managedMarker}\nissue_kind: ${issueKind}\n-->`
+    : description.trim();
+}
+
+function serializeWorkflowComment(body: string, writeId: string) {
+  return `${body.trim()}\n\n<!-- symphony workflow write\nwrite_id: ${writeId}\n-->`;
+}
+
+function workflowIssueKindForUpdate(
+  target: Awaited<ReturnType<typeof workflowMutationTargetValue>>,
+) {
+  return target.workflowKind ?? "work";
 }
 
 function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
@@ -1862,6 +2090,7 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     title: fact.title,
     description: managed.businessDescription,
     ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
+    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
     ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
     ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
     ...(managed.origin ? { origin: managed.origin } : {}),
@@ -1909,6 +2138,7 @@ async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
     ...(managed.managedMarker
       ? { managedMarker: managed.managedMarker }
       : {}),
+    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
     ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
     ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
     ...(managed.origin ? { origin: managed.origin } : {}),
@@ -1944,7 +2174,18 @@ function parseManagedDescription(description: string): {
   origin?: "user" | "symphony";
   completedInputHash?: string;
   targetIssueId?: string;
+  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
 } {
+  const workflow = description.match(WORKFLOW_ISSUE_MARKER);
+  if (workflow?.index !== undefined) {
+    return {
+      businessDescription: description.slice(0, workflow.index).trim(),
+      managedMarker: workflow[1]!,
+      workflowKind: workflow[2] as "cycle" | "plan" | "work" | "verify" | "human",
+      ...(workflow[2] === "work" ? { nodeKind: "work" as const } : {}),
+      ...(workflow[2] === "human" ? { nodeKind: "human" as const } : {}),
+    };
+  }
   const work = description.match(WORK_METADATA);
   if (work?.index !== undefined) {
     const beforeWork = description.slice(0, work.index);

@@ -300,6 +300,36 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
     return workflowTree(record(response.tree), rootIssueId, this.#projectId);
   }
 
+  async mutateWorkflow(
+    input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
+  ): Promise<import("../api/LinearGatewayInterface.js").LinearWorkflowMutationOutcome> {
+    this.#assertProject(input.expectedProjectId);
+    const response = record(await this.#request(workflowMutationBody(input, this.conductorShortHash)));
+    if (response.kind === "precondition_conflict") return { kind: "precondition_conflict" };
+    if (response.kind === "applied" || response.kind === "already_applied") {
+      return {
+        kind: response.kind,
+        readBack: workflowMutationReadBack(response.read_back),
+      };
+    }
+    if (response.kind === "write_unconfirmed") {
+      return {
+        kind: response.kind,
+        readBackTarget: workflowMutationReadBack(response.read_back_target),
+      };
+    }
+    if (response.kind === "failed") {
+      const error = record(response.error);
+      return {
+        kind: "failed",
+        code: string(error.code, "linear_workflow_mutation_error_invalid"),
+        summary: string(error.sanitized_reason, "linear_workflow_mutation_error_invalid"),
+        retryable: boolean(error.retryable, "linear_workflow_mutation_error_invalid"),
+      };
+    }
+    throw protocolError(response);
+  }
+
   async read(input: {
     rootIssueId: string; issueId: string; include: string[];
     scope: LinearRootScopeSnapshot;
@@ -869,6 +899,70 @@ function rootScopeHumanKind(
 function protocolError(response: Record<string, JsonValue>): Error {
   const code = typeof response.code === "string" ? response.code : "private_protocol_unexpected_result";
   return new Error(code);
+}
+
+function workflowMutationBody(
+  input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
+  conductorShortHash: string,
+): Record<string, JsonValue> {
+  const common = {
+    write_id: input.writeId,
+    conductor_short_hash: conductorShortHash,
+    expected_project_id: input.expectedProjectId,
+    root_issue_id: input.rootIssueId,
+    expected_root_remote_version: input.expectedRootRemoteVersion,
+  };
+  switch (input.kind) {
+    case "create_workflow_issue":
+      return {
+        ...common,
+        kind: input.kind,
+        parent_expected_remote_version: input.parentExpectedRemoteVersion,
+        parent_expected_status_id: input.parentExpectedStatusId,
+        parent_issue_id: input.parentIssueId,
+        issue_kind: input.issueKind,
+        title: input.title,
+        description: input.description,
+        status_id: input.statusId,
+        managed_marker: input.managedMarker,
+        ...(input.order === undefined ? {} : { order: input.order }),
+      };
+    case "update_workflow_issue":
+    case "append_workflow_comment":
+      return {
+        ...common,
+        kind: input.kind,
+        target: {
+          target_issue_id: input.target.targetIssueId,
+          expected_remote_version: input.target.expectedRemoteVersion,
+          ...(input.target.expectedStatusId === undefined ? {} : { expected_status_id: input.target.expectedStatusId }),
+          ...(input.target.expectedParentIssueId === undefined ? {} : { expected_parent_issue_id: input.target.expectedParentIssueId }),
+          ...(input.target.expectedManagedMarker === undefined ? {} : { expected_managed_marker: input.target.expectedManagedMarker }),
+        },
+        ...(input.kind === "update_workflow_issue"
+          ? { status_id: input.statusId, title: input.title, description: input.description }
+          : { body: input.body }),
+      };
+    case "create_workflow_relation":
+      return {
+        ...common,
+        kind: input.kind,
+        source_issue_id: input.sourceIssueId,
+        source_expected_remote_version: input.sourceExpectedRemoteVersion,
+        target_issue_id: input.targetIssueId,
+        target_expected_remote_version: input.targetExpectedRemoteVersion,
+        relation_kind: input.relationKind,
+      };
+  }
+}
+
+function workflowMutationReadBack(value: JsonValue | undefined) {
+  const readBack = record(value);
+  return {
+    writeId: string(readBack.write_id, "linear_workflow_read_back_invalid"),
+    targetIssueId: string(readBack.target_issue_id, "linear_workflow_read_back_invalid"),
+    remoteVersion: string(readBack.remote_version, "linear_workflow_read_back_invalid"),
+  };
 }
 
 function mutationCas(response: Record<string, JsonValue>): "applied" | "conflict" {

@@ -107,6 +107,7 @@ test("commit and delivery each perform exactly one fresh Root scope read", async
         },
         async read() { return {}; },
         async mutate() { return { kind: "applied" as const, summary: "ok" }; },
+        async mutateWorkflow() { return { kind: "precondition_conflict" as const }; },
       },
       git: {
         async inspect() { throw new Error("unused"); }, async diff() { throw new Error("unused"); },
@@ -146,6 +147,7 @@ function createBroker(overrides: Record<string, unknown> = {}) {
         };
       },
       async read() { return {}; }, async mutate() { return { kind: "applied" as const, summary: "ok" }; },
+      async mutateWorkflow() { return { kind: "precondition_conflict" as const }; },
     },
     readGitHead: async () => "abc123",
     workspace,
