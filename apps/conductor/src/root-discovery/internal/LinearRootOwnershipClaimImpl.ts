@@ -35,7 +35,7 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
       throw new Error("root_ownership_root_terminal");
     }
 
-    if (root.status_name !== "In Progress") {
+    if (root.status_name !== "In Progress" && !(existing && root.status_name === "In Review")) {
       const status = tree.status_catalog.find(({ name }) => name === "In Progress");
       if (!status) throw new Error("root_ownership_status_missing");
       const outcome = await this.dependencies.linear.mutateWorkflow({

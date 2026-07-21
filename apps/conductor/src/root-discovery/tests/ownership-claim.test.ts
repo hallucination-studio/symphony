@@ -40,6 +40,19 @@ test("reuses a same-Conductor ownership record without writing a second claim", 
   assert.equal(fake.tree.comments.filter(({ issue_id }) => issue_id === rootId).length, 1);
 });
 
+test("preserves an owned delivered Root in In Review during admission", async () => {
+  const fake = new FakeLinear(ownershipRecord(), "In Review");
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-ignored", ready: true });
+
+  const result = await claim.claim({ root: discoveredRoot() });
+
+  assert.equal(result.kind, "already_owned");
+  assert.deepEqual(events, ["read", "profile", "ensure", "inspect", "read"]);
+  assert.equal(fake.mutations.length, 0);
+  assert.equal(fake.tree.issues[0]?.status_name, "In Review");
+});
+
 test("rejects a Root owned by another Conductor before profile or workspace access", async () => {
   const fake = new FakeLinear(ownershipRecord({ conductorId: "conductor-foreign" }));
   const events: string[] = [];
@@ -166,17 +179,23 @@ class FakeLinear {
   onRead?: () => void;
   onMutation?: (command: LinearWorkflowMutationCommand) => void;
 
-  constructor(record?: ReturnType<typeof ownershipRecord>) {
+  constructor(record?: ReturnType<typeof ownershipRecord>, rootStatus: "Todo" | "In Progress" | "In Review" = record ? "In Progress" : "Todo") {
+    const rootState = rootStatus === "In Review"
+      ? { statusId: "status-review", statusName: "In Review", statusCategory: "started" as const, statusPosition: 2 }
+      : record
+        ? { statusId: "status-progress", statusName: "In Progress", statusCategory: "started" as const, statusPosition: 1 }
+        : { statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted" as const, statusPosition: 0 };
     this.tree = {
       root_issue_id: rootId,
       status_catalog: [
         { status_id: "status-todo", name: "Todo", category: "unstarted", position: 0 },
         { status_id: "status-progress", name: "In Progress", category: "started", position: 1 },
+        { status_id: "status-review", name: "In Review", category: "started", position: 2 },
       ],
       issues: [{
         issue_id: rootId, identifier: "SYM-1", project_id: projectId,
-        status_id: record ? "status-progress" : "status-todo", status_name: record ? "In Progress" : "Todo",
-        status_category: record ? "started" : "unstarted", status_position: record ? 1 : 0, order: 0, depth: 0, title: "Root", description: "Build it",
+        status_id: rootState.statusId, status_name: rootState.statusName,
+        status_category: rootState.statusCategory, status_position: rootState.statusPosition, order: 0, depth: 0, title: "Root", description: "Build it",
         issue_kind: "root", remote_version: "root-v1", updated_at: now,
       }],
       comments: record ? [{
