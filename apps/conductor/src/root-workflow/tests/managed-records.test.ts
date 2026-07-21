@@ -19,6 +19,18 @@ const records: ManagedRecord[] = [
     ownerGeneration: "generation-1",
   },
   {
+    kind: "delivery",
+    version: 1,
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    verifyResultId: "execution-verify-1",
+    verifiedRevision: "git-head-1",
+    deliveryKind: "pull_request",
+    deliveryBranch: "symphony/root-1",
+    pullRequest: "https://example.test/pr/1",
+    deliveredAt: "2026-07-21T00:06:00Z",
+  },
+  {
     kind: "cycle_marker",
     version: 1,
     rootIssueId: "root-1",

@@ -4,6 +4,7 @@ import type {
   CheckEvidence,
   ConvergenceRecord,
   CycleMarker,
+  DeliveryRecord,
   FindingDispositionRecord,
   FindingEvidence,
   FindingRecord,
@@ -68,6 +69,7 @@ function decodeRecord(value: unknown): ManagedRecord {
   if (object.version !== 1) fail(object.version === undefined ? "managed_record_required_field:version" : "managed_record_version_invalid");
   switch (kind) {
     case "root_ownership": return decodeRootOwnership(object);
+    case "delivery": return decodeDelivery(object);
     case "cycle_marker": return decodeCycleMarker(object);
     case "node_marker": return decodeNodeMarker(object);
     case "plan_contract": return decodePlanContract(object);
@@ -90,6 +92,18 @@ function decodeRootOwnership(o: Record<string, unknown>): RootOwnershipRecord {
     kind: "root_ownership", version: 1, rootIssueId: id(o, "root_issue_id"), conductorId: id(o, "conductor_id"),
     performerProfileId: id(o, "performer_profile_id"), deliveryBranch: text(o, "delivery_branch"),
     ...(o.pull_request === undefined ? {} : { pullRequest: text(o, "pull_request") }), ownerGeneration: id(o, "owner_generation"),
+  };
+}
+
+function decodeDelivery(o: Record<string, unknown>): DeliveryRecord {
+  fields(o, ["kind", "version", "root_issue_id", "cycle_issue_id", "verify_result_id", "verified_revision", "delivery_kind", "delivery_branch", "pull_request", "delivered_at"], ["pull_request"]);
+  return {
+    kind: "delivery", version: 1, rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"),
+    verifyResultId: id(o, "verify_result_id"), verifiedRevision: id(o, "verified_revision"),
+    deliveryKind: enumValue(o, "delivery_kind", ["pull_request", "remote_branch", "local_branch"]),
+    deliveryBranch: text(o, "delivery_branch"),
+    ...(o.pull_request === undefined ? {} : { pullRequest: text(o, "pull_request") }),
+    deliveredAt: timestamp(o, "delivered_at"),
   };
 }
 
@@ -204,6 +218,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   const record = value as unknown as ManagedRecord;
   const topFields: Record<ManagedRecord["kind"], { allowed: string[]; optional?: string[] }> = {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
+    delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     cycle_marker: { allowed: ["kind", "version", "rootIssueId", "cycleKey", "trigger", "baselineRevision", "predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"], optional: ["predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"] },
     node_marker: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "nodeKey", "nodeKind", "planContractDigest"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objectiveSummary", "includedScope", "excludedScope", "acceptanceCriteria", "workNodes", "verifyNode"] },
@@ -226,6 +241,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   }
   switch (record.kind) {
     case "root_ownership": return encodeRootOwnership(record);
+    case "delivery": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, verify_result_id: record.verifyResultId, verified_revision: record.verifiedRevision, delivery_kind: record.deliveryKind, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), delivered_at: record.deliveredAt });
     case "cycle_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_key: record.cycleKey, trigger: record.trigger, baseline_revision: record.baselineRevision, ...(record.predecessorCycleIssueId === undefined ? {} : { predecessor_cycle_issue_id: record.predecessorCycleIssueId }), ...(record.repairGroupId === undefined ? {} : { repair_group_id: record.repairGroupId }), ...(record.findingIds === undefined ? {} : { finding_ids: record.findingIds }), ...(record.predecessorPlanContractDigest === undefined ? {} : { predecessor_plan_contract_digest: record.predecessorPlanContractDigest }), ...(record.predecessorVerifyResultId === undefined ? {} : { predecessor_verify_result_id: record.predecessorVerifyResultId }), ...(record.predecessorVerifiedRevision === undefined ? {} : { predecessor_verified_revision: record.predecessorVerifiedRevision }) });
     case "node_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_key: record.nodeKey, node_kind: record.nodeKind, plan_contract_digest: record.planContractDigest });
     case "plan_contract": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest, objective_summary: record.objectiveSummary, included_scope: record.includedScope, excluded_scope: record.excludedScope, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion), work_nodes: record.workNodes.map(encodeWorkNode), verify_node: encodeVerifyNode(record.verifyNode) });

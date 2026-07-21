@@ -95,6 +95,7 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
       facts.git_head === expected.git_head &&
       facts.checks_digest === expected.checks_digest &&
       facts.checks_passed &&
+      matchingSucceededCycle(expected, facts) &&
       (!existing ||
         (existing.branch === command.workspace.branch && existing.head === expected.git_head));
     if (!valid) throw new Error("root_delivery_precondition_failed");
@@ -113,6 +114,22 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
       return undefined;
     }
   }
+}
+
+function matchingSucceededCycle(
+  expected: RootDeliveryCommand["expected"],
+  facts: RootDeliveryFacts,
+): boolean {
+  if (!expected.latest_succeeded_cycle && expected.owner_generation === undefined) return true;
+  const cycle = expected.latest_succeeded_cycle;
+  const observed = facts.latest_succeeded_cycle;
+  return cycle !== undefined && observed !== undefined &&
+    observed.issue_id === cycle.issue_id &&
+    observed.verify_result_id === cycle.verify_result_id &&
+    observed.verified_revision === cycle.verified_revision &&
+    facts.git_head === observed.verified_revision &&
+    expected.owner_generation !== undefined &&
+    facts.owner_generation === expected.owner_generation;
 }
 
 function existingResult(delivery: NonNullable<RootDeliveryFacts["existing_delivery"]>): RootDeliveryResult {

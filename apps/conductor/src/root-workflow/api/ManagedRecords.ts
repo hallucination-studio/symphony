@@ -46,6 +46,19 @@ export interface RootOwnershipRecord {
   ownerGeneration: string;
 }
 
+export interface DeliveryRecord {
+  kind: "delivery";
+  version: ManagedRecordVersion;
+  rootIssueId: string;
+  cycleIssueId: string;
+  verifyResultId: string;
+  verifiedRevision: string;
+  deliveryKind: "pull_request" | "remote_branch" | "local_branch";
+  deliveryBranch: string;
+  pullRequest?: string;
+  deliveredAt: string;
+}
+
 export interface CycleMarker {
   kind: "cycle_marker";
   version: ManagedRecordVersion;
@@ -272,6 +285,7 @@ export interface ConvergenceRecord {
 
 export type ManagedRecord =
   | RootOwnershipRecord
+  | DeliveryRecord
   | CycleMarker
   | NodeMarker
   | PlanContract

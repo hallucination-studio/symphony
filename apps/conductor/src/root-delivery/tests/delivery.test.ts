@@ -11,6 +11,12 @@ const expected = {
   tree_digest: "tree-1",
   git_head: "abc123",
   checks_digest: "checks-1",
+  latest_succeeded_cycle: {
+    issue_id: "cycle-1",
+    verify_result_id: "verify-execution-1",
+    verified_revision: "abc123",
+  },
+  owner_generation: "generation-1",
 };
 const baseFacts: RootDeliveryFacts = {
   root_issue_id: "root-1",
@@ -23,6 +29,12 @@ const baseFacts: RootDeliveryFacts = {
   git_head: "abc123",
   checks_digest: "checks-1",
   checks_passed: true,
+  latest_succeeded_cycle: {
+    issue_id: "cycle-1",
+    verify_result_id: "verify-execution-1",
+    verified_revision: "abc123",
+  },
+  owner_generation: "generation-1",
 };
 
 test("delivery rejects every stale precondition before push or PR creation", async () => {
@@ -36,6 +48,10 @@ test("delivery rejects every stale precondition before push or PR creation", asy
     { git_head: "def456" },
     { checks_digest: "checks-2" },
     { checks_passed: false },
+    { latest_succeeded_cycle: { issue_id: "cycle-2", verify_result_id: "verify-execution-1", verified_revision: "abc123" } },
+    { latest_succeeded_cycle: { issue_id: "cycle-1", verify_result_id: "verify-execution-2", verified_revision: "abc123" } },
+    { latest_succeeded_cycle: { issue_id: "cycle-1", verify_result_id: "verify-execution-1", verified_revision: "def456" } },
+    { owner_generation: "generation-2" },
   ] satisfies Partial<RootDeliveryFacts>[]) {
     const calls: string[][] = [];
     const delivery = new GitRootDeliveryImpl(

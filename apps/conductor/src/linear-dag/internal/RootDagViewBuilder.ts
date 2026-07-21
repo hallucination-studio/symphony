@@ -189,7 +189,7 @@ function readManagedRecords(comments: Comment[], issueById: Map<string, Issue>, 
 }
 
 function recordTargetMatches(record: ManagedRecord, issue: Issue): boolean {
-  if (record.kind === "root_ownership") return issue.issue_kind === "root" && record.rootIssueId === issue.issue_id;
+  if (record.kind === "root_ownership" || record.kind === "delivery") return issue.issue_kind === "root" && record.rootIssueId === issue.issue_id;
   if (record.kind === "cycle_marker") return issue.issue_kind === "cycle";
   if (record.kind === "plan_contract") return issue.issue_kind === "plan" && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "node_marker") return issue.issue_kind === record.nodeKind && record.cycleIssueId === issue.parent_issue_id;
@@ -217,6 +217,7 @@ function recordReferencesCurrentTree(record: ManagedRecord, issueById: Map<strin
 function recordRoot(record: ManagedRecord): string | undefined {
   switch (record.kind) {
     case "root_ownership":
+    case "delivery":
     case "cycle_marker":
     case "node_marker":
     case "plan_contract":

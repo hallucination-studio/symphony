@@ -23,11 +23,18 @@ export interface RootDeliveryFacts {
   git_head: string;
   checks_digest: string;
   checks_passed: boolean;
+  latest_succeeded_cycle?: {
+    issue_id: string;
+    verify_result_id: string;
+    verified_revision: string;
+  };
+  owner_generation?: string;
   existing_delivery?: ExistingRootDelivery;
 }
 
 export interface RootDeliveryCommand {
   rootIssueId: string;
+  projectId?: string;
   workspace: GitWorkspace;
   baseBranch: string;
   title: string;
@@ -38,6 +45,12 @@ export interface RootDeliveryCommand {
     tree_digest: string;
     git_head: string;
     checks_digest: string;
+    latest_succeeded_cycle?: {
+      issue_id: string;
+      verify_result_id: string;
+      verified_revision: string;
+    };
+    owner_generation?: string;
   };
 }
 
@@ -47,4 +60,13 @@ export interface RootDeliveryFactsReader {
 
 export interface RootDeliveryInterface {
   deliver(command: RootDeliveryCommand): Promise<RootDeliveryResult>;
+}
+
+export interface RootDeliveryCompletion {
+  command: RootDeliveryCommand;
+  result: RootDeliveryResult;
+}
+
+export interface RootDeliveryCompletionWriter {
+  persist(completion: RootDeliveryCompletion): Promise<void>;
 }
