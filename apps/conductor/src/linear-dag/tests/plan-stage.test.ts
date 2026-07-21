@@ -5,6 +5,7 @@ import type { JsonValue } from "@symphony/contracts";
 import type { GitWorkspaceInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { PerformerStageClientInterface } from "../../performer-stage-client/api/PerformerStageClientInterface.js";
+import { parseManagedRecord } from "../../root-workflow/api/index.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { buildRootDagView } from "../internal/RootDagViewBuilder.js";
 import { LinearDagExecutionImpl } from "../internal/LinearDagExecutionImpl.js";
@@ -110,6 +111,38 @@ test("persists one suspended Plan action and releases the Stage", async () => {
   assert.equal(fake.tree.comments.filter((comment) => comment.body.includes('"kind":"stage_terminal"')).length, 1);
   assert.deepEqual(await execution.reconcileRoot(bootstrapInput()), { kind: "blocked", reason: "plan_root_not_runnable" });
   assert.equal(performerCalls, 1);
+});
+
+test("reconciles an orphaned Plan execution into a fresh retry", async () => {
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+  const performer: PerformerStageClientInterface = {
+    async runStage() { throw new Error("performer_should_not_run"); },
+    async cancelAndReap() {},
+  };
+  const firstExecution = new LinearDagExecutionImpl({ linear: fake, git: fake.git, performer });
+  const input = bootstrapInput();
+
+  let firstReady = await firstExecution.reconcileRoot(input);
+  while (firstReady.kind === "mutation_applied") firstReady = await firstExecution.reconcileRoot(input);
+  assert.equal(firstReady.kind, "stage_ready");
+  if (firstReady.kind !== "stage_ready") throw new Error("plan_stage_not_ready");
+  const firstExecutionId = ((firstReady.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id;
+
+  const restartedExecution = new LinearDagExecutionImpl({ linear: fake, git: fake.git, performer });
+  assert.deepEqual(await restartedExecution.reconcileRoot(input), { kind: "mutation_applied", step: "plan_orphaned_execution_terminal" });
+
+  const retryReady = await restartedExecution.reconcileRoot(input);
+  assert.equal(retryReady.kind, "stage_ready");
+  if (retryReady.kind !== "stage_ready") throw new Error("plan_retry_not_ready");
+  const retryExecutionId = ((retryReady.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id;
+  assert.notEqual(retryExecutionId, firstExecutionId);
+
+  const terminal = fake.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === firstExecutionId);
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("plan_orphan_terminal_missing");
+  assert.equal(terminal.value.outcome, "failed");
+  assert.equal(terminal.value.failureCode, "orphaned_execution");
+  assert.equal(terminal.value.usage.totalTokens, input.options.limits.reservedTotalTokens);
 });
 
 test("persists a breaker decision before creating a Cycle and stops later dispatch", async () => {

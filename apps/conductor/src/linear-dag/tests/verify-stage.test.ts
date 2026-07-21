@@ -82,6 +82,49 @@ test("persists one suspended Verify action and releases the Stage", async () => 
   assert.equal(performerCalls, 1);
 });
 
+test("reconciles an orphaned Verify execution into a fresh retry", async () => {
+  const gateway = new VerifyGateway();
+  const performer: PerformerStageClientInterface = {
+    async runStage() { throw new Error("performer_should_not_run"); },
+    async cancelAndReap() {},
+  };
+  const firstExecution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
+  const input = verifyInput();
+
+  assert.deepEqual(await firstExecution.reconcileVerify(input), { kind: "mutation_applied", step: "cycle_verifying" });
+  assert.deepEqual(await firstExecution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_in_progress" });
+  assert.deepEqual(await firstExecution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+  const firstRecord = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "verify");
+  assert.equal(firstRecord?.ok, true);
+  if (!firstRecord?.ok || firstRecord.value.kind !== "stage_execution") throw new Error("verify_execution_missing");
+  const firstExecutionId = firstRecord.value.stageExecutionId;
+
+  const restartedExecution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
+  assert.deepEqual(await restartedExecution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_orphaned_execution_terminal" });
+  assert.deepEqual(await restartedExecution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+  const executions = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).filter((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "verify");
+  assert.equal(executions.length, 2);
+  const executionIds = executions.flatMap((record) => record.ok && record.value.kind === "stage_execution" ? [record.value.stageExecutionId] : []);
+  const retryExecutionId = executionIds.find((id) => id !== firstExecutionId);
+  if (executions.length !== 2 || !retryExecutionId) throw new Error("verify_retry_execution_missing");
+  assert.notEqual(retryExecutionId, firstExecutionId);
+
+  const ready = await restartedExecution.reconcileVerify(input, undefined, retryExecutionId);
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("verify_retry_not_ready");
+  assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id, retryExecutionId);
+
+  const orphanTerminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => {
+    if (!record.ok || record.value.kind !== "stage_terminal") return false;
+    return record.value.stageExecutionId === firstExecutionId;
+  });
+  assert.equal(orphanTerminal?.ok, true);
+  if (!orphanTerminal?.ok || orphanTerminal.value.kind !== "stage_terminal") throw new Error("verify_orphan_terminal_missing");
+  assert.equal(orphanTerminal.value.outcome, "failed");
+  assert.equal(orphanTerminal.value.failureCode, "orphaned_execution");
+  assert.equal(orphanTerminal.value.usage.totalTokens, input.options.limits.reservedTotalTokens);
+});
+
 test("rejects a Verify result for a changed revision before persisting terminal evidence", async () => {
   const gateway = new VerifyGateway();
   gateway.resultRevision = "commit-2";
