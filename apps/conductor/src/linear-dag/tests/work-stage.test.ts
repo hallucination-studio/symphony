@@ -213,6 +213,42 @@ test("persists one suspended Work action and releases the Stage", async () => {
   assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === rootIssueId)?.status_name, "Needs Info");
 });
 
+test("requires a fresh Human answer before resuming Work and injects it only into the new context", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+  const result = await suspendWork(gateway, execution);
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "blocked", reason: "work_root_not_runnable" });
+  restoreRootAfterHumanAnswer(gateway);
+  gateway.tree.comments.push({ comment_id: "human-answer-1", issue_id: readyWorkIssueId, body: "Preserve the current compatibility behavior.", remote_version: "human-answer-1-version", updated_at: "2026-07-21T09:03:00Z" });
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const ready = await execution.reconcileWork(workInput());
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("work_stage_not_ready");
+  const workflowContext = (ready.envelope as Record<string, JsonValue>).workflow_context as Record<string, JsonValue>;
+  const envelope = ready.envelope as Record<string, JsonValue>;
+  assert.deepEqual(workflowContext.resolved_human_input, [{
+    action_id: "root-1:human:work-execution-1",
+    request_kind: "needs_info",
+    answer_or_decision: {
+      source_id: "human-answer-1",
+      source_kind: "comment",
+      text: "Preserve the current compatibility behavior.",
+      author_kind: "human",
+      remote_version: "human-answer-1-version",
+      updated_at: "2026-07-21T09:03:00Z",
+    },
+    target_context_digest: result.contextDigest,
+  }]);
+  assert.notEqual(envelope.context_digest, result.contextDigest);
+  assert.equal((envelope.stage_execution as Record<string, JsonValue>).stage_execution_id, "work-execution-2");
+});
+
 function workInput(): WorkStageInput {
   return {
     rootIssueId,
@@ -260,6 +296,23 @@ function suspendedWorkResult(execution: ReturnType<typeof parseExecution>): Json
       impact: "Work cannot continue without a clarified requirement.",
     },
   } as unknown as JsonValue;
+}
+
+async function suspendWork(gateway: WorkGateway, execution: LinearDagExecutionImpl): Promise<ReturnType<typeof parseExecution>> {
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const executionRecord = parseExecution(gateway);
+  const result = suspendedWorkResult(executionRecord);
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_stage_terminal" });
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_human_action_created" });
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_root_needs_info" });
+  return executionRecord;
+}
+
+function restoreRootAfterHumanAnswer(gateway: WorkGateway): void {
+  const root = gateway.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+  const status = gateway.tree.status_catalog.find((candidate) => candidate.name === "In Progress")!;
+  Object.assign(root, { status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, remote_version: "root-version-after-human" });
 }
 
 function workTree(): LinearWorkflowTreeSnapshot {

@@ -205,13 +205,14 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (!nodeMarker || nodeMarker.planContractDigest !== contract.planContractDigest) return workBlocked("work_node_contract_invalid");
     const latestExecution = latestExecutionRecord(records.get(selected.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(selected.issue.issue_id) ?? []);
+    const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
     const completion = recordFrom(records, selected.issue.issue_id, "work_completion") as WorkCompletionRecord | undefined;
     if (completion) {
       if (completion.workKey !== nodeMarker.nodeKey || completion.nodeIssueId !== selected.issue.issue_id || completion.contextDigest.length === 0
         || !latestExecution || latestExecution.stageExecutionId !== completion.stageExecutionId
         || latestExecution.contextDigest !== completion.contextDigest
-        || !latestTerminal || latestTerminal.stageExecutionId !== completion.stageExecutionId
-        || latestTerminal.contextDigest !== completion.contextDigest || latestTerminal.outcome !== "completed") return workBlocked("work_completion_invalid");
+        || !currentTerminal || currentTerminal.stageExecutionId !== completion.stageExecutionId
+        || currentTerminal.contextDigest !== completion.contextDigest || currentTerminal.outcome !== "completed") return workBlocked("work_completion_invalid");
       if (gitSnapshot.head !== completion.commitRevision || gitSnapshot.status.items.length > 0) return workBlocked("work_completion_git_invalid");
       if (selected.issue.status_name !== "Done") {
         await this.updateStatus(input, tree, selected.issue, statusByName(tree, "Done"), "work_done");
@@ -225,11 +226,11 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       : undefined;
     if (suspended) {
       if (!latestExecution) return workBlocked("work_execution_missing");
-      if (!latestTerminal) {
+      if (!currentTerminal) {
         await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromSuspension(latestExecution, suspended));
         return { kind: "mutation_applied", step: "work_stage_terminal" };
       }
-      if (latestTerminal.stageExecutionId !== latestExecution.stageExecutionId || latestTerminal.outcome !== "suspended") return workBlocked("work_suspension_terminal_conflict");
+      if (currentTerminal.outcome !== "suspended") return workBlocked("work_suspension_terminal_conflict");
       const actionId = `${input.rootIssueId}:human:${latestExecution.stageExecutionId}`;
       const existingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === actionId);
       const action: HumanActionRecord = {
@@ -252,17 +253,22 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
 
     if (stageResult === undefined) {
-      if (latestTerminal?.outcome === "completed") return workBlocked("work_completion_missing");
-      const stageExecutionId = latestExecution && !latestTerminal
+      if (currentTerminal?.outcome === "completed") return workBlocked("work_completion_missing");
+      const suspendedTerminal = latestTerminal?.outcome === "suspended" ? latestTerminal : undefined;
+      const pendingAction = suspendedTerminal && (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === `${input.rootIssueId}:human:${suspendedTerminal.stageExecutionId}`);
+      const resolvedHumanInput = suspendedTerminal && pendingAction ? resolvedHumanInputForAction(tree.comments, pendingAction, suspendedTerminal) : undefined;
+      if (suspendedTerminal && pendingAction && !resolvedHumanInput) return workBlocked("work_human_resolution_missing");
+      const stageExecutionId = latestExecution && !currentTerminal
         ? latestExecution.stageExecutionId
         : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, (records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1)
           ?? `${input.rootIssueId}:work:${selected.issue.issue_id}:${(records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1}`;
       const built = await this.contextBuilder.buildWork({
         tree, cycle: cycleView.issue, plan: plan.issue, work: selected.issue, contract,
         dependencyState: dependencyState(selected, cycleView, plan.issue.issue_id), workspace: input.workspace, git: this.dependencies.git,
-        stageExecutionId, startedAt: input.options.now?.() ?? new Date().toISOString(), deadlineAt: workDeadline(input), options: input.options,
+        stageExecutionId, startedAt: input.options.now?.() ?? new Date().toISOString(), deadlineAt: workDeadline(input),
+        ...(resolvedHumanInput === undefined ? {} : { resolvedHumanInput }), options: input.options,
       });
-      if (latestExecution && !latestTerminal) {
+      if (latestExecution && !currentTerminal) {
         if (latestExecution.contextDigest !== built.executionRecord.contextDigest) return workBlocked("work_execution_context_changed");
         return { kind: "stage_ready", step: "work", envelope: built.envelope };
       }
@@ -271,11 +277,11 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     if (!latestExecution) return workBlocked("work_execution_missing");
     const validated = validateWorkResult(stageResult, latestExecution);
-    if (!latestTerminal) {
+    if (!currentTerminal) {
       await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminal(latestExecution, validated));
       return { kind: "mutation_applied", step: "work_stage_terminal" };
     }
-    if (latestTerminal.outcome !== "completed") return workBlocked("work_stage_not_completed");
+    if (currentTerminal.outcome !== "completed") return workBlocked("work_stage_not_completed");
     if (!commitRevision) {
       await validateWorkGit(this.dependencies.git, input.workspace, latestExecution, validated, contract);
       const commit = await this.dependencies.git.commit({
@@ -854,6 +860,23 @@ function validateSuspendedResult(value: JsonValue, execution: StageExecutionReco
 function stageUsage(value: JsonValue | undefined): StageUsage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
   return { inputTokens: numberValue(value.input_tokens), cachedInputTokens: numberValue(value.cached_input_tokens), outputTokens: numberValue(value.output_tokens), reasoningOutputTokens: numberValue(value.reasoning_output_tokens), totalTokens: numberValue(value.total_tokens) };
+}
+
+function resolvedHumanInputForAction(
+  comments: Comment[],
+  action: HumanActionRecord,
+  terminal: StageTerminalRecord,
+): NonNullable<import("./StageContextBuilder.js").WorkStageContextBuildInput["resolvedHumanInput"]> | undefined {
+  const answer = comments
+    .filter((comment) => comment.issue_id === action.nodeIssueId && !comment.managed_marker && comment.updated_at > terminal.completedAt)
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.comment_id.localeCompare(left.comment_id))[0];
+  if (!answer) return undefined;
+  return [{
+    actionId: action.actionId,
+    requestKind: action.requestKind,
+    answerOrDecision: { sourceId: answer.comment_id, sourceKind: "comment", text: answer.body, authorKind: "human", remoteVersion: answer.remote_version, updatedAt: answer.updated_at },
+    targetContextDigest: action.contextDigest,
+  }];
 }
 
 function rootTerminalResultReason(status: string, stageResult: JsonValue | undefined): string | undefined {

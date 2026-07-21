@@ -51,6 +51,19 @@ export interface WorkStageContextBuildInput {
   stageExecutionId: string;
   startedAt: string;
   deadlineAt: string;
+  resolvedHumanInput?: Array<{
+    actionId: string;
+    requestKind: "needs_info" | "needs_approval";
+    answerOrDecision: {
+      sourceId: string;
+      sourceKind: "issue" | "comment";
+      text: string;
+      authorKind: "human" | "symphony";
+      remoteVersion: string;
+      updatedAt: string;
+    };
+    targetContextDigest: string;
+  }>;
   options: BootstrapPlanOptions;
 }
 
@@ -260,7 +273,19 @@ export class StageContextBuilder {
         terminal_outcome: dependency.terminalOutcome,
         ...(dependency.commitRevision === undefined ? {} : { commit_revision: dependency.commitRevision }),
       })),
-      resolved_human_input: [],
+      resolved_human_input: (input.resolvedHumanInput ?? []).map((entry) => ({
+        action_id: entry.actionId,
+        request_kind: entry.requestKind,
+        answer_or_decision: {
+          source_id: entry.answerOrDecision.sourceId,
+          source_kind: entry.answerOrDecision.sourceKind,
+          text: entry.answerOrDecision.text,
+          author_kind: entry.answerOrDecision.authorKind,
+          remote_version: entry.answerOrDecision.remoteVersion,
+          updated_at: entry.answerOrDecision.updatedAt,
+        },
+        target_context_digest: entry.targetContextDigest,
+      })),
       git_baseline: { head_revision: gitSnapshot.head, status_summary: statusSummary(gitSnapshot) },
     };
     const repositoryInstructions = (options.repositoryInstructions ?? []).map((instruction) => ({
