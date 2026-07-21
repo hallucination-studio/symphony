@@ -57,6 +57,11 @@ node tools/e2e/target-workflow-entry.mjs --dry-run
 Podium/approved Profile boundary；Conductor child environment、Linear snapshot、Git
 observation、日志和 evidence 均不得包含 secret。
 
+Credentialed setup 在任何 retained Root 或 Project Label mutation 之前读取目标 Project
+绑定的唯一 Team，并校验完整的 17 个 canonical workflow statuses 及其 Linear category。
+缺少 status、重复/错误 category 或 Team 绑定不唯一时，入口 fail closed；完整目录缺失时
+使用稳定原因 `target_live_workflow_catalog_incomplete`，不会创建 Root。
+
 ## Evidence
 
 runner 只通过外部 Root/Human input adapter 创建 caller-owned 输入；它不创建 Cycle、Node、
