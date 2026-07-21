@@ -225,6 +225,66 @@ test("Agent execution policies are closed, bounded, and shared by Profile contra
   }
 });
 
+test("Stage Wire is closed, correlated, and covers each terminal outcome", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const envelope = schema.$defs.StageContextEnvelope;
+  const result = schema.$defs.StageResult;
+  const event = schema.$defs.StageEvent;
+
+  assert.deepEqual(envelope.required, [
+    "protocol_version",
+    "stage_execution",
+    "target",
+    "source_manifest",
+    "coverage",
+    "instruction_bundle",
+    "workflow_context",
+    "repository_context",
+    "execution_policy",
+    "limits",
+    "context_digest",
+  ]);
+  assert.equal(envelope.additionalProperties, false);
+  assert.equal(envelope.oneOf.length, 3);
+  assert.deepEqual(schema.$defs.StageExecution.properties.stage.enum, ["plan", "work", "verify"]);
+  assert.deepEqual(schema.$defs.StageWorkflowContext.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/PlanStageContext",
+    "#/$defs/WorkStageContext",
+    "#/$defs/VerifyStageContext",
+  ]);
+
+  assert.deepEqual(result.required, [
+    "protocol_version",
+    "stage_execution_id",
+    "stage",
+    "root_issue_id",
+    "cycle_issue_id",
+    "node_issue_id",
+    "context_digest",
+    "completed_at",
+    "outcome",
+  ]);
+  assert.equal(result.additionalProperties, false);
+  assert.deepEqual(schema.$defs.StageOutcome.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/PlanCompletedOutcome",
+    "#/$defs/WorkCompletedOutcome",
+    "#/$defs/VerifyCompletedOutcome",
+    "#/$defs/StageSuspendedOutcome",
+    "#/$defs/StageExecutionFailedOutcome",
+    "#/$defs/StageCanceledOutcome",
+  ]);
+  assert.deepEqual(schema.$defs.StageEventBody.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/StageStartedEvent",
+    "#/$defs/StageProgressEvent",
+    "#/$defs/StageWarningEvent",
+    "#/$defs/StageHeartbeatEvent",
+  ]);
+  assert.equal(event.additionalProperties, false);
+  assert.equal(schema.$defs.StageLimits.properties.reserved_total_tokens.$ref,
+    "common.schema.json#/$defs/NonNegativeInteger");
+  assert.equal(schema.$defs.StageLimits.properties.reservation, undefined);
+});
+
 test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", async () => {
   const schema = await loadSchema("conductor-performer");
   const bootstrap = schema.$defs.OpenRootConversationCommand;

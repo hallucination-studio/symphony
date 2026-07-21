@@ -1,0 +1,16 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/StageResult",
+  "value": {
+    "protocol_version": "1",
+    "stage_execution_id": "execution-1",
+    "stage": "plan",
+    "root_issue_id": "root-1",
+    "cycle_issue_id": "cycle-1",
+    "node_issue_id": "plan-1",
+    "context_digest": "context-digest-1",
+    "completed_at": "2026-07-21T09:30:00Z",
+    "outcome": {
+      "kind": "unknown_outcome"
+    }
+  }
+}
