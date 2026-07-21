@@ -20,10 +20,20 @@ export function createTargetWorkflowRunner({
     async observeRoot(input) {
       const snapshot = await snapshotTransport.readSnapshot(input);
       const facts = projectFacts(snapshot);
-      if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
+      if (!isTargetWorkflowFacts(facts)) {
         throw new Error("target_runner_facts_invalid");
       }
       return Object.freeze({ facts });
     },
   });
+}
+
+function isTargetWorkflowFacts(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).every((key) => ["root", "plan", "stageExecutions", "progress", "delivery"].includes(key)) &&
+    value.root && typeof value.root === "object" && !Array.isArray(value.root) &&
+    typeof value.root.projectId === "string" && typeof value.root.rootIssueId === "string" &&
+    value.plan && typeof value.plan === "object" && !Array.isArray(value.plan) &&
+    Array.isArray(value.stageExecutions) &&
+    value.progress && typeof value.progress === "object" && !Array.isArray(value.progress);
 }

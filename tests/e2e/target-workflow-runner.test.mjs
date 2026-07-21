@@ -25,7 +25,12 @@ test("target runner exposes only external inputs and durable-facts observation",
     },
     projectFacts(value) {
       calls.push(["projectFacts", value]);
-      return { rootIssueId: value.rootIssueId, projectId: value.projectId };
+      return {
+        root: { rootIssueId: value.rootIssueId, projectId: value.projectId },
+        plan: {},
+        stageExecutions: [],
+        progress: {},
+      };
     },
   });
 
@@ -44,7 +49,14 @@ test("target runner exposes only external inputs and durable-facts observation",
     git: { head: "a".repeat(40), branch: "symphony/runs/root-1" },
   });
 
-  assert.deepEqual(observed, { facts: { rootIssueId: "root-1", projectId: "project-1" } });
+  assert.deepEqual(observed, {
+    facts: {
+      root: { rootIssueId: "root-1", projectId: "project-1" },
+      plan: {},
+      stageExecutions: [],
+      progress: {},
+    },
+  });
   assert.equal(Object.hasOwn(observed, "snapshot"), false);
   assert.deepEqual(calls.map(([kind]) => kind), [
     "createRoot", "appendHumanResponse", "readSnapshot", "projectFacts",
@@ -64,4 +76,22 @@ test("target runner fails closed when a boundary dependency is missing", () => {
     }),
     /target_runner_boundary_invalid/u,
   );
+});
+
+test("target runner rejects an invalid durable-facts projection", async () => {
+  for (const facts of [
+    {},
+    { root: { rootIssueId: "root-1", projectId: "project-1" }, plan: {}, stageExecutions: [], progress: {}, metadata: {} },
+  ]) {
+    const runner = createTargetWorkflowRunner({
+      externalInputs: { createRoot() {}, appendHumanResponse() {} },
+      snapshotTransport: { async readSnapshot() { return {}; } },
+      projectFacts() { return facts; },
+    });
+
+    await assert.rejects(
+      runner.observeRoot({ rootIssueId: "root-1", projectId: "project-1" }),
+      /target_runner_facts_invalid/u,
+    );
+  }
 });
