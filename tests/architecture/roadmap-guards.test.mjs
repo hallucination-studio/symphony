@@ -102,6 +102,18 @@ test("approved Roadmap 2 scheduling vocabulary is inside the active boundary", (
   }
 });
 
+test("approved managed evidence vocabulary is inside the active boundary", () => {
+  for (const [file, source] of [
+    ["apps/conductor/src/root-workflow/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
+    ["apps/conductor/src/agent-symphony-harness/internal/RootConversationLifecycle.ts", "interface RootSelectionEvidence {}"],
+  ]) {
+    assert.deepEqual(inspectAuthoredFile(file, source), []);
+  }
+  assertViolationCases([
+    ["apps/conductor/src/bad.ts", "class AcceptanceEvidence {}", "future_product_scope"],
+  ]);
+});
+
 test("negative controls reject browser secrets and arbitrary provider config", () => {
   const cases = [
     [

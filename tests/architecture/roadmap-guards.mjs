@@ -58,6 +58,14 @@ function violation(file, code, summary) {
   return { file, code, summary };
 }
 
+const approvedEvidenceNames = new Set([
+  "RootSelectionEvidence",
+  "CheckEvidence",
+  "FindingEvidence",
+  "decodeFindingEvidence",
+  "encodeFindingEvidence",
+]);
+
 function importSpecifiers(source) {
   const patterns = [
     /(?:import|export)\s+(?:[^"'()]*?\s+from\s+)?["']([^"']+)["']/g,
@@ -277,11 +285,12 @@ export function inspectAuthoredFile(file, source) {
     );
   }
 
-  if (
-    /(?:class|interface|type|function|const)\s+(?!RootWorkspaceEvidence\b)\w*(?:ParallelPerformer|PlanRevision|SourceRevision|CommentRevision|WorkflowCheckpoint|DispatchQueue|OperationJournal|Verification|Manifest|Evidence|DeliveryReceipt|ClaudeBackend|SecondProvider|WebApplication|WebServer|EncryptedProfile|ProfileDatabase|AutomaticMerge|AutomaticRootDone|CompatibilityShim)\w*/.test(
-      source,
-    )
-  ) {
+  const futureScopePattern = /(?:class|interface|type|function|const)\s+(?!RootWorkspaceEvidence\b)\w*(?:ParallelPerformer|PlanRevision|SourceRevision|CommentRevision|WorkflowCheckpoint|DispatchQueue|OperationJournal|Verification|Manifest|Evidence|DeliveryReceipt|ClaudeBackend|SecondProvider|WebApplication|WebServer|EncryptedProfile|ProfileDatabase|AutomaticMerge|AutomaticRootDone|CompatibilityShim)\w*/g;
+  const futureScopeMatches = [...source.matchAll(futureScopePattern)];
+  if (futureScopeMatches.some((match) => {
+    const name = match[0].match(/\b(?:class|interface|type|function|const)\s+(\w+)/)?.[1];
+    return name !== undefined && !approvedEvidenceNames.has(name);
+  })) {
     violations.push(
       violation(
         normalizedFile,
