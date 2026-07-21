@@ -21,6 +21,7 @@ import type {
   StageUsage,
   VerifyNodeContract,
   WorkNodeContract,
+  WorkCompletionRecord,
 } from "../api/ManagedRecords.js";
 
 const marker = "<!-- symphony managed-record\n";
@@ -71,6 +72,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "plan_contract": return decodePlanContract(object);
     case "stage_execution": return decodeStageExecution(object);
     case "stage_terminal": return decodeStageTerminal(object);
+    case "work_completion": return decodeWorkCompletion(object);
     case "human_action": return decodeHumanAction(object);
     case "finding": return decodeFinding(object);
     case "finding_disposition": return decodeFindingDisposition(object);
@@ -130,6 +132,13 @@ function decodeStageTerminal(o: Record<string, unknown>): StageTerminalRecord {
   return { kind: "stage_terminal", version: 1, stageExecutionId: id(o, "stage_execution_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), stage: stageValue(o, "stage"), contextDigest: id(o, "context_digest"), outcome, completedAt: timestamp(o, "completed_at"), summary: text(o, "summary"), usage: decodeUsage(requiredObject(o, "usage")), ...(o.failure_code === undefined ? {} : { failureCode: id(o, "failure_code") }) };
 }
 
+function decodeWorkCompletion(o: Record<string, unknown>): WorkCompletionRecord {
+  fields(o, ["kind", "version", "stage_execution_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "work_key", "context_digest", "summary", "changed_paths", "checks", "commit_revision"]);
+  return {
+    kind: "work_completion", version: 1, stageExecutionId: id(o, "stage_execution_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), workKey: id(o, "work_key"), contextDigest: id(o, "context_digest"), summary: text(o, "summary"), changedPaths: paths(o, "changed_paths"), checks: array(o, "checks", decodeCheck), commitRevision: id(o, "commit_revision"),
+  };
+}
+
 function decodeHumanAction(o: Record<string, unknown>): HumanActionRecord {
   fields(o, ["kind", "version", "action_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "request_kind", "question_or_proposal", "reason", "impact", "context_digest", "expected_root_remote_version"]);
   return { kind: "human_action", version: 1, actionId: id(o, "action_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), requestKind: enumValue(o, "request_kind", ["needs_info", "needs_approval"]), questionOrProposal: text(o, "question_or_proposal"), reason: text(o, "reason"), impact: text(o, "impact"), contextDigest: id(o, "context_digest"), expectedRootRemoteVersion: id(o, "expected_root_remote_version") };
@@ -180,6 +189,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objectiveSummary", "includedScope", "excludedScope", "acceptanceCriteria", "workNodes", "verifyNode"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_terminal: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "contextDigest", "outcome", "completedAt", "summary", "usage", "failureCode"], optional: ["failureCode"] },
+    work_completion: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "workKey", "contextDigest", "summary", "changedPaths", "checks", "commitRevision"] },
     human_action: { allowed: ["kind", "version", "actionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "requestKind", "questionOrProposal", "reason", "impact", "contextDigest", "expectedRootRemoteVersion"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
     finding_disposition: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "disposition", "evidence"] },
@@ -200,6 +210,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "plan_contract": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest, objective_summary: record.objectiveSummary, included_scope: record.includedScope, excluded_scope: record.excludedScope, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion), work_nodes: record.workNodes.map(encodeWorkNode), verify_node: encodeVerifyNode(record.verifyNode) });
     case "stage_execution": return encodeStageExecution(record);
     case "stage_terminal": return encodeStageTerminal(record);
+    case "work_completion": return encodeWorkCompletion(record);
     case "human_action": return encodeSimple(record, { action_id: record.actionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, request_kind: record.requestKind, question_or_proposal: record.questionOrProposal, reason: record.reason, impact: record.impact, context_digest: record.contextDigest, expected_root_remote_version: record.expectedRootRemoteVersion });
     case "finding": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, category: record.category, severity: record.severity, evidence: record.evidence.map(encodeFindingEvidence), affected_scope: record.affectedScope.map(encodeAffectedScope), retryable: record.retryable, suggested_remediation: record.suggestedRemediation, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion) });
     case "finding_disposition": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, disposition: record.disposition, evidence: record.evidence.map(encodeFindingEvidence) });
@@ -211,6 +222,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
 function encodeRootOwnership(record: RootOwnershipRecord): Record<string, unknown> { return encodeSimple(record, { root_issue_id: record.rootIssueId, conductor_id: record.conductorId, performer_profile_id: record.performerProfileId, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), owner_generation: record.ownerGeneration }); }
 function encodeStageExecution(record: StageExecutionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }), context_digest: record.contextDigest, source_manifest: record.sourceManifest.map(encodeSource), coverage: encodeCoverage(record.coverage), instruction_set_id: record.instructionSetId, execution_policy_id: record.executionPolicyId, limits: encodeLimits(record.limits), repository_revision: record.repositoryRevision, started_at: record.startedAt, deadline_at: record.deadlineAt }); }
 function encodeStageTerminal(record: StageTerminalRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, context_digest: record.contextDigest, outcome: record.outcome, completed_at: record.completedAt, summary: record.summary, usage: encodeUsage(record.usage), ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }) }); }
+function encodeWorkCompletion(record: WorkCompletionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, work_key: record.workKey, context_digest: record.contextDigest, summary: record.summary, changed_paths: record.changedPaths, checks: record.checks.map(encodeCheck), commit_revision: record.commitRevision }); }
 function encodeCriterion(value: AcceptanceCriterion): Record<string, unknown> { recordFields(value, ["criterionKey", "statement", "verificationMethod"]); return { criterion_key: value.criterionKey, statement: value.statement, verification_method: value.verificationMethod }; }
 function encodeCheck(value: CheckEvidence): Record<string, unknown> { recordFields(value, ["checkKey", "commandOrMethod", "outcome", "summary", "artifactRevision"]); return { check_key: value.checkKey, command_or_method: value.commandOrMethod, outcome: value.outcome, summary: value.summary, artifact_revision: value.artifactRevision }; }
 function encodeSource(value: StageContextSource): Record<string, unknown> { recordFields(value, ["sourceKind", "sourceId", "versionOrDigest"]); return { source_kind: value.sourceKind, source_id: value.sourceId, version_or_digest: value.versionOrDigest }; }
@@ -231,6 +243,7 @@ function requiredString(o: Record<string, unknown>, key: string, identifier = fa
 function id(o: Record<string, unknown>, key: string): string { const value = o[key]; if (typeof value !== "string" || !identifierPattern.test(value)) fail(`managed_record_identifier_invalid:${key}`); return value; }
 function text(o: Record<string, unknown>, key: string): string { const value = o[key]; if (typeof value !== "string" || value.length === 0 || value.length > maxText || /[\0\r\n]/u.test(value)) fail("managed_record_bounded_text_invalid"); return value; }
 function strings(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || entry.length === 0 || entry.length > maxText || /[\0\r\n]/u.test(entry)) fail("managed_record_bounded_text_invalid"); return entry; }); }
+function paths(o: Record<string, unknown>, key: string): string[] { const value = strings(o, key); return value.map((entry) => { if (entry.startsWith("/") || entry.split("/").some((part) => part === "..")) fail(`managed_record_path_invalid:${key}`); return entry; }); }
 function ids(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || !identifierPattern.test(entry)) fail(`managed_record_identifier_invalid:${key}`); return entry; }); }
 function criteria(o: Record<string, unknown>, key: string): AcceptanceCriterion[] { return array(o, key, (value) => decodeCriterion(recordObject(value))); }
 function array<T>(o: Record<string, unknown>, key: string, decode: (value: Record<string, unknown>) => T): T[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => decode(recordObject(entry))); }

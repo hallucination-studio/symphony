@@ -194,6 +194,7 @@ function recordTargetMatches(record: ManagedRecord, issue: Issue): boolean {
   if (record.kind === "plan_contract") return issue.issue_kind === "plan" && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "node_marker") return issue.issue_kind === record.nodeKind && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "stage_execution" || record.kind === "stage_terminal") return issue.issue_kind === record.stage && record.nodeIssueId === issue.issue_id && record.cycleIssueId === issue.parent_issue_id;
+  if (record.kind === "work_completion") return issue.issue_kind === "work" && record.nodeIssueId === issue.issue_id && record.cycleIssueId === issue.parent_issue_id;
   if (record.kind === "human_action") return issue.issue_kind === "root";
   if (record.kind === "finding" || record.kind === "finding_disposition") return issue.issue_kind === "verify";
   if (record.kind === "progress_assessment") return issue.issue_kind === "cycle";
@@ -217,6 +218,7 @@ function recordRoot(record: ManagedRecord): string | undefined {
     case "plan_contract":
     case "stage_execution":
     case "stage_terminal":
+    case "work_completion":
     case "human_action":
     case "progress_assessment":
     case "convergence":

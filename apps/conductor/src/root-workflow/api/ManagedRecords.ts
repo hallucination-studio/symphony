@@ -137,6 +137,21 @@ export interface StageTerminalRecord {
   failureCode?: string;
 }
 
+export interface WorkCompletionRecord {
+  kind: "work_completion";
+  version: ManagedRecordVersion;
+  stageExecutionId: string;
+  rootIssueId: string;
+  cycleIssueId: string;
+  nodeIssueId: string;
+  workKey: string;
+  contextDigest: string;
+  summary: string;
+  changedPaths: string[];
+  checks: CheckEvidence[];
+  commitRevision: string;
+}
+
 export interface HumanActionRecord {
   kind: "human_action";
   version: ManagedRecordVersion;
@@ -233,6 +248,7 @@ export type ManagedRecord =
   | PlanContract
   | StageExecutionRecord
   | StageTerminalRecord
+  | WorkCompletionRecord
   | HumanActionRecord
   | FindingRecord
   | FindingDispositionRecord

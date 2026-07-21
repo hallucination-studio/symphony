@@ -9,22 +9,28 @@ import type {
   BootstrapPlanReconciliation,
   LinearDagExecutionDependencies,
   LinearDagExecutionInterface,
+  WorkStageExecutionResult,
+  WorkStageInput,
+  WorkStageReconciliation,
 } from "../api/LinearDagExecutionInterface.js";
 import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { GitWorkspaceInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type {
   CycleMarker,
+  CheckEvidence,
   ManagedRecord,
   PlanContract,
   StageExecutionRecord,
   StageTerminalRecord,
   StageUsage,
+  WorkCompletionRecord,
 } from "../../root-workflow/api/ManagedRecords.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import { DagMaterializer } from "./DagMaterializer.js";
-import { currentNodeMarker } from "./RootDagViewBuilder.js";
+import { buildRootDagView, currentNodeMarker, RootDagValidationError } from "./RootDagViewBuilder.js";
 import { StageContextBuilder, digest } from "./StageContextBuilder.js";
 
 type Issue = LinearWorkflowTreeSnapshot["issues"][number];
@@ -76,6 +82,135 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       if (next.kind === "mutation_applied") continue;
     }
     throw new Error("bootstrap_plan_reconciliation_limit_exceeded");
+  }
+
+  async executeWorkStage(input: WorkStageInput): Promise<WorkStageExecutionResult> {
+    let stageResult: JsonValue | undefined;
+    let commitRevision: string | undefined;
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      const next = await this.reconcileWork(input, stageResult, commitRevision);
+      if (next.kind === "stage_ready") {
+        try {
+          stageResult = (await this.dependencies.performer.runStage({
+            envelope: next.envelope,
+            workspaceRoot: input.workspace.worktreePath,
+          })).result;
+        } catch (error) {
+          await this.dependencies.performer.cancelAndReap();
+          throw error;
+        }
+        continue;
+      }
+      if (next.kind === "mutation_applied") {
+        if (next.step === "work_committed") commitRevision = (await this.dependencies.git.inspect(input.workspace)).head;
+        continue;
+      }
+      if (next.kind === "blocked") throw new Error(next.reason);
+      return next;
+    }
+    throw new Error("work_stage_reconciliation_limit_exceeded");
+  }
+
+  async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation> {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
+    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId || root.status_name !== "In Progress") return workBlocked("work_root_not_runnable");
+    const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+    let view;
+    try {
+      view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace });
+    } catch (error) {
+      if (error instanceof RootDagValidationError) return workBlocked(`work_tree_invalid:${error.code}`);
+      throw error;
+    }
+    const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
+    if (!cycleView || !["Sealed", "Executing"].includes(cycleView.issue.status_name)) return workBlocked("work_cycle_not_ready");
+    const plan = cycleView.nodes.find((node) => node.issue.issue_kind === "plan");
+    const contract = cycleView.planContract;
+    if (!plan || !contract || plan.issue.status_name !== "Done") return workBlocked("work_plan_not_complete");
+
+    const workNodes = cycleView.nodes.filter((node) => node.issue.issue_kind === "work");
+    const active = workNodes.filter((node) => node.issue.status_name === "In Progress");
+    if (active.length > 1) return workBlocked("work_multiple_active_nodes");
+    let selected = active[0];
+    if (!selected) {
+      const ready = workNodes.filter((node) => node.issue.status_name === "Todo" && dependenciesComplete(node, cycleView, plan.issue.issue_id));
+      if (ready.length === 0) return workBlocked("work_not_ready");
+      const readyWork = ready[0];
+      if (!readyWork) return workBlocked("work_selection_invalid");
+      selected = readyWork;
+      if (cycleView.issue.status_name === "Sealed") {
+        await this.updateStatus(input, tree, cycleView.issue, statusByName(tree, "Executing"), "cycle_executing");
+        return { kind: "mutation_applied", step: "cycle_executing" };
+      }
+      await this.updateStatus(input, tree, selected.issue, statusByName(tree, "In Progress"), "work_in_progress");
+      return { kind: "mutation_applied", step: "work_in_progress" };
+    }
+    if (!selected) return workBlocked("work_selection_invalid");
+
+    const records = recordsByIssue(tree.comments);
+    const nodeMarker = currentNodeMarker(records.get(selected.issue.issue_id) ?? [], "work");
+    if (!nodeMarker || nodeMarker.planContractDigest !== contract.planContractDigest) return workBlocked("work_node_contract_invalid");
+    const latestExecution = latestExecutionRecord(records.get(selected.issue.issue_id) ?? []);
+    const latestTerminal = latestTerminalRecord(records.get(selected.issue.issue_id) ?? []);
+    const completion = recordFrom(records, selected.issue.issue_id, "work_completion") as WorkCompletionRecord | undefined;
+    if (completion) {
+      if (completion.workKey !== nodeMarker.nodeKey || completion.nodeIssueId !== selected.issue.issue_id || completion.contextDigest.length === 0
+        || !latestExecution || latestExecution.stageExecutionId !== completion.stageExecutionId
+        || latestExecution.contextDigest !== completion.contextDigest
+        || !latestTerminal || latestTerminal.stageExecutionId !== completion.stageExecutionId
+        || latestTerminal.contextDigest !== completion.contextDigest || latestTerminal.outcome !== "completed") return workBlocked("work_completion_invalid");
+      if (gitSnapshot.head !== completion.commitRevision || gitSnapshot.status.items.length > 0) return workBlocked("work_completion_git_invalid");
+      if (selected.issue.status_name !== "Done") {
+        await this.updateStatus(input, tree, selected.issue, statusByName(tree, "Done"), "work_done");
+        return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, workIssueId: selected.issue.issue_id, workKey: nodeMarker.nodeKey, commitRevision: completion.commitRevision };
+      }
+      return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, workIssueId: selected.issue.issue_id, workKey: nodeMarker.nodeKey, commitRevision: completion.commitRevision };
+    }
+
+    if (stageResult === undefined) {
+      if (latestTerminal?.outcome === "completed") return workBlocked("work_completion_missing");
+      const stageExecutionId = latestExecution && !latestTerminal
+        ? latestExecution.stageExecutionId
+        : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, (records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1)
+          ?? `${input.rootIssueId}:work:${selected.issue.issue_id}:${(records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1}`;
+      const built = await this.contextBuilder.buildWork({
+        tree, cycle: cycleView.issue, plan: plan.issue, work: selected.issue, contract,
+        dependencyState: dependencyState(selected, cycleView, plan.issue.issue_id), workspace: input.workspace, git: this.dependencies.git,
+        stageExecutionId, startedAt: input.options.now?.() ?? new Date().toISOString(), deadlineAt: workDeadline(input), options: input.options,
+      });
+      if (latestExecution && !latestTerminal) {
+        if (latestExecution.contextDigest !== built.executionRecord.contextDigest) return workBlocked("work_execution_context_changed");
+        return { kind: "stage_ready", step: "work", envelope: built.envelope };
+      }
+      await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:execution:${stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:execution:${stageExecutionId}`, built.executionRecord);
+      return { kind: "mutation_applied", step: "work_execution_created" };
+    }
+    if (!latestExecution) return workBlocked("work_execution_missing");
+    const validated = validateWorkResult(stageResult, latestExecution);
+    if (!latestTerminal) {
+      await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminal(latestExecution, validated));
+      return { kind: "mutation_applied", step: "work_stage_terminal" };
+    }
+    if (latestTerminal.outcome !== "completed") return workBlocked("work_stage_not_completed");
+    if (!commitRevision) {
+      await validateWorkGit(this.dependencies.git, input.workspace, latestExecution, validated, contract);
+      const commit = await this.dependencies.git.commit({
+        workspace: input.workspace, rootIssueId: input.rootIssueId, issueId: selected.issue.issue_id,
+        allowedIssueIds: [selected.issue.issue_id], issueIdentifier: selected.issue.identifier, expectedHead: latestExecution.repositoryRevision,
+      });
+      commitRevision = commit.commit;
+      return { kind: "mutation_applied", step: "work_committed" };
+    }
+    const committedSnapshot = await this.dependencies.git.inspect(input.workspace);
+    if (committedSnapshot.head !== commitRevision || committedSnapshot.status.items.length > 0) return workBlocked("work_commit_read_back_invalid");
+    const completionRecord: WorkCompletionRecord = {
+      kind: "work_completion", version: 1, stageExecutionId: latestExecution.stageExecutionId, rootIssueId: input.rootIssueId,
+      cycleIssueId: cycleView.issue.issue_id, nodeIssueId: selected.issue.issue_id, workKey: nodeMarker.nodeKey, contextDigest: latestExecution.contextDigest,
+      summary: validated.summary, changedPaths: validated.changedPaths, checks: validated.checks, commitRevision,
+    };
+    await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:completion:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:completion:${latestExecution.stageExecutionId}`, completionRecord);
+    return { kind: "mutation_applied", step: "work_completion_persisted" };
   }
 
   async reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation> {
@@ -373,11 +508,136 @@ function numberValue(value: JsonValue | undefined): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function stageTerminal(execution: StageExecutionRecord, result: { completedAt: string; usage: StageUsage }): StageTerminalRecord {
+function dependenciesComplete(node: { blockedByIssueIds: string[] }, cycle: { nodes: Array<{ issue: Issue; marker: { nodeKey: string }; records: ManagedRecord[] }> }, planIssueId: string): boolean {
+  return node.blockedByIssueIds.every((dependencyId) => {
+    if (dependencyId === planIssueId) return true;
+    const dependency = cycle.nodes.find((candidate) => candidate.issue.issue_id === dependencyId);
+    if (!dependency || dependency.issue.issue_kind !== "work" || dependency.issue.status_name !== "Done") return false;
+    return dependency.records.some((record) => record.kind === "work_completion"
+      && record.nodeIssueId === dependency.issue.issue_id && record.workKey === dependency.marker.nodeKey);
+  });
+}
+
+function dependencyState(selected: { blockedByIssueIds: string[] }, cycle: { nodes: Array<{ issue: Issue; marker: { nodeKey: string }; records: ManagedRecord[] }> }, planIssueId: string): Array<{ workKey: string; terminalOutcome: "completed" | "failed" | "canceled"; commitRevision?: string }> {
+  return selected.blockedByIssueIds.map((dependencyId) => {
+    if (dependencyId === planIssueId) return { workKey: "plan-1", terminalOutcome: "completed" as const };
+    const dependency = cycle.nodes.find((candidate) => candidate.issue.issue_id === dependencyId);
+    if (!dependency || dependency.issue.issue_kind !== "work" || dependency.issue.status_name !== "Done") throw new Error("work_dependency_state_invalid");
+    const completion = dependency.records.find((record): record is WorkCompletionRecord => record.kind === "work_completion" && record.nodeIssueId === dependency.issue.issue_id && record.workKey === dependency.marker.nodeKey);
+    if (!completion) throw new Error("work_dependency_completion_missing");
+    return { workKey: dependency.marker.nodeKey, terminalOutcome: "completed" as const, commitRevision: completion.commitRevision };
+  });
+}
+
+function statusByName(tree: LinearWorkflowTreeSnapshot, name: string): Status | undefined {
+  return tree.status_catalog.find((status) => status.name === name);
+}
+
+function workDeadline(input: WorkStageInput): string {
+  const startedAt = input.options.now?.() ?? new Date().toISOString();
+  return new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString();
+}
+
+function diffPaths(text: string): string[] {
+  return [...text.matchAll(/^diff --git a\/(.+) b\/(.+)$/gmu)].map((match) => {
+    const path = match[2]!;
+    if (!safeWorkPath(path)) throw new Error("work_diff_path_invalid");
+    return path;
+  });
+}
+
+function statusPaths(items: string[]): string[] {
+  return items.map((item) => {
+    if (item.length < 4) throw new Error("work_status_invalid");
+    const value = item.slice(3).trim();
+    const arrow = value.lastIndexOf(" -> ");
+    const path = arrow < 0 ? value : value.slice(arrow + 4);
+    if (!safeWorkPath(path)) throw new Error("work_status_path_invalid");
+    return path;
+  });
+}
+
+function safeWorkPath(value: string): boolean {
+  return value.length > 0 && !value.startsWith("/") && !value.split("/").some((part) => part === ".." || part.length === 0);
+}
+
+function includedPath(value: string, scopes: string[]): boolean {
+  return scopes.some((scope) => value === scope || value.startsWith(`${scope.replace(/\/$/u, "")}/`));
+}
+
+function excludedPath(value: string, scopes: string[]): boolean {
+  return scopes.some((scope) => value === scope || value.startsWith(`${scope.replace(/\/$/u, "")}/`));
+}
+
+interface ValidatedWorkResult {
+  completedAt: string;
+  usage: StageUsage;
+  summary: string;
+  changedPaths: string[];
+  checks: CheckEvidence[];
+  observedWorkspaceRevision: string;
+}
+
+function validateWorkResult(value: JsonValue, execution: StageExecutionRecord): ValidatedWorkResult {
+  let result: JsonValue;
+  try { result = decodeConductorPerformerStageResult(value) as JsonValue; } catch { throw new Error("work_result_invalid"); }
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("work_result_invalid");
+  if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== "work"
+    || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId
+    || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error("work_result_correlation_invalid");
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "work_completed") throw new Error("work_result_not_completed");
+  const outcome = result.outcome as Record<string, JsonValue>;
+  if (typeof outcome.summary !== "string" || !Array.isArray(outcome.changed_paths) || !Array.isArray(outcome.checks) || typeof outcome.observed_workspace_revision !== "string") throw new Error("work_result_shape_invalid");
+  const checks = outcome.checks.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.check_key !== "string" || typeof value.command_or_method !== "string"
+      || !["passed", "failed", "not_run"].includes(value.outcome as string)
+      || typeof value.summary !== "string" || typeof value.artifact_revision !== "string") {
+      throw new Error("work_checks_invalid");
+    }
+    return {
+      checkKey: value.check_key,
+      commandOrMethod: value.command_or_method,
+      outcome: value.outcome as CheckEvidence["outcome"],
+      summary: value.summary,
+      artifactRevision: value.artifact_revision,
+    };
+  });
+  const usageValue = result.usage;
+  const usage: StageUsage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue) ? {
+    inputTokens: numberValue(usageValue.input_tokens), cachedInputTokens: numberValue(usageValue.cached_input_tokens), outputTokens: numberValue(usageValue.output_tokens), reasoningOutputTokens: numberValue(usageValue.reasoning_output_tokens), totalTokens: numberValue(usageValue.total_tokens),
+  } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  return { completedAt: typeof result.completed_at === "string" ? result.completed_at : "", usage, summary: outcome.summary, changedPaths: outcome.changed_paths as string[], checks, observedWorkspaceRevision: outcome.observed_workspace_revision };
+}
+
+async function validateWorkGit(git: GitWorkspaceInterface, workspace: WorkStageInput["workspace"], execution: StageExecutionRecord, result: ValidatedWorkResult, contract: PlanContract): Promise<void> {
+  if (result.observedWorkspaceRevision !== execution.repositoryRevision) throw new Error("work_result_revision_invalid");
+  if (new Set(result.changedPaths).size !== result.changedPaths.length) throw new Error("work_result_paths_duplicate");
+  for (const changedPath of result.changedPaths) {
+    if (!safeWorkPath(changedPath) || !includedPath(changedPath, contract.includedScope) || excludedPath(changedPath, contract.excludedScope)) throw new Error("work_scope_invalid");
+  }
+  const checkKeys = new Set<string>();
+  for (const check of result.checks) {
+    if (!check || typeof check !== "object" || checkKeys.has(check.checkKey) || check.outcome !== "passed" || check.artifactRevision !== execution.repositoryRevision) throw new Error("work_checks_invalid");
+    checkKeys.add(check.checkKey);
+  }
+  const snapshot = await git.inspect(workspace);
+  if (snapshot.head !== execution.repositoryRevision || snapshot.status.partial || snapshot.status.has_more) throw new Error("work_git_baseline_changed");
+  const [unstaged, staged] = await Promise.all([
+    git.diff(workspace),
+    git.diff(workspace, { staged: true }),
+  ]);
+  if (unstaged.partial || staged.partial) throw new Error("work_diff_incomplete");
+  const actualPaths = new Set([...diffPaths(unstaged.text), ...diffPaths(staged.text), ...statusPaths(snapshot.status.items)]);
+  const expectedPaths = new Set(result.changedPaths);
+  if (actualPaths.size !== expectedPaths.size || [...actualPaths].some((path) => !expectedPaths.has(path))) throw new Error("work_diff_mismatch");
+}
+
+function stageTerminal(execution: StageExecutionRecord, result: { completedAt: string; usage: StageUsage; summary?: string }): StageTerminalRecord {
   return {
     kind: "stage_terminal", version: 1, stageExecutionId: execution.stageExecutionId, rootIssueId: execution.rootIssueId,
-    cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: "plan", contextDigest: execution.contextDigest,
-    outcome: "completed", completedAt: result.completedAt, summary: "Plan Contract produced.", usage: result.usage,
+    cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
+    outcome: "completed", completedAt: result.completedAt, summary: result.summary ?? "Plan Contract produced.", usage: result.usage,
   };
 }
 
@@ -432,5 +692,9 @@ function stringValue(value: JsonValue | undefined): string {
 }
 
 function blocked(reason: string): BootstrapPlanReconciliation {
+  return { kind: "blocked", reason };
+}
+
+function workBlocked(reason: string): WorkStageReconciliation {
   return { kind: "blocked", reason };
 }

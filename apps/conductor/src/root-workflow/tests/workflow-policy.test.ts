@@ -68,7 +68,7 @@ function input(cycleStatus: string, planStatus: string, workStatus?: string, ver
   if (workStatus) {
     issues.push(node("work-1", "work", workStatus, 2));
     comments.push(record("work-1", "work-record", "root-1:work:record", { kind: "node_marker", version: 1, rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeKey: "work-1", nodeKind: "work", planContractDigest: "digest-1" }));
-    if (workStatus === "Done") comments.push(record("work-1", "work-terminal", "root-1:work:terminal", { kind: "stage_terminal", version: 1, stageExecutionId: "work-execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "work-1", stage: "work", contextDigest: "digest-1", outcome: "completed", completedAt: "2026-07-21T00:00:00Z", summary: "complete", usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 } }));
+    if (workStatus === "Done") comments.push(record("work-1", "work-completion", "root-1:work:completion", { kind: "work_completion", version: 1, stageExecutionId: "work-execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "work-1", workKey: "work-1", contextDigest: "digest-1", summary: "complete", changedPaths: ["apps/conductor/src/work.ts"], checks: [], commitRevision: "commit-1" }));
   }
   if (verifyStatus) {
     issues.push(node("verify-1", "verify", verifyStatus, 3));

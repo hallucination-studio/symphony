@@ -39,6 +39,26 @@ export interface PlanStageContextBuildResult {
   executionRecord: StageExecutionRecord;
 }
 
+export interface WorkStageContextBuildInput {
+  tree: LinearWorkflowTreeSnapshot;
+  cycle: Issue;
+  plan: Issue;
+  work: Issue;
+  contract: PlanContract;
+  dependencyState: Array<{ workKey: string; terminalOutcome: "completed" | "failed" | "canceled"; commitRevision?: string }>;
+  workspace: GitWorkspace;
+  git: GitWorkspaceInterface;
+  stageExecutionId: string;
+  startedAt: string;
+  deadlineAt: string;
+  options: BootstrapPlanOptions;
+}
+
+export interface WorkStageContextBuildResult {
+  envelope: JsonValue;
+  executionRecord: StageExecutionRecord;
+}
+
 export class StageContextBuilder {
   async build(input: PlanStageContextBuildInput): Promise<PlanStageContextBuildResult> {
     const { tree, cycle, plan, options } = input;
@@ -184,6 +204,101 @@ export class StageContextBuilder {
     };
     return { envelope, executionRecord };
   }
+
+  async buildWork(input: WorkStageContextBuildInput): Promise<WorkStageContextBuildResult> {
+    const { tree, cycle, plan, work, contract, options } = input;
+    const root = tree.issues.find((issue) => issue.issue_id === tree.root_issue_id);
+    if (!root || cycle.parent_issue_id !== root.issue_id || plan.parent_issue_id !== cycle.issue_id || work.parent_issue_id !== cycle.issue_id || work.issue_kind !== "work") {
+      throw new Error("work_context_target_invalid");
+    }
+    const records = readRecords(tree.comments);
+    const cycleMarker = oneRecord(records.get(cycle.issue_id) ?? [], "cycle_marker") as CycleMarker | undefined;
+    if (!cycleMarker) throw new Error("work_context_cycle_marker_missing");
+    const gitSnapshot = await input.git.inspect(input.workspace);
+    if (gitSnapshot.status.partial || gitSnapshot.status.has_more || gitSnapshot.status.items.length > 0) throw new Error("work_context_git_baseline_dirty");
+    const stageSources = workSources(tree, root, cycle, plan, work, gitSnapshot, options);
+    const workContract = contract.workNodes.find((node) => node.workKey === nodeKey(records.get(work.issue_id) ?? []));
+    if (!workContract) throw new Error("work_context_contract_missing");
+    const workflowContext = {
+      root_boundary: {
+        root_issue_id: root.issue_id,
+        objective_summary: contract.objectiveSummary,
+        included_scope: contract.includedScope,
+        excluded_scope: contract.excludedScope,
+        relevant_acceptance_criteria: contract.acceptanceCriteria.map(toCriterion),
+      },
+      work_node: {
+        issue_id: work.issue_id,
+        work_key: workContract.workKey,
+        title: workContract.title,
+        description: workContract.description,
+        acceptance_criteria: workContract.acceptanceCriteria.map(toCriterion),
+        relevant_comments: contentRecords(tree.comments.filter((comment) => comment.issue_id === work.issue_id)),
+        remote_version: work.remote_version,
+      },
+      dependency_state: input.dependencyState.map((dependency) => ({
+        work_key: dependency.workKey,
+        terminal_outcome: dependency.terminalOutcome,
+        ...(dependency.commitRevision === undefined ? {} : { commit_revision: dependency.commitRevision }),
+      })),
+      resolved_human_input: [],
+      git_baseline: { head_revision: gitSnapshot.head, status_summary: statusSummary(gitSnapshot) },
+    };
+    const repositoryInstructions = (options.repositoryInstructions ?? []).map((instruction) => ({
+      relative_path: instruction.relativePath,
+      content_digest: instruction.contentDigest,
+      content: instruction.content,
+    }));
+    const envelopeWithoutDigest = {
+      protocol_version: "1",
+      stage_execution: { stage_execution_id: input.stageExecutionId, stage: "work", started_at: input.startedAt, deadline_at: input.deadlineAt },
+      target: { root_issue_id: root.issue_id, cycle_issue_id: cycle.issue_id, node_issue_id: work.issue_id, plan_contract_digest: contract.planContractDigest },
+      source_manifest: stageSources,
+      coverage: { is_complete: true, omissions: [] },
+      instruction_bundle: {
+        stage_instruction_set_id: options.instructionSetId,
+        stage_instructions: options.stageInstructions,
+        output_schema: "StageResult.outcome=work_completed",
+        repository_instructions: repositoryInstructions,
+      },
+      workflow_context: workflowContext,
+      repository_context: {
+        repository_identity: options.repositoryIdentity,
+        base_branch: options.baseBranch,
+        workspace_revision: gitSnapshot.head,
+        baseline_revision: gitSnapshot.head,
+        status_summary: statusSummary(gitSnapshot),
+        relevant_paths: await topLevelPaths(input.workspace.worktreePath),
+        workspace_access: "read_write",
+      },
+      execution_policy: {
+        performer_profile_id: options.performerProfileId,
+        model_settings: { model: options.modelSettings.model, reasoning_effort: options.modelSettings.reasoningEffort, is_fast_mode_enabled: options.modelSettings.isFastModeEnabled },
+        sandbox_mode: "workspace_write",
+        allowed_tools: ["read", "write", "shell"],
+        denied_tools: ["linear", "git_commit", "git_push", "git_branch", "git_worktree", "delivery"],
+        network_policy: "restricted",
+      },
+      limits: {
+        max_context_bytes: options.limits.maxContextBytes,
+        max_result_bytes: options.limits.maxResultBytes,
+        max_wall_time_ms: options.limits.maxWallTimeMs,
+        max_tool_calls: options.limits.maxToolCalls,
+        max_command_duration_ms: options.limits.maxCommandDurationMs,
+        reserved_total_tokens: options.limits.reservedTotalTokens,
+        max_output_tokens: options.limits.maxOutputTokens,
+      },
+    };
+    const contextDigest = digest(envelopeWithoutDigest);
+    const envelope = decodeConductorPerformerStageContextEnvelope({ ...envelopeWithoutDigest, context_digest: contextDigest } as unknown as JsonValue) as JsonValue;
+    return {
+      envelope,
+      executionRecord: {
+        kind: "stage_execution", version: 1, stageExecutionId: input.stageExecutionId, rootIssueId: root.issue_id, cycleIssueId: cycle.issue_id, nodeIssueId: work.issue_id, stage: "work", planContractDigest: contract.planContractDigest,
+        contextDigest, sourceManifest: stageSources.map((source) => ({ sourceKind: source.source_kind, sourceId: source.source_id, versionOrDigest: source.version_or_digest })), coverage: { isComplete: true, omissions: [] }, instructionSetId: options.instructionSetId, executionPolicyId: `${options.performerProfileId}:${options.modelSettings.model}`, limits: options.limits, repositoryRevision: gitSnapshot.head, startedAt: input.startedAt, deadlineAt: input.deadlineAt,
+      },
+    };
+  }
 }
 
 export function digest(value: unknown): string {
@@ -209,6 +324,11 @@ function readRecords(comments: Comment[]): Map<string, ManagedRecord[]> {
     result.set(comment.issue_id, records);
   }
   return result;
+}
+
+function nodeKey(records: ManagedRecord[]): string | undefined {
+  const marker = records.find((record): record is Extract<ManagedRecord, { kind: "node_marker" }> => record.kind === "node_marker" && record.nodeKind === "work");
+  return marker?.nodeKey;
 }
 
 function oneRecord(records: ManagedRecord[], kind: ManagedRecord["kind"]): ManagedRecord | undefined {
@@ -242,6 +362,30 @@ function sources(
   for (const instruction of options.repositoryInstructions ?? []) {
     result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   }
+  return result;
+}
+
+function workSources(
+  tree: LinearWorkflowTreeSnapshot,
+  root: Issue,
+  cycle: Issue,
+  plan: Issue,
+  work: Issue,
+  git: GitWorkspaceSnapshot,
+  options: BootstrapPlanOptions,
+) {
+  const result: Array<{ source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction"; source_id: string; version_or_digest: string }> = [
+    { source_kind: "linear_issue", source_id: root.issue_id, version_or_digest: root.remote_version },
+    { source_kind: "linear_issue", source_id: cycle.issue_id, version_or_digest: cycle.remote_version },
+    { source_kind: "linear_issue", source_id: plan.issue_id, version_or_digest: plan.remote_version },
+    { source_kind: "linear_issue", source_id: work.issue_id, version_or_digest: work.remote_version },
+    { source_kind: "git", source_id: `git:work:${work.issue_id}`, version_or_digest: digest({ head: git.head, status: git.status.items }) },
+  ];
+  for (const comment of tree.comments.filter((comment) => !comment.managed_marker && [root.issue_id, cycle.issue_id, plan.issue_id, work.issue_id].includes(comment.issue_id))) {
+    result.push({ source_kind: "linear_comment", source_id: comment.comment_id, version_or_digest: comment.remote_version });
+  }
+  for (const relation of tree.relations) result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   return result;
 }
 

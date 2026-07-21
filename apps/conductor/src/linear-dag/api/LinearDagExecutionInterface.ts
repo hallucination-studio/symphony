@@ -41,6 +41,8 @@ export interface BootstrapPlanInput {
   options: BootstrapPlanOptions;
 }
 
+export type WorkStageInput = BootstrapPlanInput;
+
 export interface LinearDagExecutionDependencies {
   linear: LinearGatewayInterface;
   git: GitWorkspaceInterface;
@@ -54,6 +56,12 @@ export type BootstrapPlanReconciliation =
   | { kind: "completed"; planContractDigest: string }
   | { kind: "blocked"; reason: string };
 
+export type WorkStageReconciliation =
+  | { kind: "mutation_applied"; step: string }
+  | { kind: "stage_ready"; step: "work"; envelope: JsonValue }
+  | { kind: "completed"; cycleIssueId: string; workIssueId: string; workKey: string; commitRevision: string }
+  | { kind: "blocked"; reason: string };
+
 export interface BootstrapPlanExecutionResult {
   kind: "awaiting_approval" | "sealed";
   cycleIssueId: string;
@@ -61,7 +69,17 @@ export interface BootstrapPlanExecutionResult {
   planContractDigest: string;
 }
 
+export interface WorkStageExecutionResult {
+  kind: "completed";
+  cycleIssueId: string;
+  workIssueId: string;
+  workKey: string;
+  commitRevision: string;
+}
+
 export interface LinearDagExecutionInterface {
   reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation>;
   executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult>;
+  reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation>;
+  executeWorkStage(input: WorkStageInput): Promise<WorkStageExecutionResult>;
 }

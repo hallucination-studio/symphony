@@ -50,8 +50,8 @@ function doneNode(cycle: RootCycleView, issueId: string): boolean {
 }
 
 function hasCompletedStageRecord(node: RootCycleView["nodes"][number]): boolean {
-  return node.records.some((record) => record.kind === "stage_terminal"
-    && record.stage === node.issue.issue_kind && record.outcome === "completed");
+  return node.records.some((record) => record.kind === "work_completion"
+    && record.nodeIssueId === node.issue.issue_id && record.workKey === node.marker.nodeKey);
 }
 
 function runnable(base: { rootIssueId: string }): RootDispatchAssessment {
