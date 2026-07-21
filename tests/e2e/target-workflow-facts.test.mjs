@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectTargetWorkflowFacts } from "../../tools/e2e/target-workflow-facts.mjs";
+import {
+  projectTargetWorkflowFacts,
+  projectTargetWorkflowPendingHuman,
+} from "../../tools/e2e/target-workflow-facts.mjs";
 
 test("target facts project durable Plan, Work, Verify, and delivery records", () => {
   const facts = projectTargetWorkflowFacts(snapshot());
@@ -152,6 +155,83 @@ test("target facts project correlated repair escalation from durable records", (
       openFindingCount: 1,
     },
   });
+});
+
+test("target facts report not waiting when Root is outside Human-wait states", () => {
+  assert.deepEqual(projectTargetWorkflowPendingHuman(snapshot()), { status: "not_waiting" });
+});
+
+test("target facts project only the current correlated pending Human action", () => {
+  const pending = snapshot();
+  pending.comments = pending.comments.filter(({ id }) => id !== "approval-action");
+  pending.issues = pending.issues.map((issue) => issue.id === "root-1"
+    ? { ...issue, state: "Needs Approval" }
+    : issue.id === "cycle-1"
+      ? { ...issue, state: "Planning" }
+    : issue.id === "plan-1"
+      ? { ...issue, state: "In Review" }
+      : issue);
+  pending.comments.push(comment("root-1", "approval-pending", {
+    kind: "human_action", version: 1, action_id: "root-1:approval:plan",
+    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "plan-1",
+    request_kind: "needs_approval", question_or_proposal: "Approve the Plan.",
+    reason: "Review the Plan Contract.", impact: "Proceed to Work.",
+    context_digest: "a".repeat(64), expected_root_remote_version: "root-version",
+  }));
+
+  assert.deepEqual(projectTargetWorkflowPendingHuman(pending), {
+    status: "waiting",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "plan-1",
+    requestKind: "needs_approval",
+    actionId: "root-1:approval:plan",
+    contextDigest: "a".repeat(64),
+  });
+});
+
+test("target facts reject a pending Human action that does not match Root state", () => {
+  const pending = snapshot();
+  pending.comments = pending.comments.filter(({ id }) => id !== "approval-action");
+  pending.issues = pending.issues.map((issue) => issue.id === "root-1"
+    ? { ...issue, state: "Needs Info" }
+    : issue.id === "cycle-1"
+      ? { ...issue, state: "Planning" }
+    : issue);
+  pending.comments.push(comment("root-1", "approval-pending", {
+    kind: "human_action", version: 1, action_id: "root-1:approval:plan",
+    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "plan-1",
+    request_kind: "needs_approval", question_or_proposal: "Approve the Plan.",
+    reason: "Review the Plan Contract.", impact: "Proceed to Work.",
+    context_digest: "a".repeat(64), expected_root_remote_version: "root-version",
+  }));
+
+  assert.throws(
+    () => projectTargetWorkflowPendingHuman(pending),
+    /target_facts_human_state_invalid/u,
+  );
+});
+
+test("target facts reject a pending Human action from a terminal non-current Cycle", () => {
+  const pending = snapshot();
+  pending.comments = pending.comments.filter(({ id }) => id !== "approval-action");
+  pending.issues = pending.issues.concat(
+    issue("cycle-2", "cycle", "Planning", "root-1"),
+    issue("plan-2", "plan", "In Review", "cycle-2"),
+  );
+  pending.issues = pending.issues.map((entry) => entry.id === "root-1"
+    ? { ...entry, state: "Needs Approval" }
+    : entry);
+  pending.comments.push(comment("root-1", "approval-stale", {
+    kind: "human_action", version: 1, action_id: "root-1:approval:stale",
+    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "plan-1",
+    request_kind: "needs_approval", context_digest: "a".repeat(64),
+  }));
+
+  assert.throws(
+    () => projectTargetWorkflowPendingHuman(pending),
+    /target_facts_human_cycle_invalid/u,
+  );
 });
 
 function snapshot() {

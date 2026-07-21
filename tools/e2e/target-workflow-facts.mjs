@@ -5,6 +5,9 @@ const RECORD_SUFFIX = "\n-->";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
+const ACTIVE_CYCLE_STATES = new Set([
+  "Draft", "Planning", "Sealed", "Executing", "Verifying", "Inconclusive", "Escalated",
+]);
 
 export function projectTargetWorkflowFacts(snapshot) {
   const input = validateSnapshot(snapshot);
@@ -118,6 +121,61 @@ export function projectTargetWorkflowFacts(snapshot) {
     }),
     ...(repairEscalation ? { repairEscalation } : {}),
     ...(delivery ? { delivery: projectDelivery(delivery, verifyResult) } : {}),
+  });
+}
+
+export function projectTargetWorkflowPendingHuman(snapshot) {
+  const input = validateSnapshot(snapshot);
+  const issues = new Map(input.issues.map((issue) => [issue.id, issue]));
+  const root = issues.get(input.rootIssueId);
+  if (!root || root.kind !== "root") throw new Error("target_facts_root_invalid");
+  const expectedRequestKind = root.state === "Needs Approval"
+    ? "needs_approval"
+    : root.state === "Needs Info"
+      ? "needs_info"
+      : undefined;
+  if (!expectedRequestKind) return Object.freeze({ status: "not_waiting" });
+  const activeCycles = input.issues.filter((issue) => issue.kind === "cycle" &&
+    issue.parentIssueId === input.rootIssueId && ACTIVE_CYCLE_STATES.has(issue.state));
+  if (activeCycles.length !== 1) throw new Error("target_facts_human_cycle_invalid");
+  const currentCycle = activeCycles[0];
+  const records = parseRecords(input.comments);
+  const actions = records.filter(({ issueId, record }) => issueId === input.rootIssueId &&
+    record.kind === "human_action");
+  if (actions.length !== 1) {
+    throw new Error(actions.length > 1
+      ? "target_facts_duplicate_human_action"
+      : "target_facts_human_action_missing");
+  }
+  const action = actions[0].record;
+  if (action.request_kind !== expectedRequestKind) {
+    throw new Error("target_facts_human_state_invalid");
+  }
+  const cycle = issues.get(action.cycle_issue_id);
+  if (!cycle || cycle.id !== currentCycle.id) {
+    throw new Error("target_facts_human_cycle_invalid");
+  }
+  const node = issues.get(action.node_issue_id);
+  if (cycle.kind !== "cycle" || cycle.parentIssueId !== input.rootIssueId ||
+      !node || node.parentIssueId !== cycle.id ||
+      !["plan", "work", "verify"].includes(node.kind) ||
+      !isSafeId(action.action_id) || !isSafeId(action.node_issue_id) ||
+      !isDigest(action.context_digest) || action.root_issue_id !== input.rootIssueId ||
+      action.cycle_issue_id !== cycle.id || action.node_issue_id !== node.id) {
+    throw new Error("target_facts_human_action_invalid");
+  }
+  if (node.kind === "plan" && node.state !== "In Review" ||
+      node.kind !== "plan" && !["In Progress", "In Review"].includes(node.state)) {
+    throw new Error("target_facts_human_node_state_invalid");
+  }
+  return Object.freeze({
+    status: "waiting",
+    rootIssueId: input.rootIssueId,
+    cycleIssueId: cycle.id,
+    nodeIssueId: node.id,
+    requestKind: action.request_kind,
+    actionId: action.action_id,
+    contextDigest: action.context_digest,
   });
 }
 

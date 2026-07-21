@@ -1,3 +1,5 @@
+import { projectTargetWorkflowPendingHuman } from "./target-workflow-facts.mjs";
+
 export function createTargetWorkflowRunner({
   externalInputs,
   snapshotTransport,
@@ -10,6 +12,8 @@ export function createTargetWorkflowRunner({
     throw new Error("target_runner_boundary_invalid");
   }
 
+  const readSnapshot = (input) => snapshotTransport.readSnapshot(input);
+
   return Object.freeze({
     createRoot(input) {
       return externalInputs.createRoot(input);
@@ -18,12 +22,17 @@ export function createTargetWorkflowRunner({
       return externalInputs.appendHumanResponse(input);
     },
     async observeRoot(input) {
-      const snapshot = await snapshotTransport.readSnapshot(input);
+      const snapshot = await readSnapshot(input);
       const facts = projectFacts(snapshot);
       if (!isTargetWorkflowFacts(facts)) {
         throw new Error("target_runner_facts_invalid");
       }
       return Object.freeze({ facts });
+    },
+    async observePendingHuman(input) {
+      const snapshot = await readSnapshot(input);
+      const pendingHuman = projectTargetWorkflowPendingHuman(snapshot);
+      return Object.freeze({ pendingHuman });
     },
   });
 }

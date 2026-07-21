@@ -35,7 +35,7 @@ test("target runner exposes only external inputs and durable-facts observation",
   });
 
   assert.deepEqual(Object.keys(runner).sort(), [
-    "appendHumanResponse", "createRoot", "observeRoot",
+    "appendHumanResponse", "createRoot", "observePendingHuman", "observeRoot",
   ]);
   assert.deepEqual(await runner.createRoot({ title: "Root" }), {
     rootIssueId: "root-1", projectId: "project-1",
@@ -61,6 +61,46 @@ test("target runner exposes only external inputs and durable-facts observation",
   assert.deepEqual(calls.map(([kind]) => kind), [
     "createRoot", "appendHumanResponse", "readSnapshot", "projectFacts",
   ]);
+});
+
+test("target runner returns a closed pending Human observation without exposing the snapshot", async () => {
+  const runner = createTargetWorkflowRunner({
+    externalInputs: { createRoot() {}, appendHumanResponse() {} },
+    snapshotTransport: {
+      async readSnapshot() {
+        return {
+          rootIssueId: "root-1", projectId: "project-1", git: { head: "a".repeat(40), branch: "main" },
+          issues: [
+            { id: "root-1", projectId: "project-1", kind: "root", state: "Needs Approval" },
+            { id: "cycle-1", projectId: "project-1", kind: "cycle", state: "Planning", parentIssueId: "root-1" },
+            { id: "plan-1", projectId: "project-1", kind: "plan", state: "In Review", parentIssueId: "cycle-1" },
+          ],
+          relations: [],
+          comments: [{
+            issueId: "root-1", id: "action-1",
+            body: `<!-- symphony managed-record\n${JSON.stringify({
+              kind: "human_action", version: 1, action_id: "action-1",
+              root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "plan-1",
+              request_kind: "needs_approval", context_digest: "b".repeat(64),
+            })}\n-->`,
+          }],
+        };
+      },
+    },
+    projectFacts() { throw new Error("not_used"); },
+  });
+
+  const result = await runner.observePendingHuman({
+    rootIssueId: "root-1", projectId: "project-1", git: { head: "a".repeat(40), branch: "main" },
+  });
+
+  assert.deepEqual(result, {
+    pendingHuman: {
+      status: "waiting", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
+      requestKind: "needs_approval", actionId: "action-1", contextDigest: "b".repeat(64),
+    },
+  });
+  assert.equal(Object.hasOwn(result, "snapshot"), false);
 });
 
 test("target runner fails closed when a boundary dependency is missing", () => {

@@ -3,6 +3,7 @@ const REQUIRED = Object.freeze([
   ["runner_external_human_input", "runner", /externalInputs\.appendHumanResponse/u],
   ["runner_snapshot_read", "runner", /snapshotTransport\.readSnapshot/u],
   ["runner_durable_projection", "runner", /projectFacts\(snapshot\)/u],
+  ["runner_pending_human_projection", "runner", /projectTargetWorkflowPendingHuman\(snapshot\)/u],
   ["runner_closed_observation", "runner", /Object\.freeze\(\{ facts \}\)/u],
   ["inputs_root_mutation", "inputs", /issueCreate/u],
   ["inputs_human_mutation", "inputs", /commentCreate/u],
