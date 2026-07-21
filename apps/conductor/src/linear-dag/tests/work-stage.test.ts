@@ -159,6 +159,32 @@ test("does not select a Work node whose Done predecessor lacks completion eviden
   assert.equal(gateway.performedTargets, 0);
 });
 
+for (const rootStatus of ["Done", "Canceled"] as const) {
+  test(`rejects a late Work Result after Root ${rootStatus}`, async () => {
+    const gateway = new WorkGateway(workTree());
+    const root = gateway.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+    const status = gateway.tree.status_catalog.find((candidate) => candidate.name === rootStatus)!;
+    Object.assign(root, {
+      status_id: status.status_id,
+      status_name: status.name,
+      status_category: status.category,
+      status_position: status.position,
+    });
+    const execution = new LinearDagExecutionImpl({
+      linear: gateway,
+      git: gateway.git,
+      performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+    });
+
+    assert.deepEqual(await execution.reconcileWork(workInput(), { stage_execution_id: "old-work-execution" } as unknown as JsonValue), {
+      kind: "blocked",
+      reason: "root_terminal_result_rejected",
+    });
+    assert.equal(gateway.writes.length, 0);
+    assert.equal(gateway.commitCalls, 0);
+  });
+}
+
 function workInput(): WorkStageInput {
   return {
     rootIssueId,

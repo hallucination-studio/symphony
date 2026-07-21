@@ -180,6 +180,30 @@ test("creates a Root approval when a breaker reaches a terminal repair Cycle", a
   assert.deepEqual(await execution.reconcileRoot(input), { kind: "blocked", reason: "convergence_max_cycles_per_root" });
 });
 
+for (const rootStatus of ["Done", "Canceled"] as const) {
+  test(`rejects a late Verify Result after Root ${rootStatus}`, async () => {
+    const gateway = new VerifyGateway();
+    const root = gateway.tree.issues.find((issue) => issue.issue_id === "root-1")!;
+    const status = gateway.tree.status_catalog.find((candidate) => candidate.name === rootStatus)!;
+    Object.assign(root, {
+      status_id: status.status_id,
+      status_name: status.name,
+      status_category: status.category,
+      status_position: status.position,
+    });
+    const execution = new LinearDagExecutionImpl({
+      linear: gateway,
+      git: gateway.git,
+      performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+    });
+
+    assert.deepEqual(await execution.reconcileVerify(verifyInput(), { stage_execution_id: "old-verify-execution" } as unknown as JsonValue), {
+      kind: "blocked",
+      reason: "root_terminal_result_rejected",
+    });
+  });
+}
+
 function verifyInput(): VerifyStageInput {
   return {
     rootIssueId: "root-1", projectId: "project-1",

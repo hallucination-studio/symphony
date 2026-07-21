@@ -160,6 +160,8 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return workBlocked("work_root_not_runnable");
+    const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
+    if (terminalResultReason) return workBlocked(terminalResultReason);
     const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
     let view;
     try {
@@ -265,6 +267,8 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return verifyBlocked("verify_root_not_runnable");
+    const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
+    if (terminalResultReason) return verifyBlocked(terminalResultReason);
     const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
     let view;
     try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
@@ -376,6 +380,8 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return blocked("root_read_back_invalid");
+    const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
+    if (terminalResultReason) return blocked(terminalResultReason);
     const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
     const cycle = activeCycle(tree, input.rootIssueId);
     if (!cycle) {
@@ -775,6 +781,11 @@ function outcomeIssueId(outcome: { targetIssueId?: string }): string {
 function resultExecutionId(value: JsonValue): string {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.stage_execution_id !== "string") throw new Error("plan_result_invalid");
   return value.stage_execution_id;
+}
+
+function rootTerminalResultReason(status: string, stageResult: JsonValue | undefined): string | undefined {
+  if (stageResult === undefined || (status !== "Done" && status !== "Canceled")) return undefined;
+  return "root_terminal_result_rejected";
 }
 
 function validatePlanResult(value: JsonValue, execution: StageExecutionRecord): { planContract: Record<string, JsonValue>; completedAt: string; usage: StageUsage } {

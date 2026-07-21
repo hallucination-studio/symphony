@@ -94,6 +94,31 @@ test("persists a breaker decision before creating a Cycle and stops later dispat
   assert.equal(fake.writes.length, 1);
 });
 
+for (const rootStatus of ["Done", "Canceled"] as const) {
+  test(`rejects a late Plan Result after Root ${rootStatus}`, async () => {
+    const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+    const root = fake.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+    const status = fake.tree.status_catalog.find((candidate) => candidate.name === rootStatus)!;
+    Object.assign(root, {
+      status_id: status.status_id,
+      status_name: status.name,
+      status_category: status.category,
+      status_position: status.position,
+    });
+    const execution = new LinearDagExecutionImpl({
+      linear: fake,
+      git: fake.git,
+      performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+    });
+
+    assert.deepEqual(await execution.reconcileRoot(bootstrapInput(), { stage_execution_id: "old-plan-execution" } as unknown as JsonValue), {
+      kind: "blocked",
+      reason: "root_terminal_result_rejected",
+    });
+    assert.equal(fake.writes.length, 0);
+  });
+}
+
 function bootstrapInput() {
   return {
     rootIssueId,
