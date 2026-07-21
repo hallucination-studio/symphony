@@ -17,6 +17,25 @@ import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-li
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const TARGET_WORKFLOW_STATUS_CATEGORIES = Object.freeze({
+  Draft: "backlog",
+  Todo: "unstarted",
+  Planning: "started",
+  Sealed: "started",
+  Executing: "started",
+  Verifying: "started",
+  "In Progress": "started",
+  "In Review": "started",
+  "Needs Approval": "started",
+  "Needs Info": "started",
+  Inconclusive: "started",
+  Escalated: "started",
+  Succeeded: "completed",
+  "Changes Required": "completed",
+  Done: "completed",
+  Canceled: "canceled",
+  Failed: "canceled",
+});
 
 const PROJECT_CONFIGURATION_QUERY = `
   query TargetWorkflowProjectConfiguration($projectId: String!, $clientId: String!) {
@@ -34,7 +53,7 @@ const PROJECT_CONFIGURATION_QUERY = `
       nodes {
         id
         states(first: 50) {
-          nodes { id name }
+          nodes { id name type }
           pageInfo { hasNextPage }
         }
       }
@@ -94,6 +113,8 @@ export async function readTargetProjectConfiguration({
         teamId: team.id,
         todo: states.find(({ name }) => name === "Todo")?.id,
         done: states.find(({ name }) => name === "Done")?.id,
+        workflowCatalogComplete: Object.entries(TARGET_WORKFLOW_STATUS_CATEGORIES).every(([name, category]) =>
+          states.some((state) => state.name === name && state.type === category)),
       };
     })
     .filter(({ teamId, todo, done }) => SAFE_ID.test(teamId ?? "") && SAFE_ID.test(todo ?? "") && SAFE_ID.test(done ?? ""));
@@ -103,6 +124,9 @@ export async function readTargetProjectConfiguration({
       typeof project.name !== "string" || project.name.length === 0 || typeof project.updatedAt !== "string" ||
       candidates.length !== 1) {
     throw stableError("target_live_project_configuration_invalid");
+  }
+  if (!candidates[0].workflowCatalogComplete) {
+    throw stableError("target_live_workflow_catalog_incomplete");
   }
   return Object.freeze({
     organizationId: data.organization.id,

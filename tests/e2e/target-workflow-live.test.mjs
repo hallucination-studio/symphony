@@ -28,7 +28,7 @@ test("target project configuration selects one retained Project team and app act
         },
         teams: { nodes: [{
           id: "team-1",
-          states: { nodes: [{ id: "todo-1", name: "Todo" }, { id: "done-1", name: "Done" }], pageInfo: { hasNextPage: false } },
+          states: { nodes: targetWorkflowStates(), pageInfo: { hasNextPage: false } },
         }], pageInfo: { hasNextPage: false } },
       } });
     },
@@ -63,7 +63,7 @@ test("target project configuration accepts a Linear project id returned for a sl
       },
       teams: { nodes: [{
         id: "team-1",
-        states: { nodes: [{ id: "todo-1", name: "Todo" }, { id: "done-1", name: "Done" }], pageInfo: { hasNextPage: false } },
+        states: { nodes: targetWorkflowStates(), pageInfo: { hasNextPage: false } },
       }], pageInfo: { hasNextPage: false } },
     } }),
     log: () => {},
@@ -71,6 +71,31 @@ test("target project configuration accepts a Linear project id returned for a sl
 
   assert.equal(result.project.projectId, "project-internal-1");
   assert.equal(result.rootInput.projectId, "project-internal-1");
+});
+
+test("target project configuration rejects an incomplete retained workflow catalog", async () => {
+  await assert.rejects(
+    readTargetProjectConfiguration({
+      developmentToken: "linear-secret",
+      clientId: "client-1",
+      projectSlugId: "project-1",
+      fetch: async () => response({ data: {
+        organization: { id: "organization-1" },
+        applicationInfo: { name: "Symphony" },
+        users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
+        project: {
+          id: "project-1", name: "Retained Target", slugId: "project-1", updatedAt: "2026-07-22T00:00:00Z",
+          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
+        },
+        teams: { nodes: [{
+          id: "team-1",
+          states: { nodes: [{ id: "todo-1", name: "Todo" }, { id: "done-1", name: "Done" }], pageInfo: { hasNextPage: false } },
+        }], pageInfo: { hasNextPage: false } },
+      } }),
+      log: () => {},
+    }),
+    /target_live_workflow_catalog_incomplete/u,
+  );
 });
 
 test("target live success composes setup, production boundary, Git observation, and scope cleanup", async () => {
@@ -305,4 +330,17 @@ test("target live entry rejects a missing run ID before creating a scope", async
 
 function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, async json() { return body; } };
+}
+
+function targetWorkflowStates() {
+  return [
+    ["todo-1", "Todo", "unstarted"], ["done-1", "Done", "completed"], ["draft-1", "Draft", "backlog"],
+    ["planning-1", "Planning", "started"], ["sealed-1", "Sealed", "started"], ["executing-1", "Executing", "started"],
+    ["verifying-1", "Verifying", "started"], ["in-progress-1", "In Progress", "started"],
+    ["in-review-1", "In Review", "started"], ["needs-approval-1", "Needs Approval", "started"],
+    ["needs-info-1", "Needs Info", "started"], ["inconclusive-1", "Inconclusive", "started"],
+    ["escalated-1", "Escalated", "started"], ["succeeded-1", "Succeeded", "completed"],
+    ["changes-required-1", "Changes Required", "completed"], ["canceled-1", "Canceled", "canceled"],
+    ["failed-1", "Failed", "canceled"],
+  ].map(([id, name, type]) => ({ id, name, type }));
 }
