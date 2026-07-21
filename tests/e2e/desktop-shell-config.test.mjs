@@ -18,8 +18,10 @@ test("Desktop shell smoke uses production entrypoints without workflow credentia
     readFile("apps/podium-desktop/src-tauri/src/main.rs", "utf8"),
     readFile("tools/e2e/desktop-shell-build.mjs", "utf8"),
     readFile("tools/e2e/desktop-shell-smoke.mjs", "utf8"),
+    readFile("Makefile", "utf8"),
   ]);
-  const combined = sources.join("\n");
+  const combined = sources.slice(0, 4).join("\n");
+  const makefile = sources[4];
   assert.match(combined, /src-backend["',\s]+main\.ts|build:sidecars/u);
   assert.match(combined, /desktop-shell-smoke-observation/u);
   assert.match(combined, /desktop_webview_loaded/u);
@@ -53,8 +55,9 @@ test("Desktop shell smoke uses production entrypoints without workflow credentia
   );
   assert.equal(productionConfig.app.withGlobalTauri, undefined);
   assert.equal(productionConfig.bundle.externalBin.includes("binaries/performer"), true);
-  assert.equal(productionConfig.bundle.externalBin.includes("binaries/symphony"), true);
-  assert.match(sources[0], /command_broker["',\s]+cli\.py/u);
+  assert.equal(productionConfig.bundle.externalBin.includes("binaries/symphony"), false);
+  assert.doesNotMatch(sources[0], /command[-_]broker|command_broker/u);
+  assert.doesNotMatch(makefile, /turn-request-path/u);
 });
 
 test("quality workflow keeps Desktop shell evidence separate from core live evidence", async () => {

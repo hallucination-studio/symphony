@@ -43,4 +43,3 @@ dev: install
 
 stop:
 	-pkill -f 'apps/conductor/dist/main.js'
-	-pkill -f 'performer --turn-request-path'

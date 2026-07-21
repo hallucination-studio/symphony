@@ -44,8 +44,7 @@
     "externalBin": [
       "binaries/podium-backend",
       "binaries/conductor",
-      "binaries/performer",
-      "binaries/symphony"
+      "binaries/performer"
     ],
     "icon": ["icons/icon.png"]
   }

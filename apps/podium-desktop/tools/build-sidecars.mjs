@@ -22,13 +22,6 @@ buildPythonSidecar(
   path.join(workspaceRoot, "apps", "performer", "src", "performer", "__main__.py"),
   "performer-sidecar",
 );
-buildPythonSidecar(
-  path.join(binaries, `symphony-${target}`),
-  path.join(
-    workspaceRoot, "apps", "performer", "src", "performer", "command_broker", "cli.py",
-  ),
-  "command-broker-sidecar",
-);
 
 function buildWorkspaceDependencies() {
   const result = spawnSync(
