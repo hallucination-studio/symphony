@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import type { JsonValue } from "@symphony/contracts";
@@ -9,6 +12,9 @@ import type {
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { PerformerStageClientInterface } from "../../performer-stage-client/api/PerformerStageClientInterface.js";
+import { runCommand } from "../../composition/CommandRunner.js";
+import { NativeGitWorkspaceImpl } from "../../git-workspaces/internal/NativeGitWorkspaceImpl.js";
+import { ShortProcessPerformerStageClientImpl } from "../../performer-stage-client/internal/ShortProcessPerformerStageClientImpl.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import type { PlanContract } from "../../root-workflow/api/ManagedRecords.js";
 import type { WorkStageInput } from "../api/LinearDagExecutionInterface.js";
@@ -215,6 +221,52 @@ test("reconciles an orphaned Work execution into a fresh retry", async () => {
   assert.equal(terminal.value.outcome, "failed");
   assert.equal(terminal.value.failureCode, "orphaned_execution");
   assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
+});
+
+test("restarts after a real Performer exit using a real Git worktree", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-work-recovery-"));
+  const repository = path.join(root, "repository");
+  await runCommand("git", ["init", "-b", "main", repository]);
+  await runCommand("git", ["-C", repository, "config", "user.email", "test@example.com"]);
+  await runCommand("git", ["-C", repository, "config", "user.name", "Symphony Test"]);
+  await writeFile(path.join(repository, "README.md"), "initial\n");
+  await runCommand("git", ["-C", repository, "add", "README.md"]);
+  await runCommand("git", ["-C", repository, "commit", "-m", "initial"]);
+
+  const git = new NativeGitWorkspaceImpl(repository, path.join(root, "worktrees"));
+  const workspace = await git.ensureWorkspace({ rootIssueId, rootIdentifier: "ROOT-1", baseBranch: "main" });
+  const performerScript = path.join(root, "performer-exits.js");
+  await writeFile(performerScript, "process.exit(0);\n", { encoding: "utf8", mode: 0o700 });
+  await chmod(performerScript, 0o700);
+  const performer = new ShortProcessPerformerStageClientImpl({
+    executable: process.execPath,
+    argumentsPrefix: [performerScript],
+    runtimeRoot: path.join(root, "runtime"),
+    environment: () => ({ CODEX_HOME: path.join(root, "profile") }),
+    startupDeadlineMs: 1_000,
+    cancellationGraceMs: 100,
+  });
+  const tree = workTree();
+  const ownership = tree.comments.find((comment) => comment.issue_id === rootIssueId && comment.body.includes('"kind":"root_ownership"'))!;
+  const parsedOwnership = parseManagedRecord(ownership.body);
+  assert.equal(parsedOwnership.ok, true);
+  if (!parsedOwnership.ok || parsedOwnership.value.kind !== "root_ownership") throw new Error("root_ownership_fixture_invalid");
+  parsedOwnership.value.deliveryBranch = workspace.branch;
+  ownership.body = serializeManagedRecord(parsedOwnership.value);
+  const gateway = new WorkGateway(tree, git);
+  const input = { ...workInput(), workspace };
+  const execution = new LinearDagExecutionImpl({ linear: gateway, git, performer });
+
+  await assert.rejects(execution.executeWorkStage(input), /performer_stage_result_missing/u);
+
+  const restarted = new LinearDagExecutionImpl({ linear: gateway, git, performer });
+  assert.deepEqual(await restarted.reconcileWork(input), { kind: "mutation_applied", step: "work_orphaned_execution_terminal" });
+  assert.deepEqual(await restarted.reconcileWork(input), { kind: "mutation_applied", step: "work_execution_created" });
+  const retry = latestExecution(gateway);
+  const ready = await restarted.reconcileWork(input, undefined, undefined, retry.stageExecutionId);
+  assert.equal(ready.kind, "stage_ready");
+  assert.equal((await git.inspect(workspace)).status.items.length, 0);
+  assert.notEqual(retry.stageExecutionId, "work-execution-1");
 });
 
 test("persists one suspended Work action and releases the Stage", async () => {
@@ -455,23 +507,7 @@ function planContract(): PlanContract {
 
 class WorkGateway implements LinearGatewayInterface {
   readonly gitState = { head: "head-1", dirtyPaths: [] as string[] };
-  readonly git: GitWorkspaceInterface = {
-    inspect: async () => ({ head: this.gitState.head, branch: "symphony/root-1", status: { items: this.gitState.dirtyPaths.map((path) => ` M ${path}`), returned: this.gitState.dirtyPaths.length, cap: 32, has_more: false, partial: false } }),
-    diff: async (_workspace, options = {}) => {
-      const paths = options.fromRevision === "head-1" && options.toRevision === "commit-1" ? this.gitState.dirtyPaths : this.gitState.dirtyPaths;
-      return { text: paths.map((path) => `diff --git a/${path} b/${path}`).join("\n"), bytes: paths.length, cap: 65_536, partial: false };
-    },
-    checks: async (_workspace, names) => ({ items: names.map((name) => ({ name, status: "passed" as const })), returned: names.length, cap: 32, has_more: false, partial: false }),
-    commit: async (input) => {
-      this.commitCalls += 1;
-      assert.equal(input.rootIssueId, rootIssueId);
-      assert.deepEqual(input.allowedIssueIds, [readyWorkIssueId]);
-      assert.equal(input.expectedHead, "head-1");
-      this.gitState.head = "commit-1";
-      this.gitState.dirtyPaths = [];
-      return { kind: "committed" as const, commit: "commit-1" };
-    },
-  };
+  readonly git: GitWorkspaceInterface;
   readonly writes: string[] = [];
   readonly tree: LinearWorkflowTreeSnapshot;
   lastEnvelope?: Record<string, JsonValue>;
@@ -479,7 +515,26 @@ class WorkGateway implements LinearGatewayInterface {
   performedTargets = 0;
   commitCalls = 0;
 
-  constructor(tree: LinearWorkflowTreeSnapshot) { this.tree = tree; }
+  constructor(tree: LinearWorkflowTreeSnapshot, git?: GitWorkspaceInterface) {
+    this.tree = tree;
+    this.git = git ?? {
+      inspect: async () => ({ head: this.gitState.head, branch: "symphony/root-1", status: { items: this.gitState.dirtyPaths.map((path) => ` M ${path}`), returned: this.gitState.dirtyPaths.length, cap: 32, has_more: false, partial: false } }),
+      diff: async (_workspace, options = {}) => {
+        const paths = options.fromRevision === "head-1" && options.toRevision === "commit-1" ? this.gitState.dirtyPaths : this.gitState.dirtyPaths;
+        return { text: paths.map((path) => `diff --git a/${path} b/${path}`).join("\n"), bytes: paths.length, cap: 65_536, partial: false };
+      },
+      checks: async (_workspace, names) => ({ items: names.map((name) => ({ name, status: "passed" as const })), returned: names.length, cap: 32, has_more: false, partial: false }),
+      commit: async (input) => {
+        this.commitCalls += 1;
+        assert.equal(input.rootIssueId, rootIssueId);
+        assert.deepEqual(input.allowedIssueIds, [readyWorkIssueId]);
+        assert.equal(input.expectedHead, "head-1");
+        this.gitState.head = "commit-1";
+        this.gitState.dirtyPaths = [];
+        return { kind: "committed" as const, commit: "commit-1" };
+      },
+    };
+  }
 
   async readWorkflowIssueTree() { return structuredClone(this.tree); }
   async readFreshRootScope(): Promise<never> { throw new Error("unused"); }
