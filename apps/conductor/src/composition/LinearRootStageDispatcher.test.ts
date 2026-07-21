@@ -27,6 +27,24 @@ test("target dispatcher selects Plan, Work, and Verify from the current Cycle", 
   assert.deepEqual(calls, ["plan", "work", "verify"]);
 });
 
+test("canceled Root reconciliation bypasses Profile and Stage execution", async () => {
+  const calls: string[] = [];
+  const execution = {
+    async reconcileCanceledRoot() { calls.push("cancel"); return { kind: "mutation_applied", step: "root_cancel_cycle" }; },
+  } as unknown as LinearDagExecutionInterface;
+  const dispatcher = new LinearRootStageDispatcher({
+    execution,
+    async profileFor() { throw new Error("profile_must_not_run"); },
+    workspaceFor() { return { branch: "symphony/runs/root", worktreePath: "/tmp/root" }; },
+    optionsFor() { return options(); },
+  });
+  const canceled = view("Planning");
+  canceled.root.issue.status_name = "Canceled";
+
+  assert.equal(await dispatcher.dispatch({ root: root(), view: canceled }), "progress");
+  assert.deepEqual(calls, ["cancel"]);
+});
+
 function root(): DiscoveredRoot {
   return {
     issueId: "root", identifier: "SYM-1", state: "In Progress", title: "Root", description: "",

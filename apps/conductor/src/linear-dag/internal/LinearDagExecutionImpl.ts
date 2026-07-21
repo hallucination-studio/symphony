@@ -61,6 +61,7 @@ type ConvergenceGateResult =
   | { kind: "allow" }
   | { kind: "mutation_applied"; step: string }
   | { kind: "blocked"; reason: string };
+type RootMutationInput = Pick<BootstrapPlanInput, "rootIssueId" | "projectId" | "workspace">;
 
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
 
@@ -71,6 +72,21 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     private readonly dagMaterializer = new DagMaterializer(),
     private readonly convergencePolicy: RootConvergencePolicy = DEFAULT_ROOT_CONVERGENCE_POLICY,
   ) {}
+
+  async reconcileCanceledRoot(input: RootMutationInput) {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
+    if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return { kind: "blocked", reason: "root_read_back_invalid" } as const;
+    if (root.status_name !== "Canceled") return { kind: "blocked", reason: "root_not_canceled" } as const;
+    const gitSnapshot = await this.dependencies.git.inspect(input.workspace);
+    let view;
+    try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
+    catch (error) { if (error instanceof RootDagValidationError) return { kind: "blocked", reason: `root_tree_invalid:${error.code}` } as const; throw error; }
+    const cancellation = await this.reconcileRootCancellation(input, tree, view);
+    if (cancellation.kind !== "allow") return cancellation;
+    const convergence = await this.enforceConvergence({ ...input, reservedTotalTokens: 0 }, tree, view);
+    return convergence.kind === "allow" ? { kind: "completed" } as const : convergence;
+  }
 
   async executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult> {
     let stageResult: JsonValue | undefined;
@@ -186,7 +202,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     const cancellation = await this.reconcileRootCancellation(input, tree, view);
     if (cancellation.kind !== "allow") return cancellation;
-    const convergence = await this.enforceConvergence(input, tree, view);
+    const convergence = await this.enforceConvergence({ ...input, reservedTotalTokens: input.options.limits.reservedTotalTokens }, tree, view);
     if (convergence.kind !== "allow") return convergence;
     if (root.status_name !== "In Progress" && !(stageResult !== undefined && resultKind(stageResult) === "suspended")) return workBlocked("work_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
@@ -335,7 +351,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     catch (error) { if (error instanceof RootDagValidationError) return verifyBlocked(`verify_tree_invalid:${error.code}`); throw error; }
     const cancellation = await this.reconcileRootCancellation(input, tree, view);
     if (cancellation.kind !== "allow") return cancellation;
-    const convergence = await this.enforceConvergence(input, tree, view);
+    const convergence = await this.enforceConvergence({ ...input, reservedTotalTokens: input.options.limits.reservedTotalTokens }, tree, view);
     if (convergence.kind !== "allow") return convergence;
     if (root.status_name !== "In Progress" && !(stageResult !== undefined && resultKind(stageResult) === "suspended")) return verifyBlocked("verify_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
@@ -502,7 +518,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       let view;
       try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
       catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
-      const convergence = await this.enforceConvergence(input, tree, view);
+      const convergence = await this.enforceConvergence({ ...input, reservedTotalTokens: input.options.limits.reservedTotalTokens }, tree, view);
       if (convergence.kind !== "allow") return convergence;
       if (root.status_name !== "In Progress") return blocked("root_not_runnable");
       const predecessor = [...view.cycles]
@@ -696,7 +712,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       let view;
       try { view = buildRootDagView({ tree, git: gitSnapshot, workspace: input.workspace }); }
       catch (error) { if (error instanceof RootDagValidationError) return blocked(`root_tree_invalid:${error.code}`); throw error; }
-      const convergence = await this.enforceConvergence(input, tree, view);
+      const convergence = await this.enforceConvergence({ ...input, reservedTotalTokens: input.options.limits.reservedTotalTokens }, tree, view);
       if (convergence.kind !== "allow") return convergence;
       return { kind: "completed", planContractDigest: decision.planContractDigest };
     }
@@ -717,12 +733,12 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     return latest.stageExecutionId;
   }
 
-  private async enforceConvergence(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
+  private async enforceConvergence(input: RootMutationInput & { reservedTotalTokens: number }, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
     const assessment = assessRootConvergence({
       view,
       now: tree.observed_at,
       policy: this.convergencePolicy,
-      nextStageReservedTotalTokens: input.options.limits.reservedTotalTokens,
+      nextStageReservedTotalTokens: input.reservedTotalTokens,
     });
     if (assessment.decision === "allow") return { kind: "allow" };
     const record = toConvergenceRecord(input.rootIssueId, tree.observed_at, assessment);
@@ -775,7 +791,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     return { kind: "mutation_applied", step: "convergence_root_needs_approval" };
   }
 
-  private async reconcileRootCancellation(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
+  private async reconcileRootCancellation(input: RootMutationInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
     if (view.root.issue.status_name !== "Canceled") return { kind: "allow" };
     const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
     const activeCycle = view.cycles
@@ -796,7 +812,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     return { kind: "allow" };
   }
 
-  private async updateStatus(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {
+  private async updateStatus(input: RootMutationInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {
     if (!status) throw new Error(`status_missing:${step}`);
     const root = tree.issues.find((candidate) => candidate.issue_id === input.rootIssueId);
     if (!root) throw new Error("root_read_back_invalid");
@@ -817,7 +833,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     });
   }
 
-  private async appendRecord(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, target: Issue, writeId: string, managedMarker: string, record: ManagedRecord): Promise<void> {
+  private async appendRecord(input: RootMutationInput, tree: LinearWorkflowTreeSnapshot, target: Issue, writeId: string, managedMarker: string, record: ManagedRecord): Promise<void> {
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root) throw new Error("root_read_back_invalid");
     await this.mutateAndReadBack({
@@ -835,7 +851,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   }
 
   private async mutateAndReadBack(input: {
-    input: BootstrapPlanInput;
+    input: RootMutationInput;
     tree: LinearWorkflowTreeSnapshot;
     writeId: string;
     command: LinearWorkflowMutationCommand;

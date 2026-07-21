@@ -9,7 +9,7 @@ export function discoverCurrentRoots(input: {
     root.projectId === input.projectId &&
     root.parentIssueId === null &&
     root.state !== "Done" &&
-    root.state !== "Canceled" &&
+    (root.state !== "Canceled" || root.managedConductorId === input.conductorId) &&
     (root.managedConductorId === input.conductorId ||
       (!root.managedConductorId && root.isDelegatedToSymphony))
   );

@@ -1,0 +1,210 @@
+import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+
+import { createChildEnvironment } from "../../../tools/e2e/config.mjs";
+import { startConductorHarness } from "../../../tools/e2e/conductor-harness.mjs";
+import { createSerializedWorkflowBoundary } from "../../../tools/e2e/serialized-workflow-boundary.mjs";
+
+const run = promisify(execFile);
+
+test("real Conductor converges partial Root cancellation after restart without a new Stage", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "symphony-cancel-recovery-"));
+  const repositoryRoot = path.join(root, "repository");
+  const dataRoot = path.join(root, "conductor");
+  const statePath = path.join(root, "linear-tree.json");
+  const stageMarkerPath = path.join(dataRoot, "performer-profiles", "profile-1", "codex-home", "stage-starts.jsonl");
+  await createRepository(repositoryRoot);
+  const revision = (await run("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
+  await writeProfile(dataRoot);
+  await writeFile(statePath, JSON.stringify(serializedCanceledWorkTree(revision), null, 2));
+  const performer = await writePerformer(root);
+  const boundary = createSerializedWorkflowBoundary({ statePath });
+  const podium = { handler: boundary.handler, observeExit: () => {}, close: () => {} };
+  const environment = (instanceId) => createChildEnvironment({ additions: {
+    SYMPHONY_PRIVATE_IPC_FD: "3",
+    SYMPHONY_INSTANCE_ID: instanceId,
+    SYMPHONY_BINDING_ID: "binding-1",
+    SYMPHONY_CONDUCTOR_ID: "conductor-1",
+    SYMPHONY_CONDUCTOR_SHORT_HASH: "abc123def456",
+    SYMPHONY_LINEAR_INSTALLATION_ID: "serialized-fixture:organization-1",
+    SYMPHONY_ORGANIZATION_ID: "organization-1",
+    SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_ROOT: repositoryRoot,
+    SYMPHONY_BASE_BRANCH: "main",
+    SYMPHONY_CONDUCTOR_DATA_ROOT: dataRoot,
+    SYMPHONY_PERFORMER_EXECUTABLE: performer,
+    SYMPHONY_CYCLE_DELAY_MS: "1000",
+  } });
+
+  const first = await startConductor(environment("instance-1"), podium);
+  try {
+    const firstStage = await waitForStage(stageMarkerPath);
+    await cancelRoot(statePath);
+    assert.equal((await first.terminateAbruptly()).signal, "SIGKILL");
+    killProcess(firstStage.pid);
+
+    const second = await startConductor(environment("instance-2"), podium);
+    try {
+      await waitForTree(statePath, (tree) => {
+        const records = tree.comments.map((comment) => comment.body);
+        return tree.issues.find(({ issue_id }) => issue_id === "cycle-1")?.status_name === "Canceled"
+          && tree.issues.find(({ issue_id }) => issue_id === "work-1")?.status_name === "Canceled"
+          && tree.issues.find(({ issue_id }) => issue_id === "verify-1")?.status_name === "Canceled"
+          && records.some((body) => body.includes('"kind":"convergence"'));
+      });
+      assert.equal((await second.terminateAbruptly()).signal, "SIGKILL");
+    } finally {
+      await second.terminateAbruptly();
+    }
+  } finally {
+    await first.terminateAbruptly();
+  }
+
+  const invocations = (await readFile(stageMarkerPath, "utf8")).trim().split("\n").filter(Boolean);
+  assert.equal(invocations.length, 1);
+  assert.ok(boundary.mutationKinds.includes("update_workflow_issue"));
+}
+);
+
+async function startConductor(environment, podium) {
+  return startConductorHarness({
+    podium,
+    environment,
+    executable: process.execPath,
+    arguments: ["--import", "tsx", path.resolve("apps/conductor/src/main.ts")],
+    startupTimeoutMs: 5_000,
+    shutdownTimeoutMs: 1_000,
+  });
+}
+
+async function createRepository(repositoryRoot) {
+  await run("git", ["init", "-b", "main", repositoryRoot]);
+  await run("git", ["-C", repositoryRoot, "config", "user.email", "test@example.com"]);
+  await run("git", ["-C", repositoryRoot, "config", "user.name", "Symphony Test"]);
+  await mkdir(path.join(repositoryRoot, "apps", "conductor"), { recursive: true });
+  await writeFile(path.join(repositoryRoot, "apps", "conductor", "README.md"), "recovery\n");
+  await run("git", ["-C", repositoryRoot, "add", "."]);
+  await run("git", ["-C", repositoryRoot, "commit", "-m", "initial"]);
+}
+
+async function writeProfile(dataRoot) {
+  await mkdir(path.join(dataRoot, "performer-profiles"), { recursive: true });
+  await writeFile(path.join(dataRoot, "performer-profiles", "profiles.json"), JSON.stringify({
+    activeProfileId: "profile-1",
+    profiles: [{
+      profileId: "profile-1", displayName: "Serialized fixture", backendKind: "codex", authenticationMethod: "chatgpt",
+      codexTurnSettings: { model: "gpt-5", reasoningEffort: "high", isFastModeEnabled: true },
+      executionPolicy: { sandboxMode: "workspace_write", commandAllowlist: [], commandDenylist: [] },
+      createdAt: "2026-07-22T00:00:00.000Z", updatedAt: "2026-07-22T00:00:00.000Z",
+    }],
+  }, null, 2));
+}
+
+async function writePerformer(root) {
+  const script = path.join(root, "performer-fixture.cjs");
+  const executable = path.join(root, "performer-fixture");
+  await writeFile(script, `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args.includes("--profile-control")) {
+  let data = "";
+  process.stdin.on("data", (chunk) => { data += chunk; });
+  process.stdin.on("end", () => {
+    const request = JSON.parse(data.trim().split("\\n")[0]);
+    process.stdout.write(JSON.stringify({ protocol_version: "1", request_id: request.request_id, profile_id: request.profile_id, kind: "profile_status", readiness: "ready" }) + "\\n");
+  });
+} else {
+  const request = JSON.parse(fs.readFileSync(args[args.indexOf("--request") + 1], "utf8"));
+  const marker = path.join(process.env.CODEX_HOME, "stage-starts.jsonl");
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.appendFileSync(marker, JSON.stringify({ pid: process.pid, stage_execution_id: request.stage_execution.stage_execution_id }) + "\\n");
+  setInterval(() => {}, 1_000);
+}
+`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(executable, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`, { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+  return executable;
+}
+
+async function cancelRoot(statePath) {
+  const tree = JSON.parse(await readFile(statePath, "utf8"));
+  const root = tree.issues.find(({ issue_id }) => issue_id === "root-1");
+  const status = tree.status_catalog.find(({ name }) => name === "Canceled");
+  if (!root || !status) throw new Error("cancel_root_fixture_invalid");
+  Object.assign(root, {
+    status_id: status.status_id,
+    status_name: status.name,
+    status_category: status.category,
+    status_position: status.position,
+    remote_version: "human-cancel-root-version",
+  });
+  await writeFile(statePath, JSON.stringify(tree, null, 2), "utf8");
+}
+
+function serializedCanceledWorkTree(revision) {
+  const statuses = [
+    ["Draft", "backlog"], ["Todo", "unstarted"], ["Planning", "started"], ["Sealed", "started"], ["Executing", "started"], ["Verifying", "started"], ["In Progress", "started"], ["In Review", "started"], ["Needs Approval", "started"], ["Needs Info", "started"], ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"], ["Canceled", "canceled"], ["Failed", "canceled"],
+  ].map(([name, category], position) => ({ status_id: `status-${position}`, name, category, position }));
+  const status = (name) => statuses.find((candidate) => candidate.name === name);
+  const issue = (issue_id, issue_kind, status_name, order, parent_issue_id) => ({
+    issue_id, identifier: issue_id === "root-1" ? "SYM-1" : issue_id, project_id: "project-1",
+    ...(parent_issue_id ? { parent_issue_id } : {}), status_id: status(status_name).status_id, status_name,
+    status_category: status(status_name).category, status_position: status(status_name).position, order,
+    depth: issue_kind === "root" ? 0 : issue_kind === "cycle" ? 1 : 2, title: issue_id, description: issue_id,
+    issue_kind, remote_version: `${issue_id}:version`, updated_at: "2026-07-22T00:00:00.000Z",
+    ...((issue_kind === "cycle" ? { managed_marker: "root-1:cycle:cycle-1" } : issue_kind === "plan" ? { managed_marker: "root-1:plan:bootstrap" } : issue_kind === "work" ? { managed_marker: "root-1:work:cycle-1:one" } : issue_kind === "verify" ? { managed_marker: "root-1:verify:cycle-1" } : {})),
+  });
+  const record = (issue_id, comment_id, value) => ({ comment_id, issue_id, body: `<!-- symphony managed-record\n${JSON.stringify(value)}\n-->`, managed_marker: `root-1:${comment_id}`, remote_version: `${comment_id}:version`, updated_at: "2026-07-22T00:00:00.000Z" });
+  const criterion = { criterion_key: "root", statement: "The Root is delivered.", verification_method: "test" };
+  return {
+    root_issue_id: "root-1", status_catalog: statuses,
+    issues: [issue("root-1", "root", "In Progress", 0), issue("cycle-1", "cycle", "Executing", 1, "root-1"), issue("plan-1", "plan", "Done", 1, "cycle-1"), issue("work-1", "work", "In Progress", 2, "cycle-1"), issue("verify-1", "verify", "Todo", 3, "cycle-1")],
+    comments: [
+      record("root-1", "ownership", { kind: "root_ownership", version: 1, root_issue_id: "root-1", conductor_id: "conductor-1", performer_profile_id: "profile-1", delivery_branch: "symphony/runs/sym-1", owner_generation: "generation-1" }),
+      record("cycle-1", "cycle-marker", { kind: "cycle_marker", version: 1, root_issue_id: "root-1", cycle_key: "cycle-1", trigger: "initial", baseline_revision: revision }),
+      record("plan-1", "plan-marker", { kind: "node_marker", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_key: "plan-1", node_kind: "plan", plan_contract_digest: "digest-1" }),
+      record("plan-1", "plan-contract", { kind: "plan_contract", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", plan_contract_digest: "digest-1", objective_summary: "Recover cancellation.", included_scope: ["apps/conductor"], excluded_scope: ["packages/podium"], acceptance_criteria: [criterion], work_nodes: [{ work_key: "one", title: "Recover Work", description: "Recover the interrupted Work node.", acceptance_criteria: [criterion], dependency_work_keys: [] }], verify_node: { title: "Verify cancellation", acceptance_criteria: [criterion], required_checks: [] } }),
+      record("work-1", "work-marker", { kind: "node_marker", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_key: "one", node_kind: "work", plan_contract_digest: "digest-1" }),
+      record("verify-1", "verify-marker", { kind: "node_marker", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_key: "verify-1", node_kind: "verify", plan_contract_digest: "digest-1" }),
+    ],
+    relations: [{ relation_id: "plan-work", relation_kind: "blocks", source_issue_id: "plan-1", target_issue_id: "work-1" }, { relation_id: "work-verify", relation_kind: "blocks", source_issue_id: "work-1", target_issue_id: "verify-1" }],
+    observed_at: "2026-07-22T00:00:00.000Z",
+  };
+}
+
+async function waitForStage(markerPath) {
+  return waitFor(async () => {
+    try {
+      const lines = (await readFile(markerPath, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      return lines[0];
+    } catch { return undefined; }
+  });
+}
+
+async function waitForTree(statePath, predicate) {
+  await waitFor(async () => {
+    try { return predicate(JSON.parse(await readFile(statePath, "utf8"))); } catch { return false; }
+  });
+}
+
+async function waitFor(read) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("cancel_recovery_observation_timeout");
+}
+
+function killProcess(pid) {
+  try { process.kill(pid, "SIGKILL"); } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}

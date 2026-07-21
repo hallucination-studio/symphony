@@ -78,6 +78,19 @@ export class LinearConductorRuntime {
         }
         const view = await this.gateway.readRootDag(root.issueId);
         const assessment = this.workflow.assess(view);
+        if (view.root.issue.status_name === "Canceled") {
+          const result = await this.dispatcher.dispatch({ root, view });
+          await this.reporter.report({
+            status: result === "needs-attention" ? "blocked" : "ready",
+            rootId: root.issueId,
+            ...(result === "needs-attention"
+              ? { sanitizedReason: "root_cancellation_reconciliation_needs_attention" }
+              : {}),
+          });
+          if (result === "progress") return "progress";
+          needsAttention ||= result === "needs-attention";
+          continue;
+        }
         if (assessment.readiness === "waiting_human") {
           waitingHuman = true;
           continue;

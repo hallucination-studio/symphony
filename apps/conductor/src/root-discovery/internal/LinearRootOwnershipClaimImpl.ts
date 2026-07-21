@@ -22,6 +22,11 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
       return { kind: "foreign_owner" };
     }
 
+    if (root.status_name === "Canceled" && existing) {
+      const workspace = await this.ensureOwnedWorkspace(input, existing);
+      return { kind: "already_owned", ownership: existing, workspace };
+    }
+
     const profile = await this.dependencies.profileFor({
       ...(existing ? { ownedProfileId: existing.performerProfileId } : {}),
     });
@@ -117,6 +122,28 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
       throw new Error("root_ownership_state_read_back_failed");
     }
     return { kind: "claimed", ownership: persisted, workspace };
+  }
+
+  private async ensureOwnedWorkspace(input: { root: DiscoveredRoot }, ownership: RootOwnershipRecord) {
+    const workspace = this.dependencies.workspaceFor(input.root);
+    if (ownership.deliveryBranch !== workspace.branch) {
+      throw new Error("git_workspace_identity_conflict");
+    }
+    const ensured = await this.dependencies.git.ensureWorkspace({
+      rootIssueId: input.root.issueId,
+      rootIdentifier: input.root.identifier,
+      baseBranch: this.dependencies.baseBranch,
+    });
+    if (
+      ensured.rootIssueId !== workspace.rootIssueId ||
+      ensured.branch !== workspace.branch ||
+      ensured.worktreePath !== workspace.worktreePath
+    ) {
+      throw new Error("git_workspace_identity_conflict");
+    }
+    const snapshot = await this.dependencies.git.inspect(ensured);
+    if (snapshot.branch !== workspace.branch) throw new Error("git_workspace_identity_conflict");
+    return ensured;
   }
 }
 

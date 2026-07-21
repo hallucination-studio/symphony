@@ -53,6 +53,18 @@ test("preserves an owned delivered Root in In Review during admission", async ()
   assert.equal(fake.tree.issues[0]?.status_name, "In Review");
 });
 
+test("reuses owned workspace for a canceled Root without requiring Profile readiness", async () => {
+  const fake = new FakeLinear(ownershipRecord(), "Canceled");
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-ignored", ready: false });
+
+  const result = await claim.claim({ root: { ...discoveredRoot(), state: "Canceled" } });
+
+  assert.equal(result.kind, "already_owned");
+  assert.deepEqual(events, ["read", "ensure", "inspect"]);
+  assert.equal(fake.mutations.length, 0);
+});
+
 test("rejects a Root owned by another Conductor before profile or workspace access", async () => {
   const fake = new FakeLinear(ownershipRecord({ conductorId: "conductor-foreign" }));
   const events: string[] = [];
@@ -179,9 +191,11 @@ class FakeLinear {
   onRead?: () => void;
   onMutation?: (command: LinearWorkflowMutationCommand) => void;
 
-  constructor(record?: ReturnType<typeof ownershipRecord>, rootStatus: "Todo" | "In Progress" | "In Review" = record ? "In Progress" : "Todo") {
+  constructor(record?: ReturnType<typeof ownershipRecord>, rootStatus: "Todo" | "In Progress" | "In Review" | "Canceled" = record ? "In Progress" : "Todo") {
     const rootState = rootStatus === "In Review"
       ? { statusId: "status-review", statusName: "In Review", statusCategory: "started" as const, statusPosition: 2 }
+      : rootStatus === "Canceled"
+        ? { statusId: "status-canceled", statusName: "Canceled", statusCategory: "canceled" as const, statusPosition: 3 }
       : record
         ? { statusId: "status-progress", statusName: "In Progress", statusCategory: "started" as const, statusPosition: 1 }
         : { statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted" as const, statusPosition: 0 };
@@ -191,6 +205,7 @@ class FakeLinear {
         { status_id: "status-todo", name: "Todo", category: "unstarted", position: 0 },
         { status_id: "status-progress", name: "In Progress", category: "started", position: 1 },
         { status_id: "status-review", name: "In Review", category: "started", position: 2 },
+        { status_id: "status-canceled", name: "Canceled", category: "canceled", position: 3 },
       ],
       issues: [{
         issue_id: rootId, identifier: "SYM-1", project_id: projectId,

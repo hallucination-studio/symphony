@@ -22,12 +22,16 @@ test("Root discovery returns every owned or delegated current Root without selec
       { ...candidate, issueId: "root-other-project", projectId: "project-2" },
       { ...candidate, issueId: "root-descendant", parentIssueId: "parent-1" },
       { ...candidate, issueId: "root-done", state: "Done" },
+      { ...candidate, issueId: "root-canceled-owned", state: "Canceled", isDelegatedToSymphony: false, managedConductorId: "conductor-1" },
+      { ...candidate, issueId: "root-canceled-foreign", state: "Canceled", managedConductorId: "conductor-2" },
       { ...candidate, issueId: "root-undelegated", isDelegatedToSymphony: false },
       { ...candidate, issueId: "root-owned-elsewhere", managedConductorId: "conductor-2" },
     ],
     conductorId: "conductor-1",
   }), [candidate, {
     ...candidate, issueId: "root-owned", isDelegatedToSymphony: false, managedConductorId: "conductor-1",
+  }, {
+    ...candidate, issueId: "root-canceled-owned", state: "Canceled", isDelegatedToSymphony: false, managedConductorId: "conductor-1",
   }]);
 });
 

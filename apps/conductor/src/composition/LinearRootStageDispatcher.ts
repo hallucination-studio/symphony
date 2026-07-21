@@ -27,10 +27,21 @@ export class LinearRootStageDispatcher implements LinearWorkflowStageDispatcher 
   constructor(private readonly dependencies: LinearRootStageDispatcherDependencies) {}
 
   async dispatch(input: { root: DiscoveredRoot; view: RootDagView }) {
+    const workspace = this.dependencies.workspaceFor(input.root);
+    if (input.view.root.issue.status_name === "Canceled") {
+      try {
+        const result = await this.dependencies.execution.reconcileCanceledRoot({
+          rootIssueId: input.root.issueId,
+          projectId: input.root.projectId,
+          workspace,
+        });
+        return result.kind === "blocked" ? "needs-attention" as const : "progress" as const;
+      } catch {
+        return "needs-attention" as const;
+      }
+    }
     const profile = await this.dependencies.profileFor(input.view);
     if (!profile) return "needs-attention" as const;
-
-    const workspace = this.dependencies.workspaceFor(input.root);
     const cycle = activeCycle(input.view);
     const stage = cycle && ["Sealed", "Executing"].includes(cycle.issue.status_name)
       ? "work"
