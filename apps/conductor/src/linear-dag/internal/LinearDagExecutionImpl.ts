@@ -38,6 +38,7 @@ import type {
   StageUsage,
   VerifyResultRecord,
   WorkCompletionRecord,
+  HumanActionRecord,
 } from "../../root-workflow/api/ManagedRecords.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import { acceptVerifyFindings, openFindingSummaries } from "../../root-workflow/internal/FindingPolicy.js";
@@ -130,6 +131,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         if (next.step === "work_committed") commitRevision = (await this.dependencies.git.inspect(input.workspace)).head;
         continue;
       }
+      if (next.kind === "waiting_human") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, workIssueId: next.workIssueId, actionId: next.actionId };
       if (next.kind === "blocked") throw new Error(next.reason);
       return next;
     }
@@ -172,7 +174,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     const convergence = await this.enforceConvergence(input, tree, view);
     if (convergence.kind !== "allow") return convergence;
-    if (root.status_name !== "In Progress") return workBlocked("work_root_not_runnable");
+    if (root.status_name !== "In Progress" && !(stageResult !== undefined && resultKind(stageResult) === "suspended")) return workBlocked("work_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
     if (!cycleView || !["Sealed", "Executing"].includes(cycleView.issue.status_name)) return workBlocked("work_cycle_not_ready");
     const plan = cycleView.nodes.find((node) => node.issue.issue_kind === "plan");
@@ -216,6 +218,37 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, workIssueId: selected.issue.issue_id, workKey: nodeMarker.nodeKey, commitRevision: completion.commitRevision };
       }
       return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, workIssueId: selected.issue.issue_id, workKey: nodeMarker.nodeKey, commitRevision: completion.commitRevision };
+    }
+
+    const suspended = stageResult !== undefined && resultKind(stageResult) === "suspended"
+      ? validateSuspendedResult(stageResult, latestExecution, "work")
+      : undefined;
+    if (suspended) {
+      if (!latestExecution) return workBlocked("work_execution_missing");
+      if (!latestTerminal) {
+        await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromSuspension(latestExecution, suspended));
+        return { kind: "mutation_applied", step: "work_stage_terminal" };
+      }
+      if (latestTerminal.stageExecutionId !== latestExecution.stageExecutionId || latestTerminal.outcome !== "suspended") return workBlocked("work_suspension_terminal_conflict");
+      const actionId = `${input.rootIssueId}:human:${latestExecution.stageExecutionId}`;
+      const existingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === actionId);
+      const action: HumanActionRecord = {
+        kind: "human_action", version: 1, actionId, rootIssueId: input.rootIssueId, cycleIssueId: cycleView.issue.issue_id, nodeIssueId: selected.issue.issue_id,
+        requestKind: suspended.requestKind, questionOrProposal: suspended.questionOrProposal, reason: suspended.reason, impact: suspended.impact,
+        contextDigest: latestExecution.contextDigest, expectedRootRemoteVersion: existingAction?.expectedRootRemoteVersion ?? root.remote_version,
+      };
+      if (!existingAction) {
+        await this.appendRecord(input, tree, root, actionId, actionId, action);
+        return { kind: "mutation_applied", step: "work_human_action_created" };
+      }
+      if (serializeManagedRecord(existingAction) !== serializeManagedRecord(action)) return workBlocked("work_human_action_conflict");
+      const waitingStatus = suspended.requestKind === "needs_info" ? "Needs Info" : "Needs Approval";
+      if (root.status_name === "In Progress") {
+        await this.updateStatus(input, tree, root, statusByName(tree, waitingStatus), `work_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}`);
+        return { kind: "mutation_applied", step: `work_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}` };
+      }
+      if (root.status_name === waitingStatus) return { kind: "waiting_human", step: "work_suspension", cycleIssueId: cycleView.issue.issue_id, workIssueId: selected.issue.issue_id, actionId };
+      return workBlocked("work_human_state_invalid");
     }
 
     if (stageResult === undefined) {
@@ -783,6 +816,46 @@ function resultExecutionId(value: JsonValue): string {
   return value.stage_execution_id;
 }
 
+function resultKind(value: JsonValue): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const outcome = value.outcome;
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome) || typeof outcome.kind !== "string") return undefined;
+  return outcome.kind;
+}
+
+interface ValidatedSuspension {
+  completedAt: string;
+  usage: StageUsage;
+  requestKind: "needs_info" | "needs_approval";
+  questionOrProposal: string;
+  reason: string;
+  impact: string;
+}
+
+function validateSuspendedResult(value: JsonValue, execution: StageExecutionRecord | undefined, stage: "plan" | "work" | "verify"): ValidatedSuspension {
+  if (!execution) throw new Error(`${stage}_execution_missing`);
+  let result: JsonValue;
+  try { result = decodeConductorPerformerStageResult(value) as JsonValue; } catch { throw new Error(`${stage}_result_invalid`); }
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error(`${stage}_result_invalid`);
+  if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== stage
+    || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId
+    || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error(`${stage}_result_correlation_invalid`);
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "suspended") throw new Error(`${stage}_result_not_suspended`);
+  const outcome = result.outcome as Record<string, JsonValue>;
+  if (!["needs_info", "needs_approval"].includes(outcome.request_kind as string)
+    || typeof outcome.question_or_proposal !== "string" || typeof outcome.reason !== "string" || typeof outcome.impact !== "string") throw new Error(`${stage}_suspension_shape_invalid`);
+  return {
+    completedAt: typeof result.completed_at === "string" ? result.completed_at : "",
+    usage: stageUsage(result.usage), requestKind: outcome.request_kind as "needs_info" | "needs_approval",
+    questionOrProposal: outcome.question_or_proposal, reason: outcome.reason, impact: outcome.impact,
+  };
+}
+
+function stageUsage(value: JsonValue | undefined): StageUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+  return { inputTokens: numberValue(value.input_tokens), cachedInputTokens: numberValue(value.cached_input_tokens), outputTokens: numberValue(value.output_tokens), reasoningOutputTokens: numberValue(value.reasoning_output_tokens), totalTokens: numberValue(value.total_tokens) };
+}
+
 function rootTerminalResultReason(status: string, stageResult: JsonValue | undefined): string | undefined {
   if (stageResult === undefined || (status !== "Done" && status !== "Canceled")) return undefined;
   return "root_terminal_result_rejected";
@@ -1026,6 +1099,14 @@ function stageTerminal(execution: StageExecutionRecord, result: { completedAt: s
     kind: "stage_terminal", version: 1, stageExecutionId: execution.stageExecutionId, rootIssueId: execution.rootIssueId,
     cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
     outcome: "completed", completedAt: result.completedAt, summary: result.summary ?? "Plan Contract produced.", usage: result.usage,
+  };
+}
+
+function stageTerminalFromSuspension(execution: StageExecutionRecord, result: ValidatedSuspension): StageTerminalRecord {
+  return {
+    kind: "stage_terminal", version: 1, stageExecutionId: execution.stageExecutionId, rootIssueId: execution.rootIssueId,
+    cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
+    outcome: "suspended", completedAt: result.completedAt, summary: result.questionOrProposal, usage: result.usage,
   };
 }
 

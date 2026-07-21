@@ -9,7 +9,7 @@ import type {
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { PerformerStageClientInterface } from "../../performer-stage-client/api/PerformerStageClientInterface.js";
-import { serializeManagedRecord } from "../../root-workflow/api/index.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import type { PlanContract } from "../../root-workflow/api/ManagedRecords.js";
 import type { WorkStageInput } from "../api/LinearDagExecutionInterface.js";
 import { LinearDagExecutionImpl } from "../internal/LinearDagExecutionImpl.js";
@@ -185,6 +185,34 @@ for (const rootStatus of ["Done", "Canceled"] as const) {
   });
 }
 
+test("persists one suspended Work action and releases the Stage", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const executionRecord = parseExecution(gateway);
+  const result = suspendedWorkResult(executionRecord);
+
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_stage_terminal" });
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_human_action_created" });
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), { kind: "mutation_applied", step: "work_root_needs_info" });
+  assert.deepEqual(await execution.reconcileWork(workInput(), result), {
+    kind: "waiting_human",
+    step: "work_suspension",
+    cycleIssueId: cycleIssueId,
+    workIssueId: readyWorkIssueId,
+    actionId: "root-1:human:work-execution-1",
+  });
+  assert.equal(gateway.tree.comments.filter((comment) => comment.body.includes('"kind":"human_action"')).length, 1);
+  assert.equal(gateway.tree.comments.filter((comment) => comment.body.includes('"kind":"stage_terminal"')).length, 1);
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === rootIssueId)?.status_name, "Needs Info");
+});
+
 function workInput(): WorkStageInput {
   return {
     rootIssueId,
@@ -203,6 +231,35 @@ function workInput(): WorkStageInput {
       stageId: (_root, _cycle, attempt) => `work-execution-${attempt}`,
     },
   };
+}
+
+function parseExecution(gateway: WorkGateway) {
+  const comment = gateway.tree.comments.find((candidate) => candidate.body.includes('"kind":"stage_execution"'))!;
+  const record = parseManagedRecord(comment.body);
+  assert.equal(record.ok, true);
+  if (!record.ok || record.value.kind !== "stage_execution") throw new Error("stage_execution_fixture_invalid");
+  return record.value;
+}
+
+function suspendedWorkResult(execution: ReturnType<typeof parseExecution>): JsonValue {
+  return {
+    protocol_version: "1",
+    stage_execution_id: execution.stageExecutionId,
+    stage: "work",
+    root_issue_id: execution.rootIssueId,
+    cycle_issue_id: execution.cycleIssueId,
+    node_issue_id: execution.nodeIssueId,
+    context_digest: execution.contextDigest,
+    completed_at: "2026-07-21T09:02:00Z",
+    usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+    outcome: {
+      kind: "suspended",
+      request_kind: "needs_info",
+      question_or_proposal: "Which API behavior should the Work node preserve?",
+      reason: "The requirement is ambiguous.",
+      impact: "Work cannot continue without a clarified requirement.",
+    },
+  } as unknown as JsonValue;
 }
 
 function workTree(): LinearWorkflowTreeSnapshot {

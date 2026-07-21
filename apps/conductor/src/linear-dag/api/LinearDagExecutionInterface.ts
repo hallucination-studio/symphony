@@ -60,6 +60,7 @@ export type BootstrapPlanReconciliation =
 export type WorkStageReconciliation =
   | { kind: "mutation_applied"; step: string }
   | { kind: "stage_ready"; step: "work"; envelope: JsonValue }
+  | { kind: "waiting_human"; step: "work_suspension"; cycleIssueId: string; workIssueId: string; actionId: string }
   | { kind: "completed"; cycleIssueId: string; workIssueId: string; workKey: string; commitRevision: string }
   | { kind: "blocked"; reason: string };
 
@@ -76,13 +77,9 @@ export interface BootstrapPlanExecutionResult {
   planContractDigest: string;
 }
 
-export interface WorkStageExecutionResult {
-  kind: "completed";
-  cycleIssueId: string;
-  workIssueId: string;
-  workKey: string;
-  commitRevision: string;
-}
+export type WorkStageExecutionResult =
+  | { kind: "completed"; cycleIssueId: string; workIssueId: string; workKey: string; commitRevision: string }
+  | { kind: "awaiting_human"; cycleIssueId: string; workIssueId: string; actionId: string };
 
 export interface VerifyStageExecutionResult {
   kind: "completed";
