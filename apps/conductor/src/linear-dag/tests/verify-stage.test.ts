@@ -7,6 +7,7 @@ import type { LinearGatewayInterface, LinearWorkflowMutationCommand, LinearWorkf
 import type { PerformerStageClientInterface } from "../../performer-stage-client/api/PerformerStageClientInterface.js";
 import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
 import type { PlanContract } from "../../root-workflow/api/ManagedRecords.js";
+import { DEFAULT_ROOT_CONVERGENCE_POLICY } from "../../root-workflow/internal/RootConvergencePolicy.js";
 import type { VerifyStageInput } from "../api/LinearDagExecutionInterface.js";
 import { LinearDagExecutionImpl } from "../internal/LinearDagExecutionImpl.js";
 
@@ -97,6 +98,33 @@ test("rejects a durable Verify result that targets a different node during recon
   resultComment.body = serializeManagedRecord(parsed.value);
 
   assert.deepEqual(await execution.reconcileVerify(verifyInput()), { kind: "blocked", reason: "verify_tree_invalid:verify_result_target_invalid" });
+});
+
+test("escalates a triggered convergence breaker in durable order", async () => {
+  const gateway = new VerifyGateway();
+  const execution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer: {
+    async runStage() { throw new Error("must_not_run"); },
+    async cancelAndReap() {},
+  } }, undefined, undefined, { ...DEFAULT_ROOT_CONVERGENCE_POLICY, deadlineAt: "2026-07-21T08:59:59Z" });
+  const input = verifyInput();
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "convergence_decision_persisted" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "cycle-1")?.status_name, "Executing");
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "root-1")?.status_name, "In Progress");
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "convergence_cycle_escalated" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "cycle-1")?.status_name, "Escalated");
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "convergence_human_action_created" });
+  assert.equal(gateway.tree.comments.filter((comment) => comment.body.includes('"kind":"human_action"')).length, 1);
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "root-1")?.status_name, "In Progress");
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "convergence_root_needs_approval" });
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "root-1")?.status_name, "Needs Approval");
+
+  const writesBeforeRetry = gateway.tree.comments.length;
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "blocked", reason: "convergence_deadline_exceeded" });
+  assert.equal(gateway.tree.comments.length, writesBeforeRetry);
 });
 
 function verifyInput(): VerifyStageInput {

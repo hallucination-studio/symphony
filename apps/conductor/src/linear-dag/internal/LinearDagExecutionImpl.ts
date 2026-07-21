@@ -526,7 +526,43 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       await this.appendRecord(input, tree, view.root.issue, writeId, writeId, record);
       return { kind: "mutation_applied", step: "convergence_decision_persisted" };
     }
-    return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
+    if (assessment.decision !== "escalate") return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
+
+    const cycle = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
+    if (!cycle) return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
+    const statuses = new Map(tree.status_catalog.map((status) => [status.name, status]));
+    if (cycle.issue.status_name !== "Escalated") {
+      await this.updateStatus(input, tree, cycle.issue, statuses.get("Escalated"), "convergence_cycle_escalated");
+      return { kind: "mutation_applied", step: "convergence_cycle_escalated" };
+    }
+
+    const node = cycle.nodes.find(({ issue }) => issue.issue_kind === "verify") ?? cycle.nodes.find(({ issue }) => issue.issue_kind === "plan");
+    if (!node) return { kind: "blocked", reason: "convergence_human_action_target_missing" };
+    const actionId = `${convergenceWriteId(input.rootIssueId, record)}:approval`;
+    const existingAction = view.root.records.find((candidate): candidate is Extract<ManagedRecord, { kind: "human_action" }> => candidate.kind === "human_action" && candidate.actionId === actionId);
+    const action: Extract<ManagedRecord, { kind: "human_action" }> = {
+      kind: "human_action",
+      version: 1,
+      actionId,
+      rootIssueId: input.rootIssueId,
+      cycleIssueId: cycle.issue.issue_id,
+      nodeIssueId: node.issue.issue_id,
+      requestKind: "needs_approval",
+      questionOrProposal: `Approve the Root convergence override for ${assessment.trigger}.`,
+      reason: `The Root convergence breaker ${assessment.trigger} has been reached.`,
+      impact: "No further Stage or successor Cycle dispatch is permitted until a Human decision is recorded.",
+      contextDigest: digest({ convergence: serialized, cycleIssueId: cycle.issue.issue_id, nodeIssueId: node.issue.issue_id }),
+      expectedRootRemoteVersion: existingAction?.expectedRootRemoteVersion ?? view.root.issue.remote_version,
+    };
+    if (!existingAction) {
+      await this.appendRecord(input, tree, view.root.issue, actionId, actionId, action);
+      return { kind: "mutation_applied", step: "convergence_human_action_created" };
+    }
+    if (serializeManagedRecord(existingAction) !== serializeManagedRecord(action)) return { kind: "blocked", reason: "convergence_human_action_conflict" };
+    if (view.root.issue.status_name === "Needs Approval") return { kind: "blocked", reason: `convergence_${assessment.trigger}` };
+    if (view.root.issue.status_name !== "In Progress") return { kind: "blocked", reason: "convergence_root_state_invalid" };
+    await this.updateStatus(input, tree, view.root.issue, statuses.get("Needs Approval"), "convergence_root_needs_approval");
+    return { kind: "mutation_applied", step: "convergence_root_needs_approval" };
   }
 
   private async updateStatus(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, issue: Issue, status: Status | undefined, step: string): Promise<void> {
