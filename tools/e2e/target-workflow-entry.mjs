@@ -2,9 +2,16 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 import { isMissingInputConfiguration, loadE2EConfig } from "./config.mjs";
+import { evaluateTargetWorkflowResults } from "./target-workflow-evidence.mjs";
 import { TARGET_WORKFLOW_SCENARIOS } from "./target-workflow-verdict.mjs";
 import { auditTargetWorkflowSources } from "./target-workflow-static-audit.mjs";
-import { runTargetDeliveryLive, runTargetRepairLive, runTargetSuccessLive } from "./target-workflow-live.mjs";
+import {
+  runTargetDeliveryLive,
+  runTargetRepairLive,
+  runTargetRestartLive,
+  runTargetSchedulingLive,
+  runTargetSuccessLive,
+} from "./target-workflow-live.mjs";
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
@@ -66,6 +73,17 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
           })}\n`);
           process.exitCode = 2;
         });
+    } else if (arguments_.length === 1 && arguments_[0] === "--live-all") {
+      runTargetWorkflowLive("all")
+        .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+        .catch((error) => {
+          process.stderr.write(`${JSON.stringify({
+            status: isMissingInputConfiguration(error) ? "unverified" : "failed",
+            reason: stableReason(error),
+            ...(Array.isArray(error?.issues) ? { issues: error.issues } : {}),
+          })}\n`);
+          process.exitCode = 2;
+        });
     } else {
       process.stderr.write('{"status":"failed","reason":"target_entry_argument_invalid"}\n');
       process.exitCode = 2;
@@ -93,7 +111,54 @@ async function runTargetWorkflowLive(scenario = "success") {
   }
   if (scenario === "repair") return runTargetRepairLive({ config });
   if (scenario === "delivery") return runTargetDeliveryLive({ config });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ config });
+  if (scenario === "scheduling") return runTargetSchedulingLive({ config });
+  if (scenario === "all") return runTargetWorkflowAllLive({ config });
   return runTargetSuccessLive({ config });
+}
+
+export async function runTargetWorkflowAllLive({
+  config,
+  environment = process.env,
+  runScenario = defaultRunScenario,
+} = {}) {
+  if (!config?.linear?.projectSlugId) throw stableError("target_all_configuration_invalid");
+  if (!environment || typeof environment !== "object" || typeof runScenario !== "function") {
+    throw stableError("target_all_input_invalid");
+  }
+  const results = [];
+  for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
+    try {
+      const result = await runScenario(scenario, { config, environment });
+      if (!result || typeof result !== "object" || result.scenario !== scenario) {
+        throw stableError("target_all_scenario_result_invalid");
+      }
+      results.push(result);
+    } catch (error) {
+      results.push(Object.freeze({
+        scenario,
+        status: "failed",
+        reason: stableReason(error),
+      }));
+    }
+  }
+  const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true }, {
+    secrets: [config.secrets?.linearDevToken, config.secrets?.codexApiKey],
+  });
+  return Object.freeze({
+    status: evaluated.verdict.verdict,
+    runId: environment.SYMPHONY_E2E_RUN_ID,
+    evidence: evaluated.evidence,
+    verdict: evaluated.verdict,
+  });
+}
+
+async function defaultRunScenario(scenario, input) {
+  if (scenario === "success") return runTargetSuccessLive(input);
+  if (scenario === "repair_escalation") return runTargetRepairLive(input);
+  if (scenario === "restart_recovery") return runTargetRestartLive(input);
+  if (scenario === "delivery") return runTargetDeliveryLive(input);
+  return runTargetSchedulingLive(input);
 }
 
 function stableReason(error) {

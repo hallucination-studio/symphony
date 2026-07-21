@@ -10,7 +10,9 @@ import {
 } from "./target-workflow-fixtures.mjs";
 import { runTargetRepairBoundary } from "./target-workflow-repair-boundary.mjs";
 import { runTargetDeliveryBoundary } from "./target-workflow-delivery-boundary.mjs";
+import { runTargetRestartBoundary } from "./target-workflow-restart-boundary.mjs";
 import { runTargetSuccessBoundary } from "./target-workflow-success-boundary.mjs";
+import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-live.mjs";
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -532,6 +534,143 @@ export async function runTargetRepairLive({
   }
   if (failure) throw stableError(stableReason(failure));
   return result;
+}
+
+export async function runTargetRestartLive({
+  config,
+  environment = process.env,
+  fetch = globalThis.fetch,
+  log = () => {},
+  dependencies = {},
+} = {}) {
+  const runId = environment?.SYMPHONY_E2E_RUN_ID;
+  validateLiveInput({ config, environment, runId, fetch, log });
+  const services = {
+    createScope: dependencies.createScope ?? createTargetRunScope,
+    createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
+    readProjectConfiguration: dependencies.readProjectConfiguration ?? readTargetProjectConfiguration,
+    ensureConductorLabel: dependencies.ensureConductorLabel ?? ensureTargetConductorProjectLabel,
+    runRestartBoundary: dependencies.runRestartBoundary ?? runTargetRestartBoundary,
+    cleanupScope: dependencies.cleanupScope ?? cleanupTargetRunScope,
+    readGitObservation: dependencies.readGitObservation ?? readTargetGitObservation,
+  };
+  let scope;
+  let failure;
+  let result;
+  try {
+    scope = await services.createScope({ runId });
+    const fixture = await services.createGitFixture({ scope });
+    const setup = await services.readProjectConfiguration({
+      developmentToken: config.secrets.linearDevToken,
+      clientId: config.linear.clientId,
+      projectSlugId: config.linear.projectSlugId,
+      fetch,
+      log,
+    });
+    const ids = runIdentifiers(runId);
+    await services.ensureConductorLabel({
+      developmentToken: config.secrets.linearDevToken,
+      projectId: setup.project.projectId,
+      labelName: `symphony:conductor/${ids.conductorShortHash}`,
+      fetch,
+      log,
+    });
+    const binding = {
+      bindingId: ids.bindingId,
+      conductorId: ids.conductorId,
+      conductorShortHash: ids.conductorShortHash,
+      repositoryHandle: ids.repositoryHandle,
+      repositoryRoot: fixture.repositoryRoot,
+      baseBranch: fixture.baseBranch,
+    };
+    const childEnvironment = createChildEnvironment({ environment, additions: {
+      SYMPHONY_PRIVATE_IPC_FD: "3",
+      SYMPHONY_INSTANCE_ID: ids.instanceId,
+      SYMPHONY_BINDING_ID: binding.bindingId,
+      SYMPHONY_CONDUCTOR_ID: binding.conductorId,
+      SYMPHONY_CONDUCTOR_SHORT_HASH: binding.conductorShortHash,
+      SYMPHONY_LINEAR_INSTALLATION_ID: `development-token:${setup.organizationId}`,
+      SYMPHONY_ORGANIZATION_ID: setup.organizationId,
+      SYMPHONY_REPOSITORY_HANDLE: binding.repositoryHandle,
+      SYMPHONY_REPOSITORY_ROOT: fixture.repositoryRoot,
+      SYMPHONY_BASE_BRANCH: fixture.baseBranch,
+      SYMPHONY_CONDUCTOR_DATA_ROOT: scope.conductorDataRoot,
+      SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
+      SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
+      SYMPHONY_CYCLE_DELAY_MS: "250",
+    } });
+    const observed = await services.runRestartBoundary({
+      boundaryInput: {
+        developmentToken: config.secrets.linearDevToken,
+        codexApiKey: config.secrets.codexApiKey,
+        databasePath: path.join(scope.appDataRoot, "podium.db"),
+        project: setup.project,
+        binding,
+        delegateActorId: setup.delegateActorId,
+        environment: childEnvironment,
+        model: config.codex.model,
+        fetch,
+        log,
+      },
+      restartInput: {
+        rootInput: { ...setup.rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
+        observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
+        humanResponseBody: "Approved after restart recovery.",
+        readObservationInput: async ({ rootIssueId, phase }) => readLiveGitObservation({
+          services, fixture, scope, rootIssueId, phase,
+        }),
+      },
+    });
+    if (!observed?.facts?.root || observed.facts.root.projectId !== setup.project.projectId || !observed.recovery) {
+      throw stableError("target_live_restart_result_invalid");
+    }
+    result = Object.freeze({
+      status: "passed",
+      scenario: "restart_recovery",
+      runId,
+      rootIssueId: observed.facts.root.rootIssueId,
+      projectId: setup.project.projectId,
+      facts: observed.facts,
+      recovery: observed.recovery,
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (scope) {
+      try {
+        await services.cleanupScope(scope);
+      } catch (error) {
+        if (!failure) failure = stableError("target_live_cleanup_failed");
+        log({ event: "target_live_cleanup_failed", reason: stableReason(error) });
+      }
+    }
+  }
+  if (failure) throw stableError(stableReason(failure));
+  return result;
+}
+
+export async function runTargetSchedulingLive({
+  config,
+  environment = process.env,
+  fetch = globalThis.fetch,
+  log = () => {},
+} = {}) {
+  const setup = await readTargetProjectConfiguration({
+    developmentToken: config?.secrets?.linearDevToken,
+    clientId: config?.linear?.clientId,
+    projectSlugId: config?.linear?.projectSlugId,
+    fetch,
+    log,
+  });
+  return runTargetSchedulingScenarioLive({
+    config: {
+      ...config,
+      linear: { ...config.linear, delegateActorId: setup.delegateActorId },
+    },
+    environment,
+    fetch,
+    log,
+  });
 }
 
 async function readLiveGitObservation({ services, fixture, scope, rootIssueId, phase }) {
