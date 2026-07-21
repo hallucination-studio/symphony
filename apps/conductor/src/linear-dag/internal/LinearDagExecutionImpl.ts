@@ -89,6 +89,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         continue;
       }
       if (next.kind === "waiting_human") {
+        if (next.step === "plan_suspension") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, planIssueId: next.planIssueId, actionId: next.actionId };
         const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
         const cycle = activeCycle(tree, input.rootIssueId);
         const plan = cycle && child(tree, cycle.issue_id, "plan");
@@ -153,6 +154,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       }
       if (next.kind === "mutation_applied") continue;
       if (next.kind === "blocked") throw new Error(next.reason);
+      if (next.kind === "waiting_human" && next.step === "verify_suspension") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, verifyIssueId: next.verifyIssueId, actionId: next.actionId };
       return next;
     }
     throw new Error("verify_stage_reconciliation_limit_exceeded");
@@ -318,7 +320,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (cancellation.kind !== "allow") return cancellation;
     const convergence = await this.enforceConvergence(input, tree, view);
     if (convergence.kind !== "allow") return convergence;
-    if (root.status_name !== "In Progress") return verifyBlocked("verify_root_not_runnable");
+    if (root.status_name !== "In Progress" && !(stageResult !== undefined && resultKind(stageResult) === "suspended")) return verifyBlocked("verify_root_not_runnable");
     const cycleView = view.cycles.find(({ issue }) => !terminalCycleStates.has(issue.status_name));
     if (!cycleView) {
       const terminalCycle = view.cycles.find(({ issue }) => ["Succeeded", "Changes Required", "Inconclusive", "Escalated"].includes(issue.status_name));
@@ -346,18 +348,57 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const records = recordsByIssue(tree.comments);
     const latestExecution = latestExecutionRecord(records.get(verify.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(verify.issue.issue_id) ?? []);
+    const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
     const latestResult = latestVerifyResult(records);
     const currentResult = latestExecution && (records.get(verify.issue.issue_id) ?? []).find((record): record is VerifyResultRecord => record.kind === "verify_result" && record.stageExecutionId === latestExecution.stageExecutionId);
+
+    const suspended = stageResult !== undefined && resultKind(stageResult) === "suspended"
+      ? validateSuspendedResult(stageResult, latestExecution, "verify")
+      : undefined;
+    if (suspended) {
+      if (!latestExecution) return verifyBlocked("verify_execution_missing");
+      if (!currentTerminal) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromSuspension(latestExecution, suspended));
+        return { kind: "mutation_applied", step: "verify_stage_terminal" };
+      }
+      if (currentTerminal.outcome !== "suspended") return verifyBlocked("verify_suspension_terminal_conflict");
+      const actionId = `${input.rootIssueId}:human:${latestExecution.stageExecutionId}`;
+      const existingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === actionId);
+      const action: HumanActionRecord = {
+        kind: "human_action", version: 1, actionId, rootIssueId: input.rootIssueId, cycleIssueId: cycleView.issue.issue_id, nodeIssueId: verify.issue.issue_id,
+        requestKind: suspended.requestKind, questionOrProposal: suspended.questionOrProposal, reason: suspended.reason, impact: suspended.impact,
+        contextDigest: latestExecution.contextDigest, expectedRootRemoteVersion: existingAction?.expectedRootRemoteVersion ?? root.remote_version,
+      };
+      if (!existingAction) {
+        await this.appendRecord(input, tree, root, actionId, actionId, action);
+        return { kind: "mutation_applied", step: "verify_human_action_created" };
+      }
+      if (serializeManagedRecord(existingAction) !== serializeManagedRecord(action)) return verifyBlocked("verify_human_action_conflict");
+      const waitingStatus = suspended.requestKind === "needs_info" ? "Needs Info" : "Needs Approval";
+      if (root.status_name === "In Progress") {
+        await this.updateStatus(input, tree, root, statuses.get(waitingStatus), `verify_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}`);
+        return { kind: "mutation_applied", step: `verify_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}` };
+      }
+      if (root.status_name === waitingStatus) return { kind: "waiting_human", step: "verify_suspension", cycleIssueId: cycleView.issue.issue_id, verifyIssueId: verify.issue.issue_id, actionId };
+      return verifyBlocked("verify_human_state_invalid");
+    }
+
+    if (stageResult === undefined && currentTerminal?.outcome === "suspended") {
+      const pendingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === `${input.rootIssueId}:human:${currentTerminal.stageExecutionId}`);
+      if (!pendingAction) return verifyBlocked("verify_human_action_missing");
+      if (!resolvedHumanInputForAction(tree.comments, pendingAction, currentTerminal)) return verifyBlocked("verify_human_resolution_missing");
+    }
+
     if (currentResult && stageResult === undefined && verify.issue.status_name !== "Done") return verifyBlocked("verify_result_records_incomplete");
     if (!currentResult || (stageResult !== undefined && verify.issue.status_name !== "Done")) {
       if (stageResult === undefined) {
-        if (latestTerminal?.outcome === "completed" && !currentResult) return verifyBlocked("verify_result_missing");
+        if (currentTerminal?.outcome === "completed" && !currentResult) return verifyBlocked("verify_result_missing");
         if (currentResult) return verifyBlocked("verify_result_records_incomplete");
         const stageAttempt = (records.get(verify.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1;
         const startedAt = input.options.now?.() ?? new Date().toISOString();
-        const stageExecutionId = latestExecution && !latestTerminal ? latestExecution.stageExecutionId : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, stageAttempt) ?? `${input.rootIssueId}:verify:${cycleView.issue.issue_id}:${stageAttempt}`;
+        const stageExecutionId = latestExecution && !currentTerminal ? latestExecution.stageExecutionId : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, stageAttempt) ?? `${input.rootIssueId}:verify:${cycleView.issue.issue_id}:${stageAttempt}`;
         const built = await this.contextBuilder.buildVerify({ tree, cycle: cycleView.issue, plan: plan.issue, verify: verify.issue, contract, workspace: input.workspace, git: this.dependencies.git, stageExecutionId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString(), options: input.options });
-        if (latestExecution && !latestTerminal) {
+        if (latestExecution && !currentTerminal) {
           if (latestExecution.contextDigest !== built.executionRecord.contextDigest) return verifyBlocked("verify_execution_context_changed");
           return { kind: "stage_ready", step: "verify", envelope: built.envelope };
         }
@@ -366,11 +407,11 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       }
       if (!latestExecution) return verifyBlocked("verify_execution_missing");
       const validated = validateVerifyResult(stageResult, latestExecution, contract, gitSnapshot.head);
-      if (!latestTerminal) {
+      if (!currentTerminal) {
         await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromVerify(latestExecution, validated));
         return { kind: "mutation_applied", step: "verify_stage_terminal" };
       }
-      if (latestTerminal.outcome !== "completed") return verifyBlocked("verify_stage_not_completed");
+      if (currentTerminal.outcome !== "completed") return verifyBlocked("verify_stage_not_completed");
       const findingRecords = allFindingRecords(records);
       const dispositionRecords = allDispositionRecords(records);
       const accepted = acceptVerifyFindings({ sourceVerifyId: latestExecution.stageExecutionId, artifactRevision: validated.verifiedRevision, priorOpenFindings: openFindingSummaries(findingRecords, dispositionRecords), newFindings: validated.newFindings, dispositions: validated.dispositions });
@@ -534,13 +575,52 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (root.status_name === "Needs Approval" && plan.status_name === "In Review") {
       return { kind: "waiting_human", step: "plan_approval" };
     }
+    if (plan.status_name === "In Progress" && root.status_name !== "In Progress" && stageResult === undefined) return blocked("plan_root_not_runnable");
     if (!["In Progress", "In Review", "Done"].includes(plan.status_name)) return blocked("bootstrap_plan_state_invalid");
 
     const contract = recordFrom(records, plan.issue_id, "plan_contract") as PlanContract | undefined;
     const latestExecution = latestExecutionRecord(records.get(plan.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(plan.issue_id) ?? []);
+    const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
+
+    const suspended = stageResult !== undefined && resultKind(stageResult) === "suspended"
+      ? validateSuspendedResult(stageResult, latestExecution, "plan")
+      : undefined;
+    if (suspended) {
+      if (!latestExecution) return blocked("plan_execution_missing");
+      if (!currentTerminal) {
+        await this.appendRecord(input, tree, plan, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromSuspension(latestExecution, suspended));
+        return { kind: "mutation_applied", step: "plan_stage_terminal" };
+      }
+      if (currentTerminal.outcome !== "suspended") return blocked("plan_suspension_terminal_conflict");
+      const actionId = `${input.rootIssueId}:human:${latestExecution.stageExecutionId}`;
+      const existingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === actionId);
+      const action: HumanActionRecord = {
+        kind: "human_action", version: 1, actionId, rootIssueId: input.rootIssueId, cycleIssueId: cycle.issue_id, nodeIssueId: plan.issue_id,
+        requestKind: suspended.requestKind, questionOrProposal: suspended.questionOrProposal, reason: suspended.reason, impact: suspended.impact,
+        contextDigest: latestExecution.contextDigest, expectedRootRemoteVersion: existingAction?.expectedRootRemoteVersion ?? root.remote_version,
+      };
+      if (!existingAction) {
+        await this.appendRecord(input, tree, root, actionId, actionId, action);
+        return { kind: "mutation_applied", step: "plan_human_action_created" };
+      }
+      if (serializeManagedRecord(existingAction) !== serializeManagedRecord(action)) return blocked("plan_human_action_conflict");
+      const waitingStatus = suspended.requestKind === "needs_info" ? "Needs Info" : "Needs Approval";
+      if (root.status_name === "In Progress") {
+        await this.updateStatus(input, tree, root, statuses.get(waitingStatus), `plan_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}`);
+        return { kind: "mutation_applied", step: `plan_root_${waitingStatus === "Needs Info" ? "needs_info" : "needs_approval"}` };
+      }
+      if (root.status_name === waitingStatus) return { kind: "waiting_human", step: "plan_suspension", cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id, actionId };
+      return blocked("plan_human_state_invalid");
+    }
+
+    if (stageResult === undefined && currentTerminal?.outcome === "suspended") {
+      const pendingAction = (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === `${input.rootIssueId}:human:${currentTerminal.stageExecutionId}`);
+      if (!pendingAction) return blocked("plan_human_action_missing");
+      if (!resolvedHumanInputForAction(tree.comments, pendingAction, currentTerminal)) return blocked("plan_human_resolution_missing");
+    }
+
     if (!contract) {
-      const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
       if (stageResult !== undefined && latestExecution && latestExecution.stageExecutionId === resultExecutionId(stageResult)
         && !currentTerminal) {
         const validated = validatePlanResult(stageResult, latestExecution);

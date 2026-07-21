@@ -53,6 +53,7 @@ export interface LinearDagExecutionDependencies {
 export type BootstrapPlanReconciliation =
   | { kind: "mutation_applied"; step: string }
   | { kind: "stage_ready"; step: "plan"; envelope: JsonValue }
+  | { kind: "waiting_human"; step: "plan_suspension"; cycleIssueId: string; planIssueId: string; actionId: string }
   | { kind: "waiting_human"; step: "plan_approval" }
   | { kind: "completed"; planContractDigest: string }
   | { kind: "blocked"; reason: string };
@@ -67,26 +68,21 @@ export type WorkStageReconciliation =
 export type VerifyStageReconciliation =
   | { kind: "mutation_applied"; step: string }
   | { kind: "stage_ready"; step: "verify"; envelope: JsonValue }
+  | { kind: "waiting_human"; step: "verify_suspension"; cycleIssueId: string; verifyIssueId: string; actionId: string }
   | { kind: "completed"; cycleIssueId: string; verifyIssueId: string; conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human" }
   | { kind: "blocked"; reason: string };
 
-export interface BootstrapPlanExecutionResult {
-  kind: "awaiting_approval" | "sealed";
-  cycleIssueId: string;
-  planIssueId: string;
-  planContractDigest: string;
-}
+export type BootstrapPlanExecutionResult =
+  | { kind: "awaiting_approval" | "sealed"; cycleIssueId: string; planIssueId: string; planContractDigest: string }
+  | { kind: "awaiting_human"; cycleIssueId: string; planIssueId: string; actionId: string };
 
 export type WorkStageExecutionResult =
   | { kind: "completed"; cycleIssueId: string; workIssueId: string; workKey: string; commitRevision: string }
   | { kind: "awaiting_human"; cycleIssueId: string; workIssueId: string; actionId: string };
 
-export interface VerifyStageExecutionResult {
-  kind: "completed";
-  cycleIssueId: string;
-  verifyIssueId: string;
-  conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human";
-}
+export type VerifyStageExecutionResult =
+  | { kind: "completed"; cycleIssueId: string; verifyIssueId: string; conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human" }
+  | { kind: "awaiting_human"; cycleIssueId: string; verifyIssueId: string; actionId: string };
 
 export interface LinearDagExecutionInterface {
   reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation>;

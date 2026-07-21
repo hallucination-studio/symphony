@@ -46,6 +46,42 @@ test("executes Verify against an immutable revision and writes the accepted conc
   assert.equal((gateway.lastEnvelope?.workflow_context as Record<string, JsonValue>).artifact && ((gateway.lastEnvelope?.workflow_context as Record<string, JsonValue>).artifact as Record<string, JsonValue>).target_revision, "commit-1");
 });
 
+test("persists one suspended Verify action and releases the Stage", async () => {
+  const gateway = new VerifyGateway();
+  let performerCalls = 0;
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: {
+      async runStage(input) {
+        performerCalls += 1;
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+        return { result: {
+          protocol_version: "1", stage_execution_id: stageExecution.stage_execution_id, stage: "verify",
+          root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest, completed_at: "2026-07-21T09:02:00Z",
+          usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+          outcome: { kind: "suspended", request_kind: "needs_approval", question_or_proposal: "Approve the verification basis.", reason: "The verification basis needs human confirmation.", impact: "Verify cannot conclude until the basis is approved." },
+        } as unknown as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+
+  const result = await execution.executeVerifyStage(verifyInput());
+
+  assert.deepEqual(result, { kind: "awaiting_human", cycleIssueId: "cycle-1", verifyIssueId: "verify-1", actionId: "root-1:human:verify-execution-1" });
+  assert.equal(performerCalls, 1);
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "root-1")?.status_name, "Needs Approval");
+  assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "verify-1")?.status_name, "In Progress");
+  assert.equal(gateway.tree.comments.filter((comment) => comment.body.includes('"kind":"human_action"')).length, 1);
+  assert.equal(gateway.tree.comments.filter((comment) => comment.body.includes('"kind":"stage_terminal"')).length, 2);
+  assert.deepEqual(await execution.reconcileVerify(verifyInput()), { kind: "blocked", reason: "verify_root_not_runnable" });
+  assert.equal(performerCalls, 1);
+});
+
 test("rejects a Verify result for a changed revision before persisting terminal evidence", async () => {
   const gateway = new VerifyGateway();
   gateway.resultRevision = "commit-2";

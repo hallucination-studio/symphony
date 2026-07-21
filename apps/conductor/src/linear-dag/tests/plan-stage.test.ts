@@ -71,8 +71,45 @@ test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", 
 
   const writesBeforeRetry = fake.writes.length;
   const retry = await execution.executeBootstrapPlan(input);
+  if (retry.kind === "awaiting_human") throw new Error("bootstrap_plan_should_be_approval_gated");
   assert.equal(retry.planContractDigest, result.planContractDigest);
   assert.equal(fake.writes.length, writesBeforeRetry);
+});
+
+test("persists one suspended Plan action and releases the Stage", async () => {
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+  let performerCalls = 0;
+  const execution = new LinearDagExecutionImpl({
+    linear: fake,
+    git: fake.git,
+    performer: {
+      async runStage(input) {
+        performerCalls += 1;
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+        return { result: {
+          protocol_version: "1", stage_execution_id: stageExecution.stage_execution_id, stage: "plan",
+          root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest, completed_at: now,
+          usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+          outcome: { kind: "suspended", request_kind: "needs_info", question_or_proposal: "Clarify the target behavior.", reason: "The requirement is ambiguous.", impact: "The Plan cannot be bounded without an answer." },
+        } as unknown as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+
+  const result = await execution.executeBootstrapPlan(bootstrapInput());
+
+  assert.deepEqual(result, { kind: "awaiting_human", cycleIssueId: "cycle-1", planIssueId: "plan-1", actionId: "root-1:human:root-1:plan:execution-1" });
+  assert.equal(performerCalls, 1);
+  assert.equal(fake.tree.issues.find((issue) => issue.issue_kind === "plan")?.status_name, "In Progress");
+  assert.equal(fake.tree.issues.find((issue) => issue.issue_kind === "root")?.status_name, "Needs Info");
+  assert.equal(fake.tree.comments.filter((comment) => comment.body.includes('"kind":"human_action"')).length, 1);
+  assert.equal(fake.tree.comments.filter((comment) => comment.body.includes('"kind":"stage_terminal"')).length, 1);
+  assert.deepEqual(await execution.reconcileRoot(bootstrapInput()), { kind: "blocked", reason: "plan_root_not_runnable" });
+  assert.equal(performerCalls, 1);
 });
 
 test("persists a breaker decision before creating a Cycle and stops later dispatch", async () => {
