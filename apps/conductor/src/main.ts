@@ -11,6 +11,7 @@ import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorks
 import { buildRootDagView } from "./linear-dag/internal/RootDagViewBuilder.js";
 import { LinearDagExecutionImpl } from "./linear-dag/internal/LinearDagExecutionImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
+import { LinearRootOwnershipClaimImpl } from "./root-discovery/internal/LinearRootOwnershipClaimImpl.js";
 import { FilePerformerProfileStoreImpl } from "./performer-profiles/internal/FilePerformerProfileStoreImpl.js";
 import { ConductorProfileRelayHandler } from "./performer-profiles/internal/ConductorProfileRelayHandler.js";
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
@@ -112,11 +113,6 @@ export async function runConductor(environment = process.env): Promise<void> {
     });
     return buildRootDagView({ tree, workspace, git: await git.inspect(workspace) });
   };
-  const targetGateway = {
-    resolveProject: () => gateway.resolveProject(),
-    listRoots: (projectId: string) => gateway.listRoots(projectId),
-    readRootDag,
-  };
   const readyProfile = async (view: RootDagView) => {
     const file = await profiles.list();
     const profileId = view.root.ownership?.performerProfileId ?? file.activeProfileId;
@@ -126,6 +122,32 @@ export async function runConductor(environment = process.env): Promise<void> {
     return profile && await profileReadiness(profileControl, performer, profile.profileId) === "ready"
       ? profile
       : undefined;
+  };
+  const ownershipClaim = new LinearRootOwnershipClaimImpl({
+    linear: gateway,
+    git,
+    profileFor: async ({ ownedProfileId }) => {
+      const file = await profiles.list();
+      const profileId = ownedProfileId ?? file.activeProfileId;
+      const profile = profileId
+        ? file.profiles.find((candidate) => candidate.profileId === profileId)
+        : undefined;
+      if (!profile) return undefined;
+      return {
+        profileId: profile.profileId,
+        ready: await profileReadiness(profileControl, performer, profile.profileId) === "ready",
+      };
+    },
+    workspaceFor,
+    conductorId: config.conductorId,
+    ownerGeneration: config.instanceId,
+    baseBranch: config.baseBranch,
+  });
+  const targetGateway = {
+    resolveProject: () => gateway.resolveProject(),
+    listRoots: (projectId: string) => gateway.listRoots(projectId),
+    admitRoot: (root: DiscoveredRoot) => ownershipClaim.claim({ root }),
+    readRootDag,
   };
   const execution = new LinearDagExecutionImpl({ linear: gateway, git, performer });
   const dispatcher = new LinearRootStageDispatcher({

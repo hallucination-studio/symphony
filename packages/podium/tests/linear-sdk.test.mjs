@@ -1591,6 +1591,14 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   assert.equal(commentInput.issueId, "root-1");
   assert.match(commentInput.body, /symphony workflow write/u);
 
+  const managedRecord = "<!-- symphony managed-record\n{\"kind\":\"root_ownership\"}\n-->";
+  await adapter.executeWorkflowMutation({
+    kind: "append_workflow_comment", writeId: "write-record", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "root-1", expectedRemoteVersion: "root-version" }, body: managedRecord,
+  });
+  assert.equal(commentInput.body, managedRecord);
+
   await adapter.executeWorkflowMutation({
     kind: "create_workflow_relation", writeId: "write-3", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",

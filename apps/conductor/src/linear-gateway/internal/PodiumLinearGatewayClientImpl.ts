@@ -7,6 +7,7 @@ import type {
   LinearIssueState,
   LinearPriority,
 } from "../../root-workflow/api/Models.js";
+import { parseManagedRecord } from "../../root-workflow/api/index.js";
 
 type JsonValue =
   | null
@@ -125,6 +126,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       for (const value of items) {
         const item = record(value);
         const issue = wireIssue(item.issue);
+        const managedConductorId = rootManagedConductorId(item.root_managed_comments, issue.issue_id);
         const discovered: DiscoveredRoot = {
           issueId: issue.issue_id,
           identifier: issue.identifier,
@@ -143,6 +145,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
           blockers: array(item.blockers, "linear_blockers_invalid").map(
             (blocker) => linearBlocker(issue.issue_id, blocker),
           ),
+          ...(managedConductorId ? { managedConductorId } : {}),
         };
         roots.push(discovered);
         rootCount += 1;
@@ -260,6 +263,26 @@ function number(value: JsonValue | undefined, code: string): number {
 function boolean(value: JsonValue | undefined, code: string): boolean {
   if (typeof value !== "boolean") throw new Error(code);
   return value;
+}
+
+function rootManagedConductorId(value: JsonValue | undefined, rootIssueId: string): string | undefined {
+  if (value === undefined) return undefined;
+  const comments = array(value, "linear_root_managed_comments_invalid");
+  if (comments.length > 2) throw new Error("linear_root_managed_comments_invalid");
+  let conductorId: string | undefined;
+  for (const item of comments) {
+    const comment = record(item);
+    if (string(comment.issue_id, "linear_root_managed_comment_invalid") !== rootIssueId) {
+      throw new Error("linear_root_managed_comment_scope_invalid");
+    }
+    const body = string(comment.body, "linear_root_managed_comment_invalid");
+    const parsed = parseManagedRecord(body);
+    if (!parsed.ok || parsed.value.kind !== "root_ownership") continue;
+    if (parsed.value.rootIssueId !== rootIssueId) throw new Error("linear_root_ownership_scope_invalid");
+    if (conductorId !== undefined) throw new Error("linear_root_ownership_duplicate");
+    conductorId = parsed.value.conductorId;
+  }
+  return conductorId;
 }
 
 function linearPriority(value: JsonValue | undefined): LinearPriority {

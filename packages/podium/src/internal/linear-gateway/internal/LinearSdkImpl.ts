@@ -170,6 +170,7 @@ const AGENT_WRITE_MARKER =
   /\n*<!-- symphony agent write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const MANAGED_IDENTITY_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
+const MANAGED_RECORD_MARKER = "<!-- symphony managed-record\n";
 const HUMAN_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nkind: human\nhuman_kind: (plan_approval|planned_input|runtime_input)\ntarget_issue_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/;
 const WORK_METADATA =
@@ -1333,7 +1334,8 @@ export class LinearSdkImpl implements LinearClientInterface {
       });
       const matches = tree.comments.filter((comment) =>
         comment.issueId === command.target.targetIssueId &&
-        comment.managedMarker === command.writeId,
+        (comment.managedMarker === command.writeId ||
+          (isManagedRecordBody(command.body) && comment.body === command.body)),
       );
       if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
       const comment = matches[0];
@@ -1971,7 +1973,7 @@ function workflowCommentValue(
   ) {
     throw new Error("linear_workflow_comment_identity_mismatch");
   }
-  const managedMarker = commentManagedMarker(comment.body, issueId);
+  const managedMarker = commentManagedMarker(comment.body, issueId, comment.id);
   return {
     commentId: comment.id,
     issueId,
@@ -2027,8 +2029,9 @@ function workflowRelationKindValue(
   return undefined;
 }
 
-function commentManagedMarker(body: string, issueId: string): string | undefined {
+function commentManagedMarker(body: string, issueId: string, commentId: string): string | undefined {
   if (isRootManagedComment(body)) return rootCommentMarker(issueId);
+  if (body.startsWith(MANAGED_RECORD_MARKER)) return `${issueId}:managed-record:${commentId}`;
   return body.match(AGENT_WRITE_MARKER)?.[1]
     ?? body.match(WORKFLOW_WRITE_MARKER)?.[1]
     ?? body.match(TURN_EVENT_MARKER)?.[1];
@@ -2062,7 +2065,12 @@ function serializeWorkflowIssueDescription(
 }
 
 function serializeWorkflowComment(body: string, writeId: string) {
+  if (isManagedRecordBody(body)) return body;
   return `${body.trim()}\n\n<!-- symphony workflow write\nwrite_id: ${writeId}\n-->`;
+}
+
+function isManagedRecordBody(body: string): boolean {
+  return body.startsWith(MANAGED_RECORD_MARKER) && body.endsWith("\n-->");
 }
 
 function workflowIssueKindForUpdate(

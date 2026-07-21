@@ -1,4 +1,5 @@
 import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy.js";
+import type { RootOwnershipClaimResult } from "../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import type { DiscoveredRoot } from "../root-workflow/api/Models.js";
 import type { RootDagView, RootWorkflowPolicyInterface } from "../root-workflow/api/RootWorkflowPolicyInterface.js";
@@ -18,6 +19,7 @@ export interface LinearWorkflowRuntimeGateway {
     | { kind: "unbound" | "ambiguous" | "label_conflict" }
   >;
   listRoots(projectId: string): Promise<DiscoveredRoot[]>;
+  admitRoot(root: DiscoveredRoot): Promise<RootOwnershipClaimResult>;
   readRootDag(rootIssueId: string): Promise<RootDagView>;
 }
 
@@ -53,6 +55,27 @@ export class LinearConductorRuntime {
       let waitingHuman = false;
       let needsAttention = scheduled.blocked.length > 0;
       for (const root of scheduled.orderedEligible) {
+        let admission: RootOwnershipClaimResult;
+        try {
+          admission = await this.gateway.admitRoot(root);
+        } catch (error) {
+          needsAttention = true;
+          await this.reporter.report({
+            status: "blocked",
+            rootId: root.issueId,
+            sanitizedReason: `root_admission_failed:${sanitize(error).slice(0, 2000)}`,
+          });
+          continue;
+        }
+        if (admission.kind !== "claimed" && admission.kind !== "already_owned") {
+          needsAttention = true;
+          await this.reporter.report({
+            status: "blocked",
+            rootId: root.issueId,
+            sanitizedReason: `root_admission_${admission.kind}`,
+          });
+          continue;
+        }
         const view = await this.gateway.readRootDag(root.issueId);
         const assessment = this.workflow.assess(view);
         if (assessment.readiness === "waiting_human") {

@@ -32,6 +32,15 @@ export interface GitWorkspaceInterface {
   }): Promise<{ kind: "committed" | "no_changes"; commit: string }>;
 }
 
+export interface GitWorkspaceProvisionerInterface {
+  ensureWorkspace(input: {
+    rootIssueId: string;
+    rootIdentifier: string;
+    baseBranch: string;
+  }): Promise<GitWorkspace>;
+  inspect(workspace: GitWorkspace): Promise<GitWorkspaceSnapshot>;
+}
+
 export interface GitWorktreeCleanupInput {
   workspace: GitWorkspace;
   terminal: boolean;

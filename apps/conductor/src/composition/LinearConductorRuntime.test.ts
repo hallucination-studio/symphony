@@ -42,6 +42,11 @@ function gateway(roots: DiscoveredRoot[], read: (rootId: string) => RootDagView)
   return {
     async resolveProject() { return { kind: "resolved" as const, projectId: "project-1" }; },
     async listRoots() { return roots; },
+    async admitRoot(root: DiscoveredRoot) { return { kind: "already_owned" as const, ownership: {
+      kind: "root_ownership" as const, version: 1 as const, rootIssueId: root.issueId,
+      conductorId: "conductor-1", performerProfileId: "profile-1", deliveryBranch: `symphony/runs/${root.issueId}`,
+      ownerGeneration: "generation-1",
+    }, workspace: { branch: `symphony/runs/${root.issueId}`, worktreePath: `/tmp/${root.issueId}`, rootIssueId: root.issueId } }; },
     async readRootDag(rootId: string) { return read(rootId); },
   };
 }

@@ -26,6 +26,27 @@ test("gateway resolves the project and discovers delegated Roots", async () => {
   assert.deepEqual(requests.map(({ kind }) => kind), ["resolve_conductor_project", "list_root_issues"]);
 });
 
+test("root discovery projects the Conductor identity from a target managed record", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return {
+      kind: "root_issues_page",
+      items: [{
+        issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [],
+        root_managed_comments: [{
+          comment_id: "ownership-comment", issue_id: "root-1",
+          body: "<!-- symphony managed-record\n{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/sym-1\",\"owner_generation\":\"generation-1\"}\n-->",
+          managed_marker: "root-1:managed-record:ownership-comment", updated_at: now,
+        }],
+      }],
+      page_info: { has_next_page: false },
+    };
+  });
+  await gateway.resolveProject();
+
+  assert.equal((await gateway.listRoots("project-1"))[0]?.managedConductorId, "conductor-1");
+});
+
 test("workflow gateway serializes a closed mutation and validates its read-back", async () => {
   const requests: Record<string, unknown>[] = [];
   const gateway = createGateway(async (body) => {
