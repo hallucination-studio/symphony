@@ -74,8 +74,9 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
 
   async executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult> {
     let stageResult: JsonValue | undefined;
+    let activeStageExecutionId: string | undefined;
     for (let attempt = 0; attempt < 32; attempt += 1) {
-      const next = await this.reconcileRoot(input, stageResult);
+      const next = await this.reconcileRoot(input, stageResult, activeStageExecutionId);
       if (next.kind === "stage_ready") {
         try {
           stageResult = (await this.dependencies.performer.runStage({
@@ -106,7 +107,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         if (!cycle || !plan || !contract) throw new Error("bootstrap_plan_sealed_read_back_incomplete");
         return { kind: "sealed", cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id, planContractDigest: contract.planContractDigest };
       }
-      if (next.kind === "mutation_applied") continue;
+      if (next.kind === "mutation_applied") {
+        if (next.step === "plan_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "plan");
+        continue;
+      }
     }
     throw new Error("bootstrap_plan_reconciliation_limit_exceeded");
   }
@@ -114,8 +118,9 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   async executeWorkStage(input: WorkStageInput): Promise<WorkStageExecutionResult> {
     let stageResult: JsonValue | undefined;
     let commitRevision: string | undefined;
+    let activeStageExecutionId: string | undefined;
     for (let attempt = 0; attempt < 32; attempt += 1) {
-      const next = await this.reconcileWork(input, stageResult, commitRevision);
+      const next = await this.reconcileWork(input, stageResult, commitRevision, activeStageExecutionId);
       if (next.kind === "stage_ready") {
         try {
           stageResult = (await this.dependencies.performer.runStage({
@@ -130,6 +135,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       }
       if (next.kind === "mutation_applied") {
         if (next.step === "work_committed") commitRevision = (await this.dependencies.git.inspect(input.workspace)).head;
+        if (next.step === "work_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "work");
         continue;
       }
       if (next.kind === "waiting_human") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, workIssueId: next.workIssueId, actionId: next.actionId };
@@ -141,8 +147,9 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
 
   async executeVerifyStage(input: VerifyStageInput): Promise<VerifyStageExecutionResult> {
     let stageResult: JsonValue | undefined;
+    let activeStageExecutionId: string | undefined;
     for (let attempt = 0; attempt < 32; attempt += 1) {
-      const next = await this.reconcileVerify(input, stageResult);
+      const next = await this.reconcileVerify(input, stageResult, activeStageExecutionId);
       if (next.kind === "stage_ready") {
         try {
           stageResult = (await this.dependencies.performer.runStage({ envelope: next.envelope, workspaceRoot: input.workspace.worktreePath })).result;
@@ -152,7 +159,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         }
         continue;
       }
-      if (next.kind === "mutation_applied") continue;
+      if (next.kind === "mutation_applied") {
+        if (next.step === "verify_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "verify");
+        continue;
+      }
       if (next.kind === "blocked") throw new Error(next.reason);
       if (next.kind === "waiting_human" && next.step === "verify_suspension") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, verifyIssueId: next.verifyIssueId, actionId: next.actionId };
       return next;
@@ -160,7 +170,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     throw new Error("verify_stage_reconciliation_limit_exceeded");
   }
 
-  async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation> {
+  async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string, activeStageExecutionId?: string): Promise<WorkStageReconciliation> {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return workBlocked("work_root_not_runnable");
@@ -210,6 +220,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(selected.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(selected.issue.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
+    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+      await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Work execution ended without a terminal result and will be retried."));
+      return { kind: "mutation_applied", step: "work_orphaned_execution_terminal" };
+    }
     const completion = recordFrom(records, selected.issue.issue_id, "work_completion") as WorkCompletionRecord | undefined;
     if (completion) {
       if (completion.workKey !== nodeMarker.nodeKey || completion.nodeIssueId !== selected.issue.issue_id || completion.contextDigest.length === 0
@@ -306,7 +320,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     return { kind: "mutation_applied", step: "work_completion_persisted" };
   }
 
-  async reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue): Promise<VerifyStageReconciliation> {
+  async reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<VerifyStageReconciliation> {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return verifyBlocked("verify_root_not_runnable");
@@ -349,6 +363,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(verify.issue.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(verify.issue.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
+    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+      await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Verify execution ended without a terminal result and will be retried."));
+      return { kind: "mutation_applied", step: "verify_orphaned_execution_terminal" };
+    }
     const latestResult = latestVerifyResult(records);
     const currentResult = latestExecution && (records.get(verify.issue.issue_id) ?? []).find((record): record is VerifyResultRecord => record.kind === "verify_result" && record.stageExecutionId === latestExecution.stageExecutionId);
 
@@ -460,7 +478,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     return { kind: "completed", cycleIssueId: cycleView.issue.issue_id, verifyIssueId: verify.issue.issue_id, conclusion };
   }
 
-  async reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation> {
+  async reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<BootstrapPlanReconciliation> {
     const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return blocked("root_read_back_invalid");
@@ -582,6 +600,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     const latestExecution = latestExecutionRecord(records.get(plan.issue_id) ?? []);
     const latestTerminal = latestTerminalRecord(records.get(plan.issue_id) ?? []);
     const currentTerminal = latestTerminal?.stageExecutionId === latestExecution?.stageExecutionId ? latestTerminal : undefined;
+    if (stageResult === undefined && latestExecution && !latestTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
+      await this.appendRecord(input, tree, plan, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Plan execution ended without a terminal result and will be retried."));
+      return { kind: "mutation_applied", step: "plan_orphaned_execution_terminal" };
+    }
 
     const suspended = stageResult !== undefined && resultKind(stageResult) === "suspended"
       ? validateSuspendedResult(stageResult, latestExecution, "plan")
@@ -680,6 +702,16 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       check: (fresh, outcome) => decision.check(fresh, outcome.targetIssueId),
     });
     return { kind: "mutation_applied", step: decision.step };
+  }
+
+  private async latestStageExecutionId(input: BootstrapPlanInput, stage: StageExecutionRecord["stage"]): Promise<string> {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const latest = [...recordsByIssue(tree.comments).values()]
+      .flatMap((records) => records.filter((record): record is StageExecutionRecord => record.kind === "stage_execution" && record.rootIssueId === input.rootIssueId && record.stage === stage))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.stageExecutionId.localeCompare(right.stageExecutionId))
+      .at(-1);
+    if (!latest) throw new Error(`${stage}_execution_read_back_missing`);
+    return latest.stageExecutionId;
   }
 
   private async enforceConvergence(input: BootstrapPlanInput, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
@@ -1241,6 +1273,14 @@ function stageTerminalFromSuspension(execution: StageExecutionRecord, result: Va
 
 function stageTerminalFromVerify(execution: StageExecutionRecord, result: ValidatedVerifyResult): StageTerminalRecord {
   return stageTerminal(execution, { completedAt: result.completedAt, usage: result.usage, summary: `Verify concluded ${result.conclusion}.` });
+}
+
+function stageTerminalFromFailure(execution: StageExecutionRecord, completedAt: string, failureCode: string, summary: string): StageTerminalRecord {
+  return {
+    kind: "stage_terminal", version: 1, stageExecutionId: execution.stageExecutionId, rootIssueId: execution.rootIssueId,
+    cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
+    outcome: "failed", completedAt, summary, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: execution.limits.reservedTotalTokens }, failureCode,
+  };
 }
 
 function allFindingRecords(records: Map<string, ManagedRecord[]>): import("../../root-workflow/api/ManagedRecords.js").FindingRecord[] {

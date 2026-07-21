@@ -85,10 +85,10 @@ export type VerifyStageExecutionResult =
   | { kind: "awaiting_human"; cycleIssueId: string; verifyIssueId: string; actionId: string };
 
 export interface LinearDagExecutionInterface {
-  reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue): Promise<BootstrapPlanReconciliation>;
+  reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<BootstrapPlanReconciliation>;
   executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult>;
-  reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string): Promise<WorkStageReconciliation>;
+  reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string, activeStageExecutionId?: string): Promise<WorkStageReconciliation>;
   executeWorkStage(input: WorkStageInput): Promise<WorkStageExecutionResult>;
-  reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue): Promise<VerifyStageReconciliation>;
+  reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<VerifyStageReconciliation>;
   executeVerifyStage(input: VerifyStageInput): Promise<VerifyStageExecutionResult>;
 }

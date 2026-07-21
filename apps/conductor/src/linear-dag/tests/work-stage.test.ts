@@ -185,6 +185,35 @@ for (const rootStatus of ["Done", "Canceled"] as const) {
   });
 }
 
+test("reconciles an orphaned Work execution into a fresh retry", async () => {
+  const gateway = new WorkGateway(workTree());
+  const performer: PerformerStageClientInterface = {
+    async runStage() { throw new Error("performer_should_not_run"); },
+    async cancelAndReap() {},
+  };
+  const firstExecution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
+
+  assert.deepEqual(await firstExecution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await firstExecution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const orphanedExecution = parseExecution(gateway);
+
+  const restartedExecution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
+  assert.deepEqual(await restartedExecution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_orphaned_execution_terminal" });
+  assert.deepEqual(await restartedExecution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const retryExecution = latestExecution(gateway);
+  const ready = await restartedExecution.reconcileWork(workInput(), undefined, undefined, retryExecution.stageExecutionId);
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("work_retry_not_ready");
+  assert.equal((ready.envelope as Record<string, JsonValue>).stage_execution && ((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id, retryExecution.stageExecutionId);
+
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === orphanedExecution.stageExecutionId);
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("orphan_terminal_missing");
+  assert.equal(terminal.value.outcome, "failed");
+  assert.equal(terminal.value.failureCode, "orphaned_execution");
+  assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
+});
+
 test("persists one suspended Work action and releases the Stage", async () => {
   const gateway = new WorkGateway(workTree());
   const execution = new LinearDagExecutionImpl({
@@ -326,6 +355,13 @@ function parseExecution(gateway: WorkGateway) {
   assert.equal(record.ok, true);
   if (!record.ok || record.value.kind !== "stage_execution") throw new Error("stage_execution_fixture_invalid");
   return record.value;
+}
+
+function latestExecution(gateway: WorkGateway) {
+  const records = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).flatMap((record) => record.ok && record.value.kind === "stage_execution" ? [record.value] : []);
+  const execution = records.at(-1);
+  if (!execution) throw new Error("stage_execution_fixture_missing");
+  return execution;
 }
 
 function suspendedWorkResult(execution: ReturnType<typeof parseExecution>): JsonValue {
