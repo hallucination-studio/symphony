@@ -88,17 +88,16 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
   let reads = 0;
   let release;
   const services = await createConductorServices({
-    async getRootScope() {
+    async getWorkflowIssueTree() {
       reads += 1;
       await new Promise((resolve) => { release = resolve; });
-      return {
-        rootIssueId: "root-1", conductorId: "conductor-1", terminal: false,
-        issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
-        observedAt: "2026-07-20T00:00:01Z",
-      };
+      return workflowTree("project-1");
     },
   });
-  const body = { kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1" };
+  const body = {
+    kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
+    expected_project_id: "project-1", root_issue_id: "root-1",
+  };
   const first = services.handle(body);
   const shared = services.handle(body);
   await Promise.resolve();
@@ -112,18 +111,15 @@ test("physical rate observations reserve installation capacity from background r
   let observe;
   let usageReads = 0;
   const services = await createConductorServices({
-    async getRootScope() { return {
-      rootIssueId: "root-1", conductorId: "conductor-1", terminal: false,
-      issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
-      observedAt: "2026-07-20T00:00:01Z",
-    }; },
+    async getWorkflowIssueTree() { return workflowTree("project-1"); },
     async listRootUsage() { usageReads += 1; return { items: [], pageInfo: { hasNextPage: false } }; },
   }, undefined, (value) => { observe = value; });
   await services.handle({
-    kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1",
+    kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
+    expected_project_id: "project-1", root_issue_id: "root-1",
   });
   observe({
-    operation: "SymphonyRootScopeRoot", correlationId: "correlation-1", durationMs: 1,
+    operation: "SymphonyWorkflowIssueTree", correlationId: "correlation-1", durationMs: 1,
     status: 200,
     requestWindow: { limit: 1000, remaining: 750, reset: 60 },
     complexityWindow: { limit: 250000, remaining: 187500, reset: 60 },
@@ -602,63 +598,6 @@ test("workflow Issue Tree preserves the bounded read-back projection", async () 
     await handler.getWorkflowIssueTree("project-1", "root-1"),
     tree,
   );
-});
-
-test("compact Root scope validates authority and issue ancestry without reading a complete Tree", async () => {
-  let treeReads = 0;
-  const handler = new LinearGatewayProtocolHandlerImpl(
-    {
-      async getRootScope() {
-        return {
-          rootIssueId: "root-1",
-          conductorId: "conductor-1",
-          performerId: "conversation-1",
-          terminal: false,
-          issues: [
-            { issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" },
-            { issueId: "work-1", identifier: "SYM-2", parentIssueId: "root-1", updatedAt: "2026-07-20T00:00:01Z" },
-          ],
-          observedAt: "2026-07-20T00:00:02Z",
-        };
-      },
-      async getIssueTree() { treeReads += 1; throw new Error("complete Tree read forbidden"); },
-    },
-    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
-  );
-
-  const scope = await handler.getRootScope("project-1", "root-1");
-
-  assert.equal(treeReads, 0);
-  assert.equal(scope.issues.length, 2);
-  assert.equal(scope.performerId, "conversation-1");
-});
-
-test("Podium-Conductor compact Root scope omits workflow bodies and complete Tree reads", async () => {
-  let treeReads = 0;
-  const services = await createConductorServices({
-    async getRootScope() {
-      return {
-        rootIssueId: "root-1", conductorId: "conductor-1", performerId: "conversation-1",
-        terminal: false,
-        issues: [{ issueId: "root-1", identifier: "SYM-1", updatedAt: "2026-07-20T00:00:00Z" }],
-        observedAt: "2026-07-20T00:00:01Z",
-      };
-    },
-    async getIssueTree() { treeReads += 1; throw new Error("complete Tree read forbidden"); },
-  });
-
-  const result = await services.handle({
-    kind: "get_root_scope", project_id: "project-1", root_issue_id: "root-1",
-  });
-
-  assert.equal(treeReads, 0);
-  assert.deepEqual(result, {
-    kind: "root_scope", root_issue_id: "root-1", conductor_id: "conductor-1",
-    performer_id: "conversation-1", terminal: false,
-    issues: [{ issue_id: "root-1", identifier: "SYM-1", updated_at: "2026-07-20T00:00:00Z" }],
-    observed_at: "2026-07-20T00:00:01Z",
-  });
-  assert.doesNotMatch(JSON.stringify(result), /description|comment|label|answer|authorization/iu);
 });
 
 test("Podium-Conductor exposes the correlated workflow Tree route and rejects hash drift", async () => {

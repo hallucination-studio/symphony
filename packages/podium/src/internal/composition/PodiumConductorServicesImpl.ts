@@ -101,8 +101,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         return this.#getTree(gateway, body);
       case "get_workflow_issue_tree":
         return this.#getWorkflowTree(gateway, body);
-      case "get_root_scope":
-        return this.#getRootScope(gateway, body);
       case "list_root_usage":
         return this.#listUsage(gateway, body);
       case "create_managed_node":
@@ -405,37 +403,15 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     };
   }
 
-  async #getRootScope(
-    gateway: LinearGatewayProtocolHandlerImpl,
-    body: Body,
-  ): Promise<JsonValue> {
-    const scope = await gateway.getRootScope(
-      requiredString(body.project_id, "linear_project_id_missing"),
-      requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
-    );
-    return {
-      kind: "root_scope",
-      root_issue_id: scope.rootIssueId,
-      conductor_id: scope.conductorId,
-      ...(scope.performerId ? { performer_id: scope.performerId } : {}),
-      terminal: scope.terminal,
-      issues: scope.issues.map((issue) => ({
-        issue_id: issue.issueId,
-        identifier: issue.identifier,
-        ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
-        ...(issue.state ? { state: issue.state } : {}),
-        ...(issue.nodeKind ? { node_kind: issue.nodeKind } : {}),
-        ...(issue.humanKind ? { human_kind: issue.humanKind } : {}),
-        updated_at: issue.updatedAt,
-      })),
-      observed_at: scope.observedAt,
-    };
-  }
 }
 
 function requestClass(kind: string): InstallationRequestClass {
   if (kind === "resolve_conductor_project") return "control";
-  if (kind === "get_issue_tree" || kind === "get_root_scope" || kind === "list_root_issues") return "workflow";
+  if (
+    kind === "get_issue_tree" ||
+    kind === "get_workflow_issue_tree" ||
+    kind === "list_root_issues"
+  ) return "workflow";
   if (kind === "list_root_usage") return "background";
   return "mutation";
 }

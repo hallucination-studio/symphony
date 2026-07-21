@@ -424,57 +424,6 @@ export class LinearGatewayProtocolHandlerImpl {
     return tree;
   }
 
-  async getRootScope(projectId: string, rootIssueId: string) {
-    const scope = await this.client.getRootScope({ projectId, rootIssueId });
-    if (
-      scope.rootIssueId !== rootIssueId ||
-      !identifier(scope.conductorId, 128) ||
-      (scope.performerId !== undefined && !identifier(scope.performerId, 128)) ||
-      typeof scope.terminal !== "boolean" ||
-      !timestamp(scope.observedAt) ||
-      !Array.isArray(scope.issues) ||
-      scope.issues.length === 0 ||
-      scope.issues.length > MAX_TREE_NODES
-    ) {
-      throw new Error("linear_root_scope_invalid");
-    }
-    const byId = new Map<string, (typeof scope.issues)[number]>();
-    for (const issue of scope.issues) {
-      if (
-        !identifier(issue.issueId, 128) ||
-        !identifier(issue.identifier, 256) ||
-        !timestamp(issue.updatedAt) ||
-        (issue.parentIssueId !== undefined && !identifier(issue.parentIssueId, 128)) ||
-        byId.has(issue.issueId)
-      ) {
-        throw new Error("linear_root_scope_invalid");
-      }
-      byId.set(issue.issueId, issue);
-    }
-    const root = byId.get(rootIssueId);
-    if (!root || root.parentIssueId !== undefined) {
-      throw new Error("linear_root_scope_invalid");
-    }
-    for (const issue of scope.issues) {
-      if (issue.issueId === rootIssueId) continue;
-      const visited = new Set<string>();
-      let current = issue;
-      while (current.issueId !== rootIssueId) {
-        if (visited.has(current.issueId) || !current.parentIssueId) {
-          throw new Error("linear_root_scope_invalid");
-        }
-        visited.add(current.issueId);
-        const parent = byId.get(current.parentIssueId);
-        if (!parent) throw new Error("linear_root_scope_invalid");
-        current = parent;
-      }
-    }
-    return {
-      ...scope,
-      issues: scope.issues.map((issue) => ({ ...issue })),
-    };
-  }
-
   async listAllRootUsage(projectId: string): Promise<RootUsageValue[]> {
     const list = this.client.listRootUsage;
     const items: RootUsageValue[] = [];

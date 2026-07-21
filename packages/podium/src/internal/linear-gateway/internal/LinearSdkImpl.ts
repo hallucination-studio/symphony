@@ -137,28 +137,6 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
     }
   }
 `;
-const ROOT_SCOPE_ROOT_QUERY = `
-  query SymphonyRootScopeRoot($rootIssueId: String!, $commentMarker: String!) {
-    issue(id: $rootIssueId) {
-      id identifier updatedAt
-      project { id }
-      parent { id }
-      state { name }
-      comments(first: 2, filter: { body: { contains: $commentMarker } }) {
-        nodes { id body updatedAt issue { id } }
-        pageInfo { hasNextPage }
-      }
-    }
-  }
-`;
-const ROOT_SCOPE_CHILDREN_QUERY = `
-  query SymphonyRootScopeChildren($parentIds: [ID!]!, $cursor: String) {
-    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
-      nodes { id identifier updatedAt description state { name } project { id } parent { id } }
-      pageInfo { hasNextPage endCursor }
-    }
-  }
-`;
 const ROOT_MARKER_START = "<!-- symphony root\n";
 const WORKFLOW_ISSUE_MARKER =
   /\n*<!-- symphony workflow issue\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nissue_kind: (cycle|plan|work|verify|human)\n-->\s*$/;
@@ -276,26 +254,6 @@ interface IssueTreeRootData { issue?: IssueTreeRootFact | null }
 interface IssueTreeChildrenData {
   issues: {
     nodes: IssueTreeFact[];
-    pageInfo: { hasNextPage: boolean; endCursor?: string | null };
-  };
-}
-
-interface RootScopeIssueFact {
-  id: string;
-  identifier: string;
-  updatedAt: string;
-  description?: string | null;
-  state: { name: string };
-  project?: { id: string } | null;
-  parent?: { id: string } | null;
-}
-interface RootScopeRootFact extends RootScopeIssueFact {
-  comments: IssueTreeFact["comments"];
-}
-interface RootScopeRootData { issue?: RootScopeRootFact | null }
-interface RootScopeChildrenData {
-  issues: {
-    nodes: RootScopeIssueFact[];
     pageInfo: { hasNextPage: boolean; endCursor?: string | null };
   };
 }
@@ -1373,108 +1331,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
   }
 
-  async getRootScope(input: { projectId: string; rootIssueId: string }) {
-    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
-    if (!rawRequest) throw new Error("linear_root_scope_transport_unavailable");
-    const rootResponse = await rawRequest<RootScopeRootData, {
-      rootIssueId: string;
-      commentMarker: string;
-    }>(ROOT_SCOPE_ROOT_QUERY, {
-      rootIssueId: input.rootIssueId,
-      commentMarker: ROOT_HEADER_MARKER,
-    });
-    const root = rootResponse.data?.issue;
-    if (
-      !root || root.id !== input.rootIssueId ||
-      root.project?.id !== input.projectId || root.parent !== null
-    ) {
-      throw new Error("linear_root_scope_root_invalid");
-    }
-    if (root.comments.pageInfo.hasNextPage || root.comments.nodes.length > 1) {
-      throw new Error("linear_root_scope_authority_ambiguous");
-    }
-    const comment = root.comments.nodes[0];
-    if (comment && comment.issue.id !== root.id) {
-      throw new Error("linear_root_comment_identity_mismatch");
-    }
-    const authority = comment
-      ? parseRootScopeAuthority(comment.body)
-      : { conductorId: "unclaimed" };
-    const issues: Array<{
-      issueId: string;
-      identifier: string;
-      parentIssueId?: string;
-      state?: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
-      nodeKind?: "work" | "human";
-      humanKind?: "plan_approval" | "planned_input" | "runtime_input";
-      updatedAt: string;
-    }> = [{
-      issueId: root.id,
-      identifier: root.identifier,
-      updatedAt: timestampValue(root.updatedAt),
-    }];
-    const seenIds = new Set([root.id]);
-    let parentIds = [root.id];
-    while (parentIds.length > 0) {
-      const parentSet = new Set(parentIds);
-      const nextParentIds: string[] = [];
-      const seenCursors = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const response = await rawRequest<RootScopeChildrenData, {
-          parentIds: string[];
-          cursor?: string;
-        }>(ROOT_SCOPE_CHILDREN_QUERY, {
-          parentIds,
-          ...(cursor ? { cursor } : {}),
-        });
-        const page = response.data?.issues;
-        if (!page) throw new Error("linear_root_scope_incomplete");
-        for (const fact of page.nodes) {
-          if (
-            fact.project?.id !== input.projectId || !fact.parent ||
-            !parentSet.has(fact.parent.id)
-          ) {
-            throw new Error("linear_root_scope_issue_invalid");
-          }
-          if (seenIds.has(fact.id)) throw new Error("linear_root_scope_ambiguous");
-          if (issues.length >= MAX_TREE_NODES) throw new Error("linear_tree_bounds_exceeded");
-          seenIds.add(fact.id);
-          nextParentIds.push(fact.id);
-          const managed = parseManagedDescription(fact.description ?? "");
-          issues.push({
-            issueId: fact.id,
-            identifier: fact.identifier,
-            parentIssueId: fact.parent.id,
-            state: linearIssueState(fact.state.name),
-            ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
-            ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
-            updatedAt: timestampValue(fact.updatedAt),
-          });
-        }
-        if (!page.pageInfo.hasNextPage) {
-          cursor = undefined;
-          break;
-        }
-        const nextCursor = page.pageInfo.endCursor;
-        if (!nextCursor || seenCursors.has(nextCursor)) {
-          throw new Error("linear_root_scope_incomplete");
-        }
-        seenCursors.add(nextCursor);
-        cursor = nextCursor;
-      } while (cursor);
-      parentIds = nextParentIds;
-    }
-    const state = linearIssueState(root.state.name);
-    return {
-      rootIssueId: root.id,
-      ...authority,
-      terminal: state === "Done" || state === "Canceled",
-      issues,
-      observedAt: new Date().toISOString(),
-    };
-  }
-
   async #humanAnswers(nodes: LinearIssueValue[]) {
     const answers = [];
     for (const node of nodes) {
@@ -2271,41 +2127,6 @@ function rootCommentMarker(issueId: string) {
 function isRootManagedComment(body: string): boolean {
   const marker = body.lastIndexOf(ROOT_MARKER_START);
   return body.startsWith("Symphony\n") && marker > 0 && body.endsWith("\n-->");
-}
-
-function parseRootScopeAuthority(body: string): {
-  conductorId: string;
-  performerId?: string;
-} {
-  if (!isRootManagedComment(body)) throw new Error("linear_root_scope_authority_invalid");
-  const markerStart = body.lastIndexOf(ROOT_MARKER_START);
-  const fields = new Map<string, string>();
-  const allowed = new Set([
-    "conductor_id", "performer_profile_id", "performer_id", "delivery_branch",
-    "pull_request", "retry_blocked", "retry_expected_performer_id",
-    "retry_failure_code", "retry_observed_at",
-  ]);
-  for (const line of body.slice(markerStart + ROOT_MARKER_START.length, -4).split("\n")) {
-    const separator = line.indexOf(":");
-    if (separator < 1) throw new Error("linear_root_scope_authority_invalid");
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (!allowed.has(key) || fields.has(key) || value.length > 1_024) {
-      throw new Error("linear_root_scope_authority_invalid");
-    }
-    fields.set(key, value);
-  }
-  if (fields.size !== allowed.size) throw new Error("linear_root_scope_authority_invalid");
-  const conductorId = fields.get("conductor_id")!;
-  const performerId = fields.get("performer_id")!;
-  const identifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-  if (!identifier.test(conductorId) || (performerId !== "none" && !identifier.test(performerId))) {
-    throw new Error("linear_root_scope_authority_invalid");
-  }
-  return {
-    conductorId,
-    ...(performerId === "none" ? {} : { performerId }),
-  };
 }
 
 function linearIssueState(value: string): LinearIssueState {

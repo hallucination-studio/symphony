@@ -83,6 +83,9 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "RootGateTurnCommand",
     "PerformerTurnEvent",
     "turn_kind",
+    "GetRootScopeQuery",
+    "RootScopeResult",
+    "RootScopeIssueSnapshot",
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }

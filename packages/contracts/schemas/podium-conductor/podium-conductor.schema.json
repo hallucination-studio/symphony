@@ -382,57 +382,6 @@
         "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
       }
     },
-    "GetRootScopeQuery": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "project_id", "root_issue_id"],
-      "properties": {
-        "kind": { "const": "get_root_scope" },
-        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "RootScopeIssueSnapshot": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["issue_id", "identifier", "updated_at"],
-      "properties": {
-        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "node_kind": { "enum": ["work", "human"] },
-        "human_kind": {
-          "enum": ["plan_approval", "planned_input", "runtime_input"]
-        },
-        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "RootScopeResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "root_issue_id",
-        "conductor_id",
-        "terminal",
-        "issues",
-        "observed_at"
-      ],
-      "properties": {
-        "kind": { "const": "root_scope" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "terminal": { "type": "boolean" },
-        "issues": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/RootScopeIssueSnapshot" }
-        },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
     "ListRootUsageQuery": {
       "type": "object",
       "additionalProperties": false,
@@ -1198,13 +1147,11 @@
         { "$ref": "#/$defs/ResolveConductorProjectQuery" },
         { "$ref": "#/$defs/ListRootIssuesQuery" },
         { "$ref": "#/$defs/GetIssueTreeQuery" },
-        { "$ref": "#/$defs/GetRootScopeQuery" },
         { "$ref": "#/$defs/GetWorkflowIssueTreeQuery" },
         { "$ref": "#/$defs/ListRootUsageQuery" },
         { "$ref": "#/$defs/ProjectResolutionResult" },
         { "$ref": "#/$defs/RootIssuesPageResult" },
         { "$ref": "#/$defs/IssueTreePageResult" },
-        { "$ref": "#/$defs/RootScopeResult" },
         { "$ref": "#/$defs/WorkflowIssueTreeResult" },
         { "$ref": "#/$defs/RootUsagePageResult" },
         { "$ref": "#/$defs/LinearMutationCommand" },

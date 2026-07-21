@@ -127,26 +127,6 @@ export interface LinearClientInterface {
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<import("../types.js").WorkflowMutationReadBack | undefined>;
 
-  getRootScope(input: {
-    projectId: string;
-    rootIssueId: string;
-  }): Promise<{
-    rootIssueId: string;
-    conductorId: string;
-    performerId?: string;
-    terminal: boolean;
-    issues: Array<{
-      issueId: string;
-      identifier: string;
-      parentIssueId?: string;
-      state?: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
-      nodeKind?: "work" | "human";
-      humanKind?: "plan_approval" | "planned_input" | "runtime_input";
-      updatedAt: string;
-    }>;
-    observedAt: string;
-  }>;
-
   listRootUsage(input: {
     projectId: string;
     cursor?: string;
