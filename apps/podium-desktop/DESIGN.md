@@ -1,27 +1,45 @@
 ---
-version: alpha
+version: beta
 name: Podium Desktop
-description: Visual identity tokens for the Symphony Podium Desktop.
+description: Visual identity tokens for the Symphony Podium Desktop, following the Apple Human Interface Guidelines.
 colors:
-  surface-muted: "#fafafa"
-  surface: "#ffffff"
-  border: "#e5e7eb"
-  border-strong: "#d1d5db"
-  text: "#18181b"
-  text-muted: "#6b7280"
-  text-subtle: "#9ca3af"
-  primary: "#4f46e5"
-  primary-hover: "#4338ca"
-  primary-soft: "#eef2ff"
-  overlay: "rgba(24, 24, 27, 0.28)"
-  status-completed: "#16a34a"
-  status-completed-bg: "#f0fdf4"
-  status-in-progress: "#2563eb"
-  status-in-progress-bg: "#eff6ff"
-  status-blocked: "#dc2626"
-  status-blocked-bg: "#fef2f2"
-  status-not-started: "#9ca3af"
-  status-not-started-bg: "#f3f4f6"
+  light-window-bg: "#e9e9ee"
+  light-content-bg: "#f5f5f7"
+  light-card-bg: "#ffffff"
+  light-separator: "rgba(0, 0, 0, 0.08)"
+  light-separator-strong: "rgba(0, 0, 0, 0.16)"
+  light-label: "rgba(0, 0, 0, 0.85)"
+  light-label-secondary: "rgba(0, 0, 0, 0.5)"
+  light-label-tertiary: "rgba(0, 0, 0, 0.26)"
+  light-accent: "#007aff"
+  light-accent-hover: "#0062cc"
+  light-accent-soft: "rgba(0, 122, 255, 0.12)"
+  light-focus-halo: "rgba(0, 122, 255, 0.35)"
+  light-overlay: "rgba(0, 0, 0, 0.25)"
+  light-selection: "rgba(0, 0, 0, 0.06)"
+  light-accent-contrast: "#ffffff"
+  dark-window-bg: "#26262b"
+  dark-content-bg: "#1e1e1e"
+  dark-card-bg: "#2c2c2e"
+  dark-separator: "rgba(255, 255, 255, 0.12)"
+  dark-separator-strong: "rgba(255, 255, 255, 0.22)"
+  dark-label: "rgba(255, 255, 255, 0.85)"
+  dark-label-secondary: "rgba(255, 255, 255, 0.55)"
+  dark-label-tertiary: "rgba(255, 255, 255, 0.25)"
+  dark-accent: "#0a84ff"
+  dark-accent-hover: "#409cff"
+  dark-accent-soft: "rgba(10, 132, 255, 0.24)"
+  dark-focus-halo: "rgba(10, 132, 255, 0.45)"
+  dark-overlay: "rgba(0, 0, 0, 0.5)"
+  dark-selection: "rgba(255, 255, 255, 0.1)"
+  status-green: "#34c759"
+  status-green-dark: "#30d158"
+  status-red: "#ff3b30"
+  status-red-dark: "#ff453a"
+  status-orange: "#ff9500"
+  status-orange-dark: "#ff9f0a"
+  status-gray: "#8e8e93"
+  status-gray-dark: "#98989d"
 typography:
   display:
     fontFamily: system-ui
@@ -31,38 +49,38 @@ typography:
   h1:
     fontFamily: system-ui
     fontSize: 22px
-    fontWeight: "600"
-    lineHeight: 28px
+    fontWeight: "700"
+    lineHeight: 27px
   title:
     fontFamily: system-ui
-    fontSize: 15px
+    fontSize: 13px
     fontWeight: "600"
-    lineHeight: 20px
+    lineHeight: 16px
   body:
-    fontFamily: system-ui
-    fontSize: 15px
-    fontWeight: "400"
-    lineHeight: 22px
-  caption:
     fontFamily: system-ui
     fontSize: 13px
     fontWeight: "400"
-    lineHeight: 18px
+    lineHeight: 16px
+  caption:
+    fontFamily: system-ui
+    fontSize: 11px
+    fontWeight: "400"
+    lineHeight: 13px
   label-caps:
     fontFamily: system-ui
     fontSize: 11px
     fontWeight: "600"
-    lineHeight: 16px
+    lineHeight: 13px
     letterSpacing: 0.04em
   mono:
     fontFamily: ui-monospace
-    fontSize: 13px
+    fontSize: 11px
     fontWeight: "400"
-    lineHeight: 20px
+    lineHeight: 16px
 rounded:
-  sm: 6px
-  md: 10px
-  lg: 14px
+  control: 6px
+  card: 10px
+  dialog: 12px
   pill: 999px
 spacing:
   1: 4px
@@ -80,16 +98,32 @@ This file governs visual presentation only. Product behavior, navigation,
 runtime boundaries, and workflow semantics come exclusively from
 `docs/architecture/`.
 
-- Preserve the near-white surface stack, hairline borders, one indigo
-  interaction color, and the existing semantic status palette.
-- Use the CSS custom properties in `src/styles/tokens.css`; do not introduce a
-  second token system.
-- Keep the 232px sidebar and approximately 960px main reading column.
-- Use the existing spacing, type, and radius scales. Do not introduce web
-  fonts, decorative gradients, dense dashboard styling, or heavy shadows.
+The visual language follows the Apple Human Interface Guidelines for macOS:
+
+- The window uses an overlay title bar with inset traffic lights and a
+  translucent NSVisualEffectView sidebar material (Tauri `windowEffects`).
+  The opaque `window-bg` tokens are fallbacks for non-Tauri hosts and for
+  environments where the private API is unavailable.
+- Light and dark appearances are both normative. Every color token has a
+  light and a dark value, switched via `prefers-color-scheme`. Do not
+  hard-code appearance-specific values outside `tokens.css`.
+- One accent color: macOS system blue (`#007aff` light, `#0a84ff` dark).
+  Semantic status colors come from the macOS system palette and must always
+  be paired with text or an icon; color is never the only signal.
+- Base font size is 13px (SF Pro via `system-ui`). Use the type scale above;
+  do not introduce web fonts, decorative gradients, or dense dashboard
+  styling.
+- Controls use macOS metrics: 28px-high push buttons with 6px radius,
+  5-6px radius inputs, and a translucent accent focus halo instead of a
+  hard outline.
+- Content is presented as inset grouped lists (System Settings style):
+  10px-radius cards on the content background, hairline separators between
+  rows. Keep the 232px sidebar and a main reading column of at most 840px.
 - Keep one visually primary action per view.
-- Status must use text in addition to color.
-- Narrow layouts may hide secondary metadata, but never the next action or an
-  actionable error.
-- Never display secrets, absolute local paths, Provider handles, raw logs, or
-  SDK payloads.
+- Narrow layouts may hide secondary metadata, but never the next action or
+  an actionable error.
+- Never display secrets, absolute local paths, Provider handles, raw logs,
+  or SDK payloads.
+- Use the CSS custom properties in `src/styles/tokens.css`; do not introduce
+  a second token system. `src/styles/layout.css` must not contain raw color
+  values.
