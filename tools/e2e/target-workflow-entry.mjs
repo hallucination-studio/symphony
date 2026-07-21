@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { isMissingInputConfiguration, loadE2EConfig } from "./config.mjs";
 import { TARGET_WORKFLOW_SCENARIOS } from "./target-workflow-verdict.mjs";
 import { auditTargetWorkflowSources } from "./target-workflow-static-audit.mjs";
-import { runTargetRepairLive, runTargetSuccessLive } from "./target-workflow-live.mjs";
+import { runTargetDeliveryLive, runTargetRepairLive, runTargetSuccessLive } from "./target-workflow-live.mjs";
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
@@ -55,6 +55,17 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
           })}\n`);
           process.exitCode = 2;
         });
+    } else if (arguments_.length === 1 && arguments_[0] === "--live-delivery") {
+      runTargetWorkflowLive("delivery")
+        .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+        .catch((error) => {
+          process.stderr.write(`${JSON.stringify({
+            status: isMissingInputConfiguration(error) ? "unverified" : "failed",
+            reason: stableReason(error),
+            ...(Array.isArray(error?.issues) ? { issues: error.issues } : {}),
+          })}\n`);
+          process.exitCode = 2;
+        });
     } else {
       process.stderr.write('{"status":"failed","reason":"target_entry_argument_invalid"}\n');
       process.exitCode = 2;
@@ -80,9 +91,9 @@ async function runTargetWorkflowLive(scenario = "success") {
     error.issues = ["target_project_slug_id_missing"];
     throw error;
   }
-  return scenario === "repair"
-    ? runTargetRepairLive({ config })
-    : runTargetSuccessLive({ config });
+  if (scenario === "repair") return runTargetRepairLive({ config });
+  if (scenario === "delivery") return runTargetDeliveryLive({ config });
+  return runTargetSuccessLive({ config });
 }
 
 function stableReason(error) {

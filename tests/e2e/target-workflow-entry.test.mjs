@@ -78,3 +78,21 @@ test("target workflow live repair reports unverified before mutation when creden
   });
   assert.equal(result.stdout, "");
 });
+
+test("target workflow live delivery reports unverified before mutation when credentials are absent", () => {
+  const result = spawnSync(process.execPath, ["tools/e2e/target-workflow-entry.mjs", "--live-delivery"], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+  });
+
+  assert.equal(result.status, 2);
+  assert.deepEqual(JSON.parse(result.stderr), {
+    status: "unverified",
+    reason: "e2e_configuration_invalid",
+    issues: [
+      "linear_dev_token_missing", "linear_client_id_missing", "codex_api_key_missing",
+      "codex_base_url_missing", "codex_model_missing",
+    ],
+  });
+  assert.equal(result.stdout, "");
+});

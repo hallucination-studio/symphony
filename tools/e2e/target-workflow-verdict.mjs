@@ -21,6 +21,7 @@ const TARGET_EVIDENCE_FIELDS = new Set([
   "delivery",
   "scheduling",
   "cleanup",
+  "scenarioEvidence",
 ]);
 
 export { TARGET_WORKFLOW_SCENARIOS };
@@ -30,6 +31,10 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
   const evidence = input && typeof input === "object" ? input : {};
   if (![...Object.keys(evidence)].every((key) => TARGET_EVIDENCE_FIELDS.has(key))) {
     failures.add("evidence_shape_invalid");
+  }
+  if (evidence.scenarioEvidence !== undefined) {
+    if (containsSecret(evidence, secrets)) failures.add("secret_leaked");
+    return evaluateScenarioEvidence(evidence, failures);
   }
   const scenarioMap = new Map(
     Array.isArray(evidence.scenarios)
@@ -65,6 +70,51 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
     missingScenarios: Object.freeze(missingScenarios),
     failures: Object.freeze([...failures].sort()),
     scenarios: Object.freeze(scenarios),
+  });
+}
+
+function evaluateScenarioEvidence(evidence, failures, secrets) {
+  const scenarioEvidence = evidence.scenarioEvidence;
+  if (!scenarioEvidence || typeof scenarioEvidence !== "object" || Array.isArray(scenarioEvidence) ||
+      !TARGET_WORKFLOW_SCENARIOS.every((scenario) => scenarioEvidence[scenario] !== undefined) ||
+      Object.keys(scenarioEvidence).some((scenario) => !TARGET_WORKFLOW_SCENARIOS.includes(scenario))) {
+    failures.add("scenario_evidence_missing");
+  }
+  const scenarioResults = TARGET_WORKFLOW_SCENARIOS.map((scenario) => {
+    const value = scenarioEvidence?.[scenario];
+    const scenarioFailures = new Set();
+    if (scenario === "success") {
+      if (!validRoot(value?.root)) scenarioFailures.add("root_evidence_invalid");
+      if (!validStageExecutions(value ?? {}, scenarioFailures)) scenarioFailures.add("stage_evidence_invalid");
+      if (!validPlan(value ?? {}, scenarioFailures)) scenarioFailures.add("plan_evidence_invalid");
+      if (!validProgress(value ?? {}, scenarioFailures)) scenarioFailures.add("progress_evidence_invalid");
+    } else if (scenario === "repair_escalation") {
+      if (!validRoot(value?.root) || !validStageExecutions(value ?? {}, scenarioFailures) ||
+          !validRepairEscalation(value)) scenarioFailures.add("repair_escalation_evidence_invalid");
+      if (!validBreaker(value?.repairEscalation?.breaker)) scenarioFailures.add("convergence_breaker_bypassed");
+    } else if (scenario === "restart_recovery") {
+      if (!validRecovery(value?.recovery)) scenarioFailures.add("stale_result_accepted");
+    } else if (scenario === "delivery") {
+      if (!validRoot(value?.root) || !validStageExecutions(value ?? {}, scenarioFailures) || !validDelivery(value)) {
+        scenarioFailures.add("delivery_evidence_invalid");
+      }
+      if (!deliveryRevisionMatches(value)) scenarioFailures.add("delivery_revision_mismatch");
+    } else if (!validScheduling(value?.scheduling)) {
+      scenarioFailures.add("scheduling_evidence_invalid");
+    }
+    for (const failure of scenarioFailures) failures.add(failure);
+    return {
+      scenario,
+      verdict: scenarioFailures.size === 0 && value?.status === "passed" ? "passed" : "failed",
+    };
+  });
+  if (evidence.cleanup?.completed !== true) failures.add("cleanup_evidence_missing");
+  return Object.freeze({
+    verdict: failures.size === 0 ? "passed" : "failed",
+    missingScenarios: Object.freeze(TARGET_WORKFLOW_SCENARIOS.filter((scenario) =>
+      scenarioEvidence?.[scenario]?.status !== "passed")),
+    failures: Object.freeze([...failures].sort()),
+    scenarios: Object.freeze(scenarioResults),
   });
 }
 
