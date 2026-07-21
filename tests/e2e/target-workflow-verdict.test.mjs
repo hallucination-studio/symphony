@@ -86,6 +86,16 @@ test("target verdict rejects credentials and secret values in evidence", () => {
   assert.ok(result.failures.includes("secret_leaked"));
 });
 
+test("target verdict rejects unknown top-level evidence fields", () => {
+  const evidence = passingEvidence();
+  evidence.untrustedMetadata = { note: "ignored" };
+
+  const result = evaluateTargetWorkflowEvidence(evidence);
+
+  assert.equal(result.verdict, "failed");
+  assert.ok(result.failures.includes("evidence_shape_invalid"));
+});
+
 function passingEvidence() {
   const root = {
     projectId: "project-1",

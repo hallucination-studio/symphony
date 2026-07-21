@@ -9,12 +9,28 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const SECRET_KEY = /(?:api[_-]?key|authorization|cookie|credential|password|secret|token)/iu;
+const TARGET_EVIDENCE_FIELDS = new Set([
+  "status",
+  "root",
+  "scenarios",
+  "stageExecutions",
+  "plan",
+  "progress",
+  "recovery",
+  "repairEscalation",
+  "delivery",
+  "scheduling",
+  "cleanup",
+]);
 
 export { TARGET_WORKFLOW_SCENARIOS };
 
 export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
   const failures = new Set();
   const evidence = input && typeof input === "object" ? input : {};
+  if (![...Object.keys(evidence)].every((key) => TARGET_EVIDENCE_FIELDS.has(key))) {
+    failures.add("evidence_shape_invalid");
+  }
   const scenarioMap = new Map(
     Array.isArray(evidence.scenarios)
       ? evidence.scenarios.map((item) => [item?.scenario, item])
