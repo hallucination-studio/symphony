@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,7 @@ from openai_codex import InvalidRequestError
 
 from performer.backends.codex.codex_backend_impl import (
     SYMPHONY_BASE_INSTRUCTIONS,
+    STAGE_BASE_INSTRUCTIONS,
     CodexBackendImpl,
 )
 from performer.backends.provider_backend_interface import (
@@ -166,3 +169,59 @@ def test_nonempty_command_rules_fail_before_provider(root_command, field):
         CodexBackendImpl(sdk).run_root_turn(command)
     assert raised.value.code == "performer_profile_setting_unsupported"
     assert sdk.resumed == []
+
+
+def test_stage_starts_a_fresh_provider_context_and_never_resumes_a_thread(tmp_path: Path):
+    fixture_path = Path(__file__).parents[3] / "packages/contracts/fixtures/cross-language/valid/stage-context.json"
+    envelope = json.loads(fixture_path.read_text(encoding="utf-8"))["value"]
+    outcome = {
+        "kind": "plan_completed",
+        "plan_contract": {
+            "objective_summary": "Deliver the Stage.",
+            "included_scope": ["apps/performer"],
+            "excluded_scope": [],
+            "acceptance_criteria": [{
+                "criterion_key": "stage",
+                "statement": "The Stage completes once.",
+                "verification_method": "unit test",
+            }],
+            "work_nodes": [],
+            "verify_node": {
+                "title": "Verify Stage",
+                "acceptance_criteria": [{
+                    "criterion_key": "verify",
+                    "statement": "The Stage result is closed.",
+                    "verification_method": "unit test",
+                }],
+                "required_checks": [],
+            },
+        },
+    }
+    sdk = FakeCodex(thread=FakeThread(response=json.dumps(outcome)))
+
+    result = CodexBackendImpl(sdk).execute_stage(envelope, tmp_path, Event())
+
+    assert result["outcome"] == outcome
+    assert len(sdk.started) == 1
+    assert sdk.resumed == []
+    assert sdk.started[0]["base_instructions"] == STAGE_BASE_INSTRUCTIONS
+    prompt, kwargs = sdk.thread.calls[0]
+    assert envelope["workflow_context"]["root"]["objective"] in prompt
+    assert str(tmp_path) not in prompt
+    assert kwargs["cwd"] == str(tmp_path)
+
+
+def test_stage_start_failure_is_sanitized():
+    class FailedStart(FakeCodex):
+        def thread_start(self, **kwargs):
+            raise RuntimeError("Bearer sk-stage-private")
+
+    fixture_path = Path(__file__).parents[3] / "packages/contracts/fixtures/cross-language/valid/stage-context.json"
+    envelope = json.loads(fixture_path.read_text(encoding="utf-8"))["value"]
+
+    with pytest.raises(ProviderBackendError) as raised:
+        CodexBackendImpl(FailedStart()).execute_stage(envelope, Path("/tmp/workspace"), Event())
+
+    assert raised.value.code == "provider_stage_start_failed"
+    assert raised.value.sanitized_reason == "The Provider could not start the Stage."
+    assert "sk-stage-private" not in raised.value.sanitized_reason

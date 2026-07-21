@@ -20,5 +20,8 @@ def validate(name: str, value: Any) -> Any:
             "RootTurnEvent": "Root Turn event",
             "PerformerProfileControlMetadata": "Performer Profile control metadata",
             "PerformerProfileControlResult": "Performer Profile control result",
+            "StageContextEnvelope": "Stage context envelope",
+            "StageEvent": "Stage event",
+            "StageResult": "Stage result",
         }
         raise ValueError(f"invalid {labels.get(name, name)}") from exc

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+from threading import Event
 from typing import Any, Protocol
 
 
 class ProviderTurnDeadlineExpired(TimeoutError):
     pass
+
+
+class ProviderStageCanceled(Exception):
+    def __init__(self, sanitized_reason: str = "The Stage was canceled.") -> None:
+        super().__init__(sanitized_reason)
+        self.sanitized_reason = sanitized_reason
 
 
 class ProviderBackendError(RuntimeError):
@@ -39,3 +47,10 @@ class ProviderBackendInterface(Protocol):
     def open_conversation(self, command: dict[str, Any]) -> dict[str, Any]: ...
 
     def run_root_turn(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def execute_stage(
+        self,
+        envelope: dict[str, Any],
+        workspace_root: Path,
+        cancel_event: Event,
+    ) -> dict[str, Any]: ...
