@@ -223,6 +223,29 @@ test("reconciles an orphaned Work execution into a fresh retry", async () => {
   assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
 });
 
+test("rebuilds an active Work execution with its persisted timing after a clock change", async () => {
+  const gateway = new WorkGateway(workTree());
+  let now = "2026-07-21T09:00:00Z";
+  const input = { ...workInput(), options: { ...workInput().options, now: () => now } };
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileWork(input), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(input), { kind: "mutation_applied", step: "work_execution_created" });
+  const persisted = latestExecution(gateway);
+  now = "2026-07-21T12:00:00Z";
+
+  const ready = await execution.reconcileWork(input, undefined, undefined, persisted.stageExecutionId);
+
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("work_stage_not_ready");
+  assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).started_at, persisted.startedAt);
+  assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).deadline_at, persisted.deadlineAt);
+});
+
 test("restarts after a real Performer exit using a real Git worktree", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "symphony-work-recovery-"));
   const repository = path.join(root, "repository");

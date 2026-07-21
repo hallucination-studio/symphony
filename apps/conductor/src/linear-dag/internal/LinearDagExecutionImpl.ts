@@ -280,10 +280,13 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         ? latestExecution.stageExecutionId
         : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, (records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1)
           ?? `${input.rootIssueId}:work:${selected.issue.issue_id}:${(records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1}`;
+      const resumedExecution = latestExecution && !currentTerminal ? latestExecution : undefined;
       const built = await this.contextBuilder.buildWork({
         tree, cycle: cycleView.issue, plan: plan.issue, work: selected.issue, contract,
         dependencyState: dependencyState(selected, cycleView, plan.issue.issue_id), workspace: input.workspace, git: this.dependencies.git,
-        stageExecutionId, startedAt: input.options.now?.() ?? new Date().toISOString(), deadlineAt: workDeadline(input),
+        stageExecutionId,
+        startedAt: resumedExecution?.startedAt ?? input.options.now?.() ?? new Date().toISOString(),
+        deadlineAt: resumedExecution?.deadlineAt ?? workDeadline(input),
         ...(resolvedHumanInput === undefined ? {} : { resolvedHumanInput }), options: input.options,
       });
       if (latestExecution && !currentTerminal) {
