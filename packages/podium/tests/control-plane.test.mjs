@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { LinearAuthImpl } from "../dist/internal/linear-auth/LinearAuthImpl.js";
 import { ConductorBindingUseCase } from "../dist/internal/conductor-bindings/ConductorBindingUseCase.js";
+import { PodiumClientServicesImpl } from "../dist/internal/composition/PodiumClientServicesImpl.js";
 import { ProjectCatalogUseCase } from "../dist/internal/project-catalog/ProjectCatalogUseCase.js";
 import { SqlitePodiumStoreImpl } from "../dist/internal/storage/SqlitePodiumStoreImpl.js";
 
@@ -205,6 +206,74 @@ test("Binding creation labels one Project and rejects a second Binding", async (
     /conductor_binding_already_exists/,
   );
   store.close();
+});
+
+test("creating a Conductor initializes the Team before rebinding its Project label", async () => {
+  const events = [];
+  const installation = {
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  };
+  const project = {
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  };
+  let binding;
+  const store = {
+    getOnlyLinearCredential: () => installation,
+    getLinearCredential: (installationId) => installationId === installation.installationId ? installation : undefined,
+    getProject: (projectId) => projectId === project.projectId ? project : undefined,
+    getConductorBinding: () => undefined,
+    saveConductorBinding: (value) => { binding = value; },
+    setConductorDesiredState: (_bindingId, desiredState) => { binding.desiredState = desiredState; },
+  };
+  const host = {
+    async resolveRepository() {
+      return {
+        repositoryHandle: "repo-handle-1",
+        repositoryIdentity: "repository-1",
+        repositoryDisplayName: "Repository",
+        repositoryRoot: "/private/repository",
+        baseBranch: "main",
+      };
+    },
+    async startConductor() {},
+  };
+  const sdk = {
+    async initializeTargetTeamWorkflow(input) {
+      events.push(["team", input]);
+      return { kind: "already_applied", projectId: input.projectId, teamId: "team-1", canonicalStatuses: [], nativeDuplicate: {} };
+    },
+    async assignConductorProjectLabel(input) {
+      events.push(["project", input]);
+    },
+  };
+  const services = new PodiumClientServicesImpl(
+    store,
+    {},
+    {},
+    host,
+    () => "2026-07-16T00:00:00Z",
+    () => sdk,
+  );
+
+  await services.command({
+    kind: "create_conductor",
+    project_id: "project-1",
+    repository: { repository_handle: "repo-handle-1", base_branch: "main" },
+  });
+
+  assert.deepEqual(events, [
+    ["team", { projectId: "project-1", authorized: true }],
+    ["project", { projectId: "project-1", labelName: `symphony:conductor/${binding.conductorShortHash}` }],
+  ]);
 });
 
 test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {

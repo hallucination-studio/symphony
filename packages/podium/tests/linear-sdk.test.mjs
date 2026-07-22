@@ -1617,3 +1617,133 @@ test("workflow SDK mutations reject targets outside the requested Root tree", as
   assert.equal(await adapter.readWorkflowMutationOutcome(command), undefined);
   assert.equal(writes, 0);
 });
+
+function retainedWorkflowStates() {
+  return [
+    ["backlog-1", "Backlog", "backlog"],
+    ["todo-1", "Todo", "unstarted"],
+    ["progress-1", "In Progress", "started"],
+    ["review-1", "In Review", "started"],
+    ["done-1", "Done", "completed"],
+    ["canceled-1", "Canceled", "canceled"],
+    ["duplicate-1", "Duplicate", "duplicate"],
+  ].map(([id, name, type], position) => ({ id, name, type, position }));
+}
+
+function workflowSetupSdk(states, { failAfterCreate } = {}) {
+  const observations = { projects: 0, teams: 0, states: 0, updates: [], creates: [] };
+  const team = {
+    id: "team-1",
+    states: async () => {
+      observations.states += 1;
+      return connection(states);
+    },
+  };
+  return {
+    observations,
+    sdk: {
+      organization: Promise.resolve({ id: "organization-1" }),
+      project: async (projectId) => {
+        observations.projects += 1;
+        return {
+          id: projectId,
+          teams: async () => {
+            observations.teams += 1;
+            return connection([team]);
+          },
+        };
+      },
+      async updateWorkflowState(id, input) {
+        observations.updates.push({ id, input });
+        const state = states.find((value) => value.id === id);
+        state.name = input.name;
+      },
+      async createWorkflowState(input) {
+        observations.creates.push(input);
+        states.push({
+          id: `created-${states.length}`,
+          name: input.name,
+          type: input.type,
+          position: states.length,
+        });
+        if (failAfterCreate?.has(input.name)) throw new Error("network_write_lost");
+      },
+    },
+  };
+}
+
+test("Team workflow setup returns a bounded dry-run without explicit authorization", async () => {
+  const { sdk } = workflowSetupSdk(retainedWorkflowStates());
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: false });
+
+  assert.equal(result.kind, "dry_run");
+  assert.equal(result.currentStatuses.length, 7);
+  assert.equal(result.nativeDuplicate.category, "duplicate");
+  assert.equal(result.operations.length, 12);
+  assert.equal(result.operations.at(-1)?.name, "Failed");
+});
+
+test("Team workflow setup renames Backlog, creates missing states, and reads back each write", async () => {
+  const { sdk, observations } = workflowSetupSdk(retainedWorkflowStates());
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.initializeTargetTeamWorkflow({
+    projectId: "project-1",
+    authorized: true,
+  });
+
+  assert.equal(result.kind, "applied");
+  assert.equal(result.projectId, "project-1");
+  assert.equal(result.teamId, "team-1");
+  assert.equal(result.canonicalStatuses.length, 17);
+  assert.equal(result.nativeDuplicate.name, "Duplicate");
+  assert.deepEqual(observations.updates, [
+    { id: "backlog-1", input: { name: "Draft" } },
+  ]);
+  assert.deepEqual(observations.creates.map(({ name, type }) => ({ name, type })), [
+    ["Planning", "started"], ["Sealed", "started"], ["Executing", "started"],
+    ["Verifying", "started"], ["Needs Approval", "started"], ["Needs Info", "started"],
+    ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"],
+    ["Changes Required", "completed"], ["Failed", "canceled"],
+  ].map(([name, type]) => ({ name, type })));
+  assert.ok(observations.states >= 25);
+});
+
+test("Team workflow setup treats a lost create response as applied when read-back finds the state", async () => {
+  const { sdk } = workflowSetupSdk(retainedWorkflowStates(), {
+    failAfterCreate: new Set(["Planning"]),
+  });
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.initializeTargetTeamWorkflow({
+    projectId: "project-1",
+    authorized: true,
+  });
+
+  assert.equal(result.kind, "applied");
+  assert.equal(result.canonicalStatuses.find(({ name }) => name === "Planning")?.category, "started");
+});
+
+test("Team workflow setup is a no-op after the canonical catalog is complete", async () => {
+  const states = [
+    ["draft-1", "Draft", "backlog"], ["todo-1", "Todo", "unstarted"],
+    ["planning-1", "Planning", "started"], ["sealed-1", "Sealed", "started"],
+    ["executing-1", "Executing", "started"], ["verifying-1", "Verifying", "started"],
+    ["progress-1", "In Progress", "started"], ["review-1", "In Review", "started"],
+    ["approval-1", "Needs Approval", "started"], ["info-1", "Needs Info", "started"],
+    ["inconclusive-1", "Inconclusive", "started"], ["escalated-1", "Escalated", "started"],
+    ["succeeded-1", "Succeeded", "completed"], ["changes-1", "Changes Required", "completed"],
+    ["done-1", "Done", "completed"], ["canceled-1", "Canceled", "canceled"],
+    ["failed-1", "Failed", "canceled"], ["duplicate-1", "Duplicate", "duplicate"],
+  ].map(([id, name, type], position) => ({ id, name, type, position }));
+  const { sdk, observations } = workflowSetupSdk(states);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true });
+
+  assert.equal(result.kind, "already_applied");
+  assert.equal(observations.updates.length, 0);
+  assert.equal(observations.creates.length, 0);
+});

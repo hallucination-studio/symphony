@@ -11,6 +11,30 @@ export interface LinearProjectValue {
   updatedAt: string;
 }
 
+export interface LinearWorkflowStateValue {
+  statusId: string;
+  name: string;
+  category: "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
+  position: number;
+}
+
+export type TargetWorkflowInitializationResult =
+  | {
+      kind: "dry_run";
+      projectId: string;
+      teamId: string;
+      currentStatuses: readonly LinearWorkflowStateValue[];
+      operations: readonly import("../../../public/TargetWorkflowCatalog.js").TargetWorkflowInitializationOperation[];
+      nativeDuplicate: LinearWorkflowStateValue;
+    }
+  | {
+      kind: "already_applied" | "applied";
+      projectId: string;
+      teamId: string;
+      canonicalStatuses: readonly LinearWorkflowStateValue[];
+      nativeDuplicate: LinearWorkflowStateValue;
+    };
+
 export interface LinearClientInterface {
   listProjects(input: {
     cursor?: string;
@@ -21,6 +45,11 @@ export interface LinearClientInterface {
     projectId: string;
     labelName: string;
   }): Promise<void>;
+
+  initializeTargetTeamWorkflow(input: {
+    projectId: string;
+    authorized: boolean;
+  }): Promise<TargetWorkflowInitializationResult>;
 
   readProjectResolution(input: {
     conductorShortHash: string;

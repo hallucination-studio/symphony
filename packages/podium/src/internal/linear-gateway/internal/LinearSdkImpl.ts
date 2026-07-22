@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type {
   LinearClientInterface,
   PageInfo,
+  LinearWorkflowStateValue,
 } from "../api/LinearClientInterface.js";
 import type {
   LinearIssueValue,
@@ -22,6 +23,11 @@ import type {
   WorkflowCommentValue,
   WorkflowRelationValue,
 } from "../types.js";
+import {
+  inspectTargetWorkflowCatalog,
+  planTargetWorkflowInitialization,
+  type TargetWorkflowInitializationOperation,
+} from "../../../public/TargetWorkflowCatalog.js";
 
 const PAGE_LIMIT = 250;
 const MAX_TREE_NODES = 512;
@@ -149,6 +155,7 @@ const AGENT_WRITE_MARKER =
 const MANAGED_IDENTITY_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const MANAGED_RECORD_MARKER = "<!-- symphony managed-record\n";
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const HUMAN_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nkind: human\nhuman_kind: (plan_approval|planned_input|runtime_input)\ntarget_issue_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/;
 const WORK_METADATA =
@@ -392,6 +399,207 @@ export class LinearSdkImpl implements LinearClientInterface {
     ) {
       throw ambiguousError("linear_project_label_read_back_failed");
     }
+  }
+
+  async initializeTargetTeamWorkflow(input: {
+    projectId: string;
+    authorized: boolean;
+  }) {
+    if (!SAFE_ID.test(input.projectId)) {
+      throw new Error("linear_workflow_project_invalid");
+    }
+
+    const target = await this.#readTargetTeamWorkflow(input.projectId);
+    const plan = planTargetWorkflowInitialization({
+      teamId: target.teamId,
+      states: target.states,
+    });
+    if (plan.kind !== "ready") {
+      throw new Error(`linear_workflow_setup_${plan.reason}`);
+    }
+    if (input.authorized !== true) {
+      return {
+        kind: "dry_run" as const,
+        projectId: target.projectId,
+        teamId: target.teamId,
+        currentStatuses: target.states.map(linearWorkflowStateValueFromRaw),
+        operations: plan.operations,
+        nativeDuplicate: linearWorkflowStateValueFromRaw(
+          target.states.find(({ type }) => type === "duplicate")!,
+        ),
+      };
+    }
+    if (plan.operations.length === 0) {
+      return this.#targetWorkflowResult("already_applied", target);
+    }
+
+    for (const operation of plan.operations) {
+      await this.#applyTargetWorkflowOperation(
+        input.projectId,
+        target.teamId,
+        target.states,
+        plan.operations,
+        operation,
+      );
+    }
+    const finalTarget = await this.#readTargetTeamWorkflow(input.projectId);
+    const inspection = inspectTargetWorkflowCatalog(finalTarget.states);
+    if (inspection.kind !== "complete") {
+      throw ambiguousError("linear_workflow_setup_read_back_failed");
+    }
+    return {
+      kind: "applied" as const,
+      projectId: finalTarget.projectId,
+      teamId: finalTarget.teamId,
+      canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
+      nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
+    };
+  }
+
+  async #readTargetTeamWorkflow(projectId: string) {
+    const organization = await this.#client.organization;
+    if (organization.id !== this.organizationId) {
+      throw new Error("linear_workflow_organization_mismatch");
+    }
+    const project = await this.#client.project(projectId);
+    if (!project || project.id !== projectId) {
+      throw new Error("linear_workflow_project_mismatch");
+    }
+    const teams = await allNodes(project.teams({ first: 64 }), 64);
+    if (teams.length !== 1 || !SAFE_ID.test(teams[0]!.id)) {
+      throw new Error("linear_workflow_project_team_ambiguous");
+    }
+    const team = teams[0]!;
+    const states = await allNodes(team.states({ first: 64 }), 64);
+    return {
+      projectId,
+      teamId: team.id,
+      states: states.map((state) => {
+        if (
+          !SAFE_ID.test(state.id) ||
+          typeof state.name !== "string" ||
+          state.name.length === 0 ||
+          typeof state.type !== "string" ||
+          !Number.isFinite(state.position)
+        ) {
+          throw new Error("linear_workflow_status_catalog_invalid");
+        }
+        return {
+          id: state.id,
+          name: state.name,
+          type: state.type,
+          position: state.position,
+        };
+      }),
+    };
+  }
+
+  async #applyTargetWorkflowOperation(
+    projectId: string,
+    teamId: string,
+    initialStates: Array<{ id: string; name: string; type: string; position: number }>,
+    operations: readonly TargetWorkflowInitializationOperation[],
+    operation: TargetWorkflowInitializationOperation,
+  ): Promise<void> {
+    const current = await this.#readTargetTeamWorkflow(projectId);
+    if (current.teamId !== teamId) {
+      throw new Error("linear_workflow_project_team_changed");
+    }
+    assertTargetWorkflowPreconditions(current.states, initialStates, operations);
+    if (operation.kind === "rename") {
+      const source = current.states.find(({ id }) => id === operation.statusId);
+      if (source?.name === operation.name && source.type === operation.category) return;
+      if (
+        !source ||
+        source.name !== operation.expectedName ||
+        source.type !== operation.category
+      ) {
+        throw new Error("linear_workflow_setup_precondition_conflict");
+      }
+      if (current.states.some(({ name }) => name === operation.name)) {
+        throw new Error("linear_workflow_setup_precondition_conflict");
+      }
+      try {
+        await this.#client.updateWorkflowState(operation.statusId, {
+          name: operation.name,
+        });
+      } catch (error) {
+        const observed = await this.#readTargetTeamWorkflow(projectId).catch(() => undefined);
+        const readBack = observed?.teamId === teamId
+          ? observed.states.filter(({ id, name, type }) =>
+              id === operation.statusId && name === operation.name && type === operation.category)
+          : [];
+        if (readBack.length === 1) return;
+        throw error;
+      }
+      await this.#assertTargetWorkflowOperation(projectId, teamId, operation);
+      return;
+    }
+
+    const existing = current.states.find(({ name }) => name === operation.name);
+    if (existing) {
+      if (existing.type !== operation.category) {
+        throw new Error("linear_workflow_setup_precondition_conflict");
+      }
+      return;
+    }
+    try {
+      await this.#client.createWorkflowState({
+        teamId,
+        name: operation.name,
+        color: workflowStateColor(operation.category),
+        type: operation.category,
+      });
+    } catch (error) {
+      const observed = await this.#readTargetTeamWorkflow(projectId).catch(() => undefined);
+      const readBack = observed?.teamId === teamId
+        ? observed.states.filter(({ name, type }) =>
+            name === operation.name && type === operation.category)
+        : [];
+      if (readBack.length === 1) return;
+      throw error;
+    }
+    await this.#assertTargetWorkflowOperation(projectId, teamId, operation);
+  }
+
+  async #assertTargetWorkflowOperation(
+    projectId: string,
+    teamId: string,
+    operation: TargetWorkflowInitializationOperation,
+  ): Promise<void> {
+    const observed = await this.#readTargetTeamWorkflow(projectId);
+    if (observed.teamId !== teamId) {
+      throw ambiguousError("linear_workflow_setup_read_back_failed");
+    }
+    const matches = observed.states.filter(({ name, type, id }) =>
+      operation.kind === "rename"
+        ? id === operation.statusId && name === operation.name && type === operation.category
+        : name === operation.name && type === operation.category,
+    );
+    if (matches.length !== 1) {
+      throw ambiguousError("linear_workflow_setup_read_back_failed");
+    }
+  }
+
+  #targetWorkflowResult(
+    kind: "already_applied",
+    target: {
+      projectId: string;
+      teamId: string;
+      states: Array<{ id: string; name: string; type: string; position: number }>;
+    },
+  ) {
+    const inspection = inspectTargetWorkflowCatalog(target.states);
+    if (inspection.kind !== "complete") {
+      throw ambiguousError("linear_workflow_setup_read_back_failed");
+    }
+    return {
+      kind,
+      projectId: target.projectId,
+      teamId: target.teamId,
+      canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
+      nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
+    };
   }
 
   async readProjectResolution(input: {
@@ -2174,6 +2382,100 @@ function workflowStatusCategory(value: string):
   ) return value;
   if (value === "duplicate") return "canceled";
   throw new Error("linear_workflow_status_category_invalid");
+}
+
+function workflowStateColor(category: "backlog" | "unstarted" | "started" | "completed" | "canceled") {
+  switch (category) {
+    case "backlog": return "#95A2B3";
+    case "unstarted": return "#E2E2E2";
+    case "started": return "#F2C94C";
+    case "completed": return "#5E6AD2";
+    case "canceled": return "#EB5757";
+  }
+}
+
+function linearWorkflowStateValue(value: {
+  statusId: string;
+  name: string;
+  category: "backlog" | "unstarted" | "started" | "completed" | "canceled";
+  position?: number;
+}): LinearWorkflowStateValue {
+  if (value.position === undefined) {
+    throw new Error("linear_workflow_status_catalog_invalid");
+  }
+  return { ...value, position: value.position };
+}
+
+function linearWorkflowStateValueFromRaw(value: {
+  id: string;
+  name: string;
+  type: string;
+  position: number;
+}): LinearWorkflowStateValue {
+  return {
+    statusId: value.id,
+    name: value.name,
+    category: value.type === "duplicate"
+      ? "duplicate"
+      : workflowStatusCategory(value.type),
+    position: value.position,
+  };
+}
+
+function assertTargetWorkflowPreconditions(
+  currentStates: Array<{ id: string; name: string; type: string; position: number }>,
+  initialStates: Array<{ id: string; name: string; type: string; position: number }>,
+  operations: readonly TargetWorkflowInitializationOperation[],
+): void {
+  const expectedTypes = new Map<string, string>();
+  const expectedIds = new Map<string, string>();
+  const expectedNameIds = new Map<string, string>();
+  for (const state of initialStates) {
+    expectedTypes.set(state.name, state.type);
+    expectedIds.set(state.id, state.name);
+    expectedNameIds.set(state.name, state.id);
+    if (state.name === "Backlog") {
+      expectedTypes.set("Draft", state.type);
+      expectedNameIds.set("Draft", state.id);
+    }
+  }
+  for (const operation of operations) {
+    if (operation.kind === "create") expectedTypes.set(operation.name, operation.category);
+  }
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  for (const state of currentStates) {
+    const expectedType = expectedTypes.get(state.name);
+    const expectedName = expectedIds.get(state.id);
+    if (
+      ids.has(state.id) ||
+      names.has(state.name) ||
+      expectedType === undefined ||
+      expectedType !== state.type ||
+      (expectedName !== undefined &&
+        state.name !== expectedName &&
+        !(expectedName === "Backlog" && state.name === "Draft"))
+    ) {
+      throw new Error("linear_workflow_setup_precondition_conflict");
+    }
+    const expectedId = expectedNameIds.get(state.name);
+    if (expectedId !== undefined && expectedId !== state.id) {
+      throw new Error("linear_workflow_setup_precondition_conflict");
+    }
+    ids.add(state.id);
+    names.add(state.name);
+  }
+  for (const state of initialStates) {
+    const current = currentStates.find(({ id }) => id === state.id);
+    if (
+      !current ||
+      current.type !== state.type ||
+      (current.name !== state.name &&
+        !(state.name === "Backlog" && current.name === "Draft"))
+    ) {
+      throw new Error("linear_workflow_setup_precondition_conflict");
+    }
+  }
 }
 
 async function blockerValues(issue: Issue): Promise<LinearBlockerValue[]> {

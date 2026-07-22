@@ -172,6 +172,10 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       requiredString(repositoryBody.base_branch, "repository_base_branch_missing"),
     );
     const sdk = this.createLinearSdk(installation);
+    await sdk.initializeTargetTeamWorkflow({
+      projectId: requiredString(body.project_id, "project_id_missing"),
+      authorized: true,
+    });
     const binding = await new ConductorBindingUseCase(this.store, sdk, {
       createBindingId: randomUUID,
       createConductorId: randomUUID,
