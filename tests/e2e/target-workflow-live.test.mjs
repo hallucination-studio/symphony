@@ -31,6 +31,24 @@ test("target setup requires authorization and never creates a scenario scope", a
   assert.equal(events.at(-1)[1].event, "target_live_setup_verdict");
 });
 
+test("target setup rejects a ready result with an unknown mutation verdict", async () => {
+  await assert.rejects(
+    prepareTargetWorkflowSetup({
+      config: validConfig(true),
+      runId: "target-setup-invalid-verdict",
+      setup: { async initialize() {
+        return {
+          kind: "ready", organizationId: "organization-1", delegateActorId: "actor-1",
+          project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+          teamId: "team-1", todoStateId: "todo-1", workflow: "unexpected",
+          projectLabel: "already_applied", identityDigest: "a".repeat(16),
+        };
+      } },
+    }),
+    /target_live_setup_result_invalid/u,
+  );
+});
+
 test("target live success composes setup, production boundary, Git observation, and scope cleanup", async () => {
   const events = [];
   const facts = { root: { rootIssueId: "root-1", projectId: "project-1" } };

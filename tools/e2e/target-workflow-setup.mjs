@@ -4,6 +4,7 @@ import { createTargetWorkflowSetup } from "@symphony/podium";
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const MUTATION_KINDS = new Set(["applied", "already_applied"]);
 
 export async function prepareTargetWorkflowSetup({
   config,
@@ -37,6 +38,9 @@ export async function prepareTargetWorkflowSetup({
   }
   if (!result || typeof result !== "object" ||
       !["dry_run", "ready"].includes(result.kind) ||
+      (result.kind === "dry_run"
+        ? result.workflow !== "dry_run" || result.projectLabel !== "dry_run"
+        : !MUTATION_KINDS.has(result.workflow) || !MUTATION_KINDS.has(result.projectLabel)) ||
       !SAFE_ID.test(result.organizationId ?? "") || !SAFE_ID.test(result.delegateActorId ?? "") ||
       !SAFE_ID.test(result.project?.projectId ?? "") || !SAFE_ID.test(result.teamId ?? "") ||
       typeof result.identityDigest !== "string" || !/^[a-f0-9]{16}$/u.test(result.identityDigest)) {
