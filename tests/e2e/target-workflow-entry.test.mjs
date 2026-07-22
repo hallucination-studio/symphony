@@ -58,7 +58,8 @@ test("target workflow live success reports unverified before mutation when crede
     status: "unverified",
     reason: "e2e_configuration_invalid",
     issues: [
-      "linear_dev_token_missing", "linear_client_id_missing", "codex_api_key_missing",
+      "linear_dev_token_missing", "linear_client_id_missing", "linear_setup_authorization_missing",
+      "codex_api_key_missing",
       "codex_base_url_missing", "codex_model_missing",
     ],
   });
@@ -76,7 +77,8 @@ test("target workflow live repair reports unverified before mutation when creden
     status: "unverified",
     reason: "e2e_configuration_invalid",
     issues: [
-      "linear_dev_token_missing", "linear_client_id_missing", "codex_api_key_missing",
+      "linear_dev_token_missing", "linear_client_id_missing", "linear_setup_authorization_missing",
+      "codex_api_key_missing",
       "codex_base_url_missing", "codex_model_missing",
     ],
   });
@@ -94,7 +96,8 @@ test("target workflow live delivery reports unverified before mutation when cred
     status: "unverified",
     reason: "e2e_configuration_invalid",
     issues: [
-      "linear_dev_token_missing", "linear_client_id_missing", "codex_api_key_missing",
+      "linear_dev_token_missing", "linear_client_id_missing", "linear_setup_authorization_missing",
+      "codex_api_key_missing",
       "codex_base_url_missing", "codex_model_missing",
     ],
   });
@@ -143,7 +146,8 @@ test("target workflow all-run reports unverified before creating any scenario", 
     status: "unverified",
     reason: "e2e_configuration_invalid",
     issues: [
-      "linear_dev_token_missing", "linear_client_id_missing", "codex_api_key_missing",
+      "linear_dev_token_missing", "linear_client_id_missing", "linear_setup_authorization_missing",
+      "codex_api_key_missing",
       "codex_base_url_missing", "codex_model_missing",
     ],
   });

@@ -47,6 +47,8 @@ node tools/e2e/target-workflow-entry.mjs --dry-run
 
 - `SYMPHONY_E2E_LINEAR_DEV_TOKEN`
 - `LINEAR_CLIENT_ID`
+- `SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED` (`true` is required for credentialed
+  Team workflow initialization and Project Label rebind)
 - `SYMPHONY_E2E_PROJECT_SLUG_ID`
 - `SYMPHONY_E2E_CODEX_API_KEY`
 - `SYMPHONY_E2E_CODEX_BASE_URL`
