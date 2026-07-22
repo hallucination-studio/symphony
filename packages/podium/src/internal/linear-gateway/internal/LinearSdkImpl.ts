@@ -1753,17 +1753,18 @@ export class LinearSdkImpl implements LinearClientInterface {
       ? command.targetIssueId : command.sourceIssueId;
     const targetIssueId = command.relationKind === "blocked_by"
       ? command.sourceIssueId : command.targetIssueId;
-    const response = await rawRequest(`query WorkflowMutationRelation { issue(id: ${quoteGraphql(targetIssueId)}) { id project { id } inverseRelations(first: 64) { nodes { type issue { id project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } } } }`);
+    const response = await rawRequest(`query WorkflowMutationRelation { issue(id: ${quoteGraphql(targetIssueId)}) { id updatedAt project { id } inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id updatedAt project { id } } } pageInfo { hasNextPage } } } }`);
     const issue = (response as {
       data?: {
         issue?: {
           id?: string;
+          updatedAt?: string;
           project?: { id?: string };
           inverseRelations?: {
             nodes?: Array<{
               type?: string;
-              issue?: { id?: string; project?: { id?: string } };
-              relatedIssue?: { id?: string; project?: { id?: string } };
+              issue?: { id?: string; updatedAt?: string; project?: { id?: string } };
+              relatedIssue?: { id?: string; updatedAt?: string; project?: { id?: string } };
             }>;
             pageInfo?: { hasNextPage?: boolean };
           };
@@ -1774,16 +1775,18 @@ export class LinearSdkImpl implements LinearClientInterface {
         !issue.inverseRelations || issue.inverseRelations.pageInfo?.hasNextPage) {
       throw new Error("linear_workflow_relation_read_back_incomplete");
     }
-    const match = issue.inverseRelations.nodes?.some((relation) =>
+    const matchedRelation = issue.inverseRelations.nodes?.find((relation) =>
       relation.type === "blocks" && relation.issue?.id === sourceIssueId &&
       relation.issue.project?.id === command.expectedProjectId &&
       relation.relatedIssue?.id === targetIssueId &&
       relation.relatedIssue.project?.id === command.expectedProjectId,
-    ) ?? false;
+    );
     return {
       available: true,
-      value: match
-        ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: new Date().toISOString() }
+      value: matchedRelation
+        ? matchedRelation.issue?.updatedAt
+          ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: matchedRelation.issue.updatedAt }
+          : (() => { throw new Error("linear_workflow_relation_version_missing"); })()
         : undefined,
     };
   }

@@ -1726,6 +1726,40 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   assert.match(updatedInput.description, /managed_marker: work-marker/u);
 });
 
+test("workflow relation compact read-back returns the source Issue updatedAt", async () => {
+  const root = issue({ id: "root-1" });
+  const source = issue({ id: "source-1", parentId: "root-1" });
+  const target = issue({ id: "target-1", parentId: "root-1" });
+  const command = {
+    kind: "create_workflow_relation", writeId: "write-relation", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
+    sourceIssueId: "source-1", sourceExpectedRemoteVersion: source.updatedAt,
+    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks",
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (id) => id === "root-1" ? root : id === "source-1" ? source : target,
+    client: {
+      async rawRequest() {
+        return { data: { issue: {
+          id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" },
+          inverseRelations: {
+            nodes: [{
+              type: "blocks",
+              issue: { id: "source-1", updatedAt: "2026-07-16T00:00:04Z", project: { id: "project-1" } },
+              relatedIssue: { id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" } },
+            }],
+            pageInfo: { hasNextPage: false },
+          },
+        } } };
+      },
+    },
+  });
+
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "write-relation", targetIssueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z",
+  });
+});
+
 test("workflow SDK mutations reject targets outside the requested Root tree", async () => {
   let writes = 0;
   const root = issue({ id: "root-1" });
