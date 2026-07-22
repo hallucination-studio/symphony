@@ -1805,6 +1805,45 @@ test("workflow relation mutation batches source and target scope ancestry", asyn
   assert.equal(writes, 1);
 });
 
+test("workflow issue read-back batches child status facts", async () => {
+  const parent = issue({ id: "root-1" });
+  const childDescription = "Implement\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->";
+  const rawQueries = [];
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async () => parent,
+    client: {
+      async rawRequest(query) {
+        rawQueries.push(query);
+        if (query.includes("WorkflowMutationScope")) {
+          return { data: { issue: {
+            id: "root-1", project: { id: "project-1" }, parent: null,
+          } } };
+        }
+        assert.match(query, /WorkflowMutationChildren/u);
+        return { data: { issue: { children: {
+          nodes: [{
+            id: "work-1", updatedAt: "2026-07-22T00:00:00Z", project: { id: "project-1" },
+            parent: { id: "root-1" }, state: { id: "state-todo" }, title: "Implement",
+            description: childDescription,
+          }],
+          pageInfo: { hasNextPage: false },
+        } } } };
+      },
+    },
+  });
+  const command = {
+    kind: "create_workflow_issue", writeId: "write-child-read", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: parent.updatedAt,
+    parentExpectedRemoteVersion: parent.updatedAt, parentExpectedStatusId: "state-todo",
+    parentIssueId: "root-1", issueKind: "work", title: "Implement", description: "Implement",
+    statusId: "state-todo", managedMarker: "work-marker",
+  };
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "write-child-read", targetIssueId: "work-1", remoteVersion: "2026-07-22T00:00:00Z",
+  });
+  assert.equal(rawQueries.filter((query) => query.includes("WorkflowMutationChildren")).length, 1);
+});
+
 test("workflow SDK mutations reject targets outside the requested Root tree", async () => {
   let writes = 0;
   const root = issue({ id: "root-1" });

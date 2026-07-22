@@ -1780,8 +1780,14 @@ export class LinearSdkImpl implements LinearClientInterface {
     ))) return undefined;
     if (command.kind === "create_workflow_issue") {
       const parent = await this.#client.issue(command.parentIssueId);
-      const children = await allNodes(parent.children({ first: 64 }), 64);
-      const values = await Promise.all(children.map((child) => workflowMutationTargetValue(child)));
+      const rawValues = await this.#readWorkflowMutationChildren(parent, command.parentIssueId);
+      let values: Array<Awaited<ReturnType<typeof workflowMutationTargetValue>>>;
+      if (rawValues !== undefined) {
+        values = rawValues;
+      } else {
+        const children = await allNodes(parent.children({ first: 64 }), 64);
+        values = await Promise.all(children.map((child) => workflowMutationTargetValue(child)));
+      }
       const matches = values.filter((issue) => issue.managedMarker === command.managedMarker);
       if (matches.length > 1) throw new Error("linear_workflow_marker_ambiguous");
       const issue = matches[0];
@@ -1839,6 +1845,25 @@ export class LinearSdkImpl implements LinearClientInterface {
     return source
       ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: source.updatedAt }
       : undefined;
+  }
+
+  async #readWorkflowMutationChildren(
+    parent: Issue,
+    parentIssueId: string,
+  ): Promise<Array<Awaited<ReturnType<typeof workflowMutationTargetValue>>> | undefined> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) return undefined;
+    const response = await rawRequest(
+      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { children(first: 64) { nodes { id updatedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } } } }`,
+    );
+    const data = (response as {
+      data?: { issue?: { children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: unknown } } | null } | null };
+    }).data;
+    const children = data?.issue?.children;
+    if (!children || !Array.isArray(children.nodes) || children.pageInfo?.hasNextPage !== false) {
+      throw new Error("linear_workflow_children_read_back_incomplete");
+    }
+    return children.nodes.map((value) => workflowMutationRawTargetValue(value, parentIssueId));
   }
 
   async #readCompactWorkflowRelationOutcome(
@@ -2500,6 +2525,37 @@ async function workflowMutationTargetValue(issue: Issue) {
     ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
     statusId: state.id,
     title: issue.title,
+    description: managed.businessDescription,
+    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
+    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
+  };
+}
+
+function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: string) {
+  if (!value || typeof value !== "object") throw new Error("linear_workflow_target_invalid");
+  const raw = value as {
+    id?: unknown;
+    updatedAt?: unknown;
+    project?: { id?: unknown } | null;
+    parent?: { id?: unknown } | null;
+    state?: { id?: unknown } | null;
+    title?: unknown;
+    description?: unknown;
+  };
+  if (typeof raw.id !== "string" || typeof raw.updatedAt !== "string" ||
+      typeof raw.project?.id !== "string" || raw.parent?.id !== expectedParentIssueId ||
+      typeof raw.state?.id !== "string" || typeof raw.title !== "string" ||
+      typeof raw.description !== "string") {
+    throw new Error("linear_workflow_target_invalid");
+  }
+  const managed = parseManagedDescription(raw.description);
+  return {
+    issueId: raw.id,
+    projectId: raw.project.id,
+    updatedAt: raw.updatedAt,
+    parentIssueId: expectedParentIssueId,
+    statusId: raw.state.id,
+    title: raw.title,
     description: managed.businessDescription,
     ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
     ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
