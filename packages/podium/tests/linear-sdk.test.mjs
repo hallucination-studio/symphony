@@ -1774,6 +1774,37 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
   assert.equal(rawOperations.filter((query) => query.includes("WorkflowMutationScope")).length, 1);
 });
 
+test("workflow relation mutation batches source and target scope ancestry", async () => {
+  const root = issue({ id: "root-1" });
+  const source = issue({ id: "source-1", parentId: "root-1" });
+  const target = issue({ id: "target-1", parentId: "root-1" });
+  const rawQueries = [];
+  let writes = 0;
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (id) => id === "source-1" ? source : target,
+    async createIssueRelation() { writes += 1; return { success: true }; },
+    client: {
+      async rawRequest(query) {
+        rawQueries.push(query);
+        assert.match(query, /WorkflowMutationScopeBatch/u);
+        return { data: { issues: { nodes: [
+          { id: "source-1", project: { id: "project-1" }, parent: { id: "root-1", project: { id: "project-1" }, parent: null } },
+          { id: "target-1", project: { id: "project-1" }, parent: { id: "root-1", project: { id: "project-1" }, parent: null } },
+        ] } } };
+      },
+    },
+  });
+
+  await adapter.executeWorkflowMutation({
+    kind: "create_workflow_relation", writeId: "write-batch", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
+    sourceIssueId: "source-1", sourceExpectedRemoteVersion: source.updatedAt,
+    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks",
+  });
+  assert.equal(rawQueries.length, 1);
+  assert.equal(writes, 1);
+});
+
 test("workflow SDK mutations reject targets outside the requested Root tree", async () => {
   let writes = 0;
   const root = issue({ id: "root-1" });

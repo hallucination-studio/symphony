@@ -52,6 +52,22 @@ function workflowScopeSelection(depth: number): string {
   return `id project { id } parent { ${parent} }`;
 }
 
+function workflowScopeIssueBelongsToRoot(
+  issue: WorkflowScopeIssue,
+  projectId: string,
+  rootIssueId: string,
+): boolean {
+  const visited = new Set<string>();
+  let current: WorkflowScopeIssue | undefined = issue;
+  for (let depth = 0; current && depth <= 32; depth += 1) {
+    if (visited.has(current.id) || current.project?.id !== projectId) return false;
+    visited.add(current.id);
+    if (current.id === rootIssueId) return current.parent === null || current.parent === undefined;
+    current = current.parent ?? undefined;
+  }
+  return false;
+}
+
 const ROOT_HEADER_FACTS_QUERY = `
   query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!, $workflowCommentMarker: String!) {
     viewer { id }
@@ -1659,6 +1675,17 @@ export class LinearSdkImpl implements LinearClientInterface {
       : command.kind === "create_workflow_relation"
         ? [command.sourceIssueId, command.targetIssueId]
         : [command.target.targetIssueId];
+    if (targetIds.length > 1) {
+      const scoped = await this.#workflowMutationScopeBatch(
+        targetIds,
+        command.expectedProjectId,
+        command.rootIssueId,
+      );
+      if (scoped !== undefined) {
+        if (!scoped) throw preconditionConflictError();
+        return;
+      }
+    }
     for (const issueId of targetIds) {
       if (!(await this.#issueBelongsToWorkflowRoot(
         issueId,
@@ -1668,6 +1695,34 @@ export class LinearSdkImpl implements LinearClientInterface {
         throw preconditionConflictError();
       }
     }
+  }
+
+  async #workflowMutationScopeBatch(
+    issueIds: readonly string[],
+    projectId: string,
+    rootIssueId: string,
+  ): Promise<boolean | undefined> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) return undefined;
+    const ids = issueIds.map(quoteGraphql).join(", ");
+    const response = await rawRequest(
+      `query WorkflowMutationScopeBatch { issues(filter: { id: { in: [${ids}] } }) { nodes { ${workflowScopeSelection(32)} } } }`,
+    );
+    const data = (response as { data?: { issues?: { nodes?: unknown[] } } }).data;
+    if (!data?.issues || !Array.isArray(data.issues.nodes) || data.issues.nodes.length !== issueIds.length) {
+      return false;
+    }
+    const byId = new Map<string, WorkflowScopeIssue>();
+    for (const value of data.issues.nodes) {
+      if (!value || typeof value !== "object" || typeof (value as { id?: unknown }).id !== "string") {
+        return false;
+      }
+      byId.set((value as { id: string }).id, value as WorkflowScopeIssue);
+    }
+    return issueIds.every((issueId) => {
+      const issue = byId.get(issueId);
+      return issue ? workflowScopeIssueBelongsToRoot(issue, projectId, rootIssueId) : false;
+    });
   }
 
   async #issueBelongsToWorkflowRoot(
@@ -1687,15 +1742,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       if (!Object.prototype.hasOwnProperty.call(issue, "parent")) {
         return this.#issueBelongsToWorkflowRootViaSdk(issueId, projectId, rootIssueId);
       }
-      const visited = new Set<string>();
-      let current: WorkflowScopeIssue | undefined = issue;
-      for (let depth = 0; current && depth <= 32; depth += 1) {
-        if (visited.has(current.id) || current.project?.id !== projectId) return false;
-        visited.add(current.id);
-        if (current.id === rootIssueId) return current.parent === null || current.parent === undefined;
-        current = current.parent ?? undefined;
-      }
-      return false;
+      return workflowScopeIssueBelongsToRoot(issue, projectId, rootIssueId);
     }
     return this.#issueBelongsToWorkflowRootViaSdk(issueId, projectId, rootIssueId);
   }
