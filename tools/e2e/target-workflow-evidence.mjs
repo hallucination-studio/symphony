@@ -2,7 +2,7 @@ import { evaluateTargetWorkflowEvidence, TARGET_WORKFLOW_SCENARIOS } from "./tar
 
 const SCENARIO_SET = new Set(TARGET_WORKFLOW_SCENARIOS);
 
-export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = false } = {}) {
+export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = false, setup } = {}) {
   if (!Array.isArray(results) || results.length !== TARGET_WORKFLOW_SCENARIOS.length) {
     throw new Error("target_evidence_scenarios_invalid");
   }
@@ -22,6 +22,7 @@ export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = fal
   const scheduling = byScenario.get("scheduling");
   return Object.freeze({
     status: "failed",
+    setup: projectSetupEvidence(setup),
     scenarioEvidence: Object.freeze({
       success: Object.freeze({ ...baseFacts, status: byScenario.get("success")?.status }),
       repair_escalation: Object.freeze({ ...repairFacts, status: byScenario.get("repair_escalation")?.status }),
@@ -46,4 +47,17 @@ function factsOf(result) {
   return result?.facts && typeof result.facts === "object" && !Array.isArray(result.facts)
     ? result.facts
     : undefined;
+}
+
+function projectSetupEvidence(preparedSetup) {
+  const setup = preparedSetup?.setup;
+  const mutationKind = (value) => ["applied", "already_applied"].includes(value) ? value : "invalid";
+  return Object.freeze({
+    status: setup?.kind === "ready" ? "ready" : "invalid",
+    workflow: mutationKind(setup?.workflow),
+    projectLabel: mutationKind(setup?.projectLabel),
+    identityDigest: /^[a-f0-9]{16}$/u.test(setup?.identityDigest ?? "")
+      ? setup.identityDigest
+      : "invalid",
+  });
 }

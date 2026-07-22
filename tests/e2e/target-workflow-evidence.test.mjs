@@ -6,7 +6,11 @@ import { TARGET_WORKFLOW_SCENARIOS } from "../../tools/e2e/target-workflow-verdi
 
 test("target evidence assembly recomputes one correlated verdict from scenario facts", () => {
   const results = scenarioResults();
-  const { verdict } = evaluateTargetWorkflowResults({ results, cleanupCompleted: true });
+  const { verdict } = evaluateTargetWorkflowResults({
+    results,
+    cleanupCompleted: true,
+    setup: preparedSetup(),
+  });
   assert.equal(verdict.verdict, "passed");
   assert.deepEqual(verdict.missingScenarios, []);
   assert.deepEqual(verdict.failures, []);
@@ -15,7 +19,11 @@ test("target evidence assembly recomputes one correlated verdict from scenario f
 test("target evidence assembly keeps independent scenario Roots separate", () => {
   const results = scenarioResults();
   results[1] = { ...results[1], facts: { ...results[1].facts, root: { ...results[1].facts.root, rootIssueId: "root-2" } } };
-  const evidence = assembleTargetWorkflowEvidence({ results, cleanupCompleted: true });
+  const evidence = assembleTargetWorkflowEvidence({
+    results,
+    cleanupCompleted: true,
+    setup: preparedSetup(),
+  });
   assert.equal(evidence.scenarioEvidence.success.root.rootIssueId, "root-1");
   assert.equal(evidence.scenarioEvidence.repair_escalation.root.rootIssueId, "root-2");
 });
@@ -51,6 +59,17 @@ function scenarioResults() {
       selectedRootIds: ["root-1"], waitingRootIds: ["root-2"], maxConcurrentRoots: 1, blockerRespected: true,
     } },
   ];
+}
+
+function preparedSetup() {
+  return {
+    setup: {
+      kind: "ready",
+      workflow: "already_applied",
+      projectLabel: "already_applied",
+      identityDigest: "a".repeat(16),
+    },
+  };
 }
 
 function stage(executionId, stage, nodeIssueId, contextDigest) {

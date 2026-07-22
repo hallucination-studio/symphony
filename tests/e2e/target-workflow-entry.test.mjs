@@ -135,7 +135,13 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
 
 test("target workflow all-run prepares Linear setup once before every scenario", async () => {
   const events = [];
-  const preparedSetup = { setup: { identityDigest: "a".repeat(16) }, ids: { conductorShortHash: "abcdef123456" } };
+  const preparedSetup = {
+    setup: {
+      kind: "ready", workflow: "already_applied", projectLabel: "already_applied",
+      identityDigest: "a".repeat(16),
+    },
+    ids: { conductorShortHash: "abcdef123456" },
+  };
   const result = await runTargetWorkflowAllLive({
     config: {
       linear: { clientId: "client-1", projectSlugId: "project-1" },

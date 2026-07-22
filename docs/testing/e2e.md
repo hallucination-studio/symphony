@@ -72,7 +72,9 @@ read-only adapters 投影为闭合 facts DTO。
 
 最终 verdict 由 `evaluateTargetWorkflowResults` 从五个 scenario evidence 重新计算。它会
 拒绝缺失 correlation、stale result、错误 revision、未检查 convergence breaker、错误
-blocker 选择、cleanup 未完成和 secret leak。单场景失败不会跳过其余场景，最终状态仍为
+blocker 选择、cleanup 未完成和 secret leak。最终 evidence 还包含已完成授权 setup 的
+sanitized verdict、workflow/project-label mutation verdict 和 identity digest；不包含
+Linear IDs、SDK 对象或 mutation payload。单场景失败不会跳过其余场景，最终状态仍为
 `failed`。
 
 当前仓库没有 credentialed retained run。Restart boundary 已覆盖真实 Conductor 的重启、

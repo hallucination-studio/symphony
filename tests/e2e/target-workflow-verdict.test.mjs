@@ -22,6 +22,15 @@ test("target verdict accepts complete correlated workflow evidence", () => {
   });
 });
 
+test("target verdict rejects evidence without the authorized Linear setup checkpoint", () => {
+  const evidence = passingEvidence();
+  delete evidence.setup;
+  const result = evaluateTargetWorkflowEvidence(evidence);
+
+  assert.equal(result.verdict, "failed");
+  assert.ok(result.failures.includes("setup_evidence_invalid"));
+});
+
 test("target verdict rejects missing scenarios and mismatched Stage correlation", () => {
   const evidence = passingEvidence();
   evidence.scenarios = evidence.scenarios.filter(({ scenario }) => scenario !== "scheduling");
@@ -117,6 +126,12 @@ function passingEvidence() {
   ];
   return {
     status: "failed",
+    setup: {
+      status: "ready",
+      workflow: "already_applied",
+      projectLabel: "already_applied",
+      identityDigest: "a".repeat(16),
+    },
     root,
     scenarios: TARGET_WORKFLOW_SCENARIOS.map((scenario) => ({ scenario, status: "passed" })),
     stageExecutions,

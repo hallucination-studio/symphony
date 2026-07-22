@@ -11,6 +11,7 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const SECRET_KEY = /(?:api[_-]?key|authorization|cookie|credential|password|secret|token)/iu;
 const TARGET_EVIDENCE_FIELDS = new Set([
   "status",
+  "setup",
   "root",
   "scenarios",
   "stageExecutions",
@@ -33,6 +34,7 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
     failures.add("evidence_shape_invalid");
   }
   if (evidence.scenarioEvidence !== undefined) {
+    if (!validSetup(evidence.setup)) failures.add("setup_evidence_invalid");
     if (containsSecret(evidence, secrets)) failures.add("secret_leaked");
     return evaluateScenarioEvidence(evidence, failures);
   }
@@ -45,6 +47,7 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
     scenarioMap.get(scenario)?.status !== "passed");
 
   if (missingScenarios.length > 0) failures.add("scenario_evidence_missing");
+  if (!validSetup(evidence.setup)) failures.add("setup_evidence_invalid");
   if (!validRoot(evidence.root)) failures.add("root_evidence_invalid");
   if (!validStageExecutions(evidence, failures)) failures.add("stage_evidence_invalid");
   if (!validPlan(evidence, failures)) failures.add("plan_evidence_invalid");
@@ -130,6 +133,14 @@ function validRoot(root) {
     Object.keys(root.stageContextDigests.work).length > 0 &&
     Object.entries(root.stageContextDigests.work).every(([nodeIssueId, digest]) =>
       SAFE_ID.test(nodeIssueId) && DIGEST.test(digest));
+}
+
+function validSetup(setup) {
+  return setup && typeof setup === "object" && !Array.isArray(setup) &&
+    setup.status === "ready" &&
+    ["applied", "already_applied"].includes(setup.workflow) &&
+    ["applied", "already_applied"].includes(setup.projectLabel) &&
+    /^[a-f0-9]{16}$/u.test(setup.identityDigest ?? "");
 }
 
 function validStageExecutions(evidence, failures) {

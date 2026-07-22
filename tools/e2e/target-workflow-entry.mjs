@@ -164,7 +164,7 @@ export async function runTargetWorkflowAllLive({
       }));
     }
   }
-  const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true }, {
+  const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true, setup: preparedSetup }, {
     secrets: [config.secrets?.linearDevToken, config.secrets?.codexApiKey],
   });
   const result = Object.freeze({
