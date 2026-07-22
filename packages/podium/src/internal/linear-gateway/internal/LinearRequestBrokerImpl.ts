@@ -1,3 +1,5 @@
+import type { LinearRunBudgetImpl } from "./LinearRunBudgetImpl.js";
+
 export type InstallationRequestClass =
   | "control"
   | "workflow"
@@ -28,6 +30,8 @@ export class LinearRequestBrokerImpl {
   readonly #maxHighPriorityBurst: number;
   readonly #now: () => number;
   readonly #random: () => number;
+  readonly #budget: LinearRunBudgetImpl | undefined;
+  readonly #physicalReservations: Array<{ release(): void }> = [];
   #active = 0;
   #highPriorityBurst = 0;
   #generation = 0;
@@ -37,6 +41,7 @@ export class LinearRequestBrokerImpl {
   constructor(options: {
     maxConcurrent: number;
     maxHighPriorityBurst: number;
+    budget?: LinearRunBudgetImpl;
     now?: () => number;
     random?: () => number;
   }) {
@@ -51,12 +56,15 @@ export class LinearRequestBrokerImpl {
     this.#maxHighPriorityBurst = options.maxHighPriorityBurst;
     this.#now = options.now ?? Date.now;
     this.#random = options.random ?? Math.random;
+    this.#budget = options.budget;
   }
 
   observe(observation: {
     requestWindow?: WindowValue;
     complexityWindow?: WindowValue;
   }): void {
+    this.#budget?.observe(observation);
+    this.#physicalReservations.shift()?.release();
     if (observation.requestWindow) this.#requestWindow = { ...observation.requestWindow };
     if (observation.complexityWindow) this.#complexityWindow = { ...observation.complexityWindow };
     this.#drain();
@@ -66,6 +74,9 @@ export class LinearRequestBrokerImpl {
     if (requestClass === "background" && !this.#backgroundCapacityAvailable()) {
       throw new Error("linear_request_capacity_reserved");
     }
+    if (this.#budget) {
+      this.#physicalReservations.push(this.#budget.reserve({ requests: 1, complexity: 0 }));
+    }
   }
 
   run<T>(
@@ -73,6 +84,7 @@ export class LinearRequestBrokerImpl {
     run: () => Promise<T>,
     options: { deadlineAtMs?: number; coalesceKey?: string } = {},
   ): Promise<T> {
+    this.#budget?.recordLogicalOperation();
     try {
       this.assertPermit(requestClass);
     } catch (error) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LinearRequestBrokerImpl } from "../dist/internal/linear-gateway/internal/LinearRequestBrokerImpl.js";
+import { LinearRunBudgetImpl } from "../dist/internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
 test("installation broker reserves both rate windows from background reads", async () => {
   const broker = new LinearRequestBrokerImpl({ maxConcurrent: 2, maxHighPriorityBurst: 4 });
@@ -59,4 +60,29 @@ test("installation broker deadlines and retry jitter are bounded", async () => {
   await active;
   await assert.rejects(queued, /linear_request_budget_exhausted/u);
   assert.equal(broker.retryDelayMs({ attempt: 3, retryAfterMs: 900, maxDelayMs: 1000 }), 1000);
+});
+
+test("installation broker charges physical permits to a run budget", async () => {
+  const budget = new LinearRunBudgetImpl({ maxRequests: 2 });
+  budget.observe({
+    requestWindow: { limit: 10, remaining: 10, reset: 60 },
+    complexityWindow: { limit: 100, remaining: 100, reset: 60 },
+  });
+  const broker = new LinearRequestBrokerImpl({
+    maxConcurrent: 1,
+    maxHighPriorityBurst: 2,
+    budget,
+  });
+
+  assert.equal(await broker.run("mutation", async () => "first"), "first");
+  broker.observe({
+    requestWindow: { limit: 10, remaining: 9, reset: 60 },
+    complexityWindow: { limit: 100, remaining: 99, reset: 60 },
+  });
+  assert.equal(budget.snapshot().logicalOperations, 1);
+  assert.equal(budget.snapshot().physicalRequests, 2);
+  await assert.rejects(
+    broker.run("mutation", async () => "blocked"),
+    /linear_run_budget_exhausted/u,
+  );
 });
