@@ -129,6 +129,9 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
   assert.equal(result.status, "failed");
   assert.equal(result.verdict.verdict, "failed");
   assert.deepEqual(result.verdict.missingScenarios, ["repair_escalation"]);
+  assert.deepEqual(Object.keys(result.evidence.linearBudget.scenarios).sort(), TARGET_WORKFLOW_SCENARIOS.slice().sort());
+  assert.equal(result.evidence.linearBudget.setup.physicalRequests, 0);
+  assert.equal(result.evidence.linearBudget.total.physicalRequests, 0);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
 });

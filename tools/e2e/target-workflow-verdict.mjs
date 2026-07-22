@@ -23,6 +23,7 @@ const TARGET_EVIDENCE_FIELDS = new Set([
   "scheduling",
   "cleanup",
   "scenarioEvidence",
+  "linearBudget",
 ]);
 const TARGET_SETUP_FIELDS = new Set([
   "status",
@@ -38,6 +39,9 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
   const evidence = input && typeof input === "object" ? input : {};
   if (![...Object.keys(evidence)].every((key) => TARGET_EVIDENCE_FIELDS.has(key))) {
     failures.add("evidence_shape_invalid");
+  }
+  if (evidence.linearBudget !== undefined && !validLinearBudget(evidence.linearBudget)) {
+    failures.add("linear_budget_evidence_invalid");
   }
   if (evidence.scenarioEvidence !== undefined) {
     if (!validSetup(evidence.setup)) failures.add("setup_evidence_invalid");
@@ -80,6 +84,31 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
     failures: Object.freeze([...failures].sort()),
     scenarios: Object.freeze(scenarios),
   });
+}
+
+function validLinearBudget(value) {
+  const snapshot = (entry) => entry && typeof entry === "object" && !Array.isArray(entry) &&
+    Object.keys(entry).every((key) => [
+      "logicalOperations", "physicalRequests", "reservedRequests", "reservedComplexity",
+      "complexityConsumed", "rateLimited", "requestWindow", "complexityWindow", "status",
+    ].includes(key)) &&
+    (entry.status === "invalid" ||
+      ["logicalOperations", "physicalRequests", "reservedRequests", "reservedComplexity", "complexityConsumed"]
+        .every((key) => Number.isSafeInteger(entry[key]) && entry[key] >= 0) &&
+      typeof entry.rateLimited === "boolean" &&
+      (!entry.requestWindow || validWindow(entry.requestWindow)) &&
+      (!entry.complexityWindow || validWindow(entry.complexityWindow)));
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).every((key) => ["setup", "scenarios", "total"].includes(key)) &&
+    snapshot(value.setup) && snapshot(value.total) &&
+    value.scenarios && typeof value.scenarios === "object" && !Array.isArray(value.scenarios) &&
+    TARGET_WORKFLOW_SCENARIOS.every((scenario) => snapshot(value.scenarios[scenario]));
+}
+
+function validWindow(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).every((key) => ["limit", "remaining", "reset"].includes(key)) &&
+    Object.values(value).every((entry) => Number.isSafeInteger(entry) && entry >= 0);
 }
 
 function evaluateScenarioEvidence(evidence, failures, secrets) {

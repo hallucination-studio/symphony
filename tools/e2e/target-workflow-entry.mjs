@@ -148,6 +148,7 @@ export async function runTargetWorkflowAllLive({
     log,
     linearRunBudget,
   });
+  const budgetEvidence = { setup: linearRunBudget.snapshot(), scenarios: {} };
   const results = [];
   for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
     try {
@@ -165,15 +166,18 @@ export async function runTargetWorkflowAllLive({
         throw stableError("target_all_scenario_result_invalid");
       }
       results.push(result);
+      budgetEvidence.scenarios[scenario] = linearRunBudget.snapshot();
     } catch (error) {
       results.push(Object.freeze({
         scenario,
         status: "failed",
         reason: stableReason(error),
       }));
+      budgetEvidence.scenarios[scenario] = linearRunBudget.snapshot();
     }
   }
-  const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true, setup: preparedSetup }, {
+  budgetEvidence.total = linearRunBudget.snapshot();
+  const evaluated = evaluateTargetWorkflowResults({ results, cleanupCompleted: true, setup: preparedSetup, budgetEvidence }, {
     secrets: [config.secrets?.linearDevToken, config.secrets?.codexApiKey],
   });
   const result = Object.freeze({
