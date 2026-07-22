@@ -108,6 +108,26 @@ test("target workflow live delivery reports unverified before mutation when cred
   assert.equal(result.stdout, "");
 });
 
+test("target workflow all-run reports unverified before setup when credentials are absent", () => {
+  const result = spawnSync(process.execPath, ["tools/e2e/target-workflow-entry.mjs", "--live-all"], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+  });
+
+  assert.equal(result.status, 2);
+  assert.deepEqual(JSON.parse(result.stderr), {
+    status: "unverified",
+    reason: "e2e_configuration_invalid",
+    issues: [
+      "linear_dev_token_missing", "linear_client_id_missing", "linear_project_slug_id_missing",
+      "linear_setup_authorization_missing",
+      "codex_api_key_missing",
+      "codex_base_url_missing", "codex_model_missing",
+    ],
+  });
+  assert.equal(result.stdout, "");
+});
+
 test("target workflow all-run attempts every scenario and recomputes a failed verdict", async () => {
   const calls = [];
   const result = await runTargetWorkflowAllLive({
