@@ -31,6 +31,15 @@ test("target verdict rejects evidence without the authorized Linear setup checkp
   assert.ok(result.failures.includes("setup_evidence_invalid"));
 });
 
+test("target verdict rejects unknown fields inside setup evidence", () => {
+  const evidence = passingEvidence();
+  evidence.setup.untrustedMetadata = "must-not-cross";
+  const result = evaluateTargetWorkflowEvidence(evidence);
+
+  assert.equal(result.verdict, "failed");
+  assert.ok(result.failures.includes("setup_evidence_invalid"));
+});
+
 test("target verdict rejects missing scenarios and mismatched Stage correlation", () => {
   const evidence = passingEvidence();
   evidence.scenarios = evidence.scenarios.filter(({ scenario }) => scenario !== "scheduling");

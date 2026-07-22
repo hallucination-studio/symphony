@@ -24,6 +24,12 @@ const TARGET_EVIDENCE_FIELDS = new Set([
   "cleanup",
   "scenarioEvidence",
 ]);
+const TARGET_SETUP_FIELDS = new Set([
+  "status",
+  "workflow",
+  "projectLabel",
+  "identityDigest",
+]);
 
 export { TARGET_WORKFLOW_SCENARIOS };
 
@@ -137,6 +143,7 @@ function validRoot(root) {
 
 function validSetup(setup) {
   return setup && typeof setup === "object" && !Array.isArray(setup) &&
+    Object.keys(setup).every((key) => TARGET_SETUP_FIELDS.has(key)) &&
     setup.status === "ready" &&
     ["applied", "already_applied"].includes(setup.workflow) &&
     ["applied", "already_applied"].includes(setup.projectLabel) &&
