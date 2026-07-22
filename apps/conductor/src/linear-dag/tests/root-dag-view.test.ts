@@ -44,6 +44,7 @@ test("requires the exact Team status catalog and kind-restricted status subsets"
 
 test("accepts Linear's native Duplicate outside the canonical Symphony statuses", () => {
   const input = validInput();
+  input.tree.status_catalog.at(-1)!.position = input.tree.status_catalog[0]!.position;
   assert.doesNotThrow(() => buildRootDagView(input));
   assert.equal(input.tree.status_catalog.at(-1)?.name, "Duplicate");
 });

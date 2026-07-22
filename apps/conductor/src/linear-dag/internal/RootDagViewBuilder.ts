@@ -102,12 +102,11 @@ function validateStatusCatalog(catalog: LinearWorkflowTreeSnapshot["status_catal
   if (catalog.length !== statusDefinitions.length + 1) fail("status_catalog_incomplete");
   const ids = new Set<string>();
   const names = new Set<string>();
-  const positions = new Set<number>();
   const byName = new Map<string, LinearWorkflowTreeSnapshot["status_catalog"][number]>();
   for (const status of catalog) {
-    if (ids.has(status.status_id) || names.has(status.name) || positions.has(status.position)
+    if (ids.has(status.status_id) || names.has(status.name)
       || !Number.isInteger(status.position) || status.position < 0) fail("status_catalog_ambiguous");
-    ids.add(status.status_id); names.add(status.name); positions.add(status.position);
+    ids.add(status.status_id); names.add(status.name);
     byName.set(status.name, status);
   }
   for (const [name, category] of statusDefinitions) {
