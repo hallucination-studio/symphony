@@ -82,6 +82,20 @@ test("run budget counts logical operations and physical observations separately"
   });
 });
 
+test("permitPhysicalRequest releases its reservation on the matching observation", () => {
+  const budget = new LinearRunBudgetImpl();
+  budget.permitPhysicalRequest();
+  assert.equal(budget.snapshot().reservedRequests, 1);
+  budget.observe({ status: 200 });
+  assert.deepEqual(
+    {
+      physicalRequests: budget.snapshot().physicalRequests,
+      reservedRequests: budget.snapshot().reservedRequests,
+    },
+    { physicalRequests: 1, reservedRequests: 0 },
+  );
+});
+
 test("run budget resets the complexity baseline when the upstream window rolls over", () => {
   const budget = new LinearRunBudgetImpl({ maxRequests: 400 });
   budget.observe({ complexityWindow: { limit: 2_000_000, remaining: 1_999_000, reset: 1 } });
