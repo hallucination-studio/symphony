@@ -26,7 +26,7 @@ export function loadE2EConfig({
   const issues = [];
   const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
   const linearClientId = required(environment, INPUT_KEYS.linearClientId, "linear_client_id_missing", issues);
-  const projectSlugId = optional(environment, INPUT_KEYS.projectSlugId);
+  const projectSlugId = required(environment, INPUT_KEYS.projectSlugId, "linear_project_slug_id_missing", issues);
   const rawLinearSetupAuthorized = required(
     environment,
     INPUT_KEYS.linearSetupAuthorized,
@@ -51,8 +51,8 @@ export function loadE2EConfig({
     platform,
     linear: Object.freeze({
       clientId: linearClientId,
+      projectSlugId,
       setupAuthorized: linearSetupAuthorized,
-      ...(projectSlugId ? { projectSlugId } : {}),
     }),
     secrets: Object.freeze({ linearDevToken, codexApiKey }),
     codex: Object.freeze({ baseUrl, model }),
@@ -63,7 +63,7 @@ export function summarizeConfig(config) {
   return Object.freeze({
     platform: config.platform,
     linear: Object.freeze({
-      ...(config.linear.projectSlugId ? { projectSlugId: config.linear.projectSlugId } : {}),
+      projectSlugId: config.linear.projectSlugId,
     }),
     codex: Object.freeze({ ...config.codex }),
     secretPresence: Object.freeze({
@@ -103,11 +103,6 @@ function required(environment, key, issue, issues) {
     return undefined;
   }
   return value;
-}
-
-function optional(environment, key) {
-  const value = environment[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function validateBaseUrl(rawValue, { ci, allowedCodexHosts, issues }) {

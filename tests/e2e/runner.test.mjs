@@ -13,6 +13,7 @@ function validEnvironment() {
     SYMPHONY_E2E_LINEAR_DEV_TOKEN: "linear-dev-canary",
     LINEAR_CLIENT_ID: "linear-client-id",
     SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
+    SYMPHONY_E2E_PROJECT_SLUG_ID: "project-retained-123",
     SYMPHONY_E2E_CODEX_API_KEY: "codex-canary",
     SYMPHONY_E2E_CODEX_BASE_URL: "https://codex.example.test/v1",
     SYMPHONY_E2E_CODEX_MODEL: "codex-test-model",
@@ -29,7 +30,11 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
     baseUrl: "https://codex.example.test/v1",
     model: "codex-test-model",
   });
-  assert.deepEqual(config.linear, { clientId: "linear-client-id", setupAuthorized: true });
+  assert.deepEqual(config.linear, {
+    clientId: "linear-client-id",
+    projectSlugId: "project-retained-123",
+    setupAuthorized: true,
+  });
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("linear-dev-canary"), false);
   assert.equal(summary.includes("codex-canary"), false);
@@ -37,7 +42,7 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
   assert.match(summary, /"codexApiKey":true/u);
 });
 
-test("loads an optional retained Linear Project slug without making it a secret", () => {
+test("loads the retained Linear Project slug without making it a secret", () => {
   const environment = {
     ...validEnvironment(),
     SYMPHONY_E2E_PROJECT_SLUG_ID: "project-debug-123",
@@ -50,6 +55,17 @@ test("loads an optional retained Linear Project slug without making it a secret"
     setupAuthorized: true,
   });
   assert.equal(summarizeConfig(config).linear.projectSlugId, "project-debug-123");
+});
+
+test("requires the retained Linear Project slug before a live run", () => {
+  const environment = validEnvironment();
+  delete environment.SYMPHONY_E2E_PROJECT_SLUG_ID;
+
+  assert.throws(
+    () => loadE2EConfig({ environment, platform: "linux" }),
+    (error) => error.code === "e2e_configuration_invalid" &&
+      error.issues.includes("linear_project_slug_id_missing"),
+  );
 });
 
 test("configuration reports stable missing-input codes without values", () => {
@@ -135,6 +151,6 @@ test("doctor fails closed without printing a supplied secret canary", () => {
   assert.deepEqual(JSON.parse(result.stderr), {
     status: "unverified",
     reason: "e2e_configuration_invalid",
-      issues: ["linear_client_id_missing", "linear_setup_authorization_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
+      issues: ["linear_client_id_missing", "linear_project_slug_id_missing", "linear_setup_authorization_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
   });
 });
