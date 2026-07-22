@@ -507,27 +507,34 @@ export class LinearSdkImpl implements LinearClientInterface {
       throw new Error("linear_project_label_precondition_conflict");
     }
     let desiredLabelId = plan.desiredLabel?.labelId;
-    if (!desiredLabelId) {
-      const label = await this.#createProjectLabelWithReadBack(plan.labelName);
-      desiredLabelId = label.id;
+    let targetAlreadyAttached = freshPlan.desiredLabel?.assignedProjectIds.includes(plan.projectId) === true;
+    let mutationError: unknown;
+    try {
+      if (!desiredLabelId) {
+        const label = await this.#createProjectLabelWithReadBack(plan.labelName);
+        desiredLabelId = label.id;
+      }
+      for (const assignment of plan.detachAssignments) {
+        await this.#client.projectRemoveLabel(assignment.projectId, assignment.labelId);
+      }
+      // The compact final preflight is the single semantic read-back for the
+      // complete detach/create/attach delta.
+      if (!targetAlreadyAttached) {
+        await this.#client.projectAddLabel(plan.projectId, desiredLabelId);
+        targetAlreadyAttached = true;
+      }
+    } catch (error) {
+      mutationError = error;
     }
-    for (const assignment of plan.detachAssignments) {
-      await this.#client.projectRemoveLabel(assignment.projectId, assignment.labelId);
-      await this.#assertProjectLabelDetached(assignment.projectId, assignment.labelId);
-    }
-    const targetLabels = await this.#projectLabelsOnProject(plan.projectId);
-    if (!targetLabels.some(({ id }) => id === desiredLabelId)) {
-      await this.#client.projectAddLabel(plan.projectId, desiredLabelId);
-      await this.#assertProjectLabelAttached(plan.projectId, desiredLabelId);
-    }
-    const finalPlan = await this.preflightConductorProjectLabel(plan);
+    const finalPlan = await this.preflightConductorProjectLabel(plan).catch(() => undefined);
     if (
-      finalPlan.kind !== "ready" ||
+      finalPlan?.kind !== "ready" ||
       finalPlan.currentConductorLabels.length !== 1 ||
       finalPlan.currentConductorLabels[0]!.labelId !== desiredLabelId ||
       finalPlan.desiredLabel?.assignedProjectIds.length !== 1 ||
       finalPlan.desiredLabel.assignedProjectIds[0] !== plan.projectId
     ) {
+      if (mutationError) throw mutationError;
       throw ambiguousError("linear_project_label_read_back_failed");
     }
     return {
@@ -1949,26 +1956,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         : `${issue.id}:managed-record:${comment.id}`,
       body: comment.body,
     }));
-  }
-
-  async #projectLabelsOnProject(projectId: string): Promise<ProjectLabel[]> {
-    const project = await this.#client.project(projectId);
-    if (!project || project.id !== projectId) {
-      throw new Error("linear_project_mismatch");
-    }
-    return allNodes(project.labels({ first: PAGE_LIMIT }), 64);
-  }
-
-  async #assertProjectLabelDetached(projectId: string, labelId: string): Promise<void> {
-    if ((await this.#projectLabelsOnProject(projectId)).some(({ id }) => id === labelId)) {
-      throw ambiguousError("linear_project_label_read_back_failed");
-    }
-  }
-
-  async #assertProjectLabelAttached(projectId: string, labelId: string): Promise<void> {
-    if (!(await this.#projectLabelsOnProject(projectId)).some(({ id }) => id === labelId)) {
-      throw ambiguousError("linear_project_label_read_back_failed");
-    }
   }
 
   async #createProjectLabelWithReadBack(labelName: string): Promise<ProjectLabel> {

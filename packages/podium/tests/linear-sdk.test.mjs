@@ -1597,9 +1597,13 @@ test("Project label rebind moves a desired Conductor label from another Project"
 test("Project label rebind creates a missing desired label and proves attachment", async () => {
   let created = false;
   let attached = false;
+  let projectLabelReads = 0;
   const project = {
     id: "project-1",
-    labels: async () => connection(attached ? [label] : []),
+    labels: async () => {
+      projectLabelReads += 1;
+      return connection(attached ? [label] : []);
+    },
   };
   const label = {
     id: "label-created",
@@ -1636,6 +1640,7 @@ test("Project label rebind creates a missing desired label and proves attachment
   assert.equal(result.kind, "applied");
   assert.equal(created, true);
   assert.equal(attached, true);
+  assert.equal(projectLabelReads, 3);
 });
 
 test("workflow SDK mutations keep managed markers and use the explicit status and relation inputs", async () => {
