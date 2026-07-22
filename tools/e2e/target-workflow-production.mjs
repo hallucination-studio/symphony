@@ -64,7 +64,9 @@ export async function startTargetProductionBoundary({
       apiKey.fill(0);
     }
     const externalInputs = createTargetWorkflowExternalInputs({ developmentToken, fetch, log, budget: linearRunBudget });
-    const snapshotTransport = createTargetWorkflowSnapshotTransport({ developmentToken, fetch, log, budget: linearRunBudget });
+    const snapshotTransport = createTargetWorkflowSnapshotTransport({
+      developmentToken, fetch, log, budget: linearRunBudget, rootScoped: true,
+    });
     const runner = createRunner({
       externalInputs,
       snapshotTransport,

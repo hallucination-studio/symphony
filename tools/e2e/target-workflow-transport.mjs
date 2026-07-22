@@ -52,9 +52,46 @@ const ISSUE_DETAILS_QUERY = `
   }
 `;
 
+const ROOT_SCOPED_FACTS_QUERY = `
+  query TargetWorkflowRootScopedFacts($projectId: String!, $issueIds: [String!]!, $parentIds: [String!]) {
+    project(id: $projectId) {
+      id
+      issues(first: 250, filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }) {
+        nodes {
+          id
+          project { id }
+          parent { id }
+          state { name }
+          comments(first: 64) {
+            nodes { id body issue { id } }
+            pageInfo { hasNextPage }
+          }
+          inverseRelations(first: 250) {
+            nodes {
+              id
+              type
+              issue { id project { id } }
+              relatedIssue { id project { id } }
+            }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+const ROOT_SCOPED_ROOT_QUERY = ROOT_SCOPED_FACTS_QUERY
+  .replace("$issueIds: [String!]!, $parentIds: [String!]", "$issueIds: [String!]!")
+  .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { id: { in: $issueIds } }");
+const ROOT_SCOPED_CHILDREN_QUERY = ROOT_SCOPED_FACTS_QUERY
+  .replace("$issueIds: [String!]!, ", "")
+  .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { parent: { id: { in: $parentIds } } }");
+
 export function createTargetWorkflowSnapshotTransport({
   developmentToken,
   budget,
+  rootScoped = false,
   fetch = globalThis.fetch,
   log = () => {},
 } = {}) {
@@ -73,6 +110,7 @@ export function createTargetWorkflowSnapshotTransport({
   async function readSnapshot(input) {
     const request = validateInput(input);
     budget?.recordLogicalOperation();
+    if (rootScoped) return readRootScopedSnapshot(request);
     const projectIssues = await readProjectIssues(request.projectId);
     const issueById = new Map(projectIssues.map((issue) => [issue.id, issue]));
     const root = issueById.get(request.rootIssueId);
@@ -85,6 +123,81 @@ export function createTargetWorkflowSnapshotTransport({
       details.set(issue.id, await readIssueDetails(issue, request.projectId));
     }
     return normalizeSnapshot(request, scopedIssues, details);
+  }
+
+  async function readRootScopedSnapshot(request) {
+    const issues = [];
+    const details = new Map();
+    let issueIds = [request.rootIssueId];
+    let parentIds = [];
+    let depth = 0;
+    while (issueIds.length > 0 && depth <= 32) {
+      const facts = await readRootScopedBatch(request.projectId, issueIds, parentIds);
+      const next = [];
+      for (const fact of facts) {
+        const issue = issueHeader(fact, request.projectId);
+        if (issues.some(({ id }) => id === issue.id)) throw new Error("target_transport_duplicate_issue");
+        issues.push(issue);
+        details.set(issue.id, rootScopedDetails(fact, issue.id, request.projectId));
+        if (issues.length > MAX_ISSUES) throw new Error("target_transport_bound_exceeded");
+        if (depth === 0 && issue.id !== request.rootIssueId) throw new Error("target_transport_root_scope_invalid");
+        if (depth === 0 && issue.parentIssueId !== undefined) throw new Error("target_transport_root_scope_invalid");
+        next.push(issue.id);
+      }
+      if (depth === 0 && next.length !== 1) throw new Error("target_transport_root_scope_invalid");
+      parentIds = next;
+      issueIds = await readRootScopedChildIds(request.projectId, parentIds);
+      depth += 1;
+    }
+    if (depth > 32) throw new Error("target_transport_tree_depth_exceeded");
+    return normalizeSnapshot(request, issues, details);
+  }
+
+  async function readRootScopedBatch(projectId, issueIds, parentIds) {
+    const data = await graphql(parentIds.length === 0 ? ROOT_SCOPED_ROOT_QUERY : ROOT_SCOPED_FACTS_QUERY, {
+      projectId,
+      issueIds,
+      ...(parentIds.length > 0 ? { parentIds } : {}),
+    });
+    const project = object(data.project, "target_transport_response_invalid");
+    if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
+    const connection = pageConnection(project.issues, "target_transport_response_invalid");
+    if (connection.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
+    return connection.nodes;
+  }
+
+  async function readRootScopedChildIds(projectId, parentIds) {
+    const data = await graphql(ROOT_SCOPED_CHILDREN_QUERY, {
+      projectId,
+      parentIds,
+    });
+    const project = object(data.project, "target_transport_response_invalid");
+    if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
+    const connection = pageConnection(project.issues, "target_transport_response_invalid");
+    if (connection.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
+    return connection.nodes.map((value) => issueHeader(value, projectId).id);
+  }
+
+  function rootScopedDetails(value, issueId, projectId) {
+    const issue = object(value, "target_transport_response_invalid");
+    const comments = pageConnection(issue.comments, "target_transport_response_invalid");
+    const relations = pageConnection(issue.inverseRelations, "target_transport_response_invalid");
+    if (comments.hasNextPage || relations.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
+    const normalizedComments = [];
+    const markers = [];
+    for (const commentValue of comments.nodes) {
+      const normalized = normalizeComment(commentValue, issueId);
+      if (normalized?.comment) normalizedComments.push(normalized.comment);
+      if (normalized?.nodeMarker) markers.push(normalized.nodeMarker);
+    }
+    return {
+      comments: normalizedComments,
+      markers,
+      relations: relations.nodes.flatMap((relation) => {
+        const normalized = normalizeRelation(relation, issueId, projectId);
+        return normalized ? [normalized] : [];
+      }),
+    };
   }
 
   async function readProjectIssues(projectId) {

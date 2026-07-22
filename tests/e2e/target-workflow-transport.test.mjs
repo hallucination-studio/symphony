@@ -49,6 +49,24 @@ test("target transport consumes paginated Issue comments without duplicating rec
   assert.ok(calls.some(({ variables }) => variables.commentsAfter === "comment-cursor-1"));
 });
 
+test("root-scoped transport batches facts by tree depth instead of querying each Issue", async () => {
+  const calls = [];
+  const transport = createTargetWorkflowSnapshotTransport({
+    developmentToken: "linear-dev-token",
+    budget: new LinearRunBudgetImpl(),
+    rootScoped: true,
+    fetch: rootScopedFetch(calls),
+  });
+  const snapshot = await transport.readSnapshot({
+    rootIssueId: "root-1",
+    projectId: "project-1",
+    git: { head: "b".repeat(40), branch: "symphony/runs/root-1" },
+  });
+  assert.equal(snapshot.issues.length, 5);
+  assert.ok(calls.length <= 6);
+  assert.equal(calls.some(({ operation }) => operation === "TargetWorkflowIssueDetails"), false);
+});
+
 test("target transport keeps completed comment pagination closed while relations continue", async () => {
   const calls = [];
   const transport = createTargetWorkflowSnapshotTransport({
@@ -133,6 +151,31 @@ function fakeFetch(calls, options = {}) {
     }
     return response({ data: { issue: result } });
   };
+}
+
+function rootScopedFetch(calls) {
+  return async (_url, request) => {
+    const body = JSON.parse(request.body);
+    calls.push({ operation: body.operationName, variables: body.variables });
+    const variables = body.variables;
+    const allIds = ["root-1", "cycle-1", "plan-1", "work-1", "verify-1"];
+    const ids = variables.parentIds
+      ? allIds.filter((id) => variables.parentIds.includes(issue(id, "project-1", parentOf(id), stateOf(id)).parent?.id))
+      : variables.issueIds;
+    const nodes = ids.filter((id) => allIds.includes(id)).map((id) => ({
+      ...issue(id, "project-1", parentOf(id), stateOf(id)),
+      ...issueDetails(id),
+    }));
+    return response({ data: { project: { id: "project-1", issues: page(nodes) } } });
+  };
+}
+
+function parentOf(id) {
+  return id === "root-1" ? null : id === "cycle-1" ? "root-1" : "cycle-1";
+}
+
+function stateOf(id) {
+  return id === "root-1" ? "In Review" : id === "cycle-1" ? "Succeeded" : "Done";
 }
 
 function issue(id, projectId, parentId, state) {
