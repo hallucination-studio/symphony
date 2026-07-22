@@ -53,39 +53,39 @@ const ISSUE_DETAILS_QUERY = `
 `;
 
 const ROOT_SCOPED_FACTS_QUERY = `
-  query TargetWorkflowRootScopedFacts($projectId: String!, $issueIds: [String!]!, $parentIds: [String!]) {
+  query TargetWorkflowRootScopedFacts($projectId: String!, $issueIds: [String!], $parentIds: [String!], $issuesAfter: String, $commentsAfter: String, $relationsAfter: String) {
     project(id: $projectId) {
       id
-      issues(first: 250, filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }) {
+      issues(first: 250, after: $issuesAfter, filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }) {
         nodes {
           id
           project { id }
           parent { id }
           state { name }
-          comments(first: 64) {
+          comments(first: 64, after: $commentsAfter) {
             nodes { id body issue { id } }
-            pageInfo { hasNextPage }
+            pageInfo { hasNextPage endCursor }
           }
-          inverseRelations(first: 250) {
+          inverseRelations(first: 250, after: $relationsAfter) {
             nodes {
               id
               type
               issue { id project { id } }
               relatedIssue { id project { id } }
             }
-            pageInfo { hasNextPage }
+            pageInfo { hasNextPage endCursor }
           }
         }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 `;
 const ROOT_SCOPED_ROOT_QUERY = ROOT_SCOPED_FACTS_QUERY
-  .replace("$issueIds: [String!]!, $parentIds: [String!]", "$issueIds: [String!]!")
+  .replace("$issueIds: [String!], $parentIds: [String!], ", "$issueIds: [String!], ")
   .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { id: { in: $issueIds } }");
 const ROOT_SCOPED_CHILDREN_QUERY = ROOT_SCOPED_FACTS_QUERY
-  .replace("$issueIds: [String!]!, ", "")
+  .replace("$issueIds: [String!], ", "")
   .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { parent: { id: { in: $parentIds } } }");
 
 export function createTargetWorkflowSnapshotTransport({
@@ -154,35 +154,97 @@ export function createTargetWorkflowSnapshotTransport({
   }
 
   async function readRootScopedBatch(projectId, issueIds, parentIds) {
-    const data = await graphql(parentIds.length === 0 ? ROOT_SCOPED_ROOT_QUERY : ROOT_SCOPED_FACTS_QUERY, {
-      projectId,
-      issueIds,
-      ...(parentIds.length > 0 ? { parentIds } : {}),
-    });
-    const project = object(data.project, "target_transport_response_invalid");
-    if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
-    const connection = pageConnection(project.issues, "target_transport_response_invalid");
-    if (connection.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
-    return connection.nodes;
+    const factsById = new Map();
+    const pending = [{ issueIds, issuesAfter: null, commentsAfter: null, relationsAfter: null }];
+    const cursors = new Set();
+    let pages = 0;
+    while (pending.length > 0) {
+      const page = pending.shift();
+      if (++pages > 64) throw new Error("target_transport_pagination_bound_exceeded");
+      const data = await graphql(parentIds.length === 0 ? ROOT_SCOPED_ROOT_QUERY : ROOT_SCOPED_FACTS_QUERY, {
+        projectId,
+        issueIds: page.issueIds,
+        ...(parentIds.length > 0 ? { parentIds } : {}),
+        issuesAfter: page.issuesAfter,
+        commentsAfter: page.commentsAfter,
+        relationsAfter: page.relationsAfter,
+      });
+      const project = object(data.project, "target_transport_response_invalid");
+      if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
+      const connection = pageConnection(project.issues, "target_transport_response_invalid");
+      const issuesAfter = connection.hasNextPage
+        ? scopedNextCursor(connection, cursors, `${page.issueIds.join(",")}:issues`)
+        : null;
+      const nextGroups = new Map();
+      for (const value of connection.nodes) {
+        const issue = object(value, "target_transport_response_invalid");
+        const comments = pageConnection(issue.comments, "target_transport_response_invalid");
+        const relations = pageConnection(issue.inverseRelations, "target_transport_response_invalid");
+        const existing = factsById.get(issue.id);
+        const merged = existing ?? { ...issue, comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }, inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } };
+        for (const comment of comments.nodes) {
+          if (!merged.comments.nodes.some(({ id }) => id === comment.id)) merged.comments.nodes.push(comment);
+        }
+        for (const relation of relations.nodes) {
+          if (!merged.inverseRelations.nodes.some(({ id }) => id === relation.id)) merged.inverseRelations.nodes.push(relation);
+        }
+        factsById.set(issue.id, merged);
+        const commentsCursor = comments.hasNextPage
+          ? scopedNextCursor(comments, cursors, `${issue.id}:comments`)
+          : null;
+        const relationsCursor = relations.hasNextPage
+          ? scopedNextCursor(relations, cursors, `${issue.id}:relations`)
+          : null;
+        if (commentsCursor !== null || relationsCursor !== null) {
+          const key = `${commentsCursor ?? ""}\u0000${relationsCursor ?? ""}`;
+          const group = nextGroups.get(key) ?? { issueIds: [], commentsAfter: commentsCursor, relationsAfter: relationsCursor };
+          group.issueIds.push(issue.id);
+          nextGroups.set(key, group);
+        }
+      }
+      if (issuesAfter !== null) {
+        pending.push({ issueIds: page.issueIds, issuesAfter, commentsAfter: null, relationsAfter: null });
+      }
+      pending.push(...nextGroups.values());
+    }
+    return [...factsById.values()];
+
+    function scopedNextCursor(connection, seen, scope) {
+      if (!isCursor(connection.endCursor) || seen.has(`${scope}:${connection.endCursor}`)) {
+        throw new Error("target_transport_cursor_invalid");
+      }
+      seen.add(`${scope}:${connection.endCursor}`);
+      return connection.endCursor;
+    }
   }
 
   async function readRootScopedChildIds(projectId, parentIds) {
-    const data = await graphql(ROOT_SCOPED_CHILDREN_QUERY, {
-      projectId,
-      parentIds,
-    });
-    const project = object(data.project, "target_transport_response_invalid");
-    if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
-    const connection = pageConnection(project.issues, "target_transport_response_invalid");
-    if (connection.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
-    return connection.nodes.map((value) => issueHeader(value, projectId).id);
+    const ids = [];
+    const seen = new Set();
+    const cursors = new Set();
+    let after = null;
+    for (let pageNumber = 0; pageNumber < 64; pageNumber += 1) {
+      const data = await graphql(ROOT_SCOPED_CHILDREN_QUERY, { projectId, parentIds, issuesAfter: after });
+      const project = object(data.project, "target_transport_response_invalid");
+      if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
+      const connection = pageConnection(project.issues, "target_transport_response_invalid");
+      for (const value of connection.nodes) {
+        const id = issueHeader(value, projectId).id;
+        if (seen.has(id)) throw new Error("target_transport_duplicate_issue");
+        seen.add(id);
+        ids.push(id);
+        if (ids.length > MAX_ISSUES) throw new Error("target_transport_bound_exceeded");
+      }
+      if (!connection.hasNextPage) return ids;
+      after = nextCursor(connection, cursors);
+    }
+    throw new Error("target_transport_pagination_bound_exceeded");
   }
 
   function rootScopedDetails(value, issueId, projectId) {
     const issue = object(value, "target_transport_response_invalid");
     const comments = pageConnection(issue.comments, "target_transport_response_invalid");
     const relations = pageConnection(issue.inverseRelations, "target_transport_response_invalid");
-    if (comments.hasNextPage || relations.hasNextPage) throw new Error("target_transport_root_scope_incomplete");
     const normalizedComments = [];
     const markers = [];
     for (const commentValue of comments.nodes) {

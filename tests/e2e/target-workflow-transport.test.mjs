@@ -40,11 +40,12 @@ test("target transport consumes paginated Issue comments without duplicating rec
     developmentToken: "linear-dev-token",
     fetch: fakeFetch(calls, { paginateComments: true }),
   });
-  const snapshot = await transport.readSnapshot({
+  let snapshot;
+  try { snapshot = await transport.readSnapshot({
     rootIssueId: "root-1",
     projectId: "project-1",
     git: { head: "b".repeat(40), branch: "symphony/runs/root-1" },
-  });
+  }); } catch (error) { console.error(calls); throw error; }
   assert.equal(new Set(snapshot.comments.map(({ id }) => id)).size, snapshot.comments.length);
   assert.ok(calls.some(({ variables }) => variables.commentsAfter === "comment-cursor-1"));
 });
@@ -65,6 +66,29 @@ test("root-scoped transport batches facts by tree depth instead of querying each
   assert.equal(snapshot.issues.length, 5);
   assert.ok(calls.length <= 6);
   assert.equal(calls.some(({ operation }) => operation === "TargetWorkflowIssueDetails"), false);
+});
+
+test("root-scoped transport paginates nested comments and relations by cursor groups", async () => {
+  const calls = [];
+  const budget = new LinearRunBudgetImpl();
+  const transport = createTargetWorkflowSnapshotTransport({
+    developmentToken: "linear-dev-token",
+    budget,
+    rootScoped: true,
+    fetch: rootScopedFetch(calls, { paginateRootDetails: true }),
+  });
+  const snapshot = await transport.readSnapshot({
+    rootIssueId: "root-1",
+    projectId: "project-1",
+    git: { head: "b".repeat(40), branch: "symphony/runs/root-1" },
+  });
+
+  assert.equal(snapshot.issues.length, 5);
+  assert.equal(snapshot.comments.length, 12);
+  assert.equal(snapshot.relations.length, 2);
+  assert.equal(budget.snapshot().physicalRequests, calls.length);
+  assert.ok(calls.some(({ variables }) => variables.commentsAfter === "root-comment-cursor"));
+  assert.ok(calls.some(({ variables }) => variables.relationsAfter === "work-relation-cursor"));
 });
 
 test("target transport keeps completed comment pagination closed while relations continue", async () => {
@@ -153,21 +177,35 @@ function fakeFetch(calls, options = {}) {
   };
 }
 
-function rootScopedFetch(calls) {
+function rootScopedFetch(calls, options = {}) {
   return async (_url, request) => {
     const body = JSON.parse(request.body);
     calls.push({ operation: body.operationName, variables: body.variables });
     const variables = body.variables;
     const allIds = ["root-1", "cycle-1", "plan-1", "work-1", "verify-1"];
     const ids = variables.parentIds
-      ? allIds.filter((id) => variables.parentIds.includes(issue(id, "project-1", parentOf(id), stateOf(id)).parent?.id))
+      ? allIds.filter((id) => variables.parentIds.includes(issue(id, "project-1", parentOf(id), stateOf(id)).parent?.id) &&
+          (!variables.issueIds || variables.issueIds.includes(id)))
       : variables.issueIds;
-    const nodes = ids.filter((id) => allIds.includes(id)).map((id) => ({
+    let nodes = ids.filter((id) => allIds.includes(id)).map((id) => ({
       ...issue(id, "project-1", parentOf(id), stateOf(id)),
       ...issueDetails(id),
     }));
+    if (options.paginateRootDetails) {
+      nodes = nodes.map((node) => ({
+        ...node,
+        comments: rootPage(node.comments, variables.commentsAfter, node.id === "root-1" ? "root-comment-cursor" : undefined),
+        inverseRelations: rootPage(node.inverseRelations, variables.relationsAfter, node.id === "work-1" ? "work-relation-cursor" : undefined),
+      }));
+    }
     return response({ data: { project: { id: "project-1", issues: page(nodes) } } });
   };
+}
+
+function rootPage(connection, after, cursor) {
+  if (!cursor) return connection;
+  if (after === cursor) return page(connection.nodes.slice(1));
+  return page(connection.nodes.slice(0, 1), cursor);
 }
 
 function parentOf(id) {
