@@ -7,7 +7,6 @@ const DEFAULT_MAX_REQUESTS = 400;
 const DEFAULT_MAX_COMPLEXITY = 100_000;
 const DEFAULT_PHYSICAL_REQUEST_COMPLEXITY = 10_000;
 const DEFAULT_CONSUMPTION_FRACTION = 0.4;
-const DEFAULT_PROTECTED_FRACTION = 0.25;
 
 export interface LinearRunBudgetSnapshot {
   logicalOperations: number;
@@ -29,11 +28,11 @@ export class LinearRunBudgetImpl {
   readonly #maxComplexity: number;
   readonly #physicalRequestComplexity: number;
   readonly #consumptionFraction: number;
-  readonly #protectedFraction: number;
   readonly #now: () => number;
   #requestWindow: LinearRequestWindowObservation | undefined;
   #complexityWindow: LinearRequestWindowObservation | undefined;
-  #previousComplexityRemaining: number | undefined;
+  #complexityBaselineRemaining: number | undefined;
+  #minimumComplexityRemaining: number | undefined;
   #logicalOperations = 0;
   #physicalRequests = 0;
   #reservedRequests = 0;
@@ -47,22 +46,19 @@ export class LinearRunBudgetImpl {
     maxComplexity?: number;
     physicalRequestComplexity?: number;
     consumptionFraction?: number;
-    protectedFraction?: number;
     now?: () => number;
   } = {}) {
     this.#maxRequests = options.maxRequests ?? DEFAULT_MAX_REQUESTS;
     this.#maxComplexity = options.maxComplexity ?? DEFAULT_MAX_COMPLEXITY;
     this.#physicalRequestComplexity = options.physicalRequestComplexity ?? DEFAULT_PHYSICAL_REQUEST_COMPLEXITY;
     this.#consumptionFraction = options.consumptionFraction ?? DEFAULT_CONSUMPTION_FRACTION;
-    this.#protectedFraction = options.protectedFraction ?? DEFAULT_PROTECTED_FRACTION;
     this.#now = options.now ?? Date.now;
     if (!Number.isSafeInteger(this.#maxRequests) || this.#maxRequests < 1 ||
         this.#maxRequests > DEFAULT_MAX_REQUESTS ||
         !Number.isSafeInteger(this.#maxComplexity) || this.#maxComplexity < 1 ||
         !Number.isSafeInteger(this.#physicalRequestComplexity) || this.#physicalRequestComplexity < 0 ||
         this.#physicalRequestComplexity > this.#maxComplexity ||
-        !isFraction(this.#consumptionFraction) || !isFraction(this.#protectedFraction) ||
-        this.#consumptionFraction + this.#protectedFraction > 1) {
+        !isFraction(this.#consumptionFraction)) {
       throw new Error("linear_run_budget_invalid");
     }
   }
@@ -73,16 +69,27 @@ export class LinearRunBudgetImpl {
     if (observation.requestWindow) this.#requestWindow = { ...observation.requestWindow };
     if (observation.complexityWindow) {
       const remaining = observation.complexityWindow.remaining;
-      if (remaining !== undefined && this.#previousComplexityRemaining !== undefined &&
-          remaining <= this.#previousComplexityRemaining) {
-        this.#complexityConsumed += this.#previousComplexityRemaining - remaining;
+      if (remaining !== undefined) {
+        if (observation.complexityWindow.limit === remaining) {
+          this.#complexityBaselineRemaining = remaining;
+          this.#minimumComplexityRemaining = remaining;
+          this.#complexityConsumed = 0;
+        } else if (this.#complexityBaselineRemaining === undefined) {
+          this.#complexityBaselineRemaining = remaining;
+          this.#minimumComplexityRemaining = remaining;
+        } else {
+          this.#minimumComplexityRemaining = Math.min(this.#minimumComplexityRemaining ?? remaining, remaining);
+          this.#complexityConsumed = Math.max(
+            this.#complexityConsumed,
+            this.#complexityBaselineRemaining - this.#minimumComplexityRemaining,
+          );
+        }
       }
-      this.#previousComplexityRemaining = remaining ?? this.#previousComplexityRemaining;
       this.#complexityWindow = { ...observation.complexityWindow };
     }
     if (observation.status === 429) {
-      const resetSeconds = observation.requestWindow?.reset ?? observation.complexityWindow?.reset ?? 0;
-      this.#rateLimitedUntilMs = this.#now() + resetSeconds * 1000;
+      const reset = observation.requestWindow?.reset ?? observation.complexityWindow?.reset;
+      this.#rateLimitedUntilMs = rateLimitDeadlineMs(reset, this.#now());
     }
   }
 
@@ -136,17 +143,21 @@ export class LinearRunBudgetImpl {
   #requestCapacity(): number {
     const configured = Math.min(this.#maxRequests, this.#observedConsumptionCapacity(this.#requestWindow, this.#maxRequests));
     const remaining = this.#requestWindow?.remaining;
-    const protectedCapacity = this.#protectedCapacity(this.#requestWindow);
-    const observed = remaining === undefined ? configured : Math.max(0, remaining - protectedCapacity);
-    return Math.max(0, Math.min(configured, observed) - this.#physicalRequests - this.#reservedRequests);
+    const runCapacity = configured - this.#physicalRequests - this.#reservedRequests;
+    const windowCapacity = remaining === undefined
+      ? runCapacity
+      : remaining - this.#reservedRequests;
+    return Math.max(0, Math.min(runCapacity, windowCapacity));
   }
 
   #complexityCapacity(): number {
     const configured = this.#observedConsumptionCapacity(this.#complexityWindow, this.#maxComplexity);
     const remaining = this.#complexityWindow?.remaining;
-    const protectedCapacity = this.#protectedCapacity(this.#complexityWindow);
-    const observed = remaining === undefined ? configured : Math.max(0, remaining - protectedCapacity);
-    return Math.max(0, observed - this.#complexityConsumed - this.#reservedComplexity);
+    const runCapacity = configured - this.#complexityConsumed - this.#reservedComplexity;
+    const windowCapacity = remaining === undefined
+      ? runCapacity
+      : remaining - this.#reservedComplexity;
+    return Math.max(0, Math.min(runCapacity, windowCapacity));
   }
 
   #observedConsumptionCapacity(window: LinearRequestWindowObservation | undefined, fallback: number): number {
@@ -154,10 +165,13 @@ export class LinearRunBudgetImpl {
     return Math.floor(window.limit * this.#consumptionFraction);
   }
 
-  #protectedCapacity(window: LinearRequestWindowObservation | undefined): number {
-    if (window?.limit === undefined) return 0;
-    return Math.ceil(window.limit * this.#protectedFraction);
-  }
+}
+
+function rateLimitDeadlineMs(reset: number | undefined, nowMs: number): number {
+  if (!Number.isSafeInteger(reset) || reset === undefined) return nowMs;
+  if (reset >= 1_000_000_000_000) return reset;
+  if (reset >= 1_000_000_000) return reset * 1000;
+  return nowMs + reset * 1000;
 }
 
 function isFraction(value: number): boolean {

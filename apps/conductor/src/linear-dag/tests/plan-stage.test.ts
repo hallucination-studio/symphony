@@ -59,6 +59,8 @@ test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", 
   };
   const execution = new LinearDagExecutionImpl({ linear: fake, git: fake.git, performer });
   const input = bootstrapInput();
+  input.options.stageId = (_root: string, _cycle: string, attempt: number) =>
+    `stage-${"a".repeat(110)}-${attempt}`;
   const result = await execution.executeBootstrapPlan(input);
 
   assert.equal(result.kind, "awaiting_approval");
@@ -67,7 +69,9 @@ test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", 
   assert.equal(fake.tree.issues.find((issue) => issue.issue_kind === "root")?.status_name, "Needs Approval");
   assert.ok(stageEnvelope);
   assert.equal(stageSawExecutionRecord, true);
+  assert.ok(fake.treeReads <= 4, `expected at most four Stage-boundary tree reads: ${fake.treeReads} reads for ${fake.writes.length} writes`);
   assert.equal(fake.tree.comments.filter((comment) => comment.body.includes('"kind":"plan_contract"')).length, 1);
+  assert.ok(fake.writes.every((writeId) => writeId.length <= 128));
   assert.equal(buildRootDagView({ tree: fake.tree, git: await fake.git.inspect(input.workspace), workspace: input.workspace }).root.issue.status_name, "Needs Approval");
 
   const writesBeforeRetry = fake.writes.length;
@@ -75,6 +79,44 @@ test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", 
   if (retry.kind === "awaiting_human") throw new Error("bootstrap_plan_should_be_approval_gated");
   assert.equal(retry.planContractDigest, result.planContractDigest);
   assert.equal(fake.writes.length, writesBeforeRetry);
+});
+
+test("preserves a Performer execution failure reason for Plan diagnosis", async () => {
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: false });
+  const execution = new LinearDagExecutionImpl({
+    linear: fake,
+    git: fake.git,
+    performer: {
+      async runStage(input) {
+        const envelope = input.envelope as Record<string, JsonValue>;
+        const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+        const target = envelope.target as Record<string, JsonValue>;
+        return { result: {
+          protocol_version: "1",
+          stage_execution_id: stageExecution.stage_execution_id,
+          stage: "plan",
+          root_issue_id: target.root_issue_id,
+          cycle_issue_id: target.cycle_issue_id,
+          node_issue_id: target.node_issue_id,
+          context_digest: envelope.context_digest,
+          completed_at: now,
+          outcome: {
+            kind: "execution_failed",
+            error_code: "stage_provider_output_invalid",
+            sanitized_reason: "The Provider returned an invalid Stage result.",
+            retryable: false,
+          },
+          usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 },
+        } as JsonValue };
+      },
+      async cancelAndReap() {},
+    },
+  });
+
+  await assert.rejects(
+    execution.executeBootstrapPlan(bootstrapInput()),
+    /plan_result_execution_failed:stage_provider_output_invalid:The Provider returned an invalid Stage result\./u,
+  );
 });
 
 test("persists one suspended Plan action and releases the Stage", async () => {
@@ -264,6 +306,7 @@ function restorePlanRootAfterHumanAnswer(fake: FakeLinearGateway): void {
 
 class FakeLinearGateway implements LinearGatewayInterface {
   readonly writes: string[] = [];
+  treeReads = 0;
   readonly git: GitWorkspaceInterface = {
     async inspect() { return { head: "head-1", branch: "symphony/root-1", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
     async diff() { return { text: "", bytes: 0, cap: 65_536, partial: false }; },
@@ -278,7 +321,7 @@ class FakeLinearGateway implements LinearGatewayInterface {
     this.firstWriteUnconfirmed = options.firstWriteUnconfirmed;
   }
 
-  async readWorkflowIssueTree() { return structuredClone(this.tree); }
+  async readWorkflowIssueTree() { this.treeReads += 1; return structuredClone(this.tree); }
   async readFreshRootScope(): Promise<never> { throw new Error("unused"); }
   async read(): Promise<never> { throw new Error("unused"); }
   async mutate(): Promise<never> { throw new Error("unused"); }
@@ -300,7 +343,8 @@ class FakeLinearGateway implements LinearGatewayInterface {
     }
     if (command.kind === "append_workflow_comment") {
       const target = this.tree.issues.find((issue) => issue.issue_id === command.target.targetIssueId)!;
-      this.tree.comments.push({ comment_id: `comment-${this.tree.comments.length + 1}`, issue_id: target.issue_id, body: command.body, managed_marker: command.writeId, remote_version: `comment-${this.tree.comments.length + 1}-version`, updated_at: now });
+      const commentId = `comment-${this.tree.comments.length + 1}`;
+      this.tree.comments.push({ comment_id: commentId, issue_id: target.issue_id, body: command.body, managed_marker: `${target.issue_id}:managed-record:${commentId}`, remote_version: `${commentId}-version`, updated_at: now });
       return this.outcome(command.writeId, target.issue_id, `${target.issue_id}-version`);
     }
     throw new Error("unused");

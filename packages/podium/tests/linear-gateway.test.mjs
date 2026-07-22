@@ -36,7 +36,13 @@ async function createConductorServices(
   const services = new PodiumConductorServicesImpl(
     {
       getConductorBinding: () => binding,
-      getLinearCredential: () => ({}),
+      getLinearCredential: () => ({
+        kind: "development_token",
+        installationId: "installation-1",
+        organizationId: "organization-1",
+        accessToken: "test-token",
+        delegateActorId: "app-user-1",
+      }),
       saveRuntimeObservation: onObservation,
       saveRootRuntimeObservation() {},
     },
@@ -107,6 +113,22 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
   assert.deepEqual(await first, await shared);
 });
 
+test("Podium reuses one Linear gateway for sequential requests in the same class", async () => {
+  let sdkCreations = 0;
+  const services = await createConductorServices({
+    async getWorkflowIssueTree() { return workflowTree("project-1"); },
+  }, undefined, () => { sdkCreations += 1; });
+  const body = {
+    kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
+    expected_project_id: "project-1", root_issue_id: "root-1",
+  };
+
+  await services.handle(body);
+  await services.handle(body);
+
+  assert.equal(sdkCreations, 1);
+});
+
 test("physical rate observations reserve installation capacity from background reads", async () => {
   let observe;
   let usageReads = 0;
@@ -170,6 +192,24 @@ test("mutation conflict rereads and never executes stale state", async () => {
 
   assert.deepEqual(result, { kind: "linear_precondition_conflict" });
   assert.equal(mutations, 0);
+});
+
+test("project resolution cache recovers after a failed read", async () => {
+  let reads = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        reads += 1;
+        if (reads === 1) throw new Error("temporary_failure");
+        return { kind: "resolved", projectId: "project-1", updatedAt: "2026-07-16T00:00:00Z" };
+      },
+    },
+    { maxAttempts: 1, baseDelayMs: 1, sleep: async () => undefined },
+  );
+
+  await assert.rejects(handler.resolveProject("abc123"), /temporary_failure/u);
+  assert.equal((await handler.resolveProject("abc123")).kind, "resolved");
+  assert.equal(reads, 2);
 });
 
 test("ambiguous create reads back Managed Marker before retry", async () => {
@@ -1534,6 +1574,37 @@ test("workflow mutation proves stable write idempotency with semantic read-back"
 
   assert.deepEqual(result, { kind: "already_applied", readBack });
   assert.equal(writes, 0);
+});
+
+test("workflow mutation uses one compact preflight instead of rereading Root and target", async () => {
+  let preflights = 0;
+  let targetReads = 0;
+  let writes = 0;
+  const readBack = { writeId: "write-compact", targetIssueId: "work-1", remoteVersion: "target-new" };
+  const handler = new LinearGatewayProtocolHandlerImpl({
+    async readProjectResolution() {
+      return { kind: "resolved", projectId: "project-1", updatedAt: "project-version" };
+    },
+    async preflightWorkflowMutation() {
+      preflights += 1;
+      return { kind: "ready" };
+    },
+    async readWorkflowMutationTarget() { targetReads += 1; throw new Error("compact preflight should own target reads"); },
+    async executeWorkflowMutation() { writes += 1; },
+    async readWorkflowMutationOutcome() { return writes ? readBack : undefined; },
+  }, { sleep: async () => undefined, maxAttempts: 2, baseDelayMs: 10 });
+
+  const result = await handler.mutateWorkflow({
+    kind: "update_workflow_issue", writeId: "write-compact", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version" },
+    statusId: "status-progress", title: "Updated", description: "Description",
+  });
+
+  assert.deepEqual(result, { kind: "applied", readBack });
+  assert.equal(preflights, 1);
+  assert.equal(targetReads, 0);
+  assert.equal(writes, 1);
 });
 
 test("ambiguous workflow writes return a closed read-back target", async () => {

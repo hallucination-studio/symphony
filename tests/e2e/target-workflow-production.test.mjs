@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { LinearRunBudgetImpl } from "@symphony/podium";
 
 import { startTargetProductionBoundary } from "../../tools/e2e/target-workflow-production.mjs";
 
@@ -39,6 +40,7 @@ function dependencies(events) {
 test("target production boundary composes real boundary adapters without leaking setup state", async () => {
   const events = [];
   const runner = { marker: "runner" };
+  const linearRunBudget = new LinearRunBudgetImpl();
   const result = await startTargetProductionBoundary({
     developmentToken: "linear-development-token",
     codexApiKey: "codex-api-key",
@@ -52,6 +54,7 @@ test("target production boundary composes real boundary adapters without leaking
     environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
     fetch: () => {},
     log: () => {},
+    linearRunBudget,
     dependencies: dependencies(events),
     createRunner() {
       return runner;
@@ -64,6 +67,8 @@ test("target production boundary composes real boundary adapters without leaking
     "bootstrapInstallation", "savePodiumState", "createPodiumOwner", "startConductor", "provisionProfile",
   ].join(","));
   assert.equal(events.find(([kind]) => kind === "provisionProfile")[1].apiKey, "length:13");
+  assert.equal(events.find(([kind]) => kind === "bootstrapInstallation")[1].linearRunBudget, linearRunBudget);
+  assert.equal(events.find(([kind]) => kind === "createPodiumOwner")[1].linearRunBudget, linearRunBudget);
   assert.equal(JSON.stringify(result).includes("linear-development-token"), false);
   await result.close();
   assert.deepEqual(events.slice(-2).map(([kind]) => kind), ["conductorClose", "podiumClose"]);

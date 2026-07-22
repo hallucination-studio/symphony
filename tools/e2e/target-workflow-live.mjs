@@ -15,16 +15,20 @@ import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-li
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
 import { LinearRunBudgetImpl } from "@symphony/podium";
 
+const TARGET_E2E_TIMEOUT_MS = 5 * 60_000;
+
 export async function runTargetSuccessLive({
   config,
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
+  const deadline = liveDeadline(timeoutMs);
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -64,6 +68,7 @@ export async function runTargetSuccessLive({
       SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
+      SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
     } });
     const observed = await services.runSuccessBoundary({
       boundaryInput: {
@@ -80,6 +85,8 @@ export async function runTargetSuccessLive({
         linearRunBudget,
       },
       successInput: {
+        timeoutMs: remainingTimeout(deadline),
+        onProgress: (event) => log({ event: "target_live_success_progress", ...event }),
         rootInput,
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved for implementation.",
@@ -89,6 +96,7 @@ export async function runTargetSuccessLive({
             git = await services.readGitObservation({
               repositoryRoot: fixture.repositoryRoot,
               worktreePath: path.join(scope.conductorDataRoot, "worktrees", rootIssueId),
+              requireClean: false,
             });
           } catch (error) {
             if (phase !== "pending_human" || !["target_git_command_failed", "target_git_observation_read_failed"].includes(stableReason(error))) {
@@ -103,6 +111,11 @@ export async function runTargetSuccessLive({
     if (!observed?.facts?.root || observed.facts.root.projectId !== setup.project.projectId) {
       throw stableError("target_live_success_result_invalid");
     }
+    await services.readGitObservation({
+      repositoryRoot: fixture.repositoryRoot,
+      worktreePath: path.join(scope.conductorDataRoot, "worktrees", observed.facts.root.rootIssueId),
+      requireClean: true,
+    });
     result = Object.freeze({
       status: "passed",
       scenario: "success",
@@ -133,10 +146,12 @@ export async function runTargetDeliveryLive({
   fetch = globalThis.fetch,
   log = () => {},
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
+  const deadline = liveDeadline(timeoutMs);
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -176,8 +191,10 @@ export async function runTargetDeliveryLive({
       SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
+      SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
     } });
     const observed = await services.runDeliveryBoundary({
+      deadlineAtMs: deadline,
       boundaryInput: {
         developmentToken: config.secrets.linearDevToken,
         codexApiKey: config.secrets.codexApiKey,
@@ -245,10 +262,12 @@ export async function runTargetRepairLive({
   fetch = globalThis.fetch,
   log = () => {},
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
+  const deadline = liveDeadline(timeoutMs);
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -288,6 +307,7 @@ export async function runTargetRepairLive({
       SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
+      SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
     } });
     const observed = await services.runRepairBoundary({
       boundaryInput: {
@@ -304,6 +324,7 @@ export async function runTargetRepairLive({
         linearRunBudget,
       },
       repairInput: {
+        timeoutMs: remainingTimeout(deadline),
         rootInput: {
           ...rootInput,
           title: "Target live repair escalation",
@@ -362,10 +383,12 @@ export async function runTargetRestartLive({
   fetch = globalThis.fetch,
   log = () => {},
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
+  const deadline = liveDeadline(timeoutMs);
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -405,6 +428,7 @@ export async function runTargetRestartLive({
       SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
+      SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
     } });
     const observed = await services.runRestartBoundary({
       boundaryInput: {
@@ -421,6 +445,7 @@ export async function runTargetRestartLive({
         linearRunBudget,
       },
       restartInput: {
+        timeoutMs: remainingTimeout(deadline),
         rootInput: { ...rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved after restart recovery.",
@@ -463,13 +488,16 @@ export async function runTargetSchedulingLive({
   fetch = globalThis.fetch,
   log = () => {},
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
+  const deadline = liveDeadline(timeoutMs);
   const prepared = await (dependencies.prepareSetup ?? prepareTargetWorkflowSetup)({
     config, runId, fetch, log, linearRunBudget,
   });
+  remainingTimeout(deadline);
   return runTargetSchedulingScenarioLive({
     config: {
       ...config,
@@ -485,6 +513,19 @@ export async function runTargetSchedulingLive({
     log,
     linearRunBudget,
   });
+}
+
+function liveDeadline(timeoutMs) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TARGET_E2E_TIMEOUT_MS) {
+    throw stableError("target_live_timeout_invalid");
+  }
+  return Date.now() + timeoutMs;
+}
+
+function remainingTimeout(deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw stableError("target_live_timeout");
+  return remaining;
 }
 
 async function readLiveGitObservation({ services, fixture, scope, rootIssueId, phase }) {

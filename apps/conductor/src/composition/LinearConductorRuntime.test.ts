@@ -15,7 +15,7 @@ test("Linear composition skips Waiting Human and dispatches the highest runnable
     gateway(roots, (rootId) => view(rootId, rootId === "waiting" ? "Needs Approval" : "In Progress")),
     new LinearPriorityRootSchedulingPolicyImpl(),
     new LinearCycleRootWorkflowPolicyImpl(),
-    { async dispatch({ root }) { started.push(root.issueId); return "progress"; } },
+    { async dispatch({ root }) { started.push(root.issueId); return { kind: "progress" as const }; } },
     { async report() {} },
   );
 
@@ -30,7 +30,7 @@ test("Linear composition releases a waiting lane without creating a queue entry"
     gateway([root("waiting", "high", 1)], () => view("waiting", "Needs Info")),
     new LinearPriorityRootSchedulingPolicyImpl(),
     new LinearCycleRootWorkflowPolicyImpl(),
-    { async dispatch() { dispatches += 1; return "progress"; } },
+    { async dispatch() { dispatches += 1; return { kind: "progress" as const }; } },
     { async report() {} },
   );
 

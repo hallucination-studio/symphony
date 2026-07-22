@@ -81,10 +81,11 @@ export async function createTargetGitFixture({ scope } = {}) {
   }
 }
 
-export async function readTargetGitObservation({ repositoryRoot, branch, worktreePath } = {}) {
+export async function readTargetGitObservation({ repositoryRoot, branch, worktreePath, requireClean = true } = {}) {
   if (typeof repositoryRoot !== "string" || repositoryRoot.length === 0 ||
       (branch !== undefined && !BRANCH.test(branch)) ||
-      (worktreePath !== undefined && (typeof worktreePath !== "string" || worktreePath.length === 0))) {
+      (worktreePath !== undefined && (typeof worktreePath !== "string" || worktreePath.length === 0)) ||
+      typeof requireClean !== "boolean") {
     throw stableError("target_git_observation_input_invalid");
   }
   const targetPath = worktreePath ?? repositoryRoot;
@@ -100,10 +101,11 @@ export async function readTargetGitObservation({ repositoryRoot, branch, worktre
       ]);
     const observedBranch = branchResult.stdout.trim();
     const head = headResult.stdout.trim();
+    const clean = statusResult.stdout.trim() === "";
     const commonRoot = await realpath(resolveGitPath(repositoryRoot, commonGitDir.stdout.trim()));
     const targetCommonRoot = await realpath(resolveGitPath(targetPath, targetCommonGitDir.stdout.trim()));
     if ((branch !== undefined && observedBranch !== branch) || !BRANCH.test(observedBranch) ||
-        !SHA.test(head) || statusResult.stdout.trim() !== "" ||
+        !SHA.test(head) || (requireClean && !clean) ||
         commonRoot !== targetCommonRoot) {
       throw stableError("target_git_observation_mismatch");
     }
@@ -111,7 +113,7 @@ export async function readTargetGitObservation({ repositoryRoot, branch, worktre
       repositoryIdentity,
       branch: observedBranch,
       head,
-      clean: true,
+      clean,
     });
   } catch (error) {
     throw isStableError(error) ? error : stableError("target_git_observation_read_failed");

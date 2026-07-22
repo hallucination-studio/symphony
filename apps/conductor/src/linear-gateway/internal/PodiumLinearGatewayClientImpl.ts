@@ -539,9 +539,19 @@ function workflowMutationBody(
 
 function workflowMutationReadBack(value: JsonValue | undefined) {
   const readBack = record(value);
+  const issueVersions = Array.isArray(readBack.issue_versions)
+    ? readBack.issue_versions.map((value) => {
+      const version = record(value);
+      return {
+        issueId: string(version.issue_id, "linear_workflow_read_back_invalid"),
+        remoteVersion: string(version.remote_version, "linear_workflow_read_back_invalid"),
+      };
+    })
+    : undefined;
   return {
     writeId: string(readBack.write_id, "linear_workflow_read_back_invalid"),
     targetIssueId: string(readBack.target_issue_id, "linear_workflow_read_back_invalid"),
     remoteVersion: string(readBack.remote_version, "linear_workflow_read_back_invalid"),
+    ...(issueVersions ? { issueVersions } : {}),
   };
 }

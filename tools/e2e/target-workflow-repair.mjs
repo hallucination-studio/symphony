@@ -27,7 +27,7 @@ export async function runTargetRepairEscalationScenario({
   observationInput,
   humanResponseBody,
   maxHumanActions = 16,
-  timeoutMs = 30 * 60_000,
+  timeoutMs = 5 * 60_000,
   pollIntervalMs = 1_000,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   now = Date.now,
@@ -120,7 +120,7 @@ function validateDependencies({ runner, observationInput, humanResponseBody, max
     throw new Error("target_repair_human_body_invalid");
   }
   if (!Number.isSafeInteger(maxHumanActions) || maxHumanActions < 1 || maxHumanActions > 64 ||
-      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000 ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5 * 60_000 ||
       !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 0 || pollIntervalMs > 300_000 ||
       typeof sleep !== "function" || typeof now !== "function" || typeof onProgress !== "function") {
     throw new Error("target_repair_timing_invalid");

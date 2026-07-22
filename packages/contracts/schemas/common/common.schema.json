@@ -45,7 +45,25 @@
     },
     "LinearIssueState": {
       "type": "string",
-      "enum": ["Todo", "In Progress", "In Review", "Done", "Canceled"]
+      "enum": [
+        "Draft",
+        "Todo",
+        "Planning",
+        "Sealed",
+        "Executing",
+        "Verifying",
+        "In Progress",
+        "In Review",
+        "Needs Approval",
+        "Needs Info",
+        "Inconclusive",
+        "Escalated",
+        "Succeeded",
+        "Changes Required",
+        "Done",
+        "Canceled",
+        "Failed"
+      ]
     },
     "ProtocolError": {
       "type": "object",

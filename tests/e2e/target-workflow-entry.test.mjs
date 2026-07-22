@@ -243,6 +243,72 @@ test("target workflow all-run refuses a scenario before dispatch when Root budge
   assert.deepEqual(result.verdict.missingScenarios, TARGET_WORKFLOW_SCENARIOS);
 });
 
+test("each target workflow rerun starts with a fresh local Linear budget", async () => {
+  const setupSnapshots = [];
+  const input = {
+    config: {
+      linear: { clientId: "client-1", projectSlugId: "project-1" },
+      secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+      codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+    },
+    environment: { SYMPHONY_E2E_RUN_ID: "target-all-fresh-budget" },
+    prepareSetup: async ({ linearRunBudget }) => {
+      linearRunBudget.observe({
+        requestWindow: { limit: 1000, remaining: 251, reset: 3600 },
+        complexityWindow: { limit: 2_000_000, remaining: 506_726, reset: 3600 },
+      });
+      setupSnapshots.push(linearRunBudget.snapshot());
+      return { setup: {}, ids: {}, rootInput: {} };
+    },
+    runScenario: async (scenario) => ({ scenario, status: "passed" }),
+    writeEvidence: false,
+  };
+
+  await runTargetWorkflowAllLive(input);
+  await runTargetWorkflowAllLive(input);
+
+  assert.deepEqual(setupSnapshots.map((snapshot) => ({
+    physicalRequests: snapshot.physicalRequests,
+    complexityConsumed: snapshot.complexityConsumed,
+  })), [
+    { physicalRequests: 1, complexityConsumed: 0 },
+    { physicalRequests: 1, complexityConsumed: 0 },
+  ]);
+});
+
+test("target workflow all-run shares one five-minute deadline across scenarios", async () => {
+  let currentTime = 0;
+  const calls = [];
+  const result = await runTargetWorkflowAllLive({
+    config: {
+      linear: { clientId: "client-1", projectSlugId: "project-1" },
+      secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+      codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+    },
+    environment: { SYMPHONY_E2E_RUN_ID: "target-all-deadline" },
+    timeoutMs: 250,
+    now: () => currentTime,
+    prepareSetup: async () => {
+      currentTime = 100;
+      return { setup: {}, ids: {}, rootInput: {} };
+    },
+    runScenario: async (scenario, input) => {
+      calls.push([scenario, input.timeoutMs]);
+      currentTime += 60;
+      return { scenario, status: "passed" };
+    },
+    writeEvidence: false,
+  });
+
+  assert.deepEqual(calls, [
+    ["success", 150],
+    ["repair_escalation", 90],
+    ["restart_recovery", 30],
+  ]);
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.verdict.missingScenarios, ["delivery", "scheduling"]);
+});
+
 test("target workflow all-run binds the production setup as its default", async () => {
   const source = await readFile("tools/e2e/target-workflow-entry.mjs", "utf8");
 

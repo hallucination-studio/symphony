@@ -7,11 +7,37 @@ import {
   runTargetRestartLive,
   runTargetSuccessLive,
 } from "../../tools/e2e/target-workflow-live.mjs";
-import { prepareTargetWorkflowSetup } from "../../tools/e2e/target-workflow-setup.mjs";
+import { archivePriorE2eRoots, prepareTargetWorkflowSetup } from "../../tools/e2e/target-workflow-setup.mjs";
 import { createTargetWorkflowSetup } from "@symphony/podium";
 
 test("target setup factory rejects a credentialed transport without a run budget", () => {
   assert.throws(() => createTargetWorkflowSetup(), /linear_target_setup_budget_missing/u);
+});
+
+test("target setup archives only marked historical E2E Roots and reads them back", async () => {
+  const requests = [];
+  const responses = [
+    { project: { issues: { nodes: [
+      { id: "old-1", description: "<!-- symphony e2e-run\nrun_id: old-run\n-->", parent: null, project: { id: "project-1" } },
+      { id: "current-1", description: "<!-- symphony e2e-run\nrun_id: current-run\n-->", parent: null, project: { id: "project-1" } },
+      { id: "user-1", description: "ordinary", parent: null, project: { id: "project-1" } },
+    ], pageInfo: { hasNextPage: false } } } },
+    { a0: { success: true } },
+    { issues: { nodes: [{ id: "old-1", archivedAt: "2026-07-22T00:00:00Z" }], pageInfo: { hasNextPage: false } } },
+  ];
+  const budget = { recordLogicalOperation() {}, reservePhysicalRequest() { return { release() {} }; }, observe() {} };
+  const count = await archivePriorE2eRoots({
+    developmentToken: "token", projectId: "project-1", currentRunId: "current-run", budget,
+    linearRunBudget: budget,
+    async fetch(_url, init) {
+      requests.push(JSON.parse(init.body).query);
+      return { ok: true, status: 200, headers: { get: () => undefined }, async json() { return { data: responses.shift() }; } };
+    },
+  });
+  assert.equal(count, 1);
+  assert.match(requests[1], /issueArchive\(id: "old-1"\)/u);
+  assert.doesNotMatch(requests[1], /current-1|user-1/u);
+  assert.match(requests[2], /includeArchived: true/u);
 });
 
 test("target setup requires authorization and never creates a scenario scope", async () => {
@@ -85,6 +111,7 @@ test("target live success composes setup, production boundary, Git observation, 
   const result = await runTargetSuccessLive({
     config,
     environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-live" },
+    log: (event) => events.push(["progress", event]),
     dependencies: {
       prepareSetup: async () => { events.push(["setup"]); return preparedSetup(); },
       createScope: async (input) => { events.push(["scope", input]); return {
@@ -98,14 +125,23 @@ test("target live success composes setup, production boundary, Git observation, 
         events.push(["boundary", input]);
         assert.equal(input.boundaryInput.codexApiKey, "codex-secret");
         assert.equal(input.boundaryInput.environment.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
+        input.successInput.onProgress({ phase: "durable_facts", reason: "target_facts_dag_incomplete" });
         return { facts };
       },
+      readGitObservation: async (input) => { events.push(["observe-git", input]); return {
+        repositoryIdentity: "/tmp/repository", branch: "symphony/runs/root-1", head: "b".repeat(40), clean: true,
+      }; },
       cleanupScope: async (scope) => { events.push(["cleanup", scope]); },
     },
   });
 
   assert.deepEqual(result, { status: "passed", scenario: "success", runId: "target-live", rootIssueId: "root-1", projectId: "project-1", facts });
-  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "cleanup"]);
+  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "progress", "observe-git", "cleanup"]);
+  assert.deepEqual(events[4][1], {
+    event: "target_live_success_progress",
+    phase: "durable_facts",
+    reason: "target_facts_dag_incomplete",
+  });
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
 });

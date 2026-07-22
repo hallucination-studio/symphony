@@ -223,6 +223,37 @@ test("reconciles an orphaned Work execution into a fresh retry", async () => {
   assert.equal(terminal.value.usage.totalTokens, workInput().options.limits.reservedTotalTokens);
 });
 
+test("persists a retryable Work Provider failure and creates a fresh execution", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+  const input = workInput();
+
+  assert.deepEqual(await execution.reconcileWork(input), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(input), { kind: "mutation_applied", step: "work_execution_created" });
+  const firstExecution = latestExecution(gateway);
+  const failure = {
+    protocol_version: "1", stage_execution_id: firstExecution.stageExecutionId, stage: "work",
+    root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, node_issue_id: readyWorkIssueId,
+    context_digest: firstExecution.contextDigest, completed_at: "2026-07-21T09:01:00Z",
+    usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+    outcome: { kind: "execution_failed", error_code: "provider_stage_failed", sanitized_reason: "Temporary Provider failure.", retryable: true },
+  } as unknown as JsonValue;
+
+  assert.deepEqual(await execution.reconcileWork(input, failure, undefined, firstExecution.stageExecutionId), { kind: "mutation_applied", step: "work_stage_retryable_failure_terminal" });
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === firstExecution.stageExecutionId);
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("work_failure_terminal_missing");
+  assert.equal(terminal.value.failureCode, "provider_stage_failed");
+  assert.equal(terminal.value.outcome, "failed");
+
+  assert.deepEqual(await execution.reconcileWork(input), { kind: "mutation_applied", step: "work_execution_created" });
+  assert.notEqual(latestExecution(gateway).stageExecutionId, firstExecution.stageExecutionId);
+});
+
 test("rebuilds an active Work execution with its persisted timing after a clock change", async () => {
   const gateway = new WorkGateway(workTree());
   let now = "2026-07-21T09:00:00Z";

@@ -14,9 +14,11 @@ import {
   runTargetSuccessLive,
 } from "./target-workflow-live.mjs";
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
+import { createE2ELogger } from "./logging.mjs";
 import { LinearRunBudgetImpl } from "@symphony/podium";
 
 const TARGET_SCENARIO_START_COST = Object.freeze({ requests: 1, complexity: 10_000 });
+const TARGET_E2E_TIMEOUT_MS = 5 * 60_000;
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
@@ -120,12 +122,16 @@ async function runTargetWorkflowLive(scenario = "success") {
   const linearRunBudget = new LinearRunBudgetImpl({
     physicalRequestComplexity: config.linear.physicalRequestComplexity,
   });
-  if (scenario === "repair") return runTargetRepairLive({ config, linearRunBudget });
-  if (scenario === "delivery") return runTargetDeliveryLive({ config, linearRunBudget });
-  if (scenario === "restart_recovery") return runTargetRestartLive({ config, linearRunBudget });
-  if (scenario === "scheduling") return runTargetSchedulingLive({ config, linearRunBudget });
-  if (scenario === "all") return runTargetWorkflowAllLive({ config, linearRunBudget });
-  return runTargetSuccessLive({ config, linearRunBudget });
+  const log = createE2ELogger({
+    runId: process.env.SYMPHONY_E2E_RUN_ID,
+    secrets: [config.secrets.linearDevToken, config.secrets.codexApiKey],
+  });
+  if (scenario === "repair") return runTargetRepairLive({ config, linearRunBudget, log });
+  if (scenario === "delivery") return runTargetDeliveryLive({ config, linearRunBudget, log });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ config, linearRunBudget, log });
+  if (scenario === "scheduling") return runTargetSchedulingLive({ config, linearRunBudget, log });
+  if (scenario === "all") return runTargetWorkflowAllLive({ config, linearRunBudget, log });
+  return runTargetSuccessLive({ config, linearRunBudget, log });
 }
 
 export async function runTargetWorkflowAllLive({
@@ -136,14 +142,19 @@ export async function runTargetWorkflowAllLive({
   runScenario = defaultRunScenario,
   prepareSetup = prepareTargetWorkflowSetup,
   linearRunBudget = new LinearRunBudgetImpl(),
+  timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  now = Date.now,
   writeEvidence = true,
   evidenceDirectory,
 } = {}) {
   if (!config?.linear?.projectSlugId) throw stableError("target_all_configuration_invalid");
   if (!environment || typeof environment !== "object" || typeof runScenario !== "function" ||
-      typeof prepareSetup !== "function" || typeof fetch !== "function" || typeof log !== "function") {
+      typeof prepareSetup !== "function" || typeof fetch !== "function" || typeof log !== "function" ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TARGET_E2E_TIMEOUT_MS ||
+      typeof now !== "function") {
     throw stableError("target_all_input_invalid");
   }
+  const deadline = now() + timeoutMs;
   const preparedSetup = await prepareSetup({
     config,
     runId: environment.SYMPHONY_E2E_RUN_ID,
@@ -155,6 +166,8 @@ export async function runTargetWorkflowAllLive({
   const results = [];
   for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
     try {
+      const remainingMs = deadline - now();
+      if (remainingMs <= 0) throw stableError("target_all_timeout");
       const rootReservation = linearRunBudget.reserve(TARGET_SCENARIO_START_COST);
       rootReservation.release();
       const result = await runScenario(scenario, {
@@ -164,6 +177,7 @@ export async function runTargetWorkflowAllLive({
         log,
         setup: preparedSetup,
         linearRunBudget,
+        timeoutMs: remainingMs,
       });
       if (!result || typeof result !== "object" || result.scenario !== scenario) {
         throw stableError("target_all_scenario_result_invalid");
@@ -215,7 +229,7 @@ async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
   }
 }
 
-async function defaultRunScenario(scenario, { setup, linearRunBudget, ...input }) {
+async function defaultRunScenario(scenario, { setup, linearRunBudget, timeoutMs, ...input }) {
   const composed = composeTargetWorkflowScenarioInput(scenario, {
     setup,
     environment: input.environment,
@@ -226,11 +240,11 @@ async function defaultRunScenario(scenario, { setup, linearRunBudget, ...input }
     ...input,
     environment: composed.environment,
   };
-  if (scenario === "success") return runTargetSuccessLive({ ...scenarioInput, linearRunBudget, dependencies });
-  if (scenario === "repair_escalation") return runTargetRepairLive({ ...scenarioInput, linearRunBudget, dependencies });
-  if (scenario === "restart_recovery") return runTargetRestartLive({ ...scenarioInput, linearRunBudget, dependencies });
-  if (scenario === "delivery") return runTargetDeliveryLive({ ...scenarioInput, linearRunBudget, dependencies });
-  return runTargetSchedulingLive({ ...scenarioInput, linearRunBudget, dependencies });
+  if (scenario === "success") return runTargetSuccessLive({ ...scenarioInput, linearRunBudget, timeoutMs, dependencies });
+  if (scenario === "repair_escalation") return runTargetRepairLive({ ...scenarioInput, linearRunBudget, timeoutMs, dependencies });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ ...scenarioInput, linearRunBudget, timeoutMs, dependencies });
+  if (scenario === "delivery") return runTargetDeliveryLive({ ...scenarioInput, linearRunBudget, timeoutMs, dependencies });
+  return runTargetSchedulingLive({ ...scenarioInput, linearRunBudget, timeoutMs, dependencies });
 }
 
 export function composeTargetWorkflowScenarioInput(scenario, { setup, environment } = {}) {

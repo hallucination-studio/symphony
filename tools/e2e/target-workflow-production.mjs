@@ -23,6 +23,7 @@ export async function startTargetProductionBoundary({
   model = "target-model",
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget: inputLinearRunBudget,
   dependencies = {},
   createRunner = createTargetWorkflowRunner,
 } = {}) {
@@ -34,7 +35,7 @@ export async function startTargetProductionBoundary({
     startConductor: dependencies.startConductor ?? startConductorHarness,
     provisionProfile: dependencies.provisionProfile ?? provisionApiKeyProfile,
   };
-  const linearRunBudget = dependencies.linearRunBudget ?? new LinearRunBudgetImpl();
+  const linearRunBudget = inputLinearRunBudget ?? dependencies.linearRunBudget ?? new LinearRunBudgetImpl();
   let installation;
   let podium;
   let harness;

@@ -18,6 +18,14 @@ export const TARGET_WORKFLOW_STATUS_CATEGORIES = Object.freeze({
   Failed: "canceled",
 });
 
+export type TargetWorkflowStatusName = keyof typeof TARGET_WORKFLOW_STATUS_CATEGORIES;
+export const TARGET_WORKFLOW_STATUS_NAMES = Object.freeze(
+  Object.keys(TARGET_WORKFLOW_STATUS_CATEGORIES) as TargetWorkflowStatusName[],
+);
+export function isTargetWorkflowStatusName(value: unknown): value is TargetWorkflowStatusName {
+  return typeof value === "string" && value in TARGET_WORKFLOW_STATUS_CATEGORIES;
+}
+
 export type TargetWorkflowStatusCategory =
   (typeof TARGET_WORKFLOW_STATUS_CATEGORIES)[keyof typeof TARGET_WORKFLOW_STATUS_CATEGORIES];
 

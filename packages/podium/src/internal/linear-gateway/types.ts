@@ -1,11 +1,6 @@
 import type { ProtocolError } from "../errors.js";
 
-export type LinearIssueState =
-  | "Todo"
-  | "In Progress"
-  | "In Review"
-  | "Done"
-  | "Canceled";
+export type LinearIssueState = import("../../public/TargetWorkflowCatalog.js").TargetWorkflowStatusName;
 
 export type LinearPriority =
   | "urgent"
@@ -302,6 +297,7 @@ export interface WorkflowMutationReadBack {
   writeId: string;
   targetIssueId: string;
   remoteVersion: string;
+  issueVersions?: Array<{ issueId: string; remoteVersion: string }>;
 }
 
 export type WorkflowMutationResult =

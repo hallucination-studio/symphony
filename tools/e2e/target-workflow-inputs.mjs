@@ -6,6 +6,7 @@ const MAX_HUMAN_BODY_LENGTH = 8_192;
 const MANAGED_RECORD_PREFIX = "<!-- symphony managed-record";
 const ROOT_INPUT_FIELDS = new Set(["teamId", "projectId", "stateId", "delegateId", "title", "description"]);
 const HUMAN_INPUT_FIELDS = new Set(["projectId", "issueId", "body"]);
+const REQUEST_TIMEOUT_MS = 30_000;
 
 const CREATE_ROOT_MUTATION = `
   mutation TargetWorkflowCreateRoot($input: IssueCreateInput!) {
@@ -93,6 +94,7 @@ export function createTargetWorkflowExternalInputs({
 
   async function graphql(query, variables) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
+    log({ event: "target_inputs_request_started", operation });
     const reservation = budget?.reservePhysicalRequest();
     let observed = false;
     let response;
@@ -101,12 +103,13 @@ export function createTargetWorkflowExternalInputs({
         method: "POST",
         headers: { authorization: developmentToken, "content-type": "application/json" },
         body: JSON.stringify({ query, variables, operationName: operation }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       budget?.observe({ status: response.status, ...readRateWindows(response.headers) });
       observed = true;
     } catch {
       if (!observed) budget?.observe({});
-      log({ event: "target_inputs_request_failed", operation });
+      log({ event: "target_inputs_request_failed", operation, timeoutMs: REQUEST_TIMEOUT_MS });
       throw new Error("target_inputs_request_failed");
     } finally {
       reservation?.release();

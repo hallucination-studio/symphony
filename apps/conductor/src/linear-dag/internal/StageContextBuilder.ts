@@ -483,11 +483,24 @@ function workSources(
 
 function verifySources(tree: LinearWorkflowTreeSnapshot, root: Issue, cycle: Issue, plan: Issue, verify: Issue, git: GitWorkspaceSnapshot, options: BootstrapPlanOptions) {
   const result: Array<{ source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction"; source_id: string; version_or_digest: string }> = [
-    { source_kind: "linear_issue", source_id: root.issue_id, version_or_digest: root.remote_version }, { source_kind: "linear_issue", source_id: cycle.issue_id, version_or_digest: cycle.remote_version }, { source_kind: "linear_issue", source_id: plan.issue_id, version_or_digest: plan.remote_version }, { source_kind: "linear_issue", source_id: verify.issue_id, version_or_digest: verify.remote_version }, { source_kind: "git", source_id: `git:verify:${git.head}`, version_or_digest: digest(git) },
+    { source_kind: "linear_issue", source_id: root.issue_id, version_or_digest: root.remote_version }, { source_kind: "linear_issue", source_id: cycle.issue_id, version_or_digest: cycle.remote_version }, { source_kind: "linear_issue", source_id: plan.issue_id, version_or_digest: plan.remote_version }, { source_kind: "linear_issue", source_id: verify.issue_id, version_or_digest: stableIssueDigest(verify) }, { source_kind: "git", source_id: `git:verify:${git.head}`, version_or_digest: digest(git) },
   ];
   for (const relation of tree.relations) result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
   for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   return result;
+}
+
+function stableIssueDigest(issue: Issue): string {
+  return digest({
+    identifier: issue.identifier,
+    projectId: issue.project_id,
+    parentIssueId: issue.parent_issue_id,
+    statusId: issue.status_id,
+    title: issue.title,
+    description: issue.description,
+    managedMarker: issue.managed_marker,
+    issueKind: issue.issue_kind,
+  });
 }
 
 function encodeCheck(check: { checkKey: string; commandOrMethod: string; outcome: string; summary: string; artifactRevision: string }) { return { check_key: check.checkKey, command_or_method: check.commandOrMethod, outcome: check.outcome, summary: check.summary, artifact_revision: check.artifactRevision }; }

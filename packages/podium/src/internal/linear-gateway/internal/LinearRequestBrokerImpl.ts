@@ -85,10 +85,8 @@ export class LinearRequestBrokerImpl {
     options: { deadlineAtMs?: number; coalesceKey?: string } = {},
   ): Promise<T> {
     this.#budget?.recordLogicalOperation();
-    try {
-      this.assertPermit(requestClass);
-    } catch (error) {
-      return Promise.reject(error);
+    if (requestClass === "background" && !this.#backgroundCapacityAvailable()) {
+      return Promise.reject(new Error("linear_request_capacity_reserved"));
     }
     if (requestClass === "mutation") {
       this.#generation += 1;

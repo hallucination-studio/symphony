@@ -887,7 +887,20 @@
       "properties": {
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "issue_versions": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_id", "remote_version"],
+            "properties": {
+              "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+              "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+            }
+          }
+        }
       }
     },
     "WorkflowMutationResult": {

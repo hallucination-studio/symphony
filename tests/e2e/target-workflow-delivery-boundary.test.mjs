@@ -32,3 +32,24 @@ test("target delivery boundary preserves success or delivery failure and closes 
   );
   assert.deepEqual(events, ["close"]);
 });
+
+test("target delivery boundary shares one decreasing deadline across success and delivery", async () => {
+  const timeouts = [];
+  const times = [1_100, 1_400];
+  const result = await runTargetDeliveryBoundary({
+    deadlineAtMs: 2_000,
+    now: () => times.shift(),
+    startBoundary: async () => ({ runner: {}, async close() {} }),
+    runSuccess: async ({ timeoutMs }) => {
+      timeouts.push(timeoutMs);
+      return { facts: { root: { rootIssueId: "root-1" } } };
+    },
+    runDelivery: async ({ timeoutMs }) => {
+      timeouts.push(timeoutMs);
+      return { delivery: { kind: "local_branch" } };
+    },
+  });
+
+  assert.equal(result.delivery.delivery.kind, "local_branch");
+  assert.deepEqual(timeouts, [900, 600]);
+});

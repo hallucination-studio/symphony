@@ -1753,13 +1753,21 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
             parent: { id: "root-1", project: { id: "project-1" }, parent: null },
           } } };
         }
-        return { data: { issue: {
+        return { data: { root: {
+          id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null,
+        }, source: {
+          id: "source-1", updatedAt: "2026-07-16T00:00:04Z", project: { id: "project-1" },
+          parent: { id: "cycle-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" },
+            parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null } },
+        }, issue: {
           id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" },
+          parent: { id: "cycle-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" },
+            parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null } },
           inverseRelations: {
             nodes: [{
               type: "blocks",
-              issue: { id: "source-1", updatedAt: "2026-07-16T00:00:04Z", project: { id: "project-1" } },
-              relatedIssue: { id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" } },
+              issue: { id: "source-1", updatedAt: "2026-07-16T00:00:03Z", project: { id: "project-1" } },
+              relatedIssue: { id: "target-1", updatedAt: "2026-07-16T00:00:07Z", project: { id: "project-1" } },
             }],
             pageInfo: { hasNextPage: false },
           },
@@ -1770,8 +1778,59 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
 
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-relation", targetIssueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z",
+    issueVersions: [
+      { issueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z" },
+      { issueId: "target-1", remoteVersion: "2026-07-16T00:00:07Z" },
+      { issueId: "cycle-1", remoteVersion: "2026-07-16T00:00:06Z" },
+      { issueId: "root-1", remoteVersion: "2026-07-16T00:00:06Z" },
+    ],
   });
-  assert.equal(rawOperations.filter((query) => query.includes("WorkflowMutationScope")).length, 1);
+  assert.equal(rawOperations.length, 1);
+});
+
+test("workflow blocked_by read-back maps Linear relation versions to command endpoints", async () => {
+  const root = issue({ id: "root-1" });
+  const blocked = issue({ id: "blocked-1", parentId: "root-1" });
+  const dependency = issue({ id: "dependency-1", parentId: "root-1" });
+  const command = {
+    kind: "create_workflow_relation", writeId: "write-blocked-by", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
+    sourceIssueId: "blocked-1", sourceExpectedRemoteVersion: blocked.updatedAt,
+    targetIssueId: "dependency-1", targetExpectedRemoteVersion: dependency.updatedAt, relationKind: "blocked_by",
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (id) => id === "root-1" ? root : id === "blocked-1" ? blocked : dependency,
+    client: {
+      async rawRequest() {
+        return { data: { root: {
+          id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null,
+        }, source: {
+          id: "dependency-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" },
+          parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null },
+        }, issue: {
+          id: "blocked-1", updatedAt: "2026-07-16T00:00:04Z", project: { id: "project-1" },
+          parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null },
+          inverseRelations: {
+            nodes: [{
+              type: "blocks",
+              issue: { id: "dependency-1", updatedAt: "2026-07-16T00:00:07Z", project: { id: "project-1" } },
+              relatedIssue: { id: "blocked-1", updatedAt: "2026-07-16T00:00:03Z", project: { id: "project-1" } },
+            }],
+            pageInfo: { hasNextPage: false },
+          },
+        } } };
+      },
+    },
+  });
+
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "write-blocked-by", targetIssueId: "blocked-1", remoteVersion: "2026-07-16T00:00:04Z",
+    issueVersions: [
+      { issueId: "blocked-1", remoteVersion: "2026-07-16T00:00:04Z" },
+      { issueId: "dependency-1", remoteVersion: "2026-07-16T00:00:07Z" },
+      { issueId: "root-1", remoteVersion: "2026-07-16T00:00:06Z" },
+    ],
+  });
 });
 
 test("workflow relation mutation batches source and target scope ancestry", async () => {
@@ -1820,7 +1879,9 @@ test("workflow issue read-back batches child status facts", async () => {
           } } };
         }
         assert.match(query, /WorkflowMutationChildren/u);
-        return { data: { issue: { children: {
+        return { data: { issue: {
+          id: "root-1", updatedAt: "2026-07-22T00:00:01Z", project: { id: "project-1" }, parent: null,
+          children: {
           nodes: [{
             id: "work-1", updatedAt: "2026-07-22T00:00:00Z", project: { id: "project-1" },
             parent: { id: "root-1" }, state: { id: "state-todo" }, title: "Implement",
@@ -1840,8 +1901,49 @@ test("workflow issue read-back batches child status facts", async () => {
   };
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-child-read", targetIssueId: "work-1", remoteVersion: "2026-07-22T00:00:00Z",
+    issueVersions: [{ issueId: "root-1", remoteVersion: "2026-07-22T00:00:01Z" }],
   });
   assert.equal(rawQueries.filter((query) => query.includes("WorkflowMutationChildren")).length, 1);
+  assert.equal(rawQueries.length, 1);
+});
+
+test("workflow SDK compact preflight validates all update facts in one physical request", async () => {
+  const rawQueries = [];
+  const description = "Existing\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->";
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    client: { async rawRequest(query) {
+      rawQueries.push(query);
+      return { data: { issues: { nodes: [
+        {
+          id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null,
+          state: { id: "status-progress" }, title: "Root", description: "Root",
+          team: { id: "team-1", states: { nodes: [{ id: "status-progress" }], pageInfo: { hasNextPage: false } } },
+          comments: { nodes: [], pageInfo: { hasNextPage: false } },
+          children: { nodes: [], pageInfo: { hasNextPage: false } },
+          inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+        },
+        {
+          id: "work-1", updatedAt: "work-version", project: { id: "project-1" },
+          parent: { id: "root-1", project: { id: "project-1" }, parent: null },
+          state: { id: "status-todo" }, title: "Existing", description,
+          team: { id: "team-1", states: { nodes: [{ id: "status-progress" }], pageInfo: { hasNextPage: false } } },
+          comments: { nodes: [], pageInfo: { hasNextPage: false } },
+          children: { nodes: [], pageInfo: { hasNextPage: false } },
+          inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+        },
+      ] } } };
+    } },
+  });
+  const result = await adapter.preflightWorkflowMutation({
+    kind: "update_workflow_issue", writeId: "write-preflight", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1", expectedManagedMarker: "work-marker" },
+    statusId: "status-progress", title: "Updated", description: "Updated description",
+  });
+
+  assert.deepEqual(result, { kind: "ready" });
+  assert.equal(rawQueries.length, 1);
+  assert.match(rawQueries[0], /WorkflowMutationPreflight/u);
 });
 
 test("workflow SDK mutations reject targets outside the requested Root tree", async () => {

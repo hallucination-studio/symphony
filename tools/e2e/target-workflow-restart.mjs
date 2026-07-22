@@ -14,7 +14,7 @@ export async function runTargetRestartRecoveryScenario({
   rootInput,
   observationInput,
   humanResponseBody,
-  timeoutMs = 30 * 60_000,
+  timeoutMs = 5 * 60_000,
   pollIntervalMs = 1_000,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   now = Date.now,
@@ -116,7 +116,7 @@ function validateDependencies({ runner, boundary, observationInput, humanRespons
   if (typeof humanResponseBody !== "string" || humanResponseBody.trim().length === 0 || humanResponseBody.length > 8_192) {
     throw new Error("target_restart_recovery_human_body_invalid");
   }
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000 ||
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5 * 60_000 ||
       !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 0 || pollIntervalMs > 300_000 ||
       typeof sleep !== "function" || typeof now !== "function" || typeof onProgress !== "function" ||
       typeof readObservationInput !== "function") {

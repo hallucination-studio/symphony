@@ -4,7 +4,7 @@ const RECORD_PREFIX = "<!-- symphony managed-record\n";
 const RECORD_SUFFIX = "\n-->";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
-const DIGEST = /^[0-9a-f]{64}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const ACTIVE_CYCLE_STATES = new Set([
   "Draft", "Planning", "Sealed", "Executing", "Verifying", "Inconclusive", "Escalated",
 ]);

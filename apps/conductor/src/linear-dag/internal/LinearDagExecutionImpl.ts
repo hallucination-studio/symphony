@@ -66,6 +66,9 @@ type RootMutationInput = Pick<BootstrapPlanInput, "rootIssueId" | "projectId" | 
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
 
 export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
+  private readonly projectedTrees = new Map<string, LinearWorkflowTreeSnapshot>();
+  private readonly projectionScopes = new Set<string>();
+
   constructor(
     private readonly dependencies: LinearDagExecutionDependencies,
     private readonly contextBuilder = new StageContextBuilder(),
@@ -91,9 +94,11 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   async executeBootstrapPlan(input: BootstrapPlanInput): Promise<BootstrapPlanExecutionResult> {
     let stageResult: JsonValue | undefined;
     let activeStageExecutionId: string | undefined;
-    for (let attempt = 0; attempt < 32; attempt += 1) {
+    this.projectionScopes.add(input.rootIssueId);
+    try { for (let attempt = 0; attempt < 32; attempt += 1) {
       const next = await this.reconcileRoot(input, stageResult, activeStageExecutionId);
       if (next.kind === "stage_ready") {
+        this.projectedTrees.delete(input.rootIssueId);
         try {
           stageResult = (await this.dependencies.performer.runStage({
             envelope: next.envelope,
@@ -124,20 +129,27 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         return { kind: "sealed", cycleIssueId: cycle.issue_id, planIssueId: plan.issue_id, planContractDigest: contract.planContractDigest };
       }
       if (next.kind === "mutation_applied") {
+        if (next.step === "plan_stage_retryable_failure_terminal") {
+          stageResult = undefined;
+          activeStageExecutionId = undefined;
+        }
         if (next.step === "plan_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "plan");
         continue;
       }
     }
-    throw new Error("bootstrap_plan_reconciliation_limit_exceeded");
+    throw new Error("bootstrap_plan_reconciliation_limit_exceeded"); }
+    finally { this.projectionScopes.delete(input.rootIssueId); this.projectedTrees.delete(input.rootIssueId); }
   }
 
   async executeWorkStage(input: WorkStageInput): Promise<WorkStageExecutionResult> {
     let stageResult: JsonValue | undefined;
     let commitRevision: string | undefined;
     let activeStageExecutionId: string | undefined;
-    for (let attempt = 0; attempt < 32; attempt += 1) {
+    this.projectionScopes.add(input.rootIssueId);
+    try { for (let attempt = 0; attempt < 32; attempt += 1) {
       const next = await this.reconcileWork(input, stageResult, commitRevision, activeStageExecutionId);
       if (next.kind === "stage_ready") {
+        this.projectedTrees.delete(input.rootIssueId);
         try {
           stageResult = (await this.dependencies.performer.runStage({
             envelope: next.envelope,
@@ -150,6 +162,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         continue;
       }
       if (next.kind === "mutation_applied") {
+        if (next.step === "work_stage_retryable_failure_terminal") {
+          stageResult = undefined;
+          activeStageExecutionId = undefined;
+        }
         if (next.step === "work_committed") commitRevision = (await this.dependencies.git.inspect(input.workspace)).head;
         if (next.step === "work_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "work");
         continue;
@@ -158,15 +174,18 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       if (next.kind === "blocked") throw new Error(next.reason);
       return next;
     }
-    throw new Error("work_stage_reconciliation_limit_exceeded");
+    throw new Error("work_stage_reconciliation_limit_exceeded"); }
+    finally { this.projectionScopes.delete(input.rootIssueId); this.projectedTrees.delete(input.rootIssueId); }
   }
 
   async executeVerifyStage(input: VerifyStageInput): Promise<VerifyStageExecutionResult> {
     let stageResult: JsonValue | undefined;
     let activeStageExecutionId: string | undefined;
-    for (let attempt = 0; attempt < 32; attempt += 1) {
+    this.projectionScopes.add(input.rootIssueId);
+    try { for (let attempt = 0; attempt < 32; attempt += 1) {
       const next = await this.reconcileVerify(input, stageResult, activeStageExecutionId);
       if (next.kind === "stage_ready") {
+        this.projectedTrees.delete(input.rootIssueId);
         try {
           stageResult = (await this.dependencies.performer.runStage({ envelope: next.envelope, workspaceRoot: input.workspace.worktreePath })).result;
         } catch (error) {
@@ -176,6 +195,10 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         continue;
       }
       if (next.kind === "mutation_applied") {
+        if (next.step === "verify_stage_retryable_failure_terminal") {
+          stageResult = undefined;
+          activeStageExecutionId = undefined;
+        }
         if (next.step === "verify_execution_created") activeStageExecutionId = await this.latestStageExecutionId(input, "verify");
         continue;
       }
@@ -183,11 +206,12 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       if (next.kind === "waiting_human" && next.step === "verify_suspension") return { kind: "awaiting_human", cycleIssueId: next.cycleIssueId, verifyIssueId: next.verifyIssueId, actionId: next.actionId };
       return next;
     }
-    throw new Error("verify_stage_reconciliation_limit_exceeded");
+    throw new Error("verify_stage_reconciliation_limit_exceeded"); }
+    finally { this.projectionScopes.delete(input.rootIssueId); this.projectedTrees.delete(input.rootIssueId); }
   }
 
   async reconcileWork(input: WorkStageInput, stageResult?: JsonValue, commitRevision?: string, activeStageExecutionId?: string): Promise<WorkStageReconciliation> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const tree = await this.readReconciliationTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return workBlocked("work_root_not_runnable");
     const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
@@ -239,6 +263,21 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (stageResult === undefined && latestExecution && !currentTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
       await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Work execution ended without a terminal result and will be retried."));
       return { kind: "mutation_applied", step: "work_orphaned_execution_terminal" };
+    }
+    const executionFailure = stageResult !== undefined && resultKind(stageResult) === "execution_failed"
+      ? validateExecutionFailure(stageResult, latestExecution, "work")
+      : undefined;
+    if (executionFailure) {
+      if (!executionFailure.retryable) throw new Error(stageFailureReason("work", executionFailure.outcome));
+      if (!latestExecution) return workBlocked("work_execution_missing");
+      if (!currentTerminal) {
+        await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(
+          latestExecution, executionFailure.completedAt, executionFailure.errorCode, executionFailure.sanitizedReason,
+        ));
+        return { kind: "mutation_applied", step: "work_stage_retryable_failure_terminal" };
+      }
+      if (currentTerminal.outcome !== "failed") return workBlocked("work_retryable_failure_terminal_conflict");
+      if (resultExecutionId(stageResult as JsonValue) === latestExecution.stageExecutionId) return workBlocked("work_retryable_failure_replayed");
     }
     const completion = recordFrom(records, selected.issue.issue_id, "work_completion") as WorkCompletionRecord | undefined;
     if (completion) {
@@ -341,7 +380,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   }
 
   async reconcileVerify(input: VerifyStageInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<VerifyStageReconciliation> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const tree = await this.readReconciliationTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return verifyBlocked("verify_root_not_runnable");
     const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
@@ -386,6 +425,21 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (stageResult === undefined && latestExecution && !currentTerminal && latestExecution.stageExecutionId !== activeStageExecutionId) {
       await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(latestExecution, tree.observed_at, "orphaned_execution", "The Verify execution ended without a terminal result and will be retried."));
       return { kind: "mutation_applied", step: "verify_orphaned_execution_terminal" };
+    }
+    const executionFailure = stageResult !== undefined && resultKind(stageResult) === "execution_failed"
+      ? validateExecutionFailure(stageResult, latestExecution, "verify")
+      : undefined;
+    if (executionFailure) {
+      if (!executionFailure.retryable) throw new Error(stageFailureReason("verify", executionFailure.outcome));
+      if (!latestExecution) return verifyBlocked("verify_execution_missing");
+      if (!currentTerminal) {
+        await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(
+          latestExecution, executionFailure.completedAt, executionFailure.errorCode, executionFailure.sanitizedReason,
+        ));
+        return { kind: "mutation_applied", step: "verify_stage_retryable_failure_terminal" };
+      }
+      if (currentTerminal.outcome !== "failed") return verifyBlocked("verify_retryable_failure_terminal_conflict");
+      if (resultExecutionId(stageResult as JsonValue) === latestExecution.stageExecutionId) return verifyBlocked("verify_retryable_failure_replayed");
     }
     const latestResult = latestVerifyResult(records);
     const currentResult = latestExecution && (records.get(verify.issue.issue_id) ?? []).find((record): record is VerifyResultRecord => record.kind === "verify_result" && record.stageExecutionId === latestExecution.stageExecutionId);
@@ -499,7 +553,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   }
 
   async reconcileRoot(input: BootstrapPlanInput, stageResult?: JsonValue, activeStageExecutionId?: string): Promise<BootstrapPlanReconciliation> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const tree = await this.readReconciliationTree(input.rootIssueId);
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root || root.issue_kind !== "root" || root.project_id !== input.projectId) return blocked("root_read_back_invalid");
     const terminalResultReason = rootTerminalResultReason(root.status_name, stageResult);
@@ -625,6 +679,25 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       return { kind: "mutation_applied", step: "plan_orphaned_execution_terminal" };
     }
 
+    const executionFailure = stageResult !== undefined && resultKind(stageResult) === "execution_failed"
+      ? validateExecutionFailure(stageResult, latestExecution, "plan")
+      : undefined;
+    if (executionFailure) {
+      if (!executionFailure.retryable) throw new Error(stageFailureReason("plan", executionFailure.outcome));
+      if (!latestExecution) return blocked("plan_execution_missing");
+      if (!currentTerminal) {
+        await this.appendRecord(input, tree, plan, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:plan:${plan.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromFailure(
+          latestExecution,
+          executionFailure.completedAt,
+          executionFailure.errorCode,
+          executionFailure.sanitizedReason,
+        ));
+        return { kind: "mutation_applied", step: "plan_stage_retryable_failure_terminal" };
+      }
+      if (currentTerminal.outcome !== "failed") return blocked("plan_retryable_failure_terminal_conflict");
+      if (stageResult !== undefined && resultExecutionId(stageResult) === latestExecution.stageExecutionId) return blocked("plan_retryable_failure_replayed");
+    }
+
     const suspended = stageResult !== undefined && resultKind(stageResult) === "suspended"
       ? validateSuspendedResult(stageResult, latestExecution, "plan")
       : undefined;
@@ -725,7 +798,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
   }
 
   private async latestStageExecutionId(input: BootstrapPlanInput, stage: StageExecutionRecord["stage"]): Promise<string> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(input.rootIssueId);
+    const tree = await this.readReconciliationTree(input.rootIssueId);
     const latest = [...recordsByIssue(tree.comments).values()]
       .flatMap((records) => records.filter((record): record is StageExecutionRecord => record.kind === "stage_execution" && record.rootIssueId === input.rootIssueId && record.stage === stage))
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.stageExecutionId.localeCompare(right.stageExecutionId))
@@ -834,20 +907,22 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     });
   }
 
-  private async appendRecord(input: RootMutationInput, tree: LinearWorkflowTreeSnapshot, target: Issue, writeId: string, managedMarker: string, record: ManagedRecord): Promise<void> {
+  private async appendRecord(input: RootMutationInput, tree: LinearWorkflowTreeSnapshot, target: Issue, writeId: string, _managedMarker: string, record: ManagedRecord): Promise<void> {
     const root = tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
     if (!root) throw new Error("root_read_back_invalid");
+    const boundedWriteId = boundedRecordWriteId(input.rootIssueId, writeId);
     await this.mutateAndReadBack({
       input,
       tree,
-      writeId,
+      writeId: boundedWriteId,
       command: {
-        kind: "append_workflow_comment", writeId, expectedProjectId: input.projectId, rootIssueId: input.rootIssueId,
+        kind: "append_workflow_comment", writeId: boundedWriteId, expectedProjectId: input.projectId, rootIssueId: input.rootIssueId,
         expectedRootRemoteVersion: root.remote_version,
         target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, ...(target.status_id ? { expectedStatusId: target.status_id } : {}), ...(target.parent_issue_id ? { expectedParentIssueId: target.parent_issue_id } : {}), ...(target.managed_marker ? { expectedManagedMarker: target.managed_marker } : {}) },
         body: serializeManagedRecord(record),
       },
-      check: (fresh) => fresh.comments.some((comment) => comment.issue_id === target.issue_id && comment.managed_marker === managedMarker && comment.body === serializeManagedRecord(record)),
+      check: (fresh) => fresh.comments.some((comment) =>
+        comment.issue_id === target.issue_id && comment.body === serializeManagedRecord(record)),
     });
   }
 
@@ -863,10 +938,78 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     if (outcome.kind === "precondition_conflict") throw new Error("workflow_precondition_conflict");
     const readBackWriteId = outcome.kind === "write_unconfirmed" ? outcome.readBackTarget.writeId : outcome.readBack.writeId;
     if (readBackWriteId !== input.writeId) throw new Error("workflow_write_read_back_mismatch");
-    const targetIssueId = outcome.kind === "write_unconfirmed" ? outcome.readBackTarget.targetIssueId : outcome.readBack.targetIssueId;
-    const fresh = await this.dependencies.linear.readWorkflowIssueTree(input.input.rootIssueId);
-    if (!input.check(fresh, { targetIssueId })) throw new Error(`workflow_write_unconfirmed:${input.writeId}`);
+    const readBack = outcome.kind === "write_unconfirmed" ? outcome.readBackTarget : outcome.readBack;
+    if (this.projectionScopes.has(input.input.rootIssueId)) {
+      this.projectedTrees.set(input.input.rootIssueId, projectWorkflowMutation(input.tree, input.command, readBack));
+    }
+    // Podium has already proved this exact write. Projection is scoped to one
+    // execution loop and is discarded before every Performer boundary.
   }
+
+  private async readReconciliationTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot> {
+    const projected = this.projectedTrees.get(rootIssueId);
+    if (projected) {
+      return structuredClone(projected);
+    }
+    return this.dependencies.linear.readWorkflowIssueTree(rootIssueId);
+  }
+}
+
+function projectWorkflowMutation(
+  tree: LinearWorkflowTreeSnapshot,
+  command: LinearWorkflowMutationCommand,
+  readBack: { targetIssueId: string; remoteVersion: string; issueVersions?: Array<{ issueId: string; remoteVersion: string }> },
+): LinearWorkflowTreeSnapshot {
+  const projected = structuredClone(tree);
+  projected.observed_at = new Date().toISOString();
+  if (command.kind === "create_workflow_issue") {
+    const parent = projected.issues.find((issue) => issue.issue_id === command.parentIssueId);
+    const status = projected.status_catalog.find((value) => value.status_id === command.statusId);
+    if (!parent || !status) throw new Error("workflow_projection_create_invalid");
+    projected.issues.push({
+      issue_id: readBack.targetIssueId, identifier: readBack.targetIssueId,
+      project_id: command.expectedProjectId, parent_issue_id: command.parentIssueId,
+      status_id: status.status_id, status_name: status.name, status_category: status.category,
+      status_position: status.position, order: command.order ?? projected.issues.length,
+      depth: parent.depth + 1, title: command.title, description: command.description,
+      managed_marker: command.managedMarker, issue_kind: command.issueKind,
+      remote_version: readBack.remoteVersion, updated_at: projected.observed_at,
+    });
+  } else if (command.kind === "update_workflow_issue") {
+    const issue = projected.issues.find((value) => value.issue_id === command.target.targetIssueId);
+    const status = projected.status_catalog.find((value) => value.status_id === command.statusId);
+    if (!issue || !status || readBack.targetIssueId !== issue.issue_id) throw new Error("workflow_projection_update_invalid");
+    Object.assign(issue, {
+      status_id: status.status_id, status_name: status.name, status_category: status.category,
+      status_position: status.position, title: command.title, description: command.description,
+      remote_version: readBack.remoteVersion, updated_at: projected.observed_at,
+    });
+  } else if (command.kind === "append_workflow_comment") {
+    if (readBack.targetIssueId !== command.target.targetIssueId) throw new Error("workflow_projection_comment_invalid");
+    projected.comments.push({
+      comment_id: command.writeId, issue_id: command.target.targetIssueId, body: command.body,
+      managed_marker: command.writeId, remote_version: readBack.remoteVersion, updated_at: projected.observed_at,
+    });
+  } else {
+    if (readBack.targetIssueId !== command.sourceIssueId) throw new Error("workflow_projection_relation_invalid");
+    projected.relations.push({
+      relation_id: command.writeId, relation_kind: command.relationKind,
+      source_issue_id: command.sourceIssueId, target_issue_id: command.targetIssueId,
+    });
+  }
+  for (const version of readBack.issueVersions ?? []) {
+    const issue = projected.issues.find((value) => value.issue_id === version.issueId);
+    if (issue) {
+      issue.remote_version = version.remoteVersion;
+      issue.updated_at = projected.observed_at;
+    }
+  }
+  return projected;
+}
+
+function boundedRecordWriteId(rootIssueId: string, writeId: string): string {
+  if (writeId.length <= 128) return writeId;
+  return `${rootIssueId}:record:${digest(writeId).slice("sha256:".length)}`;
 }
 
 function createIssue(input: BootstrapPlanInput, parent: Issue, rootRemoteVersion: string, status: Status | undefined, issueKind: "cycle" | "plan", title: string, description: string, managedMarker: string, options: { writeId?: string; order?: number } = {}): LinearWorkflowMutationCommand {
@@ -994,6 +1137,21 @@ function resultKind(value: JsonValue): string | undefined {
   return outcome.kind;
 }
 
+function stageFailureReason(stage: "plan" | "work" | "verify", outcome: JsonValue | undefined): string {
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome) || typeof outcome.kind !== "string") {
+    return `${stage}_result_not_completed`;
+  }
+  if (outcome.kind === "execution_failed") {
+    const errorCode = typeof outcome.error_code === "string" ? outcome.error_code : "unknown";
+    const reason = typeof outcome.sanitized_reason === "string"
+      ? outcome.sanitized_reason.replace(/\s+/gu, " ").slice(0, 1_000)
+      : "Stage execution failed.";
+    return `${stage}_result_execution_failed:${errorCode}:${reason}`;
+  }
+  if (outcome.kind === "canceled") return `${stage}_result_canceled`;
+  return `${stage}_result_not_completed:${outcome.kind}`;
+}
+
 interface ValidatedSuspension {
   completedAt: string;
   usage: StageUsage;
@@ -1001,6 +1159,38 @@ interface ValidatedSuspension {
   questionOrProposal: string;
   reason: string;
   impact: string;
+}
+
+function validateExecutionFailure(
+  value: JsonValue,
+  execution: StageExecutionRecord | undefined,
+  stage: "plan" | "work" | "verify",
+): {
+  completedAt: string;
+  errorCode: string;
+  sanitizedReason: string;
+  retryable: boolean;
+  outcome: JsonValue;
+} {
+  if (!execution) throw new Error(`${stage}_execution_missing`);
+  let result: JsonValue;
+  try { result = decodeConductorPerformerStageResult(value) as JsonValue; } catch { throw new Error(`${stage}_result_invalid`); }
+  if (!result || typeof result !== "object" || Array.isArray(result)
+    || result.stage_execution_id !== execution.stageExecutionId || result.stage !== stage
+    || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId
+    || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest
+    || !result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome)
+    || result.outcome.kind !== "execution_failed" || typeof result.outcome.error_code !== "string"
+    || typeof result.outcome.sanitized_reason !== "string" || typeof result.outcome.retryable !== "boolean") {
+    throw new Error(`${stage}_result_invalid`);
+  }
+  return {
+    completedAt: typeof result.completed_at === "string" ? result.completed_at : "",
+    errorCode: result.outcome.error_code,
+    sanitizedReason: result.outcome.sanitized_reason,
+    retryable: result.outcome.retryable,
+    outcome: result.outcome,
+  };
 }
 
 function validateSuspendedResult(value: JsonValue, execution: StageExecutionRecord | undefined, stage: "plan" | "work" | "verify"): ValidatedSuspension {
@@ -1056,7 +1246,9 @@ function validatePlanResult(value: JsonValue, execution: StageExecutionRecord): 
   if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== "plan"
     || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId
     || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error("plan_result_correlation_invalid");
-  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "plan_completed") throw new Error("plan_result_not_completed");
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "plan_completed") {
+    throw new Error(stageFailureReason("plan", result.outcome));
+  }
   const planContract = result.outcome.plan_contract;
   if (!planContract || typeof planContract !== "object" || Array.isArray(planContract)) throw new Error("plan_contract_invalid");
   const workNodes = planContract.work_nodes;
@@ -1181,7 +1373,9 @@ function validateWorkResult(value: JsonValue, execution: StageExecutionRecord): 
   if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== "work"
     || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId
     || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error("work_result_correlation_invalid");
-  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "work_completed") throw new Error("work_result_not_completed");
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "work_completed") {
+    throw new Error(stageFailureReason("work", result.outcome));
+  }
   const outcome = result.outcome as Record<string, JsonValue>;
   if (typeof outcome.summary !== "string" || !Array.isArray(outcome.changed_paths) || !Array.isArray(outcome.checks) || typeof outcome.observed_workspace_revision !== "string") throw new Error("work_result_shape_invalid");
   const checks = outcome.checks.map((value) => {
@@ -1219,7 +1413,9 @@ function validateVerifyResult(value: JsonValue | undefined, execution: StageExec
   try { result = decodeConductorPerformerStageResult(value as JsonValue) as JsonValue; } catch { throw new Error("verify_result_invalid"); }
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("verify_result_invalid");
   if (result.stage_execution_id !== execution.stageExecutionId || result.stage !== "verify" || result.root_issue_id !== execution.rootIssueId || result.cycle_issue_id !== execution.cycleIssueId || result.node_issue_id !== execution.nodeIssueId || result.context_digest !== execution.contextDigest) throw new Error("verify_result_correlation_invalid");
-  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "verify_completed") throw new Error("verify_result_not_completed");
+  if (!result.outcome || typeof result.outcome !== "object" || Array.isArray(result.outcome) || result.outcome.kind !== "verify_completed") {
+    throw new Error(stageFailureReason("verify", result.outcome));
+  }
   const outcome = result.outcome as Record<string, JsonValue>;
   if (outcome.verified_revision !== execution.repositoryRevision || outcome.verified_revision !== currentRevision) throw new Error("verify_revision_invalid");
   if (!Array.isArray(outcome.criteria_results) || !Array.isArray(outcome.checks) || !Array.isArray(outcome.new_findings) || !Array.isArray(outcome.finding_dispositions)) throw new Error("verify_result_shape_invalid");

@@ -13,7 +13,7 @@ export async function runTargetDeliveryScenario({
   verifiedRevision,
   deliveryBranch,
   observationInput,
-  timeoutMs = 30 * 60_000,
+  timeoutMs = 5 * 60_000,
   pollIntervalMs = 1_000,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   now = Date.now,
@@ -56,7 +56,7 @@ function validateDependencies({ runner, rootIssueId, projectId, verifyIssueId, v
       !SHA.test(observationInput.git?.head ?? "") || !SAFE_ID.test(observationInput.git?.branch ?? "")) {
     throw new Error("target_delivery_observation_invalid");
   }
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000 ||
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5 * 60_000 ||
       !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 0 || pollIntervalMs > 300_000 ||
       typeof sleep !== "function" || typeof now !== "function" || typeof onProgress !== "function") {
     throw new Error("target_delivery_timing_invalid");

@@ -22,6 +22,10 @@ type Body = Record<string, JsonValue> & { kind: string };
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   #activeInstanceId: string | undefined;
   readonly #linearRequests: LinearRequestBrokerImpl;
+  readonly #linearGateways = new Map<InstallationRequestClass, {
+    installation: LinearInstallation;
+    gateway: LinearGatewayProtocolHandlerImpl;
+  }>();
 
   constructor(
     private readonly store: PodiumConductorStoreInterface,
@@ -84,18 +88,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     );
     if (!installation) throw new Error("linear_installation_missing");
     const classification = requestClass(body.kind);
-    const gateway = new LinearGatewayProtocolHandlerImpl(
-      this.options.createLinearSdk(installation, (observation) => {
-        this.#linearRequests.observe(observation);
-      }, () => this.#linearRequests.assertPermit(classification)),
-      {
-        maxAttempts: 4,
-        baseDelayMs: 250,
-        maxDelayMs: 30_000,
-        random: Math.random,
-        sleep: this.options.sleep,
-      },
-    );
+    const gateway = this.#linearGateway(installation, classification);
     return this.#linearRequests.run(classification, async () => {
       switch (body.kind) {
       case "resolve_conductor_project":
@@ -137,6 +130,34 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         coalesceKey: JSON.stringify(body),
       }),
     });
+  }
+
+  #linearGateway(
+    installation: LinearInstallation,
+    classification: InstallationRequestClass,
+  ): LinearGatewayProtocolHandlerImpl {
+    const current = this.#linearGateways.get(classification);
+    if (current && sameInstallation(current.installation, installation)) {
+      return current.gateway;
+    }
+    if ([...this.#linearGateways.values()].some(({ installation: cached }) =>
+      !sameInstallation(cached, installation))) {
+      this.#linearGateways.clear();
+    }
+    const gateway = new LinearGatewayProtocolHandlerImpl(
+      this.options.createLinearSdk(installation, (observation) => {
+        this.#linearRequests.observe(observation);
+      }, () => this.#linearRequests.assertPermit(classification)),
+      {
+        maxAttempts: 4,
+        baseDelayMs: 250,
+        maxDelayMs: 30_000,
+        random: Math.random,
+        sleep: this.options.sleep,
+      },
+    );
+    this.#linearGateways.set(classification, { installation, gateway });
+    return gateway;
   }
 
   #runtime(body: Body): JsonValue {
@@ -408,6 +429,17 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     };
   }
 
+}
+
+function sameInstallation(left: LinearInstallation, right: LinearInstallation): boolean {
+  return left.kind === right.kind &&
+    left.installationId === right.installationId &&
+    left.organizationId === right.organizationId &&
+    left.accessToken === right.accessToken &&
+    (left.kind === "oauth" && right.kind === "oauth"
+      ? left.refreshToken === right.refreshToken && left.expiresAt === right.expiresAt
+      : left.kind === "development_token" && right.kind === "development_token" &&
+        left.delegateActorId === right.delegateActorId);
 }
 
 function requestClass(kind: string): InstallationRequestClass {
@@ -725,6 +757,7 @@ function workflowMutationResult(
       write_id: result.readBackTarget.writeId,
       target_issue_id: result.readBackTarget.targetIssueId,
       remote_version: result.readBackTarget.remoteVersion,
+      ...(result.readBackTarget.issueVersions ? { issue_versions: result.readBackTarget.issueVersions.map((value) => ({ issue_id: value.issueId, remote_version: value.remoteVersion })) } : {}),
     } };
   }
   if (result.kind === "precondition_conflict") return { kind: result.kind };
@@ -732,6 +765,7 @@ function workflowMutationResult(
     write_id: result.readBack.writeId,
     target_issue_id: result.readBack.targetIssueId,
     remote_version: result.readBack.remoteVersion,
+    ...(result.readBack.issueVersions ? { issue_versions: result.readBack.issueVersions.map((value) => ({ issue_id: value.issueId, remote_version: value.remoteVersion })) } : {}),
   } };
 }
 

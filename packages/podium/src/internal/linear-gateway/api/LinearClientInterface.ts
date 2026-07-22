@@ -209,6 +209,14 @@ export interface LinearClientInterface {
     issueId: string,
   ): Promise<import("../types.js").WorkflowMutationTargetValue | undefined>;
 
+  preflightWorkflowMutation?(
+    command: import("../types.js").WorkflowMutationCommand,
+  ): Promise<
+    | { kind: "ready" }
+    | { kind: "already_applied"; readBack: import("../types.js").WorkflowMutationReadBack }
+    | { kind: "precondition_conflict" }
+  >;
+
   executeWorkflowMutation(
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<void>;

@@ -47,10 +47,13 @@ export {
   inspectTargetWorkflowCatalog,
   planTargetWorkflowInitialization,
   TARGET_WORKFLOW_STATUS_CATEGORIES,
+  TARGET_WORKFLOW_STATUS_NAMES,
+  isTargetWorkflowStatusName,
   type TargetWorkflowCatalogInspection,
   type TargetWorkflowInitializationOperation,
   type TargetWorkflowInitializationPlan,
   type TargetWorkflowStatusCategory,
+  type TargetWorkflowStatusName,
   type TargetWorkflowStatusSnapshot,
 } from "./TargetWorkflowCatalog.js";
 export {

@@ -1,5 +1,6 @@
 import type { ProtocolError } from "../errors.js";
 import type { LinearClientInterface } from "./api/LinearClientInterface.js";
+import { isTargetWorkflowStatusName } from "../../public/TargetWorkflowCatalog.js";
 import type {
   LinearMutationCommand,
   LinearMutationResult,
@@ -122,6 +123,8 @@ function commandPrecondition(
 }
 
 export class LinearGatewayProtocolHandlerImpl {
+  private readonly projectResolutionCache = new Map<string, ReturnType<LinearClientInterface["readProjectResolution"]>>();
+
   constructor(
     private readonly client: LinearClientInterface,
     private readonly retry: RetryOptions,
@@ -142,7 +145,7 @@ export class LinearGatewayProtocolHandlerImpl {
     if (!identifier(conductorShortHash, 128)) {
       throw new Error("linear_conductor_short_hash_invalid");
     }
-    return this.client.readProjectResolution({ conductorShortHash });
+    return this.readProjectResolution(conductorShortHash);
   }
 
   async listAllRootIssues(projectId: string): Promise<RootIssueValue[]> {
@@ -523,6 +526,7 @@ export class LinearGatewayProtocolHandlerImpl {
         if (!isRetryable || attempt === this.retry.maxAttempts) {
           return { kind: "failed", error: protocolFailure(error) };
         }
+        this.projectResolutionCache.delete(command.project.conductorShortHash);
         const retryAfterMs = typeof record.retryAfterMs === "number"
           && Number.isFinite(record.retryAfterMs) && record.retryAfterMs >= 0
           ? record.retryAfterMs : 0;
@@ -554,10 +558,20 @@ export class LinearGatewayProtocolHandlerImpl {
           if (outcome) return { kind: "already_applied", readBack: outcome };
           readBackBeforeRetry = false;
         }
-        const idempotentOutcome = await this.#checkWorkflowIdempotentOutcome(command);
-        if (idempotentOutcome) return idempotentOutcome;
-        const preconditionFailure = await this.#checkWorkflowPreconditions(command);
-        if (preconditionFailure) return preconditionFailure;
+        if (this.client.preflightWorkflowMutation) {
+          const preflight = await this.client.preflightWorkflowMutation(command);
+          if (preflight.kind === "already_applied") {
+            return { kind: "already_applied", readBack: preflight.readBack };
+          }
+          if (preflight.kind === "precondition_conflict") {
+            return { kind: "precondition_conflict" };
+          }
+        } else {
+          const idempotentOutcome = await this.#checkWorkflowIdempotentOutcome(command);
+          if (idempotentOutcome) return idempotentOutcome;
+          const preconditionFailure = await this.#checkWorkflowPreconditions(command);
+          if (preconditionFailure) return preconditionFailure;
+        }
         mutationAttempted = true;
         await this.client.executeWorkflowMutation(command);
         const readBack = await this.client.readWorkflowMutationOutcome(command);
@@ -666,9 +680,7 @@ export class LinearGatewayProtocolHandlerImpl {
   async #checkWorkflowProject(
     command: WorkflowMutationCommand,
   ): Promise<Extract<WorkflowMutationResult, { kind: "precondition_conflict" }> | undefined> {
-    const resolution = await this.client.readProjectResolution({
-      conductorShortHash: command.conductorShortHash,
-    });
+    const resolution = await this.readProjectResolution(command.conductorShortHash);
     return resolution.kind === "resolved" &&
       resolution.projectId === command.expectedProjectId
       ? undefined : { kind: "precondition_conflict" };
@@ -782,9 +794,7 @@ export class LinearGatewayProtocolHandlerImpl {
     | { kind: "linear_precondition_conflict" }
     | undefined
   > {
-    const resolution = await this.client.readProjectResolution({
-      conductorShortHash: command.project.conductorShortHash,
-    });
+    const resolution = await this.readProjectResolution(command.project.conductorShortHash);
     if (
       resolution.kind !== "resolved" ||
       resolution.projectId !== command.project.expectedProjectId
@@ -795,6 +805,17 @@ export class LinearGatewayProtocolHandlerImpl {
       return { kind: "linear_precondition_conflict" };
     }
     return undefined;
+  }
+
+  private async readProjectResolution(conductorShortHash: string) {
+    const cached = this.projectResolutionCache.get(conductorShortHash);
+    if (cached) return cached;
+    const pending = this.client.readProjectResolution({ conductorShortHash }).catch((error) => {
+      this.projectResolutionCache.delete(conductorShortHash);
+      throw error;
+    });
+    this.projectResolutionCache.set(conductorShortHash, pending);
+    return pending;
   }
 }
 
@@ -892,7 +913,7 @@ function validateRootScheduling(root: RootIssueValue): void {
     if (
       comment.issueId !== root.issue.issueId ||
       !identifier(comment.commentId, 128) ||
-      comment.managedMarker !== `${root.issue.issueId}:root-comment` ||
+      !rootManagedCommentMarkerValid(comment.managedMarker, root.issue.issueId) ||
       typeof comment.body !== "string" ||
       codePointLength(comment.body) > 16_384 ||
       !timestamp(comment.updatedAt)
@@ -900,6 +921,11 @@ function validateRootScheduling(root: RootIssueValue): void {
       throw new Error("linear_root_scheduling_invalid");
     }
   }
+}
+
+function rootManagedCommentMarkerValid(value: string, issueId: string): boolean {
+  return value === `${issueId}:root-comment` ||
+    (value.startsWith(`${issueId}:managed-record:`) && identifier(value.slice(`${issueId}:managed-record:`.length), 128));
 }
 
 function identifier(value: string | undefined, maximum: number): boolean {
@@ -929,13 +955,7 @@ function timestamp(value: string | undefined): boolean {
 }
 
 function linearIssueState(value: string | undefined): boolean {
-  return (
-    value === "Todo" ||
-    value === "In Progress" ||
-    value === "In Review" ||
-    value === "Done" ||
-    value === "Canceled"
-  );
+  return isTargetWorkflowStatusName(value);
 }
 
 function linearPriority(value: string | undefined): boolean {

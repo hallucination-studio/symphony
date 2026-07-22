@@ -7,6 +7,7 @@ export type ConductorCycleDisposition =
 export function conductorCycleDelayMs(input: {
   disposition: ConductorCycleDisposition;
   baseDelayMs: number;
+  idleDelayMs?: number;
   random: () => number;
 }): number {
   if (
@@ -16,9 +17,14 @@ export function conductorCycleDelayMs(input: {
     throw new Error("conductor_cycle_delay_invalid");
   }
   if (input.disposition === "progress") return 0;
+  if (input.idleDelayMs !== undefined && (
+    !Number.isSafeInteger(input.idleDelayMs) || input.idleDelayMs < 1 || input.idleDelayMs > 300_000
+  )) {
+    throw new Error("conductor_cycle_delay_invalid");
+  }
   const floor = input.disposition === "waiting-human" ? 15_000 : 60_000;
   const multiplier = input.disposition === "waiting-human" ? 15 : 60;
-  const base = Math.min(300_000, Math.max(floor, input.baseDelayMs * multiplier));
+  const base = input.idleDelayMs ?? Math.min(300_000, Math.max(floor, input.baseDelayMs * multiplier));
   const random = input.random();
   if (!Number.isFinite(random) || random < 0 || random > 1) {
     throw new Error("conductor_cycle_delay_random_invalid");

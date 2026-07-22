@@ -277,6 +277,8 @@ function details() {
     "cycle-1": { comments: [comment("cycle-1", "cycle-marker", { kind: "cycle_marker", version: 1,
       root_issue_id: "root-1", cycle_key: "cycle-1", trigger: "initial", baseline_revision: "a".repeat(40) })], relations: [] },
     "plan-1": { comments: [
+      comment("plan-1", "plan-marker-pending", { kind: "node_marker", version: 1, root_issue_id: "root-1",
+        cycle_issue_id: "cycle-1", node_key: "plan-1", node_kind: "plan", plan_contract_digest: "pending-plan-contract" }),
       comment("plan-1", "plan-marker", { kind: "node_marker", version: 1, root_issue_id: "root-1",
         cycle_issue_id: "cycle-1", node_key: "plan-1", node_kind: "plan", plan_contract_digest: "d".repeat(64) }),
       comment("plan-1", "plan-contract", { kind: "plan_contract", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1",

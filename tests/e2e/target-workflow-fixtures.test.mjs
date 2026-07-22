@@ -56,6 +56,32 @@ test("target Git observation rejects a branch that is not the current clean work
   }
 });
 
+test("target Git observation can preserve identity during an active dirty Work stage", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "symphony-target-fixture-test-"));
+  const scope = await createTargetRunScope({ runId: "target-fixture-dirty", parentDirectory: parent });
+  try {
+    const fixture = await createTargetGitFixture({ scope });
+    await writeFile(path.join(fixture.repositoryRoot, "README.md"), "active work\n");
+
+    const observation = await readTargetGitObservation({
+      repositoryRoot: fixture.repositoryRoot,
+      branch: fixture.baseBranch,
+      requireClean: false,
+    });
+
+    assert.equal(observation.head, fixture.initialCommit);
+    assert.equal(observation.branch, fixture.baseBranch);
+    assert.equal(observation.clean, false);
+    await assert.rejects(
+      readTargetGitObservation({ repositoryRoot: fixture.repositoryRoot, branch: fixture.baseBranch }),
+      /target_git_observation_mismatch/u,
+    );
+  } finally {
+    await cleanupTargetRunScope(scope);
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 test("target scope cleanup fails closed for a foreign owner", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "symphony-target-fixture-test-"));
   const scope = await createTargetRunScope({ runId: "target-fixture-3", parentDirectory: parent });

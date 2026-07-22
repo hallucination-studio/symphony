@@ -74,7 +74,10 @@ test("installation broker charges physical permits to a run budget", async () =>
     budget,
   });
 
-  assert.equal(await broker.run("mutation", async () => "first"), "first");
+  assert.equal(await broker.run("mutation", async () => {
+    broker.assertPermit("mutation");
+    return "first";
+  }), "first");
   broker.observe({
     requestWindow: { limit: 10, remaining: 9, reset: 60 },
     complexityWindow: { limit: 2_000_000, remaining: 1_999_000, reset: 60 },
@@ -82,7 +85,60 @@ test("installation broker charges physical permits to a run budget", async () =>
   assert.equal(budget.snapshot().logicalOperations, 1);
   assert.equal(budget.snapshot().physicalRequests, 2);
   await assert.rejects(
-    broker.run("mutation", async () => "blocked"),
+    broker.run("mutation", async () => {
+      broker.assertPermit("mutation");
+      return "blocked";
+    }),
     /linear_run_budget_exhausted/u,
+  );
+});
+
+test("installation broker reserves only dispatched physical work", async () => {
+  const budget = new LinearRunBudgetImpl({ maxRequests: 10 });
+  const broker = new LinearRequestBrokerImpl({
+    maxConcurrent: 1,
+    maxHighPriorityBurst: 2,
+    budget,
+  });
+  let release;
+  const active = broker.run("control", () => {
+    broker.assertPermit("control");
+    return new Promise((resolve) => { release = resolve; });
+  });
+  const queued = broker.run("workflow", async () => {
+    broker.assertPermit("workflow");
+    return "queued";
+  });
+  assert.equal(budget.snapshot().reservedRequests, 1);
+  broker.observe({});
+  release("active");
+  assert.equal(await active, "active");
+  assert.equal(await queued, "queued");
+  assert.equal(budget.snapshot().reservedRequests, 1);
+  broker.observe({});
+  assert.equal(budget.snapshot().reservedRequests, 0);
+});
+
+test("installation broker does not leak a logical reservation around SDK physical permits", async () => {
+  const budget = new LinearRunBudgetImpl({ maxRequests: 10 });
+  const broker = new LinearRequestBrokerImpl({
+    maxConcurrent: 1,
+    maxHighPriorityBurst: 2,
+    budget,
+  });
+
+  await broker.run("workflow", async () => {
+    broker.assertPermit("workflow");
+    broker.observe({});
+    broker.assertPermit("workflow");
+    broker.observe({});
+  });
+
+  assert.deepEqual(
+    {
+      physicalRequests: budget.snapshot().physicalRequests,
+      reservedRequests: budget.snapshot().reservedRequests,
+    },
+    { physicalRequests: 2, reservedRequests: 0 },
   );
 });

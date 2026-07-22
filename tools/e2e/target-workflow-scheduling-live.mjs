@@ -1,10 +1,12 @@
 import { runTargetSchedulingScenario } from "./target-workflow-scheduling.mjs";
+import { TARGET_WORKFLOW_STATUS_NAMES } from "@symphony/podium";
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const PAGE_SIZE = 250;
 const MAX_ROOTS = 512;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const PRIORITY = Object.freeze({ 0: "no_priority", 1: "urgent", 2: "high", 3: "normal", 4: "low" });
+const WORKFLOW_STATES = new Set(TARGET_WORKFLOW_STATUS_NAMES);
 
 const PROJECT_ROOTS_QUERY = `
   query TargetWorkflowSchedulingRoots($projectId: String!, $after: String) {
@@ -133,7 +135,7 @@ function normalizeRoot(node, projectId, delegateActorId, conductorId) {
   }
   if (node.parent?.id !== undefined && node.parent?.id !== null) return undefined;
   if (
-      !["Todo", "In Progress", "In Review", "Done", "Canceled"].includes(node.state?.name) ||
+      !WORKFLOW_STATES.has(node.state?.name) ||
       !Number.isSafeInteger(node.priority) || PRIORITY[node.priority] === undefined ||
       typeof node.sortOrder !== "number" || !Number.isFinite(node.sortOrder) ||
       !Array.isArray(node.comments?.nodes) || node.comments.nodes.length > 64 || node.comments.pageInfo?.hasNextPage !== false ||
@@ -146,7 +148,7 @@ function normalizeRoot(node, projectId, delegateActorId, conductorId) {
   const blockers = node.inverseRelations.nodes.flatMap((relation) => {
     if (relation.type !== "blocks") return [];
     if (relation.relatedIssue?.id !== node.id || relation.issue?.project?.id !== projectId ||
-        !SAFE_ID.test(relation.issue?.id ?? "") || !["Todo", "In Progress", "In Review", "Done", "Canceled"].includes(relation.issue?.state?.name)) {
+        !SAFE_ID.test(relation.issue?.id ?? "") || !WORKFLOW_STATES.has(relation.issue?.state?.name)) {
       throw stableError("target_scheduling_blocker_invalid");
     }
     return [{ targetIssueId: relation.issue.id, targetState: relation.issue.state.name }];

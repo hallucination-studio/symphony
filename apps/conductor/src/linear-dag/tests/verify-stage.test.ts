@@ -128,6 +128,38 @@ test("reconciles an orphaned Verify execution into a fresh retry", async () => {
   assert.equal(orphanTerminal.value.usage.totalTokens, input.options.limits.reservedTotalTokens);
 });
 
+test("persists a retryable Verify Provider failure and creates a fresh execution", async () => {
+  const gateway = new VerifyGateway();
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+  const input = verifyInput();
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "cycle_verifying" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_in_progress" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+  const firstExecution = latestVerifyExecution(gateway);
+  const failure = {
+    protocol_version: "1", stage_execution_id: firstExecution.stageExecutionId, stage: "verify",
+    root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "verify-1",
+    context_digest: firstExecution.contextDigest, completed_at: "2026-07-21T09:02:00Z",
+    usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+    outcome: { kind: "execution_failed", error_code: "provider_stage_failed", sanitized_reason: "Temporary Provider failure.", retryable: true },
+  } as unknown as JsonValue;
+
+  assert.deepEqual(await execution.reconcileVerify(input, failure, firstExecution.stageExecutionId), { kind: "mutation_applied", step: "verify_stage_retryable_failure_terminal" });
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) => record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === firstExecution.stageExecutionId);
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("verify_failure_terminal_missing");
+  assert.equal(terminal.value.failureCode, "provider_stage_failed");
+  assert.equal(terminal.value.outcome, "failed");
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+  assert.notEqual(latestVerifyExecution(gateway).stageExecutionId, firstExecution.stageExecutionId);
+});
+
 test("resumes a suspended Verify with a fresh execution identity", async () => {
   const gateway = new VerifyGateway();
   const execution = new LinearDagExecutionImpl({
@@ -350,6 +382,13 @@ function restoreVerifyRootAfterHumanAnswer(gateway: VerifyGateway): void {
   Object.assign(root, { status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, remote_version: "root-version-after-human" });
 }
 
+function latestVerifyExecution(gateway: VerifyGateway) {
+  const records = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).flatMap((record) => record.ok && record.value.kind === "stage_execution" && record.value.stage === "verify" ? [record.value] : []);
+  const execution = records.at(-1);
+  if (!execution) throw new Error("verify_stage_execution_fixture_missing");
+  return execution;
+}
+
 function prepareRepairTree(tree: LinearWorkflowTreeSnapshot): void {
   const status = (name: string) => tree.status_catalog.find((candidate) => candidate.name === name)!;
   for (const issueId of ["verify-1"]) {
@@ -399,8 +438,15 @@ class VerifyGateway implements LinearGatewayInterface {
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: issue.issue_id, remoteVersion: issue.remote_version } };
     }
     if (command.kind === "append_workflow_comment") {
+      const issue = this.tree.issues.find((candidate) => candidate.issue_id === command.target.targetIssueId)!;
+      issue.remote_version = `${command.writeId}:issue-version`;
       this.tree.comments.push({ comment_id: command.writeId, issue_id: command.target.targetIssueId, body: command.body, managed_marker: command.writeId, remote_version: `${command.writeId}:version`, updated_at: this.tree.observed_at });
-      return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: `${command.writeId}:version` } };
+      return { kind: "applied" as const, readBack: {
+        writeId: command.writeId,
+        targetIssueId: command.target.targetIssueId,
+        remoteVersion: `${command.writeId}:version`,
+        issueVersions: [{ issueId: issue.issue_id, remoteVersion: issue.remote_version }],
+      } };
     }
     throw new Error(`unexpected_${command.kind}`);
   }

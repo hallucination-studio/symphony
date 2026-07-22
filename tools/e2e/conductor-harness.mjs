@@ -183,9 +183,36 @@ export async function startConductorHarness({
         event: "e2e_conductor_request",
         request_kind: message.body?.kind ?? "unknown",
       });
-      const response = await podium.handler.handle(message);
+      let response;
+      try {
+        response = await podium.handler.handle(message);
+      } catch (error) {
+        emit({
+          event: "e2e_podium_handler_failed",
+          request_kind: message.body?.kind ?? "unknown",
+          reason: sanitizedHarnessReason(error),
+        });
+        throw error;
+      }
       const body = response?.body;
-      if (body?.code) throw stableError("conductor_handshake_rejected");
+      if (body?.code) {
+        emit({
+          event: "e2e_podium_response_error",
+          request_kind: message.body?.kind ?? "unknown",
+          code: sanitizedHarnessReason({ message: body.code }),
+        });
+        throw stableError(message.body?.kind === "conductor_handshake"
+          ? "conductor_handshake_rejected"
+          : sanitizedHarnessReason({ message: body.code }));
+      }
+      emit({
+        event: "e2e_conductor_response",
+        request_kind: message.body?.kind ?? "unknown",
+        response_kind: body?.kind ?? "unknown",
+        response_fields: body && typeof body === "object" && !Array.isArray(body)
+          ? Object.keys(body).sort()
+          : [],
+      });
       const observation = Object.freeze({
         kind: message.body?.kind ?? "unknown",
         ...(typeof message.body?.status === "string" ? { status: message.body.status } : {}),
@@ -275,6 +302,17 @@ function stableError(code) {
   const error = new Error(code);
   error.code = code;
   return error;
+}
+
+function sanitizedHarnessReason(error) {
+  const reason = error instanceof Error
+    ? error.message
+    : error && typeof error === "object" && typeof error.message === "string"
+      ? error.message
+      : "";
+  return /^[a-z][a-z0-9_]{1,120}$/u.test(reason)
+    ? reason
+    : "e2e_podium_handler_failed";
 }
 
 async function boundedExit(exit, timeoutMs) {

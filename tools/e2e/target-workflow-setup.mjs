@@ -5,6 +5,8 @@ import { createTargetWorkflowSetup } from "@symphony/podium";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const MUTATION_KINDS = new Set(["applied", "already_applied"]);
+const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
+const E2E_MARKER = /<!-- symphony e2e-run\s+run_id: ([A-Za-z0-9][A-Za-z0-9._-]{0,127})\s+-->/u;
 
 export async function prepareTargetWorkflowSetup({
   config,
@@ -66,6 +68,14 @@ export async function prepareTargetWorkflowSetup({
       ? "target_live_setup_authorization_required"
       : "target_live_setup_incomplete");
   }
+  const archivedRootCount = await archivePriorE2eRoots({
+    developmentToken: config.secrets.linearDevToken,
+    projectId: result.project.projectId,
+    currentRunId: runId,
+    fetch,
+    linearRunBudget,
+  });
+  log({ event: "target_live_prior_roots_archived", count: archivedRootCount });
   return Object.freeze({
     setup: result,
     ids,
@@ -75,9 +85,73 @@ export async function prepareTargetWorkflowSetup({
       stateId: result.todoStateId,
       delegateId: result.delegateActorId,
       title: "Target live success",
-      description: "Target live success Root.",
+      description: `Target live success Root. Plan exactly one minimal Work node that adds one E2E evidence line to README.md, then Verify it.\n\n<!-- symphony e2e-run\nrun_id: ${runId}\n-->`,
     }),
   });
+}
+
+export async function archivePriorE2eRoots({ developmentToken, projectId, currentRunId, fetch, linearRunBudget }) {
+  const request = async (query, operationName) => {
+    linearRunBudget?.recordLogicalOperation();
+    const reservation = linearRunBudget?.reservePhysicalRequest();
+    let observed = false;
+    try {
+      const response = await fetch(LINEAR_GRAPHQL_URL, {
+        method: "POST",
+        headers: { authorization: developmentToken, "content-type": "application/json" },
+        body: JSON.stringify({ query, operationName }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      linearRunBudget?.observe({ status: response.status, ...rateWindows(response.headers) });
+      observed = true;
+      const body = await response.json();
+      if (!response.ok || body?.errors?.length || !body?.data) throw stableError("target_live_archive_failed");
+      return body.data;
+    } catch (error) {
+      if (!observed) linearRunBudget?.observe({});
+      throw error?.message === "target_live_archive_failed" ? error : stableError("target_live_archive_failed");
+    } finally {
+      reservation?.release();
+    }
+  };
+  const data = await request(`query TargetWorkflowListPriorRoots {
+    project(id: ${JSON.stringify(projectId)}) {
+      issues(first: 250, includeArchived: false) { nodes { id description parent { id } project { id } } pageInfo { hasNextPage } }
+    }
+  }`, "TargetWorkflowListPriorRoots");
+  const connection = data.project?.issues;
+  if (!Array.isArray(connection?.nodes) || connection.pageInfo?.hasNextPage !== false) {
+    throw stableError("target_live_archive_scope_invalid");
+  }
+  const ids = connection.nodes.flatMap((issue) => {
+    const match = typeof issue?.description === "string" ? issue.description.match(E2E_MARKER) : undefined;
+    return SAFE_ID.test(issue?.id ?? "") && issue.project?.id === projectId && issue.parent === null &&
+      match && match[1] !== currentRunId ? [issue.id] : [];
+  });
+  if (ids.length === 0) return 0;
+  const aliases = ids.map((id, index) => `a${index}: issueArchive(id: ${JSON.stringify(id)}) { success }`).join("\n");
+  const archived = await request(`mutation TargetWorkflowArchivePriorRoots { ${aliases} }`, "TargetWorkflowArchivePriorRoots");
+  if (ids.some((_, index) => archived[`a${index}`]?.success !== true)) throw stableError("target_live_archive_failed");
+  const readBack = await request(`query TargetWorkflowReadArchivedRoots {
+    issues(filter: { id: { in: [${ids.map((id) => JSON.stringify(id)).join(", ")}] } }, first: 250, includeArchived: true) {
+      nodes { id archivedAt } pageInfo { hasNextPage }
+    }
+  }`, "TargetWorkflowReadArchivedRoots");
+  if (!Array.isArray(readBack.issues?.nodes) || readBack.issues.pageInfo?.hasNextPage !== false ||
+      readBack.issues.nodes.length !== ids.length ||
+      readBack.issues.nodes.some((issue) => !ids.includes(issue?.id) || typeof issue.archivedAt !== "string")) {
+    throw stableError("target_live_archive_read_back_failed");
+  }
+  return ids.length;
+}
+
+function rateWindows(headers) {
+  const window = (prefix) => {
+    const number = (suffix) => { const value = headers?.get(`${prefix}-${suffix}`); return /^\d{1,16}$/u.test(value ?? "") ? Number(value) : undefined; };
+    const limit = number("limit"); const remaining = number("remaining"); const reset = number("reset");
+    return [limit, remaining, reset].every(Number.isSafeInteger) ? { limit, remaining, reset } : undefined;
+  };
+  return { ...(window("x-ratelimit-requests") ? { requestWindow: window("x-ratelimit-requests") } : {}), ...(window("x-ratelimit-complexity") ? { complexityWindow: window("x-ratelimit-complexity") } : {}) };
 }
 
 export function runIdentifiers(runId) {

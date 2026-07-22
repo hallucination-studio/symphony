@@ -53,20 +53,20 @@ const ISSUE_DETAILS_QUERY = `
 `;
 
 const ROOT_SCOPED_FACTS_QUERY = `
-  query TargetWorkflowRootScopedFacts($projectId: String!, $issueIds: [String!], $parentIds: [String!], $issuesAfter: String, $commentsAfter: String, $relationsAfter: String) {
+  query TargetWorkflowRootScopedFacts($projectId: String!, $issueIds: [ID!], $issuesAfter: String, $commentsAfter: String, $relationsAfter: String) {
     project(id: $projectId) {
       id
-      issues(first: 250, after: $issuesAfter, filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }) {
+      issues(first: 25, after: $issuesAfter, filter: { id: { in: $issueIds } }) {
         nodes {
           id
           project { id }
           parent { id }
           state { name }
-          comments(first: 64, after: $commentsAfter) {
+          comments(first: 16, after: $commentsAfter) {
             nodes { id body issue { id } }
             pageInfo { hasNextPage endCursor }
           }
-          inverseRelations(first: 250, after: $relationsAfter) {
+          inverseRelations(first: 50, after: $relationsAfter) {
             nodes {
               id
               type
@@ -81,12 +81,8 @@ const ROOT_SCOPED_FACTS_QUERY = `
     }
   }
 `;
-const ROOT_SCOPED_ROOT_QUERY = ROOT_SCOPED_FACTS_QUERY
-  .replace("$issueIds: [String!], $parentIds: [String!], ", "$issueIds: [String!], ")
-  .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { id: { in: $issueIds } }");
-const ROOT_SCOPED_CHILDREN_QUERY = ROOT_SCOPED_FACTS_QUERY
-  .replace("$issueIds: [String!], ", "")
-  .replace("filter: { id: { in: $issueIds }, parent: { id: { in: $parentIds } } }", "filter: { parent: { id: { in: $parentIds } } }");
+const ROOT_SCOPED_ROOT_QUERY = ROOT_SCOPED_FACTS_QUERY;
+const ROOT_SCOPED_CHILDREN_QUERY = PROJECT_ISSUES_QUERY;
 
 export function createTargetWorkflowSnapshotTransport({
   developmentToken,
@@ -230,7 +226,9 @@ export function createTargetWorkflowSnapshotTransport({
       if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
       const connection = pageConnection(project.issues, "target_transport_response_invalid");
       for (const value of connection.nodes) {
-        const id = issueHeader(value, projectId).id;
+        const issue = issueHeader(value, projectId);
+        if (!parentIds.includes(issue.parentIssueId)) continue;
+        const id = issue.id;
         if (seen.has(id)) throw new Error("target_transport_duplicate_issue");
         seen.add(id);
         ids.push(id);
@@ -497,9 +495,8 @@ function normalizeSnapshot(request, issues, details) {
     const issueDetails = details.get(issue.id);
     if (!issueDetails) throw new Error("target_transport_issue_details_missing");
     const rawMarkers = issueDetails.markers;
-    if (rawMarkers.length > 1) throw new Error("target_transport_node_marker_ambiguous");
-    if (rawMarkers.length === 1) {
-      const marker = rawMarkers[0];
+    const marker = currentNodeMarker(rawMarkers);
+    if (marker) {
     if (marker.version !== 1 || marker.root_issue_id !== request.rootIssueId ||
           !isSafeId(marker.cycle_issue_id) || !isSafeId(marker.node_key) ||
           !["plan", "work", "verify"].includes(marker.node_kind)) {
@@ -535,6 +532,19 @@ function normalizeSnapshot(request, issues, details) {
     comments: Object.freeze(comments),
     relations: Object.freeze(normalizeRelations(issues, details)),
   });
+}
+
+function currentNodeMarker(markers) {
+  if (markers.length <= 1) return markers[0];
+  if (markers.some(({ node_kind: kind }) => kind !== "plan")) {
+    throw new Error("target_transport_node_marker_ambiguous");
+  }
+  const pending = markers.filter(({ plan_contract_digest: digest }) => digest === "pending-plan-contract");
+  const resolved = markers.filter(({ plan_contract_digest: digest }) => digest !== "pending-plan-contract");
+  if (pending.length > 1 || resolved.length > 1) {
+    throw new Error("target_transport_node_marker_ambiguous");
+  }
+  return resolved[0] ?? pending[0];
 }
 
 function issueDetailsFor(issueId, details) {

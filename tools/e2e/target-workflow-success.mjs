@@ -5,7 +5,10 @@ const ROOT_RESULT_FIELDS = new Set([
   "rootIssueId", "identifier", "projectId", "parentIssueId", "stateName",
 ]);
 const OBSERVATION_FIELDS = new Set(["git"]);
-const PENDING_TRANSIENT_ERRORS = new Set(["target_facts_human_action_missing"]);
+const PENDING_TRANSIENT_ERRORS = new Set([
+  "target_facts_human_action_missing",
+  "target_transport_issue_kind_invalid",
+]);
 const FACTS_TRANSIENT_ERRORS = new Set([
   "target_facts_cycle_invalid",
   "target_facts_dag_incomplete",
@@ -17,6 +20,7 @@ const FACTS_TRANSIENT_ERRORS = new Set([
   "target_facts_work_incomplete",
   "target_facts_verify_result_invalid",
   "target_facts_delivery_revision_mismatch",
+  "target_transport_issue_kind_invalid",
 ]);
 const FACTS_FIELDS = new Set([
   "root", "plan", "stageExecutions", "progress", "repairEscalation", "delivery",
@@ -28,7 +32,7 @@ export async function runTargetSuccessScenario({
   rootInput,
   observationInput,
   humanResponseBody,
-  timeoutMs = 30 * 60_000,
+  timeoutMs = 5 * 60_000,
   pollIntervalMs = 1_000,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   now = Date.now,
@@ -132,7 +136,7 @@ function validateDependencies({ runner, observationInput, humanResponseBody, tim
       humanResponseBody.length > 8_192 || humanResponseBody.includes(MANAGED_RECORD_PREFIX)) {
     throw new Error("target_success_human_body_invalid");
   }
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000 ||
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5 * 60_000 ||
       !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 0 || pollIntervalMs > 300_000 ||
       typeof sleep !== "function" || typeof now !== "function" || typeof onProgress !== "function") {
     throw new Error("target_success_timing_invalid");

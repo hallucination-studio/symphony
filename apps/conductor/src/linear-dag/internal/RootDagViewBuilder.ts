@@ -145,7 +145,7 @@ function validateIssues(
       ? new Set(["Todo", "In Progress", "In Review", "Done", "Failed", "Canceled"])
       : new Set(["Todo", "In Progress", "Done", "Failed", "Canceled"]);
     if (!allowed.has(issue.status_name)) fail(`${issue.issue_kind}_status_invalid`);
-    if (!Number.isInteger(issue.depth) || issue.depth < 0 || !Number.isInteger(issue.order) || issue.order < 0) fail("tree_order_invalid");
+    if (!Number.isInteger(issue.depth) || issue.depth < 0 || !Number.isInteger(issue.order)) fail("tree_order_invalid");
   }
   const root = tree.issues.find((issue) => issue.issue_id === tree.root_issue_id);
   if (!root || root.issue_kind !== "root" || roots !== 1 || root.depth !== 0 || root.parent_issue_id !== undefined) fail("root_scope_invalid");
@@ -173,7 +173,13 @@ function readManagedRecords(comments: Comment[], issueById: Map<string, Issue>, 
       if (comment.body.startsWith("<!-- symphony managed-record")) fail("managed_record_invalid");
       continue;
     }
-    if (!markerPattern.test(comment.managed_marker) || !comment.managed_marker.startsWith(`${rootIssueId}:`) || comment.managed_marker.length <= rootIssueId.length + 1) fail("managed_marker_invalid");
+    const issueScopedManagedRecordMarker = `${comment.issue_id}:managed-record:${comment.comment_id}`;
+    const rootScopedMarker = comment.managed_marker.startsWith(`${rootIssueId}:`) &&
+      comment.managed_marker.length > rootIssueId.length + 1;
+    if (!markerPattern.test(comment.managed_marker) ||
+        (!rootScopedMarker && comment.managed_marker !== issueScopedManagedRecordMarker)) {
+      fail("managed_marker_invalid");
+    }
     if (occupiedMarkers.has(comment.managed_marker)) fail("duplicate_managed_marker");
     occupiedMarkers.add(comment.managed_marker);
     const parsed = parseManagedRecord(comment.body);

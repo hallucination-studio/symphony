@@ -25,7 +25,8 @@ export interface LinearWorkflowRuntimeGateway {
 
 export interface LinearWorkflowStageDispatcher {
   dispatch(input: { root: DiscoveredRoot; view: RootDagView }): Promise<
-    "progress" | "waiting-human" | "needs-attention"
+    | { kind: "progress" | "waiting-human" }
+    | { kind: "needs-attention"; sanitizedReason: string }
   >;
 }
 
@@ -81,14 +82,14 @@ export class LinearConductorRuntime {
         if (view.root.issue.status_name === "Canceled") {
           const result = await this.dispatcher.dispatch({ root, view });
           await this.reporter.report({
-            status: result === "needs-attention" ? "blocked" : "ready",
+            status: result.kind === "needs-attention" ? "blocked" : "ready",
             rootId: root.issueId,
-            ...(result === "needs-attention"
-              ? { sanitizedReason: "root_cancellation_reconciliation_needs_attention" }
+            ...(result.kind === "needs-attention"
+              ? { sanitizedReason: result.sanitizedReason }
               : {}),
           });
-          if (result === "progress") return "progress";
-          needsAttention ||= result === "needs-attention";
+          if (result.kind === "progress") return "progress";
+          needsAttention ||= result.kind === "needs-attention";
           continue;
         }
         if (assessment.readiness === "waiting_human") {
@@ -101,15 +102,15 @@ export class LinearConductorRuntime {
         }
         const result = await this.dispatcher.dispatch({ root, view });
         await this.reporter.report({
-          status: result === "needs-attention" ? "blocked" : "ready",
+          status: result.kind === "needs-attention" ? "blocked" : "ready",
           rootId: root.issueId,
-          ...(result === "needs-attention"
-            ? { sanitizedReason: "root_stage_dispatch_needs_attention" }
+          ...(result.kind === "needs-attention"
+            ? { sanitizedReason: result.sanitizedReason }
             : {}),
         });
-        if (result === "progress") return "progress";
-        waitingHuman ||= result === "waiting-human";
-        needsAttention ||= result === "needs-attention";
+        if (result.kind === "progress") return "progress";
+        waitingHuman ||= result.kind === "waiting-human";
+        needsAttention ||= result.kind === "needs-attention";
       }
       await this.reporter.report({ status: "ready" });
       if (waitingHuman) return "waiting-human";

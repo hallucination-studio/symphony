@@ -31,9 +31,8 @@ test("target success orchestration creates, approves, and returns only durable f
     async observePendingHuman(input) {
       calls.push(["observePendingHuman", input]);
       pendingReads += 1;
-      return pendingReads === 1
-        ? { pendingHuman: { status: "not_waiting" } }
-        : { pendingHuman: {
+      if (pendingReads === 1) throw new Error("target_transport_issue_kind_invalid");
+      return { pendingHuman: {
           status: "waiting", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
           requestKind: "needs_approval", actionId: "action-1", contextDigest: "a".repeat(64),
         } };
@@ -46,7 +45,7 @@ test("target success orchestration creates, approves, and returns only durable f
     async observeRoot(input) {
       calls.push(["observeRoot", input]);
       factsReads += 1;
-      if (factsReads === 1) throw new Error("target_facts_stage_shape_invalid");
+      if (factsReads === 1) throw new Error("target_transport_issue_kind_invalid");
       return { facts };
     },
   };

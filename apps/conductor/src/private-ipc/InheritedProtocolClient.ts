@@ -54,7 +54,7 @@ export class InheritedProtocolClient {
       this.#buffer = Buffer.concat([this.#buffer, bytes]);
       this.#processing = this.#processing
         .then(() => this.#drain())
-        .catch(() => this.#close(new Error("private_ipc_read_failed")));
+        .catch((error) => this.#close(new Error(privateIpcFailureCode(error))));
     });
     input.once("error", (error) => this.#close(error));
     input.once("end", () => {
@@ -228,6 +228,13 @@ function sanitizedCode(error: unknown): string {
     return error.message;
   }
   return "profile_relay_failed";
+}
+
+function privateIpcFailureCode(error: unknown): string {
+  const code = error instanceof Error ? error.message : "";
+  return /^private_ipc_[a-z0-9_]{1,120}$/u.test(code)
+    ? code
+    : "private_ipc_read_failed";
 }
 
 function isRecord(value: JsonValue): value is { [key: string]: JsonValue } {

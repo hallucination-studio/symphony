@@ -20,11 +20,41 @@ test("target dispatcher selects Plan, Work, and Verify from the current Cycle", 
     optionsFor() { return options(); },
   });
 
-  await dispatcher.dispatch({ root: root(), view: view("Planning") });
-  await dispatcher.dispatch({ root: root(), view: view("Executing") });
-  await dispatcher.dispatch({ root: root(), view: view("Verifying") });
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: view("Planning") }), { kind: "progress" });
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: view("Executing") }), { kind: "progress" });
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: view("Verifying") }), { kind: "progress" });
 
   assert.deepEqual(calls, ["plan", "work", "verify"]);
+});
+
+test("target dispatcher advances an Executing Cycle with completed Work to Verify", async () => {
+  const calls: string[] = [];
+  const execution = {
+    async executeBootstrapPlan() { calls.push("plan"); throw new Error("unexpected_plan"); },
+    async executeWorkStage() { calls.push("work"); throw new Error("unexpected_work"); },
+    async executeVerifyStage() { calls.push("verify"); return { kind: "completed", cycleIssueId: "cycle", verifyIssueId: "verify", conclusion: "passed" }; },
+  } as unknown as LinearDagExecutionInterface;
+  const dispatcher = new LinearRootStageDispatcher({
+    execution,
+    async profileFor() { return profile(); },
+    workspaceFor() { return { branch: "symphony/runs/root", worktreePath: "/tmp/root" }; },
+    optionsFor() { return options(); },
+  });
+  const current = view("Executing");
+  current.cycles[0]!.nodes = [{
+    issue: { issue_id: "work", issue_kind: "work", status_name: "Done" },
+    marker: { nodeKey: "work-1" },
+    records: [{ kind: "work_completion", nodeIssueId: "work", workKey: "work-1" }],
+    blockedByIssueIds: [],
+  }, {
+    issue: { issue_id: "verify", issue_kind: "verify", status_name: "Todo" },
+    marker: { nodeKey: "verify-1" },
+    records: [],
+    blockedByIssueIds: [],
+  }] as unknown as RootDagView["cycles"][number]["nodes"];
+
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: current }), { kind: "progress" });
+  assert.deepEqual(calls, ["verify"]);
 });
 
 test("canceled Root reconciliation bypasses Profile and Stage execution", async () => {
@@ -41,8 +71,25 @@ test("canceled Root reconciliation bypasses Profile and Stage execution", async 
   const canceled = view("Planning");
   canceled.root.issue.status_name = "Canceled";
 
-  assert.equal(await dispatcher.dispatch({ root: root(), view: canceled }), "progress");
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: canceled }), { kind: "progress" });
   assert.deepEqual(calls, ["cancel"]);
+});
+
+test("target dispatcher preserves a sanitized Stage failure reason", async () => {
+  const execution = {
+    async executeBootstrapPlan() { throw new Error("performer_result_invalid Bearer secret-value"); },
+  } as unknown as LinearDagExecutionInterface;
+  const dispatcher = new LinearRootStageDispatcher({
+    execution,
+    async profileFor() { return profile(); },
+    workspaceFor() { return { branch: "symphony/runs/root", worktreePath: "/tmp/root" }; },
+    optionsFor() { return options(); },
+  });
+
+  assert.deepEqual(await dispatcher.dispatch({ root: root(), view: view("Planning") }), {
+    kind: "needs-attention",
+    sanitizedReason: "root_stage_dispatch_failed:performer_result_invalid [REDACTED]",
+  });
 });
 
 function root(): DiscoveredRoot {

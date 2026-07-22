@@ -165,7 +165,7 @@ test("real Conductor rejects a late Work result after the Git baseline changes",
     await run("git", ["-C", worktree, "commit", "--allow-empty", "-m", "external precondition change"]);
     await waitForStageMarker(stageMarkerPath, (entry) => entry.result_written === true);
     const recovery = await first.waitForObservation((observation) => observation.kind === "conductor_runtime_report" && observation.status === "recovering");
-    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_needs_attention");
+    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_failed:work_git_baseline_changed");
 
     const finalTree = JSON.parse(await readFile(statePath, "utf8"));
     const records = finalTree.comments.map((comment) => comment.body);
@@ -215,7 +215,7 @@ async function runLateResultRecovery(rootStatus) {
     await setRootStatus(statePath, rootStatus);
     await waitForStageMarker(stageMarkerPath, (entry) => entry.result_written === true);
     const recovery = await first.waitForObservation((observation) => observation.kind === "conductor_runtime_report" && observation.status === "recovering");
-    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_needs_attention");
+    assert.equal(recovery.sanitizedSummary, "root_stage_dispatch_failed:root_terminal_result_rejected");
 
     const finalTree = JSON.parse(await readFile(statePath, "utf8"));
     const records = finalTree.comments.map((comment) => comment.body);

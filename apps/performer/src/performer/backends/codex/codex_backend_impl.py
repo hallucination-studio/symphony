@@ -4,11 +4,13 @@ import json
 import os
 import re
 import threading
+from copy import deepcopy
 from pathlib import Path
 from threading import Event
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
+from contracts import SCHEMA_REGISTRY
 from openai_codex import Codex, CodexConfig, Sandbox
 
 from performer.backends.provider_backend_interface import (
@@ -19,6 +21,14 @@ from performer.backends.provider_backend_interface import (
 
 
 CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
+CONDUCTOR_PERFORMER_SCHEMA_ID = (
+    "https://symphony.local/contracts/conductor-performer.schema.json"
+)
+STAGE_COMPLETED_OUTCOME_DEFINITION = {
+    "plan": "PlanCompletedOutcome",
+    "work": "WorkCompletedOutcome",
+    "verify": "VerifyCompletedOutcome",
+}
 
 STAGE_BASE_INSTRUCTIONS = (
     "Execute exactly the supplied Symphony Stage.\n"
@@ -129,7 +139,7 @@ class CodexBackendImpl:
                 if cancel_event.is_set() or interrupted.is_set():
                     raise ProviderStageCanceled() from exc
                 raise ProviderBackendError(
-                    "The Provider could not complete the Stage.",
+                    _provider_failure_reason(exc),
                     code="provider_stage_failed",
                     retryable=True,
                     action_required="Retry the Stage with a fresh Provider context.",
@@ -198,7 +208,7 @@ def _stage_sandbox(envelope: dict[str, Any]) -> Sandbox:
 
 def _stage_prompt(envelope: dict[str, Any]) -> str:
     instructions = envelope["instruction_bundle"]["stage_instructions"]
-    output_schema = envelope["instruction_bundle"]["output_schema"]
+    output_schema = _stage_output_schema(envelope["stage_execution"]["stage"])
     context = {
         "stage": envelope["stage_execution"]["stage"],
         "target": envelope["target"],
@@ -212,10 +222,72 @@ def _stage_prompt(envelope: dict[str, Any]) -> str:
     }
     return (
         f"STAGE INSTRUCTIONS:\n{instructions}\n"
-        f"OUTPUT SCHEMA:\n{output_schema}\n"
+        "Return one JSON object with an outcome property matching this schema:\n"
+        f"{json.dumps(output_schema, separators=(',', ':'))}\n"
         "STAGE CONTEXT (JSON):\n"
         f"{json.dumps(context, separators=(',', ':'))}"
     )
+
+
+def _stage_output_schema(stage: str) -> dict[str, Any]:
+    try:
+        completed_definition = STAGE_COMPLETED_OUTCOME_DEFINITION[stage]
+    except KeyError as error:
+        raise ValueError("unsupported_stage") from error
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "outcome": {
+                "oneOf": [
+                    _resolve_contract_schema(
+                        f"#/$defs/{completed_definition}",
+                        CONDUCTOR_PERFORMER_SCHEMA_ID,
+                    ),
+                    _resolve_contract_schema(
+                        "#/$defs/StageSuspendedOutcome",
+                        CONDUCTOR_PERFORMER_SCHEMA_ID,
+                    ),
+                ]
+            }
+        },
+        "required": ["outcome"],
+    }
+
+
+def _resolve_contract_schema(reference: str, current_schema_id: str) -> Any:
+    document_reference, fragment = urldefrag(reference)
+    schema_id = (
+        urljoin(current_schema_id, document_reference)
+        if document_reference
+        else current_schema_id
+    )
+    try:
+        value: Any = SCHEMA_REGISTRY[schema_id]
+    except KeyError as error:
+        raise ValueError("contract_schema_reference_unknown") from error
+    if fragment:
+        if not fragment.startswith("/"):
+            raise ValueError("contract_schema_pointer_unsupported")
+        for raw_part in fragment[1:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            value = value[part]
+    return _expand_contract_schema(deepcopy(value), schema_id)
+
+
+def _expand_contract_schema(value: Any, schema_id: str) -> Any:
+    if isinstance(value, list):
+        return [_expand_contract_schema(item, schema_id) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "$ref" in value:
+        if len(value) != 1:
+            raise ValueError("contract_schema_reference_siblings_unsupported")
+        return _resolve_contract_schema(value["$ref"], schema_id)
+    return {
+        key: _expand_contract_schema(child, schema_id)
+        for key, child in value.items()
+    }
 
 
 def _stage_outcome(response: Any) -> dict[str, Any]:
@@ -223,26 +295,53 @@ def _stage_outcome(response: Any) -> dict[str, Any]:
         raise ProviderBackendError(
             "The Provider returned an empty Stage result.",
             code="provider_stage_output_invalid",
-            retryable=False,
+            retryable=True,
             action_required="Retry the Stage with a fresh Provider context.",
         )
     try:
-        outcome = json.loads(response)
-    except json.JSONDecodeError as exc:
+        wrapper = _decode_single_json_object(response)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ProviderBackendError(
             "The Provider returned an invalid Stage result.",
             code="provider_stage_output_invalid",
-            retryable=False,
+            retryable=True,
             action_required="Retry the Stage with a fresh Provider context.",
         ) from exc
+    outcome = wrapper.get("outcome") if isinstance(wrapper, dict) and "outcome" in wrapper else wrapper
     if not isinstance(outcome, dict) or not isinstance(outcome.get("kind"), str):
         raise ProviderBackendError(
             "The Provider returned an invalid Stage result.",
             code="provider_stage_output_invalid",
-            retryable=False,
+            retryable=True,
             action_required="Retry the Stage with a fresh Provider context.",
         )
     return outcome
+
+
+def _decode_single_json_object(response: str) -> Any:
+    stripped = response.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    matches: list[Any] = []
+    index = 0
+    while index < len(stripped):
+        if stripped[index] != "{":
+            index += 1
+            continue
+        try:
+            value, end = decoder.raw_decode(stripped, index)
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        if isinstance(value, dict):
+            matches.append(value)
+        index = end
+    if len(matches) != 1:
+        raise ValueError("provider_stage_output_not_unique")
+    return matches[0]
 
 
 def _provider_failure_reason(error: Exception) -> str:

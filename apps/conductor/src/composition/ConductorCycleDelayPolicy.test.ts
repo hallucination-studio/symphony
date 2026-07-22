@@ -10,3 +10,12 @@ test("cycle delay is bounded, jittered, and immediate after progress", () => {
   assert.equal(conductorCycleDelayMs({ disposition: "empty", baseDelayMs: 1_000, random: () => 0 }), 60_000);
   assert.equal(conductorCycleDelayMs({ disposition: "needs-attention", baseDelayMs: 1_000, random: () => 1 }), 72_000);
 });
+
+test("an explicit idle delay keeps credentialed E2E reconciliation bounded", () => {
+  assert.equal(conductorCycleDelayMs({
+    disposition: "empty", baseDelayMs: 250, idleDelayMs: 250, random: () => 0,
+  }), 250);
+  assert.equal(conductorCycleDelayMs({
+    disposition: "needs-attention", baseDelayMs: 250, idleDelayMs: 250, random: () => 1,
+  }), 300);
+});

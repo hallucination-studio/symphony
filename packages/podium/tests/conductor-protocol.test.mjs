@@ -27,6 +27,43 @@ test("Podium-Conductor handler validates, dispatches, and correlates messages", 
   assert.equal(requests.length, 1);
 });
 
+test("Podium-Conductor handler accepts target workflow states in root discovery", async () => {
+  const handler = new PodiumConductorProtocolHandler({
+    async handle() {
+      return {
+        kind: "root_issues_page",
+        items: [{
+          issue: {
+            issue_id: "root-1",
+            identifier: "SYM-1",
+            project_id: "project-1",
+            state: "Succeeded",
+            order: 1,
+            depth: 0,
+            title: "Completed root",
+            description: "",
+            updated_at: "2026-07-22T00:00:00.000Z",
+          },
+          is_delegated_to_symphony: true,
+          priority: "normal",
+          blockers: [],
+          root_managed_comments: [],
+        }],
+        page_info: { has_next_page: false },
+      };
+    },
+  });
+
+  const response = await handler.handle(envelope({
+    kind: "list_root_issues",
+    project_id: "project-1",
+    page: { limit: 250 },
+  }));
+
+  assert.equal(response.body.kind, "root_issues_page");
+  assert.equal(response.body.items[0].issue.state, "Succeeded");
+});
+
 test("Podium-Conductor handler rejects invalid messages without dispatch", async () => {
   let calls = 0;
   const handler = new PodiumConductorProtocolHandler({

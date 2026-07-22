@@ -108,11 +108,18 @@ export type LinearWorkflowMutationCommand =
     };
 
 export type LinearWorkflowMutationOutcome =
-  | { kind: "applied"; readBack: { writeId: string; targetIssueId: string; remoteVersion: string } }
-  | { kind: "already_applied"; readBack: { writeId: string; targetIssueId: string; remoteVersion: string } }
-  | { kind: "write_unconfirmed"; readBackTarget: { writeId: string; targetIssueId: string; remoteVersion: string } }
+  | { kind: "applied"; readBack: WorkflowMutationReadBack }
+  | { kind: "already_applied"; readBack: WorkflowMutationReadBack }
+  | { kind: "write_unconfirmed"; readBackTarget: WorkflowMutationReadBack }
   | { kind: "precondition_conflict" }
   | { kind: "failed"; code: string; summary: string; retryable?: boolean };
+
+export interface WorkflowMutationReadBack {
+  writeId: string;
+  targetIssueId: string;
+  remoteVersion: string;
+  issueVersions?: Array<{ issueId: string; remoteVersion: string }>;
+}
 
 export interface LinearGatewayInterface {
   readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot>;

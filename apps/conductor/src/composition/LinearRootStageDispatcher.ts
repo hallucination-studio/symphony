@@ -35,19 +35,17 @@ export class LinearRootStageDispatcher implements LinearWorkflowStageDispatcher 
           projectId: input.root.projectId,
           workspace,
         });
-        return result.kind === "blocked" ? "needs-attention" as const : "progress" as const;
-      } catch {
-        return "needs-attention" as const;
+        return result.kind === "blocked"
+          ? needsAttention("root_cancellation_reconciliation_needs_attention")
+          : { kind: "progress" as const };
+      } catch (error) {
+        return needsAttention(`root_cancellation_reconciliation_failed:${sanitize(error)}`);
       }
     }
     const profile = await this.dependencies.profileFor(input.view);
-    if (!profile) return "needs-attention" as const;
+    if (!profile) return needsAttention("root_stage_profile_not_ready");
     const cycle = activeCycle(input.view);
-    const stage = cycle && ["Sealed", "Executing"].includes(cycle.issue.status_name)
-      ? "work"
-      : cycle && ["Verifying", "Inconclusive", "Escalated"].includes(cycle.issue.status_name)
-        ? "verify"
-        : "plan";
+    const stage = stageFor(cycle);
     const options = this.dependencies.optionsFor({ ...input, profile, stage });
     const shared = {
       rootIssueId: input.root.issueId,
@@ -59,22 +57,51 @@ export class LinearRootStageDispatcher implements LinearWorkflowStageDispatcher 
     try {
       if (stage === "plan") {
         const result = await this.dependencies.execution.executeBootstrapPlan(shared);
-        return result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const;
+        return { kind: result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const };
       }
       if (stage === "work") {
         const result = await this.dependencies.execution.executeWorkStage(shared as WorkStageInput);
-        return result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const;
+        return { kind: result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const };
       }
       const result = await this.dependencies.execution.executeVerifyStage(shared as VerifyStageInput);
-      return result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const;
-    } catch {
-      return "needs-attention" as const;
+      return { kind: result.kind === "awaiting_human" ? "waiting-human" as const : "progress" as const };
+    } catch (error) {
+      return needsAttention(`root_stage_dispatch_failed:${sanitize(error)}`);
     }
   }
+}
+
+function needsAttention(sanitizedReason: string) {
+  return { kind: "needs-attention" as const, sanitizedReason };
+}
+
+function sanitize(error: unknown) {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/(?:Bearer\s+|sk-)[A-Za-z0-9._-]+/giu, "[REDACTED]")
+    .replace(/\s+/gu, " ")
+    .slice(0, 1_900);
 }
 
 function activeCycle(view: RootDagView): RootCycleView | undefined {
   return view.cycles.find(({ issue }) => ![
     "Succeeded", "Changes Required", "Canceled",
   ].includes(issue.status_name));
+}
+
+function stageFor(cycle: RootCycleView | undefined): "plan" | "work" | "verify" {
+  if (!cycle) return "plan";
+  if (["Verifying", "Inconclusive", "Escalated"].includes(cycle.issue.status_name)) {
+    return "verify";
+  }
+  if (!["Sealed", "Executing"].includes(cycle.issue.status_name)) return "plan";
+  const work = cycle.nodes.filter((node) => node.issue.issue_kind === "work");
+  const verify = cycle.nodes.find((node) => node.issue.issue_kind === "verify");
+  const workComplete = work.length > 0 && work.every((node) =>
+    node.issue.status_name === "Done" && node.records.some((record) =>
+      record.kind === "work_completion" &&
+      record.nodeIssueId === node.issue.issue_id &&
+      record.workKey === node.marker.nodeKey));
+  return workComplete && verify && ["Todo", "In Progress"].includes(verify.issue.status_name)
+    ? "verify"
+    : "work";
 }

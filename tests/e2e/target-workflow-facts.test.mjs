@@ -176,7 +176,7 @@ test("target facts project only the current correlated pending Human action", ()
     root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_issue_id: "plan-1",
     request_kind: "needs_approval", question_or_proposal: "Approve the Plan.",
     reason: "Review the Plan Contract.", impact: "Proceed to Work.",
-    context_digest: "a".repeat(64), expected_root_remote_version: "root-version",
+    context_digest: `sha256:${"a".repeat(64)}`, expected_root_remote_version: "root-version",
   }));
 
   assert.deepEqual(projectTargetWorkflowPendingHuman(pending), {
@@ -186,7 +186,7 @@ test("target facts project only the current correlated pending Human action", ()
     nodeIssueId: "plan-1",
     requestKind: "needs_approval",
     actionId: "root-1:approval:plan",
-    contextDigest: "a".repeat(64),
+    contextDigest: `sha256:${"a".repeat(64)}`,
   });
 });
 

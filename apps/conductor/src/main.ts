@@ -242,7 +242,12 @@ export async function runConductor(environment = process.env): Promise<void> {
         instance_id: config.instanceId,
         occurred_at: new Date().toISOString(),
       });
-      await delay(conductorCycleDelayMs({ disposition, baseDelayMs: config.cycleDelayMs, random: Math.random }));
+      await delay(conductorCycleDelayMs({
+        disposition,
+        baseDelayMs: config.cycleDelayMs,
+        ...(config.idleDelayMs === undefined ? {} : { idleDelayMs: config.idleDelayMs }),
+        random: Math.random,
+      }));
     }
   } finally {
     await requestStop();
@@ -297,6 +302,9 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
       : 1_000,
+    idleDelayMs: environment.SYMPHONY_CYCLE_IDLE_DELAY_MS
+      ? positiveInteger(environment.SYMPHONY_CYCLE_IDLE_DELAY_MS, "cycle_idle_delay_invalid")
+      : undefined,
   };
 }
 
