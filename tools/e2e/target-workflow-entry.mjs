@@ -124,18 +124,34 @@ async function runTargetWorkflowLive(scenario = "success") {
 export async function runTargetWorkflowAllLive({
   config,
   environment = process.env,
+  fetch = globalThis.fetch,
+  log = () => {},
   runScenario = defaultRunScenario,
+  prepareSetup = prepareTargetWorkflowSetup,
   writeEvidence = true,
   evidenceDirectory,
 } = {}) {
   if (!config?.linear?.projectSlugId) throw stableError("target_all_configuration_invalid");
-  if (!environment || typeof environment !== "object" || typeof runScenario !== "function") {
+  if (!environment || typeof environment !== "object" || typeof runScenario !== "function" ||
+      typeof prepareSetup !== "function" || typeof fetch !== "function" || typeof log !== "function") {
     throw stableError("target_all_input_invalid");
   }
+  const preparedSetup = await prepareSetup({
+    config,
+    runId: environment.SYMPHONY_E2E_RUN_ID,
+    fetch,
+    log,
+  });
   const results = [];
   for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
     try {
-      const result = await runScenario(scenario, { config, environment });
+      const result = await runScenario(scenario, {
+        config,
+        environment,
+        fetch,
+        log,
+        setup: preparedSetup,
+      });
       if (!result || typeof result !== "object" || result.scenario !== scenario) {
         throw stableError("target_all_scenario_result_invalid");
       }
@@ -182,12 +198,13 @@ async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
   }
 }
 
-async function defaultRunScenario(scenario, input) {
-  if (scenario === "success") return runTargetSuccessLive(input);
-  if (scenario === "repair_escalation") return runTargetRepairLive(input);
-  if (scenario === "restart_recovery") return runTargetRestartLive(input);
-  if (scenario === "delivery") return runTargetDeliveryLive(input);
-  return runTargetSchedulingLive(input);
+async function defaultRunScenario(scenario, { setup, ...input }) {
+  const dependencies = { prepareSetup: async () => setup };
+  if (scenario === "success") return runTargetSuccessLive({ ...input, dependencies });
+  if (scenario === "repair_escalation") return runTargetRepairLive({ ...input, dependencies });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ ...input, dependencies });
+  if (scenario === "delivery") return runTargetDeliveryLive({ ...input, dependencies });
+  return runTargetSchedulingLive({ ...input, dependencies });
 }
 
 function stableReason(error) {

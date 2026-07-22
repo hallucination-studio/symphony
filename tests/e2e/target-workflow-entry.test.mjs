@@ -118,6 +118,7 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
       if (scenario === "repair_escalation") throw new Error("repair_live_failed");
       return { scenario, status: "passed" };
     },
+    prepareSetup: async () => ({ setup: {}, ids: {} }),
     writeEvidence: false,
   });
 
@@ -127,6 +128,38 @@ test("target workflow all-run attempts every scenario and recomputes a failed ve
   assert.deepEqual(result.verdict.missingScenarios, ["repair_escalation"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
+});
+
+test("target workflow all-run prepares Linear setup once before every scenario", async () => {
+  const events = [];
+  const preparedSetup = { setup: { identityDigest: "a".repeat(16) }, ids: { conductorShortHash: "abcdef123456" } };
+  const result = await runTargetWorkflowAllLive({
+    config: {
+      linear: { clientId: "client-1", projectSlugId: "project-1" },
+      secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+      codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+    },
+    environment: { SYMPHONY_E2E_RUN_ID: "target-all-setup" },
+    prepareSetup: async () => {
+      events.push(["setup"]);
+      return preparedSetup;
+    },
+    runScenario: async (scenario, input) => {
+      events.push([scenario, input.setup]);
+      return { scenario, status: "passed" };
+    },
+    writeEvidence: false,
+  });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(events, [
+    ["setup"],
+    ["success", preparedSetup],
+    ["repair_escalation", preparedSetup],
+    ["restart_recovery", preparedSetup],
+    ["delivery", preparedSetup],
+    ["scheduling", preparedSetup],
+  ]);
 });
 
 test("target workflow CLI returns failure for a recomputed failed all-run verdict", () => {
