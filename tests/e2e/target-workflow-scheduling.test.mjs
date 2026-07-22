@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { runTargetSchedulingScenario } from "../../tools/e2e/target-workflow-scheduling.mjs";
 import { readTargetSchedulingEvidence } from "../../tools/e2e/target-workflow-scheduling-live.mjs";
+import { LinearRunBudgetImpl } from "@symphony/podium";
 
 test("target scheduling accepts bounded blocker-aware single-writer evidence", async () => {
   const result = await runTargetSchedulingScenario({
@@ -27,10 +28,12 @@ test("target scheduling rejects a selected Root whose blocker is unresolved", as
 });
 
 test("target scheduling reader derives the single writer from Linear priority and blockers", async () => {
+  const budget = new LinearRunBudgetImpl();
   const result = await readTargetSchedulingEvidence({
     developmentToken: "linear-secret",
     projectId: "project-1",
     delegateActorId: "actor-1",
+    linearRunBudget: budget,
     fetch: async (_url, request) => {
       const body = JSON.parse(request.body);
       assert.equal(body.operationName, "TargetWorkflowSchedulingRoots");
@@ -54,6 +57,7 @@ test("target scheduling reader derives the single writer from Linear priority an
     maxConcurrentRoots: 1,
     blockerRespected: true,
   });
+  assert.equal(budget.snapshot().physicalRequests, 1);
 });
 
 function root(id, priority, sortOrder, state, relations) {

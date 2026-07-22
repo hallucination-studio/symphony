@@ -41,6 +41,7 @@ export async function runTargetSchedulingScenarioLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   if (!SAFE_ID.test(runId ?? "") || !config?.linear?.projectSlugId ||
@@ -55,6 +56,7 @@ export async function runTargetSchedulingScenarioLive({
     conductorId: config.linear.conductorId,
     fetch,
     log,
+    linearRunBudget,
   });
   return Object.freeze({ status: "passed", scenario: "scheduling", runId, scheduling });
 }
@@ -66,6 +68,7 @@ export async function readTargetSchedulingEvidence({
   conductorId = "",
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
 } = {}) {
   if (typeof developmentToken !== "string" || developmentToken.length === 0 ||
       !SAFE_ID.test(projectId ?? "") || !SAFE_ID.test(delegateActorId ?? "") ||
@@ -73,7 +76,7 @@ export async function readTargetSchedulingEvidence({
       typeof log !== "function") {
     throw stableError("target_scheduling_reader_input_invalid");
   }
-  const roots = await readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log });
+  const roots = await readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, linearRunBudget });
   const current = roots.filter((root) => root.parentIssueId === undefined && root.state !== "Done" &&
     (root.state !== "Canceled" || root.managedConductorId === conductorId) &&
     (root.managedConductorId === conductorId || (!root.managedConductorId && root.isDelegatedToSymphony)));
@@ -92,12 +95,12 @@ export async function readTargetSchedulingEvidence({
   });
 }
 
-async function readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log }) {
+async function readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, linearRunBudget }) {
   const roots = [];
   const seenCursors = new Set();
   let after = null;
   while (true) {
-    const data = await graphql(PROJECT_ROOTS_QUERY, { projectId, after }, { developmentToken, fetch, log });
+    const data = await graphql(PROJECT_ROOTS_QUERY, { projectId, after }, { developmentToken, fetch, log, linearRunBudget });
     const project = data.project;
     if (project?.id !== projectId) throw stableError("target_scheduling_project_scope_invalid");
     const page = project.issues;
@@ -178,7 +181,9 @@ function compareRoots(left, right) {
   return priority[left.priority] - priority[right.priority] || left.order - right.order || left.identifier.localeCompare(right.identifier);
 }
 
-async function graphql(query, variables, { developmentToken, fetch, log }) {
+async function graphql(query, variables, { developmentToken, fetch, log, linearRunBudget }) {
+  const reservation = linearRunBudget?.reservePhysicalRequest();
+  let observed = false;
   let response;
   try {
     response = await fetch(LINEAR_GRAPHQL_URL, {
@@ -186,9 +191,14 @@ async function graphql(query, variables, { developmentToken, fetch, log }) {
       headers: { authorization: developmentToken, "content-type": "application/json" },
       body: JSON.stringify({ query, variables, operationName: "TargetWorkflowSchedulingRoots" }),
     });
+    linearRunBudget?.observe({ status: response.status, ...readRateWindows(response.headers) });
+    observed = true;
   } catch {
+    if (!observed) linearRunBudget?.observe({});
     log({ event: "target_scheduling_request_failed" });
     throw stableError("target_scheduling_request_failed");
+  } finally {
+    reservation?.release();
   }
   let body;
   try { body = await response.json(); } catch {
@@ -200,6 +210,26 @@ async function graphql(query, variables, { developmentToken, fetch, log }) {
     throw stableError("target_scheduling_graphql_failed");
   }
   return body.data;
+}
+
+function readRateWindows(headers) {
+  return {
+    ...(readRateWindow(headers, "x-ratelimit-requests") ? { requestWindow: readRateWindow(headers, "x-ratelimit-requests") } : {}),
+    ...(readRateWindow(headers, "x-ratelimit-complexity") ? { complexityWindow: readRateWindow(headers, "x-ratelimit-complexity") } : {}),
+  };
+}
+
+function readRateWindow(headers, prefix) {
+  const read = (suffix) => {
+    const value = headers?.get(`${prefix}-${suffix}`);
+    return /^\d{1,16}$/u.test(value ?? "") ? Number(value) : undefined;
+  };
+  const limit = read("limit");
+  const remaining = read("remaining");
+  const reset = read("reset");
+  return limit === undefined && remaining === undefined && reset === undefined
+    ? undefined
+    : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
 }
 
 function stableError(code) {
