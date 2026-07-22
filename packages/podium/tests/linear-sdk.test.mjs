@@ -1050,6 +1050,51 @@ test("complete Issue Tree batches enforce ancestry and maximum depth", async () 
   );
 });
 
+test("target project configuration is read as a closed Podium value", async () => {
+  const states = [
+    { id: "todo-1", name: "Todo", type: "unstarted", position: 1 },
+  ];
+  const sdk = {
+    organization: Promise.resolve({ id: "organization-1" }),
+    async applicationInfo() { return { name: "Symphony" }; },
+    async users() {
+      return {
+        nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }],
+        pageInfo: { hasNextPage: false },
+      };
+    },
+    async project() {
+      return {
+        id: "project-1", name: "Target", slugId: "project-slug-1",
+        updatedAt: new Date("2026-07-22T00:00:00Z"),
+        async teams() {
+          return { nodes: [{
+            id: "team-1",
+            async states() { return { nodes: states, pageInfo: { hasNextPage: false } }; },
+          }], pageInfo: { hasNextPage: false } };
+        },
+      };
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "development_token", token: "token", delegateActorId: "actor-1" }, "organization-1", sdk);
+
+  const result = await adapter.readTargetProjectConfiguration({
+    clientId: "client-1", projectSlugId: "project-slug-1",
+  });
+
+  assert.deepEqual(result, {
+    organizationId: "organization-1",
+    delegateActorId: "actor-1",
+    project: {
+      projectId: "project-1", organizationId: "organization-1", name: "Target",
+      slugId: "project-slug-1", updatedAt: "2026-07-22T00:00:00.000Z",
+    },
+    teamId: "team-1",
+    todoStateId: "todo-1",
+  });
+  assert.equal(JSON.stringify(result).includes("token"), false);
+});
+
 test("official SDK adapter creates a managed node and proves it by exact Marker read-back", async () => {
   const parent = issue({ id: "root-1" });
   let created;

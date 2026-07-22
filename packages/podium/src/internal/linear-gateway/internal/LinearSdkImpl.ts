@@ -305,6 +305,58 @@ export class LinearSdkImpl implements LinearClientInterface {
     return organization.id;
   }
 
+  async readTargetProjectConfiguration(input: {
+    clientId: string;
+    projectSlugId: string;
+  }) {
+    if (!SAFE_ID.test(input.clientId) || !SAFE_ID.test(input.projectSlugId)) {
+      throw new Error("linear_target_project_configuration_invalid");
+    }
+    const organization = await this.#client.organization;
+    if (!SAFE_ID.test(organization.id) || organization.id !== this.organizationId) {
+      throw new Error("linear_target_project_organization_mismatch");
+    }
+    const application = await this.#client.applicationInfo(input.clientId);
+    if (!application || typeof application.name !== "string" || application.name.length === 0) {
+      throw new Error("linear_target_project_application_invalid");
+    }
+    const appUsers = (await allNodes(
+      this.#client.users({ first: PAGE_LIMIT, filter: { app: { eq: true } } }),
+      PAGE_LIMIT,
+    )).filter(({ app, name, displayName }) =>
+      app === true && (name === application.name || displayName === application.name));
+    if (appUsers.length !== 1 || !SAFE_ID.test(appUsers[0]!.id)) {
+      throw new Error("linear_target_project_delegate_ambiguous");
+    }
+    const project = await this.#client.project(input.projectSlugId);
+    if (!project || !SAFE_ID.test(project.id) || project.slugId !== input.projectSlugId ||
+        typeof project.name !== "string" || project.name.length === 0 ||
+        !(project.updatedAt instanceof Date) || Number.isNaN(project.updatedAt.getTime())) {
+      throw new Error("linear_target_project_invalid");
+    }
+    const teams = await allNodes(project.teams({ first: 64 }), 64);
+    if (teams.length !== 1 || !SAFE_ID.test(teams[0]!.id)) {
+      throw new Error("linear_target_project_team_ambiguous");
+    }
+    const states = await allNodes(teams[0]!.states({ first: 64 }), 64);
+    const todoStates = states.filter(({ id, name, type }) =>
+      SAFE_ID.test(id) && name === "Todo" && type === "unstarted");
+    if (todoStates.length > 1) throw new Error("linear_target_project_todo_ambiguous");
+    return Object.freeze({
+      organizationId: organization.id,
+      delegateActorId: appUsers[0]!.id,
+      project: Object.freeze({
+        projectId: project.id,
+        organizationId: organization.id,
+        name: project.name,
+        slugId: project.slugId,
+        updatedAt: project.updatedAt.toISOString(),
+      }),
+      teamId: teams[0]!.id,
+      ...(todoStates[0] ? { todoStateId: todoStates[0].id } : {}),
+    });
+  }
+
   async listProjects(input: {
     cursor?: string;
     limit: number;

@@ -11,6 +11,14 @@ export interface LinearProjectValue {
   updatedAt: string;
 }
 
+export interface TargetWorkflowProjectConfiguration {
+  organizationId: string;
+  delegateActorId: string;
+  project: LinearProjectValue;
+  teamId: string;
+  todoStateId?: string;
+}
+
 export interface LinearWorkflowStateValue {
   statusId: string;
   name: string;
@@ -74,6 +82,11 @@ export type ConductorProjectLabelRebindResult =
     };
 
 export interface LinearClientInterface {
+  readTargetProjectConfiguration(input: {
+    clientId: string;
+    projectSlugId: string;
+  }): Promise<TargetWorkflowProjectConfiguration>;
+
   listProjects(input: {
     cursor?: string;
     limit: number;

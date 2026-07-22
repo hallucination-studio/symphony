@@ -48,3 +48,12 @@ export {
   type TargetWorkflowStatusCategory,
   type TargetWorkflowStatusSnapshot,
 } from "./TargetWorkflowCatalog.js";
+export {
+  createTargetWorkflowSetup,
+} from "./createTargetWorkflowSetup.js";
+export type {
+  TargetWorkflowSetupInterface,
+  TargetWorkflowSetupMutationKind,
+  TargetWorkflowSetupProject,
+  TargetWorkflowSetupResult,
+} from "./TargetWorkflowSetupInterface.js";
