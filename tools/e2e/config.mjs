@@ -27,7 +27,16 @@ export function loadE2EConfig({
   const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
   const linearClientId = required(environment, INPUT_KEYS.linearClientId, "linear_client_id_missing", issues);
   const projectSlugId = optional(environment, INPUT_KEYS.projectSlugId);
-  const linearSetupAuthorized = environment[INPUT_KEYS.linearSetupAuthorized] === "true";
+  const rawLinearSetupAuthorized = required(
+    environment,
+    INPUT_KEYS.linearSetupAuthorized,
+    "linear_setup_authorization_missing",
+    issues,
+  );
+  const linearSetupAuthorized = rawLinearSetupAuthorized === "true";
+  if (rawLinearSetupAuthorized && !["true", "false"].includes(rawLinearSetupAuthorized)) {
+    issues.push("linear_setup_authorization_invalid");
+  }
   const codexApiKey = required(environment, INPUT_KEYS.codexApiKey, "codex_api_key_missing", issues);
   const rawBaseUrl = required(environment, INPUT_KEYS.codexBaseUrl, "codex_base_url_missing", issues);
   const model = required(environment, INPUT_KEYS.codexModel, "codex_model_missing", issues);
