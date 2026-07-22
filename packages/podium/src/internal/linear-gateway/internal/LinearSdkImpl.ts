@@ -38,6 +38,20 @@ const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_HEADER_MARKER = "<!-- symphony root\n";
+
+type WorkflowScopeIssue = {
+  id: string;
+  project?: { id?: string } | null;
+  parent?: WorkflowScopeIssue | null;
+};
+
+function workflowScopeSelection(depth: number): string {
+  const parent = depth === 0
+    ? "id project { id }"
+    : `${workflowScopeSelection(depth - 1)}`;
+  return `id project { id } parent { ${parent} }`;
+}
+
 const ROOT_HEADER_FACTS_QUERY = `
   query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!, $workflowCommentMarker: String!) {
     viewer { id }
@@ -1657,6 +1671,36 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async #issueBelongsToWorkflowRoot(
+    issueId: string,
+    projectId: string,
+    rootIssueId: string,
+  ): Promise<boolean> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (rawRequest) {
+      const response = await rawRequest(`query WorkflowMutationScope { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} } }`);
+      const data = (response as { data?: { issue?: WorkflowScopeIssue } }).data;
+      // Test doubles and older SDK adapters may expose rawRequest for other
+      // compact queries only; retain the bounded SDK fallback in that case.
+      if (data === undefined) return this.#issueBelongsToWorkflowRootViaSdk(issueId, projectId, rootIssueId);
+      const issue = data.issue;
+      if (!issue) return false;
+      if (!Object.prototype.hasOwnProperty.call(issue, "parent")) {
+        return this.#issueBelongsToWorkflowRootViaSdk(issueId, projectId, rootIssueId);
+      }
+      const visited = new Set<string>();
+      let current: WorkflowScopeIssue | undefined = issue;
+      for (let depth = 0; current && depth <= 32; depth += 1) {
+        if (visited.has(current.id) || current.project?.id !== projectId) return false;
+        visited.add(current.id);
+        if (current.id === rootIssueId) return current.parent === null || current.parent === undefined;
+        current = current.parent ?? undefined;
+      }
+      return false;
+    }
+    return this.#issueBelongsToWorkflowRootViaSdk(issueId, projectId, rootIssueId);
+  }
+
+  async #issueBelongsToWorkflowRootViaSdk(
     issueId: string,
     projectId: string,
     rootIssueId: string,

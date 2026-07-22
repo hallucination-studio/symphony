@@ -1741,10 +1741,18 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
     sourceIssueId: "source-1", sourceExpectedRemoteVersion: source.updatedAt,
     targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks",
   };
+  const rawOperations = [];
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async (id) => id === "root-1" ? root : id === "source-1" ? source : target,
     client: {
       async rawRequest() {
+        rawOperations.push(arguments[0]);
+        if (rawOperations.at(-1).includes("WorkflowMutationScope")) {
+          return { data: { issue: {
+            id: "source-1", project: { id: "project-1" },
+            parent: { id: "root-1", project: { id: "project-1" }, parent: null },
+          } } };
+        }
         return { data: { issue: {
           id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" },
           inverseRelations: {
@@ -1763,6 +1771,7 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-relation", targetIssueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z",
   });
+  assert.equal(rawOperations.filter((query) => query.includes("WorkflowMutationScope")).length, 1);
 });
 
 test("workflow SDK mutations reject targets outside the requested Root tree", async () => {
