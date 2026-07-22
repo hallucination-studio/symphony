@@ -35,6 +35,44 @@ export type TargetWorkflowInitializationResult =
       nativeDuplicate: LinearWorkflowStateValue;
     };
 
+export type ConductorProjectLabelRebindPlan =
+  | {
+      kind: "ready";
+      projectId: string;
+      labelName: string;
+      fingerprint: string;
+      currentConductorLabels: readonly { labelId: string; name: string }[];
+      desiredLabel?: {
+        labelId: string;
+        name: string;
+        assignedProjectIds: readonly string[];
+      };
+      detachAssignments: readonly { projectId: string; labelId: string }[];
+    }
+  | {
+      kind: "blocked";
+      projectId: string;
+      labelName: string;
+      reason:
+        | "project_invalid"
+        | "label_invalid"
+        | "label_ambiguous"
+        | "project_labels_invalid"
+        | "label_ownership_invalid";
+    };
+
+export type ConductorProjectLabelRebindResult =
+  | {
+      kind: "dry_run";
+      plan: ConductorProjectLabelRebindPlan;
+    }
+  | {
+      kind: "already_applied" | "applied";
+      projectId: string;
+      labelName: string;
+      fingerprint: string;
+    };
+
 export interface LinearClientInterface {
   listProjects(input: {
     cursor?: string;
@@ -45,6 +83,16 @@ export interface LinearClientInterface {
     projectId: string;
     labelName: string;
   }): Promise<void>;
+
+  preflightConductorProjectLabel(input: {
+    projectId: string;
+    labelName: string;
+  }): Promise<ConductorProjectLabelRebindPlan>;
+
+  rebindConductorProjectLabel(input: {
+    plan: Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>;
+    authorized: boolean;
+  }): Promise<ConductorProjectLabelRebindResult>;
 
   initializeTargetTeamWorkflow(input: {
     projectId: string;

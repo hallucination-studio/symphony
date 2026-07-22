@@ -5,9 +5,11 @@ import {
   type IssueLabel,
   type ProjectLabel,
 } from "@linear/sdk";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
+  ConductorProjectLabelRebindPlan,
+  ConductorProjectLabelRebindResult,
   LinearClientInterface,
   PageInfo,
   LinearWorkflowStateValue,
@@ -339,66 +341,132 @@ export class LinearSdkImpl implements LinearClientInterface {
     projectId: string;
     labelName: string;
   }): Promise<void> {
-    if (!input.labelName.startsWith(CONDUCTOR_LABEL_PREFIX)) {
-      throw new Error("linear_conductor_label_invalid");
+    const plan = await this.preflightConductorProjectLabel(input);
+    if (plan.kind !== "ready") throw new Error(`linear_${plan.reason}`);
+    await this.rebindConductorProjectLabel({ plan, authorized: true });
+  }
+
+  async preflightConductorProjectLabel(input: {
+    projectId: string;
+    labelName: string;
+  }): Promise<ConductorProjectLabelRebindPlan> {
+    if (!SAFE_ID.test(input.projectId)) {
+      return { kind: "blocked", ...input, reason: "project_invalid" };
+    }
+    if (
+      !input.labelName.startsWith(CONDUCTOR_LABEL_PREFIX) ||
+      !SAFE_ID.test(input.labelName.slice(CONDUCTOR_LABEL_PREFIX.length))
+    ) {
+      return { kind: "blocked", ...input, reason: "label_invalid" };
+    }
+    const organization = await this.#client.organization;
+    if (organization.id !== this.organizationId) {
+      return { kind: "blocked", ...input, reason: "project_invalid" };
     }
     const project = await this.#client.project(input.projectId);
-    const currentLabels = await allNodes(
-      project.labels({ first: PAGE_LIMIT }),
-      64,
-    );
-    const conductorLabels = currentLabels.filter(({ name }) =>
-      name.startsWith(CONDUCTOR_LABEL_PREFIX),
-    );
-    if (
-      conductorLabels.length > 1 ||
-      (conductorLabels[0] && conductorLabels[0].name !== input.labelName)
-    ) {
-      throw new Error("linear_conductor_project_label_conflict");
+    if (!project || project.id !== input.projectId) {
+      return { kind: "blocked", ...input, reason: "project_invalid" };
     }
-    const label = await this.#uniqueProjectLabel(input.labelName);
-    const assignedProjects = await allNodes(
-      label.projects({ first: PAGE_LIMIT }),
-      2,
+    const currentLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
+    const conductorLabels = currentLabels.filter(({ name, isGroup, archivedAt, retiredById }) =>
+      typeof name === "string" &&
+      name.startsWith(CONDUCTOR_LABEL_PREFIX) &&
+      !isGroup &&
+      !archivedAt &&
+      !retiredById,
     );
-    if (
-      assignedProjects.length > 1 ||
-      (assignedProjects[0] && assignedProjects[0].id !== input.projectId)
-    ) {
-      throw new Error("linear_conductor_label_project_conflict");
+    if (conductorLabels.some(({ id, name }) => !SAFE_ID.test(id) || !SAFE_ID.test(name))) {
+      return { kind: "blocked", ...input, reason: "project_labels_invalid" };
     }
-    if (conductorLabels.length === 0) {
-      await this.#client.projectAddLabel(input.projectId, label.id);
+    const desiredLabels = await this.#projectLabelsNamed(input.labelName);
+    if (desiredLabels.length > 1) {
+      return { kind: "blocked", ...input, reason: "label_ambiguous" };
     }
-    const labels = await allNodes(
-      (await this.#client.project(input.projectId)).labels({
-        first: PAGE_LIMIT,
-      }),
-      64,
-    );
-    const finalConductorLabels = labels.filter(({ name }) =>
-      name.startsWith(CONDUCTOR_LABEL_PREFIX),
-    );
+    const desiredLabel = desiredLabels[0];
+    const assignedProjects = desiredLabel
+      ? await allNodes(desiredLabel.projects({ first: PAGE_LIMIT }), 64)
+      : [];
+    if (assignedProjects.some(({ id }) => !SAFE_ID.test(id))) {
+      return { kind: "blocked", ...input, reason: "label_ownership_invalid" };
+    }
+    const detachAssignments = [
+      ...conductorLabels
+        .filter(({ id }) => id !== desiredLabel?.id)
+        .map(({ id }) => ({ projectId: input.projectId, labelId: id })),
+      ...(desiredLabel
+        ? assignedProjects
+            .filter(({ id }) => id !== input.projectId)
+            .map(({ id }) => ({ projectId: id, labelId: desiredLabel.id }))
+        : []),
+    ];
+    const plan = {
+      kind: "ready" as const,
+      projectId: input.projectId,
+      labelName: input.labelName,
+      fingerprint: "",
+      currentConductorLabels: conductorLabels.map(({ id, name }) => ({
+        labelId: id,
+        name,
+      })),
+      ...(desiredLabel
+        ? {
+            desiredLabel: {
+              labelId: desiredLabel.id,
+              name: desiredLabel.name,
+              assignedProjectIds: assignedProjects.map(({ id }) => id),
+            },
+          }
+        : {}),
+      detachAssignments,
+    } satisfies Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>;
+    return { ...plan, fingerprint: projectLabelRebindFingerprint(plan) };
+  }
+
+  async rebindConductorProjectLabel(input: {
+    plan: Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>;
+    authorized: boolean;
+  }): Promise<ConductorProjectLabelRebindResult> {
+    const plan = input.plan;
+    if (plan.fingerprint !== projectLabelRebindFingerprint(plan)) {
+      throw new Error("linear_project_label_plan_invalid");
+    }
+    if (input.authorized !== true) return { kind: "dry_run", plan };
+    const freshPlan = await this.preflightConductorProjectLabel(plan);
+    if (freshPlan.kind !== "ready" || freshPlan.fingerprint !== plan.fingerprint) {
+      throw new Error("linear_project_label_precondition_conflict");
+    }
+    let desiredLabelId = plan.desiredLabel?.labelId;
+    if (!desiredLabelId) {
+      const label = await this.#createProjectLabelWithReadBack(plan.labelName);
+      desiredLabelId = label.id;
+    }
+    for (const assignment of plan.detachAssignments) {
+      await this.#client.projectRemoveLabel(assignment.projectId, assignment.labelId);
+      await this.#assertProjectLabelDetached(assignment.projectId, assignment.labelId);
+    }
+    const targetLabels = await this.#projectLabelsOnProject(plan.projectId);
+    if (!targetLabels.some(({ id }) => id === desiredLabelId)) {
+      await this.#client.projectAddLabel(plan.projectId, desiredLabelId);
+      await this.#assertProjectLabelAttached(plan.projectId, desiredLabelId);
+    }
+    const finalPlan = await this.preflightConductorProjectLabel(plan);
     if (
-      finalConductorLabels.length !== 1 ||
-      finalConductorLabels[0]!.name !== input.labelName
+      finalPlan.kind !== "ready" ||
+      finalPlan.currentConductorLabels.length !== 1 ||
+      finalPlan.currentConductorLabels[0]!.labelId !== desiredLabelId ||
+      finalPlan.desiredLabel?.assignedProjectIds.length !== 1 ||
+      finalPlan.desiredLabel.assignedProjectIds[0] !== plan.projectId
     ) {
       throw ambiguousError("linear_project_label_read_back_failed");
     }
-    const finalLabels = await this.#projectLabelsNamed(input.labelName);
-    if (finalLabels.length !== 1) {
-      throw ambiguousError("linear_project_label_read_back_failed");
-    }
-    const finalProjects = await allNodes(
-      finalLabels[0]!.projects({ first: PAGE_LIMIT }),
-      2,
-    );
-    if (
-      finalProjects.length !== 1 ||
-      finalProjects[0]!.id !== input.projectId
-    ) {
-      throw ambiguousError("linear_project_label_read_back_failed");
-    }
+    return {
+      kind: plan.detachAssignments.length === 0 && plan.desiredLabel?.labelId === desiredLabelId
+        ? "already_applied"
+        : "applied",
+      projectId: plan.projectId,
+      labelName: plan.labelName,
+      fingerprint: finalPlan.fingerprint,
+    };
   }
 
   async initializeTargetTeamWorkflow(input: {
@@ -1686,6 +1754,47 @@ export class LinearSdkImpl implements LinearClientInterface {
     }));
   }
 
+  async #projectLabelsOnProject(projectId: string): Promise<ProjectLabel[]> {
+    const project = await this.#client.project(projectId);
+    if (!project || project.id !== projectId) {
+      throw new Error("linear_project_mismatch");
+    }
+    return allNodes(project.labels({ first: PAGE_LIMIT }), 64);
+  }
+
+  async #assertProjectLabelDetached(projectId: string, labelId: string): Promise<void> {
+    if ((await this.#projectLabelsOnProject(projectId)).some(({ id }) => id === labelId)) {
+      throw ambiguousError("linear_project_label_read_back_failed");
+    }
+  }
+
+  async #assertProjectLabelAttached(projectId: string, labelId: string): Promise<void> {
+    if (!(await this.#projectLabelsOnProject(projectId)).some(({ id }) => id === labelId)) {
+      throw ambiguousError("linear_project_label_read_back_failed");
+    }
+  }
+
+  async #createProjectLabelWithReadBack(labelName: string): Promise<ProjectLabel> {
+    try {
+      const payload = await this.#client.createProjectLabel({
+        name: labelName,
+        color: "#5E6AD2",
+        isGroup: false,
+      });
+      const label = payload.projectLabel ? await payload.projectLabel : undefined;
+      if (!payload.success || !label) throw new Error("linear_project_label_create_failed");
+      const organization = await label.organization;
+      if (organization.id !== this.organizationId) {
+        throw new Error("linear_label_organization_mismatch");
+      }
+      return label;
+    } catch (error) {
+      const matches = await this.#projectLabelsNamed(labelName).catch(() => []);
+      if (matches.length === 1) return matches[0]!;
+      throw error;
+    }
+  }
+
   async #projectLabelsNamed(name: string): Promise<ProjectLabel[]> {
     const labels = await allNodes(
       this.#client.projectLabels({
@@ -2420,6 +2529,27 @@ function linearWorkflowStateValueFromRaw(value: {
       : workflowStatusCategory(value.type),
     position: value.position,
   };
+}
+
+function projectLabelRebindFingerprint(
+  plan: Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>,
+): string {
+  const canonical = {
+    projectId: plan.projectId,
+    labelName: plan.labelName,
+    currentConductorLabels: [...plan.currentConductorLabels].sort((left, right) =>
+      left.labelId.localeCompare(right.labelId)),
+    desiredLabel: plan.desiredLabel
+      ? {
+          labelId: plan.desiredLabel.labelId,
+          name: plan.desiredLabel.name,
+          assignedProjectIds: [...plan.desiredLabel.assignedProjectIds].sort(),
+        }
+      : undefined,
+    detachAssignments: [...plan.detachAssignments].sort((left, right) =>
+      `${left.projectId}:${left.labelId}`.localeCompare(`${right.projectId}:${right.labelId}`)),
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 function assertTargetWorkflowPreconditions(

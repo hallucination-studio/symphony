@@ -1423,7 +1423,7 @@ function v3PrimaryComment() {
   ].join("\n");
 }
 
-test("Project label assignment rejects a conflicting Conductor label introduced before read-back", async () => {
+test("Project label rebind rejects a conflicting label introduced after preflight", async () => {
   let added = false;
   const desiredLabel = {
     id: "label-desired",
@@ -1450,6 +1450,7 @@ test("Project label assignment rejects a conflicting Conductor label introduced 
     },
   };
   const sdk = {
+    organization: Promise.resolve({ id: "organization-1" }),
     project: async () => project,
     projectLabels: async () => connection([desiredLabel]),
     projectAddLabel: async () => {
@@ -1464,11 +1465,11 @@ test("Project label assignment rejects a conflicting Conductor label introduced 
       projectId: "project-1",
       labelName: "symphony:conductor/abc123",
     }),
-    /linear_project_label_read_back_failed/,
+    /linear_project_label_precondition_conflict/,
   );
 });
 
-test("Project label assignment rejects a Conductor label already attached elsewhere", async () => {
+test("Project label rebind moves a desired Conductor label from another Project", async () => {
   const otherProject = { id: "project-other" };
   const desiredLabel = {
     id: "label-desired",
@@ -1477,31 +1478,86 @@ test("Project label assignment rejects a Conductor label already attached elsewh
     archivedAt: null,
     retiredById: undefined,
     organization: Promise.resolve({ id: "organization-1" }),
-    projects: async () => connection([otherProject]),
+    projects: async () => connection(
+      [...labelProjects].map(([id]) => id === "project-1" ? project : otherProject),
+    ),
   };
   let additions = 0;
+  let removals = 0;
+  const labelProjects = new Map([["project-other", desiredLabel]]);
   const project = {
     id: "project-1",
-    labels: async () => connection([]),
+    labels: async () => connection(labelProjects.has("project-1") ? [desiredLabel] : []),
   };
+  otherProject.labels = async () => connection(labelProjects.has("project-other") ? [desiredLabel] : []);
   const sdk = {
-    project: async () => project,
+    organization: Promise.resolve({ id: "organization-1" }),
+    project: async (projectId) => projectId === "project-other" ? otherProject : project,
     projectLabels: async () => connection([desiredLabel]),
     projectAddLabel: async () => {
       additions += 1;
+      labelProjects.set("project-1", desiredLabel);
+      return { success: true };
+    },
+    projectRemoveLabel: async (projectId) => {
+      removals += 1;
+      labelProjects.delete(projectId);
       return { success: true };
     },
   };
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
-  await assert.rejects(
-    adapter.assignConductorProjectLabel({
-      projectId: "project-1",
-      labelName: "symphony:conductor/abc123",
-    }),
-    /linear_conductor_label_project_conflict/,
-  );
-  assert.equal(additions, 0);
+  await adapter.assignConductorProjectLabel({
+    projectId: "project-1",
+    labelName: "symphony:conductor/abc123",
+  });
+  assert.equal(additions, 1);
+  assert.equal(removals, 1);
+  assert.deepEqual([...labelProjects.keys()], ["project-1"]);
+});
+
+test("Project label rebind creates a missing desired label and proves attachment", async () => {
+  let created = false;
+  let attached = false;
+  const project = {
+    id: "project-1",
+    labels: async () => connection(attached ? [label] : []),
+  };
+  const label = {
+    id: "label-created",
+    name: "symphony:conductor/abc123",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: undefined,
+    organization: Promise.resolve({ id: "organization-1" }),
+    projects: async () => connection(attached ? [project] : []),
+  };
+  const sdk = {
+    organization: Promise.resolve({ id: "organization-1" }),
+    project: async () => project,
+    projectLabels: async () => connection(created ? [label] : []),
+    createProjectLabel: async () => {
+      created = true;
+      return { success: true, projectLabel: Promise.resolve(label) };
+    },
+    projectAddLabel: async () => {
+      attached = true;
+      return { success: true };
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const plan = await adapter.preflightConductorProjectLabel({
+    projectId: "project-1",
+    labelName: "symphony:conductor/abc123",
+  });
+  assert.equal(plan.kind, "ready");
+  assert.equal(plan.desiredLabel, undefined);
+  const result = await adapter.rebindConductorProjectLabel({ plan, authorized: true });
+
+  assert.equal(result.kind, "applied");
+  assert.equal(created, true);
+  assert.equal(attached, true);
 });
 
 test("workflow SDK mutations keep managed markers and use the explicit status and relation inputs", async () => {
