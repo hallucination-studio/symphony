@@ -43,7 +43,14 @@ export async function prepareTargetWorkflowSetup({
         : !MUTATION_KINDS.has(result.workflow) || !MUTATION_KINDS.has(result.projectLabel)) ||
       !SAFE_ID.test(result.organizationId ?? "") || !SAFE_ID.test(result.delegateActorId ?? "") ||
       !SAFE_ID.test(result.project?.projectId ?? "") || !SAFE_ID.test(result.teamId ?? "") ||
-      typeof result.identityDigest !== "string" || !/^[a-f0-9]{16}$/u.test(result.identityDigest)) {
+      typeof result.identityDigest !== "string" || !/^[a-f0-9]{16}$/u.test(result.identityDigest) ||
+      (result.kind === "ready" && (
+        typeof result.project?.updatedAt !== "string" ||
+        result.resolution?.kind !== "resolved" ||
+        result.resolution.projectId !== result.project.projectId ||
+        typeof result.resolution.updatedAt !== "string" ||
+        result.resolution.updatedAt !== result.project.updatedAt
+      ))) {
     throw stableError("target_live_setup_result_invalid");
   }
   log({
