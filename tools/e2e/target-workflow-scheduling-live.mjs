@@ -46,7 +46,7 @@ export async function runTargetSchedulingScenarioLive({
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   if (!SAFE_ID.test(runId ?? "") || !config?.linear?.projectSlugId ||
       typeof config.secrets?.linearDevToken !== "string" || config.secrets.linearDevToken.length === 0 ||
-      typeof fetch !== "function" || typeof log !== "function") {
+      typeof fetch !== "function" || typeof log !== "function" || !hasRunBudget(linearRunBudget)) {
     throw stableError("target_live_scheduling_input_invalid");
   }
   const scheduling = await readTargetSchedulingEvidence({
@@ -73,7 +73,7 @@ export async function readTargetSchedulingEvidence({
   if (typeof developmentToken !== "string" || developmentToken.length === 0 ||
       !SAFE_ID.test(projectId ?? "") || !SAFE_ID.test(delegateActorId ?? "") ||
       (conductorId !== "" && !SAFE_ID.test(conductorId)) || typeof fetch !== "function" ||
-      typeof log !== "function") {
+      typeof log !== "function" || !hasRunBudget(linearRunBudget)) {
     throw stableError("target_scheduling_reader_input_invalid");
   }
   linearRunBudget?.recordLogicalOperation();
@@ -231,6 +231,11 @@ function readRateWindow(headers, prefix) {
   return limit === undefined && remaining === undefined && reset === undefined
     ? undefined
     : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
+}
+
+function hasRunBudget(value) {
+  return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
+    typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
 }
 
 function stableError(code) {

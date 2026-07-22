@@ -61,6 +61,18 @@ test("target scheduling reader derives the single writer from Linear priority an
   assert.equal(budget.snapshot().physicalRequests, 1);
 });
 
+test("target scheduling reader rejects a credentialed call without a run budget", async () => {
+  await assert.rejects(
+    readTargetSchedulingEvidence({
+      developmentToken: "linear-secret",
+      projectId: "project-1",
+      delegateActorId: "actor-1",
+      fetch: async () => { throw new Error("must_not_fetch"); },
+    }),
+    /target_scheduling_reader_input_invalid/u,
+  );
+});
+
 function root(id, priority, sortOrder, state, relations) {
   return {
     id,
