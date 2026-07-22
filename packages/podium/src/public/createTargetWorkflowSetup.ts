@@ -19,6 +19,10 @@ export function createTargetWorkflowSetup(input: {
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
   linearRunBudget?: LinearRunBudgetImpl;
 } = {}): TargetWorkflowSetupInterface {
+  if (!input.linearRunBudget || typeof input.linearRunBudget.permitPhysicalRequest !== "function" ||
+      typeof input.linearRunBudget.observe !== "function") {
+    throw new Error("linear_target_setup_budget_missing");
+  }
   return {
     initialize: (setupInput) => runWithFetch(
       setupInput.fetch,

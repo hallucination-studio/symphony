@@ -8,6 +8,11 @@ import {
   runTargetSuccessLive,
 } from "../../tools/e2e/target-workflow-live.mjs";
 import { prepareTargetWorkflowSetup } from "../../tools/e2e/target-workflow-setup.mjs";
+import { createTargetWorkflowSetup } from "@symphony/podium";
+
+test("target setup factory rejects a credentialed transport without a run budget", () => {
+  assert.throws(() => createTargetWorkflowSetup(), /linear_target_setup_budget_missing/u);
+});
 
 test("target setup requires authorization and never creates a scenario scope", async () => {
   const events = [];
