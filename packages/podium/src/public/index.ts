@@ -38,3 +38,10 @@ export {
   bootstrapDevelopmentTokenInstallation,
   type DevelopmentTokenInstallationView,
 } from "./bootstrapDevelopmentTokenInstallation.js";
+export {
+  inspectTargetWorkflowCatalog,
+  TARGET_WORKFLOW_STATUS_CATEGORIES,
+  type TargetWorkflowCatalogInspection,
+  type TargetWorkflowStatusCategory,
+  type TargetWorkflowStatusSnapshot,
+} from "./TargetWorkflowCatalog.js";
