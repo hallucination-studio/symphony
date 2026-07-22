@@ -57,6 +57,7 @@ test("target scheduling reader derives the single writer from Linear priority an
     maxConcurrentRoots: 1,
     blockerRespected: true,
   });
+  assert.equal(budget.snapshot().logicalOperations, 1);
   assert.equal(budget.snapshot().physicalRequests, 1);
 });
 

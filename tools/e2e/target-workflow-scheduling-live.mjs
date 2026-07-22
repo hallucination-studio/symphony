@@ -76,6 +76,7 @@ export async function readTargetSchedulingEvidence({
       typeof log !== "function") {
     throw stableError("target_scheduling_reader_input_invalid");
   }
+  linearRunBudget?.recordLogicalOperation();
   const roots = await readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, linearRunBudget });
   const current = roots.filter((root) => root.parentIssueId === undefined && root.state !== "Done" &&
     (root.state !== "Canceled" || root.managedConductorId === conductorId) &&
