@@ -98,6 +98,7 @@ export function createTargetWorkflowSnapshotTransport({
   if (typeof developmentToken !== "string" || developmentToken.length === 0) {
     throw new Error("target_transport_token_missing");
   }
+  if (!hasRunBudget(budget)) throw new Error("target_transport_budget_missing");
   if (typeof fetch !== "function") throw new Error("target_transport_fetch_invalid");
   if (typeof log !== "function") throw new Error("target_transport_log_invalid");
 
@@ -391,6 +392,11 @@ export function createTargetWorkflowSnapshotTransport({
     const reset = read("reset");
     return limit === undefined && remaining === undefined && reset === undefined
       ? undefined : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
+  }
+
+  function hasRunBudget(value) {
+    return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
+      typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
   }
 }
 

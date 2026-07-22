@@ -34,6 +34,7 @@ export function createTargetWorkflowExternalInputs({
   if (typeof developmentToken !== "string" || developmentToken.length === 0) {
     throw new Error("target_inputs_token_missing");
   }
+  if (!hasRunBudget(budget)) throw new Error("target_inputs_budget_missing");
   if (typeof fetch !== "function") throw new Error("target_inputs_fetch_invalid");
   if (typeof log !== "function") throw new Error("target_inputs_log_invalid");
 
@@ -147,6 +148,11 @@ export function createTargetWorkflowExternalInputs({
     const reset = read("reset");
     return limit === undefined && remaining === undefined && reset === undefined
       ? undefined : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
+  }
+
+  function hasRunBudget(value) {
+    return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
+      typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
   }
 }
 

@@ -3,7 +3,18 @@ import test from "node:test";
 
 import { LinearRunBudgetImpl } from "@symphony/podium";
 import { projectTargetWorkflowFacts } from "../../tools/e2e/target-workflow-facts.mjs";
-import { createTargetWorkflowSnapshotTransport } from "../../tools/e2e/target-workflow-transport.mjs";
+import { createTargetWorkflowSnapshotTransport as createRawTargetWorkflowSnapshotTransport } from "../../tools/e2e/target-workflow-transport.mjs";
+
+function createTargetWorkflowSnapshotTransport(input = {}) {
+  return createRawTargetWorkflowSnapshotTransport({ budget: new LinearRunBudgetImpl(), ...input });
+}
+
+test("target snapshot transport rejects a credentialed transport without a run budget", () => {
+  assert.throws(
+    () => createRawTargetWorkflowSnapshotTransport({ developmentToken: "linear-token", fetch: async () => {} }),
+    /target_transport_budget_missing/u,
+  );
+});
 
 test("target transport paginates Linear facts and feeds the durable projection", async () => {
   const calls = [];

@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTargetWorkflowExternalInputs } from "../../tools/e2e/target-workflow-inputs.mjs";
+import { createTargetWorkflowExternalInputs as createRawTargetWorkflowExternalInputs } from "../../tools/e2e/target-workflow-inputs.mjs";
+import { LinearRunBudgetImpl } from "@symphony/podium";
+
+function createTargetWorkflowExternalInputs(input = {}) {
+  return createRawTargetWorkflowExternalInputs({ budget: new LinearRunBudgetImpl(), ...input });
+}
+
+test("target external inputs reject a credentialed transport without a run budget", () => {
+  assert.throws(
+    () => createRawTargetWorkflowExternalInputs({ developmentToken: "linear-token", fetch: async () => {} }),
+    /target_inputs_budget_missing/u,
+  );
+});
 
 test("target external inputs create only a Root and return closed read-back facts", async () => {
   const calls = [];
