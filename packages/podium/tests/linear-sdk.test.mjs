@@ -471,6 +471,39 @@ test("Root scheduling batch preserves managed comments and blocker facts", async
   }]);
 });
 
+test("Root scheduling batch exposes new workflow ownership records", async () => {
+  const ownership = '<!-- symphony managed-record\n{"kind":"root_ownership"}\n-->';
+  const root = issue({ id: "root-1", priority: 2, order: 3 });
+  const sdk = {
+    project: async () => ({ issues: async () => connection([root]) }),
+    client: {
+      async rawRequest(query, variables) {
+        assert.match(query, /workflowManagedComments: comments\(first: 64, filter:/u);
+        assert.equal(variables.workflowCommentMarker, "<!-- symphony managed-record\n");
+        return { data: {
+          viewer: { id: "app-user" },
+          issues: { nodes: [{
+            id: "root-1", identifier: "ROOT-1", title: "Title", description: "Description",
+            priority: 2, sortOrder: 3, updatedAt: "2026-07-16T00:00:00Z",
+            project: { id: "project-1" }, parent: null, delegate: { id: "app-user" },
+            state: { name: "In Progress" },
+            comments: { nodes: [], pageInfo: { hasNextPage: false } },
+            workflowManagedComments: { nodes: [{
+              id: "ownership-1", body: ownership, updatedAt: "2026-07-16T00:00:00Z", issue: { id: "root-1" },
+            }], pageInfo: { hasNextPage: false } },
+            inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+          }], pageInfo: { hasNextPage: false } },
+        } };
+      },
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+
+  assert.equal(result.items[0].rootManagedComments[0].body, ownership);
+});
+
 test("Root scheduling reads candidate facts with bounded concurrency", async () => {
   let releaseReads;
   const readsReleased = new Promise((resolve) => { releaseReads = resolve; });

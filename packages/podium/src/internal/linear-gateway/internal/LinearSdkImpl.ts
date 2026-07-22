@@ -39,7 +39,7 @@ const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_HEADER_MARKER = "<!-- symphony root\n";
 const ROOT_HEADER_FACTS_QUERY = `
-  query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!) {
+  query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!, $workflowCommentMarker: String!) {
     viewer { id }
     issues(first: 250, filter: { id: { in: $rootIds } }) {
       nodes {
@@ -49,6 +49,10 @@ const ROOT_HEADER_FACTS_QUERY = `
         delegate { id }
         state { name }
         comments(first: 2, filter: { body: { contains: $commentMarker } }) {
+          nodes { id body updatedAt issue { id } }
+          pageInfo { hasNextPage }
+        }
+        workflowManagedComments: comments(first: 64, filter: { body: { contains: $workflowCommentMarker } }) {
           nodes { id body updatedAt issue { id } }
           pageInfo { hasNextPage }
         }
@@ -210,6 +214,15 @@ interface RootHeaderFact {
   delegate?: { id: string } | null;
   state: { name: string };
   comments: {
+    nodes: Array<{
+      id: string;
+      body: string;
+      updatedAt: string;
+      issue: { id: string };
+    }>;
+    pageInfo: { hasNextPage: boolean };
+  };
+  workflowManagedComments?: {
     nodes: Array<{
       id: string;
       body: string;
@@ -1112,9 +1125,11 @@ export class LinearSdkImpl implements LinearClientInterface {
     const response = await rawRequest<RootHeaderFactsData, {
       rootIds: string[];
       commentMarker: string;
+      workflowCommentMarker: string;
     }>(ROOT_HEADER_FACTS_QUERY, {
       rootIds: roots.map(({ issue }) => issue.id),
       commentMarker: ROOT_HEADER_MARKER,
+      workflowCommentMarker: MANAGED_RECORD_MARKER,
     });
     const data = response.data;
     if (!data || data.issues.pageInfo.hasNextPage) {
@@ -1130,22 +1145,28 @@ export class LinearSdkImpl implements LinearClientInterface {
       if (!fact || fact.project?.id !== projectId || fact.parent !== null) {
         throw new Error("linear_root_header_batch_invalid");
       }
-      if (fact.comments.pageInfo.hasNextPage || fact.comments.nodes.length > 2) {
+      if (fact.comments.pageInfo.hasNextPage || fact.comments.nodes.length > 2 ||
+          fact.workflowManagedComments?.pageInfo.hasNextPage) {
         throw new Error("linear_root_comments_too_many");
       }
       if (fact.inverseRelations.pageInfo.hasNextPage) {
         throw new Error("linear_root_relations_too_many");
       }
-      const rootManagedComments = fact.comments.nodes.flatMap((comment) => {
+      const rootManagedComments = [
+        ...fact.comments.nodes,
+        ...(fact.workflowManagedComments?.nodes ?? []),
+      ].flatMap((comment) => {
         if (comment.issue.id !== fact.id) {
           throw new Error("linear_root_comment_identity_mismatch");
         }
-        if (!isRootManagedComment(comment.body)) return [];
+        if (!isRootManagedComment(comment.body) && !isRootOwnershipComment(comment.body)) return [];
         return [{
           commentId: comment.id,
           issueId: fact.id,
           updatedAt: timestampValue(comment.updatedAt),
-          managedMarker: rootCommentMarker(fact.id),
+          managedMarker: isRootManagedComment(comment.body)
+            ? rootCommentMarker(fact.id)
+            : `${fact.id}:managed-record:${comment.id}`,
           body: comment.body,
         }];
       });
@@ -1793,7 +1814,7 @@ export class LinearSdkImpl implements LinearClientInterface {
 
   async #rootManagedCommentValues(issue: Issue) {
     const comments = (await this.#rootComments(issue))
-      .filter(({ body }) => isRootManagedComment(body));
+      .filter(({ body }) => isRootManagedComment(body) || isRootOwnershipComment(body));
     if (comments.length > 2) {
       throw new Error("linear_root_comments_too_many");
     }
@@ -1801,7 +1822,9 @@ export class LinearSdkImpl implements LinearClientInterface {
       commentId: comment.id,
       issueId: issue.id,
       updatedAt: comment.updatedAt.toISOString(),
-      managedMarker: rootCommentMarker(issue.id),
+      managedMarker: isRootManagedComment(comment.body)
+        ? rootCommentMarker(issue.id)
+        : `${issue.id}:managed-record:${comment.id}`,
       body: comment.body,
     }));
   }
@@ -2496,6 +2519,16 @@ function rootCommentMarker(issueId: string) {
 function isRootManagedComment(body: string): boolean {
   const marker = body.lastIndexOf(ROOT_MARKER_START);
   return body.startsWith("Symphony\n") && marker > 0 && body.endsWith("\n-->");
+}
+
+function isRootOwnershipComment(body: string): boolean {
+  if (!body.startsWith(MANAGED_RECORD_MARKER) || !body.endsWith("\n-->")) return false;
+  try {
+    const value = JSON.parse(body.slice(MANAGED_RECORD_MARKER.length, -"\n-->".length));
+    return value && typeof value === "object" && value.kind === "root_ownership";
+  } catch {
+    return false;
+  }
 }
 
 function linearIssueState(value: string): LinearIssueState {
