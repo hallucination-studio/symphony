@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { TARGET_WORKFLOW_SCENARIOS } from "../../tools/e2e/target-workflow-verdict.mjs";
 import {
+  composeTargetWorkflowScenarioInput,
   targetWorkflowCliExitCode,
   runTargetWorkflowAllLive,
   runTargetWorkflowDryRun,
@@ -172,6 +173,22 @@ test("target workflow all-run prepares Linear setup once before every scenario",
     ["delivery", preparedSetup],
     ["scheduling", preparedSetup],
   ]);
+});
+
+test("default scenario composition isolates run IDs and Root inputs", () => {
+  const setup = {
+    ids: { conductorId: "conductor-1" },
+    rootInput: { title: "Target Root", description: "Target description" },
+  };
+  const inputs = TARGET_WORKFLOW_SCENARIOS.map((scenario) => composeTargetWorkflowScenarioInput(scenario, {
+    setup,
+    environment: { SYMPHONY_E2E_RUN_ID: "target-all-composition" },
+  }));
+  const runIds = inputs.map(({ environment }) => environment.SYMPHONY_E2E_RUN_ID);
+  assert.equal(new Set(runIds).size, TARGET_WORKFLOW_SCENARIOS.length);
+  assert.deepEqual(inputs.map(({ setup: value }) => value.ids), [setup.ids, setup.ids, setup.ids, setup.ids, setup.ids]);
+  assert.deepEqual(inputs.map(({ setup: value }) => value.rootInput.title), TARGET_WORKFLOW_SCENARIOS.map((scenario) => `Target Root [${scenario}]`));
+  assert.ok(inputs.every(({ setup: value }, index) => value.rootInput.description.includes(runIds[index])));
 });
 
 test("target workflow all-run refuses a scenario before dispatch when Root budget is unavailable", async () => {

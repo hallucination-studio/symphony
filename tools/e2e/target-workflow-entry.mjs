@@ -213,28 +213,42 @@ async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
 }
 
 async function defaultRunScenario(scenario, { setup, linearRunBudget, ...input }) {
-  const scenarioSuffix = `-${scenario}`;
-  const scenarioRunId = `${input.environment.SYMPHONY_E2E_RUN_ID.slice(0, 128 - scenarioSuffix.length)}${scenarioSuffix}`;
-  const scenarioSetup = {
-    ...setup,
-    ...(setup?.rootInput ? {
-      rootInput: {
-        ...setup.rootInput,
-        title: `${setup.rootInput.title} [${scenario}]`,
-        description: `${setup.rootInput.description} Scenario correlation: ${scenarioRunId}.`,
-      },
-    } : {}),
-  };
+  const composed = composeTargetWorkflowScenarioInput(scenario, {
+    setup,
+    environment: input.environment,
+  });
+  const scenarioSetup = composed.setup;
   const dependencies = { prepareSetup: async () => scenarioSetup };
   const scenarioInput = {
     ...input,
-    environment: { ...input.environment, SYMPHONY_E2E_RUN_ID: scenarioRunId },
+    environment: composed.environment,
   };
   if (scenario === "success") return runTargetSuccessLive({ ...scenarioInput, linearRunBudget, dependencies });
   if (scenario === "repair_escalation") return runTargetRepairLive({ ...scenarioInput, linearRunBudget, dependencies });
   if (scenario === "restart_recovery") return runTargetRestartLive({ ...scenarioInput, linearRunBudget, dependencies });
   if (scenario === "delivery") return runTargetDeliveryLive({ ...scenarioInput, linearRunBudget, dependencies });
   return runTargetSchedulingLive({ ...scenarioInput, linearRunBudget, dependencies });
+}
+
+export function composeTargetWorkflowScenarioInput(scenario, { setup, environment } = {}) {
+  if (typeof scenario !== "string" || !environment || typeof environment.SYMPHONY_E2E_RUN_ID !== "string") {
+    throw stableError("target_all_scenario_composition_invalid");
+  }
+  const scenarioSuffix = `-${scenario}`;
+  const scenarioRunId = `${environment.SYMPHONY_E2E_RUN_ID.slice(0, 128 - scenarioSuffix.length)}${scenarioSuffix}`;
+  return Object.freeze({
+    setup: Object.freeze({
+      ...setup,
+      ...(setup?.rootInput ? {
+        rootInput: Object.freeze({
+          ...setup.rootInput,
+          title: `${setup.rootInput.title} [${scenario}]`,
+          description: `${setup.rootInput.description} Scenario correlation: ${scenarioRunId}.`,
+        }),
+      } : {}),
+    }),
+    environment: Object.freeze({ ...environment, SYMPHONY_E2E_RUN_ID: scenarioRunId }),
+  });
 }
 
 function stableReason(error) {
