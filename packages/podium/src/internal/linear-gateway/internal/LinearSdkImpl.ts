@@ -1631,32 +1631,58 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #assertWorkflowMutationScope(
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<void> {
-    const tree = await this.getWorkflowIssueTree({
-      projectId: command.expectedProjectId,
-      rootIssueId: command.rootIssueId,
-    });
-    const issueIds = new Set(tree.issues.map((issue) => issue.issueId));
     const targetIds = command.kind === "create_workflow_issue"
       ? [command.parentIssueId]
       : command.kind === "create_workflow_relation"
         ? [command.sourceIssueId, command.targetIssueId]
         : [command.target.targetIssueId];
-    if (tree.rootIssueId !== command.rootIssueId ||
-      !issueIds.has(command.rootIssueId) ||
-      targetIds.some((issueId) => !issueIds.has(issueId))) {
-      throw preconditionConflictError();
+    for (const issueId of targetIds) {
+      if (!(await this.#issueBelongsToWorkflowRoot(
+        issueId,
+        command.expectedProjectId,
+        command.rootIssueId,
+      ))) {
+        throw preconditionConflictError();
+      }
     }
+  }
+
+  async #issueBelongsToWorkflowRoot(
+    issueId: string,
+    projectId: string,
+    rootIssueId: string,
+  ): Promise<boolean> {
+    const visited = new Set<string>();
+    let currentId: string | undefined = issueId;
+    for (let depth = 0; currentId && depth <= 32; depth += 1) {
+      if (visited.has(currentId)) return false;
+      visited.add(currentId);
+      const issue = await this.#client.issue(currentId);
+      if (issue.projectId !== projectId) return false;
+      if (issue.id === rootIssueId) return issue.parentId === undefined || issue.parentId === null;
+      currentId = issue.parentId ?? undefined;
+    }
+    return false;
   }
 
   async readWorkflowMutationOutcome(
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<import("../types.js").WorkflowMutationReadBack | undefined> {
+    const outcomeTargetId = command.kind === "create_workflow_issue"
+      ? command.parentIssueId
+      : command.kind === "create_workflow_relation"
+        ? command.sourceIssueId
+        : command.target.targetIssueId;
+    if (!(await this.#issueBelongsToWorkflowRoot(
+      outcomeTargetId,
+      command.expectedProjectId,
+      command.rootIssueId,
+    ))) return undefined;
     if (command.kind === "create_workflow_issue") {
-      const tree = await this.getWorkflowIssueTree({
-        projectId: command.expectedProjectId,
-        rootIssueId: command.rootIssueId,
-      });
-      const matches = tree.issues.filter((issue) => issue.managedMarker === command.managedMarker);
+      const parent = await this.#client.issue(command.parentIssueId);
+      const children = await allNodes(parent.children({ first: 64 }), 64);
+      const values = await Promise.all(children.map((child) => workflowMutationTargetValue(child)));
+      const matches = values.filter((issue) => issue.managedMarker === command.managedMarker);
       if (matches.length > 1) throw new Error("linear_workflow_marker_ambiguous");
       const issue = matches[0];
       if (!issue) return undefined;
@@ -1665,14 +1691,11 @@ export class LinearSdkImpl implements LinearClientInterface {
         issue.title !== command.title || issue.description !== command.description) {
         throw preconditionConflictError();
       }
-      return { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.remoteVersion };
+      return { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt };
     }
     if (command.kind === "update_workflow_issue") {
-      const tree = await this.getWorkflowIssueTree({
-        projectId: command.expectedProjectId,
-        rootIssueId: command.rootIssueId,
-      });
-      const issue = tree.issues.find(({ issueId }) => issueId === command.target.targetIssueId);
+      const issue = await this.#client.issue(command.target.targetIssueId)
+        .then((value) => workflowMutationTargetValue(value));
       return issue && issue.projectId === command.expectedProjectId &&
         issue.statusId === command.statusId && issue.title === command.title &&
         issue.description === command.description &&
@@ -1683,21 +1706,20 @@ export class LinearSdkImpl implements LinearClientInterface {
         : undefined;
     }
     if (command.kind === "append_workflow_comment") {
-      const tree = await this.getWorkflowIssueTree({
-        projectId: command.expectedProjectId,
-        rootIssueId: command.rootIssueId,
-      });
-      const matches = tree.comments.filter((comment) =>
+      const issue = await this.#client.issue(command.target.targetIssueId);
+      const comments = await allNodes(issue.comments({ first: PAGE_LIMIT }), MAX_ROOT_COMMENTS);
+      const matches = comments.filter((comment) =>
         comment.issueId === command.target.targetIssueId &&
-        (comment.managedMarker === command.writeId ||
-          (isManagedRecordBody(command.body) && comment.body === command.body)),
+        comment.body === serializeWorkflowComment(command.body, command.writeId),
       );
       if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
       const comment = matches[0];
       return comment && comment.body === serializeWorkflowComment(command.body, command.writeId)
-        ? { writeId: command.writeId, targetIssueId: comment.issueId, remoteVersion: comment.remoteVersion }
+        ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: comment.updatedAt.toISOString() }
         : undefined;
     }
+    const compactRelation = await this.#readCompactWorkflowRelationOutcome(command);
+    if (compactRelation.available) return compactRelation.value;
     const tree = await this.getWorkflowIssueTree({
       projectId: command.expectedProjectId,
       rootIssueId: command.rootIssueId,
@@ -1717,6 +1739,53 @@ export class LinearSdkImpl implements LinearClientInterface {
     return source
       ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: source.updatedAt }
       : undefined;
+  }
+
+  async #readCompactWorkflowRelationOutcome(
+    command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" }>,
+  ): Promise<{
+    available: boolean;
+    value: import("../types.js").WorkflowMutationReadBack | undefined;
+  }> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) return { available: false, value: undefined };
+    const sourceIssueId = command.relationKind === "blocked_by"
+      ? command.targetIssueId : command.sourceIssueId;
+    const targetIssueId = command.relationKind === "blocked_by"
+      ? command.sourceIssueId : command.targetIssueId;
+    const response = await rawRequest(`query WorkflowMutationRelation { issue(id: ${quoteGraphql(targetIssueId)}) { id project { id } inverseRelations(first: 64) { nodes { type issue { id project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } } } }`);
+    const issue = (response as {
+      data?: {
+        issue?: {
+          id?: string;
+          project?: { id?: string };
+          inverseRelations?: {
+            nodes?: Array<{
+              type?: string;
+              issue?: { id?: string; project?: { id?: string } };
+              relatedIssue?: { id?: string; project?: { id?: string } };
+            }>;
+            pageInfo?: { hasNextPage?: boolean };
+          };
+        };
+      };
+    }).data?.issue;
+    if (!issue || issue.id !== targetIssueId || issue.project?.id !== command.expectedProjectId ||
+        !issue.inverseRelations || issue.inverseRelations.pageInfo?.hasNextPage) {
+      throw new Error("linear_workflow_relation_read_back_incomplete");
+    }
+    const match = issue.inverseRelations.nodes?.some((relation) =>
+      relation.type === "blocks" && relation.issue?.id === sourceIssueId &&
+      relation.issue.project?.id === command.expectedProjectId &&
+      relation.relatedIssue?.id === targetIssueId &&
+      relation.relatedIssue.project?.id === command.expectedProjectId,
+    ) ?? false;
+    return {
+      available: true,
+      value: match
+        ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: new Date().toISOString() }
+        : undefined,
+    };
   }
 
   async #workflowStatusId(issue: Issue, statusId: string): Promise<void> {
