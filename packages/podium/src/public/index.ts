@@ -30,6 +30,11 @@ export type {
   LinearRequestWindowObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 export {
+  LinearRunBudgetImpl,
+  type LinearRunBudgetReservation,
+  type LinearRunBudgetSnapshot,
+} from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
+export {
   createPodiumClientServices,
   type PodiumClientServiceOwner,
 } from "./createPodiumClientServices.js";

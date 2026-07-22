@@ -54,6 +54,7 @@ const ISSUE_DETAILS_QUERY = `
 
 export function createTargetWorkflowSnapshotTransport({
   developmentToken,
+  budget,
   fetch = globalThis.fetch,
   log = () => {},
 } = {}) {
@@ -71,6 +72,7 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function readSnapshot(input) {
     const request = validateInput(input);
+    budget?.recordLogicalOperation();
     const projectIssues = await readProjectIssues(request.projectId);
     const issueById = new Map(projectIssues.map((issue) => [issue.id, issue]));
     const root = issueById.get(request.rootIssueId);
@@ -159,6 +161,8 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function graphql(query, variables) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
+    const reservation = budget?.reserve({ requests: 1, complexity: 0 });
+    let observed = false;
     let response;
     try {
       response = await fetch(LINEAR_GRAPHQL_URL, {
@@ -166,9 +170,14 @@ export function createTargetWorkflowSnapshotTransport({
         headers: { authorization: developmentToken, "content-type": "application/json" },
         body: JSON.stringify({ query, variables, operationName: operation }),
       });
+      budget?.observe({ status: response.status, ...readRateWindows(response.headers) });
+      observed = true;
     } catch {
+      if (!observed) budget?.observe({});
       log({ event: "target_transport_request_failed", operation });
       throw new Error("target_transport_request_failed");
+    } finally {
+      reservation?.release();
     }
     let body;
     try {
@@ -188,6 +197,25 @@ export function createTargetWorkflowSnapshotTransport({
       throw new Error("target_transport_graphql_failed");
     }
     return body.data;
+  }
+
+  function readRateWindows(headers) {
+    return {
+      ...(readRateWindow(headers, "x-ratelimit-requests") ? { requestWindow: readRateWindow(headers, "x-ratelimit-requests") } : {}),
+      ...(readRateWindow(headers, "x-ratelimit-complexity") ? { complexityWindow: readRateWindow(headers, "x-ratelimit-complexity") } : {}),
+    };
+  }
+
+  function readRateWindow(headers, prefix) {
+    const read = (suffix) => {
+      const value = headers?.get(`${prefix}-${suffix}`);
+      return /^\d{1,16}$/u.test(value ?? "") ? Number(value) : undefined;
+    };
+    const limit = read("limit");
+    const remaining = read("remaining");
+    const reset = read("reset");
+    return limit === undefined && remaining === undefined && reset === undefined
+      ? undefined : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
   }
 }
 

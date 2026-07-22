@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { LinearRunBudgetImpl } from "@symphony/podium";
 import { projectTargetWorkflowFacts } from "../../tools/e2e/target-workflow-facts.mjs";
 import { createTargetWorkflowSnapshotTransport } from "../../tools/e2e/target-workflow-transport.mjs";
 
 test("target transport paginates Linear facts and feeds the durable projection", async () => {
   const calls = [];
+  const budget = new LinearRunBudgetImpl();
   const transport = createTargetWorkflowSnapshotTransport({
     developmentToken: "linear-dev-token",
+    budget,
     fetch: fakeFetch(calls),
   });
 
@@ -19,6 +22,8 @@ test("target transport paginates Linear facts and feeds the durable projection",
   const facts = projectTargetWorkflowFacts(snapshot);
 
   assert.equal(calls.length, 7);
+  assert.equal(budget.snapshot().physicalRequests, 7);
+  assert.equal(budget.snapshot().logicalOperations, 1);
   assert.deepEqual(facts.plan.workNodeIds, ["work-1"]);
   assert.equal(facts.plan.dagSealed, true);
   assert.equal(snapshot.issues.find(({ id }) => id === "work-1").nodeKey, "work-key-1");
