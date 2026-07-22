@@ -171,6 +171,12 @@ test("target workflow all-run prepares Linear setup once before every scenario",
   ]);
 });
 
+test("target workflow all-run binds the production setup as its default", async () => {
+  const source = await readFile("tools/e2e/target-workflow-entry.mjs", "utf8");
+
+  assert.match(source, /import \{ prepareTargetWorkflowSetup \} from "\.\/target-workflow-setup\.mjs";/u);
+});
+
 test("target workflow CLI returns failure for a recomputed failed all-run verdict", () => {
   assert.equal(targetWorkflowCliExitCode({ status: "passed" }), 0);
   assert.equal(targetWorkflowCliExitCode({ status: "failed" }), 1);

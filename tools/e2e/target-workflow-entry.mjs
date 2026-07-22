@@ -13,6 +13,7 @@ import {
   runTargetSchedulingLive,
   runTargetSuccessLive,
 } from "./target-workflow-live.mjs";
+import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
