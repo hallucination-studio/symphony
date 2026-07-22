@@ -2,134 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ensureTargetConductorProjectLabel,
-  readTargetProjectConfiguration,
   runTargetDeliveryLive,
   runTargetRepairLive,
   runTargetRestartLive,
   runTargetSuccessLive,
 } from "../../tools/e2e/target-workflow-live.mjs";
+import { prepareTargetWorkflowSetup } from "../../tools/e2e/target-workflow-setup.mjs";
 
-test("target project configuration selects one retained Project team and app actor", async () => {
-  const calls = [];
-  const result = await readTargetProjectConfiguration({
-    developmentToken: "linear-secret",
-    clientId: "client-1",
-    projectSlugId: "project-1",
-    fetch: async (_url, request) => {
-      calls.push(JSON.parse(request.body));
-      return response({ data: {
-        organization: { id: "organization-1" },
-        applicationInfo: { name: "Symphony" },
-        users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
-        project: {
-          id: "project-1", name: "Retained Target", slugId: "project-1", updatedAt: "2026-07-22T00:00:00Z",
-          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
-        },
-        teams: { nodes: [{
-          id: "team-1",
-          states: { nodes: targetWorkflowStates(), pageInfo: { hasNextPage: false } },
-        }], pageInfo: { hasNextPage: false } },
-      } });
-    },
-    log: () => {},
-  });
-
-  assert.deepEqual(result, {
-    organizationId: "organization-1",
-    delegateActorId: "actor-1",
-    project: { projectId: "project-1", name: "Retained Target", updatedAt: "2026-07-22T00:00:00Z" },
-    rootInput: {
-      teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1",
-      title: "Target live success", description: "Target live success Root.",
-    },
-  });
-  assert.equal(calls.length, 1);
-  assert.equal(JSON.stringify(result).includes("linear-secret"), false);
-});
-
-test("target project configuration accepts a Linear project id returned for a slug lookup", async () => {
-  const result = await readTargetProjectConfiguration({
-    developmentToken: "linear-secret",
-    clientId: "client-1",
-    projectSlugId: "project-slug-1",
-    fetch: async () => response({ data: {
-      organization: { id: "organization-1" },
-      applicationInfo: { name: "Symphony" },
-      users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
-      project: {
-        id: "project-internal-1", name: "Retained Target", slugId: "project-slug-1", updatedAt: "2026-07-22T00:00:00Z",
-        teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
-      },
-      teams: { nodes: [{
-        id: "team-1",
-        states: { nodes: targetWorkflowStates(), pageInfo: { hasNextPage: false } },
-      }], pageInfo: { hasNextPage: false } },
-    } }),
-    log: () => {},
-  });
-
-  assert.equal(result.project.projectId, "project-internal-1");
-  assert.equal(result.rootInput.projectId, "project-internal-1");
-});
-
-test("target project configuration rejects an incomplete retained workflow catalog", async () => {
+test("target setup requires authorization and never creates a scenario scope", async () => {
+  const events = [];
   await assert.rejects(
-    readTargetProjectConfiguration({
-      developmentToken: "linear-secret",
-      clientId: "client-1",
-      projectSlugId: "project-1",
-      fetch: async () => response({ data: {
-        organization: { id: "organization-1" },
-        applicationInfo: { name: "Symphony" },
-        users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
-        project: {
-          id: "project-1", name: "Retained Target", slugId: "project-1", updatedAt: "2026-07-22T00:00:00Z",
-          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
-        },
-        teams: { nodes: [{
-          id: "team-1",
-          states: { nodes: [{ id: "todo-1", name: "Todo" }, { id: "done-1", name: "Done" }], pageInfo: { hasNextPage: false } },
-        }], pageInfo: { hasNextPage: false } },
-      } }),
-      log: () => {},
+    prepareTargetWorkflowSetup({
+      config: validConfig(false),
+      runId: "target-setup-dry-run",
+      setup: { async initialize(input) {
+        events.push(["setup", input]);
+        return {
+          kind: "dry_run", organizationId: "organization-1", delegateActorId: "actor-1",
+          project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+          teamId: "team-1", workflow: "dry_run", projectLabel: "dry_run", identityDigest: "a".repeat(16),
+        };
+      } },
+      log: (event) => events.push(["log", event]),
     }),
-    /target_live_workflow_catalog_incomplete/u,
+    /target_live_setup_authorization_required/u,
   );
-});
-
-test("target project configuration rejects a duplicate retained workflow status", async () => {
-  const states = targetWorkflowStates();
-  states.push({ id: "duplicate-todo", name: "Todo", type: "unstarted" });
-  await assert.rejects(
-    readTargetProjectConfiguration({
-      developmentToken: "development-input",
-      clientId: "client-1",
-      projectSlugId: "project-1",
-      fetch: async () => response({ data: {
-        organization: { id: "organization-1" },
-        applicationInfo: { name: "Symphony" },
-        users: { nodes: [{ id: "actor-1", name: "Symphony", displayName: "Symphony", app: true }], pageInfo: { hasNextPage: false } },
-        project: {
-          id: "project-1", name: "Retained Target", slugId: "project-1", updatedAt: "2026-07-22T00:00:00Z",
-          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
-        },
-        teams: { nodes: [{
-          id: "team-1",
-          states: { nodes: states, pageInfo: { hasNextPage: false } },
-        }], pageInfo: { hasNextPage: false } },
-      } }),
-      log: () => {},
-    }),
-    /target_live_workflow_catalog_incomplete/u,
-  );
+  assert.equal(events[0][0], "setup");
+  assert.equal(events.at(-1)[1].event, "target_live_setup_verdict");
 });
 
 test("target live success composes setup, production boundary, Git observation, and scope cleanup", async () => {
   const events = [];
   const facts = { root: { rootIssueId: "root-1", projectId: "project-1" } };
   const config = {
-    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    linear: { clientId: "client-1", projectSlugId: "project-1", setupAuthorized: true },
     secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
     codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
   };
@@ -137,6 +43,7 @@ test("target live success composes setup, production boundary, Git observation, 
     config,
     environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-live" },
     dependencies: {
+      prepareSetup: async () => { events.push(["setup"]); return preparedSetup(); },
       createScope: async (input) => { events.push(["scope", input]); return {
         runId: input.runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
         codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
@@ -144,12 +51,6 @@ test("target live success composes setup, production boundary, Git observation, 
       createGitFixture: async ({ scope }) => { events.push(["git", scope]); return {
         repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "a".repeat(40),
       }; },
-      readProjectConfiguration: async () => { events.push(["project"]); return {
-        organizationId: "organization-1", delegateActorId: "actor-1",
-        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
-        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
-      }; },
-      ensureConductorLabel: async (input) => { events.push(["label", input]); },
       runSuccessBoundary: async (input) => {
         events.push(["boundary", input]);
         assert.equal(input.boundaryInput.codexApiKey, "codex-secret");
@@ -161,7 +62,7 @@ test("target live success composes setup, production boundary, Git observation, 
   });
 
   assert.deepEqual(result, { status: "passed", scenario: "success", runId: "target-live", rootIssueId: "root-1", projectId: "project-1", facts });
-  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
 });
@@ -176,7 +77,7 @@ test("target live repair composes setup, repair boundary, Git observation, and s
     },
   };
   const config = {
-    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    linear: { clientId: "client-1", projectSlugId: "project-1", setupAuthorized: true },
     secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
     codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
   };
@@ -184,6 +85,7 @@ test("target live repair composes setup, repair boundary, Git observation, and s
     config,
     environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-repair-live" },
     dependencies: {
+      prepareSetup: async () => { events.push(["setup"]); return preparedSetup(); },
       createScope: async (input) => { events.push(["scope", input]); return {
         runId: input.runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
         codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
@@ -191,12 +93,6 @@ test("target live repair composes setup, repair boundary, Git observation, and s
       createGitFixture: async ({ scope }) => { events.push(["git", scope]); return {
         repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "a".repeat(40),
       }; },
-      readProjectConfiguration: async () => { events.push(["project"]); return {
-        organizationId: "organization-1", delegateActorId: "actor-1",
-        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
-        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
-      }; },
-      ensureConductorLabel: async (input) => { events.push(["label", input]); },
       runRepairBoundary: async (input) => {
         events.push(["boundary", input]);
         assert.equal(input.boundaryInput.codexApiKey, "codex-secret");
@@ -212,7 +108,7 @@ test("target live repair composes setup, repair boundary, Git observation, and s
     status: "passed", scenario: "repair_escalation", runId: "target-repair-live",
     rootIssueId: "root-1", projectId: "project-1", facts,
   });
-  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
 });
@@ -220,7 +116,7 @@ test("target live repair composes setup, repair boundary, Git observation, and s
 test("target live restart composes setup, restart boundary, and scope cleanup", async () => {
   const events = [];
   const config = {
-    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    linear: { clientId: "client-1", projectSlugId: "project-1", setupAuthorized: true },
     secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
     codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
   };
@@ -233,6 +129,7 @@ test("target live restart composes setup, restart boundary, and scope cleanup", 
     config,
     environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-restart-live" },
     dependencies: {
+      prepareSetup: async () => { events.push(["setup"]); return preparedSetup(); },
       createScope: async ({ runId }) => { events.push(["scope", runId]); return {
         runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
         codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
@@ -240,12 +137,6 @@ test("target live restart composes setup, restart boundary, and scope cleanup", 
       createGitFixture: async () => { events.push(["git"]); return {
         repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "a".repeat(40),
       }; },
-      readProjectConfiguration: async () => { events.push(["project"]); return {
-        organizationId: "organization-1", delegateActorId: "actor-1",
-        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
-        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
-      }; },
-      ensureConductorLabel: async () => { events.push(["label"]); },
       runRestartBoundary: async (input) => {
         events.push(["boundary", input]);
         assert.equal(input.boundaryInput.codexApiKey, "codex-secret");
@@ -260,7 +151,7 @@ test("target live restart composes setup, restart boundary, and scope cleanup", 
     status: "passed", scenario: "restart_recovery", runId: "target-restart-live",
     rootIssueId: "root-1", projectId: "project-1", facts, recovery,
   });
-  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
 });
@@ -268,7 +159,7 @@ test("target live restart composes setup, restart boundary, and scope cleanup", 
 test("target live delivery keeps the boundary through durable delivery read-back", async () => {
   const events = [];
   const config = {
-    linear: { clientId: "client-1", projectSlugId: "project-1" },
+    linear: { clientId: "client-1", projectSlugId: "project-1", setupAuthorized: true },
     secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
     codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
   };
@@ -280,6 +171,7 @@ test("target live delivery keeps the boundary through durable delivery read-back
     config,
     environment: { HOME: "/tmp/home", PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "target-delivery-live" },
     dependencies: {
+      prepareSetup: async () => { events.push(["setup"]); return preparedSetup(); },
       createScope: async (input) => { events.push(["scope", input]); return {
         runId: input.runId, root: "/tmp/target-run", appDataRoot: "/tmp/app", conductorDataRoot: "/tmp/conductor",
         codexHomeRoot: "/tmp/codex", evidenceRoot: "/tmp/evidence",
@@ -287,12 +179,6 @@ test("target live delivery keeps the boundary through durable delivery read-back
       createGitFixture: async () => { events.push(["git"]); return {
         repositoryRoot: "/tmp/repository", baseBranch: "main", initialCommit: "b".repeat(40),
       }; },
-      readProjectConfiguration: async () => { events.push(["project"]); return {
-        organizationId: "organization-1", delegateActorId: "actor-1",
-        project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
-        rootInput: { teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1", title: "Target", description: "Target" },
-      }; },
-      ensureConductorLabel: async () => { events.push(["label"]); },
       runDeliveryBoundary: async (input) => {
         events.push(["boundary", input]);
         const deliveryInput = input.deliveryInput({ success: { facts }, runner: {} });
@@ -308,38 +194,9 @@ test("target live delivery keeps the boundary through durable delivery read-back
   assert.equal(result.status, "passed");
   assert.equal(result.scenario, "delivery");
   assert.equal(result.delivery.readBack, true);
-  assert.deepEqual(events.map(([kind]) => kind), ["scope", "git", "project", "label", "boundary", "cleanup"]);
+  assert.deepEqual(events.map(([kind]) => kind), ["setup", "scope", "git", "boundary", "cleanup"]);
   assert.equal(JSON.stringify(result).includes("linear-secret"), false);
   assert.equal(JSON.stringify(result).includes("codex-secret"), false);
-});
-
-test("target setup creates and reads back exactly one Conductor Project Label", async () => {
-  const operations = [];
-  const result = await ensureTargetConductorProjectLabel({
-    developmentToken: "linear-secret",
-    projectId: "project-1",
-    labelName: "symphony:conductor/abcdef123456",
-    fetch: async (_url, request) => {
-      const body = JSON.parse(request.body);
-      operations.push(body.operationName);
-      if (body.operationName === "TargetWorkflowProjectLabels") {
-        return response({ data: { project: {
-          id: "project-1",
-          labels: { nodes: operations.length === 1 ? [] : [{ id: "label-1", name: "symphony:conductor/abcdef123456" }], pageInfo: { hasNextPage: false } },
-        } } });
-      }
-      if (body.operationName === "TargetWorkflowCreateProjectLabel") {
-        return response({ data: { projectLabelCreate: { success: true, projectLabel: { id: "label-1", name: "symphony:conductor/abcdef123456" } } } });
-      }
-      return response({ data: { projectAddLabel: { success: true } } });
-    },
-  });
-
-  assert.deepEqual(result, { projectId: "project-1", labelName: "symphony:conductor/abcdef123456" });
-  assert.deepEqual(operations, [
-    "TargetWorkflowProjectLabels", "TargetWorkflowCreateProjectLabel",
-    "TargetWorkflowAttachProjectLabel", "TargetWorkflowProjectLabels",
-  ]);
 });
 
 test("target live entry rejects a missing run ID before creating a scope", async () => {
@@ -355,19 +212,30 @@ test("target live entry rejects a missing run ID before creating a scope", async
   assert.equal(scopes, 0);
 });
 
-function response(body, status = 200) {
-  return { ok: status >= 200 && status < 300, status, async json() { return body; } };
+function validConfig(setupAuthorized) {
+  return {
+    linear: { clientId: "client-1", projectSlugId: "project-1", setupAuthorized },
+    secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+    codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+  };
 }
 
-function targetWorkflowStates() {
-  return [
-    ["todo-1", "Todo", "unstarted"], ["done-1", "Done", "completed"], ["draft-1", "Draft", "backlog"],
-    ["planning-1", "Planning", "started"], ["sealed-1", "Sealed", "started"], ["executing-1", "Executing", "started"],
-    ["verifying-1", "Verifying", "started"], ["in-progress-1", "In Progress", "started"],
-    ["in-review-1", "In Review", "started"], ["needs-approval-1", "Needs Approval", "started"],
-    ["needs-info-1", "Needs Info", "started"], ["inconclusive-1", "Inconclusive", "started"],
-    ["escalated-1", "Escalated", "started"], ["succeeded-1", "Succeeded", "completed"],
-    ["changes-required-1", "Changes Required", "completed"], ["canceled-1", "Canceled", "canceled"],
-    ["failed-1", "Failed", "canceled"],
-  ].map(([id, name, type]) => ({ id, name, type }));
+function preparedSetup() {
+  return {
+    setup: {
+      kind: "ready", organizationId: "organization-1", delegateActorId: "actor-1",
+      project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+      teamId: "team-1", todoStateId: "todo-1", workflow: "already_applied",
+      projectLabel: "already_applied", resolution: { kind: "resolved", projectId: "project-1", updatedAt: "2026-07-22T00:00:00Z" },
+      identityDigest: "a".repeat(16),
+    },
+    ids: {
+      conductorShortHash: "abcdef123456", conductorId: "conductor-1", bindingId: "binding-1",
+      instanceId: "instance-1", repositoryHandle: "repository-1",
+    },
+    rootInput: {
+      teamId: "team-1", projectId: "project-1", stateId: "todo-1", delegateId: "actor-1",
+      title: "Target live success", description: "Target live success Root.",
+    },
+  };
 }

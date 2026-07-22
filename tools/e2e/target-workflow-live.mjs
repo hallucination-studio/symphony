@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { createChildEnvironment } from "./config.mjs";
@@ -13,190 +12,7 @@ import { runTargetDeliveryBoundary } from "./target-workflow-delivery-boundary.m
 import { runTargetRestartBoundary } from "./target-workflow-restart-boundary.mjs";
 import { runTargetSuccessBoundary } from "./target-workflow-success-boundary.mjs";
 import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-live.mjs";
-
-const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const TARGET_WORKFLOW_STATUS_CATEGORIES = Object.freeze({
-  Draft: "backlog",
-  Todo: "unstarted",
-  Planning: "started",
-  Sealed: "started",
-  Executing: "started",
-  Verifying: "started",
-  "In Progress": "started",
-  "In Review": "started",
-  "Needs Approval": "started",
-  "Needs Info": "started",
-  Inconclusive: "started",
-  Escalated: "started",
-  Succeeded: "completed",
-  "Changes Required": "completed",
-  Done: "completed",
-  Canceled: "canceled",
-  Failed: "canceled",
-});
-
-const PROJECT_CONFIGURATION_QUERY = `
-  query TargetWorkflowProjectConfiguration($projectId: String!, $clientId: String!) {
-    organization { id }
-    applicationInfo(clientId: $clientId) { name }
-    users(first: 250, filter: { app: { eq: true } }) {
-      nodes { id name displayName app }
-      pageInfo { hasNextPage }
-    }
-    project(id: $projectId) {
-      id name slugId updatedAt
-      teams(first: 50) { nodes { id } pageInfo { hasNextPage } }
-    }
-    teams(first: 50) {
-      nodes {
-        id
-        states(first: 50) {
-          nodes { id name type }
-          pageInfo { hasNextPage }
-        }
-      }
-      pageInfo { hasNextPage }
-    }
-  }
-`;
-
-const PROJECT_LABEL_QUERY = `
-  query TargetWorkflowProjectLabels($projectId: String!) {
-    project(id: $projectId) {
-      id
-      labels(first: 64) { nodes { id name } pageInfo { hasNextPage } }
-    }
-  }
-`;
-
-const CREATE_LABEL_MUTATION = `
-  mutation TargetWorkflowCreateProjectLabel($input: ProjectLabelCreateInput!) {
-    projectLabelCreate(input: $input) { success projectLabel { id name } }
-  }
-`;
-
-const ATTACH_LABEL_MUTATION = `
-  mutation TargetWorkflowAttachProjectLabel($projectId: String!, $labelId: String!) {
-    projectAddLabel(id: $projectId, labelId: $labelId) { success }
-  }
-`;
-
-export async function readTargetProjectConfiguration({
-  developmentToken,
-  clientId,
-  projectSlugId,
-  fetch = globalThis.fetch,
-  log = () => {},
-} = {}) {
-  if (typeof developmentToken !== "string" || developmentToken.length === 0 ||
-      !SAFE_ID.test(clientId ?? "") || !SAFE_ID.test(projectSlugId ?? "") ||
-      typeof fetch !== "function" || typeof log !== "function") {
-    throw stableError("target_live_project_input_invalid");
-  }
-  const data = await graphql(PROJECT_CONFIGURATION_QUERY, {
-    projectId: projectSlugId,
-    clientId,
-  }, { developmentToken, fetch, log });
-  const project = data.project;
-  const appName = data.applicationInfo?.name;
-  const appUsers = connection(data.users, "target_live_users_invalid")
-    .filter((user) => user?.app === true && (user.name === appName || user.displayName === appName));
-  const projectTeams = connection(project?.teams, "target_live_project_teams_invalid");
-  const teams = connection(data.teams, "target_live_teams_invalid");
-  const candidates = teams
-    .filter((team) => projectTeams.some(({ id }) => id === team?.id))
-    .map((team) => {
-      const states = connection(team.states, "target_live_states_invalid");
-      return {
-        teamId: team.id,
-        todo: states.find(({ name }) => name === "Todo")?.id,
-        done: states.find(({ name }) => name === "Done")?.id,
-        workflowCatalogComplete: isCompleteTargetWorkflowCatalog(states),
-      };
-    })
-    .filter(({ teamId, todo, done }) => SAFE_ID.test(teamId ?? "") && SAFE_ID.test(todo ?? "") && SAFE_ID.test(done ?? ""));
-  if (data.organization?.id === undefined || !SAFE_ID.test(data.organization.id) ||
-      appUsers.length !== 1 || !SAFE_ID.test(appUsers[0]?.id ?? "") ||
-      !project || !SAFE_ID.test(project.id ?? "") || project.slugId !== projectSlugId ||
-      typeof project.name !== "string" || project.name.length === 0 || typeof project.updatedAt !== "string" ||
-      candidates.length !== 1) {
-    throw stableError("target_live_project_configuration_invalid");
-  }
-  if (!candidates[0].workflowCatalogComplete) {
-    throw stableError("target_live_workflow_catalog_incomplete");
-  }
-  return Object.freeze({
-    organizationId: data.organization.id,
-    delegateActorId: appUsers[0].id,
-    project: Object.freeze({ projectId: project.id, name: project.name, updatedAt: project.updatedAt }),
-    rootInput: Object.freeze({
-      teamId: candidates[0].teamId,
-      projectId: project.id,
-      stateId: candidates[0].todo,
-      delegateId: appUsers[0].id,
-      title: "Target live success",
-      description: "Target live success Root.",
-    }),
-  });
-}
-
-function isCompleteTargetWorkflowCatalog(states) {
-  if (!Array.isArray(states) || states.length !== Object.keys(TARGET_WORKFLOW_STATUS_CATEGORIES).length) return false;
-  const ids = new Set();
-  const names = new Set();
-  for (const state of states) {
-    if (!SAFE_ID.test(state?.id ?? "") || typeof state.name !== "string" || typeof state.type !== "string" ||
-        ids.has(state.id) || names.has(state.name)) {
-      return false;
-    }
-    ids.add(state.id);
-    names.add(state.name);
-  }
-  return Object.entries(TARGET_WORKFLOW_STATUS_CATEGORIES).every(([name, category]) =>
-    states.some((state) => state.name === name && state.type === category));
-}
-
-export async function ensureTargetConductorProjectLabel({
-  developmentToken,
-  projectId,
-  labelName,
-  fetch = globalThis.fetch,
-  log = () => {},
-} = {}) {
-  if (typeof developmentToken !== "string" || developmentToken.length === 0 ||
-      !SAFE_ID.test(projectId ?? "") || !/^symphony:conductor\/[a-f0-9]{12}$/u.test(labelName ?? "") ||
-      typeof fetch !== "function" || typeof log !== "function") {
-    throw stableError("target_live_label_input_invalid");
-  }
-  const initial = await graphql(PROJECT_LABEL_QUERY, { projectId }, { developmentToken, fetch, log });
-  const project = initial.project;
-  const labels = connection(project?.labels, "target_live_project_labels_invalid");
-  const conductorLabels = labels.filter(({ name }) => typeof name === "string" && name.startsWith("symphony:conductor/"));
-  if (project?.id !== projectId || conductorLabels.length > 1 ||
-      (conductorLabels[0] && conductorLabels[0].name !== labelName)) {
-    throw stableError("target_live_project_label_conflict");
-  }
-  let label = conductorLabels[0];
-  if (!label) {
-    const created = await graphql(CREATE_LABEL_MUTATION, {
-      input: { name: labelName, color: "#5E6AD2", isGroup: false },
-    }, { developmentToken, fetch, log });
-    label = created.projectLabelCreate?.projectLabel;
-    if (created.projectLabelCreate?.success !== true || !SAFE_ID.test(label?.id ?? "") || label.name !== labelName) {
-      throw stableError("target_live_project_label_create_failed");
-    }
-    const attached = await graphql(ATTACH_LABEL_MUTATION, { projectId, labelId: label.id }, { developmentToken, fetch, log });
-    if (attached.projectAddLabel?.success !== true) throw stableError("target_live_project_label_attach_failed");
-  }
-  const readback = await graphql(PROJECT_LABEL_QUERY, { projectId }, { developmentToken, fetch, log });
-  const finalLabels = connection(readback.project?.labels, "target_live_project_labels_invalid");
-  if (readback.project?.id !== projectId || finalLabels.filter(({ name }) => name === labelName).length !== 1) {
-    throw stableError("target_live_project_label_readback_failed");
-  }
-  return Object.freeze({ projectId, labelName });
-}
+import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
 
 export async function runTargetSuccessLive({
   config,
@@ -210,8 +26,7 @@ export async function runTargetSuccessLive({
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
-    readProjectConfiguration: dependencies.readProjectConfiguration ?? readTargetProjectConfiguration,
-    ensureConductorLabel: dependencies.ensureConductorLabel ?? ensureTargetConductorProjectLabel,
+    prepareSetup: dependencies.prepareSetup ?? prepareTargetWorkflowSetup,
     runSuccessBoundary: dependencies.runSuccessBoundary ?? runTargetSuccessBoundary,
     cleanupScope: dependencies.cleanupScope ?? cleanupTargetRunScope,
     readGitObservation: dependencies.readGitObservation ?? readTargetGitObservation,
@@ -220,23 +35,10 @@ export async function runTargetSuccessLive({
   let failure;
   let result;
   try {
+    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
-    const setup = await services.readProjectConfiguration({
-      developmentToken: config.secrets.linearDevToken,
-      clientId: config.linear.clientId,
-      projectSlugId: config.linear.projectSlugId,
-      fetch,
-      log,
-    });
-    const ids = runIdentifiers(runId);
-    await services.ensureConductorLabel({
-      developmentToken: config.secrets.linearDevToken,
-      projectId: setup.project.projectId,
-      labelName: `symphony:conductor/${ids.conductorShortHash}`,
-      fetch,
-      log,
-    });
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -275,7 +77,7 @@ export async function runTargetSuccessLive({
         log,
       },
       successInput: {
-        rootInput: setup.rootInput,
+        rootInput,
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved for implementation.",
         readObservationInput: async ({ rootIssueId, phase }) => {
@@ -334,8 +136,7 @@ export async function runTargetDeliveryLive({
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
-    readProjectConfiguration: dependencies.readProjectConfiguration ?? readTargetProjectConfiguration,
-    ensureConductorLabel: dependencies.ensureConductorLabel ?? ensureTargetConductorProjectLabel,
+    prepareSetup: dependencies.prepareSetup ?? prepareTargetWorkflowSetup,
     runDeliveryBoundary: dependencies.runDeliveryBoundary ?? runTargetDeliveryBoundary,
     cleanupScope: dependencies.cleanupScope ?? cleanupTargetRunScope,
     readGitObservation: dependencies.readGitObservation ?? readTargetGitObservation,
@@ -344,23 +145,10 @@ export async function runTargetDeliveryLive({
   let failure;
   let result;
   try {
+    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
-    const setup = await services.readProjectConfiguration({
-      developmentToken: config.secrets.linearDevToken,
-      clientId: config.linear.clientId,
-      projectSlugId: config.linear.projectSlugId,
-      fetch,
-      log,
-    });
-    const ids = runIdentifiers(runId);
-    await services.ensureConductorLabel({
-      developmentToken: config.secrets.linearDevToken,
-      projectId: setup.project.projectId,
-      labelName: `symphony:conductor/${ids.conductorShortHash}`,
-      fetch,
-      log,
-    });
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -399,7 +187,7 @@ export async function runTargetDeliveryLive({
         log,
       },
       successInput: {
-        rootInput: { ...setup.rootInput, title: "Target live delivery", description: "Target live delivery Root." },
+        rootInput: { ...rootInput, title: "Target live delivery", description: "Target live delivery Root." },
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved for delivery.",
         readObservationInput: async ({ rootIssueId, phase }) => readLiveGitObservation({
@@ -458,8 +246,7 @@ export async function runTargetRepairLive({
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
-    readProjectConfiguration: dependencies.readProjectConfiguration ?? readTargetProjectConfiguration,
-    ensureConductorLabel: dependencies.ensureConductorLabel ?? ensureTargetConductorProjectLabel,
+    prepareSetup: dependencies.prepareSetup ?? prepareTargetWorkflowSetup,
     runRepairBoundary: dependencies.runRepairBoundary ?? runTargetRepairBoundary,
     cleanupScope: dependencies.cleanupScope ?? cleanupTargetRunScope,
     readGitObservation: dependencies.readGitObservation ?? readTargetGitObservation,
@@ -468,23 +255,10 @@ export async function runTargetRepairLive({
   let failure;
   let result;
   try {
+    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
-    const setup = await services.readProjectConfiguration({
-      developmentToken: config.secrets.linearDevToken,
-      clientId: config.linear.clientId,
-      projectSlugId: config.linear.projectSlugId,
-      fetch,
-      log,
-    });
-    const ids = runIdentifiers(runId);
-    await services.ensureConductorLabel({
-      developmentToken: config.secrets.linearDevToken,
-      projectId: setup.project.projectId,
-      labelName: `symphony:conductor/${ids.conductorShortHash}`,
-      fetch,
-      log,
-    });
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -524,7 +298,7 @@ export async function runTargetRepairLive({
       },
       repairInput: {
         rootInput: {
-          ...setup.rootInput,
+          ...rootInput,
           title: "Target live repair escalation",
           description: "Target live repair escalation Root.",
         },
@@ -587,8 +361,7 @@ export async function runTargetRestartLive({
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
-    readProjectConfiguration: dependencies.readProjectConfiguration ?? readTargetProjectConfiguration,
-    ensureConductorLabel: dependencies.ensureConductorLabel ?? ensureTargetConductorProjectLabel,
+    prepareSetup: dependencies.prepareSetup ?? prepareTargetWorkflowSetup,
     runRestartBoundary: dependencies.runRestartBoundary ?? runTargetRestartBoundary,
     cleanupScope: dependencies.cleanupScope ?? cleanupTargetRunScope,
     readGitObservation: dependencies.readGitObservation ?? readTargetGitObservation,
@@ -597,23 +370,10 @@ export async function runTargetRestartLive({
   let failure;
   let result;
   try {
+    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
-    const setup = await services.readProjectConfiguration({
-      developmentToken: config.secrets.linearDevToken,
-      clientId: config.linear.clientId,
-      projectSlugId: config.linear.projectSlugId,
-      fetch,
-      log,
-    });
-    const ids = runIdentifiers(runId);
-    await services.ensureConductorLabel({
-      developmentToken: config.secrets.linearDevToken,
-      projectId: setup.project.projectId,
-      labelName: `symphony:conductor/${ids.conductorShortHash}`,
-      fetch,
-      log,
-    });
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -652,7 +412,7 @@ export async function runTargetRestartLive({
         log,
       },
       restartInput: {
-        rootInput: { ...setup.rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
+        rootInput: { ...rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved after restart recovery.",
         readObservationInput: async ({ rootIssueId, phase }) => readLiveGitObservation({
@@ -693,18 +453,22 @@ export async function runTargetSchedulingLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  dependencies = {},
 } = {}) {
-  const setup = await readTargetProjectConfiguration({
-    developmentToken: config?.secrets?.linearDevToken,
-    clientId: config?.linear?.clientId,
-    projectSlugId: config?.linear?.projectSlugId,
-    fetch,
-    log,
+  const runId = environment?.SYMPHONY_E2E_RUN_ID;
+  validateLiveInput({ config, environment, runId, fetch, log });
+  const prepared = await (dependencies.prepareSetup ?? prepareTargetWorkflowSetup)({
+    config, runId, fetch, log,
   });
   return runTargetSchedulingScenarioLive({
     config: {
       ...config,
-      linear: { ...config.linear, delegateActorId: setup.delegateActorId },
+      linear: {
+        ...config.linear,
+        projectSlugId: prepared.setup.project.projectId,
+        delegateActorId: prepared.setup.delegateActorId,
+        conductorId: prepared.ids.conductorId,
+      },
     },
     environment,
     fetch,
@@ -727,61 +491,20 @@ async function readLiveGitObservation({ services, fixture, scope, rootIssueId, p
   }
 }
 
-async function graphql(query, variables, { developmentToken, fetch, log }) {
-  const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
-  let response;
-  try {
-    response = await fetch(LINEAR_GRAPHQL_URL, {
-      method: "POST",
-      headers: { authorization: developmentToken, "content-type": "application/json" },
-      body: JSON.stringify({ query, variables, operationName: operation }),
-    });
-  } catch {
-    log({ event: "target_live_request_failed", operation });
-    throw stableError("target_live_request_failed");
-  }
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    log({ event: "target_live_response_invalid", operation, status: response.status });
-    throw stableError("target_live_response_invalid");
-  }
-  if (!response.ok || body?.errors?.length || !body?.data || typeof body.data !== "object") {
-    log({ event: "target_live_graphql_failed", operation, status: response.status, errorCount: Array.isArray(body?.errors) ? body.errors.length : 0 });
-    throw stableError("target_live_graphql_failed");
-  }
-  return body.data;
-}
-
-function connection(value, errorCode) {
-  if (!value || !Array.isArray(value.nodes) || value.nodes.length > 250 ||
-      !value.pageInfo || value.pageInfo.hasNextPage !== false) {
-    throw stableError(errorCode);
-  }
-  return value.nodes;
-}
-
 function validateLiveInput({ config, environment, runId, fetch, log }) {
-  if (!RUN_ID.test(runId ?? "") || !config?.linear || !SAFE_ID.test(config.linear.clientId ?? "") ||
-      !SAFE_ID.test(config.linear.projectSlugId ?? "") || typeof config.secrets?.linearDevToken !== "string" ||
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId ?? "") || !config?.linear ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(config.linear.clientId ?? "") ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(config.linear.projectSlugId ?? "") ||
+      typeof config.linear.setupAuthorized !== "boolean" ||
+      typeof config.secrets?.linearDevToken !== "string" ||
       config.secrets.linearDevToken.length === 0 || typeof config.secrets.codexApiKey !== "string" ||
       config.secrets.codexApiKey.length === 0 || typeof config.codex?.baseUrl !== "string" ||
       typeof config.codex.model !== "string" || typeof fetch !== "function" || typeof log !== "function" ||
       !environment || typeof environment !== "object") {
-    throw stableError(!RUN_ID.test(runId ?? "") ? "target_live_run_id_invalid" : "target_live_input_invalid");
+    throw stableError(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId ?? "")
+      ? "target_live_run_id_invalid"
+      : "target_live_input_invalid");
   }
-}
-
-function runIdentifiers(runId) {
-  const hash = createHash("sha256").update(runId).digest("hex");
-  return Object.freeze({
-    conductorShortHash: hash.slice(0, 12),
-    conductorId: `conductor-${hash.slice(0, 24)}`,
-    bindingId: `binding-${hash.slice(0, 24)}`,
-    instanceId: `instance-${hash.slice(0, 24)}`,
-    repositoryHandle: `repository-${hash.slice(0, 24)}`,
-  });
 }
 
 function stableReason(error) {

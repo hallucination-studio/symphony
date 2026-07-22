@@ -12,6 +12,7 @@ function validEnvironment() {
   return {
     SYMPHONY_E2E_LINEAR_DEV_TOKEN: "linear-dev-canary",
     LINEAR_CLIENT_ID: "linear-client-id",
+    SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
     SYMPHONY_E2E_CODEX_API_KEY: "codex-canary",
     SYMPHONY_E2E_CODEX_BASE_URL: "https://codex.example.test/v1",
     SYMPHONY_E2E_CODEX_MODEL: "codex-test-model",
@@ -28,7 +29,7 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
     baseUrl: "https://codex.example.test/v1",
     model: "codex-test-model",
   });
-  assert.deepEqual(config.linear, { clientId: "linear-client-id" });
+  assert.deepEqual(config.linear, { clientId: "linear-client-id", setupAuthorized: true });
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("linear-dev-canary"), false);
   assert.equal(summary.includes("codex-canary"), false);
@@ -46,6 +47,7 @@ test("loads an optional retained Linear Project slug without making it a secret"
   assert.deepEqual(config.linear, {
     clientId: "linear-client-id",
     projectSlugId: "project-debug-123",
+    setupAuthorized: true,
   });
   assert.equal(summarizeConfig(config).linear.projectSlugId, "project-debug-123");
 });

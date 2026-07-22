@@ -58,6 +58,7 @@ test("target workflow credentials are scoped to input validation and live run st
   }
   for (const name of [
     "SYMPHONY_E2E_PROJECT_SLUG_ID",
+    "SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED",
     "SYMPHONY_E2E_CODEX_ALLOWED_HOSTS",
   ]) {
     const pattern = new RegExp(`${name}: \\$\\{\\{ vars\\.${name} \\}\\}`, "u");
