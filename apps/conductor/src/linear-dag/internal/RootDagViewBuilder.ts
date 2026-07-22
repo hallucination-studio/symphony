@@ -30,6 +30,7 @@ const statusDefinitions = [
   ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"],
   ["Canceled", "canceled"], ["Failed", "canceled"],
 ] as const;
+const nativeDuplicateDefinition = ["Duplicate", "canceled"] as const;
 const rootStates = new Set(["Todo", "In Progress", "Needs Approval", "Needs Info", "In Review", "Done", "Canceled"]);
 const cycleStates = new Set(["Draft", "Planning", "Sealed", "Executing", "Verifying", "Succeeded", "Changes Required", "Inconclusive", "Escalated", "Canceled"]);
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
@@ -98,7 +99,7 @@ export function buildRootDagView(input: RootDagViewBuilderInput): RootDagView {
 }
 
 function validateStatusCatalog(catalog: LinearWorkflowTreeSnapshot["status_catalog"]) {
-  if (catalog.length !== statusDefinitions.length) fail("status_catalog_incomplete");
+  if (catalog.length !== statusDefinitions.length + 1) fail("status_catalog_incomplete");
   const ids = new Set<string>();
   const names = new Set<string>();
   const positions = new Set<number>();
@@ -113,6 +114,8 @@ function validateStatusCatalog(catalog: LinearWorkflowTreeSnapshot["status_catal
     const status = byName.get(name);
     if (!status || status.category !== category) fail("status_catalog_incomplete");
   }
+  const duplicate = byName.get(nativeDuplicateDefinition[0]);
+  if (!duplicate || duplicate.category !== nativeDuplicateDefinition[1]) fail("status_catalog_incomplete");
   return new Map(catalog.map((status) => [status.status_id, status]));
 }
 

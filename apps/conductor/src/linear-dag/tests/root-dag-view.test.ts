@@ -42,6 +42,12 @@ test("requires the exact Team status catalog and kind-restricted status subsets"
   assert.throws(() => buildRootDagView(wrongKindStatus), validation("cycle_status_invalid"));
 });
 
+test("accepts Linear's native Duplicate outside the canonical Symphony statuses", () => {
+  const input = validInput();
+  assert.doesNotThrow(() => buildRootDagView(input));
+  assert.equal(input.tree.status_catalog.at(-1)?.name, "Duplicate");
+});
+
 test("rejects duplicate issue keys and managed markers", () => {
   const duplicateIssue = validInput();
   duplicateIssue.tree.issues.push({ ...duplicateIssue.tree.issues[2]! });
@@ -183,7 +189,7 @@ function statusCatalog(): LinearWorkflowTreeSnapshot["status_catalog"] {
     ["Draft", "backlog"], ["Todo", "unstarted"], ["Planning", "started"], ["Sealed", "started"],
     ["Executing", "started"], ["Verifying", "started"], ["In Progress", "started"], ["In Review", "started"],
     ["Needs Approval", "started"], ["Needs Info", "started"], ["Inconclusive", "started"], ["Escalated", "started"],
-    ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"], ["Canceled", "canceled"], ["Failed", "canceled"],
+    ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"], ["Canceled", "canceled"], ["Failed", "canceled"], ["Duplicate", "canceled"],
   ] as const).map(([name, category], position) => ({ status_id: `status-${name.toLowerCase().replaceAll(" ", "-")}`, name, category: category as LinearWorkflowTreeSnapshot["status_catalog"][number]["category"], position }));
 }
 
