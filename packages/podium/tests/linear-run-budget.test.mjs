@@ -81,3 +81,12 @@ test("run budget counts logical operations and physical observations separately"
     rateLimited: false,
   });
 });
+
+test("run budget resets the complexity baseline when the upstream window rolls over", () => {
+  const budget = new LinearRunBudgetImpl({ maxRequests: 400 });
+  budget.observe({ complexityWindow: { limit: 2_000_000, remaining: 1_999_000, reset: 1 } });
+  budget.observe({ complexityWindow: { limit: 2_000_000, remaining: 2_000_000, reset: 3600 } });
+  budget.observe({ complexityWindow: { limit: 2_000_000, remaining: 1_998_000, reset: 3599 } });
+
+  assert.equal(budget.snapshot().complexityConsumed, 2_000);
+});

@@ -21,6 +21,7 @@ const FACTS_TRANSIENT_ERRORS = new Set([
 const FACTS_FIELDS = new Set([
   "root", "plan", "stageExecutions", "progress", "repairEscalation", "delivery",
 ]);
+import { createAdaptivePoller } from "./target-workflow-polling.mjs";
 
 export async function runTargetSuccessScenario({
   runner,
@@ -105,13 +106,14 @@ export async function runTargetSuccessScenario({
 }
 
 async function pollUntil({ phase, deadline, now, sleep, pollIntervalMs, onProgress, read, accepted }) {
+  const poller = createAdaptivePoller({ baseIntervalMs: pollIntervalMs });
   while (now() < deadline) {
     const value = await read();
     if (value?.status) onProgress({ phase, status: value.status });
     if (accepted(value)) return value;
     const remaining = deadline - now();
     if (remaining <= 0) break;
-    await sleep(Math.min(pollIntervalMs, remaining));
+    await sleep(Math.min(poller.observe(value), remaining));
   }
   throw new Error("target_success_timeout");
 }

@@ -3,6 +3,7 @@ const SHA = /^[0-9a-f]{40}$/u;
 const OBSERVATION_FIELDS = new Set(["git"]);
 const DELIVERY_FIELDS = new Set(["kind", "branch", "head", "verifiedAgainst", "readBack"]);
 const DELIVERY_KINDS = new Set(["local_branch", "remote_branch", "pull_request"]);
+import { createAdaptivePoller } from "./target-workflow-polling.mjs";
 
 export async function runTargetDeliveryScenario({
   runner,
@@ -20,6 +21,7 @@ export async function runTargetDeliveryScenario({
 } = {}) {
   validateDependencies({ runner, rootIssueId, projectId, verifyIssueId, verifiedRevision, deliveryBranch, observationInput, timeoutMs, pollIntervalMs, sleep, now, onProgress });
   const deadline = now() + timeoutMs;
+  const poller = createAdaptivePoller({ baseIntervalMs: pollIntervalMs });
   while (now() < deadline) {
     const observed = await runner.observeRoot({ rootIssueId, projectId, ...observationInput });
     const facts = observed?.facts;
@@ -29,7 +31,7 @@ export async function runTargetDeliveryScenario({
     }
     if (facts.delivery === undefined) {
       onProgress({ phase: "delivery", status: "awaiting_read_back" });
-      await pause(deadline, now, sleep, pollIntervalMs);
+      await pause(deadline, now, sleep, poller, facts);
       continue;
     }
     const delivery = validateDelivery(facts.delivery);
@@ -74,7 +76,7 @@ function validateDelivery(value) {
   });
 }
 
-async function pause(deadline, now, sleep, pollIntervalMs) {
+async function pause(deadline, now, sleep, poller, value) {
   const remaining = deadline - now();
-  if (remaining > 0) await sleep(Math.min(pollIntervalMs, remaining));
+  if (remaining > 0) await sleep(Math.min(poller.observe(value), remaining));
 }

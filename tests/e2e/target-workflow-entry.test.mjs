@@ -171,6 +171,38 @@ test("target workflow all-run prepares Linear setup once before every scenario",
   ]);
 });
 
+test("target workflow all-run refuses a scenario before dispatch when Root budget is unavailable", async () => {
+  const calls = [];
+  const budget = {
+    reserve() { throw new Error("linear_run_budget_exhausted"); },
+    snapshot() {
+      return {
+        logicalOperations: 0, physicalRequests: 0, reservedRequests: 0,
+        reservedComplexity: 0, complexityConsumed: 0, rateLimited: false,
+      };
+    },
+  };
+  const result = await runTargetWorkflowAllLive({
+    config: {
+      linear: { clientId: "client-1", projectSlugId: "project-1" },
+      secrets: { linearDevToken: "linear-secret", codexApiKey: "codex-secret" },
+      codex: { baseUrl: "https://codex.example.test/v1", model: "model-1" },
+    },
+    environment: { SYMPHONY_E2E_RUN_ID: "target-all-budget" },
+    linearRunBudget: budget,
+    prepareSetup: async () => ({ setup: {}, ids: {}, rootInput: {} }),
+    runScenario: async (scenario) => {
+      calls.push(scenario);
+      return { scenario, status: "passed" };
+    },
+    writeEvidence: false,
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.verdict.missingScenarios, TARGET_WORKFLOW_SCENARIOS);
+});
+
 test("target workflow all-run binds the production setup as its default", async () => {
   const source = await readFile("tools/e2e/target-workflow-entry.mjs", "utf8");
 

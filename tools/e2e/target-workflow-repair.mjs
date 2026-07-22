@@ -7,6 +7,7 @@ const OBSERVATION_FIELDS = new Set(["git"]);
 const FACTS_FIELDS = new Set(["root", "plan", "stageExecutions", "progress", "repairEscalation", "delivery"]);
 const REPAIR_FIELDS = new Set(["findingId", "sourceVerifyId", "disposition", "breaker"]);
 const BREAKER_FIELDS = new Set(["checked", "decision", "cycleCount", "maxCycles", "openFindingCount"]);
+import { createAdaptivePoller } from "./target-workflow-polling.mjs";
 const TRANSIENT_FACTS_ERRORS = new Set([
   "target_facts_cycle_invalid",
   "target_facts_dag_incomplete",
@@ -41,6 +42,7 @@ export async function runTargetRepairEscalationScenario({
   const created = validateRootResult(await runner.createRoot(rootInput));
   const submittedActionIds = new Set();
   let lastSubmittedActionId;
+  const pollers = new Map();
 
   const readInput = async (phase) => Object.freeze({
     rootIssueId: created.rootIssueId,
@@ -68,7 +70,7 @@ export async function runTargetRepairEscalationScenario({
           throw new Error("target_repair_duplicate_human_action");
         }
         onProgress({ phase: "human_response", status: "pending", actionId: pending.actionId });
-        await pause(deadline, now, sleep, pollIntervalMs);
+        await pause(deadline, now, sleep, pollIntervalMs, pollers, "pending_human", pending);
         continue;
       }
       if (submittedActionIds.size >= maxHumanActions) {
@@ -94,12 +96,12 @@ export async function runTargetRepairEscalationScenario({
     } catch (error) {
       if (!TRANSIENT_FACTS_ERRORS.has(reason(error))) throw error;
       onProgress({ phase: "durable_facts", reason: reason(error) });
-      await pause(deadline, now, sleep, pollIntervalMs);
+      await pause(deadline, now, sleep, pollIntervalMs, pollers, "durable_facts", error.message);
       continue;
     }
     if (facts.repairEscalation) return Object.freeze({ facts });
     onProgress({ phase: "durable_facts", status: "awaiting_escalation" });
-    await pause(deadline, now, sleep, pollIntervalMs);
+    await pause(deadline, now, sleep, pollIntervalMs, pollers, "durable_facts", facts);
   }
   throw new Error("target_repair_timeout");
 }
@@ -188,10 +190,15 @@ function isClosedObject(value, fields) {
     Object.keys(value).every((key) => fields.has(key));
 }
 
-async function pause(deadline, now, sleep, pollIntervalMs) {
+async function pause(deadline, now, sleep, pollIntervalMs, pollers, phase, value) {
   const remaining = deadline - now();
   if (remaining <= 0) return;
-  await sleep(Math.min(pollIntervalMs, remaining));
+  let poller = pollers.get(phase);
+  if (!poller) {
+    poller = createAdaptivePoller({ baseIntervalMs: pollIntervalMs });
+    pollers.set(phase, poller);
+  }
+  await sleep(Math.min(poller.observe(value), remaining));
 }
 
 function reason(error) {

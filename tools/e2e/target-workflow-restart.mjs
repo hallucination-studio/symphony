@@ -6,6 +6,7 @@ const TRANSIENT_PENDING_ERRORS = new Set([
   "target_facts_human_action_missing",
   "target_facts_human_cycle_invalid",
 ]);
+import { createAdaptivePoller } from "./target-workflow-polling.mjs";
 
 export async function runTargetRestartRecoveryScenario({
   runner,
@@ -66,6 +67,7 @@ export async function runTargetRestartRecoveryScenario({
 }
 
 async function pollPending({ runner, created, deadline, now, sleep, pollIntervalMs, onProgress, readInput, phase }) {
+  const poller = createAdaptivePoller({ baseIntervalMs: pollIntervalMs });
   while (now() < deadline) {
     try {
       const pending = validatePending(await runner.observePendingHuman(await readInput(phase)), created.rootIssueId);
@@ -73,16 +75,19 @@ async function pollPending({ runner, created, deadline, now, sleep, pollInterval
         onProgress({ phase, status: pending.status });
         return pending;
       }
+      await pause(deadline, now, sleep, poller, pending);
+      continue;
     } catch (error) {
       if (!TRANSIENT_PENDING_ERRORS.has(reason(error))) throw error;
       onProgress({ phase, reason: reason(error) });
+      await pause(deadline, now, sleep, poller, reason(error));
     }
-    await pause(deadline, now, sleep, pollIntervalMs);
   }
   throw new Error("target_restart_recovery_timeout");
 }
 
 async function pollFacts({ runner, created, deadline, now, sleep, pollIntervalMs, onProgress, readInput }) {
+  const poller = createAdaptivePoller({ baseIntervalMs: pollIntervalMs });
   while (now() < deadline) {
     try {
       const observed = await runner.observeRoot(await readInput("durable_facts_after_restart"));
@@ -95,8 +100,8 @@ async function pollFacts({ runner, created, deadline, now, sleep, pollIntervalMs
     } catch (error) {
       if (reason(error) !== "target_restart_recovery_facts_pending") throw error;
       onProgress({ phase: "durable_facts_after_restart", reason: reason(error) });
+      await pause(deadline, now, sleep, poller, reason(error));
     }
-    await pause(deadline, now, sleep, pollIntervalMs);
   }
   throw new Error("target_restart_recovery_timeout");
 }
@@ -174,9 +179,9 @@ function samePending(left, right) {
     .every((key) => left[key] === right[key]);
 }
 
-async function pause(deadline, now, sleep, pollIntervalMs) {
+async function pause(deadline, now, sleep, poller, value) {
   const remaining = deadline - now();
-  if (remaining > 0) await sleep(Math.min(pollIntervalMs, remaining));
+  if (remaining > 0) await sleep(Math.min(poller.observe(value), remaining));
 }
 
 function reason(error) {

@@ -16,6 +16,8 @@ import {
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
 import { LinearRunBudgetImpl } from "@symphony/podium";
 
+const TARGET_SCENARIO_START_COST = Object.freeze({ requests: 1, complexity: 10_000 });
+
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
   inputs: "tools/e2e/target-workflow-inputs.mjs",
@@ -130,6 +132,7 @@ export async function runTargetWorkflowAllLive({
   log = () => {},
   runScenario = defaultRunScenario,
   prepareSetup = prepareTargetWorkflowSetup,
+  linearRunBudget = new LinearRunBudgetImpl(),
   writeEvidence = true,
   evidenceDirectory,
 } = {}) {
@@ -138,7 +141,6 @@ export async function runTargetWorkflowAllLive({
       typeof prepareSetup !== "function" || typeof fetch !== "function" || typeof log !== "function") {
     throw stableError("target_all_input_invalid");
   }
-  const linearRunBudget = new LinearRunBudgetImpl();
   const preparedSetup = await prepareSetup({
     config,
     runId: environment.SYMPHONY_E2E_RUN_ID,
@@ -149,6 +151,8 @@ export async function runTargetWorkflowAllLive({
   const results = [];
   for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
     try {
+      const rootReservation = linearRunBudget.reserve(TARGET_SCENARIO_START_COST);
+      rootReservation.release();
       const result = await runScenario(scenario, {
         config,
         environment,
@@ -177,6 +181,7 @@ export async function runTargetWorkflowAllLive({
     runId: environment.SYMPHONY_E2E_RUN_ID,
     evidence: evaluated.evidence,
     verdict: evaluated.verdict,
+    budget: linearRunBudget.snapshot(),
   });
   if (writeEvidence) await persistTargetWorkflowEvidence(result, evidenceDirectory);
   return result;
@@ -204,12 +209,28 @@ async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
 }
 
 async function defaultRunScenario(scenario, { setup, linearRunBudget, ...input }) {
-  const dependencies = { prepareSetup: async () => setup };
-  if (scenario === "success") return runTargetSuccessLive({ ...input, linearRunBudget, dependencies });
-  if (scenario === "repair_escalation") return runTargetRepairLive({ ...input, linearRunBudget, dependencies });
-  if (scenario === "restart_recovery") return runTargetRestartLive({ ...input, linearRunBudget, dependencies });
-  if (scenario === "delivery") return runTargetDeliveryLive({ ...input, linearRunBudget, dependencies });
-  return runTargetSchedulingLive({ ...input, linearRunBudget, dependencies });
+  const scenarioSuffix = `-${scenario}`;
+  const scenarioRunId = `${input.environment.SYMPHONY_E2E_RUN_ID.slice(0, 128 - scenarioSuffix.length)}${scenarioSuffix}`;
+  const scenarioSetup = {
+    ...setup,
+    ...(setup?.rootInput ? {
+      rootInput: {
+        ...setup.rootInput,
+        title: `${setup.rootInput.title} [${scenario}]`,
+        description: `${setup.rootInput.description} Scenario correlation: ${scenarioRunId}.`,
+      },
+    } : {}),
+  };
+  const dependencies = { prepareSetup: async () => scenarioSetup };
+  const scenarioInput = {
+    ...input,
+    environment: { ...input.environment, SYMPHONY_E2E_RUN_ID: scenarioRunId },
+  };
+  if (scenario === "success") return runTargetSuccessLive({ ...scenarioInput, linearRunBudget, dependencies });
+  if (scenario === "repair_escalation") return runTargetRepairLive({ ...scenarioInput, linearRunBudget, dependencies });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ ...scenarioInput, linearRunBudget, dependencies });
+  if (scenario === "delivery") return runTargetDeliveryLive({ ...scenarioInput, linearRunBudget, dependencies });
+  return runTargetSchedulingLive({ ...scenarioInput, linearRunBudget, dependencies });
 }
 
 function stableReason(error) {

@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createAdaptivePoller } from "../../tools/e2e/target-workflow-polling.mjs";
+
+test("adaptive polling backs off on unchanged facts and resets after progress", () => {
+  const poller = createAdaptivePoller({ baseIntervalMs: 1000, maxIntervalMs: 4000 });
+  assert.equal(poller.observe({ state: "Planning" }), 1000);
+  assert.equal(poller.observe({ state: "Planning" }), 2000);
+  assert.equal(poller.observe({ state: "Planning" }), 4000);
+  assert.equal(poller.observe({ state: "Done" }), 1000);
+});
+
 import { runTargetSuccessScenario } from "../../tools/e2e/target-workflow-success.mjs";
 
 test("target success orchestration creates, approves, and returns only durable facts", async () => {
