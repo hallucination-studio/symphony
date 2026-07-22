@@ -13,13 +13,14 @@ import { runTargetRestartBoundary } from "./target-workflow-restart-boundary.mjs
 import { runTargetSuccessBoundary } from "./target-workflow-success-boundary.mjs";
 import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-live.mjs";
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
+import { LinearRunBudgetImpl } from "@symphony/podium";
 
 export async function runTargetSuccessLive({
   config,
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  linearRunBudget = new LinearRunBudgetImpl(),
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -131,7 +132,7 @@ export async function runTargetDeliveryLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  linearRunBudget = new LinearRunBudgetImpl(),
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -243,7 +244,7 @@ export async function runTargetRepairLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  linearRunBudget = new LinearRunBudgetImpl(),
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -360,7 +361,7 @@ export async function runTargetRestartLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  linearRunBudget = new LinearRunBudgetImpl(),
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -461,7 +462,7 @@ export async function runTargetSchedulingLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  linearRunBudget = new LinearRunBudgetImpl(),
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;

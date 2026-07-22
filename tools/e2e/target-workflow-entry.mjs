@@ -117,12 +117,15 @@ async function runTargetWorkflowLive(scenario = "success") {
     error.issues = ["target_project_slug_id_missing"];
     throw error;
   }
-  if (scenario === "repair") return runTargetRepairLive({ config });
-  if (scenario === "delivery") return runTargetDeliveryLive({ config });
-  if (scenario === "restart_recovery") return runTargetRestartLive({ config });
-  if (scenario === "scheduling") return runTargetSchedulingLive({ config });
-  if (scenario === "all") return runTargetWorkflowAllLive({ config });
-  return runTargetSuccessLive({ config });
+  const linearRunBudget = new LinearRunBudgetImpl({
+    physicalRequestComplexity: config.linear.physicalRequestComplexity,
+  });
+  if (scenario === "repair") return runTargetRepairLive({ config, linearRunBudget });
+  if (scenario === "delivery") return runTargetDeliveryLive({ config, linearRunBudget });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ config, linearRunBudget });
+  if (scenario === "scheduling") return runTargetSchedulingLive({ config, linearRunBudget });
+  if (scenario === "all") return runTargetWorkflowAllLive({ config, linearRunBudget });
+  return runTargetSuccessLive({ config, linearRunBudget });
 }
 
 export async function runTargetWorkflowAllLive({

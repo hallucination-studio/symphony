@@ -34,6 +34,7 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
     clientId: "linear-client-id",
     projectSlugId: "project-retained-123",
     setupAuthorized: true,
+    physicalRequestComplexity: 10_000,
   });
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("linear-dev-canary"), false);
@@ -53,8 +54,17 @@ test("loads the retained Linear Project slug without making it a secret", () => 
     clientId: "linear-client-id",
     projectSlugId: "project-debug-123",
     setupAuthorized: true,
+    physicalRequestComplexity: 10_000,
   });
   assert.equal(summarizeConfig(config).linear.projectSlugId, "project-debug-123");
+});
+
+test("accepts a bounded per-request complexity reservation", () => {
+  const environment = validEnvironment();
+  environment.SYMPHONY_E2E_LINEAR_PHYSICAL_REQUEST_COMPLEXITY = "12000";
+  const config = loadE2EConfig({ environment, platform: "linux" });
+  assert.equal(config.linear.physicalRequestComplexity, 12_000);
+  assert.equal(summarizeConfig(config).linear.physicalRequestComplexity, 12_000);
 });
 
 test("requires the retained Linear Project slug before a live run", () => {
