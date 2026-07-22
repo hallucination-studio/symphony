@@ -1765,7 +1765,7 @@ function retainedWorkflowStates() {
 }
 
 function workflowSetupSdk(states, { failAfterCreate } = {}) {
-  const observations = { projects: 0, teams: 0, states: 0, updates: [], creates: [] };
+  const observations = { projects: 0, teams: 0, states: 0, batches: 0, updates: [], creates: [] };
   const team = {
     id: "team-1",
     states: async () => {
@@ -1843,6 +1843,36 @@ test("Team workflow setup renames Backlog, creates missing states, and reads bac
     ["Changes Required", "completed"], ["Failed", "canceled"],
   ].map(([name, type]) => ({ name, type })));
   assert.ok(observations.states >= 25);
+});
+
+test("Team workflow setup batches real GraphQL status mutations and reads the catalog back once", async () => {
+  const states = retainedWorkflowStates();
+  const { sdk, observations } = workflowSetupSdk(states);
+  observations.batches = 0;
+  sdk.client = {
+    rawRequest: async (query) => {
+      observations.batches += 1;
+      states.splice(0, states.length, ...[
+        ["draft-1", "Draft", "backlog"], ["todo-1", "Todo", "unstarted"],
+        ["planning-1", "Planning", "started"], ["sealed-1", "Sealed", "started"],
+        ["executing-1", "Executing", "started"], ["verifying-1", "Verifying", "started"],
+        ["progress-1", "In Progress", "started"], ["review-1", "In Review", "started"],
+        ["approval-1", "Needs Approval", "started"], ["info-1", "Needs Info", "started"],
+        ["inconclusive-1", "Inconclusive", "started"], ["escalated-1", "Escalated", "started"],
+        ["succeeded-1", "Succeeded", "completed"], ["changes-1", "Changes Required", "completed"],
+        ["done-1", "Done", "completed"], ["canceled-1", "Canceled", "canceled"],
+        ["failed-1", "Failed", "canceled"], ["duplicate-1", "Duplicate", "duplicate"],
+      ].map(([id, name, type], position) => ({ id, name, type, position })));
+      return Object.fromEntries([...query.matchAll(/operation[0-9]+/gu)].map(([alias]) => [alias, { success: true }]));
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true });
+
+  assert.equal(result.kind, "applied");
+  assert.equal(observations.batches, 1);
+  assert.equal(observations.states, 2);
 });
 
 test("Team workflow setup treats a lost create response as applied when read-back finds the state", async () => {

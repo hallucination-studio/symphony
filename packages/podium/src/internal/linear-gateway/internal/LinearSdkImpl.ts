@@ -572,15 +572,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       return this.#targetWorkflowResult("already_applied", target);
     }
 
-    for (const operation of plan.operations) {
-      await this.#applyTargetWorkflowOperation(
-        input.projectId,
-        target.teamId,
-        target.states,
-        plan.operations,
-        operation,
-      );
-    }
+    await this.#applyTargetWorkflowOperationsBatch(input.projectId, target, plan.operations);
     const finalTarget = await this.#readTargetTeamWorkflow(input.projectId);
     const inspection = inspectTargetWorkflowCatalog(finalTarget.states);
     if (inspection.kind !== "complete") {
@@ -593,6 +585,56 @@ export class LinearSdkImpl implements LinearClientInterface {
       canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
       nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
     };
+  }
+
+  async #applyTargetWorkflowOperationsBatch(
+    projectId: string,
+    target: {
+      projectId: string;
+      teamId: string;
+      states: Array<{ id: string; name: string; type: string; position: number }>;
+    },
+    operations: readonly TargetWorkflowInitializationOperation[],
+  ): Promise<void> {
+    assertTargetWorkflowPreconditions(target.states, target.states, operations);
+    const client = this.#client as unknown as {
+      client?: { rawRequest?: (query: string) => Promise<Record<string, unknown>> };
+    };
+    if (typeof client.client?.rawRequest === "function") {
+      await this.#runTargetWorkflowMutationBatch(client.client.rawRequest.bind(client.client), target, operations);
+      return;
+    }
+    for (const operation of operations) {
+      await this.#applyTargetWorkflowOperation(
+        projectId,
+        target.teamId,
+        target.states,
+        operations,
+        operation,
+      );
+    }
+  }
+
+  async #runTargetWorkflowMutationBatch(
+    rawRequest: (query: string) => Promise<Record<string, unknown>>,
+    target: {
+      teamId: string;
+    },
+    operations: readonly TargetWorkflowInitializationOperation[],
+  ): Promise<void> {
+    const fields = operations.map((operation, index) => {
+      const alias = `operation${index}`;
+      if (operation.kind === "rename") {
+        return `${alias}: workflowStateUpdate(id: ${quoteGraphql(operation.statusId)}, input: { name: ${quoteGraphql(operation.name)} }) { success }`;
+      }
+      return `${alias}: workflowStateCreate(input: { teamId: ${quoteGraphql(target.teamId)}, name: ${quoteGraphql(operation.name)}, color: ${quoteGraphql(workflowStateColor(operation.category))}, type: ${operation.category} }) { success }`;
+    });
+    const result = await rawRequest(`mutation TargetWorkflowStatusBatch { ${fields.join(" ")} }`);
+    for (const [key, value] of Object.entries(result.data ?? result)) {
+      if (!value || typeof value !== "object" || (value as { success?: unknown }).success !== true) {
+        throw new Error(`linear_workflow_setup_batch_failed_${key}`);
+      }
+    }
   }
 
   async #readTargetTeamWorkflow(projectId: string) {
@@ -1985,6 +2027,10 @@ function clientOptions(credential: LinearSdkCredential):
   return credential.kind === "oauth"
     ? { accessToken: credential.token }
     : { apiKey: credential.token };
+}
+
+function quoteGraphql(value: string): string {
+  return JSON.stringify(value);
 }
 
 function observedClient(
