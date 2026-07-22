@@ -75,7 +75,7 @@ export class LinearRequestBrokerImpl {
       throw new Error("linear_request_capacity_reserved");
     }
     if (this.#budget) {
-      this.#physicalReservations.push(this.#budget.reserve({ requests: 1, complexity: 0 }));
+      this.#physicalReservations.push(this.#budget.reservePhysicalRequest());
     }
   }
 

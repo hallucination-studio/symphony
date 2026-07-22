@@ -161,7 +161,7 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function graphql(query, variables) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
-    const reservation = budget?.reserve({ requests: 1, complexity: 0 });
+    const reservation = budget?.reservePhysicalRequest();
     let observed = false;
     let response;
     try {

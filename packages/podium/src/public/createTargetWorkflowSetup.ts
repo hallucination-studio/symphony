@@ -33,20 +33,26 @@ async function initializeTargetWorkflowSetup(
   linearRunBudget?: LinearRunBudgetImpl,
 ): Promise<TargetWorkflowSetupResult> {
   validateInput(input);
+  const observe = observeLinearRequest || linearRunBudget
+    ? (observation: LinearPhysicalRequestObservation) => {
+        linearRunBudget?.observe(observation);
+        observeLinearRequest?.(observation);
+      }
+    : undefined;
   const organizationId = await LinearSdkImpl.discoverDevelopmentTokenOrganizationId(
     input.developmentToken,
-    observeLinearRequest,
+    observe,
     linearRunBudget ? () => linearRunBudget.permitPhysicalRequest() : undefined,
   );
   const createSdk = (delegateActorId: string) => new LinearSdkImpl(
     { kind: "development_token", token: input.developmentToken, delegateActorId },
     organizationId,
     undefined,
-    observeLinearRequest
+    observe || linearRunBudget
       ? {
           correlationId: randomUUID,
           now: Date.now,
-          observe: observeLinearRequest,
+          ...(observe ? { observe } : {}),
           ...(linearRunBudget ? { permit: () => linearRunBudget.permitPhysicalRequest() } : {}),
         }
       : undefined,

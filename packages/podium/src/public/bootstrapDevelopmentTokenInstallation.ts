@@ -19,6 +19,7 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
   discoverOrganizationId?: (
     accessToken: string,
     observe?: (observation: LinearPhysicalRequestObservation) => void,
+    permit?: () => void,
   ) => Promise<string>;
 }): Promise<DevelopmentTokenInstallationView> {
   if (!input.developmentToken) throw new Error("linear_development_token_missing");
@@ -28,9 +29,15 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
     LinearSdkImpl.discoverDevelopmentTokenOrganizationId;
   let organizationId: string;
   try {
+    const observe = input.observeLinearRequest || input.linearRunBudget
+      ? (observation: LinearPhysicalRequestObservation) => {
+          input.linearRunBudget?.observe(observation);
+          input.observeLinearRequest?.(observation);
+        }
+      : undefined;
     organizationId = await discoverOrganizationId(
       input.developmentToken,
-      input.observeLinearRequest,
+      observe,
       input.linearRunBudget ? () => input.linearRunBudget!.permitPhysicalRequest() : undefined,
     );
   } catch {

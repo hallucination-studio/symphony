@@ -66,7 +66,7 @@ test("installation broker charges physical permits to a run budget", async () =>
   const budget = new LinearRunBudgetImpl({ maxRequests: 2 });
   budget.observe({
     requestWindow: { limit: 10, remaining: 10, reset: 60 },
-    complexityWindow: { limit: 100, remaining: 100, reset: 60 },
+    complexityWindow: { limit: 2_000_000, remaining: 2_000_000, reset: 60 },
   });
   const broker = new LinearRequestBrokerImpl({
     maxConcurrent: 1,
@@ -77,7 +77,7 @@ test("installation broker charges physical permits to a run budget", async () =>
   assert.equal(await broker.run("mutation", async () => "first"), "first");
   broker.observe({
     requestWindow: { limit: 10, remaining: 9, reset: 60 },
-    complexityWindow: { limit: 100, remaining: 99, reset: 60 },
+    complexityWindow: { limit: 2_000_000, remaining: 1_999_000, reset: 60 },
   });
   assert.equal(budget.snapshot().logicalOperations, 1);
   assert.equal(budget.snapshot().physicalRequests, 2);
