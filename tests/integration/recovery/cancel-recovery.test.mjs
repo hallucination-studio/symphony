@@ -149,7 +149,7 @@ async function cancelRoot(statePath) {
 
 function serializedCanceledWorkTree(revision) {
   const statuses = [
-    ["Draft", "backlog"], ["Todo", "unstarted"], ["Planning", "started"], ["Sealed", "started"], ["Executing", "started"], ["Verifying", "started"], ["In Progress", "started"], ["In Review", "started"], ["Needs Approval", "started"], ["Needs Info", "started"], ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"], ["Canceled", "canceled"], ["Failed", "canceled"],
+    ["Draft", "backlog"], ["Todo", "unstarted"], ["Planning", "started"], ["Sealed", "started"], ["Executing", "started"], ["Verifying", "started"], ["In Progress", "started"], ["In Review", "started"], ["Needs Approval", "started"], ["Needs Info", "started"], ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"], ["Canceled", "canceled"], ["Failed", "canceled"], ["Duplicate", "canceled"],
   ].map(([name, category], position) => ({ status_id: `status-${position}`, name, category, position }));
   const status = (name) => statuses.find((candidate) => candidate.name === name);
   const issue = (issue_id, issue_kind, status_name, order, parent_issue_id) => ({
