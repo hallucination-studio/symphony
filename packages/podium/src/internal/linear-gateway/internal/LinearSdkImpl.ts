@@ -190,7 +190,7 @@ export interface LinearRequestObservationOptions {
   correlationId(): string;
   now(): number;
   permit?(): void;
-  observe(observation: LinearPhysicalRequestObservation): void;
+  observe?(observation: LinearPhysicalRequestObservation): void;
 }
 
 interface RootHeaderFactsData {
@@ -306,11 +306,17 @@ export class LinearSdkImpl implements LinearClientInterface {
   static async discoverDevelopmentTokenOrganizationId(
     developmentToken: string,
     observe?: (observation: LinearPhysicalRequestObservation) => void,
+    permit?: () => void,
   ): Promise<string> {
     const client = observedClient(
       { kind: "development_token", token: developmentToken, delegateActorId: "bootstrap" },
-      observe
-        ? { correlationId: randomUUID, now: Date.now, observe }
+      observe || permit
+        ? {
+            correlationId: randomUUID,
+            now: Date.now,
+            ...(observe ? { observe } : {}),
+            ...(permit ? { permit } : {}),
+          }
         : undefined,
     );
     const organization = await client.organization;
@@ -2024,7 +2030,7 @@ async function observeRequest<Result>(
   try {
     const result = await request();
     const response = responseMetadata(result);
-    observation.observe(requestObservation(
+    observation.observe?.(requestObservation(
       document,
       correlationId,
       observation.now() - startedAt,
@@ -2034,7 +2040,7 @@ async function observeRequest<Result>(
     return result;
   } catch (error) {
     const response = errorResponseMetadata(error);
-    observation.observe(requestObservation(
+    observation.observe?.(requestObservation(
       document,
       correlationId,
       observation.now() - startedAt,

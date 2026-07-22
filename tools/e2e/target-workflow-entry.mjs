@@ -14,6 +14,7 @@ import {
   runTargetSuccessLive,
 } from "./target-workflow-live.mjs";
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
+import { LinearRunBudgetImpl } from "@symphony/podium";
 
 const TARGET_SOURCE_FILES = Object.freeze({
   runner: "tools/e2e/target-workflow-runner.mjs",
@@ -137,11 +138,13 @@ export async function runTargetWorkflowAllLive({
       typeof prepareSetup !== "function" || typeof fetch !== "function" || typeof log !== "function") {
     throw stableError("target_all_input_invalid");
   }
+  const linearRunBudget = new LinearRunBudgetImpl();
   const preparedSetup = await prepareSetup({
     config,
     runId: environment.SYMPHONY_E2E_RUN_ID,
     fetch,
     log,
+    linearRunBudget,
   });
   const results = [];
   for (const scenario of TARGET_WORKFLOW_SCENARIOS) {
@@ -152,6 +155,7 @@ export async function runTargetWorkflowAllLive({
         fetch,
         log,
         setup: preparedSetup,
+        linearRunBudget,
       });
       if (!result || typeof result !== "object" || result.scenario !== scenario) {
         throw stableError("target_all_scenario_result_invalid");
@@ -199,13 +203,13 @@ async function persistTargetWorkflowEvidence(result, evidenceDirectory) {
   }
 }
 
-async function defaultRunScenario(scenario, { setup, ...input }) {
+async function defaultRunScenario(scenario, { setup, linearRunBudget, ...input }) {
   const dependencies = { prepareSetup: async () => setup };
-  if (scenario === "success") return runTargetSuccessLive({ ...input, dependencies });
-  if (scenario === "repair_escalation") return runTargetRepairLive({ ...input, dependencies });
-  if (scenario === "restart_recovery") return runTargetRestartLive({ ...input, dependencies });
-  if (scenario === "delivery") return runTargetDeliveryLive({ ...input, dependencies });
-  return runTargetSchedulingLive({ ...input, dependencies });
+  if (scenario === "success") return runTargetSuccessLive({ ...input, linearRunBudget, dependencies });
+  if (scenario === "repair_escalation") return runTargetRepairLive({ ...input, linearRunBudget, dependencies });
+  if (scenario === "restart_recovery") return runTargetRestartLive({ ...input, linearRunBudget, dependencies });
+  if (scenario === "delivery") return runTargetDeliveryLive({ ...input, linearRunBudget, dependencies });
+  return runTargetSchedulingLive({ ...input, linearRunBudget, dependencies });
 }
 
 function stableReason(error) {

@@ -11,7 +11,8 @@ export async function prepareTargetWorkflowSetup({
   runId,
   fetch = globalThis.fetch,
   log = () => {},
-  setup = createTargetWorkflowSetup(),
+  linearRunBudget,
+  setup = createTargetWorkflowSetup(linearRunBudget ? { linearRunBudget } : {}),
 } = {}) {
   if (!RUN_ID.test(runId ?? "") || !config?.linear ||
       !SAFE_ID.test(config.linear.clientId ?? "") || !SAFE_ID.test(config.linear.projectSlugId ?? "") ||

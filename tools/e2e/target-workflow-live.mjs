@@ -19,6 +19,7 @@ export async function runTargetSuccessLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -35,7 +36,7 @@ export async function runTargetSuccessLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
     const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
@@ -75,6 +76,7 @@ export async function runTargetSuccessLive({
         model: config.codex.model,
         fetch,
         log,
+        linearRunBudget,
       },
       successInput: {
         rootInput,
@@ -129,6 +131,7 @@ export async function runTargetDeliveryLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -145,7 +148,7 @@ export async function runTargetDeliveryLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
     const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
@@ -185,6 +188,7 @@ export async function runTargetDeliveryLive({
         model: config.codex.model,
         fetch,
         log,
+        linearRunBudget,
       },
       successInput: {
         rootInput: { ...rootInput, title: "Target live delivery", description: "Target live delivery Root." },
@@ -239,6 +243,7 @@ export async function runTargetRepairLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -255,7 +260,7 @@ export async function runTargetRepairLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
     const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
@@ -295,6 +300,7 @@ export async function runTargetRepairLive({
         model: config.codex.model,
         fetch,
         log,
+        linearRunBudget,
       },
       repairInput: {
         rootInput: {
@@ -354,6 +360,7 @@ export async function runTargetRestartLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
@@ -370,7 +377,7 @@ export async function runTargetRestartLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log });
+    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
     const { setup, ids, rootInput } = prepared;
     scope = await services.createScope({ runId });
     const fixture = await services.createGitFixture({ scope });
@@ -410,6 +417,7 @@ export async function runTargetRestartLive({
         model: config.codex.model,
         fetch,
         log,
+        linearRunBudget,
       },
       restartInput: {
         rootInput: { ...rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
@@ -453,12 +461,13 @@ export async function runTargetSchedulingLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
+  linearRunBudget,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
   const prepared = await (dependencies.prepareSetup ?? prepareTargetWorkflowSetup)({
-    config, runId, fetch, log,
+    config, runId, fetch, log, linearRunBudget,
   });
   return runTargetSchedulingScenarioLive({
     config: {
@@ -473,6 +482,7 @@ export async function runTargetSchedulingLive({
     environment,
     fetch,
     log,
+    linearRunBudget,
   });
 }
 

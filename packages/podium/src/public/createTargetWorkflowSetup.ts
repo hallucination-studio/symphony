@@ -5,6 +5,7 @@ import {
   type LinearPhysicalRequestObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 import type { TargetWorkflowProjectConfiguration } from "../internal/linear-gateway/api/LinearClientInterface.js";
+import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 import type {
   TargetWorkflowSetupInterface,
   TargetWorkflowSetupResult,
@@ -16,11 +17,12 @@ const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 
 export function createTargetWorkflowSetup(input: {
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
+  linearRunBudget?: LinearRunBudgetImpl;
 } = {}): TargetWorkflowSetupInterface {
   return {
     initialize: (setupInput) => runWithFetch(
       setupInput.fetch,
-      () => initializeTargetWorkflowSetup(setupInput, input.observeLinearRequest),
+      () => initializeTargetWorkflowSetup(setupInput, input.observeLinearRequest, input.linearRunBudget),
     ),
   };
 }
@@ -28,11 +30,13 @@ export function createTargetWorkflowSetup(input: {
 async function initializeTargetWorkflowSetup(
   input: Parameters<TargetWorkflowSetupInterface["initialize"]>[0],
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void,
+  linearRunBudget?: LinearRunBudgetImpl,
 ): Promise<TargetWorkflowSetupResult> {
   validateInput(input);
   const organizationId = await LinearSdkImpl.discoverDevelopmentTokenOrganizationId(
     input.developmentToken,
     observeLinearRequest,
+    linearRunBudget ? () => linearRunBudget.permitPhysicalRequest() : undefined,
   );
   const createSdk = (delegateActorId: string) => new LinearSdkImpl(
     { kind: "development_token", token: input.developmentToken, delegateActorId },
@@ -43,6 +47,7 @@ async function initializeTargetWorkflowSetup(
           correlationId: randomUUID,
           now: Date.now,
           observe: observeLinearRequest,
+          ...(linearRunBudget ? { permit: () => linearRunBudget.permitPhysicalRequest() } : {}),
         }
       : undefined,
   );

@@ -3,6 +3,7 @@ import {
   type LinearPhysicalRequestObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
+import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
 export interface DevelopmentTokenInstallationView {
   installationId: string;
@@ -14,6 +15,7 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
   developmentToken: string;
   delegateActorId: string;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
+  linearRunBudget?: LinearRunBudgetImpl;
   discoverOrganizationId?: (
     accessToken: string,
     observe?: (observation: LinearPhysicalRequestObservation) => void,
@@ -29,6 +31,7 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
     organizationId = await discoverOrganizationId(
       input.developmentToken,
       input.observeLinearRequest,
+      input.linearRunBudget ? () => input.linearRunBudget!.permitPhysicalRequest() : undefined,
     );
   } catch {
     throw new Error("linear_development_token_invalid");

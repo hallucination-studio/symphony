@@ -36,6 +36,7 @@ export class LinearRunBudgetImpl {
   #reservedComplexity = 0;
   #complexityConsumed = 0;
   #rateLimitedUntilMs = 0;
+  readonly #physicalReservations: Array<LinearRunBudgetReservation> = [];
 
   constructor(options: {
     maxRequests?: number;
@@ -57,6 +58,7 @@ export class LinearRunBudgetImpl {
 
   observe(observation: Pick<LinearPhysicalRequestObservation, "status" | "requestWindow" | "complexityWindow">): void {
     this.#physicalRequests += 1;
+    this.#physicalReservations.shift()?.release();
     if (observation.requestWindow) this.#requestWindow = { ...observation.requestWindow };
     if (observation.complexityWindow) {
       const remaining = observation.complexityWindow.remaining;
@@ -75,6 +77,10 @@ export class LinearRunBudgetImpl {
 
   recordLogicalOperation(): void {
     this.#logicalOperations += 1;
+  }
+
+  permitPhysicalRequest(complexity = 0): void {
+    this.#physicalReservations.push(this.reserve({ requests: 1, complexity }));
   }
 
   reserve(cost: { requests: number; complexity: number }): LinearRunBudgetReservation {
