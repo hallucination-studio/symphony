@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { inspectTargetWorkflowCatalog } from "../dist/public/index.js";
+import {
+  inspectTargetWorkflowCatalog,
+  planTargetWorkflowInitialization,
+} from "../dist/public/index.js";
 
 function canonicalStates() {
   return [
@@ -23,6 +26,18 @@ function canonicalStates() {
     ["canceled-1", "Canceled", "canceled"],
     ["failed-1", "Failed", "canceled"],
   ].map(([id, name, type], position) => ({ id, name, type, position }));
+}
+
+function retainedStates() {
+  return [
+    { id: "backlog-1", name: "Backlog", type: "backlog" },
+    { id: "todo-1", name: "Todo", type: "unstarted" },
+    { id: "progress-1", name: "In Progress", type: "started" },
+    { id: "review-1", name: "In Review", type: "started" },
+    { id: "done-1", name: "Done", type: "completed" },
+    { id: "canceled-1", name: "Canceled", type: "canceled" },
+    { id: "duplicate-1", name: "Duplicate", type: "duplicate" },
+  ];
 }
 
 test("target workflow catalog accepts canonical states plus native Duplicate", () => {
@@ -70,4 +85,34 @@ test("target workflow catalog reports missing canonical states", () => {
   assert.deepEqual(inspectTargetWorkflowCatalog(states), {
     kind: "incomplete", reason: "canonical_status_missing",
   });
+});
+
+test("target workflow initialization plans Backlog rename and missing canonical creates", () => {
+  const result = planTargetWorkflowInitialization({
+    teamId: "team-1",
+    states: retainedStates(),
+  });
+
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(result.operations, [
+    { kind: "rename", statusId: "backlog-1", expectedName: "Backlog", name: "Draft", category: "backlog" },
+    ...[
+      ["Planning", "started"], ["Sealed", "started"], ["Executing", "started"],
+      ["Verifying", "started"], ["Needs Approval", "started"], ["Needs Info", "started"],
+      ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"],
+      ["Changes Required", "completed"], ["Failed", "canceled"],
+    ].map(([name, category]) => ({ kind: "create", name, category })),
+  ]);
+});
+
+test("target workflow initialization rejects Backlog when Draft already exists", () => {
+  const result = planTargetWorkflowInitialization({
+    teamId: "team-1",
+    states: [
+      ...retainedStates(),
+      { id: "draft-1", name: "Draft", type: "backlog" },
+    ],
+  });
+
+  assert.deepEqual(result, { kind: "blocked", reason: "unexpected_status" });
 });

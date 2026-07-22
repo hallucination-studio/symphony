@@ -40,8 +40,11 @@ export {
 } from "./bootstrapDevelopmentTokenInstallation.js";
 export {
   inspectTargetWorkflowCatalog,
+  planTargetWorkflowInitialization,
   TARGET_WORKFLOW_STATUS_CATEGORIES,
   type TargetWorkflowCatalogInspection,
+  type TargetWorkflowInitializationOperation,
+  type TargetWorkflowInitializationPlan,
   type TargetWorkflowStatusCategory,
   type TargetWorkflowStatusSnapshot,
 } from "./TargetWorkflowCatalog.js";
