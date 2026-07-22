@@ -1810,6 +1810,31 @@ function workflowSetupSdk(states, { failAfterCreate } = {}) {
   return {
     observations,
     sdk: {
+      client: {
+        async rawRequest() {
+          observations.batches += 1;
+          const canonical = [
+            ["Draft", "backlog"], ["Todo", "unstarted"], ["Planning", "started"],
+            ["Sealed", "started"], ["Executing", "started"], ["Verifying", "started"],
+            ["In Progress", "started"], ["In Review", "started"], ["Needs Approval", "started"],
+            ["Needs Info", "started"], ["Inconclusive", "started"], ["Escalated", "started"],
+            ["Succeeded", "completed"], ["Changes Required", "completed"], ["Done", "completed"],
+            ["Canceled", "canceled"], ["Failed", "canceled"], ["Duplicate", "duplicate"],
+          ];
+          const backlog = states.find((value) => value.id === "backlog-1");
+          if (backlog && backlog.name === "Backlog") {
+            backlog.name = "Draft";
+            observations.updates.push({ id: backlog.id, input: { name: "Draft" } });
+          }
+          for (const [name, type] of canonical) {
+            if (states.some((value) => value.name === name && value.type === type)) continue;
+            observations.creates.push({ teamId: "team-1", name, type });
+            states.push({ id: `created-${states.length}`, name, type, position: states.length });
+          }
+          if (failAfterCreate?.has("Planning")) throw new Error("network_write_lost");
+          return { operation0: { success: true } };
+        },
+      },
       organization: Promise.resolve({ id: "organization-1" }),
       project: async (projectId) => {
         observations.projects += 1;
@@ -1876,7 +1901,7 @@ test("Team workflow setup renames Backlog, creates missing states, and reads bac
     ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"],
     ["Changes Required", "completed"], ["Failed", "canceled"],
   ].map(([name, type]) => ({ name, type })));
-  assert.ok(observations.states >= 25);
+  assert.equal(observations.states, 2);
 });
 
 test("Team workflow setup batches real GraphQL status mutations and reads the catalog back once", async () => {
@@ -1907,6 +1932,17 @@ test("Team workflow setup batches real GraphQL status mutations and reads the ca
   assert.equal(result.kind, "applied");
   assert.equal(observations.batches, 1);
   assert.equal(observations.states, 2);
+});
+
+test("Team workflow setup fails closed when the SDK cannot submit a mutation batch", async () => {
+  const { sdk } = workflowSetupSdk(retainedWorkflowStates());
+  delete sdk.client;
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await assert.rejects(
+    adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true }),
+    /linear_workflow_batch_unsupported/u,
+  );
 });
 
 test("Team workflow setup treats a lost create response as applied when read-back finds the state", async () => {

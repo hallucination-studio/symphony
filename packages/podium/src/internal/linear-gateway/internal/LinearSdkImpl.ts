@@ -572,7 +572,17 @@ export class LinearSdkImpl implements LinearClientInterface {
       return this.#targetWorkflowResult("already_applied", target);
     }
 
-    await this.#applyTargetWorkflowOperationsBatch(input.projectId, target, plan.operations);
+    try {
+      await this.#applyTargetWorkflowOperationsBatch(input.projectId, target, plan.operations);
+    } catch (error) {
+      // A lost batch response is recoverable only when the final catalog proves
+      // that the complete authorized mutation was applied.
+      const observed = await this.#readTargetTeamWorkflow(input.projectId).catch(() => undefined);
+      if (!observed || observed.teamId !== target.teamId ||
+          inspectTargetWorkflowCatalog(observed.states).kind !== "complete") {
+        throw error;
+      }
+    }
     const finalTarget = await this.#readTargetTeamWorkflow(input.projectId);
     const inspection = inspectTargetWorkflowCatalog(finalTarget.states);
     if (inspection.kind !== "complete") {
@@ -604,15 +614,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       await this.#runTargetWorkflowMutationBatch(client.client.rawRequest.bind(client.client), target, operations);
       return;
     }
-    for (const operation of operations) {
-      await this.#applyTargetWorkflowOperation(
-        projectId,
-        target.teamId,
-        target.states,
-        operations,
-        operation,
-      );
-    }
+    throw new Error("linear_workflow_batch_unsupported");
   }
 
   async #runTargetWorkflowMutationBatch(
