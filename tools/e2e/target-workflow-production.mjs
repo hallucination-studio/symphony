@@ -1,4 +1,4 @@
-import { bootstrapDevelopmentTokenInstallation } from "@symphony/podium";
+import { bootstrapDevelopmentTokenInstallation, LinearRunBudgetImpl } from "@symphony/podium";
 
 import { createProductionPodiumConductorOwner, startConductorHarness } from "./conductor-harness.mjs";
 import { provisionApiKeyProfile } from "./conductor-profile.mjs";
@@ -34,6 +34,7 @@ export async function startTargetProductionBoundary({
     startConductor: dependencies.startConductor ?? startConductorHarness,
     provisionProfile: dependencies.provisionProfile ?? provisionApiKeyProfile,
   };
+  const linearRunBudget = dependencies.linearRunBudget ?? new LinearRunBudgetImpl();
   let installation;
   let podium;
   let harness;
@@ -46,7 +47,7 @@ export async function startTargetProductionBoundary({
       observeLinearRequest: (observation) => log({ event: "linear_physical_request", ...observation }),
     }));
     await services.savePodiumState({ databasePath, installation, project, binding });
-    podium = await services.createPodiumOwner({ databasePath, log });
+    podium = await services.createPodiumOwner({ databasePath, log, linearRunBudget });
     harness = await services.startConductor({ podium, environment, log });
     const apiKey = new TextEncoder().encode(codexApiKey);
     try {
@@ -61,8 +62,8 @@ export async function startTargetProductionBoundary({
     } finally {
       apiKey.fill(0);
     }
-    const externalInputs = createTargetWorkflowExternalInputs({ developmentToken, fetch, log });
-    const snapshotTransport = createTargetWorkflowSnapshotTransport({ developmentToken, fetch, log });
+    const externalInputs = createTargetWorkflowExternalInputs({ developmentToken, fetch, log, budget: linearRunBudget });
+    const snapshotTransport = createTargetWorkflowSnapshotTransport({ developmentToken, fetch, log, budget: linearRunBudget });
     const runner = createRunner({
       externalInputs,
       snapshotTransport,

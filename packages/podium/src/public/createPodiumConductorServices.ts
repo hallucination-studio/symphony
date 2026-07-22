@@ -7,6 +7,7 @@ import {
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
 import type { PodiumConductorServices } from "./PodiumConductorProtocolHandler.js";
+import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
 export interface PodiumConductorServiceOwner {
   services: PodiumConductorServices;
@@ -18,6 +19,7 @@ export function createPodiumConductorServices(input: {
   now?: () => string;
   sleep?: (delayMs: number) => Promise<void>;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
+  linearRunBudget?: LinearRunBudgetImpl;
 }): PodiumConductorServiceOwner {
   const store = new SqlitePodiumStoreImpl(input.databasePath);
   return {
@@ -46,6 +48,7 @@ export function createPodiumConductorServices(input: {
           },
         },
       ),
+      ...(input.linearRunBudget ? { linearRunBudget: input.linearRunBudget } : {}),
     }),
     close: () => store.close(),
   };

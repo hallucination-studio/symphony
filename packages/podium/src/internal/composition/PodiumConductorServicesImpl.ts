@@ -6,6 +6,7 @@ import {
   LinearRequestBrokerImpl,
   type InstallationRequestClass,
 } from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
+import type { LinearRunBudgetImpl } from "../linear-gateway/internal/LinearRunBudgetImpl.js";
 import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
 import type {
   LinearIssueState,
@@ -20,10 +21,7 @@ type Body = Record<string, JsonValue> & { kind: string };
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   #activeInstanceId: string | undefined;
-  readonly #linearRequests = new LinearRequestBrokerImpl({
-    maxConcurrent: 8,
-    maxHighPriorityBurst: 4,
-  });
+  readonly #linearRequests: LinearRequestBrokerImpl;
 
   constructor(
     private readonly store: PodiumConductorStoreInterface,
@@ -35,8 +33,15 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         observe: (observation: LinearPhysicalRequestObservation) => void,
         permit: () => void,
       ): LinearClientInterface;
+      linearRunBudget?: LinearRunBudgetImpl;
     },
-  ) {}
+  ) {
+    this.#linearRequests = new LinearRequestBrokerImpl({
+      maxConcurrent: 8,
+      maxHighPriorityBurst: 4,
+      ...(this.options.linearRunBudget ? { budget: this.options.linearRunBudget } : {}),
+    });
+  }
 
   observeExit(input: {
     bindingId: string;

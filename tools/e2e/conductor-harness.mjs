@@ -9,13 +9,14 @@ const SECRET_KEYS = new Set([
   "SYMPHONY_E2E_CODEX_API_KEY",
 ]);
 
-export async function createProductionPodiumConductorOwner({ databasePath, log }) {
+export async function createProductionPodiumConductorOwner({ databasePath, log, linearRunBudget }) {
   const {
     createPodiumConductorServices,
     PodiumConductorProtocolHandler,
   } = await import("@symphony/podium");
   const owner = createPodiumConductorServices({
     databasePath,
+    linearRunBudget,
     observeLinearRequest: (observation) => log?.({
       event: "linear_physical_request",
       ...observation,
