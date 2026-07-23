@@ -63,9 +63,15 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "OpenExternalUrlCommand",
     "ResolveConductorProjectQuery",
     "WorkflowMutationCommand",
-    "StageContextEnvelope",
-    "StageResult",
-    "StageEvent",
+    "ConductorPerformerMessage",
+    "RootReconcilerObservation",
+    "RootDirective",
+    "PlanTurnRequest",
+    "WorkTurnRequest",
+    "VerifyTurnRequest",
+    "PlanResult",
+    "WorkResult",
+    "VerifyResult",
   ]) {
     assert.match(source, new RegExp(`"${requiredName}"`), requiredName);
   }
@@ -207,64 +213,60 @@ test("Agent execution policies are closed, bounded, and shared by Profile contra
   }
 });
 
-test("Stage Wire is closed, correlated, and covers each terminal outcome", async () => {
+test("Agent Wire is closed, correlated, and covers each role outcome", async () => {
   const schema = await loadSchema("conductor-performer");
-  const envelope = schema.$defs.StageContextEnvelope;
-  const result = schema.$defs.StageResult;
-  const event = schema.$defs.StageEvent;
-
-  assert.deepEqual(envelope.required, [
-    "protocol_version",
-    "stage_execution",
-    "target",
-    "source_manifest",
-    "coverage",
-    "instruction_bundle",
-    "workflow_context",
-    "repository_context",
-    "execution_policy",
-    "limits",
-    "context_digest",
+  const message = schema.$defs.ConductorPerformerMessage;
+  assert.deepEqual(message.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/OpenRootReconcilerRequest",
+    "#/$defs/RootReconcilerOpenedResult",
+    "#/$defs/RootReconcilerObservation",
+    "#/$defs/RootDirective",
+    "#/$defs/PlanTurnRequest",
+    "#/$defs/PlanResult",
+    "#/$defs/WorkTurnRequest",
+    "#/$defs/WorkResult",
+    "#/$defs/VerifyTurnRequest",
+    "#/$defs/VerifyResult",
+    "#/$defs/CloseCycleStageSessionsCommand",
+    "#/$defs/CloseCycleStageSessionsResult",
+    "#/$defs/CloseRootReconcilerCommand",
+    "#/$defs/CloseRootReconcilerResult",
+    "#/$defs/PerformerProfileControlMetadata",
+    "#/$defs/PerformerProfileControlResult",
   ]);
-  assert.equal(envelope.additionalProperties, false);
-  assert.equal(envelope.oneOf.length, 3);
-  assert.deepEqual(schema.$defs.StageExecution.properties.stage.enum, ["plan", "work", "verify"]);
-  assert.deepEqual(schema.$defs.StageWorkflowContext.oneOf.map(({ $ref }) => $ref), [
-    "#/$defs/PlanStageContext",
-    "#/$defs/WorkStageContext",
-    "#/$defs/VerifyStageContext",
+  for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
+    const definition = schema.$defs[name];
+    assert.equal(definition.additionalProperties, false, name);
+    assert.ok(definition.required.includes("role"), name);
+    assert.ok(definition.required.includes("role_session_id"), name);
+    assert.ok(definition.required.includes("role_turn_id"), name);
+  }
+  assert.deepEqual(schema.$defs.PlanResultOutcome.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/PlanCompletedResult",
+    "#/$defs/PlanNeedsInformationResult",
+    "#/$defs/PlanBlockedResult",
+    "#/$defs/StageBudgetExhaustedResult",
+    "#/$defs/StageCanceledResult",
+    "#/$defs/StageExecutionFailedResult",
   ]);
-
-  assert.deepEqual(result.required, [
-    "protocol_version",
-    "stage_execution_id",
-    "stage",
-    "root_issue_id",
-    "cycle_issue_id",
-    "node_issue_id",
-    "context_digest",
-    "completed_at",
-    "outcome",
+  assert.deepEqual(schema.$defs.WorkResultOutcome.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/WorkCompletedResult",
+    "#/$defs/WorkBlockedResult",
+    "#/$defs/WorkSpecialResult",
+    "#/$defs/StageBudgetExhaustedResult",
+    "#/$defs/StageCanceledResult",
+    "#/$defs/StageExecutionFailedResult",
   ]);
-  assert.equal(result.additionalProperties, false);
-  assert.deepEqual(schema.$defs.StageOutcome.oneOf.map(({ $ref }) => $ref), [
-    "#/$defs/PlanCompletedOutcome",
-    "#/$defs/WorkCompletedOutcome",
-    "#/$defs/VerifyCompletedOutcome",
-    "#/$defs/StageSuspendedOutcome",
-    "#/$defs/StageExecutionFailedOutcome",
-    "#/$defs/StageCanceledOutcome",
+  assert.deepEqual(schema.$defs.VerifyResultOutcome.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/VerifyPassedResult",
+    "#/$defs/VerifyChangesRequiredResult",
+    "#/$defs/VerifyInconclusiveResult",
+    "#/$defs/VerifyPlanContractViolationResult",
+    "#/$defs/VerifyBlockedResult",
+    "#/$defs/StageBudgetExhaustedResult",
+    "#/$defs/StageCanceledResult",
+    "#/$defs/StageExecutionFailedResult",
   ]);
-  assert.deepEqual(schema.$defs.StageEventBody.oneOf.map(({ $ref }) => $ref), [
-    "#/$defs/StageStartedEvent",
-    "#/$defs/StageProgressEvent",
-    "#/$defs/StageWarningEvent",
-    "#/$defs/StageHeartbeatEvent",
-  ]);
-  assert.equal(event.additionalProperties, false);
-  assert.equal(schema.$defs.StageLimits.properties.reserved_total_tokens.$ref,
-    "common.schema.json#/$defs/NonNegativeInteger");
-  assert.equal(schema.$defs.StageLimits.properties.reservation, undefined);
 });
 
 test("workflow gateway contracts expose catalog, complete Tree facts, and stable writes", async () => {
@@ -333,7 +335,7 @@ test("generation is deterministic and check mode detects drift", async () => {
   );
   assert.deepEqual(after, before);
   assert.match(before[0], /export type PodiumClientConnectLinearCommand/);
-  assert.match(before[1], /class ConductorPerformerStageContextEnvelope/);
+  assert.match(before[1], /class ConductorPerformerRootDirective/);
   assert.match(
     before[2],
     /define_contract_type!\(DesktopHostOpenExternalUrlCommand/,

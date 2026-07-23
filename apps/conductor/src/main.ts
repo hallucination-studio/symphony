@@ -4,25 +4,21 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 
-import { LinearConductorRuntime } from "./composition/ConductorRuntime.js";
-import { LinearRootStageDispatcher } from "./composition/LinearRootStageDispatcher.js";
-import { conductorCycleDelayMs } from "./composition/ConductorCycleDelayPolicy.js";
+import { RootReconciliationRuntime } from "./root-reconciliation/internal/RootReconciliationRuntime.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
-import { buildRootDagView } from "./linear-dag/internal/RootDagViewBuilder.js";
-import { LinearDagExecutionImpl } from "./linear-dag/internal/LinearDagExecutionImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
 import { LinearRootOwnershipClaimImpl } from "./root-discovery/internal/LinearRootOwnershipClaimImpl.js";
 import { FilePerformerProfileStoreImpl } from "./performer-profiles/internal/FilePerformerProfileStoreImpl.js";
 import { ConductorProfileRelayHandler } from "./performer-profiles/internal/ConductorProfileRelayHandler.js";
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
 import { SerializedPerformerProcessRunnerImpl } from "./performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
-import { ShortProcessPerformerStageClientImpl } from "./performer-stage-client/internal/ShortProcessPerformerStageClientImpl.js";
-import { stageProcessEnvironment, validateCodexBaseUrl } from "./performer-stage-client/internal/StageProcessEnvironment.js";
+import { SessionPerformerAgentClientImpl } from "./performer-agent-client/internal/SessionPerformerAgentClientImpl.js";
+import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
+import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
+import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
-import { LinearCycleRootWorkflowPolicyImpl } from "./root-workflow/internal/LinearCycleRootWorkflowPolicyImpl.js";
-import { createDefaultRootConvergencePolicy } from "./root-workflow/internal/RootConvergencePolicy.js";
-import type { DiscoveredRoot, RootDagView } from "./root-workflow/api/index.js";
+import type { DiscoveredRoot } from "./root-reconciliation/api/RootModels.js";
 
 type JsonValue =
   | null
@@ -32,36 +28,33 @@ type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-const MAX_STAGE_WALL_TIME_MS = 5 * 60_000;
 const MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export async function runConductor(environment = process.env): Promise<void> {
   const config = runtimeConfig(environment);
-  const rootDeadlineMs = Date.parse(config.rootConvergencePolicy.deadlineAt);
+  const rootDeadlineMs = Date.parse(config.rootDeadlineAt);
   const input = createReadStream("", { fd: config.privateIpcFd, autoClose: false });
   const output = createWriteStream("", { fd: config.privateIpcFd, autoClose: false });
   const profiles = new FilePerformerProfileStoreImpl(config.dataRoot);
   const processRunner = new SerializedPerformerProcessRunnerImpl();
   const profileControl = new PerformerProfileControlProcessImpl(processRunner, profiles, {
     executable: config.performerExecutable,
-    environment: () => stageProcessEnvironment(config.performerExecutable, config.codexBaseUrl),
+    environment: () => agentProcessEnvironment(config.performerExecutable, config.codexBaseUrl),
     deadlineMs: 120_000,
   });
   const git = new NativeGitWorkspaceImpl(
     config.repositoryRoot,
     path.join(config.dataRoot, "worktrees"),
   );
-  const performer = new ShortProcessPerformerStageClientImpl({
-    runtimeRoot: path.join(config.dataRoot, "stages"),
+  const performer = new SessionPerformerAgentClientImpl({
     executable: config.performerExecutable,
-    environment: (profileId) => stageProcessEnvironment(
+    environment: (profileId) => agentProcessEnvironment(
       config.performerExecutable,
       config.codexBaseUrl,
       { CODEX_HOME: profiles.codexHome(profileId) },
     ),
-    ...(config.codexBaseUrl ? { codexBaseUrl: config.codexBaseUrl } : {}),
-    startupDeadlineMs: 120_000,
-    cancellationGraceMs: 1_000,
+    lane: processRunner,
+    deadlineMs: 300_000,
   });
   let stopping = false;
   let shutdown: Promise<void> | undefined;
@@ -113,27 +106,6 @@ export async function runConductor(environment = process.env): Promise<void> {
     branch: `symphony/runs/${root.identifier.toLowerCase()}`,
     worktreePath: path.join(config.dataRoot, "worktrees", root.issueId),
   });
-  const readRootDag = async (rootIssueId: string): Promise<RootDagView> => {
-    const tree = await gateway.readWorkflowIssueTree(rootIssueId);
-    const root = tree.issues.find((issue) => issue.issue_id === rootIssueId);
-    if (!root) throw new Error("root_tree_root_missing");
-    const workspace = await git.ensureWorkspace({
-      rootIssueId,
-      rootIdentifier: root.identifier,
-      baseBranch: config.baseBranch,
-    });
-    return buildRootDagView({ tree, workspace, git: await git.inspect(workspace) });
-  };
-  const readyProfile = async (view: RootDagView) => {
-    const file = await profiles.list();
-    const profileId = view.root.ownership?.performerProfileId ?? file.activeProfileId;
-    const profile = profileId
-      ? file.profiles.find((candidate) => candidate.profileId === profileId)
-      : undefined;
-    return profile && await profileReadiness(profileControl, performer, profile.profileId) === "ready"
-      ? profile
-      : undefined;
-  };
   const ownershipClaim = new LinearRootOwnershipClaimImpl({
     linear: gateway,
     git,
@@ -146,60 +118,13 @@ export async function runConductor(environment = process.env): Promise<void> {
       if (!profile) return undefined;
       return {
         profileId: profile.profileId,
-        ready: await profileReadiness(profileControl, performer, profile.profileId) === "ready",
+        ready: await profileReadiness(profileControl, profile.profileId) === "ready",
       };
     },
     workspaceFor,
     conductorId: config.conductorId,
     ownerGeneration: config.instanceId,
     baseBranch: config.baseBranch,
-  });
-  const targetGateway = {
-    resolveProject: () => gateway.resolveProject(),
-    listRoots: (projectId: string) => gateway.listRoots(projectId),
-    admitRoot: (root: DiscoveredRoot) => ownershipClaim.claim({ root }),
-    readRootDag,
-  };
-  const execution = new LinearDagExecutionImpl(
-    { linear: gateway, git, performer },
-    undefined,
-    undefined,
-    config.rootConvergencePolicy,
-  );
-  const dispatcher = new LinearRootStageDispatcher({
-    execution,
-    profileFor: readyProfile,
-    workspaceFor,
-    optionsFor({ root, view, profile, stage }) {
-      const cycle = view.cycles.find(({ issue }) => ![
-        "Succeeded", "Changes Required", "Canceled",
-      ].includes(issue.status_name));
-      return {
-        conductorShortHash: config.conductorShortHash,
-        repositoryIdentity: config.repositoryHandle,
-        baseBranch: config.baseBranch,
-        performerProfileId: profile.profileId,
-        modelSettings: {
-          model: profile.codexTurnSettings.model,
-          reasoningEffort: stageReasoningEffort(profile.codexTurnSettings.reasoningEffort),
-          isFastModeEnabled: profile.codexTurnSettings.isFastModeEnabled,
-        },
-        limits: {
-          maxContextBytes: 8_388_608,
-          maxResultBytes: 1_048_576,
-          maxWallTimeMs: MAX_STAGE_WALL_TIME_MS,
-          maxToolCalls: 256,
-          maxCommandDurationMs: 300_000,
-          reservedTotalTokens: 50_000,
-          maxOutputTokens: 8_000,
-        },
-        instructionSetId: `${stage}-v1`,
-        stageInstructions: stageInstructions(stage),
-        now: () => new Date().toISOString(),
-        stageId: (_root, cycleIssueId, attempt) =>
-          `${root.issueId}:${stage}:${cycle?.issue.issue_id ?? cycleIssueId}:${attempt}`,
-      };
-    },
   });
   const report = async (body: JsonValue) => protocol.request({
     requestId: randomUUID(),
@@ -220,44 +145,48 @@ export async function runConductor(environment = process.env): Promise<void> {
       base_branch: config.baseBranch,
     },
   });
-  const runtime = new LinearConductorRuntime(
-    config.conductorId,
-    config.conductorShortHash,
-    targetGateway,
-    new LinearPriorityRootSchedulingPolicyImpl(),
-    new LinearCycleRootWorkflowPolicyImpl(config.rootConvergencePolicy),
-    dispatcher,
-    {
-      async report(value) {
-        logEvent(value.status === "blocked" ? "error" : "info", "conductor_cycle_reported", {
-          conductor_id: config.conductorId,
-          binding_id: config.bindingId,
-          instance_id: config.instanceId,
-          ...(value.rootId ? { root_issue_id: value.rootId } : {}),
-          ...(value.sanitizedReason ? { sanitized_reason: value.sanitizedReason } : {}),
-          status: value.status,
-        });
-      },
+  const runtime = new RootReconciliationRuntime({
+    conductorId: config.conductorId,
+    conductorShortHash: config.conductorShortHash,
+    baseBranch: config.baseBranch,
+    linear: gateway,
+    git,
+    ownership: ownershipClaim,
+    scheduling: new LinearPriorityRootSchedulingPolicyImpl(),
+    performer,
+    materializer: new LinearRootDirectiveMaterializerImpl(
+      gateway,
+      new LinearHumanActionMaterializerImpl(gateway),
+    ),
+    profileIdFor: async () => {
+      const file = await profiles.list();
+      const profileId = file.activeProfileId;
+      if (!profileId) return undefined;
+      const profile = file.profiles.find((candidate) => candidate.profileId === profileId);
+      return profile && await profileReadiness(profileControl, profile.profileId) === "ready"
+        ? profile.profileId
+        : undefined;
     },
-  );
+    modelSettingsFor: async (profileId) => {
+      const file = await profiles.list();
+      const profile = file.profiles.find((candidate) => candidate.profileId === profileId);
+      if (!profile) throw new Error("performer_profile_missing");
+      return {
+        model: profile.codexTurnSettings.model,
+        reasoningEffort: stageReasoningEffort(profile.codexTurnSettings.reasoningEffort),
+        isFastModeEnabled: profile.codexTurnSettings.isFastModeEnabled,
+      };
+    },
+    log: (event, fields) => logEvent("info", event, fields),
+  });
   const stop = () => { void requestStop().catch(() => undefined); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   const deadlineTimer = setTimeout(stop, Math.max(0, rootDeadlineMs - Date.now()));
   try {
-    let idleAttempt = 0;
     while (!stopping) {
-      const disposition = await runtime.cycle();
-      const currentIdleAttempt = idleAttempt;
-      idleAttempt = disposition === "progress" ? 0 : Math.min(20, idleAttempt + 1);
-      const cycleDelay = conductorCycleDelayMs({
-        disposition,
-        baseDelayMs: config.cycleDelayMs,
-        ...(config.idleDelayMs === undefined ? {} : { idleDelayMs: config.idleDelayMs }),
-        idleAttempt: currentIdleAttempt,
-        random: Math.random,
-      });
-      await delay(Math.min(cycleDelay, Math.max(0, rootDeadlineMs - Date.now())));
+      await runtime.cycle();
+      await delay(Math.min(config.cycleDelayMs, Math.max(0, rootDeadlineMs - Date.now())));
     }
   } finally {
     clearTimeout(deadlineTimer);
@@ -267,14 +196,11 @@ export async function runConductor(environment = process.env): Promise<void> {
 
 async function profileReadiness(
   control: PerformerProfileControlProcessImpl,
-  performer: ShortProcessPerformerStageClientImpl,
   profileId: string,
 ) {
-  if (performer) {
-    const result = await control.status(profileId);
-    const readiness = result.readiness;
-    if (readiness === "login-required" || readiness === "ready" || readiness === "invalid") return readiness;
-  }
+  const result = await control.status(profileId);
+  const readiness = result.readiness;
+  if (readiness === "login-required" || readiness === "ready" || readiness === "invalid") return readiness;
   throw new Error("profile_status_invalid");
 }
 
@@ -284,26 +210,13 @@ function stageReasoningEffort(value: string): "low" | "medium" | "high" {
   return "low";
 }
 
-function stageInstructions(stage: "plan" | "work" | "verify") {
-  if (stage === "plan") return "Produce a bounded Plan Contract from the supplied Root facts. included_scope and excluded_scope must contain only exact repository-relative path prefixes; do not put prose, actions, or rationale in those arrays.";
-  if (stage === "work") return "Implement the selected Work node within the approved scope.";
-  return "Verify the immutable artifact against the approved Plan Contract.";
-}
-
 function isKind(value: JsonValue, kind: string): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && value.kind === kind;
 }
 
 function runtimeConfig(environment: NodeJS.ProcessEnv) {
-  const defaultRootConvergencePolicy = createDefaultRootConvergencePolicy();
   const rootDeadlineAt = environment.SYMPHONY_ROOT_DEADLINE_AT;
-  const rootConvergencePolicy = rootDeadlineAt === undefined
-    ? defaultRootConvergencePolicy
-    : {
-      ...defaultRootConvergencePolicy,
-      deadlineAt: validTimestamp(rootDeadlineAt, "root_deadline_invalid"),
-    };
   return {
     privateIpcFd: positiveInteger(environment.SYMPHONY_PRIVATE_IPC_FD, "private_ipc_fd_invalid"),
     instanceId: required(environment.SYMPHONY_INSTANCE_ID, "instance_id_missing"),
@@ -321,10 +234,9 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
       : 1_000,
-    idleDelayMs: environment.SYMPHONY_CYCLE_IDLE_DELAY_MS
-      ? positiveInteger(environment.SYMPHONY_CYCLE_IDLE_DELAY_MS, "cycle_idle_delay_invalid")
-      : undefined,
-    rootConvergencePolicy,
+    rootDeadlineAt: rootDeadlineAt === undefined
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      : validTimestamp(rootDeadlineAt, "root_deadline_invalid"),
   };
 }
 

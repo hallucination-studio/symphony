@@ -1,7 +1,7 @@
 import type { GitWorkspace, GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { DiscoveredRoot } from "../../root-workflow/api/Models.js";
-import type { RootOwnershipRecord } from "../../root-workflow/api/ManagedRecords.js";
+import type { DiscoveredRoot } from "../../root-reconciliation/api/RootModels.js";
+import type { RootOwnershipRecord } from "../../root-reconciliation/api/ManagedRecords.js";
 
 export type RootOwnershipClaimResult =
   | { kind: "claimed"; ownership: RootOwnershipRecord; workspace: GitWorkspace }

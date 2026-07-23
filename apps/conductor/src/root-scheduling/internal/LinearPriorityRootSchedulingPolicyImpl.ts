@@ -2,7 +2,7 @@ import type { RootSchedulingPolicyInterface } from "../api/RootSchedulingPolicyI
 import type {
   DiscoveredRoot,
   LinearPriority,
-} from "../../root-workflow/api/Models.js";
+} from "../../root-reconciliation/api/RootModels.js";
 import { blockerEligibleRoots } from "./LinearBlockerEligibilityPolicy.js";
 
 const PRIORITY_ORDER: Record<LinearPriority, number> = {

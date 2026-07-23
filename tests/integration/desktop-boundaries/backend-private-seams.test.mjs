@@ -38,11 +38,12 @@ test("Desktop Backend closes Client, Host, Profile, and binary secret seams", as
   assert.match(open.body.url, /^https:\/\/linear\.app\/oauth\/authorize\?/);
   assert.equal(new URL(open.body.url).searchParams.get("code_challenge_method"), "S256");
   child.stdio[3].write(frame(open.request_id, {
-    kind: "host_command_accepted",
-    command_kind: "open_external_url",
+    kind: "host_operation_completed",
+    operation: "open_external_url",
   }));
   const accepted = await client.next();
-  assert.equal(accepted.body.kind, "command_accepted");
+  assert.equal(accepted.body.kind, "linear_authorization_started");
+  assert.equal(typeof accepted.body.attempt_id, "string");
 
   const secret = Buffer.from("one-shot-key");
   child.stdin.write(Buffer.concat([

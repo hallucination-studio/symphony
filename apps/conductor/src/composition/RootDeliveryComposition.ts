@@ -5,8 +5,8 @@ import type {
   RootDeliveryInterface,
   RootDeliveryResult,
 } from "../root-delivery/api/RootDeliveryInterface.js";
-import type { DeliveryRecord } from "../root-workflow/api/ManagedRecords.js";
-import { parseManagedRecord, serializeManagedRecord } from "../root-workflow/api/index.js";
+import type { DeliveryRecord } from "../root-reconciliation/api/ManagedRecords.js";
+import { parseManagedRecord, serializeManagedRecord } from "../root-reconciliation/api/index.js";
 
 export class RootDeliveryCoordinator {
   constructor(

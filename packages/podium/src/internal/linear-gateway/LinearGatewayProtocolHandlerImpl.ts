@@ -588,19 +588,6 @@ function workflowRelationKind(value: string | undefined): boolean {
   return value === "blocks" || value === "blocked_by" || value === "triggered_by";
 }
 
-function rootPhase(value: string): boolean {
-  return (
-    value === "planning" ||
-    value === "awaiting-human" ||
-    value === "working" ||
-    value === "gating" ||
-    value === "delivering" ||
-    value === "in-review" ||
-    value === "blocked" ||
-    value === "failed"
-  );
-}
-
 function managedNodeShapeValid(issue: LinearIssueValue): boolean {
   if (issue.nodeKind === undefined) {
     return (

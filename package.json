@@ -25,11 +25,9 @@
     "test:host": "npm run test:host -w @symphony/podium-desktop --",
     "test:integration": "node --test tests/integration/*.test.mjs tests/integration/*/*.test.mjs",
     "e2e:doctor": "node tools/e2e/doctor.mjs",
-    "e2e:target-live": "node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-all",
     "test:e2e:runner": "node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node --test tests/e2e/*.test.mjs",
     "desktop-shell-smoke:build": "node tools/e2e/desktop-shell-build.mjs",
     "desktop-shell-smoke": "npm run desktop-shell-smoke:build && node tools/e2e/desktop-shell-smoke.mjs",
-    "e2e:cleanup": "node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/cleanup.mjs",
     "test:typescript": "npm test -w @symphony/podium && npm test -w @symphony/conductor && npm test -w @symphony/podium-desktop",
     "test": "npm run test:architecture && npm run test:contracts && npm run test:typescript && npm run test:integration",
     "package": "npm run package -w @symphony/podium-desktop"

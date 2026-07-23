@@ -1,4 +1,4 @@
-import type { DiscoveredRoot } from "../root-workflow/api/Models.js";
+import type { DiscoveredRoot } from "../root-reconciliation/api/RootModels.js";
 
 export function discoverCurrentRoots(input: {
   projectId: string;

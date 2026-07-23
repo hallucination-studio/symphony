@@ -1,123 +1,53 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://symphony.local/contracts/conductor-performer.schema.json",
-  "title": "Conductor Performer Protocol V1",
+  "title": "Conductor Performer Agent Protocol V1",
   "$defs": {
-
-
     "CodexTurnSettings": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "model",
-        "reasoning_effort",
-        "is_fast_mode_enabled"
-      ],
+      "required": ["model", "reasoning_effort", "is_fast_mode_enabled"],
       "properties": {
-        "model": {
-          "$ref": "common.schema.json#/$defs/ShortText"
-        },
-        "reasoning_effort": {
-          "enum": [
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ]
-        },
-        "is_fast_mode_enabled": {
-          "type": "boolean"
-        }
+        "model": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "reasoning_effort": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh"] },
+        "is_fast_mode_enabled": { "type": "boolean" }
       }
     },
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "StageExecution": {
+    "ExecutionPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "stage_execution_id",
-        "stage",
-        "started_at",
-        "deadline_at"
-      ],
+      "required": ["sandbox_mode", "allowed_tools", "denied_tools", "network_policy"],
       "properties": {
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "enum": ["plan", "work", "verify"] },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "sandbox_mode": { "enum": ["read_only", "workspace_write"] },
+        "allowed_tools": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
+        "denied_tools": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
+        "network_policy": { "enum": ["disabled", "restricted", "enabled"] }
+      }
+    },
+    "TurnLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_context_bytes", "max_result_bytes", "max_output_tokens", "max_tool_calls", "max_wall_time_ms", "deadline_at"],
+      "properties": {
+        "max_context_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_output_tokens": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "max_tool_calls": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "max_wall_time_ms": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
         "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "StageExecutionPlan": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["stage_execution_id", "stage", "started_at", "deadline_at"],
-      "properties": {
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "const": "plan" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "StageExecutionWork": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["stage_execution_id", "stage", "started_at", "deadline_at"],
-      "properties": {
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "const": "work" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "StageExecutionVerify": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["stage_execution_id", "stage", "started_at", "deadline_at"],
-      "properties": {
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "const": "verify" },
-        "started_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "StageTarget": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_issue_id", "cycle_issue_id", "node_issue_id"],
-      "properties": {
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "node_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageContextSource": {
+    "SourceManifestEntry": {
       "type": "object",
       "additionalProperties": false,
       "required": ["source_kind", "source_id", "version_or_digest"],
       "properties": {
-        "source_kind": {
-          "enum": ["linear_issue", "linear_comment", "linear_relation", "git", "repository_instruction"]
-        },
+        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_relation", "git", "repository_instruction"] },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "version_or_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
-    "StageContextCoverageOmission": {
+    "CoverageOmission": {
       "type": "object",
       "additionalProperties": false,
       "required": ["source_id", "reason"],
@@ -126,20 +56,16 @@
         "reason": { "$ref": "common.schema.json#/$defs/ShortText" }
       }
     },
-    "StageContextCoverage": {
+    "Coverage": {
       "type": "object",
       "additionalProperties": false,
       "required": ["is_complete", "omissions"],
       "properties": {
         "is_complete": { "type": "boolean" },
-        "omissions": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageContextCoverageOmission" }
-        }
+        "omissions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CoverageOmission" } }
       }
     },
-    "StageRepositoryInstruction": {
+    "RepositoryInstruction": {
       "type": "object",
       "additionalProperties": false,
       "required": ["relative_path", "content_digest", "content"],
@@ -149,111 +75,42 @@
         "content": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
-    "StageInstructionBundle": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["stage_instruction_set_id", "stage_instructions", "output_schema", "repository_instructions"],
-      "properties": {
-        "stage_instruction_set_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage_instructions": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "output_schema": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "repository_instructions": {
-          "type": "array",
-          "maxItems": 32,
-          "items": { "$ref": "#/$defs/StageRepositoryInstruction" }
-        }
-      }
-    },
     "RepositoryContext": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "repository_identity",
-        "base_branch",
-        "workspace_revision",
-        "baseline_revision",
-        "status_summary",
-        "relevant_paths",
-        "workspace_access"
-      ],
+      "required": ["repository_identity", "base_branch", "workspace_revision", "baseline_revision", "status_summary", "relevant_paths", "workspace_access", "instructions"],
       "properties": {
         "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
         "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
         "workspace_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
         "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
         "status_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "relevant_paths": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedPath" }
-        },
-        "workspace_access": { "enum": ["read_only", "read_write"] }
+        "relevant_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } },
+        "workspace_access": { "enum": ["read_only", "read_write"] },
+        "instructions": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/RepositoryInstruction" } }
       }
     },
-    "StageExecutionPolicy": {
+    "GitFacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "performer_profile_id",
-        "model_settings",
-        "sandbox_mode",
-        "allowed_tools",
-        "denied_tools",
-        "network_policy"
-      ],
+      "required": ["head_revision", "baseline_revision", "status_summary", "changed_paths"],
       "properties": {
-        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "model_settings": { "$ref": "#/$defs/CodexTurnSettings" },
-        "sandbox_mode": { "enum": ["read_only", "workspace_write"] },
-        "allowed_tools": {
-          "type": "array",
-          "maxItems": 64,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "denied_tools": {
-          "type": "array",
-          "maxItems": 64,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "network_policy": { "enum": ["disabled", "restricted", "enabled"] }
+        "head_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "changed_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } }
       }
     },
-    "StageLimits": {
+    "EvidenceRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "max_context_bytes",
-        "max_result_bytes",
-        "max_wall_time_ms",
-        "max_tool_calls",
-        "max_command_duration_ms",
-        "reserved_total_tokens",
-        "max_output_tokens"
-      ],
+      "required": ["reference_id", "source_kind"],
       "properties": {
-        "max_context_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
-        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
-        "max_wall_time_ms": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
-        "max_tool_calls": { "type": "integer", "minimum": 0, "maximum": 10000 },
-        "max_command_duration_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
-        "reserved_total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "max_output_tokens": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+        "reference_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_record", "git", "check", "result"] }
       }
     },
-    "StageContentRecord": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["source_id", "source_kind", "text", "author_kind", "remote_version", "updated_at"],
-      "properties": {
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_kind": { "enum": ["issue", "comment"] },
-        "text": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "author_kind": { "enum": ["human", "symphony"] },
-        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "StageAcceptanceCriterion": {
+    "AcceptanceCriterion": {
       "type": "object",
       "additionalProperties": false,
       "required": ["criterion_key", "statement", "verification_method"],
@@ -263,94 +120,170 @@
         "verification_method": { "$ref": "common.schema.json#/$defs/ShortText" }
       }
     },
-    "StageRootContext": {
+    "IssueSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["identifier", "title", "objective", "acceptance_criteria", "relevant_comments", "remote_version"],
+      "required": ["issue_id", "issue_kind", "title", "description", "status", "is_archived", "remote_version"],
       "properties": {
-        "identifier": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "title": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "objective": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "acceptance_criteria": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "relevant_comments": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageContentRecord" }
-        },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "is_archived": { "type": "boolean" },
         "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
       }
     },
-    "StageCycleContext": {
+    "RelationSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_key", "trigger"],
+      "required": ["relation_id", "relation_kind", "source_issue_id", "target_issue_id"],
       "properties": {
-        "cycle_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "trigger": { "enum": ["initial", "verify_changes", "review_changes"] },
-        "predecessor_cycle": { "$ref": "#/$defs/StagePredecessorCycle" }
+        "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] },
+        "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
-    "StagePredecessorCycle": {
+    "CommentSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_issue_id", "approved_plan", "verify_evidence", "completion_summary"],
+      "required": ["comment_id", "comment_version", "issue_id", "author_kind", "body", "created_at", "updated_at"],
       "properties": {
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "author_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "UserCommentInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comment_id", "comment_version", "issue_id", "issue_kind", "author_user_id", "body", "created_at", "updated_at"],
+      "properties": {
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "approved_plan": { "$ref": "#/$defs/StagePlanContract" },
-        "verify_evidence": { "$ref": "#/$defs/StageVerifyEvidence" },
-        "completion_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "author_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "StageVerifyEvidence": {
+    "ExternalLinearChangeInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["verify_result_id", "verified_revision", "criteria_results", "checks"],
+      "required": ["change_id", "actor_kind", "target_issue_id", "issue_kind", "change_kind", "before_version_or_digest", "after_version_or_digest", "changed_field_names", "observed_at"],
       "properties": {
-        "verify_result_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "verified_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "criteria_results": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageVerifyCriterionResult" }
-        },
-        "checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageCheck" }
-        }
+        "change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "change_kind": { "enum": ["status", "content", "archive", "parent", "relation"] },
+        "before_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "after_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "changed_field_names": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
+        "relation_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "StageDiffEntry": {
+    "RecordReference": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["relative_path", "change_kind"],
+      "required": ["record_id", "record_kind", "version"],
       "properties": {
-        "relative_path": { "$ref": "common.schema.json#/$defs/BoundedPath" },
-        "change_kind": { "enum": ["added", "modified", "deleted", "renamed"] },
-        "before_blob": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "after_blob": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "record_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "record_kind": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
       }
     },
-    "StageActualChanges": {
+    "HumanActionRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_revision", "target_revision", "diff_entries", "diff_summary"],
+      "required": ["action_id", "action_issue_id", "action_kind", "parent_scope", "status", "is_archived", "related_issue_ids"],
       "properties": {
-        "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "diff_entries": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/StageDiffEntry" }
-        },
-        "diff_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] },
+        "parent_scope": { "enum": ["root", "cycle"] },
+        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "is_archived": { "type": "boolean" },
+        "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }
       }
     },
-    "StageFindingSummary": {
+    "HumanActionResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolution_id", "action_id", "action_issue_id", "outcome", "terminal_status", "terminal_remote_version", "actor_kind", "resolved_at"],
+      "properties": {
+        "resolution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] },
+        "outcome": { "enum": ["approved", "rejected", "answered", "canceled", "granted", "denied", "waived", "override_applied", "override_rejected"] },
+        "terminal_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "terminal_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "source_comment_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
+        "actor_kind": { "const": "human" },
+        "resolved_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RootObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue", "objective", "scope", "acceptance_criteria", "root_status", "ownership", "convergence_summary"],
+      "properties": {
+        "issue": { "$ref": "#/$defs/IssueSnapshot" },
+        "objective": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "scope": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "acceptance_criteria": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } },
+        "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } },
+        "root_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "ownership": { "$ref": "#/$defs/RecordReference" },
+        "convergence_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "CycleObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cycle_issue", "predecessor_cycle_issue_id", "cycle_status", "is_archived", "issues", "relations", "plan_results", "work_results", "verify_results", "findings", "human_action_records", "human_action_resolutions"],
+      "properties": {
+        "cycle_issue": { "$ref": "#/$defs/IssueSnapshot" },
+        "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "cycle_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "is_archived": { "type": "boolean" },
+        "active_plan_contract": { "$ref": "#/$defs/PlanContract" },
+        "budget": { "$ref": "#/$defs/BudgetSnapshot" },
+        "outcome": { "$ref": "#/$defs/RecordReference" },
+        "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
+        "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
+        "plan_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
+        "work_results": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RecordReference" } },
+        "verify_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
+        "findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } },
+        "human_action_records": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionRecord" } },
+        "human_action_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }
+      }
+    },
+    "BudgetSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turns_used", "turns_remaining", "tokens_used", "tokens_remaining"],
+      "properties": {
+        "turns_used": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "turns_remaining": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "tokens_used": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "tokens_remaining": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
+      }
+    },
+    "Finding": {
       "type": "object",
       "additionalProperties": false,
       "required": ["finding_id", "category", "severity", "summary"],
@@ -361,404 +294,91 @@
         "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
-    "StageAttemptSummary": {
+    "RootReconcilerObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["attempt_key", "summary", "outcome"],
-      "properties": {
-        "attempt_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "outcome": { "enum": ["completed", "failed", "canceled", "suspended"] }
-      }
-    },
-    "StageExistingNode": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["issue_id", "kind", "title", "business_state", "blocked_by_issue_ids"],
-      "properties": {
-        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "kind": { "enum": ["cycle", "plan", "work", "verify"] },
-        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "business_state": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "blocked_by_issue_ids": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/Identifier" }
-        }
-      }
-    },
-    "StageRepositorySnapshot": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["head_revision", "status_summary", "top_level_paths"],
-      "properties": {
-        "head_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "status_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "top_level_paths": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedPath" }
-        }
-      }
-    },
-    "PlanStageContext": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "root",
-        "cycle",
-        "actual_changes",
-        "unresolved_findings",
-        "attempted_approaches",
-        "review_inputs",
-        "existing_nodes",
-        "repository_snapshot"
-      ],
-      "properties": {
-        "root": { "$ref": "#/$defs/StageRootContext" },
-        "cycle": { "$ref": "#/$defs/StageCycleContext" },
-        "actual_changes": { "$ref": "#/$defs/StageActualChanges" },
-        "unresolved_findings": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageFindingSummary" }
-        },
-        "attempted_approaches": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAttemptSummary" }
-        },
-        "review_inputs": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageContentRecord" }
-        },
-        "existing_nodes": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "#/$defs/StageExistingNode" }
-        },
-        "repository_snapshot": { "$ref": "#/$defs/StageRepositorySnapshot" }
-      }
-    },
-    "StageRootBoundary": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_issue_id", "objective_summary", "included_scope", "excluded_scope", "relevant_acceptance_criteria"],
-      "properties": {
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "objective_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "included_scope": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "excluded_scope": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "relevant_acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        }
-      }
-    },
-    "StageWorkNode": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["issue_id", "work_key", "title", "description", "acceptance_criteria", "relevant_comments", "remote_version"],
-      "properties": {
-        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "work_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "relevant_comments": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageContentRecord" }
-        },
-        "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
-      }
-    },
-    "StageDependencyState": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["work_key", "terminal_outcome"],
-      "properties": {
-        "work_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "terminal_outcome": { "enum": ["completed", "failed", "canceled"] },
-        "commit_revision": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageGitBaseline": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["head_revision", "status_summary"],
-      "properties": {
-        "head_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "status_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "StageResolvedHumanInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["action_id", "request_kind", "answer_or_decision", "target_context_digest"],
-      "properties": {
-        "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "request_kind": { "enum": ["needs_info", "needs_approval"] },
-        "answer_or_decision": { "$ref": "#/$defs/StageContentRecord" },
-        "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "WorkStageContext": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["root_boundary", "work_node", "dependency_state", "resolved_human_input", "git_baseline"],
-      "properties": {
-        "root_boundary": { "$ref": "#/$defs/StageRootBoundary" },
-        "work_node": { "$ref": "#/$defs/StageWorkNode" },
-        "dependency_state": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageDependencyState" }
-        },
-        "resolved_human_input": {
-          "type": "array",
-          "maxItems": 16,
-          "items": { "$ref": "#/$defs/StageResolvedHumanInput" }
-        },
-        "git_baseline": { "$ref": "#/$defs/StageGitBaseline" }
-      }
-    },
-    "StageApprovedPlan": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["included_scope", "excluded_scope", "acceptance_criteria", "verify_contract"],
-      "properties": {
-        "included_scope": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "excluded_scope": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "verify_contract": { "$ref": "#/$defs/StageVerifyContract" }
-      }
-    },
-    "StageVerifyRootContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["objective", "acceptance_criteria"],
-      "properties": {
-        "objective": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        }
-      }
-    },
-    "StageVerifyContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["acceptance_criteria", "required_checks"],
-      "properties": {
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "required_checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        }
-      }
-    },
-    "StageCheck": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["check_key", "command_or_method", "outcome", "summary", "artifact_revision"],
-      "properties": {
-        "check_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "command_or_method": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "outcome": { "enum": ["passed", "failed", "not_run"] },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "artifact_revision": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageWorkEvidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["work_key", "completion_summary", "changed_paths", "checks", "commit_revision"],
-      "properties": {
-        "work_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "completion_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "changed_paths": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedPath" }
-        },
-        "checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageCheck" }
-        },
-        "commit_revision": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageArtifact": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["baseline_revision", "target_revision", "changed_paths"],
-      "properties": {
-        "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "changed_paths": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedPath" }
-        }
-      }
-    },
-    "VerifyStageContext": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "root_contract",
-        "approved_plan",
-        "work_evidence",
-        "prior_open_findings",
-        "prior_attempts",
-        "artifact",
-        "required_checks",
-        "delivery_preconditions"
-      ],
-      "properties": {
-        "root_contract": { "$ref": "#/$defs/StageVerifyRootContract" },
-        "approved_plan": { "$ref": "#/$defs/StageApprovedPlan" },
-        "work_evidence": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageWorkEvidence" }
-        },
-        "prior_open_findings": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageFindingSummary" }
-        },
-        "prior_attempts": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAttemptSummary" }
-        },
-        "artifact": { "$ref": "#/$defs/StageArtifact" },
-        "required_checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageCheck" }
-        },
-        "delivery_preconditions": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        }
-      }
-    },
-    "StageWorkflowContext": {
-      "oneOf": [
-        { "$ref": "#/$defs/PlanStageContext" },
-        { "$ref": "#/$defs/WorkStageContext" },
-        { "$ref": "#/$defs/VerifyStageContext" }
-      ]
-    },
-    "StageContextEnvelope": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "stage_execution",
-        "target",
-        "source_manifest",
-        "coverage",
-        "instruction_bundle",
-        "workflow_context",
-        "repository_context",
-        "execution_policy",
-        "limits",
-        "context_digest"
-      ],
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["stage_execution", "workflow_context"],
-          "properties": {
-            "stage_execution": { "$ref": "#/$defs/StageExecutionPlan" },
-            "workflow_context": { "$ref": "#/$defs/PlanStageContext" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["stage_execution", "workflow_context"],
-          "properties": {
-            "stage_execution": { "$ref": "#/$defs/StageExecutionWork" },
-            "workflow_context": { "$ref": "#/$defs/WorkStageContext" }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["stage_execution", "workflow_context"],
-          "properties": {
-            "stage_execution": { "$ref": "#/$defs/StageExecutionVerify" },
-            "workflow_context": { "$ref": "#/$defs/VerifyStageContext" }
-          }
-        }
-      ],
+      "required": ["protocol_version", "request_id", "reconciler_session_id", "reconciler_turn_id", "observed_at", "root", "cycles", "root_human_actions", "accepted_root_directives", "root_reconciler_failures", "pending_user_comments", "reconciler_reply_records", "external_linear_changes", "workflow_change_resolutions", "git_facts", "delivery", "source_manifest", "coverage", "observed_root_tree_digest", "limits"],
       "properties": {
         "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "stage_execution": { "$ref": "#/$defs/StageExecution" },
-        "target": { "$ref": "#/$defs/StageTarget" },
-        "source_manifest": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 256,
-          "items": { "$ref": "#/$defs/StageContextSource" }
-        },
-        "coverage": { "$ref": "#/$defs/StageContextCoverage" },
-        "instruction_bundle": { "$ref": "#/$defs/StageInstructionBundle" },
-        "workflow_context": { "$ref": "#/$defs/StageWorkflowContext" },
-        "repository_context": { "$ref": "#/$defs/RepositoryContext" },
-        "execution_policy": { "$ref": "#/$defs/StageExecutionPolicy" },
-        "limits": { "$ref": "#/$defs/StageLimits" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "root": { "$ref": "#/$defs/RootObservation" },
+        "cycles": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CycleObservation" } },
+        "root_human_actions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionRecord" } },
+        "accepted_root_directives": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } },
+        "root_reconciler_failures": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RootReconcilerFailureRecord" } },
+        "pending_user_comments": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentInput" } },
+        "reconciler_reply_records": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RootReconcilerReplyRecord" } },
+        "external_linear_changes": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ExternalLinearChangeInput" } },
+        "workflow_change_resolutions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } },
+        "git_facts": { "$ref": "#/$defs/GitFacts" },
+        "delivery": { "$ref": "#/$defs/RecordReference" },
+        "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } },
+        "coverage": { "$ref": "#/$defs/Coverage" },
+        "observed_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "limits": { "$ref": "#/$defs/TurnLimits" }
       }
     },
-    "StageUsageSnapshot": {
+    "RootReconcilerReplyRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"],
+      "required": ["reply_id", "root_directive_id", "source_comment_id", "source_comment_version", "target_issue_id", "materialized_outcome_refs", "rendered_schema_version", "replied_at"],
+      "properties": {
+        "reply_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_directive_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "materialized_outcome_refs": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/EvidenceRef" } },
+        "rendered_schema_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "replied_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "UserCommentDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_comment_id", "source_comment_version", "interpretation", "impact", "decision_ref", "reply"],
+      "properties": {
+        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "interpretation": { "enum": ["question", "feedback", "execution_instruction", "requirement_revision", "approval_context", "cancellation_request", "no_action"] },
+        "impact": { "enum": ["none", "current_stage", "current_cycle_dag", "current_cycle_plan", "root_contract", "human_action"] },
+        "decision_ref": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reply": { "$ref": "#/$defs/CommentReply" }
+      }
+    },
+    "CommentReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acknowledgement", "interpreted_request", "decided_action", "next_step"],
+      "properties": {
+        "acknowledgement": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "interpreted_request": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "decided_action": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "next_step": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "RootReconcilerFailureRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "observed_root_tree_digest", "category", "sanitized_reason", "failed_at"],
+      "properties": {
+        "failure_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "observed_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output"] },
+        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "usage": { "$ref": "#/$defs/UsageSnapshot" },
+        "failed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "UsageSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "total_tokens"],
       "properties": {
         "input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
         "cached_input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
@@ -767,511 +387,195 @@
         "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
       }
     },
-    "StagePlanWorkNode": {
+    "ExternalLinearChangeDisposition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["work_key", "title", "description", "acceptance_criteria", "dependency_work_keys"],
+      "required": ["change_id", "impact", "decision_ref"],
       "properties": {
-        "work_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "dependency_work_keys": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/Identifier" }
-        }
+        "change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "impact": { "enum": ["none", "lifecycle", "current_stage", "current_cycle_dag", "current_cycle_plan", "root_contract", "invalid_structure"] },
+        "decision_ref": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
-    "StagePlanVerifyNode": {
+    "RootDirective": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["title", "acceptance_criteria", "required_checks"],
-      "properties": {
-        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "required_checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        }
-      }
-    },
-    "StagePlanContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["objective_summary", "included_scope", "excluded_scope", "acceptance_criteria", "work_nodes", "verify_node"],
-      "properties": {
-        "objective_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "included_scope": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "excluded_scope": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
-        },
-        "acceptance_criteria": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageAcceptanceCriterion" }
-        },
-        "work_nodes": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StagePlanWorkNode" }
-        },
-        "verify_node": { "$ref": "#/$defs/StagePlanVerifyNode" }
-      }
-    },
-    "PlanCompletedOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "plan_contract"],
-      "properties": {
-        "kind": { "const": "plan_completed" },
-        "plan_contract": { "$ref": "#/$defs/StagePlanContract" }
-      }
-    },
-    "WorkCompletedOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "summary", "changed_paths", "checks", "observed_workspace_revision"],
-      "properties": {
-        "kind": { "const": "work_completed" },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "changed_paths": {
-          "type": "array",
-          "maxItems": 512,
-          "items": { "$ref": "common.schema.json#/$defs/BoundedPath" }
-        },
-        "checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageCheck" }
-        },
-        "observed_workspace_revision": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageFindingProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["category", "severity", "summary"],
-      "properties": {
-        "category": { "enum": ["product", "code", "test", "infra", "requirement", "policy"] },
-        "severity": { "enum": ["critical", "high", "medium", "low"] },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "StageFindingDispositionProposal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["finding_id", "disposition"],
-      "properties": {
-        "finding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "disposition": { "enum": ["resolved", "still_open", "rejected"] }
-      }
-    },
-    "StageVerifyCriterionResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["criterion_key", "outcome", "summary"],
-      "properties": {
-        "criterion_key": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "outcome": { "enum": ["passed", "failed", "not_run"] },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "VerifyCompletedOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "conclusion", "criteria_results", "checks", "new_findings", "finding_dispositions", "verified_revision"],
-      "properties": {
-        "kind": { "const": "verify_completed" },
-        "conclusion": { "enum": ["passed", "changes_required", "inconclusive", "escalate_human"] },
-        "criteria_results": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageVerifyCriterionResult" }
-        },
-        "checks": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageCheck" }
-        },
-        "new_findings": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageFindingProposal" }
-        },
-        "finding_dispositions": {
-          "type": "array",
-          "maxItems": 128,
-          "items": { "$ref": "#/$defs/StageFindingDispositionProposal" }
-        },
-        "verified_revision": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "StageSuspendedOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "request_kind", "question_or_proposal", "reason", "impact"],
-      "properties": {
-        "kind": { "const": "suspended" },
-        "request_kind": { "enum": ["needs_info", "needs_approval"] },
-        "question_or_proposal": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "impact": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "StageExecutionFailedOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "error_code", "sanitized_reason", "retryable"],
-      "properties": {
-        "kind": { "const": "execution_failed" },
-        "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
-        "retryable": { "type": "boolean" }
-      }
-    },
-    "StageCanceledOutcome": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "sanitized_reason"],
-      "properties": {
-        "kind": { "const": "canceled" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }
-      }
-    },
-    "StageOutcome": {
-      "oneOf": [
-        { "$ref": "#/$defs/PlanCompletedOutcome" },
-        { "$ref": "#/$defs/WorkCompletedOutcome" },
-        { "$ref": "#/$defs/VerifyCompletedOutcome" },
-        { "$ref": "#/$defs/StageSuspendedOutcome" },
-        { "$ref": "#/$defs/StageExecutionFailedOutcome" },
-        { "$ref": "#/$defs/StageCanceledOutcome" }
-      ]
-    },
-    "StageResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "stage_execution_id",
-        "stage",
-        "root_issue_id",
-        "cycle_issue_id",
-        "node_issue_id",
-        "context_digest",
-        "completed_at",
-        "outcome"
-      ],
+      "required": ["protocol_version", "request_id", "root_directive_id", "reconciler_session_id", "reconciler_turn_id", "based_on_root_tree_digest", "rationale", "evidence_refs", "comment_dispositions", "external_change_dispositions", "action"],
       "properties": {
         "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "enum": ["plan", "work", "verify"] },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "node_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "usage": { "$ref": "#/$defs/StageUsageSnapshot" },
-        "outcome": { "$ref": "#/$defs/StageOutcome" }
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_directive_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "based_on_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "rationale": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } },
+        "comment_dispositions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentDisposition" } },
+        "external_change_dispositions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ExternalLinearChangeDisposition" } },
+        "action": { "$ref": "#/$defs/RootDirectiveAction" }
       }
     },
-    "StageStartedEvent": {
+    "RootDirectiveAction": {
+      "oneOf": [
+        { "$ref": "#/$defs/ExecutePlanDirective" }, { "$ref": "#/$defs/ExecuteWorkDirective" }, { "$ref": "#/$defs/ExecuteVerifyDirective" },
+        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/ResolveInvalidLifecycleDirective" }, { "$ref": "#/$defs/ReviseCycleTreeDirective" },
+        { "$ref": "#/$defs/ReplanCurrentCycleDirective" }, { "$ref": "#/$defs/SupersedeCycleDirective" }, { "$ref": "#/$defs/CreateSuccessorCycleDirective" },
+        { "$ref": "#/$defs/RequestHumanActionDirective" }, { "$ref": "#/$defs/ConcludeCycleDirective" }, { "$ref": "#/$defs/ConcludeRootDirective" },
+        { "$ref": "#/$defs/WaitDirective" }, { "$ref": "#/$defs/AcknowledgeDirective" }
+      ]
+    },
+    "DirectiveBase": {
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
-      "properties": { "kind": { "const": "started" } }
+      "properties": { "kind": { "$ref": "common.schema.json#/$defs/ShortText" } }
     },
-    "StageProgressEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "summary"],
+    "ExecutePlanDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cycle_issue_id", "plan_issue_id", "plan_goal", "required_outputs", "prior_plan_result_ids", "human_resolution_ids"],
       "properties": {
-        "kind": { "const": "progress" },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "kind": { "const": "execute_plan" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" }, "required_outputs": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
+        "prior_plan_result_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "human_resolution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }
       }
     },
-    "StageWarningEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "code", "sanitized_reason"],
+    "ExecuteWorkDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cycle_issue_id", "work_issue_id", "execution_goal", "required_checks", "dependency_evidence_refs"],
       "properties": {
-        "kind": { "const": "warning" },
-        "code": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "kind": { "const": "execute_work" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "execution_goal": { "$ref": "common.schema.json#/$defs/BoundedText" }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
+        "dependency_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
       }
     },
-    "StageHeartbeatEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind"],
-      "properties": { "kind": { "const": "heartbeat" } }
+    "ExecuteVerifyDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cycle_issue_id", "verify_issue_id", "target_git_revision", "required_evidence_refs"],
+      "properties": {
+        "kind": { "const": "execute_verify" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "verify_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_git_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "required_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
+      }
     },
-    "StageEventBody": {
+    "RerunStageDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cycle_issue_id", "role", "target_issue_id", "invalidated_execution_ids", "reason", "preserved_evidence_refs"],
+      "properties": {
+        "kind": { "const": "rerun_stage" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "enum": ["plan", "work", "verify"] },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
+        "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
+      }
+    },
+    "LifecycleChange": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_issue_id", "issue_kind", "observed_status", "requested_status", "expected_remote_version", "durable_evidence_refs"],
+      "properties": {
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "observed_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" }, "requested_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "durable_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
+      }
+    },
+    "ResolveInvalidLifecycleDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "reason", "changes"],
+      "properties": { "kind": { "const": "resolve_invalid_lifecycle" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "changes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/LifecycleChange" } } }
+    },
+    "TreeOperation": {
       "oneOf": [
-        { "$ref": "#/$defs/StageStartedEvent" },
-        { "$ref": "#/$defs/StageProgressEvent" },
-        { "$ref": "#/$defs/StageWarningEvent" },
-        { "$ref": "#/$defs/StageHeartbeatEvent" }
+        { "$ref": "#/$defs/CreateNodeOperation" }, { "$ref": "#/$defs/UpdateNodeOperation" }, { "$ref": "#/$defs/ArchiveNodeOperation" },
+        { "$ref": "#/$defs/RestoreNodeOperation" }, { "$ref": "#/$defs/ReorderNodesOperation" }, { "$ref": "#/$defs/ReplaceDependenciesOperation" },
+        { "$ref": "#/$defs/CreateRelationOperation" }, { "$ref": "#/$defs/RemoveRelationOperation" }
       ]
     },
-    "StageEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "stage_execution_id",
-        "stage",
-        "root_issue_id",
-        "cycle_issue_id",
-        "node_issue_id",
-        "context_digest",
-        "sequence",
-        "occurred_at",
-        "body"
-      ],
-      "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "stage": { "enum": ["plan", "work", "verify"] },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "node_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "sequence": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "body": { "$ref": "#/$defs/StageEventBody" }
-      }
+    "TreePrecondition": {
+      "type": "object", "additionalProperties": false, "required": ["target_issue_id", "expected_remote_version"],
+      "properties": { "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "expected_parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "expected_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" } }
     },
+    "CreateNodeOperation": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "issue_kind", "title", "description", "parent_issue_id", "status", "precondition"],
+      "properties": { "kind": { "const": "create_node" }, "issue_kind": { "enum": ["plan", "work", "verify", "human_action"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } }
+    },
+    "UpdateNodeOperation": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "precondition", "title", "description", "status"],
+      "properties": { "kind": { "const": "update_node" }, "precondition": { "$ref": "#/$defs/TreePrecondition" }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" } }
+    },
+    "ArchiveNodeOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "precondition"], "properties": { "kind": { "const": "archive_node" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
+    "RestoreNodeOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "precondition"], "properties": { "kind": { "const": "restore_node" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
+    "ReorderNodesOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "ordered_issue_ids", "precondition"], "properties": { "kind": { "const": "reorder_nodes" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "ordered_issue_ids": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
+    "ReplaceDependenciesOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "work_issue_id", "dependency_issue_ids", "precondition"], "properties": { "kind": { "const": "replace_dependencies" }, "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "dependency_issue_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
+    "CreateRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_kind", "source_issue_id", "target_issue_id"], "properties": { "kind": { "const": "create_relation" }, "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] }, "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "RemoveRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_id", "precondition"], "properties": { "kind": { "const": "remove_relation" }, "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
+    "ReviseCycleTreeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "operations"], "properties": { "kind": { "const": "revise_cycle_tree" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "operations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/TreeOperation" } } } },
+    "ReplanCurrentCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "superseded_plan_contract_ids", "invalidate_execution_ids", "preserve_evidence_refs", "archive_or_restore_operations", "plan_issue_id", "fresh_plan_goal"], "properties": { "kind": { "const": "replan_current_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "superseded_plan_contract_ids": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "invalidate_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserve_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "archive_or_restore_operations": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/TreeOperation" } }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "fresh_plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "SupersedeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "current_cycle_issue_id", "reason", "invalidated_execution_ids", "unresolved_finding_ids", "preserved_evidence_refs", "successor"], "properties": { "kind": { "const": "supersede_cycle" }, "current_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_requirement_revision", "destructive_cycle_revision", "no_safe_replan"] }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor": { "$ref": "#/$defs/SuccessorPlan" } } },
+    "SuccessorPlan": { "type": "object", "additionalProperties": false, "required": ["create", "plan_trigger", "inherited_fact_refs"], "properties": { "create": { "const": true }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "CreateSuccessorCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "plan_trigger", "inherited_fact_refs", "invalidated_delivery_refs"], "properties": { "kind": { "const": "create_successor_cycle" }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_requirement_revision", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"] }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "invalidated_delivery_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "RequestHumanActionDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "parent_scope", "root_issue_id", "action_kind", "title", "description", "related_issue_ids", "requested_decision", "options", "comment_required", "evidence_refs"], "properties": { "kind": { "const": "request_human_action" }, "parent_scope": { "enum": ["root", "cycle"] }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "requested_decision": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "comment_required": { "type": "boolean" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "ConcludeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "conclusion", "completed_work_ids", "unresolved_finding_ids", "attempted_approach_refs", "verification_evidence_refs"], "properties": { "kind": { "const": "conclude_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "conclusion": { "enum": ["succeeded", "repair_required", "exhausted", "canceled"] }, "completed_work_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "attempted_approach_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "verification_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor_recommendation": { "$ref": "#/$defs/SuccessorPlan" } } },
+    "ConcludeRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "conclusion", "evidence_refs"], "properties": { "kind": { "const": "conclude_root" }, "conclusion": { "const": "ready_for_delivery" }, "evidence_refs": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "WaitDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason_code", "blocking_fact_refs"], "properties": { "kind": { "const": "wait" }, "reason_code": { "$ref": "common.schema.json#/$defs/ShortText" }, "blocking_fact_refs": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "AcknowledgeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "acknowledge" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "continue_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "OpenRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "open_root_reconciler" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
+    "RootReconcilerOpenedResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "reconciler_session_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_opened" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "CloseCycleStageSessionsCommand": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id", "reason"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "close_cycle_stage_sessions" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/ShortText" } } },
+    "CloseCycleStageSessionsResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "cycle_stage_sessions_closed" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "CloseRootReconcilerCommand": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "reason"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "close_root_reconciler" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/ShortText" } } },
+    "CloseRootReconcilerResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_closed" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "InstructionBundle": { "type": "object", "additionalProperties": false, "required": ["instruction_set_id", "instructions", "output_schema"], "properties": { "instruction_set_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "instructions": { "$ref": "common.schema.json#/$defs/BoundedText" }, "output_schema": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "PlanCycleContext": { "type": "object", "additionalProperties": false, "required": ["cycle_issue_id", "trigger"], "properties": { "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "trigger": { "enum": ["initial", "verify_changes", "review_changes", "repair", "user_requested_retry"] }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "PlanRootContract": { "type": "object", "additionalProperties": false, "required": ["objective", "requested_scope", "constraints", "acceptance_criteria"], "properties": { "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "requested_scope": { "$ref": "common.schema.json#/$defs/BoundedText" }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } } } },
+    "PlanTurnContext": { "type": "object", "additionalProperties": false, "required": ["root_contract", "cycle", "current_plan_issue", "prior_plan_results", "prior_plan_contracts", "unresolved_findings", "human_resolutions", "current_git_facts", "required_output"], "properties": { "root_contract": { "$ref": "#/$defs/PlanRootContract" }, "cycle": { "$ref": "#/$defs/PlanCycleContext" }, "current_plan_issue": { "$ref": "#/$defs/IssueSnapshot" }, "prior_plan_results": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/RecordReference" } }, "prior_plan_contracts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/PlanContract" } }, "unresolved_findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "current_git_facts": { "$ref": "#/$defs/GitFacts" }, "required_output": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "PlanWorkNode": { "type": "object", "additionalProperties": false, "required": ["proposal_key", "title", "description", "expected_outcome", "required_checks", "dependency_proposal_keys"], "properties": { "proposal_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "expected_outcome": { "$ref": "common.schema.json#/$defs/BoundedText" }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "dependency_proposal_keys": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } } } },
+    "PlanVerifyNode": { "type": "object", "additionalProperties": false, "required": ["title", "acceptance_criteria", "required_checks"], "properties": { "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
+    "PlanContract": { "type": "object", "additionalProperties": false, "required": ["objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements"], "properties": { "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "included_scope": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "excluded_scope": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
+    "PlanDag": { "type": "object", "additionalProperties": false, "required": ["work_nodes", "dependency_edges", "verify_node"], "properties": { "work_nodes": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/PlanWorkNode" } }, "dependency_edges": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RelationSnapshot" } }, "verify_node": { "$ref": "#/$defs/PlanVerifyNode" } } },
+    "PlanCompletedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"], "properties": { "kind": { "const": "plan_completed" }, "plan_contract": { "$ref": "#/$defs/PlanContract" }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" }, "risks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "required_permissions": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "PlanNeedsInformationResult": { "type": "object", "additionalProperties": false, "required": ["kind", "missing_questions", "impact", "evidence_refs"], "properties": { "kind": { "const": "plan_needs_information" }, "missing_questions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "impact": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "PlanBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "attempts", "evidence_refs"], "properties": { "kind": { "const": "plan_blocked" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "WorkTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "current_active_work_dag", "selected_work", "completed_work_evidence", "prior_turn_results", "human_resolutions", "git_baseline", "workspace_capability"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "current_active_work_dag": { "$ref": "#/$defs/PlanDag" }, "selected_work": { "$ref": "#/$defs/IssueSnapshot" }, "completed_work_evidence": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/EvidenceRef" } }, "prior_turn_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "git_baseline": { "$ref": "#/$defs/GitFacts" }, "workspace_capability": { "enum": ["workspace_write"] } } },
+    "CheckResult": { "type": "object", "additionalProperties": false, "required": ["check_key", "command_or_method", "outcome", "evidence_ref"], "properties": { "check_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "command_or_method": { "$ref": "common.schema.json#/$defs/ShortText" }, "outcome": { "enum": ["passed", "failed", "not_run"] }, "evidence_ref": { "$ref": "#/$defs/EvidenceRef" } } },
+    "ActualChanges": { "type": "object", "additionalProperties": false, "required": ["baseline_revision", "target_revision", "changed_paths", "summary"], "properties": { "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "changed_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "WorkCompletedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "actual_changes", "checks", "artifacts", "discovered_facts", "evidence_refs"], "properties": { "kind": { "const": "work_completed" }, "actual_changes": { "$ref": "#/$defs/ActualChanges" }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } }, "artifacts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "discovered_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "WorkBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "blocker_kind", "sanitized_reason", "attempted_approaches", "failed_check_evidence", "discovered_facts", "suggested_dag_changes"], "properties": { "kind": { "const": "work_blocked" }, "blocker_kind": { "$ref": "common.schema.json#/$defs/ShortText" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempted_approaches": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "failed_check_evidence": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "discovered_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "suggested_dag_changes": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } } } },
+    "WorkSpecialResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "enum": ["work_plan_assumption_invalid", "work_scope_conflict", "work_permission_required", "work_information_required"] }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "VerifyTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "complete_active_cycle_dag", "archived_cycle_nodes", "completed_work_results", "unresolved_findings", "human_resolutions", "verification_requirements", "immutable_target_revision", "repository_snapshot"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "complete_active_cycle_dag": { "$ref": "#/$defs/PlanDag" }, "archived_cycle_nodes": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "completed_work_results": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } }, "unresolved_findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "immutable_target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "repository_snapshot": { "$ref": "#/$defs/GitFacts" } } },
+    "VerifyCriterionResult": { "type": "object", "additionalProperties": false, "required": ["criterion_key", "outcome", "summary"], "properties": { "criterion_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "outcome": { "enum": ["passed", "failed", "not_run"] }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "VerifyPassedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "checks", "resolved_finding_ids", "evidence_refs"], "properties": { "kind": { "const": "verify_passed" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } }, "resolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "VerifyChangesRequiredResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "findings", "checks"], "properties": { "kind": { "const": "verify_changes_required" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } } } },
+    "VerifyInconclusiveResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "missing_evidence", "attempted_methods", "retryable"], "properties": { "kind": { "const": "verify_inconclusive" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "missing_evidence": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "attempted_methods": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "retryable": { "type": "boolean" } } },
+    "VerifyPlanContractViolationResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "const": "verify_plan_contract_violation" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "VerifyBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "const": "verify_blocked" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "StageBudgetExhaustedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "budget_kind", "usage", "attempted_approaches", "resumable_facts"], "properties": { "kind": { "const": "budget_exhausted" }, "budget_kind": { "$ref": "common.schema.json#/$defs/ShortText" }, "usage": { "$ref": "#/$defs/UsageSnapshot" }, "attempted_approaches": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "resumable_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "StageCanceledResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason"], "properties": { "kind": { "const": "canceled" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "StageExecutionFailedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "error_code", "sanitized_reason", "retryable"], "properties": { "kind": { "const": "execution_failed" }, "error_code": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "retryable": { "type": "boolean" } } },
+    "PlanResultOutcome": { "oneOf": [{ "$ref": "#/$defs/PlanCompletedResult" }, { "$ref": "#/$defs/PlanNeedsInformationResult" }, { "$ref": "#/$defs/PlanBlockedResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
+    "WorkResultOutcome": { "oneOf": [{ "$ref": "#/$defs/WorkCompletedResult" }, { "$ref": "#/$defs/WorkBlockedResult" }, { "$ref": "#/$defs/WorkSpecialResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
+    "VerifyResultOutcome": { "oneOf": [{ "$ref": "#/$defs/VerifyPassedResult" }, { "$ref": "#/$defs/VerifyChangesRequiredResult" }, { "$ref": "#/$defs/VerifyInconclusiveResult" }, { "$ref": "#/$defs/VerifyPlanContractViolationResult" }, { "$ref": "#/$defs/VerifyBlockedResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
+    "PlanTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "plan" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/PlanTurnContext" } } },
+    "WorkTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "work" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/WorkTurnContext" } } },
+    "VerifyTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "verify" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/VerifyTurnContext" } } },
+    "PlanResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "plan" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "usage": { "$ref": "#/$defs/UsageSnapshot" }, "outcome": { "$ref": "#/$defs/PlanResultOutcome" } } },
+    "WorkResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "work" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "usage": { "$ref": "#/$defs/UsageSnapshot" }, "outcome": { "$ref": "#/$defs/WorkResultOutcome" } } },
+    "VerifyResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "verify" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "usage": { "$ref": "#/$defs/UsageSnapshot" }, "outcome": { "$ref": "#/$defs/VerifyResultOutcome" } } },
     "PerformerProfileControlMetadata": {
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "enum": [
-                "get_profile_status",
-                "start_chatgpt_login"
-              ]
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id",
-            "secret_frame_length"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "const": "set_api_key"
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "secret_frame_length": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16384
-            }
-          }
-        }
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "enum": ["get_profile_status", "start_chatgpt_login"] }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id", "secret_frame_length"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "set_api_key" }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "secret_frame_length": { "type": "integer", "minimum": 1, "maximum": 16384 } } }
       ]
     },
     "PerformerProfileControlResult": {
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id",
-            "readiness"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "const": "profile_status"
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "readiness": {
-              "enum": [
-                "login-required",
-                "ready",
-                "invalid"
-              ]
-            },
-            "sanitized_account_label": {
-              "$ref": "common.schema.json#/$defs/ShortText"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "enum": [
-                "login_started",
-                "login_succeeded"
-              ]
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id",
-            "verification_url",
-            "user_code",
-            "expires_at"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "const": "login_pending"
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "verification_url": {
-              "type": "string",
-              "maxLength": 2048,
-              "pattern": "^https://"
-            },
-            "user_code": {
-              "$ref": "common.schema.json#/$defs/ShortText"
-            },
-            "expires_at": {
-              "$ref": "common.schema.json#/$defs/Timestamp"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "protocol_version",
-            "request_id",
-            "kind",
-            "profile_id",
-            "error"
-          ],
-          "properties": {
-            "protocol_version": {
-              "$ref": "common.schema.json#/$defs/ProtocolVersion"
-            },
-            "request_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "kind": {
-              "const": "login_failed"
-            },
-            "profile_id": {
-              "$ref": "common.schema.json#/$defs/Identifier"
-            },
-            "error": {
-              "$ref": "common.schema.json#/$defs/ProtocolError"
-            }
-          }
-        }
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id", "readiness"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "profile_status" }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "readiness": { "enum": ["login-required", "ready", "invalid"] }, "sanitized_account_label": { "$ref": "common.schema.json#/$defs/ShortText" } } },
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "enum": ["login_started", "login_succeeded"] }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id", "verification_url", "user_code", "expires_at"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "login_pending" }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "verification_url": { "type": "string", "maxLength": 2048, "pattern": "^https://" }, "user_code": { "$ref": "common.schema.json#/$defs/ShortText" }, "expires_at": { "$ref": "common.schema.json#/$defs/Timestamp" } } },
+        { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "profile_id", "error"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "login_failed" }, "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "error": { "$ref": "common.schema.json#/$defs/ProtocolError" } } }
       ]
     },
     "ConductorPerformerMessage": {
       "oneOf": [
-        {
-          "$ref": "#/$defs/StageContextEnvelope"
-        },
-        {
-          "$ref": "#/$defs/StageEvent"
-        },
-        {
-          "$ref": "#/$defs/StageResult"
-        },
-        {
-          "$ref": "#/$defs/PerformerProfileControlMetadata"
-        },
-        {
-          "$ref": "#/$defs/PerformerProfileControlResult"
-        }
+        { "$ref": "#/$defs/OpenRootReconcilerRequest" }, { "$ref": "#/$defs/RootReconcilerOpenedResult" }, { "$ref": "#/$defs/RootReconcilerObservation" }, { "$ref": "#/$defs/RootDirective" },
+        { "$ref": "#/$defs/PlanTurnRequest" }, { "$ref": "#/$defs/PlanResult" }, { "$ref": "#/$defs/WorkTurnRequest" }, { "$ref": "#/$defs/WorkResult" },
+        { "$ref": "#/$defs/VerifyTurnRequest" }, { "$ref": "#/$defs/VerifyResult" }, { "$ref": "#/$defs/CloseCycleStageSessionsCommand" }, { "$ref": "#/$defs/CloseCycleStageSessionsResult" },
+        { "$ref": "#/$defs/CloseRootReconcilerCommand" }, { "$ref": "#/$defs/CloseRootReconcilerResult" }, { "$ref": "#/$defs/PerformerProfileControlMetadata" }, { "$ref": "#/$defs/PerformerProfileControlResult" }
       ]
     }
   },

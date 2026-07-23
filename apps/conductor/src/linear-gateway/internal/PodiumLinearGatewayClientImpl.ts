@@ -6,9 +6,9 @@ import type {
   DiscoveredRoot,
   LinearIssueState,
   LinearPriority,
-} from "../../root-workflow/api/Models.js";
+} from "../../root-reconciliation/api/RootModels.js";
 import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
-import { parseManagedRecord } from "../../root-workflow/api/index.js";
+import { parseManagedRecord } from "../../root-reconciliation/api/index.js";
 
 type JsonValue =
   | null

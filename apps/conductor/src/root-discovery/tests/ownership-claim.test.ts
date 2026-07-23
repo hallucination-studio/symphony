@@ -5,7 +5,7 @@ import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 import { LinearRootOwnershipClaimImpl } from "../internal/LinearRootOwnershipClaimImpl.js";
 
 const rootId = "root-1";

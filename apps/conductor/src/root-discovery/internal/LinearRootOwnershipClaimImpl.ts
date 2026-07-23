@@ -1,6 +1,6 @@
-import { parseManagedRecord, serializeManagedRecord } from "../../root-workflow/api/index.js";
-import type { RootOwnershipRecord } from "../../root-workflow/api/ManagedRecords.js";
-import type { DiscoveredRoot } from "../../root-workflow/api/Models.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
+import type { RootOwnershipRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import type { DiscoveredRoot } from "../../root-reconciliation/api/RootModels.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
   RootOwnershipClaimDependencies,
