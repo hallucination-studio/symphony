@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from performer.role_execution.runtime import RoleExecutionRuntime
 from performer.session_runtime.manager import SessionManager
@@ -12,7 +13,7 @@ class RootReconcilerRuntime:
         self._roles = roles
 
     def open(self, request: dict[str, Any]) -> dict[str, Any]:
-        session_id = _text(request, "reconciler_session_id")
+        session_id = f"root-reconciler-{uuid4()}"
         root_issue_id = _text(request, "root_issue_id")
         record = self._sessions.open(
             session_id=session_id,
@@ -24,7 +25,6 @@ class RootReconcilerRuntime:
         return {
             "reconciler_session_id": record.session_id,
             "root_issue_id": record.root_issue_id,
-            "role": record.role,
         }
 
     def advance(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -37,7 +37,7 @@ class RootReconcilerRuntime:
         return {
             **result,
             "directive": {
-                "protocol_version": 1,
+                "protocol_version": "1",
                 "request_id": request["request_id"],
                 "root_directive_id": f"{request['root_issue_id']}:{request['role_turn_id']}",
                 "reconciler_session_id": request["role_session_id"],

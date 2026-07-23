@@ -32,7 +32,7 @@ class FakeBackend:
 
 
 def envelope(request_id: str, kind: str, payload: dict[str, object]) -> dict[str, object]:
-    return {"protocol_version": 1, "request_id": request_id, "kind": kind, "payload": payload}
+    return {"protocol_version": "1", "request_id": request_id, "kind": kind, **payload}
 
 
 def test_host_keeps_root_session_and_returns_root_directive():
@@ -40,21 +40,23 @@ def test_host_keeps_root_session_and_returns_root_directive():
     host = AgentProtocolHost(backend)
 
     opened = host.handle(envelope("open", "open_root_reconciler", {
-        "reconciler_session_id": "root-session",
         "root_issue_id": "root-1",
-        "model_settings": {"model": "gpt"},
+        "performer_profile_id": "profile-1",
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2026-07-23T00:00:00Z"},
     }))
     result = host.handle(envelope("turn", "advance_root_reconciler", {
-        "role_session_id": "root-session",
+        "role_session_id": opened["reconciler_session_id"],
         "role_turn_id": "turn-1",
         "root_issue_id": "root-1",
         "observed_root_tree_digest": "tree-1",
-        "context": {"root": "complete tree"},
+            "observation": {"root": "complete tree"},
     }))
 
     assert opened["kind"] == "root_reconciler_opened"
     assert result["kind"] == "root_directive"
-    assert result["payload"]["directive"]["action"]["kind"] == "wait"
+    assert result["directive"]["action"]["kind"] == "wait"
     assert backend.turns[0][0] == "provider-1"
 
 
@@ -78,19 +80,34 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "context_digest": "context-1",
         "execution_policy": {"sandbox_mode": "read_only", "workspace_access": "read_only"},
         "target_issue_id": "target-1",
+        "source_manifest": [],
+        "coverage": {"is_complete": True, "omissions": []},
+        "instruction_bundle": {"instruction_set_id": "stage-v1", "instructions": "run", "output_schema": "result"},
+        "repository_context": {
+            "repository_identity": "repo-1", "base_branch": "main", "workspace_revision": "head-1",
+            "baseline_revision": "head-1", "status_summary": "clean", "relevant_paths": [],
+            "workspace_access": "read_only", "instructions": [],
+        },
+        "limits": {
+            "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
+            "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
+        },
+        "context": {},
     }
     for role in ("plan", "verify"):
         result = host.handle(envelope(role, f"execute_{role}_turn", {
             **common,
+            "role": role,
             "role_session_id": f"{role}-session",
             "role_turn_id": f"{role}-turn",
             "stage_execution_id": f"{role}-execution",
         }))
         assert result["kind"] == "stage_result"
-        assert result["payload"]["result"]["kind"] == f"{role}_completed"
+        assert result["result"]["kind"] == f"{role}_completed"
 
     work_payload = {
         **common,
+        "role": "work",
         "role_session_id": "work-session",
         "role_turn_id": "work-turn",
         "stage_execution_id": "work-execution",
@@ -98,7 +115,7 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "workspace_capability": {"access": "workspace_write"},
     }
     result = host.handle(envelope("work", "execute_work_turn", work_payload))
-    assert result["payload"]["result"]["kind"] == "work_completed"
+    assert result["result"]["kind"] == "work_completed"
     assert backend.turns[-1][2] == tmp_path
     assert len({handle for handle, _, _ in backend.turns}) == 3
 
@@ -106,26 +123,35 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
 def test_host_rejects_unknown_or_malformed_protocol_requests():
     host = AgentProtocolHost(FakeBackend())
 
-    unknown = host.handle({"protocol_version": 1, "request_id": "x", "kind": "old_stage", "payload": {}})
-    malformed = host.handle({"protocol_version": 1, "request_id": "x", "kind": "open_root_reconciler"})
+    unknown = host.handle({"protocol_version": "1", "request_id": "x", "kind": "old_stage"})
+    malformed = host.handle({"protocol_version": "1", "request_id": "x", "kind": "open_root_reconciler"})
 
-    assert unknown["payload"]["code"] == "request_kind_unsupported"
-    assert malformed["payload"]["code"] == "request_shape_invalid"
+    assert unknown["code"] == "request_kind_unsupported"
+    assert malformed["code"] == "request_shape_invalid"
+
+    legacy_envelope = host.handle({
+        "protocol_version": "1", "request_id": "legacy", "kind": "open_root_reconciler",
+        "payload": {"root_issue_id": "root-1"},
+    })
+    assert legacy_envelope["code"] == "request_shape_invalid"
 
 
 def test_close_cycle_does_not_close_root_session():
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
     host.handle(envelope("root", "open_root_reconciler", {
-        "reconciler_session_id": "root-session", "root_issue_id": "root-1", "model_settings": {},
+        "root_issue_id": "root-1", "performer_profile_id": "profile-1",
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2026-07-23T00:00:00Z"},
     }))
     host._sessions.open(
         session_id="plan-session", role="plan", root_issue_id="root-1", cycle_issue_id="cycle-1", settings={}
     )
     result = host.handle(envelope("close", "close_cycle_stage_sessions", {
-        "root_issue_id": "root-1", "cycle_issue_id": "cycle-1",
+        "root_issue_id": "root-1", "cycle_issue_id": "cycle-1", "reason": "cycle_terminal",
     }))
 
-    assert result["payload"]["closed_session_ids"] == ["plan-session"]
-    assert "root-session" in host._sessions._sessions
+    assert result["closed_session_ids"] == ["plan-session"]
+    assert any(record.role == "root_reconciler" for record in host._sessions._sessions.values())
     assert backend.closed == ["provider-2"]

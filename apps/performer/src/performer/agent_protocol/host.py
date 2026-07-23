@@ -33,7 +33,7 @@ class AgentProtocolHost:
         request_id = value.get("request_id", "unknown") if isinstance(value, dict) else "unknown"
         try:
             request = validate_request(value)
-            payload = {**request["payload"], "request_id": request["request_id"]}
+            payload = request
             kind = request["kind"]
             if kind == "open_root_reconciler":
                 return response(request["request_id"], "root_reconciler_opened", self._root.open(payload))

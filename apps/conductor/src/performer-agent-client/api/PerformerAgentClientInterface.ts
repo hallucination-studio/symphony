@@ -18,6 +18,6 @@ export interface PerformerAgentClientInterface {
   executeWorkTurn(input: StageTurnInput): Promise<StageResult>;
   executeVerifyTurn(input: StageTurnInput): Promise<StageResult>;
   closeCycleStageSessions(input: { requestId: string; rootIssueId: string; cycleIssueId: string }): Promise<void>;
-  closeRootReconciler(input: { requestId: string; sessionId: string }): Promise<void>;
+  closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void>;
   cancelAndReap(): Promise<void>;
 }

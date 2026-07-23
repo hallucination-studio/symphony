@@ -348,6 +348,9 @@ export type StageRole = "plan" | "work" | "verify";
 export interface StageTurnInput {
   protocolVersion: 1;
   requestId: string;
+  stageExecutionId: string;
+  roleSessionId: string;
+  roleTurnId: string;
   rootIssueId: string;
   cycleIssueId: string;
   targetIssueId: string;
@@ -358,6 +361,12 @@ export interface StageTurnInput {
   git: GitWorkspaceSnapshot;
   profileId: string;
   modelSettings: AgentModelSettings;
+  observedTreeDigest: string;
+  contextDigest: string;
+  executionPolicy: {
+    sandbox_mode: "read_only" | "workspace_write";
+    workspace_access: "read_only" | "read_write";
+  };
 }
 
 export interface StageResultBase {
