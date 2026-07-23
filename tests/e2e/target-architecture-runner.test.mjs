@@ -45,6 +45,19 @@ test("target E2E diagnostics prefer the concrete boundary failure over the harne
       message: JSON.stringify({ event: "root_reconciliation_failed", fields: { reason: "root_directive_invalid" } }),
     },
   ]), "root_directive_invalid");
+  assert.equal(lastLogReason([
+    {
+      event: "e2e_child_log",
+      message: JSON.stringify({
+        event: "root_reconciliation_failed",
+        fields: {
+          reason: "root_reconciliation_failed",
+          failure_code: "role_result_write_linear_internal_failed",
+          phase: "persist_plan_linear_write",
+        },
+      }),
+    },
+  ]), "role_result_write_linear_internal_failed");
   assert.equal(safeErrorCode(new TypeError("untrusted runtime detail")), "target_e2e_type_error");
 });
 

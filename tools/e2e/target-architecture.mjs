@@ -463,10 +463,14 @@ function readLogReason(event, logs) {
   for (const key of ["reason", "code"]) {
     const value = event?.[key];
     if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
-      if (value === "root_reconciliation_failed" && typeof event?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(event.phase)) {
+      const concrete = value === "root_reconciliation_failed" && typeof event?.failure_code === "string"
+        ? event.failure_code
+        : value;
+      if (concrete !== "root_reconciliation_failed") return addRequestKind(concrete, event?.request_kind, logs);
+      if (typeof event?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(event.phase)) {
         return `root_reconciliation_${event.phase}`;
       }
-      return addRequestKind(value, event?.request_kind, logs);
+      return concrete;
     }
   }
   if (event?.event !== "e2e_child_log" || typeof event.message !== "string") return undefined;
@@ -478,10 +482,14 @@ function readLogReason(event, logs) {
     for (const key of ["sanitized_reason", "error_code", "code", "reason"]) {
       const value = fields?.[key];
       if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
-        if (value === "root_reconciliation_failed" && typeof fields?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(fields.phase)) {
+        const concrete = value === "root_reconciliation_failed" && typeof fields?.failure_code === "string"
+          ? fields.failure_code
+          : value;
+        if (concrete !== "root_reconciliation_failed") return addRequestKind(concrete, fields?.request_kind, logs);
+        if (typeof fields?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(fields.phase)) {
           return `root_reconciliation_${fields.phase}`;
         }
-        return addRequestKind(value, fields?.request_kind, logs);
+        return concrete;
       }
     }
   } catch {

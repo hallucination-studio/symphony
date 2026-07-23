@@ -80,9 +80,13 @@ export class RootReconciliationRuntime {
         result = await this.reconcileRoot(root);
       } catch (error) {
         this.sessions.delete(root.issueId);
+        const failureReason = error instanceof RootReconciliationPhaseError
+          ? error.failureCode
+          : sanitizedFailureReason(error);
         this.dependencies.log("root_reconciliation_failed", {
           root_issue_id: root.issueId,
-          reason: sanitizedFailureReason(error),
+          reason: failureReason,
+          ...(failureReason !== "root_reconciliation_failed" ? { failure_code: failureReason } : {}),
           ...(error instanceof RootReconciliationPhaseError ? { phase: error.phase } : {}),
         });
         result = "needs-attention";
@@ -97,7 +101,7 @@ export class RootReconciliationRuntime {
     try {
       return await this.reconcileRootBody(root, (nextPhase) => { phase = nextPhase; });
     } catch (error) {
-      throw new RootReconciliationPhaseError(phase, error);
+      throw new RootReconciliationPhaseError(phase, sanitizedFailureReason(error));
     }
   }
 
@@ -264,8 +268,8 @@ export class RootReconciliationRuntime {
       throw new Error("role_result_conflict");
     }
     setPhase(`persist_${result.role}_linear_write`);
-    const outcome = await this.dependencies.linear.mutateWorkflow({
-      kind: "append_workflow_comment",
+    const command = {
+      kind: "append_workflow_comment" as const,
       writeId: `${directiveId}:result:${result.resultId}`,
       expectedProjectId: target.project_id,
       rootIssueId: view.root.issueId,
@@ -276,9 +280,35 @@ export class RootReconciliationRuntime {
         expectedStatusId: target.status_id,
       },
       body,
+    };
+    this.dependencies.log("root_stage_result_linear_write_started", {
+      role: result.role,
+      body_bytes: String(Buffer.byteLength(body, "utf8")),
+      root_remote_version: rootIssue.remote_version,
+      target_remote_version: target.remote_version,
+    });
+    let outcome: Awaited<ReturnType<RootReconciliationRuntimeDependencies["linear"]["mutateWorkflow"]>>;
+    try {
+      outcome = await this.dependencies.linear.mutateWorkflow(command);
+    } catch (error) {
+      this.dependencies.log("root_stage_result_linear_write_threw", {
+        role: result.role,
+        reason: sanitizedFailureReason(error),
+        error_name: error instanceof Error ? safeFailureCode(error.name.toLowerCase()) : "unknown",
+      });
+      throw error;
+    }
+    this.dependencies.log("root_stage_result_linear_write_outcome", {
+      role: result.role,
+      outcome: outcome.kind,
+      ...(outcome.kind === "failed" ? { failure_code: safeFailureCode(outcome.code) } : {}),
     });
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      throw new Error(`role_result_write_${outcome.kind}`);
+      const suffix = outcome.kind === "failed" ? safeFailureCode(outcome.code) : outcome.kind;
+      const code = `role_result_write_${suffix}`;
+      const error = new Error(code);
+      Object.assign(error, { code });
+      throw error;
     }
     setPhase(`persist_${result.role}_linear_read_back`);
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
@@ -294,9 +324,18 @@ export class RootReconciliationRuntime {
 }
 
 class RootReconciliationPhaseError extends Error {
-  constructor(readonly phase: string, cause: unknown) {
-    super("root_reconciliation_phase_failed", { cause });
+  readonly failureCode: string;
+
+  constructor(readonly phase: string, failureCode: string) {
+    super("root_reconciliation_phase_failed");
+    this.failureCode = failureCode;
   }
+}
+
+function safeFailureCode(value: unknown): string {
+  return typeof value === "string" && /^[a-z][a-z0-9_:-]{1,120}$/u.test(value)
+    ? value
+    : "unknown";
 }
 
 function validateStageResult(input: StageTurnInput, result: StageResult): void {
