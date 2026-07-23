@@ -1,3 +1,5 @@
+import type { HumanActionKind } from "./RootReconciliationContracts.js";
+
 export type ManagedRecordVersion = 1;
 
 export interface AcceptanceCriterion {
@@ -171,19 +173,50 @@ export interface WorkCompletionRecord {
   commitRevision: string;
 }
 
-export interface HumanActionRecord {
-  kind: "human_action";
+export interface HumanActionRequestRecord {
+  kind: "human_action_request";
   version: ManagedRecordVersion;
   actionId: string;
+  actionIssueId: string;
+  actionKind: HumanActionKind;
+  parentScope: "root" | "cycle";
   rootIssueId: string;
-  cycleIssueId: string;
-  nodeIssueId: string;
-  requestKind: "needs_info" | "needs_approval";
-  questionOrProposal: string;
-  reason: string;
-  impact: string;
-  contextDigest: string;
-  expectedRootRemoteVersion: string;
+  cycleIssueId?: string;
+  relatedIssueIds: string[];
+  sourceRootDirectiveId?: string;
+  sourceRootGateRecordId?: string;
+  basedOnTreeDigest?: string;
+  proposalDigest: string;
+  expectedParentRemoteVersion: string;
+  createdAt: string;
+}
+
+export type HumanActionResolutionOutcome =
+  | "approved"
+  | "rejected"
+  | "answered"
+  | "canceled"
+  | "granted"
+  | "denied"
+  | "waived"
+  | "override_applied"
+  | "override_rejected";
+
+export interface HumanActionResolutionRecord {
+  kind: "human_action_resolution";
+  version: ManagedRecordVersion;
+  resolutionId: string;
+  actionId: string;
+  actionIssueId: string;
+  actionKind: HumanActionKind;
+  outcome: HumanActionResolutionOutcome;
+  terminalStatus: "Approved" | "Rejected" | "Answered" | "Canceled";
+  terminalRemoteVersion: string;
+  sourceCommentIds: string[];
+  sourceCommentVersions: string[];
+  actorKind: "human";
+  proposalDigest: string;
+  resolvedAt: string;
 }
 
 export interface FindingEvidence {
@@ -292,7 +325,8 @@ export type ManagedRecord =
   | StageExecutionRecord
   | StageTerminalRecord
   | WorkCompletionRecord
-  | HumanActionRecord
+  | HumanActionRequestRecord
+  | HumanActionResolutionRecord
   | FindingRecord
   | FindingDispositionRecord
   | VerifyResultRecord

@@ -8,7 +8,8 @@ import type {
   FindingDispositionRecord,
   FindingEvidence,
   FindingRecord,
-  HumanActionRecord,
+  HumanActionRequestRecord,
+  HumanActionResolutionRecord,
   ManagedRecord,
   NodeMarker,
   PlanContract,
@@ -76,7 +77,8 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "stage_execution": return decodeStageExecution(object);
     case "stage_terminal": return decodeStageTerminal(object);
     case "work_completion": return decodeWorkCompletion(object);
-    case "human_action": return decodeHumanAction(object);
+    case "human_action_request": return decodeHumanActionRequest(object);
+    case "human_action_resolution": return decodeHumanActionResolution(object);
     case "finding": return decodeFinding(object);
     case "finding_disposition": return decodeFindingDisposition(object);
     case "verify_result": return decodeVerifyResult(object);
@@ -163,9 +165,35 @@ function decodeWorkCompletion(o: Record<string, unknown>): WorkCompletionRecord 
   };
 }
 
-function decodeHumanAction(o: Record<string, unknown>): HumanActionRecord {
-  fields(o, ["kind", "version", "action_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "request_kind", "question_or_proposal", "reason", "impact", "context_digest", "expected_root_remote_version"]);
-  return { kind: "human_action", version: 1, actionId: id(o, "action_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), requestKind: enumValue(o, "request_kind", ["needs_info", "needs_approval"]), questionOrProposal: text(o, "question_or_proposal"), reason: text(o, "reason"), impact: text(o, "impact"), contextDigest: id(o, "context_digest"), expectedRootRemoteVersion: id(o, "expected_root_remote_version") };
+function decodeHumanActionRequest(o: Record<string, unknown>): HumanActionRequestRecord {
+  fields(o, ["kind", "version", "action_id", "action_issue_id", "action_kind", "parent_scope", "root_issue_id", "cycle_issue_id", "related_issue_ids", "source_root_directive_id", "source_root_gate_record_id", "based_on_tree_digest", "proposal_digest", "expected_parent_remote_version", "created_at"], ["cycle_issue_id", "source_root_directive_id", "source_root_gate_record_id", "based_on_tree_digest"]);
+  const parentScope = enumValue(o, "parent_scope", ["root", "cycle"]);
+  if (parentScope === "cycle" && o.cycle_issue_id === undefined) fail("managed_record_required_field:cycle_issue_id");
+  if (parentScope === "root" && o.cycle_issue_id !== undefined) fail("managed_record_scope_invalid");
+  return {
+    kind: "human_action_request", version: 1, actionId: id(o, "action_id"), actionIssueId: id(o, "action_issue_id"),
+    actionKind: enumValue(o, "action_kind", ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"]),
+    parentScope, rootIssueId: id(o, "root_issue_id"),
+    ...(o.cycle_issue_id === undefined ? {} : { cycleIssueId: id(o, "cycle_issue_id") }), relatedIssueIds: ids(o, "related_issue_ids"),
+    ...(o.source_root_directive_id === undefined ? {} : { sourceRootDirectiveId: id(o, "source_root_directive_id") }),
+    ...(o.source_root_gate_record_id === undefined ? {} : { sourceRootGateRecordId: id(o, "source_root_gate_record_id") }),
+    ...(o.based_on_tree_digest === undefined ? {} : { basedOnTreeDigest: id(o, "based_on_tree_digest") }),
+    proposalDigest: id(o, "proposal_digest"), expectedParentRemoteVersion: opaque(o, "expected_parent_remote_version"), createdAt: timestamp(o, "created_at"),
+  };
+}
+
+function decodeHumanActionResolution(o: Record<string, unknown>): HumanActionResolutionRecord {
+  fields(o, ["kind", "version", "resolution_id", "action_id", "action_issue_id", "action_kind", "outcome", "terminal_status", "terminal_remote_version", "source_comment_ids", "source_comment_versions", "actor_kind", "proposal_digest", "resolved_at"]);
+  const sourceCommentIds = ids(o, "source_comment_ids");
+  const sourceCommentVersions = opaques(o, "source_comment_versions");
+  if (sourceCommentIds.length !== sourceCommentVersions.length) fail("managed_record_source_comment_mismatch");
+  return {
+    kind: "human_action_resolution", version: 1, resolutionId: id(o, "resolution_id"), actionId: id(o, "action_id"), actionIssueId: id(o, "action_issue_id"),
+    actionKind: enumValue(o, "action_kind", ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"]),
+    outcome: enumValue(o, "outcome", ["approved", "rejected", "answered", "canceled", "granted", "denied", "waived", "override_applied", "override_rejected"]),
+    terminalStatus: enumValue(o, "terminal_status", ["Approved", "Rejected", "Answered", "Canceled"]), terminalRemoteVersion: opaque(o, "terminal_remote_version"),
+    sourceCommentIds, sourceCommentVersions, actorKind: enumValue(o, "actor_kind", ["human"]), proposalDigest: id(o, "proposal_digest"), resolvedAt: timestamp(o, "resolved_at"),
+  };
 }
 
 function decodeFinding(o: Record<string, unknown>): FindingRecord {
@@ -225,7 +253,8 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_terminal: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "contextDigest", "outcome", "completedAt", "summary", "usage", "failureCode"], optional: ["failureCode"] },
     work_completion: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "workKey", "contextDigest", "summary", "changedPaths", "checks", "commitRevision"] },
-    human_action: { allowed: ["kind", "version", "actionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "requestKind", "questionOrProposal", "reason", "impact", "contextDigest", "expectedRootRemoteVersion"] },
+    human_action_request: { allowed: ["kind", "version", "actionId", "actionIssueId", "actionKind", "parentScope", "rootIssueId", "cycleIssueId", "relatedIssueIds", "sourceRootDirectiveId", "sourceRootGateRecordId", "basedOnTreeDigest", "proposalDigest", "expectedParentRemoteVersion", "createdAt"], optional: ["cycleIssueId", "sourceRootDirectiveId", "sourceRootGateRecordId", "basedOnTreeDigest"] },
+    human_action_resolution: { allowed: ["kind", "version", "resolutionId", "actionId", "actionIssueId", "actionKind", "outcome", "terminalStatus", "terminalRemoteVersion", "sourceCommentIds", "sourceCommentVersions", "actorKind", "proposalDigest", "resolvedAt"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
     finding_disposition: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "disposition", "evidence"] },
     verify_result: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "conclusion", "criteriaResults", "checks", "verifiedRevision"] },
@@ -248,7 +277,8 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "stage_execution": return encodeStageExecution(record);
     case "stage_terminal": return encodeStageTerminal(record);
     case "work_completion": return encodeWorkCompletion(record);
-    case "human_action": return encodeSimple(record, { action_id: record.actionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, request_kind: record.requestKind, question_or_proposal: record.questionOrProposal, reason: record.reason, impact: record.impact, context_digest: record.contextDigest, expected_root_remote_version: record.expectedRootRemoteVersion });
+    case "human_action_request": return encodeSimple(record, { action_id: record.actionId, action_issue_id: record.actionIssueId, action_kind: record.actionKind, parent_scope: record.parentScope, root_issue_id: record.rootIssueId, ...(record.cycleIssueId === undefined ? {} : { cycle_issue_id: record.cycleIssueId }), related_issue_ids: record.relatedIssueIds, ...(record.sourceRootDirectiveId === undefined ? {} : { source_root_directive_id: record.sourceRootDirectiveId }), ...(record.sourceRootGateRecordId === undefined ? {} : { source_root_gate_record_id: record.sourceRootGateRecordId }), ...(record.basedOnTreeDigest === undefined ? {} : { based_on_tree_digest: record.basedOnTreeDigest }), proposal_digest: record.proposalDigest, expected_parent_remote_version: record.expectedParentRemoteVersion, created_at: record.createdAt });
+    case "human_action_resolution": return encodeSimple(record, { resolution_id: record.resolutionId, action_id: record.actionId, action_issue_id: record.actionIssueId, action_kind: record.actionKind, outcome: record.outcome, terminal_status: record.terminalStatus, terminal_remote_version: record.terminalRemoteVersion, source_comment_ids: record.sourceCommentIds, source_comment_versions: record.sourceCommentVersions, actor_kind: record.actorKind, proposal_digest: record.proposalDigest, resolved_at: record.resolvedAt });
     case "finding": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, category: record.category, severity: record.severity, evidence: record.evidence.map(encodeFindingEvidence), affected_scope: record.affectedScope.map(encodeAffectedScope), retryable: record.retryable, suggested_remediation: record.suggestedRemediation, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion) });
     case "finding_disposition": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, disposition: record.disposition, evidence: record.evidence.map(encodeFindingEvidence) });
     case "verify_result": return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, conclusion: record.conclusion, criteria_results: record.criteriaResults.map((criterion) => { recordFields(criterion, ["criterionKey", "outcome", "summary"]); return { criterion_key: criterion.criterionKey, outcome: criterion.outcome, summary: criterion.summary }; }), checks: record.checks.map(encodeCheck), verified_revision: record.verifiedRevision });
@@ -279,10 +309,12 @@ function requiredObject(o: Record<string, unknown>, key: string): Record<string,
 function fields(o: Record<string, unknown>, allowed: string[], optional: string[] = []): void { const allowedSet = new Set(allowed); for (const key of Object.keys(o)) if (!allowedSet.has(key)) fail(`managed_record_unknown_field:${key}`); const optionalSet = new Set(optional); for (const key of allowed) if (!optionalSet.has(key) && !(key in o)) fail(`managed_record_required_field:${key}`); }
 function requiredString(o: Record<string, unknown>, key: string, identifier = false): string { const value = o[key]; if (typeof value !== "string") fail(`managed_record_required_field:${key}`); return identifier ? id(o, key) : value; }
 function id(o: Record<string, unknown>, key: string): string { const value = o[key]; if (typeof value !== "string" || !identifierPattern.test(value)) fail(`managed_record_identifier_invalid:${key}`); return value; }
+function opaque(o: Record<string, unknown>, key: string): string { const value = o[key]; if (typeof value !== "string" || value.length === 0 || value.length > 512 || /[\0\r\n]/u.test(value)) fail(`managed_record_opaque_invalid:${key}`); return value; }
 function text(o: Record<string, unknown>, key: string): string { const value = o[key]; if (typeof value !== "string" || value.length === 0 || value.length > maxText || /[\0\r\n]/u.test(value)) fail("managed_record_bounded_text_invalid"); return value; }
 function strings(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || entry.length === 0 || entry.length > maxText || /[\0\r\n]/u.test(entry)) fail("managed_record_bounded_text_invalid"); return entry; }); }
 function paths(o: Record<string, unknown>, key: string): string[] { const value = strings(o, key); return value.map((entry) => { if (entry.startsWith("/") || entry.split("/").some((part) => part === "..")) fail(`managed_record_path_invalid:${key}`); return entry; }); }
 function ids(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || !identifierPattern.test(entry)) fail(`managed_record_identifier_invalid:${key}`); return entry; }); }
+function opaques(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || entry.length === 0 || entry.length > 512 || /[\0\r\n]/u.test(entry)) fail(`managed_record_opaque_invalid:${key}`); return entry; }); }
 function criteria(o: Record<string, unknown>, key: string): AcceptanceCriterion[] { return array(o, key, (value) => decodeCriterion(recordObject(value))); }
 function array<T>(o: Record<string, unknown>, key: string, decode: (value: Record<string, unknown>) => T): T[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => decode(recordObject(entry))); }
 function bool(o: Record<string, unknown>, key: string): boolean { if (typeof o[key] !== "boolean") fail(`managed_record_boolean_invalid:${key}`); return o[key] as boolean; }
