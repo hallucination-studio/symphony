@@ -1,3 +1,5 @@
+import { createTargetWorkflowRequestSignal } from "./target-workflow-deadline.mjs";
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const PAGE_SIZE = 250;
 const COMMENT_PAGE_SIZE = 64;
@@ -62,11 +64,11 @@ const ROOT_SCOPED_FACTS_QUERY = `
           project { id }
           parent { id }
           state { name }
-          comments(first: 16, after: $commentsAfter) {
+          comments(first: 8, after: $commentsAfter) {
             nodes { id body issue { id } }
             pageInfo { hasNextPage endCursor }
           }
-          inverseRelations(first: 50, after: $relationsAfter) {
+          inverseRelations(first: 16, after: $relationsAfter) {
             nodes {
               id
               type
@@ -81,20 +83,47 @@ const ROOT_SCOPED_FACTS_QUERY = `
     }
   }
 `;
-const ROOT_SCOPED_ROOT_QUERY = ROOT_SCOPED_FACTS_QUERY;
-const ROOT_SCOPED_CHILDREN_QUERY = PROJECT_ISSUES_QUERY;
+const ROOT_SCOPED_CHILDREN_QUERY = `
+  query TargetWorkflowRootScopedChildren($projectId: String!, $parentIds: [ID!]!, $after: String) {
+    project(id: $projectId) {
+      id
+      issues(first: 25, after: $after, filter: { parent: { id: { in: $parentIds } } }) {
+        nodes {
+          id
+          project { id }
+          parent { id }
+          state { name }
+          comments(first: 8) {
+            nodes { id body issue { id } }
+            pageInfo { hasNextPage endCursor }
+          }
+          inverseRelations(first: 16) {
+            nodes {
+              id
+              type
+              issue { id project { id } }
+              relatedIssue { id project { id } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
 
 export function createTargetWorkflowSnapshotTransport({
   developmentToken,
-  budget,
+  observer,
   rootScoped = false,
+  signal,
   fetch = globalThis.fetch,
   log = () => {},
 } = {}) {
   if (typeof developmentToken !== "string" || developmentToken.length === 0) {
     throw new Error("target_transport_token_missing");
   }
-  if (!hasRunBudget(budget)) throw new Error("target_transport_budget_missing");
   if (typeof fetch !== "function") throw new Error("target_transport_fetch_invalid");
   if (typeof log !== "function") throw new Error("target_transport_log_invalid");
 
@@ -106,7 +135,7 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function readSnapshot(input) {
     const request = validateInput(input);
-    budget?.recordLogicalOperation();
+    observer?.recordLogicalOperation();
     if (rootScoped) return readRootScopedSnapshot(request);
     const projectIssues = await readProjectIssues(request.projectId);
     const issueById = new Map(projectIssues.map((issue) => [issue.id, issue]));
@@ -128,8 +157,9 @@ export function createTargetWorkflowSnapshotTransport({
     let issueIds = [request.rootIssueId];
     let parentIds = [];
     let depth = 0;
-    while (issueIds.length > 0 && depth <= 32) {
+    while (depth <= 32) {
       const facts = await readRootScopedBatch(request.projectId, issueIds, parentIds);
+      if (depth > 0 && facts.length === 0) break;
       const next = [];
       for (const fact of facts) {
         const issue = issueHeader(fact, request.projectId);
@@ -143,7 +173,7 @@ export function createTargetWorkflowSnapshotTransport({
       }
       if (depth === 0 && next.length !== 1) throw new Error("target_transport_root_scope_invalid");
       parentIds = next;
-      issueIds = await readRootScopedChildIds(request.projectId, parentIds);
+      issueIds = [];
       depth += 1;
     }
     if (depth > 32) throw new Error("target_transport_tree_depth_exceeded");
@@ -152,16 +182,17 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function readRootScopedBatch(projectId, issueIds, parentIds) {
     const factsById = new Map();
-    const pending = [{ issueIds, issuesAfter: null, commentsAfter: null, relationsAfter: null }];
+    const pending = [{ issueIds, parentIds, issuesAfter: null, commentsAfter: null, relationsAfter: null }];
     const cursors = new Set();
     let pages = 0;
     while (pending.length > 0) {
       const page = pending.shift();
       if (++pages > 64) throw new Error("target_transport_pagination_bound_exceeded");
-      const data = await graphql(parentIds.length === 0 ? ROOT_SCOPED_ROOT_QUERY : ROOT_SCOPED_FACTS_QUERY, {
+      const useParentFilter = page.parentIds.length > 0;
+      const data = await graphql(useParentFilter ? ROOT_SCOPED_CHILDREN_QUERY : ROOT_SCOPED_FACTS_QUERY, {
         projectId,
-        issueIds: page.issueIds,
-        ...(parentIds.length > 0 ? { parentIds } : {}),
+        ...(page.issueIds.length > 0 ? { issueIds: page.issueIds } : {}),
+        ...(useParentFilter ? { parentIds: page.parentIds } : {}),
         issuesAfter: page.issuesAfter,
         commentsAfter: page.commentsAfter,
         relationsAfter: page.relationsAfter,
@@ -200,9 +231,15 @@ export function createTargetWorkflowSnapshotTransport({
         }
       }
       if (issuesAfter !== null) {
-        pending.push({ issueIds: page.issueIds, issuesAfter, commentsAfter: null, relationsAfter: null });
+        pending.push({
+          issueIds: page.issueIds,
+          parentIds: page.parentIds,
+          issuesAfter,
+          commentsAfter: null,
+          relationsAfter: null,
+        });
       }
-      pending.push(...nextGroups.values());
+      pending.push(...[...nextGroups.values()].map((group) => ({ ...group, parentIds: [] })));
     }
     return [...factsById.values()];
 
@@ -213,31 +250,6 @@ export function createTargetWorkflowSnapshotTransport({
       seen.add(`${scope}:${connection.endCursor}`);
       return connection.endCursor;
     }
-  }
-
-  async function readRootScopedChildIds(projectId, parentIds) {
-    const ids = [];
-    const seen = new Set();
-    const cursors = new Set();
-    let after = null;
-    for (let pageNumber = 0; pageNumber < 64; pageNumber += 1) {
-      const data = await graphql(ROOT_SCOPED_CHILDREN_QUERY, { projectId, parentIds, issuesAfter: after });
-      const project = object(data.project, "target_transport_response_invalid");
-      if (project.id !== projectId) throw new Error("target_transport_project_scope_invalid");
-      const connection = pageConnection(project.issues, "target_transport_response_invalid");
-      for (const value of connection.nodes) {
-        const issue = issueHeader(value, projectId);
-        if (!parentIds.includes(issue.parentIssueId)) continue;
-        const id = issue.id;
-        if (seen.has(id)) throw new Error("target_transport_duplicate_issue");
-        seen.add(id);
-        ids.push(id);
-        if (ids.length > MAX_ISSUES) throw new Error("target_transport_bound_exceeded");
-      }
-      if (!connection.hasNextPage) return ids;
-      after = nextCursor(connection, cursors);
-    }
-    throw new Error("target_transport_pagination_bound_exceeded");
   }
 
   function rootScopedDetails(value, issueId, projectId) {
@@ -335,7 +347,6 @@ export function createTargetWorkflowSnapshotTransport({
 
   async function graphql(query, variables) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
-    const reservation = budget?.reservePhysicalRequest();
     let observed = false;
     let response;
     try {
@@ -343,15 +354,19 @@ export function createTargetWorkflowSnapshotTransport({
         method: "POST",
         headers: { authorization: developmentToken, "content-type": "application/json" },
         body: JSON.stringify({ query, variables, operationName: operation }),
+        signal: createTargetWorkflowRequestSignal(signal, 30_000),
       });
-      budget?.observe({ status: response.status, ...readRateWindows(response.headers) });
+      observer?.observe({ status: response.status, ...readRateWindows(response.headers) });
       observed = true;
-    } catch {
-      if (!observed) budget?.observe({});
+      if (response.status === 429) throw new Error("target_transport_rate_limited");
+    } catch (error) {
+      if (!observed) observer?.observe({});
+      if (observer?.snapshot?.()?.rateLimited === true) {
+        throw new Error("target_transport_rate_limited");
+      }
+      if (error?.message === "target_transport_rate_limited") throw error;
       log({ event: "target_transport_request_failed", operation });
       throw new Error("target_transport_request_failed");
-    } finally {
-      reservation?.release();
     }
     let body;
     try {
@@ -392,10 +407,6 @@ export function createTargetWorkflowSnapshotTransport({
       ? undefined : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
   }
 
-  function hasRunBudget(value) {
-    return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
-      typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
-  }
 }
 
 function validateInput(input) {

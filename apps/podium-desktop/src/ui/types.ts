@@ -46,6 +46,9 @@ export interface ConductorSummaryView {
     | "unbound"
     | "project_conflict";
   projectName?: string;
+  projectId?: string;
+  projectPool?: string[];
+  projectResolutionStatus?: "resolved" | "unbound" | "ambiguous" | "conflict";
   repositoryDisplayName?: string;
   baseBranch?: string;
   observedAt: string;
@@ -58,6 +61,9 @@ export interface RootSummaryView {
   status: string;
   currentNodeSummary?: string;
   linearUrl?: string;
+  routingConductorShortHash?: string;
+  routingStatus?: "routed" | "unrouted" | "conflict";
+  ownershipStatus?: "matched" | "mismatch" | "unknown";
   observedAt: string;
 }
 
@@ -176,6 +182,13 @@ export type DesktopCommand =
       kind: "create_conductor";
       projectId: string;
       repository: RepositorySelection;
+    }
+  | {
+      kind: "create_root";
+      projectId: string;
+      conductorId?: string;
+      title: string;
+      description: string;
     }
   | { kind: "start_conductor" | "stop_conductor" | "restart_conductor"; conductorId: string }
   | {

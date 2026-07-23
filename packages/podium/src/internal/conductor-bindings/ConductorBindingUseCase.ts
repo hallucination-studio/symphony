@@ -24,7 +24,10 @@ export class ConductorBindingUseCase {
     private readonly client: Pick<
       LinearClientInterface,
       "assignConductorProjectLabel"
-    >,
+    > & Partial<Pick<
+      LinearClientInterface,
+      "readConductorProjectPool" | "preflightConductorProjectPool" | "reconcileConductorProjectPool"
+    >>,
     private readonly dependencies: BindingDependencies,
   ) {
     const maximum = dependencies.maxAttempts ?? 4;
@@ -59,25 +62,18 @@ export class ConductorBindingUseCase {
     projectId: string;
     repositoryContext: RepositoryContext;
   }): Promise<ConductorBinding> {
-    const existing = this.store.getConductorBinding();
+    const existingBindings = this.store.listConductorBindings
+      ? this.store.listConductorBindings()
+      : (this.store.getConductorBinding() ? [this.store.getConductorBinding()!] : []);
+    const existing = existingBindings.find((binding) =>
+      binding.desiredState === "stopped" &&
+      binding.linearInstallationId === input.installationId &&
+      sameRepository(binding.repositoryContext, input.repositoryContext),
+    );
     if (existing) {
-      if (
-        existing.desiredState === "stopped" &&
-        existing.linearInstallationId === input.installationId &&
-        sameRepository(existing.repositoryContext, input.repositoryContext)
-      ) {
-        await this.#assignLabel({
-          projectId: input.projectId,
-          labelName: `symphony:conductor/${existing.conductorShortHash}`,
-        });
-        this.store.setConductorDesiredState(existing.bindingId, "running");
-        return { ...existing, desiredState: "running" };
-      }
-      throw podiumError(
-        "conductor_binding_already_exists",
-        "Roadmap V1 supports exactly one Conductor Binding.",
-        { actionRequired: "use_existing_binding" },
-      );
+      await this.#ensureProjectPool(input.projectId, existing.conductorShortHash);
+      this.store.setConductorDesiredState(existing.bindingId, "running");
+      return { ...existing, desiredState: "running" };
     }
     const installation = this.store.getLinearCredential(input.installationId);
     const project = this.store.getProject(input.projectId);
@@ -108,12 +104,32 @@ export class ConductorBindingUseCase {
       desiredState: "stopped",
     };
     this.store.saveConductorBinding(binding);
-    await this.#assignLabel({
-      projectId: project.projectId,
-      labelName: `symphony:conductor/${conductorShortHash}`,
-    });
+    // Keep the stopped binding as a durable retry intent if pool reconciliation fails.
+    await this.#ensureProjectPool(project.projectId, conductorShortHash);
     this.store.setConductorDesiredState(binding.bindingId, "running");
     return { ...binding, desiredState: "running" };
+  }
+
+  async #ensureProjectPool(projectId: string, conductorShortHash: string): Promise<void> {
+    if (
+      typeof this.client.readConductorProjectPool !== "function" ||
+      typeof this.client.preflightConductorProjectPool !== "function" ||
+      typeof this.client.reconcileConductorProjectPool !== "function"
+    ) {
+      await this.#assignLabel({
+        projectId,
+        labelName: `symphony:conductor/${conductorShortHash}`,
+      });
+      return;
+    }
+    const current = await this.client.readConductorProjectPool({ projectId });
+    const desiredMembers = [...new Set([...current.members, conductorShortHash])];
+    const plan = await this.client.preflightConductorProjectPool({ projectId, desiredMembers });
+    if (plan.kind !== "ready") throw new Error(`linear_project_pool_${plan.reason}`);
+    const result = await this.client.reconcileConductorProjectPool({ plan, authorized: true });
+    if (result.kind === "dry_run" || !result.members.includes(conductorShortHash)) {
+      throw new Error("linear_project_pool_read_back_failed");
+    }
   }
 
   async #assignLabel(input: { projectId: string; labelName: string }) {

@@ -116,6 +116,7 @@ function root(
     priority,
     order,
     blockers,
+    rootConductorLabels: [],
   };
 }
 

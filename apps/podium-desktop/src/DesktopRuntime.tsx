@@ -207,6 +207,14 @@ function commandBody(command: DesktopCommand): JsonValue {
           base_branch: command.repository.baseBranch,
         },
       };
+    case "create_root":
+      return {
+        kind: command.kind,
+        project_id: command.projectId,
+        ...(command.conductorId === undefined ? {} : { conductor_id: command.conductorId }),
+        title: command.title,
+        description: command.description,
+      };
     case "start_conductor":
     case "stop_conductor":
     case "restart_conductor":

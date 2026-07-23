@@ -91,6 +91,23 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
     };
   }
 
+  async restoreWorktree(workspace: GitWorkspace, expectedHead: string) {
+    if (!workspace.rootIssueId || path.resolve(workspace.worktreePath) !== path.resolve(path.join(this.worktreeRoot, workspace.rootIssueId))) {
+      throw new Error("git_restore_workspace_scope_invalid");
+    }
+    await this.#assertWorkspaceIdentity(workspace);
+    if (!safeRevision(expectedHead)) throw new Error("git_restore_revision_invalid");
+    const snapshot = await this.inspect(workspace);
+    if (snapshot.head !== expectedHead) throw new Error("git_restore_head_changed");
+    await runCommand("git", ["-C", workspace.worktreePath, "restore", "--source", expectedHead, "--staged", "--worktree", "--", "."]);
+    await runCommand("git", ["-C", workspace.worktreePath, "clean", "-fd", "--", "."]);
+    const restored = await this.inspect(workspace);
+    if (restored.head !== expectedHead || restored.status.items.length > 0 || restored.status.partial || restored.status.has_more) {
+      throw new Error("git_restore_read_back_invalid");
+    }
+    return { kind: "restored" as const };
+  }
+
   async checks(workspace: GitWorkspace, names: string[]) {
     await this.#assertWorkspaceIdentity(workspace);
     if (names.length > 32) throw new Error("git_checks_cap_exceeded");

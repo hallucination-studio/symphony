@@ -28,6 +28,11 @@ export class PodiumDesktopViewImpl implements DesktopViewInterface {
           ? { current_node_summary: root.current_node_summary }
           : {}),
         ...(root.linear_url ? { linear_url: root.linear_url } : {}),
+        ...(root.routing_conductor_short_hash
+          ? { routing_conductor_short_hash: root.routing_conductor_short_hash }
+          : {}),
+        ...(root.routing_status ? { routing_status: root.routing_status } : {}),
+        ...(root.ownership_status ? { ownership_status: root.ownership_status } : {}),
         observed_at: root.observed_at,
       })),
       recent_problems: input.problems,

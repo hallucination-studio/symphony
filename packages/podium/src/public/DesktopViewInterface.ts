@@ -33,6 +33,9 @@ export interface ConductorSummaryView {
     | "unbound"
     | "project_conflict";
   project_name?: string;
+  project_id?: string;
+  project_pool?: string[];
+  project_resolution_status?: "resolved" | "unbound" | "ambiguous" | "conflict";
   repository_display_name?: string;
   base_branch?: string;
   observed_at: string;
@@ -62,6 +65,9 @@ export interface RootSummaryView {
   status: string;
   current_node_summary?: string;
   linear_url?: string;
+  routing_conductor_short_hash?: string;
+  routing_status?: "routed" | "unrouted" | "conflict";
+  ownership_status?: "matched" | "mismatch" | "unknown";
   observed_at: string;
 }
 

@@ -77,6 +77,21 @@ export function WorkPage({
             </ul>
           </section>
           <section className="panel">
+            <h2>Root routing</h2>
+            <p>
+              {detail.summary.routingStatus === "unrouted"
+                ? "Unrouted: this Root is paused."
+                : detail.summary.routingStatus === "conflict"
+                ? "Routing conflict: this Root is paused."
+                : detail.summary.routingConductorShortHash
+                  ? `Routed to ${detail.summary.routingConductorShortHash}.`
+                  : "Routing has not been resolved."}
+            </p>
+            {detail.summary.ownershipStatus === "mismatch" && (
+              <p role="alert">Ownership conflict: Symphony will not silently take over this Root.</p>
+            )}
+          </section>
+          <section className="panel">
             <h2>Usage</h2>
             <p>{formatNumber(detail.usage.totalTokens)} total tokens</p>
           </section>

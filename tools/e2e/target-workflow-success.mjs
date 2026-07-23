@@ -1,5 +1,6 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const MANAGED_RECORD_PREFIX = "<!-- symphony managed-record";
 const ROOT_RESULT_FIELDS = new Set([
   "rootIssueId", "identifier", "projectId", "parentIssueId", "stateName",
@@ -7,6 +8,10 @@ const ROOT_RESULT_FIELDS = new Set([
 const OBSERVATION_FIELDS = new Set(["git"]);
 const PENDING_TRANSIENT_ERRORS = new Set([
   "target_facts_human_action_missing",
+  "target_facts_human_action_invalid",
+  "target_facts_human_cycle_invalid",
+  "target_facts_human_node_state_invalid",
+  "target_facts_human_state_invalid",
   "target_transport_issue_kind_invalid",
 ]);
 const FACTS_TRANSIENT_ERRORS = new Set([
@@ -168,13 +173,23 @@ function validatePendingObservation(value, rootIssueId) {
     throw new Error("target_success_pending_observation_invalid");
   }
   if (pending.status === "not_waiting" && Object.keys(pending).length === 1) return pending;
-  if (pending.status !== "waiting" || Object.keys(pending).some((key) => ![
+  const pendingFields = [
     "status", "rootIssueId", "cycleIssueId", "nodeIssueId", "requestKind", "actionId", "contextDigest",
-  ].includes(key)) || !SAFE_ID.test(pending.rootIssueId ?? "") ||
-      !SAFE_ID.test(pending.cycleIssueId ?? "") || !SAFE_ID.test(pending.nodeIssueId ?? "") ||
-      !SAFE_ID.test(pending.actionId ?? "") || !/^[0-9a-f]{64}$/u.test(pending.contextDigest ?? "") ||
-      !["needs_approval", "needs_info"].includes(pending.requestKind) ||
-      pending.rootIssueId !== rootIssueId) {
+  ];
+  if (pending.status === "waiting" && pending.rootIssueId === rootIssueId &&
+      ["needs_approval", "needs_info"].includes(pending.requestKind) &&
+      Object.keys(pending).every((key) => pendingFields.includes(key)) &&
+      ["cycleIssueId", "nodeIssueId", "actionId", "contextDigest"].some((key) => pending[key] === undefined)) {
+    throw new Error("target_facts_human_action_missing");
+  }
+  if (pending.status !== "waiting" || Object.keys(pending).some((key) => ![
+    ...pendingFields,
+  ].includes(key)) || pending.rootIssueId !== rootIssueId ||
+      !["needs_approval", "needs_info"].includes(pending.requestKind)) {
+    throw new Error("target_success_pending_observation_invalid");
+  }
+  if (!SAFE_ID.test(pending.cycleIssueId ?? "") || !SAFE_ID.test(pending.nodeIssueId ?? "") ||
+      !SAFE_ID.test(pending.actionId ?? "") || !DIGEST.test(pending.contextDigest ?? "")) {
     throw new Error("target_success_pending_observation_invalid");
   }
   return pending;

@@ -20,11 +20,13 @@ import type {
   LinearBlockerValue,
   LinearMutationCommand,
   LinearPriority,
+  ConductorPoolValue,
   RootIssueValue,
   RootUsageValue,
   WorkflowCommentValue,
   WorkflowRelationValue,
 } from "../types.js";
+import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
 import {
   inspectTargetWorkflowCatalog,
   isTargetWorkflowStatusName,
@@ -39,6 +41,8 @@ const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_HEADER_MARKER = "<!-- symphony root\n";
+const MAX_ROOT_TITLE_LENGTH = 256;
+const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
 
 type WorkflowScopeIssue = {
   id: string;
@@ -138,15 +142,16 @@ const ROOT_HEADER_FACTS_QUERY = `
         parent { id }
         delegate { id }
         state { name }
+        labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         comments(first: 2, filter: { body: { contains: $commentMarker } }) {
           nodes { id body updatedAt issue { id } }
           pageInfo { hasNextPage }
         }
-        workflowManagedComments: comments(first: 64, filter: { body: { contains: $workflowCommentMarker } }) {
+        workflowManagedComments: comments(first: 25, filter: { body: { contains: $workflowCommentMarker } }) {
           nodes { id body updatedAt issue { id } }
           pageInfo { hasNextPage }
         }
-        inverseRelations(first: 250) {
+        inverseRelations(first: 25) {
           nodes {
             type
             issue { id state { name } }
@@ -169,11 +174,11 @@ const ISSUE_TREE_ROOT_QUERY = `
       labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
       comments(first: 2, filter: { body: { contains: $commentMarker } }) {
         nodes { id body updatedAt issue { id } }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
       }
       inverseRelations(first: 250) {
         nodes { type issue { id state { name } } relatedIssue { id } }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -186,13 +191,13 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
       parent { id }
       state { name }
       labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
-      comments(first: 64) {
+      comments(first: 8) {
         nodes { id body updatedAt issue { id } }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
       }
-      inverseRelations(first: 250) {
+      inverseRelations(first: 8) {
         nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -207,11 +212,11 @@ const ISSUE_TREE_CHILDREN_QUERY = `
         state { name }
         comments(first: 64) {
           nodes { id body updatedAt issue { id } }
-          pageInfo { hasNextPage }
+          pageInfo { hasNextPage endCursor }
         }
         inverseRelations(first: 250) {
           nodes { type issue { id state { name } } relatedIssue { id } }
-          pageInfo { hasNextPage }
+          pageInfo { hasNextPage endCursor }
         }
       }
       pageInfo { hasNextPage endCursor }
@@ -220,22 +225,44 @@ const ISSUE_TREE_CHILDREN_QUERY = `
 `;
 const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
   query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
-    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
+    issues(first: 25, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
       nodes {
         id identifier title description sortOrder subIssueSortOrder updatedAt
         project { id }
         parent { id }
         state { name }
-        comments(first: 64) {
+        comments(first: 8) {
           nodes { id body updatedAt issue { id } }
-          pageInfo { hasNextPage }
+          pageInfo { hasNextPage endCursor }
         }
-        inverseRelations(first: 250) {
+        inverseRelations(first: 8) {
           nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
-          pageInfo { hasNextPage }
+          pageInfo { hasNextPage endCursor }
         }
       }
       pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+const ISSUE_TREE_COMMENTS_PAGE_QUERY = `
+  query SymphonyIssueTreeComments($issueId: String!, $cursor: String!) {
+    issue(id: $issueId) {
+      id
+      comments(first: 25, after: $cursor) {
+        nodes { id body updatedAt issue { id } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
+const ISSUE_TREE_RELATIONS_PAGE_QUERY = `
+  query SymphonyIssueTreeRelations($issueId: String!, $cursor: String!) {
+    issue(id: $issueId) {
+      id
+      inverseRelations(first: 25, after: $cursor) {
+        nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
+        pageInfo { hasNextPage endCursor }
+      }
     }
   }
 `;
@@ -279,7 +306,6 @@ export interface LinearPhysicalRequestObservation {
 export interface LinearRequestObservationOptions {
   correlationId(): string;
   now(): number;
-  permit?(): void;
   observe?(observation: LinearPhysicalRequestObservation): void;
 }
 
@@ -289,6 +315,25 @@ interface RootHeaderFactsData {
     nodes: RootHeaderFact[];
     pageInfo: { hasNextPage: boolean };
   };
+}
+
+interface IssueTreePageInfo {
+  hasNextPage: boolean;
+  endCursor?: string | null;
+}
+
+interface IssueTreeComment {
+  id: string;
+  body: string;
+  updatedAt: string;
+  issue: { id: string };
+}
+
+interface IssueTreeRelation {
+  id?: string | null;
+  type: string;
+  issue?: { id: string; state: { name: string }; project?: { id: string } | null } | null;
+  relatedIssue?: { id: string; project?: { id: string } | null } | null;
 }
 
 interface RootHeaderFact {
@@ -303,6 +348,10 @@ interface RootHeaderFact {
   parent?: { id: string } | null;
   delegate?: { id: string } | null;
   state: { name: string };
+  labels: {
+    nodes: Array<{ name: string }>;
+    pageInfo: { hasNextPage: boolean };
+  };
   comments: {
     nodes: Array<{
       id: string;
@@ -344,15 +393,13 @@ interface IssueTreeFact {
   parent?: { id: string } | null;
   state: { name: string };
   comments: {
-    nodes: Array<{
-      id: string;
-      body: string;
-      updatedAt: string;
-      issue: { id: string };
-    }>;
-    pageInfo: { hasNextPage: boolean };
+    nodes: IssueTreeComment[];
+    pageInfo: IssueTreePageInfo;
   };
-  inverseRelations: RootHeaderFact["inverseRelations"];
+  inverseRelations: {
+    nodes: IssueTreeRelation[];
+    pageInfo: IssueTreePageInfo;
+  };
 }
 
 interface IssueTreeRootFact extends IssueTreeFact {
@@ -363,6 +410,13 @@ interface IssueTreeRootFact extends IssueTreeFact {
 }
 
 interface IssueTreeRootData { issue?: IssueTreeRootFact | null }
+interface IssueTreeNestedPageData {
+  issue?: {
+    id: string;
+    comments?: IssueTreeFact["comments"];
+    inverseRelations?: IssueTreeFact["inverseRelations"];
+  } | null;
+}
 interface IssueTreeChildrenData {
   issues: {
     nodes: IssueTreeFact[];
@@ -410,16 +464,14 @@ export class LinearSdkImpl implements LinearClientInterface {
   static async discoverDevelopmentTokenOrganizationId(
     developmentToken: string,
     observe?: (observation: LinearPhysicalRequestObservation) => void,
-    permit?: () => void,
   ): Promise<string> {
     const client = observedClient(
       { kind: "development_token", token: developmentToken, delegateActorId: "bootstrap" },
-      observe || permit
+      observe
         ? {
             correlationId: randomUUID,
             now: Date.now,
-            ...(observe ? { observe } : {}),
-            ...(permit ? { permit } : {}),
+            observe,
           }
         : undefined,
     );
@@ -519,6 +571,134 @@ export class LinearSdkImpl implements LinearClientInterface {
     const plan = await this.preflightConductorProjectLabel(input);
     if (plan.kind !== "ready") throw new Error(`linear_${plan.reason}`);
     await this.rebindConductorProjectLabel({ plan, authorized: true });
+  }
+
+  async readConductorProjectPool(input: { projectId: string }) {
+    if (!SAFE_ID.test(input.projectId)) throw new Error("linear_project_pool_project_invalid");
+    const organization = await this.#client.organization;
+    if (organization.id !== this.organizationId) throw new Error("linear_project_pool_organization_mismatch");
+    const project = await this.#client.project(input.projectId);
+    if (!project || project.id !== input.projectId) throw new Error("linear_project_pool_project_invalid");
+    const labels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
+    const active = labels.filter(({ isGroup, archivedAt, retiredById }) => !isGroup && !archivedAt && !retiredById);
+    const members = conductorPoolFromLabels(active.map(({ name }) => name));
+    return {
+      projectId: input.projectId,
+      updatedAt: project.updatedAt.toISOString(),
+      members: members.map(({ conductorShortHash }) => conductorShortHash),
+    };
+  }
+
+  async createRootIssue(input: {
+    projectId: string;
+    conductorShortHash: string;
+    title: string;
+    description: string;
+  }) {
+    const plan = await this.#preflightRootCreation(input);
+    const fresh = await this.#preflightRootCreation(input);
+    if (fresh.fingerprint !== plan.fingerprint) {
+      throw new Error("linear_root_creation_precondition_conflict");
+    }
+    const payload = await this.#client.createIssue({
+      teamId: plan.teamId,
+      projectId: plan.projectId,
+      labelIds: [plan.issueLabelId],
+      title: input.title,
+      description: input.description,
+    });
+    if (!payload.success || !payload.issueId) {
+      throw new Error("linear_root_issue_create_failed");
+    }
+    const issue = await this.#client.issue(payload.issueId);
+    const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
+    const routeLabels = labels.filter(({ name }) => name.startsWith(CONDUCTOR_LABEL_PREFIX));
+    if (
+      issue.id !== payload.issueId ||
+      issue.projectId !== plan.projectId ||
+      issue.parentId !== undefined && issue.parentId !== null ||
+      issue.title !== input.title ||
+      issue.description !== input.description ||
+      routeLabels.length !== 1 ||
+      routeLabels[0]?.id !== plan.issueLabelId ||
+      routeLabels[0]?.name !== plan.issueLabelName
+    ) {
+      throw ambiguousError("linear_root_issue_read_back_failed");
+    }
+    if (!SAFE_ID.test(issue.identifier)) {
+      throw new Error("linear_root_identifier_invalid");
+    }
+    return {
+      rootIssueId: issue.id,
+      identifier: issue.identifier,
+      projectId: issue.projectId,
+    };
+  }
+
+  async #preflightRootCreation(input: {
+    projectId: string;
+    conductorShortHash: string;
+    title: string;
+    description: string;
+  }) {
+    if (
+      !SAFE_ID.test(input.projectId) ||
+      !/^[a-f0-9]{12}$/u.test(input.conductorShortHash) ||
+      !boundedRootText(input.title, MAX_ROOT_TITLE_LENGTH) ||
+      !boundedRootText(input.description, MAX_ROOT_DESCRIPTION_LENGTH)
+    ) {
+      throw new Error("linear_root_creation_input_invalid");
+    }
+    const organization = await this.#client.organization;
+    if (organization.id !== this.organizationId) {
+      throw new Error("linear_root_creation_organization_mismatch");
+    }
+    const project = await this.#client.project(input.projectId);
+    if (!project || project.id !== input.projectId || !(project.updatedAt instanceof Date)) {
+      throw new Error("linear_root_creation_project_invalid");
+    }
+    const projectLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
+    const pool = conductorPoolFromLabels(projectLabels
+      .filter(({ isGroup, archivedAt, retiredById }) => !isGroup && !archivedAt && !retiredById)
+      .map(({ name }) => name));
+    if (!pool.some(({ conductorShortHash }) => conductorShortHash === input.conductorShortHash)) {
+      throw new Error("linear_root_creation_conductor_not_in_pool");
+    }
+    const teams = await allNodes(project.teams({ first: 64 }), 64);
+    if (teams.length !== 1 || !SAFE_ID.test(teams[0]!.id)) {
+      throw new Error("linear_root_creation_team_ambiguous");
+    }
+    const labelName = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
+    const labels = await allNodes(this.#client.issueLabels({
+      first: 3,
+      includeArchived: false,
+      filter: { name: { eq: labelName }, isGroup: { eq: false } },
+    }), 3);
+    const matches = labels.filter(({ id, name, isGroup, archivedAt, retiredById, teamId }) =>
+      SAFE_ID.test(id) && name === labelName && !isGroup && !archivedAt && !retiredById &&
+      (teamId === undefined || teamId === teams[0]!.id));
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0
+        ? "linear_root_creation_issue_label_missing"
+        : "linear_root_creation_issue_label_ambiguous");
+    }
+    const labelOrganization = await matches[0]!.organization;
+    if (labelOrganization.id !== this.organizationId) {
+      throw new Error("linear_root_creation_label_organization_mismatch");
+    }
+    const plan = {
+      projectId: input.projectId,
+      expectedProjectUpdatedAt: project.updatedAt.toISOString(),
+      teamId: teams[0]!.id,
+      issueLabelId: matches[0]!.id,
+      issueLabelName: labelName,
+      conductorShortHash: input.conductorShortHash,
+      fingerprint: "",
+    };
+    return {
+      ...plan,
+      fingerprint: createHash("sha256").update(JSON.stringify(plan)).digest("hex"),
+    };
   }
 
   async preflightConductorProjectLabel(input: {
@@ -650,6 +830,199 @@ export class LinearSdkImpl implements LinearClientInterface {
       labelName: plan.labelName,
       fingerprint: finalPlan.fingerprint,
     };
+  }
+
+  async preflightConductorProjectPool(input: {
+    projectId: string;
+    desiredMembers: readonly string[];
+  }) {
+    if (!SAFE_ID.test(input.projectId)) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_invalid" as const };
+    }
+    const desiredMembers = normalizePoolMembers(input.desiredMembers);
+    if (!desiredMembers) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "desired_members_invalid" as const };
+    }
+    const organization = await this.#client.organization;
+    if (organization.id !== this.organizationId) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_invalid" as const };
+    }
+    const project = await this.#client.project(input.projectId);
+    if (!project || project.id !== input.projectId || !(project.updatedAt instanceof Date)) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_invalid" as const };
+    }
+    const projectLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
+    const conductorLabels = projectLabels.filter(({ name, isGroup, archivedAt, retiredById }) =>
+      typeof name === "string" && name.startsWith(CONDUCTOR_LABEL_PREFIX) &&
+      !isGroup && !archivedAt && !retiredById,
+    );
+    const currentMembers = normalizePoolMembers(
+      conductorLabels.map(({ name }) => name.slice(CONDUCTOR_LABEL_PREFIX.length)),
+    );
+    if (!currentMembers) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+    }
+    for (const member of desiredMembers) {
+      const matches = await this.#projectLabelsNamed(`${CONDUCTOR_LABEL_PREFIX}${member}`);
+      if (matches.length > 1) {
+        return { kind: "blocked" as const, projectId: input.projectId, reason: "member_label_ambiguous" as const };
+      }
+      if (matches[0]) {
+        const assignedProjects = await allNodes(matches[0].projects({ first: PAGE_LIMIT }), 64);
+        if (assignedProjects.some(({ id }) => id !== input.projectId)) {
+          return { kind: "blocked" as const, projectId: input.projectId, reason: "member_label_owned_by_other_project" as const };
+        }
+      }
+    }
+    let roots: RootIssueValue[];
+    try {
+      roots = await this.#allRootIssuesForPool(input.projectId);
+    } catch {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+    }
+    let policy;
+    try {
+      policy = planProjectConductorPoolMutation({
+        project: { projectId: input.projectId, updatedAt: project.updatedAt.toISOString() },
+        currentMembers,
+        desiredMembers,
+        roots: roots.map((root) => {
+          const ownershipConductorId = rootOwnershipConductorId(root.rootManagedComments);
+          const base = {
+            issueId: root.issue.issueId,
+            state: root.issue.state ?? "Draft",
+            labels: root.rootConductorLabels.map(({ conductorShortHash }) => conductorShortHash),
+          };
+          return ownershipConductorId === undefined
+            ? base
+            : { ...base, ownershipConductorId };
+        }),
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "";
+      return {
+        kind: "blocked" as const,
+        projectId: input.projectId,
+        reason: reason === "project_conductor_pool_member_in_use" ? "member_in_use" as const
+          : "root_routing_conflict" as const,
+      };
+    }
+    const plan = {
+      kind: "ready" as const,
+      projectId: input.projectId,
+      expectedProjectUpdatedAt: policy.expectedProjectUpdatedAt,
+      fingerprint: "",
+      currentMembers,
+      desiredMembers,
+      addMembers: policy.addMembers,
+      removeMembers: policy.removeMembers,
+      routeRoots: policy.routeRoots,
+    };
+    return { ...plan, fingerprint: projectPoolFingerprint(plan) };
+  }
+
+  async reconcileConductorProjectPool(input: {
+    plan: Extract<import("../api/LinearClientInterface.js").ConductorProjectPoolPlan, { kind: "ready" }>;
+    authorized: boolean;
+  }) {
+    const plan = input.plan;
+    if (plan.fingerprint !== projectPoolFingerprint(plan)) {
+      throw new Error("linear_project_pool_plan_invalid");
+    }
+    const fresh = await this.preflightConductorProjectPool({
+      projectId: plan.projectId,
+      desiredMembers: plan.desiredMembers,
+    });
+    if (fresh.kind !== "ready" || fresh.fingerprint !== plan.fingerprint) {
+      throw new Error("linear_project_pool_precondition_conflict");
+    }
+    if (!input.authorized) return { kind: "dry_run" as const, plan };
+
+    let mutationError: unknown;
+    try {
+      for (const route of plan.routeRoots) {
+        await this.#ensureRootConductorLabel({
+          projectId: plan.projectId,
+          rootIssueId: route.rootIssueId,
+          conductorShortHash: route.conductorShortHash,
+        });
+      }
+      for (const member of plan.addMembers) {
+        const label = await this.#uniqueProjectLabel(`${CONDUCTOR_LABEL_PREFIX}${member}`);
+        await this.#client.projectAddLabel(plan.projectId, label.id);
+      }
+      for (const member of plan.removeMembers) {
+        const labels = await this.#projectLabelsNamed(`${CONDUCTOR_LABEL_PREFIX}${member}`);
+        if (labels.length !== 1) throw new Error("linear_project_pool_member_label_missing");
+        await this.#client.projectRemoveLabel(plan.projectId, labels[0]!.id);
+      }
+    } catch (error) {
+      mutationError = error;
+    }
+    const finalPlan = await this.preflightConductorProjectPool({
+      projectId: plan.projectId,
+      desiredMembers: plan.desiredMembers,
+    }).catch(() => undefined);
+    const exactMembers = finalPlan?.kind === "ready" &&
+      sameMembers(finalPlan.currentMembers, plan.desiredMembers);
+    const exactRoutes = finalPlan?.kind === "ready" && finalPlan.routeRoots.length === 0;
+    if (!exactMembers || !exactRoutes) {
+      if (mutationError) throw mutationError;
+      throw ambiguousError("linear_project_pool_read_back_failed");
+    }
+    return {
+      kind: plan.addMembers.length === 0 && plan.removeMembers.length === 0 && plan.routeRoots.length === 0
+        ? "already_applied" as const : "applied" as const,
+      projectId: plan.projectId,
+      fingerprint: finalPlan!.fingerprint,
+      members: finalPlan!.currentMembers,
+    };
+  }
+
+  async #allRootIssuesForPool(projectId: string): Promise<RootIssueValue[]> {
+    const roots: RootIssueValue[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.listRootIssues({ projectId, ...(cursor ? { cursor } : {}), limit: PAGE_LIMIT });
+      roots.push(...page.items);
+      if (roots.length > 512) throw new Error("linear_root_collection_too_large");
+      cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : undefined;
+      if (page.pageInfo.hasNextPage && !cursor) throw new Error("linear_pagination_cursor_missing");
+    } while (cursor);
+    return roots;
+  }
+
+  async #ensureRootConductorLabel(input: {
+    projectId: string;
+    rootIssueId: string;
+    conductorShortHash: string;
+  }): Promise<void> {
+    const issue = await this.#client.issue(input.rootIssueId);
+    if (!issue || issue.projectId !== input.projectId || issue.parentId) {
+      throw new Error("linear_root_routing_scope_invalid");
+    }
+    const state = await issue.state;
+    if (!state || state.name === "Done" || state.name === "Canceled") {
+      throw new Error("linear_root_routing_terminal");
+    }
+    const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
+    const current = labels
+      .map(({ name }) => name)
+      .filter((name) => name.startsWith(CONDUCTOR_LABEL_PREFIX));
+    if (current.length > 1) throw new Error("linear_root_routing_conflict");
+    const target = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
+    if (current[0] === target) return;
+    if (current.length !== 0) throw new Error("linear_root_routing_conflict");
+    const label = await this.#uniqueIssueLabel(target, issue.teamId);
+    await this.#client.issueAddLabel(issue.id, label.id);
+    const readBack = await this.#client.issue(issue.id);
+    const finalLabels = await allNodes(readBack.labels({ first: PAGE_LIMIT }), 64);
+    const finalConductorLabels = finalLabels
+      .map(({ name }) => name)
+      .filter((name) => name.startsWith(CONDUCTOR_LABEL_PREFIX));
+    if (finalConductorLabels.length !== 1 || finalConductorLabels[0] !== target) {
+      throw ambiguousError("linear_root_routing_read_back_failed");
+    }
   }
 
   async initializeTargetTeamWorkflow(input: {
@@ -930,17 +1303,15 @@ export class LinearSdkImpl implements LinearClientInterface {
       project.labels({ first: PAGE_LIMIT }),
       64,
     );
-    if (
-      projectLabels.filter(({ name: labelName }) =>
-        labelName.startsWith(CONDUCTOR_LABEL_PREFIX),
-      ).length !== 1
-    ) {
+    const conductorPool = conductorPoolFromLabels(projectLabels.map(({ name }) => name));
+    if (!conductorPool.some(({ conductorShortHash }) => conductorShortHash === input.conductorShortHash)) {
       return { kind: "conflict" };
     }
     return {
       kind: "resolved",
       projectId: project.id,
       updatedAt: project.updatedAt.toISOString(),
+      conductorPool,
     };
   }
 
@@ -1276,16 +1647,18 @@ export class LinearSdkImpl implements LinearClientInterface {
       roots,
       ROOT_READ_CONCURRENCY,
       async ({ issue, priority }) => {
-        const [value, blockers, rootManagedComments] = await Promise.all([
+        const [value, blockers, rootManagedComments, labels] = await Promise.all([
           issueValue(issue, 0),
           blockerValues(issue),
           this.#rootManagedCommentValues(issue),
+          allNodes(issue.labels({ first: 64 }), 64),
         ]);
         return {
           issue: value,
           isDelegatedToSymphony: issue.delegateId === delegateActorId,
           priority,
           blockers,
+          rootConductorLabels: conductorPoolFromLabels(labels.map(({ name }) => name)),
           rootManagedComments,
         };
       },
@@ -1328,6 +1701,9 @@ export class LinearSdkImpl implements LinearClientInterface {
       }
       if (fact.inverseRelations.pageInfo.hasNextPage) {
         throw new Error("linear_root_relations_too_many");
+      }
+      if (fact.labels.pageInfo.hasNextPage) {
+        throw new Error("linear_root_labels_too_many");
       }
       const rootManagedComments = [
         ...fact.comments.nodes,
@@ -1373,6 +1749,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         isDelegatedToSymphony: fact.delegate?.id === delegateActorId,
         priority: linearPriority(fact.priority),
         blockers,
+        rootConductorLabels: conductorPoolFromLabels(fact.labels.nodes.map(({ name }) => name)),
         rootManagedComments,
       };
     });
@@ -1386,6 +1763,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   }): Promise<{
     nodes: LinearIssueValue[];
     rootPhaseLabels: string[];
+    rootConductorLabels: ConductorPoolValue[];
     rootManagedComments: Array<{
       commentId: string;
       issueId: string;
@@ -1421,10 +1799,12 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (rootPhaseLabels.length > 2) {
       throw new Error("linear_root_phase_labels_too_many");
     }
+    const rootConductorLabels = conductorPoolFromLabels(labels.map(({ name }) => name));
     const rootManagedComments = await this.#rootManagedCommentValues(root);
     return {
       nodes,
       rootPhaseLabels,
+      rootConductorLabels,
       rootManagedComments,
       humanAnswers: await this.#humanAnswers(nodes),
       comments: await workflowCommentsFromIssues(workflowFacts),
@@ -1452,13 +1832,8 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!root || root.id !== rootIssueId || root.project?.id !== projectId || root.parent !== null) {
       throw new Error("linear_tree_root_invalid");
     }
-    if (
-      root.labels.pageInfo.hasNextPage ||
-      root.comments.pageInfo.hasNextPage ||
-      root.inverseRelations.pageInfo.hasNextPage
-    ) {
-      throw new Error("linear_tree_batch_incomplete");
-    }
+    if (root.labels.pageInfo.hasNextPage) throw new Error("linear_tree_batch_incomplete");
+    await completeNestedIssueTreeFact(rawRequest, root);
     validateTreeRelations(root);
 
     const facts = new Map<string, { fact: IssueTreeFact; depth: number }>([
@@ -1490,12 +1865,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           ) {
             throw new Error("linear_tree_batch_invalid");
           }
-          if (
-            fact.comments.pageInfo.hasNextPage ||
-            fact.inverseRelations.pageInfo.hasNextPage
-          ) {
-            throw new Error("linear_tree_batch_incomplete");
-          }
+          await completeNestedIssueTreeFact(rawRequest, fact);
           if (facts.has(fact.id)) throw new Error("linear_tree_batch_ambiguous");
           if (childDepth > 32 || facts.size >= MAX_TREE_NODES) {
             throw new Error("linear_tree_bounds_exceeded");
@@ -1536,6 +1906,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
       .map(({ name }) => name.slice(ROOT_PHASE_PREFIX.length));
     if (rootPhaseLabels.length > 2) throw new Error("linear_root_phase_labels_too_many");
+    const rootConductorLabels = conductorPoolFromLabels(root.labels.nodes.map(({ name }) => name));
     const rootManagedComments = root.comments.nodes.flatMap((comment) => {
       if (comment.issue.id !== root.id) throw new Error("linear_root_comment_identity_mismatch");
       if (!isRootManagedComment(comment.body)) return [];
@@ -1576,6 +1947,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     return {
       nodes,
       rootPhaseLabels,
+      rootConductorLabels,
       rootManagedComments,
       humanAnswers,
       comments,
@@ -2501,7 +2873,6 @@ async function observeRequest<Result>(
   observation: LinearRequestObservationOptions,
   request: () => Promise<Result>,
 ): Promise<Result> {
-  observation.permit?.();
   const startedAt = observation.now();
   const correlationId = observation.correlationId();
   try {
@@ -2956,6 +3327,57 @@ function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
     left.identifier.localeCompare(right.identifier);
 }
 
+async function completeNestedIssueTreeFact(
+  rawRequest: <Data, Variables extends Record<string, unknown>>(
+    query: string,
+    variables: Variables,
+  ) => Promise<{ data?: Data }>,
+  fact: IssueTreeFact,
+): Promise<void> {
+  if (fact.comments.pageInfo.hasNextPage) {
+    let cursor = fact.comments.pageInfo.endCursor;
+    const seenCursors = new Set<string>();
+    while (fact.comments.pageInfo.hasNextPage) {
+      if (!cursor || seenCursors.has(cursor)) throw new Error("linear_tree_batch_incomplete");
+      seenCursors.add(cursor);
+      const response = await rawRequest<IssueTreeNestedPageData, {
+        issueId: string;
+        cursor: string;
+      }>(ISSUE_TREE_COMMENTS_PAGE_QUERY, { issueId: fact.id, cursor });
+      const page = response.data?.issue;
+      if (!page || page.id !== fact.id || !page.comments) {
+        throw new Error("linear_tree_batch_incomplete");
+      }
+      if (page.comments.nodes.some((comment) => comment.issue.id !== fact.id)) {
+        throw new Error("linear_tree_batch_invalid");
+      }
+      fact.comments.nodes.push(...page.comments.nodes);
+      fact.comments.pageInfo = page.comments.pageInfo;
+      cursor = page.comments.pageInfo.endCursor;
+    }
+  }
+
+  if (fact.inverseRelations.pageInfo.hasNextPage) {
+    let cursor = fact.inverseRelations.pageInfo.endCursor;
+    const seenCursors = new Set<string>();
+    while (fact.inverseRelations.pageInfo.hasNextPage) {
+      if (!cursor || seenCursors.has(cursor)) throw new Error("linear_tree_batch_incomplete");
+      seenCursors.add(cursor);
+      const response = await rawRequest<IssueTreeNestedPageData, {
+        issueId: string;
+        cursor: string;
+      }>(ISSUE_TREE_RELATIONS_PAGE_QUERY, { issueId: fact.id, cursor });
+      const page = response.data?.issue;
+      if (!page || page.id !== fact.id || !page.inverseRelations) {
+        throw new Error("linear_tree_batch_incomplete");
+      }
+      fact.inverseRelations.nodes.push(...page.inverseRelations.nodes);
+      fact.inverseRelations.pageInfo = page.inverseRelations.pageInfo;
+      cursor = page.inverseRelations.pageInfo.endCursor;
+    }
+  }
+}
+
 function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
   const managed = parseManagedDescription(fact.description ?? "");
   return {
@@ -3174,6 +3596,84 @@ function linearPriority(value: number): LinearPriority {
     default:
       throw new Error("linear_issue_priority_invalid");
   }
+}
+
+function conductorPoolFromLabels(labels: readonly string[]): ConductorPoolValue[] {
+  const pool: ConductorPoolValue[] = [];
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (!label.startsWith(CONDUCTOR_LABEL_PREFIX)) continue;
+    const conductorShortHash = label.slice(CONDUCTOR_LABEL_PREFIX.length);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(conductorShortHash)) {
+      throw new Error("linear_conductor_label_invalid");
+    }
+    if (seen.has(conductorShortHash)) {
+      throw new Error("linear_conductor_label_duplicate");
+    }
+    seen.add(conductorShortHash);
+    pool.push({ conductorShortHash });
+    if (pool.length > 64) throw new Error("linear_conductor_pool_too_large");
+  }
+  return pool;
+}
+
+function normalizePoolMembers(values: readonly string[]): string[] | undefined {
+  if (values.length === 0 || values.length > 64) return undefined;
+  const result = [...values];
+  if (result.some((value) => !/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(value))) return undefined;
+  if (new Set(result).size !== result.length) return undefined;
+  return result;
+}
+
+function boundedRootText(value: string, maximum: number): boolean {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum;
+}
+
+function rootOwnershipConductorId(
+  comments: readonly { body: string }[],
+): string | undefined {
+  const owners: string[] = [];
+  for (const comment of comments) {
+    if (!isRootOwnershipComment(comment.body)) continue;
+    try {
+      const value = JSON.parse(comment.body.slice(MANAGED_RECORD_MARKER.length, -"\n-->".length)) as {
+        conductor_id?: unknown;
+      };
+      if (typeof value.conductor_id !== "string") throw new Error("invalid");
+      owners.push(value.conductor_id);
+    } catch {
+      throw new Error("project_conductor_root_ownership_invalid");
+    }
+  }
+  if (owners.length > 1) throw new Error("project_conductor_root_ownership_duplicate");
+  return owners[0];
+}
+
+function projectPoolFingerprint(input: {
+  projectId: string;
+  expectedProjectUpdatedAt: string;
+  currentMembers: readonly string[];
+  desiredMembers: readonly string[];
+  addMembers: readonly string[];
+  removeMembers: readonly string[];
+  routeRoots: readonly { rootIssueId: string; conductorShortHash: string }[];
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      projectId: input.projectId,
+      expectedProjectUpdatedAt: input.expectedProjectUpdatedAt,
+      currentMembers: [...input.currentMembers].sort(),
+      desiredMembers: [...input.desiredMembers].sort(),
+      addMembers: [...input.addMembers].sort(),
+      removeMembers: [...input.removeMembers].sort(),
+      routeRoots: [...input.routeRoots].sort((left, right) => left.rootIssueId.localeCompare(right.rootIssueId)),
+    }))
+    .digest("hex");
+}
+
+function sameMembers(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length &&
+    [...left].sort().every((member, index) => member === [...right].sort()[index]);
 }
 
 function workflowStatusCategory(value: string):

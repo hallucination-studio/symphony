@@ -20,6 +20,7 @@ export function createSerializedWorkflowBoundary({ statePath, readState = readFi
           kind: "resolved",
           resolved_project: {
             conductor_short_hash: body.conductor_short_hash,
+            conductor_pool: [{ conductor_short_hash: body.conductor_short_hash }],
             project: {
               project_id: "project-1",
               organization_id: "organization-1",
@@ -50,6 +51,7 @@ export function createSerializedWorkflowBoundary({ statePath, readState = readFi
             is_delegated_to_symphony: true,
             priority: "high",
             blockers: [],
+            root_conductor_labels: [],
             root_managed_comments: tree.comments
               .filter(({ issue_id }) => issue_id === root.issue_id)
               .map(({ comment_id, issue_id, body: commentBody, managed_marker, updated_at }) => ({

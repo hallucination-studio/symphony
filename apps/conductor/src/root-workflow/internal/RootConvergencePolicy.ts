@@ -46,8 +46,13 @@ export const DEFAULT_ROOT_CONVERGENCE_POLICY: RootConvergencePolicy = {
   maxSameOpenFindingCycles: 2,
   maxConsecutiveNoProgress: 2,
   maxTotalTokens: Number.MAX_SAFE_INTEGER,
-  deadlineAt: "9999-12-31T23:59:59.999Z",
+  deadlineAt: new Date(Date.now() + 5 * 60_000).toISOString(),
 };
+
+export function createDefaultRootConvergencePolicy(now = Date.now()): RootConvergencePolicy {
+  if (!Number.isSafeInteger(now)) throw new Error("convergence_policy_clock_invalid");
+  return { ...DEFAULT_ROOT_CONVERGENCE_POLICY, deadlineAt: new Date(now + 5 * 60_000).toISOString() };
+}
 
 export function assessRootConvergence(input: RootConvergenceInput): RootConvergenceAssessment {
   const policy = input.policy ?? DEFAULT_ROOT_CONVERGENCE_POLICY;

@@ -103,6 +103,14 @@
         "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
+    "ShutdownConductorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "shutdown_conductor_ack" }
+      }
+    },
     "RemotePrecondition": {
       "type": "object",
       "additionalProperties": false,
@@ -186,6 +194,7 @@
         "is_delegated_to_symphony",
         "priority",
         "blockers",
+        "root_conductor_labels",
         "root_managed_comments"
       ],
       "properties": {
@@ -196,6 +205,11 @@
           "type": "array",
           "maxItems": 512,
           "items": { "$ref": "#/$defs/LinearBlockerSnapshot" }
+        },
+        "root_conductor_labels": {
+          "type": "array",
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/ConductorPool" }
         },
         "root_managed_comments": {
           "type": "array",
@@ -215,13 +229,27 @@
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
+    "ConductorPool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conductor_short_hash"],
+      "properties": {
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
     "ResolvedConductorProject": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "conductor_short_hash"],
+      "required": ["project", "conductor_short_hash", "conductor_pool"],
       "properties": {
         "project": { "$ref": "#/$defs/LinearProjectSnapshot" },
-        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_pool": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/ConductorPool" }
+        }
       }
     },
     "ProjectResolutionResult": {
@@ -268,6 +296,7 @@
         "root_issue_id",
         "nodes",
         "root_phase_labels",
+        "root_conductor_labels",
         "root_managed_comments",
         "human_answers",
         "observed_at"
@@ -294,6 +323,11 @@
               "failed"
             ]
           }
+        },
+        "root_conductor_labels": {
+          "type": "array",
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/ConductorPool" }
         },
         "root_managed_comments": {
           "type": "array",
@@ -355,18 +389,20 @@
     "ResolveConductorProjectQuery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "conductor_short_hash"],
+      "required": ["kind", "binding_id", "conductor_short_hash"],
       "properties": {
         "kind": { "const": "resolve_conductor_project" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
     "ListRootIssuesQuery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project_id", "page"],
+      "required": ["kind", "binding_id", "project_id", "page"],
       "properties": {
         "kind": { "const": "list_root_issues" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
       }
@@ -374,9 +410,10 @@
     "GetIssueTreeQuery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project_id", "root_issue_id", "page"],
+      "required": ["kind", "binding_id", "project_id", "root_issue_id", "page"],
       "properties": {
         "kind": { "const": "get_issue_tree" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
@@ -385,9 +422,10 @@
     "ListRootUsageQuery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project_id", "page"],
+      "required": ["kind", "binding_id", "project_id", "page"],
       "properties": {
         "kind": { "const": "list_root_usage" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
       }
@@ -433,9 +471,10 @@
     "CreateManagedNodeCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "parent_issue_id", "managed_marker", "node_kind", "order", "title", "description"],
+      "required": ["kind", "binding_id", "project", "parent_issue_id", "managed_marker", "node_kind", "order", "title", "description"],
       "properties": {
         "kind": { "const": "create_managed_node" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -480,9 +519,10 @@
     "UpdateManagedNodeCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "node_kind", "title", "description"],
+      "required": ["kind", "binding_id", "project", "precondition", "node_kind", "title", "description"],
       "properties": {
         "kind": { "const": "update_managed_node" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "node_kind": { "enum": ["work", "human"] },
@@ -528,9 +568,10 @@
     "UpdateIssueStateCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "state"],
+      "required": ["kind", "binding_id", "project", "precondition", "state"],
       "properties": {
         "kind": { "const": "update_issue_state" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" }
@@ -539,9 +580,10 @@
     "UpdateIssueAssigneeCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "assignee_id"],
+      "required": ["kind", "binding_id", "project", "precondition", "assignee_id"],
       "properties": {
         "kind": { "const": "update_issue_assignee" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "assignee_id": { "$ref": "common.schema.json#/$defs/Identifier" }
@@ -550,9 +592,10 @@
     "UpdateIssueLabelCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "label", "operation"],
+      "required": ["kind", "binding_id", "project", "precondition", "label", "operation"],
       "properties": {
         "kind": { "const": "update_issue_label" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "label": { "$ref": "common.schema.json#/$defs/ShortText" },
@@ -562,9 +605,10 @@
     "CreateIssueCommentCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "write_id", "body"],
+      "required": ["kind", "binding_id", "project", "precondition", "write_id", "body"],
       "properties": {
         "kind": { "const": "create_issue_comment" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -574,9 +618,10 @@
     "ReorderIssueNodeCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "parent_issue_id", "order"],
+      "required": ["kind", "binding_id", "project", "precondition", "parent_issue_id", "order"],
       "properties": {
         "kind": { "const": "reorder_issue_node" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -586,9 +631,10 @@
     "ReplaceRootPhaseLabelCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "precondition", "phase"],
+      "required": ["kind", "binding_id", "project", "precondition", "phase"],
       "properties": {
         "kind": { "const": "replace_root_phase_label" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "phase": {
@@ -599,9 +645,10 @@
     "UpsertRootManagedCommentCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "root_precondition", "managed_marker", "body"],
+      "required": ["kind", "binding_id", "project", "root_precondition", "managed_marker", "body"],
       "properties": {
         "kind": { "const": "upsert_root_managed_comment" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "root_precondition": { "$ref": "#/$defs/RemotePrecondition" },
         "comment_precondition": { "$ref": "#/$defs/RemotePrecondition" },
@@ -618,7 +665,7 @@
     "ProjectRootCommentCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "project", "root_issue_id", "body"],
+      "required": ["kind", "binding_id", "project", "root_issue_id", "body"],
       "oneOf": [
         {
           "type": "object",
@@ -633,6 +680,7 @@
       ],
       "properties": {
         "kind": { "const": "project_root_comment" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "project": { "$ref": "#/$defs/ProjectPrecondition" },
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "event_key": { "$ref": "#/$defs/TurnEventKey" },
@@ -756,9 +804,10 @@
     "GetWorkflowIssueTreeQuery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "conductor_short_hash", "expected_project_id", "root_issue_id"],
+      "required": ["kind", "binding_id", "conductor_short_hash", "expected_project_id", "root_issue_id"],
       "properties": {
         "kind": { "const": "get_workflow_issue_tree" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
@@ -790,6 +839,7 @@
       "additionalProperties": false,
       "required": [
         "kind",
+        "binding_id",
         "write_id",
         "conductor_short_hash",
         "expected_project_id",
@@ -806,6 +856,7 @@
       ],
       "properties": {
         "kind": { "const": "create_workflow_issue" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -825,9 +876,10 @@
     "UpdateWorkflowIssueCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "status_id", "title", "description"],
+      "required": ["kind", "binding_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "status_id", "title", "description"],
       "properties": {
         "kind": { "const": "update_workflow_issue" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -842,9 +894,10 @@
     "AppendWorkflowCommentCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "body"],
+      "required": ["kind", "binding_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "body"],
       "properties": {
         "kind": { "const": "append_workflow_comment" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -857,9 +910,10 @@
     "CreateWorkflowRelationCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "source_issue_id", "source_expected_remote_version", "target_issue_id", "target_expected_remote_version", "relation_kind"],
+      "required": ["kind", "binding_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id", "expected_root_remote_version", "source_issue_id", "source_expected_remote_version", "target_issue_id", "target_expected_remote_version", "relation_kind"],
       "properties": {
         "kind": { "const": "create_workflow_relation" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -1157,6 +1211,7 @@
         { "$ref": "#/$defs/ConductorHeartbeat" },
         { "$ref": "#/$defs/ConductorRuntimeReport" },
         { "$ref": "#/$defs/ShutdownConductorCommand" },
+        { "$ref": "#/$defs/ShutdownConductorResult" },
         { "$ref": "#/$defs/ResolveConductorProjectQuery" },
         { "$ref": "#/$defs/ListRootIssuesQuery" },
         { "$ref": "#/$defs/GetIssueTreeQuery" },

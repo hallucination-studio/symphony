@@ -35,7 +35,7 @@ test("target delivery boundary preserves success or delivery failure and closes 
 
 test("target delivery boundary shares one decreasing deadline across success and delivery", async () => {
   const timeouts = [];
-  const times = [1_100, 1_400];
+  const times = [1_100, 1_100, 1_400, 1_400, 1_400];
   const result = await runTargetDeliveryBoundary({
     deadlineAtMs: 2_000,
     now: () => times.shift(),

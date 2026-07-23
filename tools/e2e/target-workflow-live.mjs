@@ -13,22 +13,29 @@ import { runTargetRestartBoundary } from "./target-workflow-restart-boundary.mjs
 import { runTargetSuccessBoundary } from "./target-workflow-success-boundary.mjs";
 import { runTargetSchedulingScenarioLive } from "./target-workflow-scheduling-live.mjs";
 import { prepareTargetWorkflowSetup } from "./target-workflow-setup.mjs";
-import { LinearRunBudgetImpl } from "@symphony/podium";
-
-const TARGET_E2E_TIMEOUT_MS = 5 * 60_000;
+import {
+  createTargetWorkflowDeadline,
+  remainingTargetWorkflowTimeout,
+  rootWorkflowDeadlineAt,
+  TARGET_E2E_TIMEOUT_MS,
+  withTargetWorkflowDeadline,
+} from "./target-workflow-deadline.mjs";
 
 export async function runTargetSuccessLive({
   config,
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget = new LinearRunBudgetImpl(),
+  observer,
   timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  deadlineAtMs: suppliedDeadlineAtMs,
+  signal: suppliedSignal,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
-  const deadline = liveDeadline(timeoutMs);
+  const deadline = suppliedDeadlineAtMs ?? createTargetWorkflowDeadline(timeoutMs);
+  const signal = suppliedSignal ?? AbortSignal.timeout(remainingTargetWorkflowTimeout(deadline));
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -41,10 +48,12 @@ export async function runTargetSuccessLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
+    const prepared = await withTargetWorkflowDeadline(
+      () => services.prepareSetup({ config, runId, fetch, log, observer, signal }), deadline,
+    );
     const { setup, ids, rootInput } = prepared;
-    scope = await services.createScope({ runId });
-    const fixture = await services.createGitFixture({ scope });
+    scope = await withTargetWorkflowDeadline(() => services.createScope({ runId }), deadline);
+    const fixture = await withTargetWorkflowDeadline(() => services.createGitFixture({ scope }), deadline);
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -69,8 +78,9 @@ export async function runTargetSuccessLive({
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
       SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
+      SYMPHONY_ROOT_DEADLINE_AT: rootWorkflowDeadlineAt(deadline),
     } });
-    const observed = await services.runSuccessBoundary({
+    const observed = await withTargetWorkflowDeadline(() => services.runSuccessBoundary({
       boundaryInput: {
         developmentToken: config.secrets.linearDevToken,
         codexApiKey: config.secrets.codexApiKey,
@@ -82,13 +92,14 @@ export async function runTargetSuccessLive({
         model: config.codex.model,
         fetch,
         log,
-        linearRunBudget,
+        observer,
       },
       successInput: {
-        timeoutMs: remainingTimeout(deadline),
+        timeoutMs: remainingTargetWorkflowTimeout(deadline),
         onProgress: (event) => log({ event: "target_live_success_progress", ...event }),
         rootInput,
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
+        pollIntervalMs: 5_000,
         humanResponseBody: "Approved for implementation.",
         readObservationInput: async ({ rootIssueId, phase }) => {
           let git;
@@ -99,7 +110,8 @@ export async function runTargetSuccessLive({
               requireClean: false,
             });
           } catch (error) {
-            if (phase !== "pending_human" || !["target_git_command_failed", "target_git_observation_read_failed"].includes(stableReason(error))) {
+            if (phase !== "pending_human" ||
+                !["target_git_command_failed", "target_git_observation_read_failed"].includes(stableReason(error))) {
               throw error;
             }
             return { git: { head: fixture.initialCommit, branch: fixture.baseBranch } };
@@ -107,15 +119,16 @@ export async function runTargetSuccessLive({
           return { git: { head: git.head, branch: git.branch } };
         },
       },
-    });
+      deadlineAtMs: deadline,
+    }), deadline);
     if (!observed?.facts?.root || observed.facts.root.projectId !== setup.project.projectId) {
       throw stableError("target_live_success_result_invalid");
     }
-    await services.readGitObservation({
+    await withTargetWorkflowDeadline(() => services.readGitObservation({
       repositoryRoot: fixture.repositoryRoot,
       worktreePath: path.join(scope.conductorDataRoot, "worktrees", observed.facts.root.rootIssueId),
       requireClean: true,
-    });
+    }), deadline);
     result = Object.freeze({
       status: "passed",
       scenario: "success",
@@ -129,7 +142,7 @@ export async function runTargetSuccessLive({
   } finally {
     if (scope) {
       try {
-        await services.cleanupScope(scope);
+        await withTargetWorkflowDeadline(() => services.cleanupScope(scope), deadline);
       } catch (error) {
         if (!failure) failure = stableError("target_live_cleanup_failed");
         log({ event: "target_live_cleanup_failed", reason: stableReason(error) });
@@ -145,13 +158,16 @@ export async function runTargetDeliveryLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget = new LinearRunBudgetImpl(),
+  observer,
   timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  deadlineAtMs: suppliedDeadlineAtMs,
+  signal: suppliedSignal,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
-  const deadline = liveDeadline(timeoutMs);
+  const deadline = suppliedDeadlineAtMs ?? createTargetWorkflowDeadline(timeoutMs);
+  const signal = suppliedSignal ?? AbortSignal.timeout(remainingTargetWorkflowTimeout(deadline));
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -164,10 +180,12 @@ export async function runTargetDeliveryLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
+    const prepared = await withTargetWorkflowDeadline(
+      () => services.prepareSetup({ config, runId, fetch, log, observer, signal }), deadline,
+    );
     const { setup, ids, rootInput } = prepared;
-    scope = await services.createScope({ runId });
-    const fixture = await services.createGitFixture({ scope });
+    scope = await withTargetWorkflowDeadline(() => services.createScope({ runId }), deadline);
+    const fixture = await withTargetWorkflowDeadline(() => services.createGitFixture({ scope }), deadline);
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -192,8 +210,9 @@ export async function runTargetDeliveryLive({
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
       SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
+      SYMPHONY_ROOT_DEADLINE_AT: rootWorkflowDeadlineAt(deadline),
     } });
-    const observed = await services.runDeliveryBoundary({
+    const observed = await withTargetWorkflowDeadline(() => services.runDeliveryBoundary({
       deadlineAtMs: deadline,
       boundaryInput: {
         developmentToken: config.secrets.linearDevToken,
@@ -206,10 +225,13 @@ export async function runTargetDeliveryLive({
         model: config.codex.model,
         fetch,
         log,
-        linearRunBudget,
+        observer,
       },
       successInput: {
-        rootInput: { ...rootInput, title: "Target live delivery", description: "Target live delivery Root." },
+        rootInput: scenarioRootInput(rootInput, "Target live delivery", [
+          "Delivery scenario: keep the same single-Work README.md scope and acceptance criteria from the base Root instructions.",
+          "After Verify succeeds, leave the verified revision and branch ready for the delivery read-back.",
+        ]),
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved for delivery.",
         readObservationInput: async ({ rootIssueId, phase }) => readLiveGitObservation({
@@ -227,7 +249,8 @@ export async function runTargetDeliveryLive({
           observationInput: { git: { head: verify.gitHead, branch: fixture.baseBranch } },
         };
       },
-    });
+      deadlineAtMs: deadline,
+    }), deadline);
     if (!observed?.success?.facts?.root || !observed.delivery?.delivery) {
       throw stableError("target_live_delivery_result_invalid");
     }
@@ -245,7 +268,7 @@ export async function runTargetDeliveryLive({
   } finally {
     if (scope) {
       try {
-        await services.cleanupScope(scope);
+        await withTargetWorkflowDeadline(() => services.cleanupScope(scope), deadline);
       } catch (error) {
         if (!failure) failure = stableError("target_live_cleanup_failed");
         log({ event: "target_live_cleanup_failed", reason: stableReason(error) });
@@ -261,13 +284,16 @@ export async function runTargetRepairLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget = new LinearRunBudgetImpl(),
+  observer,
   timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  deadlineAtMs: suppliedDeadlineAtMs,
+  signal: suppliedSignal,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
-  const deadline = liveDeadline(timeoutMs);
+  const deadline = suppliedDeadlineAtMs ?? createTargetWorkflowDeadline(timeoutMs);
+  const signal = suppliedSignal ?? AbortSignal.timeout(remainingTargetWorkflowTimeout(deadline));
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -280,10 +306,12 @@ export async function runTargetRepairLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
+    const prepared = await withTargetWorkflowDeadline(
+      () => services.prepareSetup({ config, runId, fetch, log, observer, signal }), deadline,
+    );
     const { setup, ids, rootInput } = prepared;
-    scope = await services.createScope({ runId });
-    const fixture = await services.createGitFixture({ scope });
+    scope = await withTargetWorkflowDeadline(() => services.createScope({ runId }), deadline);
+    const fixture = await withTargetWorkflowDeadline(() => services.createGitFixture({ scope }), deadline);
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -308,8 +336,9 @@ export async function runTargetRepairLive({
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
       SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
+      SYMPHONY_ROOT_DEADLINE_AT: rootWorkflowDeadlineAt(deadline),
     } });
-    const observed = await services.runRepairBoundary({
+    const observed = await withTargetWorkflowDeadline(() => services.runRepairBoundary({
       boundaryInput: {
         developmentToken: config.secrets.linearDevToken,
         codexApiKey: config.secrets.codexApiKey,
@@ -321,15 +350,14 @@ export async function runTargetRepairLive({
         model: config.codex.model,
         fetch,
         log,
-        linearRunBudget,
+        observer,
       },
       repairInput: {
-        timeoutMs: remainingTimeout(deadline),
-        rootInput: {
-          ...rootInput,
-          title: "Target live repair escalation",
-          description: "Target live repair escalation Root.",
-        },
+        timeoutMs: remainingTargetWorkflowTimeout(deadline),
+        rootInput: scenarioRootInput(rootInput, "Target live repair escalation", [
+          "Repair scenario: Plan exactly one Work node for README.md, but deliberately leave its acceptance criterion unmet by not adding the evidence line.",
+          "Verify must record one open Finding that the required README.md evidence line is absent. Do not resolve that Finding or change the repository to satisfy it; preserve the same open Finding through repeated approved repair cycles so Conductor's convergence limit escalates it.",
+        ], { stripSuccessInstruction: true, prepend: true }),
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved for repair escalation.",
         readObservationInput: async ({ rootIssueId, phase }) => {
@@ -338,9 +366,11 @@ export async function runTargetRepairLive({
             git = await services.readGitObservation({
               repositoryRoot: fixture.repositoryRoot,
               worktreePath: path.join(scope.conductorDataRoot, "worktrees", rootIssueId),
+              requireClean: false,
             });
           } catch (error) {
-            if (phase !== "pending_human" || !["target_git_command_failed", "target_git_observation_read_failed"].includes(stableReason(error))) {
+            if (!["pending_human", "durable_facts"].includes(phase) ||
+                !["target_git_command_failed", "target_git_observation_read_failed"].includes(stableReason(error))) {
               throw error;
             }
             return { git: { head: fixture.initialCommit, branch: fixture.baseBranch } };
@@ -348,7 +378,8 @@ export async function runTargetRepairLive({
           return { git: { head: git.head, branch: git.branch } };
         },
       },
-    });
+      deadlineAtMs: deadline,
+    }), deadline);
     if (!observed?.facts?.root || observed.facts.root.projectId !== setup.project.projectId ||
         !observed.facts.repairEscalation) {
       throw stableError("target_live_repair_result_invalid");
@@ -366,7 +397,7 @@ export async function runTargetRepairLive({
   } finally {
     if (scope) {
       try {
-        await services.cleanupScope(scope);
+        await withTargetWorkflowDeadline(() => services.cleanupScope(scope), deadline);
       } catch (error) {
         if (!failure) failure = stableError("target_live_cleanup_failed");
         log({ event: "target_live_cleanup_failed", reason: stableReason(error) });
@@ -382,13 +413,16 @@ export async function runTargetRestartLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget = new LinearRunBudgetImpl(),
+  observer,
   timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  deadlineAtMs: suppliedDeadlineAtMs,
+  signal: suppliedSignal,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
-  const deadline = liveDeadline(timeoutMs);
+  const deadline = suppliedDeadlineAtMs ?? createTargetWorkflowDeadline(timeoutMs);
+  const signal = suppliedSignal ?? AbortSignal.timeout(remainingTargetWorkflowTimeout(deadline));
   const services = {
     createScope: dependencies.createScope ?? createTargetRunScope,
     createGitFixture: dependencies.createGitFixture ?? createTargetGitFixture,
@@ -401,10 +435,12 @@ export async function runTargetRestartLive({
   let failure;
   let result;
   try {
-    const prepared = await services.prepareSetup({ config, runId, fetch, log, linearRunBudget });
+    const prepared = await withTargetWorkflowDeadline(
+      () => services.prepareSetup({ config, runId, fetch, log, observer, signal }), deadline,
+    );
     const { setup, ids, rootInput } = prepared;
-    scope = await services.createScope({ runId });
-    const fixture = await services.createGitFixture({ scope });
+    scope = await withTargetWorkflowDeadline(() => services.createScope({ runId }), deadline);
+    const fixture = await withTargetWorkflowDeadline(() => services.createGitFixture({ scope }), deadline);
     const binding = {
       bindingId: ids.bindingId,
       conductorId: ids.conductorId,
@@ -429,8 +465,9 @@ export async function runTargetRestartLive({
       SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
       SYMPHONY_CYCLE_DELAY_MS: "250",
       SYMPHONY_CYCLE_IDLE_DELAY_MS: "250",
+      SYMPHONY_ROOT_DEADLINE_AT: rootWorkflowDeadlineAt(deadline),
     } });
-    const observed = await services.runRestartBoundary({
+    const observed = await withTargetWorkflowDeadline(() => services.runRestartBoundary({
       boundaryInput: {
         developmentToken: config.secrets.linearDevToken,
         codexApiKey: config.secrets.codexApiKey,
@@ -442,18 +479,22 @@ export async function runTargetRestartLive({
         model: config.codex.model,
         fetch,
         log,
-        linearRunBudget,
+        observer,
       },
       restartInput: {
-        timeoutMs: remainingTimeout(deadline),
-        rootInput: { ...rootInput, title: "Target live restart recovery", description: "Target live restart recovery Root." },
+        timeoutMs: remainingTargetWorkflowTimeout(deadline),
+        rootInput: scenarioRootInput(rootInput, "Target live restart recovery", [
+          "Restart scenario: use the same single-Work README.md scope and acceptance criteria from the base Root instructions.",
+          "The workflow must be recoverable from a Conductor restart and must continue from durable Linear and Git facts using a fresh Performer context.",
+        ]),
         observationInput: { git: { head: fixture.initialCommit, branch: fixture.baseBranch } },
         humanResponseBody: "Approved after restart recovery.",
         readObservationInput: async ({ rootIssueId, phase }) => readLiveGitObservation({
           services, fixture, scope, rootIssueId, phase,
         }),
       },
-    });
+      deadlineAtMs: deadline,
+    }), deadline);
     if (!observed?.facts?.root || observed.facts.root.projectId !== setup.project.projectId || !observed.recovery) {
       throw stableError("target_live_restart_result_invalid");
     }
@@ -471,7 +512,7 @@ export async function runTargetRestartLive({
   } finally {
     if (scope) {
       try {
-        await services.cleanupScope(scope);
+        await withTargetWorkflowDeadline(() => services.cleanupScope(scope), deadline);
       } catch (error) {
         if (!failure) failure = stableError("target_live_cleanup_failed");
         log({ event: "target_live_cleanup_failed", reason: stableReason(error) });
@@ -487,18 +528,21 @@ export async function runTargetSchedulingLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget = new LinearRunBudgetImpl(),
+  observer,
   timeoutMs = TARGET_E2E_TIMEOUT_MS,
+  deadlineAtMs: suppliedDeadlineAtMs,
+  signal: suppliedSignal,
   dependencies = {},
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   validateLiveInput({ config, environment, runId, fetch, log });
-  const deadline = liveDeadline(timeoutMs);
-  const prepared = await (dependencies.prepareSetup ?? prepareTargetWorkflowSetup)({
-    config, runId, fetch, log, linearRunBudget,
-  });
-  remainingTimeout(deadline);
-  return runTargetSchedulingScenarioLive({
+  const deadline = suppliedDeadlineAtMs ?? createTargetWorkflowDeadline(timeoutMs);
+  const signal = suppliedSignal ?? AbortSignal.timeout(remainingTargetWorkflowTimeout(deadline));
+  const prepared = await withTargetWorkflowDeadline(
+    () => (dependencies.prepareSetup ?? prepareTargetWorkflowSetup)({ config, runId, fetch, log, observer, signal }),
+    deadline,
+  );
+  return withTargetWorkflowDeadline(() => runTargetSchedulingScenarioLive({
     config: {
       ...config,
       linear: {
@@ -511,21 +555,9 @@ export async function runTargetSchedulingLive({
     environment,
     fetch,
     log,
-    linearRunBudget,
-  });
-}
-
-function liveDeadline(timeoutMs) {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TARGET_E2E_TIMEOUT_MS) {
-    throw stableError("target_live_timeout_invalid");
-  }
-  return Date.now() + timeoutMs;
-}
-
-function remainingTimeout(deadline) {
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) throw stableError("target_live_timeout");
-  return remaining;
+    observer,
+    signal,
+  }), deadline);
 }
 
 async function readLiveGitObservation({ services, fixture, scope, rootIssueId, phase }) {
@@ -557,6 +589,27 @@ function validateLiveInput({ config, environment, runId, fetch, log }) {
       ? "target_live_run_id_invalid"
       : "target_live_input_invalid");
   }
+}
+
+function scenarioRootInput(rootInput, title, instructions, options = {}) {
+  if (!rootInput || typeof rootInput !== "object" || typeof rootInput.description !== "string" ||
+      !Array.isArray(instructions) || instructions.some((item) => typeof item !== "string" || item.length === 0)) {
+    throw stableError("target_live_root_input_invalid");
+  }
+  const baseDescription = options.stripSuccessInstruction === true
+    ? rootInput.description.replace(
+      /Plan exactly one minimal Work node that adds one E2E evidence line to README\.md, then Verify it\.\s*/u,
+      "",
+    )
+    : rootInput.description;
+  const scenarioDescription = instructions.join(" ");
+  return {
+    ...rootInput,
+    title,
+    description: options.prepend === true
+      ? `${scenarioDescription}\n\n${baseDescription}`
+      : `${baseDescription}\n\n${scenarioDescription}`,
+  };
 }
 
 function stableReason(error) {

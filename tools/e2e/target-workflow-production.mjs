@@ -1,4 +1,4 @@
-import { bootstrapDevelopmentTokenInstallation, LinearRunBudgetImpl } from "@symphony/podium";
+import { bootstrapDevelopmentTokenInstallation } from "@symphony/podium";
 
 import { createProductionPodiumConductorOwner, startConductorHarness } from "./conductor-harness.mjs";
 import { provisionApiKeyProfile } from "./conductor-profile.mjs";
@@ -6,8 +6,15 @@ import { projectTargetWorkflowFacts } from "./target-workflow-facts.mjs";
 import { createTargetWorkflowExternalInputs } from "./target-workflow-inputs.mjs";
 import { createTargetWorkflowRunner } from "./target-workflow-runner.mjs";
 import { createTargetWorkflowSnapshotTransport } from "./target-workflow-transport.mjs";
+import {
+  createTargetWorkflowDeadline,
+  remainingTargetWorkflowTimeout,
+  TARGET_E2E_TIMEOUT_MS,
+  withTargetWorkflowDeadline,
+} from "./target-workflow-deadline.mjs";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const SECRET_ENVIRONMENT_KEYS = new Set([
   "SYMPHONY_E2E_LINEAR_DEV_TOKEN", "SYMPHONY_E2E_CODEX_API_KEY",
 ]);
@@ -23,11 +30,15 @@ export async function startTargetProductionBoundary({
   model = "target-model",
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget: inputLinearRunBudget,
+  observer,
+  deadlineAtMs,
+  now = Date.now,
   dependencies = {},
   createRunner = createTargetWorkflowRunner,
 } = {}) {
   validateInput({ developmentToken, codexApiKey, databasePath, project, binding, delegateActorId, environment, model, fetch, log });
+  const effectiveDeadlineAtMs = deadlineAtMs ?? createTargetWorkflowDeadline(TARGET_E2E_TIMEOUT_MS, now);
+  remainingTargetWorkflowTimeout(effectiveDeadlineAtMs, now);
   const services = {
     bootstrapInstallation: dependencies.bootstrapInstallation ?? bootstrapDevelopmentTokenInstallation,
     savePodiumState: dependencies.savePodiumState ?? savePodiumState,
@@ -35,38 +46,63 @@ export async function startTargetProductionBoundary({
     startConductor: dependencies.startConductor ?? startConductorHarness,
     provisionProfile: dependencies.provisionProfile ?? provisionApiKeyProfile,
   };
-  const linearRunBudget = inputLinearRunBudget ?? dependencies.linearRunBudget ?? new LinearRunBudgetImpl();
   let installation;
   let podium;
   let harness;
   let restartCount = 0;
+  let timeoutTriggered = false;
+  const abortController = new AbortController();
+  const abortResources = () => {
+    timeoutTriggered = true;
+    abortController.abort();
+    void harness?.terminateAbruptly?.();
+    void podium?.close?.();
+  };
+  const removeRateLimitListener = observer?.onRateLimited?.(() => {
+    log({ event: "target_live_rate_limit_abort" });
+    abortResources();
+  }) ?? (() => {});
+  const bounded = (operation) => withTargetWorkflowDeadline(
+    operation, effectiveDeadlineAtMs, { now, onTimeout: abortResources },
+  );
   try {
-    installation = validateInstallation(await services.bootstrapInstallation({
+    installation = validateInstallation(await bounded(() => services.bootstrapInstallation({
       databasePath,
       developmentToken,
       delegateActorId,
-      linearRunBudget,
-      observeLinearRequest: (observation) => log({ event: "linear_physical_request", ...observation }),
+      signal: abortController.signal,
+      observeLinearRequest: (observation) => {
+        observer?.observe?.(observation);
+        log({ event: "linear_physical_request", ...observation });
+      },
+    })));
+    await bounded(() => services.savePodiumState({ databasePath, installation, project, binding }));
+    podium = await bounded(() => services.createPodiumOwner({ databasePath, log, linearRequestObserver: observer }));
+    harness = await bounded(() => services.startConductor({
+      podium,
+      environment,
+      log,
+      abortSignal: abortController.signal,
+      startupTimeoutMs: remainingTargetWorkflowTimeout(effectiveDeadlineAtMs, now),
     }));
-    await services.savePodiumState({ databasePath, installation, project, binding });
-    podium = await services.createPodiumOwner({ databasePath, log, linearRunBudget });
-    harness = await services.startConductor({ podium, environment, log });
     const apiKey = new TextEncoder().encode(codexApiKey);
     try {
-      await services.provisionProfile({
+      await bounded(() => services.provisionProfile({
         harness,
         conductorId: binding.conductorId,
         model,
         apiKey,
         displayName: "Target workflow E2E",
         log,
-      });
+      }));
     } finally {
       apiKey.fill(0);
     }
-    const externalInputs = createTargetWorkflowExternalInputs({ developmentToken, fetch, log, budget: linearRunBudget });
+    const externalInputs = createTargetWorkflowExternalInputs({
+      developmentToken, fetch, log, observer, signal: abortController.signal,
+    });
     const snapshotTransport = createTargetWorkflowSnapshotTransport({
-      developmentToken, fetch, log, budget: linearRunBudget, rootScoped: true,
+      developmentToken, fetch, log, observer, rootScoped: true, signal: abortController.signal,
     });
     const runner = createRunner({
       externalInputs,
@@ -86,22 +122,36 @@ export async function startTargetProductionBoundary({
         const instanceId = `${environment.SYMPHONY_INSTANCE_ID ?? binding.bindingId}-restart-${restartCount}`;
         const nextEnvironment = { ...environment, SYMPHONY_INSTANCE_ID: instanceId };
         try {
-          harness = await services.startConductor({ podium, environment: nextEnvironment, log });
+          harness = await bounded(() => services.startConductor({
+            podium,
+            environment: nextEnvironment,
+            log,
+            abortSignal: abortController.signal,
+            startupTimeoutMs: remainingTargetWorkflowTimeout(effectiveDeadlineAtMs, now),
+          }));
         } catch (error) {
           await closeQuietly(() => podium.close(), log);
           throw stableError(error);
         }
         return Object.freeze({ restarted: true, instanceId });
       },
-      async close() {
+      async close(options = {}) {
         if (closed) return;
         closed = true;
-        await harness.close();
+        removeRateLimitListener();
+        if (timeoutTriggered || options.force === true) {
+          abortController.abort();
+          await harness.terminateAbruptly?.();
+          await podium.close?.();
+        } else {
+          await harness.close();
+        }
       },
     });
   } catch (error) {
+    removeRateLimitListener();
     if (harness) {
-      await closeQuietly(() => harness.close(), log);
+      await closeQuietly(() => timeoutTriggered ? harness.terminateAbruptly?.() : harness.close(), log);
     } else if (podium) {
       await closeQuietly(() => podium.close(), log);
     }
@@ -178,7 +228,7 @@ function validateRestartInput(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       !SAFE_ID.test(value.rootIssueId ?? "") || !SAFE_ID.test(value.cycleIssueId ?? "") ||
       !SAFE_ID.test(value.nodeIssueId ?? "") || !SAFE_ID.test(value.actionId ?? "") ||
-      !/^[0-9a-f]{64}$/u.test(value.contextDigest ?? "")) {
+      !DIGEST.test(value.contextDigest ?? "")) {
     throw new Error("target_production_restart_input_invalid");
   }
 }

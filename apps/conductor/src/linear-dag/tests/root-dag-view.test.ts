@@ -123,6 +123,13 @@ test("rejects Work states outside the kind-restricted transition set", () => {
   assert.throws(() => buildRootDagView(invalid), validation("work_status_invalid"));
 });
 
+test("accepts fractional Linear sibling sort orders", () => {
+  const input = validInput();
+  input.tree.issues[1] = { ...input.tree.issues[1]!, order: 0.5 };
+
+  assert.doesNotThrow(() => buildRootDagView(input));
+});
+
 function validInput() {
   const statuses = statusCatalog();
   const root = issue({ issue_id: rootIssueId, issue_kind: "root", status: "In Progress", depth: 0, order: 0 });

@@ -40,6 +40,8 @@ Performer Python process
 - Plan、每个Work和Verify使用隔离Provider context，不共享thread；
 - 不设计sub-agents或独立memory；跨Stage连续性只从Linear/Git重建；
 - Podium独占Linear OAuth、Token和SDK，Performer独占Provider SDK；
+- 一个Project可以通过多个Conductor Project Labels形成执行池；每个Root在claim前必须唯一
+  route到一个pool member，且durable ownership仍由Root managed comment承载；
 - cross-process communication使用closed versioned schemas和generated types。
 
 ## 2. 权威事实
@@ -48,7 +50,8 @@ Performer Python process
 |---|---|---|
 | OAuth、Token、installation、Project catalog | `podium.db` | Podium |
 | Conductor Identity、Binding、Repository Context | `podium.db` | Podium Desktop |
-| Resolved Conductor Project | Linear Project上的Conductor Project Label | Conductor |
+| Project Conductor Pool与Resolved Conductor Project | Linear Project上的Conductor Project Labels | Podium / Conductor |
+| Root routing | Root Issue上的唯一Root Conductor Label | Podium / Conductor |
 | Root ownership、fixed Profile、execution/convergence policy、delivery summary | Root managed comments | Conductor |
 | Root/Cycle/Node status、Cycle Issues、typed DAG nodes、Stage execution、Plan Contract、Finding、token budget、Human action和Stage outcome | Linear Issue Tree、relations和comments | Conductor reconciles |
 | Root/Tree order、Priority、blockers、Team workflow status catalog | Linear | Conductor |

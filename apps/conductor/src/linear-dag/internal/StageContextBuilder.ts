@@ -476,7 +476,9 @@ function workSources(
   for (const comment of tree.comments.filter((comment) => !comment.managed_marker && [root.issue_id, cycle.issue_id, plan.issue_id, work.issue_id].includes(comment.issue_id))) {
     result.push({ source_kind: "linear_comment", source_id: comment.comment_id, version_or_digest: comment.remote_version });
   }
-  for (const relation of tree.relations) result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  for (const relation of [...tree.relations].sort((left, right) => left.relation_id.localeCompare(right.relation_id))) {
+    result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  }
   for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   return result;
 }
@@ -485,7 +487,9 @@ function verifySources(tree: LinearWorkflowTreeSnapshot, root: Issue, cycle: Iss
   const result: Array<{ source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction"; source_id: string; version_or_digest: string }> = [
     { source_kind: "linear_issue", source_id: root.issue_id, version_or_digest: root.remote_version }, { source_kind: "linear_issue", source_id: cycle.issue_id, version_or_digest: cycle.remote_version }, { source_kind: "linear_issue", source_id: plan.issue_id, version_or_digest: plan.remote_version }, { source_kind: "linear_issue", source_id: verify.issue_id, version_or_digest: stableIssueDigest(verify) }, { source_kind: "git", source_id: `git:verify:${git.head}`, version_or_digest: digest(git) },
   ];
-  for (const relation of tree.relations) result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  for (const relation of [...tree.relations].sort((left, right) => left.relation_id.localeCompare(right.relation_id))) {
+    result.push({ source_kind: "linear_relation", source_id: relation.relation_id, version_or_digest: `${relation.source_issue_id}:${relation.target_issue_id}` });
+  }
   for (const instruction of options.repositoryInstructions ?? []) result.push({ source_kind: "repository_instruction", source_id: `instruction:${digest(instruction.relativePath).slice(7, 39)}`, version_or_digest: instruction.contentDigest });
   return result;
 }

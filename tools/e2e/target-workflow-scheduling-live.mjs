@@ -1,5 +1,6 @@
 import { runTargetSchedulingScenario } from "./target-workflow-scheduling.mjs";
 import { TARGET_WORKFLOW_STATUS_NAMES } from "@symphony/podium";
+import { createTargetWorkflowRequestSignal } from "./target-workflow-deadline.mjs";
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const PAGE_SIZE = 250;
@@ -43,12 +44,13 @@ export async function runTargetSchedulingScenarioLive({
   environment = process.env,
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  observer,
+  signal,
 } = {}) {
   const runId = environment?.SYMPHONY_E2E_RUN_ID;
   if (!SAFE_ID.test(runId ?? "") || !config?.linear?.projectSlugId ||
       typeof config.secrets?.linearDevToken !== "string" || config.secrets.linearDevToken.length === 0 ||
-      typeof fetch !== "function" || typeof log !== "function" || !hasRunBudget(linearRunBudget)) {
+      typeof fetch !== "function" || typeof log !== "function") {
     throw stableError("target_live_scheduling_input_invalid");
   }
   const scheduling = await readTargetSchedulingEvidence({
@@ -58,7 +60,8 @@ export async function runTargetSchedulingScenarioLive({
     conductorId: config.linear.conductorId,
     fetch,
     log,
-    linearRunBudget,
+    observer,
+    signal,
   });
   return Object.freeze({ status: "passed", scenario: "scheduling", runId, scheduling });
 }
@@ -70,16 +73,17 @@ export async function readTargetSchedulingEvidence({
   conductorId = "",
   fetch = globalThis.fetch,
   log = () => {},
-  linearRunBudget,
+  observer,
+  signal,
 } = {}) {
   if (typeof developmentToken !== "string" || developmentToken.length === 0 ||
       !SAFE_ID.test(projectId ?? "") || !SAFE_ID.test(delegateActorId ?? "") ||
       (conductorId !== "" && !SAFE_ID.test(conductorId)) || typeof fetch !== "function" ||
-      typeof log !== "function" || !hasRunBudget(linearRunBudget)) {
+      typeof log !== "function") {
     throw stableError("target_scheduling_reader_input_invalid");
   }
-  linearRunBudget?.recordLogicalOperation();
-  const roots = await readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, linearRunBudget });
+  observer?.recordLogicalOperation();
+  const roots = await readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, observer, signal });
   const current = roots.filter((root) => root.parentIssueId === undefined && root.state !== "Done" &&
     (root.state !== "Canceled" || root.managedConductorId === conductorId) &&
     (root.managedConductorId === conductorId || (!root.managedConductorId && root.isDelegatedToSymphony)));
@@ -98,12 +102,12 @@ export async function readTargetSchedulingEvidence({
   });
 }
 
-async function readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, linearRunBudget }) {
+async function readProjectRoots({ developmentToken, projectId, delegateActorId, conductorId, fetch, log, observer, signal }) {
   const roots = [];
   const seenCursors = new Set();
   let after = null;
   while (true) {
-    const data = await graphql(PROJECT_ROOTS_QUERY, { projectId, after }, { developmentToken, fetch, log, linearRunBudget });
+    const data = await graphql(PROJECT_ROOTS_QUERY, { projectId, after }, { developmentToken, fetch, log, observer, signal });
     const project = data.project;
     if (project?.id !== projectId) throw stableError("target_scheduling_project_scope_invalid");
     const page = project.issues;
@@ -184,8 +188,7 @@ function compareRoots(left, right) {
   return priority[left.priority] - priority[right.priority] || left.order - right.order || left.identifier.localeCompare(right.identifier);
 }
 
-async function graphql(query, variables, { developmentToken, fetch, log, linearRunBudget }) {
-  const reservation = linearRunBudget?.reservePhysicalRequest();
+async function graphql(query, variables, { developmentToken, fetch, log, observer, signal }) {
   let observed = false;
   let response;
   try {
@@ -193,15 +196,16 @@ async function graphql(query, variables, { developmentToken, fetch, log, linearR
       method: "POST",
       headers: { authorization: developmentToken, "content-type": "application/json" },
       body: JSON.stringify({ query, variables, operationName: "TargetWorkflowSchedulingRoots" }),
+      signal: createTargetWorkflowRequestSignal(signal, 30_000),
     });
-    linearRunBudget?.observe({ status: response.status, ...readRateWindows(response.headers) });
+    observer?.observe({ status: response.status, ...readRateWindows(response.headers) });
     observed = true;
-  } catch {
-    if (!observed) linearRunBudget?.observe({});
+    if (response.status === 429) throw stableError("target_live_rate_limited");
+  } catch (error) {
+    if (!observed) observer?.observe({});
+    if (error?.message === "target_live_rate_limited") throw error;
     log({ event: "target_scheduling_request_failed" });
     throw stableError("target_scheduling_request_failed");
-  } finally {
-    reservation?.release();
   }
   let body;
   try { body = await response.json(); } catch {
@@ -235,10 +239,6 @@ function readRateWindow(headers, prefix) {
     : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
 }
 
-function hasRunBudget(value) {
-  return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
-    typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
-}
 
 function stableError(code) {
   const error = new Error(code);

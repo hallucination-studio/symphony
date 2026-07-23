@@ -24,6 +24,25 @@ test("target success boundary closes production resources after success", async 
   assert.equal(Object.hasOwn(result, "runner"), false);
 });
 
+test("target success boundary supplies the five-minute deadline when none is provided", async () => {
+  let boundaryDeadline;
+  let scenarioTimeout;
+  await runTargetSuccessBoundary({
+    now: () => 1_000,
+    startBoundary: async (input) => {
+      boundaryDeadline = input.deadlineAtMs;
+      return { runner: {}, async close() {} };
+    },
+    runSuccess: async ({ timeoutMs }) => {
+      scenarioTimeout = timeoutMs;
+      return { scenario: "success" };
+    },
+  });
+
+  assert.equal(boundaryDeadline, 301_000);
+  assert.equal(scenarioTimeout, 300_000);
+});
+
 test("target success boundary preserves scenario failure while closing resources", async () => {
   const events = [];
   await assert.rejects(

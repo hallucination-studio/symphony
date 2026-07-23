@@ -7,6 +7,7 @@ import {
   loadE2EConfig,
   summarizeConfig,
 } from "../../tools/e2e/config.mjs";
+import { run as runCleanup } from "../../tools/e2e/cleanup.mjs";
 
 function validEnvironment() {
   return {
@@ -34,7 +35,6 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
     clientId: "linear-client-id",
     projectSlugId: "project-retained-123",
     setupAuthorized: true,
-    physicalRequestComplexity: 10_000,
   });
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("linear-dev-canary"), false);
@@ -54,17 +54,8 @@ test("loads the retained Linear Project slug without making it a secret", () => 
     clientId: "linear-client-id",
     projectSlugId: "project-debug-123",
     setupAuthorized: true,
-    physicalRequestComplexity: 10_000,
   });
   assert.equal(summarizeConfig(config).linear.projectSlugId, "project-debug-123");
-});
-
-test("accepts a bounded per-request complexity reservation", () => {
-  const environment = validEnvironment();
-  environment.SYMPHONY_E2E_LINEAR_PHYSICAL_REQUEST_COMPLEXITY = "12000";
-  const config = loadE2EConfig({ environment, platform: "linux" });
-  assert.equal(config.linear.physicalRequestComplexity, 12_000);
-  assert.equal(summarizeConfig(config).linear.physicalRequestComplexity, 12_000);
 });
 
 test("requires the retained Linear Project slug before a live run", () => {
@@ -163,4 +154,47 @@ test("doctor fails closed without printing a supplied secret canary", () => {
     reason: "e2e_configuration_invalid",
       issues: ["linear_client_id_missing", "linear_project_slug_id_missing", "linear_setup_authorization_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
   });
+});
+
+test("standalone cleanup resolves the Project with Linear's supported id argument", async () => {
+  const requests = [];
+  const result = await runCleanup({
+    environment: { ...validEnvironment() },
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requests.push(request);
+      if (request.operationName === "TargetWorkflowResolveProject") {
+        return {
+          ok: true,
+          status: 200,
+          async json() { return { data: { project: { id: "project-1" } } }; },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => undefined },
+        async json() {
+          return { data: { project: { issues: { nodes: [], pageInfo: { hasNextPage: false } } } } };
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(result, { status: "passed", archived: 0, projectDigest: "a33e35d30212" });
+  assert.match(requests[0].query, /project\(id: \$projectSlugId\)/u);
+  assert.deepEqual(requests[0].variables, { projectSlugId: "project-retained-123" });
+  assert.equal(requests.length, 2);
+});
+
+test("standalone cleanup refuses workflow mutation without explicit setup authorization", async () => {
+  let requests = 0;
+  await assert.rejects(
+    runCleanup({
+      environment: { ...validEnvironment(), SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "false" },
+      fetch: async () => { requests += 1; },
+    }),
+    /target_live_cleanup_authorization_required/u,
+  );
+  assert.equal(requests, 0);
 });

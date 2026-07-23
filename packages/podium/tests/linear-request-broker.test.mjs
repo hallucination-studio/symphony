@@ -2,23 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LinearRequestBrokerImpl } from "../dist/internal/linear-gateway/internal/LinearRequestBrokerImpl.js";
-import { LinearRunBudgetImpl } from "../dist/internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
-test("installation broker reserves both rate windows from background reads", async () => {
+test("installation broker dispatches background reads regardless of observed remainder", async () => {
   const broker = new LinearRequestBrokerImpl({ maxConcurrent: 2, maxHighPriorityBurst: 4 });
-  await assert.rejects(
-    broker.run("background", async () => "unknown"),
-    /linear_request_capacity_reserved/u,
-  );
   broker.observe({
-    requestWindow: { limit: 1000, remaining: 750, reset: 60 },
-    complexityWindow: { limit: 250000, remaining: 200000, reset: 60 },
+    requestWindow: { limit: 1000, remaining: 1, reset: 60 },
+    complexityWindow: { limit: 250000, remaining: 1, reset: 60 },
   });
-
-  await assert.rejects(
-    broker.run("background", async () => "forbidden"),
-    /linear_request_capacity_reserved/u,
-  );
+  assert.equal(await broker.run("background", async () => "observed-only"), "observed-only");
   assert.equal(await broker.run("mutation", async () => "allowed"), "allowed");
   assert.equal(await broker.run("read-back", async () => "allowed"), "allowed");
 });
@@ -58,87 +49,24 @@ test("installation broker deadlines and retry jitter are bounded", async () => {
   now = 111;
   release("done");
   await active;
-  await assert.rejects(queued, /linear_request_budget_exhausted/u);
+  await assert.rejects(queued, /linear_request_deadline_exceeded/u);
   assert.equal(broker.retryDelayMs({ attempt: 3, retryAfterMs: 900, maxDelayMs: 1000 }), 1000);
 });
 
-test("installation broker charges physical permits to a run budget", async () => {
-  const budget = new LinearRunBudgetImpl({ maxRequests: 2 });
-  budget.observe({
-    requestWindow: { limit: 10, remaining: 10, reset: 60 },
-    complexityWindow: { limit: 2_000_000, remaining: 2_000_000, reset: 60 },
-  });
+test("installation broker applies a bounded deadline when callers omit one", async () => {
   const broker = new LinearRequestBrokerImpl({
     maxConcurrent: 1,
-    maxHighPriorityBurst: 2,
-    budget,
+    maxHighPriorityBurst: 1,
+    requestTimeoutMs: 100,
   });
 
-  assert.equal(await broker.run("mutation", async () => {
-    broker.assertPermit("mutation");
-    return "first";
-  }), "first");
-  broker.observe({
-    requestWindow: { limit: 10, remaining: 9, reset: 60 },
-    complexityWindow: { limit: 2_000_000, remaining: 1_999_000, reset: 60 },
-  });
-  assert.equal(budget.snapshot().logicalOperations, 1);
-  assert.equal(budget.snapshot().physicalRequests, 2);
+  const timedOut = broker.run("workflow", () => new Promise(() => {}));
   await assert.rejects(
-    broker.run("mutation", async () => {
-      broker.assertPermit("mutation");
-      return "blocked";
-    }),
-    /linear_run_budget_exhausted/u,
+    timedOut,
+    /linear_request_deadline_exceeded/u,
   );
-});
-
-test("installation broker reserves only dispatched physical work", async () => {
-  const budget = new LinearRunBudgetImpl({ maxRequests: 10 });
-  const broker = new LinearRequestBrokerImpl({
-    maxConcurrent: 1,
-    maxHighPriorityBurst: 2,
-    budget,
-  });
-  let release;
-  const active = broker.run("control", () => {
-    broker.assertPermit("control");
-    return new Promise((resolve) => { release = resolve; });
-  });
-  const queued = broker.run("workflow", async () => {
-    broker.assertPermit("workflow");
-    return "queued";
-  });
-  assert.equal(budget.snapshot().reservedRequests, 1);
-  broker.observe({});
-  release("active");
-  assert.equal(await active, "active");
-  assert.equal(await queued, "queued");
-  assert.equal(budget.snapshot().reservedRequests, 1);
-  broker.observe({});
-  assert.equal(budget.snapshot().reservedRequests, 0);
-});
-
-test("installation broker does not leak a logical reservation around SDK physical permits", async () => {
-  const budget = new LinearRunBudgetImpl({ maxRequests: 10 });
-  const broker = new LinearRequestBrokerImpl({
-    maxConcurrent: 1,
-    maxHighPriorityBurst: 2,
-    budget,
-  });
-
-  await broker.run("workflow", async () => {
-    broker.assertPermit("workflow");
-    broker.observe({});
-    broker.assertPermit("workflow");
-    broker.observe({});
-  });
-
-  assert.deepEqual(
-    {
-      physicalRequests: budget.snapshot().physicalRequests,
-      reservedRequests: budget.snapshot().reservedRequests,
-    },
-    { physicalRequests: 2, reservedRequests: 0 },
+  assert.equal(
+    await broker.run("workflow", async () => "after-timeout"),
+    "after-timeout",
   );
 });

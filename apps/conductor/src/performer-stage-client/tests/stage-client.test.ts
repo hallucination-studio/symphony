@@ -142,9 +142,32 @@ test("Stage client enforces the Stage wall-clock deadline", async () => {
   assert.ok(Date.now() - startedAt >= 900);
 });
 
+test("Stage client honors the persisted absolute deadline before the wall-time limit", async () => {
+  const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-stage-absolute-timeout-"));
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-stage-workspace-"));
+  const envelope = await loadEnvelope();
+  const typedEnvelope = envelope as unknown as {
+    limits: { max_wall_time_ms: number };
+    stage_execution: { deadline_at: string };
+  };
+  typedEnvelope.limits.max_wall_time_ms = 3_000;
+  typedEnvelope.stage_execution.deadline_at = new Date(Date.now() + 150).toISOString();
+  const script = await writeNodeScript(runtimeRoot, ["setInterval(() => {}, 1000);"]);
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    createClient(runtimeRoot, script).runStage({ envelope, workspaceRoot }),
+    /performer_stage_timeout/u,
+  );
+  assert.ok(Date.now() - startedAt < 1_500);
+});
+
 async function loadEnvelope(): Promise<JsonValue> {
   const document = JSON.parse(await readFile(fixturePath, "utf8")) as { value: JsonValue };
-  return document.value;
+  const envelope = document.value as Record<string, JsonValue>;
+  const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+  stageExecution.deadline_at = new Date(Date.now() + 60_000).toISOString();
+  return envelope;
 }
 
 async function writeNodeScript(directory: string, lines: string[]): Promise<string> {

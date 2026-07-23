@@ -35,4 +35,5 @@ export interface DiscoveredRoot extends RootIssue {
   priority: LinearPriority;
   order: number;
   blockers: LinearBlockerSnapshot[];
+  rootConductorLabels: Array<{ conductorShortHash: string }>;
 }

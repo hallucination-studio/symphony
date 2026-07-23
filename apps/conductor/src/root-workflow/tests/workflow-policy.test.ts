@@ -31,6 +31,19 @@ test("returns waiting_human and terminal assessments from Root facts", () => {
   assert.deepEqual(policy.assess(terminal), { rootIssueId: "root-1", readiness: "terminal" });
 });
 
+test("stops Stage dispatch after a successful Cycle while delivery remains pending", () => {
+  const deliveryReady = buildRootDagView(input("Succeeded", "Done", undefined, "Done", false, "Done"));
+  const inProgress = deliveryReady.statusCatalog.find(({ name }) => name === "In Progress")!;
+  deliveryReady.root.issue = {
+    ...deliveryReady.root.issue,
+    status_id: inProgress.status_id,
+    status_name: inProgress.name,
+    status_category: inProgress.category,
+    status_position: inProgress.position,
+  };
+  assert.deepEqual(policy.assess(deliveryReady), { rootIssueId: "root-1", readiness: "terminal" });
+});
+
 test("stops dispatch when the Root cycle convergence limit is reached", () => {
   const view = buildRootDagView(input("Succeeded", "Done", undefined, "Done", false, "In Progress"));
   const historicalCycle = (cycleId: string, order: number) => ({
@@ -99,7 +112,9 @@ function input(cycleStatus: string, planStatus: string, workStatus?: string, ver
     comments.push(record("root-1", "human-record", "root-1:human-action", { kind: "human_action", version: 1, actionId: "action-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1", requestKind: "needs_approval", questionOrProposal: "Approve", reason: "Review", impact: "Proceed", contextDigest: "digest-1", expectedRootRemoteVersion: "root-version" }));
   }
   if (cycleStatus === "Succeeded") {
+    comments.push(record("verify-1", "execution", "root-1:verify-execution", { kind: "stage_execution", version: 1, stageExecutionId: "execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", stage: "verify", planContractDigest: "digest-1", contextDigest: "digest-1", sourceManifest: [], coverage: { isComplete: true, omissions: [] }, instructionSetId: "verify-v1", executionPolicyId: "policy-1", limits: { maxContextBytes: 1, maxResultBytes: 1, maxWallTimeMs: 1, maxToolCalls: 1, maxCommandDurationMs: 1, reservedTotalTokens: 10, maxOutputTokens: 1 }, repositoryRevision: "commit-1", startedAt: "2026-07-21T00:00:00Z", deadlineAt: "2026-07-21T01:00:00Z" }));
     comments.push(record("verify-1", "result", "root-1:verify-result", { kind: "stage_terminal", version: 1, stageExecutionId: "execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", stage: "verify", contextDigest: "digest-1", outcome: "completed", completedAt: "2026-07-21T00:00:00Z", summary: "passed", usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 } }));
+    comments.push(record("verify-1", "verify-result", "root-1:verify-result-record", { kind: "verify_result", version: 1, stageExecutionId: "execution-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "verify-1", conclusion: "passed", criteriaResults: [{ criterionKey: "verify-criterion", outcome: "passed", summary: "passed" }], checks: [], verifiedRevision: "commit-1" }));
   }
   return { tree: { root_issue_id: "root-1", status_catalog: statuses, issues, comments, relations, observed_at: "2026-07-21T00:00:00Z" }, git: { head: "head-1", branch: "symphony/root-1", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }, workspace: { branch: "symphony/root-1", worktreePath: "/tmp/root-1", rootIssueId: "root-1" } };
 }

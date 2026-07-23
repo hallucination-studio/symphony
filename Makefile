@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(PYTHON) -m pip
 E2E_SECRET_FREE := env -u SYMPHONY_E2E_LINEAR_DEV_TOKEN -u SYMPHONY_E2E_CODEX_API_KEY
-E2E_LIVE := node --env-file-if-exists=.env tools/e2e/target-workflow-entry.mjs --live-all
+E2E_LIVE := node --env-file-if-exists=.env tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-all
 
 .PHONY: install build lint typecheck test test-all e2e dev stop
 

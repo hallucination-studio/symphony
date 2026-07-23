@@ -46,7 +46,7 @@ import { assessProgress } from "../../root-workflow/internal/ProgressPolicy.js";
 import { groupRepairFindings, type RepairGroup } from "../../root-workflow/internal/RepairGroupingPolicy.js";
 import {
   assessRootConvergence,
-  DEFAULT_ROOT_CONVERGENCE_POLICY,
+  createDefaultRootConvergencePolicy,
   toConvergenceRecord,
   type RootConvergencePolicy,
 } from "../../root-workflow/internal/RootConvergencePolicy.js";
@@ -73,7 +73,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     private readonly dependencies: LinearDagExecutionDependencies,
     private readonly contextBuilder = new StageContextBuilder(),
     private readonly dagMaterializer = new DagMaterializer(),
-    private readonly convergencePolicy: RootConvergencePolicy = DEFAULT_ROOT_CONVERGENCE_POLICY,
+    private readonly convergencePolicy: RootConvergencePolicy = createDefaultRootConvergencePolicy(),
   ) {}
 
   async reconcileCanceledRoot(input: RootMutationInput) {
@@ -162,6 +162,9 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         continue;
       }
       if (next.kind === "mutation_applied") {
+        if (next.step.startsWith("work_stage_validation_failure_terminal:")) {
+          throw new Error(next.step.slice("work_stage_validation_failure_terminal:".length));
+        }
         if (next.step === "work_stage_retryable_failure_terminal") {
           stageResult = undefined;
           activeStageExecutionId = undefined;
@@ -190,6 +193,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
           stageResult = (await this.dependencies.performer.runStage({ envelope: next.envelope, workspaceRoot: input.workspace.worktreePath })).result;
         } catch (error) {
           await this.dependencies.performer.cancelAndReap();
+          await this.persistPerformerFailure(input, "verify", error);
           throw error;
         }
         continue;
@@ -331,17 +335,27 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       const pendingAction = suspendedTerminal && (records.get(input.rootIssueId) ?? []).find((record): record is HumanActionRecord => record.kind === "human_action" && record.actionId === `${input.rootIssueId}:human:${suspendedTerminal.stageExecutionId}`);
       const resolvedHumanInput = suspendedTerminal && pendingAction ? resolvedHumanInputForAction(tree.comments, pendingAction, suspendedTerminal) : undefined;
       if (suspendedTerminal && pendingAction && !resolvedHumanInput) return workBlocked("work_human_resolution_missing");
+      const stageAttempt = [...records.values()]
+        .flatMap((values) => values)
+        .filter((record): record is StageExecutionRecord =>
+          record.kind === "stage_execution" && record.stage === "work" && record.cycleIssueId === cycleView.issue.issue_id,
+        ).length + 1;
       const stageExecutionId = latestExecution && !currentTerminal
         ? latestExecution.stageExecutionId
-        : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, (records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1)
-          ?? `${input.rootIssueId}:work:${selected.issue.issue_id}:${(records.get(selected.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1}`;
+        : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, stageAttempt)
+          ?? `${input.rootIssueId}:work:${selected.issue.issue_id}:${stageAttempt}`;
       const resumedExecution = latestExecution && !currentTerminal ? latestExecution : undefined;
+      const startedAt = resumedExecution?.startedAt ?? input.options.now?.() ?? new Date().toISOString();
       const built = await this.contextBuilder.buildWork({
         tree, cycle: cycleView.issue, plan: plan.issue, work: selected.issue, contract,
         dependencyState: dependencyState(selected, cycleView, plan.issue.issue_id), workspace: input.workspace, git: this.dependencies.git,
         stageExecutionId,
-        startedAt: resumedExecution?.startedAt ?? input.options.now?.() ?? new Date().toISOString(),
-        deadlineAt: resumedExecution?.deadlineAt ?? workDeadline(input),
+        startedAt,
+        deadlineAt: resumedExecution?.deadlineAt ?? stageDeadline(
+          startedAt,
+          input.options.limits.maxWallTimeMs,
+          this.convergencePolicy.deadlineAt,
+        ),
         ...(resolvedHumanInput === undefined ? {} : { resolvedHumanInput }), options: input.options,
       });
       if (latestExecution && !currentTerminal) {
@@ -352,9 +366,30 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       return { kind: "mutation_applied", step: "work_execution_created" };
     }
     if (!latestExecution) return workBlocked("work_execution_missing");
-    const validated = validateWorkResult(stageResult, latestExecution);
+    let validated: ValidatedWorkResult;
+    try {
+      validated = validateWorkResult(stageResult, latestExecution);
+      if (!currentTerminal) await validateWorkGit(this.dependencies.git, input.workspace, latestExecution, validated, contract);
+    } catch (error) {
+      if (currentTerminal) throw error;
+      const failureCode = workValidationFailureCode(error);
+      try {
+        await this.dependencies.git.restoreWorktree(input.workspace, latestExecution.repositoryRevision);
+      } catch {
+        // Preserve the validation failure when cleanup observes a newer external HEAD.
+        throw error;
+      }
+      await this.appendRecord(
+        input,
+        tree,
+        selected.issue,
+        `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`,
+        `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`,
+        stageTerminalFromFailure(latestExecution, tree.observed_at, failureCode, `Work result validation failed: ${failureCode}.`),
+      );
+      return { kind: "mutation_applied", step: `work_stage_validation_failure_terminal:${failureCode}` };
+    }
     if (!currentTerminal) {
-      await validateWorkGit(this.dependencies.git, input.workspace, latestExecution, validated, contract);
       await this.appendRecord(input, tree, selected.issue, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:work:${selected.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminal(latestExecution, validated));
       return { kind: "mutation_applied", step: "work_stage_terminal" };
     }
@@ -487,9 +522,15 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         if (currentTerminal?.outcome === "completed" && !currentResult) return verifyBlocked("verify_result_missing");
         if (currentResult) return verifyBlocked("verify_result_records_incomplete");
         const stageAttempt = (records.get(verify.issue.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1;
-        const startedAt = input.options.now?.() ?? new Date().toISOString();
         const stageExecutionId = latestExecution && !currentTerminal ? latestExecution.stageExecutionId : input.options.stageId?.(input.rootIssueId, cycleView.issue.issue_id, stageAttempt) ?? `${input.rootIssueId}:verify:${cycleView.issue.issue_id}:${stageAttempt}`;
-        const built = await this.contextBuilder.buildVerify({ tree, cycle: cycleView.issue, plan: plan.issue, verify: verify.issue, contract, workspace: input.workspace, git: this.dependencies.git, stageExecutionId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString(), options: input.options });
+        const resumedExecution = latestExecution && !currentTerminal ? latestExecution : undefined;
+        const startedAt = resumedExecution?.startedAt ?? input.options.now?.() ?? new Date().toISOString();
+        const deadlineAt = resumedExecution?.deadlineAt ?? stageDeadline(
+          startedAt,
+          input.options.limits.maxWallTimeMs,
+          this.convergencePolicy.deadlineAt,
+        );
+        const built = await this.contextBuilder.buildVerify({ tree, cycle: cycleView.issue, plan: plan.issue, verify: verify.issue, contract, workspace: input.workspace, git: this.dependencies.git, stageExecutionId, startedAt, deadlineAt, options: input.options });
         if (latestExecution && !currentTerminal) {
           if (latestExecution.contextDigest !== built.executionRecord.contextDigest) return verifyBlocked("verify_execution_context_changed");
           return { kind: "stage_ready", step: "verify", envelope: built.envelope };
@@ -498,7 +539,23 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
         return { kind: "mutation_applied", step: "verify_execution_created" };
       }
       if (!latestExecution) return verifyBlocked("verify_execution_missing");
-      const validated = validateVerifyResult(stageResult, latestExecution, contract, gitSnapshot.head);
+      let validated: ValidatedVerifyResult;
+      try {
+        validated = validateVerifyResult(stageResult, latestExecution, contract, gitSnapshot.head);
+      } catch (error) {
+        const failureCode = verifyValidationFailureCode(error);
+        if (!currentTerminal) {
+          await this.appendRecord(
+            input,
+            tree,
+            verify.issue,
+            `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`,
+            `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`,
+            stageTerminalFromFailure(latestExecution, tree.observed_at, failureCode, `Verify result validation failed: ${failureCode}.`),
+          );
+        }
+        return verifyBlocked(failureCode);
+      }
       if (!currentTerminal) {
         await this.appendRecord(input, tree, verify.issue, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, `${input.rootIssueId}:verify:${verify.issue.issue_id}:terminal:${latestExecution.stageExecutionId}`, stageTerminalFromVerify(latestExecution, validated));
         return { kind: "mutation_applied", step: "verify_stage_terminal" };
@@ -750,7 +807,11 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       }
       const stageAttempt = (records.get(plan.issue_id) ?? []).filter((record) => record.kind === "stage_execution").length + 1;
       const startedAt = (input.options.now ?? (() => new Date().toISOString()))();
-      const deadlineAt = new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString();
+      const deadlineAt = stageDeadline(
+        startedAt,
+        input.options.limits.maxWallTimeMs,
+        this.convergencePolicy.deadlineAt,
+      );
       const stageExecutionId = input.options.stageId?.(input.rootIssueId, cycle.issue_id, stageAttempt)
         ?? `${input.rootIssueId}:plan:${cycle.issue_id}:${stageAttempt}`;
       const built = await this.contextBuilder.build({ tree, cycle, plan, workspace: input.workspace, git: this.dependencies.git, stageExecutionId, startedAt, deadlineAt, options: input.options });
@@ -775,7 +836,7 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
     }
     if (root.status_name === "Needs Approval") return { kind: "waiting_human", step: "plan_approval" };
     if (root.status_name !== "In Progress") return blocked("plan_approval_read_back_invalid");
-    if (approval.expectedRootRemoteVersion === root.remote_version) {
+    if (!hasHumanResponseAfterAction(tree.comments, approval)) {
       await this.updateStatus(input, tree, root, statuses.get("Needs Approval"), "root_needs_approval");
       return { kind: "mutation_applied", step: "root_needs_approval" };
     }
@@ -805,6 +866,34 @@ export class LinearDagExecutionImpl implements LinearDagExecutionInterface {
       .at(-1);
     if (!latest) throw new Error(`${stage}_execution_read_back_missing`);
     return latest.stageExecutionId;
+  }
+
+  private async persistPerformerFailure(
+    input: BootstrapPlanInput,
+    stage: StageExecutionRecord["stage"],
+    error: unknown,
+  ): Promise<void> {
+    const tree = await this.readReconciliationTree(input.rootIssueId);
+    const records = recordsByIssue(tree.comments);
+    const execution = [...records.values()]
+      .flatMap((values) => values.filter((record): record is StageExecutionRecord =>
+        record.kind === "stage_execution" && record.rootIssueId === input.rootIssueId && record.stage === stage))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.stageExecutionId.localeCompare(right.stageExecutionId))
+      .at(-1);
+    if (!execution) throw new Error(`${stage}_execution_read_back_missing`);
+    const terminal = latestTerminalRecord(records.get(execution.nodeIssueId) ?? []);
+    if (terminal?.stageExecutionId === execution.stageExecutionId) return;
+    const target = tree.issues.find((issue) => issue.issue_id === execution.nodeIssueId);
+    if (!target) throw new Error(`${stage}_node_read_back_missing`);
+    const failureCode = performerFailureCode(error);
+    await this.appendRecord(
+      input,
+      tree,
+      target,
+      `${input.rootIssueId}:${stage}:${target.issue_id}:terminal:${execution.stageExecutionId}`,
+      `${input.rootIssueId}:${stage}:${target.issue_id}:terminal:${execution.stageExecutionId}`,
+      stageTerminalFromFailure(execution, tree.observed_at, failureCode, performerFailureSummary(stage, error)),
+    );
   }
 
   private async enforceConvergence(input: RootMutationInput & { reservedTotalTokens: number }, tree: LinearWorkflowTreeSnapshot, view: ReturnType<typeof buildRootDagView>): Promise<ConvergenceGateResult> {
@@ -1234,6 +1323,23 @@ function resolvedHumanInputForAction(
   }];
 }
 
+function hasHumanResponseAfterAction(comments: Comment[], action: HumanActionRecord): boolean {
+  const actionComment = comments
+    .filter((comment) => comment.issue_id === action.rootIssueId && comment.managed_marker)
+    .flatMap((comment) => {
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "human_action" && parsed.value.actionId === action.actionId
+        ? [comment]
+        : [];
+    })
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.comment_id.localeCompare(left.comment_id))[0];
+  if (!actionComment) return false;
+  return comments.some((comment) => comment.issue_id === action.nodeIssueId
+    && !comment.managed_marker
+    && (comment.updated_at > actionComment.updated_at
+      || (comment.updated_at === actionComment.updated_at && comment.comment_id > actionComment.comment_id)));
+}
+
 function rootTerminalResultReason(status: string, stageResult: JsonValue | undefined): string | undefined {
   if (stageResult === undefined || (status !== "Done" && status !== "Canceled")) return undefined;
   return "root_terminal_result_rejected";
@@ -1321,9 +1427,13 @@ function convergenceWriteId(rootIssueId: string, record: ConvergenceRecord): str
   return `${rootIssueId}:convergence:${digest}`;
 }
 
-function workDeadline(input: WorkStageInput): string {
-  const startedAt = input.options.now?.() ?? new Date().toISOString();
-  return new Date(Date.parse(startedAt) + input.options.limits.maxWallTimeMs).toISOString();
+function stageDeadline(startedAt: string, maxWallTimeMs: number, rootDeadlineAt: string): string {
+  const stageDeadlineMs = Date.parse(startedAt) + maxWallTimeMs;
+  const rootDeadlineMs = Date.parse(rootDeadlineAt);
+  if (!Number.isFinite(stageDeadlineMs) || !Number.isFinite(rootDeadlineMs)) {
+    throw new Error("stage_deadline_invalid");
+  }
+  return new Date(Math.min(stageDeadlineMs, rootDeadlineMs)).toISOString();
 }
 
 function diffPaths(text: string): string[] {
@@ -1497,6 +1607,32 @@ function stageTerminalFromFailure(execution: StageExecutionRecord, completedAt: 
     cycleIssueId: execution.cycleIssueId, nodeIssueId: execution.nodeIssueId, stage: execution.stage, contextDigest: execution.contextDigest,
     outcome: "failed", completedAt, summary, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: execution.limits.reservedTotalTokens }, failureCode,
   };
+}
+
+function performerFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const candidate = message.split(/\s+/u, 1)[0] ?? "";
+  return /^[a-z][a-z0-9_]{1,120}$/u.test(candidate) ? candidate : "performer_stage_failed";
+}
+
+function performerFailureSummary(stage: StageExecutionRecord["stage"], error: unknown): string {
+  const message = (error instanceof Error ? error.message : "Stage process failed.")
+    .replace(/(?:Bearer\s+|sk-)[A-Za-z0-9._-]+/giu, "[REDACTED]")
+    .replace(/\s+/gu, " ")
+    .slice(0, 1_000);
+  return `${stage} Performer execution failed: ${message}`;
+}
+
+function verifyValidationFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const candidate = message.split(":", 1)[0] ?? "";
+  return /^[a-z][a-z0-9_]{1,120}$/u.test(candidate) ? candidate : "verify_result_invalid";
+}
+
+function workValidationFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const candidate = message.split(":", 1)[0] ?? "";
+  return /^[a-z][a-z0-9_]{1,120}$/u.test(candidate) ? candidate : "work_result_invalid";
 }
 
 function allFindingRecords(records: Map<string, ManagedRecord[]>): import("../../root-workflow/api/ManagedRecords.js").FindingRecord[] {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
 
 import { createE2ELogger } from "./logging.mjs";
@@ -9,14 +10,14 @@ const SECRET_KEYS = new Set([
   "SYMPHONY_E2E_CODEX_API_KEY",
 ]);
 
-export async function createProductionPodiumConductorOwner({ databasePath, log, linearRunBudget }) {
+export async function createProductionPodiumConductorOwner({ databasePath, log, linearRequestObserver }) {
   const {
     createPodiumConductorServices,
     PodiumConductorProtocolHandler,
   } = await import("@symphony/podium");
   const owner = createPodiumConductorServices({
     databasePath,
-    linearRunBudget,
+    linearRequestObserver,
     observeLinearRequest: (observation) => log?.({
       event: "linear_physical_request",
       ...observation,
@@ -37,6 +38,7 @@ export async function startConductorHarness({
   cwd = process.cwd(),
   startupTimeoutMs = 30_000,
   shutdownTimeoutMs = 5_000,
+  abortSignal,
   spawnProcess = spawn,
   log,
 }) {
@@ -46,6 +48,7 @@ export async function startConductorHarness({
     cwd,
     env: environment,
     stdio: ["ignore", "pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
   emit({ event: "e2e_child_started", component: "conductor" });
   const channel = child.stdio?.[3];
@@ -60,11 +63,20 @@ export async function startConductorHarness({
   let buffer = Buffer.alloc(0);
   let processing = Promise.resolve();
   let closed = false;
+  let podiumClosed = false;
   let firstFailure;
   const handshake = deferred();
   const exit = deferred();
+  const abortHandler = () => {
+    if (closed) return;
+    fail("conductor_aborted");
+    void terminateAbruptlyInternal();
+  };
+  if (abortSignal?.aborted) abortHandler();
+  else abortSignal?.addEventListener("abort", abortHandler, { once: true });
   child.once("error", () => fail("conductor_process_start_failed"));
   child.once("exit", (code, signal) => {
+    abortSignal?.removeEventListener("abort", abortHandler);
     emit({ event: "e2e_child_exited", component: "conductor", exit_code: code, signal });
     exit.resolve({ code, signal });
     if (!closed && !firstFailure) fail("conductor_process_exited");
@@ -75,19 +87,24 @@ export async function startConductorHarness({
     buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
     processing = processing
       .then(() => drain())
-      .catch(() => fail("conductor_protocol_failed"));
+      .catch(() => {
+        if (!closed) fail("conductor_protocol_failed");
+      });
   });
-  channel.once("error", () => fail("conductor_protocol_failed"));
+  channel.once("error", () => {
+    if (!closed) fail("conductor_protocol_failed");
+  });
 
   const startupTimer = setTimeout(() => fail("conductor_startup_timeout"), startupTimeoutMs);
   try {
     await handshake.promise;
   } catch (error) {
     closed = true;
+    abortSignal?.removeEventListener("abort", abortHandler);
+    killProcessTree(child, "SIGKILL");
     channel.destroy();
-    child.kill("SIGKILL");
     await boundedExit(exit.promise, shutdownTimeoutMs);
-    podium.close();
+    closePodium();
     throw error;
   } finally {
     clearTimeout(startupTimer);
@@ -101,7 +118,12 @@ export async function startConductorHarness({
       const waiter = deferred();
       const timer = setTimeout(() => {
         observationWaiters.delete(entry);
-        waiter.reject(stableError("conductor_observation_timeout"));
+        const error = stableError("conductor_observation_timeout");
+        waiter.reject(error);
+        if (!closed) {
+          fail(error.message);
+          void terminateAbruptlyInternal();
+        }
       }, timeoutMs);
       const entry = { predicate, waiter, timer };
       observationWaiters.add(entry);
@@ -121,41 +143,46 @@ export async function startConductorHarness({
       return result.promise;
     },
     async terminateAbruptly(signal = "SIGKILL") {
-      if (closed) return exit.promise;
-      closed = true;
-      channel.destroy();
-      child.kill(signal);
-      return boundedExit(exit.promise, shutdownTimeoutMs + 1_000);
+      return terminateAbruptlyInternal(signal);
     },
     async close() {
-      if (closed) return;
-      try {
-        const requestId = `e2e-shutdown-${randomUUID()}`;
-        await write(channel, `${JSON.stringify({
-          protocol_version: "1",
-          request_id: requestId,
-          body: {
-          kind: "shutdown_conductor",
-          binding_id: environment.SYMPHONY_BINDING_ID,
-          instance_id: environment.SYMPHONY_INSTANCE_ID,
-          deadline_at: new Date(Date.now() + shutdownTimeoutMs).toISOString(),
-          },
-        })}\n`);
-      } catch {}
+      if (closed) {
+        closePodium();
+        return;
+      }
       closed = true;
-      channel.end();
-      const timer = setTimeout(() => child.kill("SIGKILL"), shutdownTimeoutMs);
+      child.kill("SIGTERM");
+      const timer = setTimeout(() => killProcessTree(child, "SIGKILL"), shutdownTimeoutMs);
       await boundedExit(exit.promise, shutdownTimeoutMs + 1_000);
       clearTimeout(timer);
+      channel.destroy();
       podium.observeExit?.({
         bindingId: environment.SYMPHONY_BINDING_ID,
         instanceId: environment.SYMPHONY_INSTANCE_ID,
         observedAt: new Date().toISOString(),
         sanitizedReason: "conductor_process_exited",
       });
-      podium.close();
+      closePodium();
     },
   });
+
+  async function terminateAbruptlyInternal(signal = "SIGKILL") {
+    if (!closed) {
+      closed = true;
+      abortSignal?.removeEventListener("abort", abortHandler);
+      killProcessTree(child, signal);
+      channel.destroy();
+    }
+    const result = await boundedExit(exit.promise, shutdownTimeoutMs + 1_000);
+    closePodium();
+    return result;
+  }
+
+  function closePodium() {
+    if (podiumClosed) return;
+    podiumClosed = true;
+    podium.close();
+  }
 
   async function drain() {
     while (true) {
@@ -236,6 +263,10 @@ export async function startConductorHarness({
     if (firstFailure) return;
     emit({ event: "e2e_child_failed", component: "conductor", reason: code });
     firstFailure = stableError(code);
+    // A failed inbound handler leaves the Conductor waiting for its response.
+    // Terminate the child so its IPC client rejects that pending request.
+    killProcessTree(child, "SIGKILL");
+    channel.destroy();
     handshake.reject(firstFailure);
     for (const request of pending.values()) {
       clearTimeout(request.timer);
@@ -268,6 +299,67 @@ export async function startConductorHarness({
     });
   }
 
+}
+
+function killProcessTree(child, signal) {
+  if (!child?.pid) {
+    child?.kill?.(signal);
+    return;
+  }
+  if (process.platform !== "win32") {
+    for (const pid of listDescendantPids(child.pid)) killProcessGroup(pid, signal);
+    killProcessGroup(child.pid, signal);
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The process may have exited between discovery and termination.
+  }
+}
+
+function listDescendantPids(rootPid) {
+  let output;
+  try {
+    output = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" });
+  } catch {
+    return [];
+  }
+  const childrenByParent = new Map();
+  for (const line of output.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/u);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const children = childrenByParent.get(parentPid) ?? [];
+    children.push(pid);
+    childrenByParent.set(parentPid, children);
+  }
+  const descendants = [];
+  const pending = [...(childrenByParent.get(rootPid) ?? [])];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    if (pid === undefined) continue;
+    descendants.push(pid);
+    pending.push(...(childrenByParent.get(pid) ?? []));
+  }
+  return descendants.sort((left, right) => right - left);
+}
+
+function killProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error)) throw error;
+    if (error.code === "ESRCH") return;
+    if (error.code !== "EPERM") throw error;
+    try {
+      process.kill(pid, signal);
+    } catch (fallbackError) {
+      if (!(fallbackError instanceof Error && "code" in fallbackError && fallbackError.code === "ESRCH")) {
+        throw fallbackError;
+      }
+    }
+  }
 }
 
 function validateEnvironment(environment) {

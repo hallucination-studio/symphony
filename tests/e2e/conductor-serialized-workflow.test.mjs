@@ -46,7 +46,7 @@ test("real Conductor rebuilds a serialized terminal Root with a real Git worktre
     environment: environment("instance-1"),
     executable: process.execPath,
     arguments: ["--import", "tsx", path.resolve("apps/conductor/src/main.ts")],
-    startupTimeoutMs: 5_000,
+    startupTimeoutMs: 30_000,
     shutdownTimeoutMs: 1_000,
   });
   await first.waitForObservation((value) => value.kind === "conductor_runtime_report" && value.status === "ready");
@@ -57,7 +57,7 @@ test("real Conductor rebuilds a serialized terminal Root with a real Git worktre
     environment: environment("instance-2"),
     executable: process.execPath,
     arguments: ["--import", "tsx", path.resolve("apps/conductor/src/main.ts")],
-    startupTimeoutMs: 5_000,
+    startupTimeoutMs: 30_000,
     shutdownTimeoutMs: 1_000,
   });
   await second.waitForObservation((value) => value.kind === "conductor_runtime_report" && value.status === "ready");

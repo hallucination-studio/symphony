@@ -19,3 +19,11 @@ test("an explicit idle delay keeps credentialed E2E reconciliation bounded", () 
     disposition: "needs-attention", baseDelayMs: 250, idleDelayMs: 250, random: () => 1,
   }), 300);
 });
+
+test("an explicit idle delay backs off across unchanged cycles", () => {
+  const input = { disposition: "empty" as const, baseDelayMs: 250, idleDelayMs: 250, random: () => 0 };
+  assert.equal(conductorCycleDelayMs({ ...input, idleAttempt: 0 }), 250);
+  assert.equal(conductorCycleDelayMs({ ...input, idleAttempt: 1 }), 500);
+  assert.equal(conductorCycleDelayMs({ ...input, idleAttempt: 2 }), 1_000);
+  assert.equal(conductorCycleDelayMs({ ...input, idleAttempt: 20 }), 300_000);
+});

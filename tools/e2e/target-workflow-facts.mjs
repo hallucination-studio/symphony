@@ -21,7 +21,7 @@ export function projectTargetWorkflowFacts(snapshot) {
   const cycle = selectCurrentCycle(cycles, records, input.rootIssueId);
   const cycleRecords = records.filter(({ issueId }) => issueId === cycle.id);
   const cycleMarker = one(cycleRecords, "cycle_marker");
-  if (cycleMarker.root_issue_id !== input.rootIssueId || cycleMarker.cycle_key !== cycle.id ||
+  if (cycleMarker.root_issue_id !== input.rootIssueId || !isSafeId(cycleMarker.cycle_key) ||
       !isSha(cycleMarker.baseline_revision)) {
     throw new Error("target_facts_cycle_invalid");
   }
@@ -198,14 +198,16 @@ function selectCurrentCycle(cycles, records, rootIssueId) {
   const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
   const predecessorById = new Map();
   const childrenById = new Map(cycles.map((cycle) => [cycle.id, []]));
+  const cycleKeys = new Set();
 
   for (const cycle of cycles) {
     const cycleRecords = records.filter(({ issueId }) => issueId === cycle.id);
     const marker = one(cycleRecords, "cycle_marker");
-    if (marker.root_issue_id !== rootIssueId || marker.cycle_key !== cycle.id ||
-        !isSha(marker.baseline_revision)) {
+    if (marker.root_issue_id !== rootIssueId || !isSafeId(marker.cycle_key) ||
+        cycleKeys.has(marker.cycle_key) || !isSha(marker.baseline_revision)) {
       throw new Error("target_facts_cycle_invalid");
     }
+    cycleKeys.add(marker.cycle_key);
     const predecessor = marker.predecessor_cycle;
     if (predecessor === undefined) continue;
     if (!predecessor || typeof predecessor !== "object" || Array.isArray(predecessor) ||
@@ -376,6 +378,7 @@ function stageEvidence(issueId, record, terminals, completions, results, input, 
   if (!terminal || terminal.issueId !== record.node_issue_id || !sameCorrelation(record, terminal.record) ||
       terminal.record.context_digest !== record.context_digest ||
       terminal.record.outcome !== "completed") {
+    if (terminal?.record?.outcome === "failed") throw new Error("target_facts_stage_failed");
     throw new Error("target_facts_stage_correlation_invalid");
   }
   if (record.stage === "work" && (!completion || completion.record.context_digest !== record.context_digest ||

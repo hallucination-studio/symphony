@@ -148,7 +148,12 @@ export interface RootIssueValue {
   isDelegatedToSymphony: boolean;
   priority: LinearPriority;
   blockers: LinearBlockerValue[];
+  rootConductorLabels: ConductorPoolValue[];
   rootManagedComments: RootManagedCommentValue[];
+}
+
+export interface ConductorPoolValue {
+  conductorShortHash: string;
 }
 
 export interface RootManagedCommentValue {

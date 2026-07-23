@@ -12,16 +12,20 @@ test("gateway resolves the project and discovers delegated Roots", async () => {
     if (body.kind === "resolve_conductor_project") return resolved();
     return {
       kind: "root_issues_page",
-      items: [{ issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [] }],
+      items: [{ issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [], root_conductor_labels: [{ conductor_short_hash: "abc123" }] }],
       page_info: { has_next_page: false },
     };
   });
 
-  assert.deepEqual(await gateway.resolveProject(), { kind: "resolved", projectId: "project-1" });
+  assert.deepEqual(await gateway.resolveProject(), {
+    kind: "resolved", projectId: "project-1",
+    conductorPool: [{ conductorShortHash: "abc123" }, { conductorShortHash: "def456" }],
+  });
   assert.deepEqual(await gateway.listRoots("project-1"), [{
     issueId: "root-1", identifier: "SYM-1", state: "In Progress", title: "Root", description: "Build it",
     updatedAt: now, projectId: "project-1", parentIssueId: null, isDelegatedToSymphony: true,
     priority: "high", order: 0, blockers: [],
+    rootConductorLabels: [{ conductorShortHash: "abc123" }],
   }]);
   assert.deepEqual(requests.map(({ kind }) => kind), ["resolve_conductor_project", "list_root_issues"]);
 });
@@ -32,7 +36,7 @@ test("root discovery projects the Conductor identity from a target managed recor
     return {
       kind: "root_issues_page",
       items: [{
-        issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [],
+        issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [], root_conductor_labels: [{ conductor_short_hash: "abc123" }],
         root_managed_comments: [{
           comment_id: "ownership-comment", issue_id: "root-1",
           body: "<!-- symphony managed-record\n{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/sym-1\",\"owner_generation\":\"generation-1\"}\n-->",
@@ -45,6 +49,26 @@ test("root discovery projects the Conductor identity from a target managed recor
   await gateway.resolveProject();
 
   assert.equal((await gateway.listRoots("project-1"))[0]?.managedConductorId, "conductor-1");
+});
+
+test("gateway evaluates the IPC timeout for each request", async () => {
+  const timeouts: number[] = [];
+  let remaining = 2_000;
+  const gateway = new PodiumLinearGatewayClientImpl("abc123", {
+    async request({ body, timeoutMs }) {
+      timeouts.push(timeoutMs);
+      if ((body as { kind: string }).kind === "resolve_conductor_project") return resolved();
+      return {
+        kind: "root_issues_page", items: [], page_info: { has_next_page: false },
+      };
+    },
+  }, { timeoutMs: () => remaining });
+
+  await gateway.resolveProject();
+  remaining = 1_000;
+  await gateway.listRoots("project-1");
+
+  assert.deepEqual(timeouts, [2_000, 1_000]);
 });
 
 test("workflow gateway serializes a closed mutation and validates its read-back", async () => {
@@ -64,7 +88,7 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
 
   assert.deepEqual(result, { kind: "applied", readBack: { writeId: "write-1", targetIssueId: "work-1", remoteVersion: "v2" } });
   assert.deepEqual(requests[1], {
-    kind: "update_workflow_issue", write_id: "write-1", conductor_short_hash: "abc123",
+    kind: "update_workflow_issue", binding_id: "binding-1", write_id: "write-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
     target: { target_issue_id: "work-1", expected_remote_version: now },
     status_id: "status-progress", title: "Updated", description: "Description",
@@ -91,6 +115,7 @@ function createGateway(request: (body: Record<string, unknown>) => Promise<unkno
 function resolved() {
   return { kind: "resolved", resolved_project: {
     conductor_short_hash: "abc123", project: { project_id: "project-1", organization_id: "org-1", name: "Symphony", updated_at: now },
+    conductor_pool: [{ conductor_short_hash: "abc123" }, { conductor_short_hash: "def456" }],
   } };
 }
 

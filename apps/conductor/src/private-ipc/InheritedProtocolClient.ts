@@ -1,4 +1,7 @@
-import { decodePodiumConductorPodiumConductorMessage } from "@symphony/contracts";
+import {
+  decodePodiumConductorPodiumConductorMessage,
+  decodePodiumConductorWorkflowIssueTreeResult,
+} from "@symphony/contracts";
 
 type JsonValue =
   | null
@@ -17,6 +20,19 @@ type ProtocolMessage = {
 type RequestHandler = {
   handleRequest(body: JsonValue, secret?: Uint8Array): Promise<JsonValue>;
 };
+
+type FailureDetails = {
+  requestId?: string;
+  bodyKind?: string;
+  bodyCode?: string;
+  bodyKeys?: string[];
+};
+
+type FailureListener = (
+  reason: string,
+  schemaPath?: string,
+  details?: FailureDetails,
+) => void;
 
 const MAX_FRAME_BYTES = 1_048_576;
 const PROFILE_REQUEST_KINDS = new Set([
@@ -48,21 +64,26 @@ export class InheritedProtocolClient {
     input: NodeJS.ReadableStream,
     private readonly output: NodeJS.WritableStream,
     private readonly handler?: RequestHandler,
+    private readonly onFailure?: FailureListener,
   ) {
     input.on("data", (chunk: Buffer | string) => {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       this.#buffer = Buffer.concat([this.#buffer, bytes]);
       this.#processing = this.#processing
         .then(() => this.#drain())
-        .catch((error) => this.#close(new Error(privateIpcFailureCode(error))));
+        .catch((error) => this.#close(
+          new Error(privateIpcFailureCode(error)),
+          undefined,
+          privateIpcFailureSchemaPath(error),
+        ));
     });
-    input.once("error", (error) => this.#close(error));
+    input.once("error", (error) => this.#close(error, "private_ipc_read_failed"));
     input.once("end", () => {
       void this.#processing.finally(() => {
         if (this.#buffer.byteLength > 0) {
-          this.#close(new Error("private_ipc_frame_incomplete"));
+          this.#close(new Error("private_ipc_frame_incomplete"), "private_ipc_frame_incomplete");
         } else {
-          this.#close(new Error("private_ipc_closed"));
+          this.#close(new Error("private_ipc_closed"), "private_ipc_closed");
         }
       });
     });
@@ -122,16 +143,22 @@ export class InheritedProtocolClient {
         return;
       }
       const line = this.#buffer.subarray(0, newline).toString("utf8");
+      let raw: unknown;
       let message: ProtocolMessage;
       try {
-        message = validateMessage(JSON.parse(line));
+        raw = JSON.parse(line);
+        message = validateMessage(raw);
       } catch (error) {
+        const reason = error instanceof SyntaxError
+          ? "private_ipc_json_invalid"
+          : privateIpcFailureCode(error).includes("schema_invalid")
+            ? "private_ipc_handler_result_schema_invalid"
+            : "private_ipc_message_invalid";
         this.#close(
-          new Error(
-            error instanceof SyntaxError
-              ? "private_ipc_json_invalid"
-              : "private_ipc_message_invalid",
-          ),
+          new Error(reason),
+          reason,
+          privateIpcFailureSchemaPath(error),
+          protocolFailureDetails(raw),
         );
         return;
       }
@@ -178,17 +205,36 @@ export class InheritedProtocolClient {
     } finally {
       secret?.fill(0);
     }
-    const response = validateMessage({
-      protocol_version: "1",
-      request_id: message.request_id,
-      body: result,
-    });
-    await writeFrame(this.output, `${JSON.stringify(response)}\n`);
+    try {
+      const response = validateMessage({
+        protocol_version: "1",
+        request_id: message.request_id,
+        body: result,
+      });
+      await writeFrame(this.output, `${JSON.stringify(response)}\n`);
+    } catch (error) {
+      this.#close(
+        new Error(privateIpcFailureCode(error)),
+        undefined,
+        privateIpcFailureSchemaPath(error),
+        protocolFailureDetails({
+          protocol_version: "1",
+          request_id: message.request_id,
+          body: result,
+        }),
+      );
+    }
   }
 
-  #close(error: Error): void {
+  #close(
+    error: Error,
+    reason = privateIpcFailureCode(error),
+    schemaPath?: string,
+    details?: FailureDetails,
+  ): void {
     if (this.#closedError) return;
-    this.#closedError = error;
+    this.onFailure?.(reason, schemaPath, details);
+    this.#closedError = new Error(reason);
     this.#buffer.fill(0);
     this.#buffer = Buffer.alloc(0);
     for (const pending of this.#pending.values()) {
@@ -200,9 +246,23 @@ export class InheritedProtocolClient {
 }
 
 function validateMessage(value: unknown): ProtocolMessage {
-  return decodePodiumConductorPodiumConductorMessage(
-    value as JsonValue,
-  ) as unknown as ProtocolMessage;
+  try {
+    return decodePodiumConductorPodiumConductorMessage(
+      value as JsonValue,
+    ) as unknown as ProtocolMessage;
+  } catch (error) {
+    const bodyValue = isRecord(value) ? value.body : undefined;
+    const body = isRecord(bodyValue) ? bodyValue : undefined;
+    if (body && body.kind === "workflow_issue_tree") {
+      try {
+        decodePodiumConductorWorkflowIssueTreeResult(body);
+      } catch (bodyError) {
+        const detail = bodyError instanceof Error ? bodyError.message : "";
+        if (detail.startsWith("$")) throw new Error(`$.body${detail.slice(1)}`);
+      }
+    }
+    throw error;
+  }
 }
 
 function isIncomingRequest(body: JsonValue): boolean {
@@ -232,12 +292,33 @@ function sanitizedCode(error: unknown): string {
 
 function privateIpcFailureCode(error: unknown): string {
   const code = error instanceof Error ? error.message : "";
-  return /^private_ipc_[a-z0-9_]{1,120}$/u.test(code)
-    ? code
-    : "private_ipc_read_failed";
+  if (/^private_ipc_[a-z0-9_]{1,120}$/u.test(code)) return code;
+  if (code.includes("$.body")) return "private_ipc_handler_result_schema_invalid";
+  if (/^[a-z][a-z0-9_]{1,80}$/u.test(code)) {
+    return `private_ipc_handler_${code}`;
+  }
+  return "private_ipc_handler_result_invalid";
 }
 
-function isRecord(value: JsonValue): value is { [key: string]: JsonValue } {
+function privateIpcFailureSchemaPath(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : "";
+  if (!message.includes("$.body")) return undefined;
+  return message.match(/\$\.body(?:\.[A-Za-z0-9_]+|\[\d+\])*/u)?.[0];
+}
+
+function protocolFailureDetails(value: unknown): FailureDetails | undefined {
+  if (!isRecord(value)) return undefined;
+  const body = isRecord(value.body) ? value.body : undefined;
+  if (!body) return undefined;
+  return {
+    ...(typeof value.request_id === "string" ? { requestId: value.request_id } : {}),
+    ...(typeof body.kind === "string" ? { bodyKind: body.kind } : {}),
+    ...(typeof body.code === "string" ? { bodyCode: body.code } : {}),
+    bodyKeys: Object.keys(body).sort().slice(0, 32),
+  };
+}
+
+function isRecord(value: unknown): value is { [key: string]: JsonValue } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 

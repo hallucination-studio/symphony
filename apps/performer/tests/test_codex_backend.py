@@ -158,6 +158,54 @@ def test_stage_output_schema_is_closed_and_specific_to_the_stage(
     assert "common.schema.json" not in serialized
 
 
+def test_verify_output_schema_restricts_keys_to_the_approved_contract():
+    fixture_path = Path(__file__).parents[3] / "packages/contracts/fixtures/cross-language/valid/stage-context.json"
+    envelope = json.loads(fixture_path.read_text(encoding="utf-8"))["value"]
+    envelope["stage_execution"]["stage"] = "verify"
+    envelope["workflow_context"] = {
+        "approved_plan": {
+            "verify_contract": {
+                "acceptance_criteria": [
+                    {"criterion_key": "verify.diff"},
+                    {"criterion_key": "verify.content"},
+                ],
+            },
+        },
+        "required_checks": [
+            {"check_key": "check-1"},
+            {"check_key": "check-2"},
+        ],
+    }
+
+    schema = _stage_output_schema("verify", envelope)
+    completed = schema["properties"]["outcome"]["oneOf"][0]
+    criteria = completed["properties"]["criteria_results"]
+    checks = completed["properties"]["checks"]
+
+    assert criteria["minItems"] == criteria["maxItems"] == 2
+    assert criteria["items"]["properties"]["criterion_key"]["enum"] == [
+        "verify.diff", "verify.content",
+    ]
+    assert checks["minItems"] == checks["maxItems"] == 2
+    assert checks["items"]["properties"]["check_key"]["enum"] == [
+        "check-1", "check-2",
+    ]
+
+
+def test_work_output_schema_requires_passed_checks_at_the_baseline_revision():
+    fixture_path = Path(__file__).parents[3] / "packages/contracts/fixtures/cross-language/valid/stage-context.json"
+    envelope = json.loads(fixture_path.read_text(encoding="utf-8"))["value"]
+    envelope["stage_execution"]["stage"] = "work"
+    envelope["repository_context"]["workspace_revision"] = "git-base-1"
+
+    schema = _stage_output_schema("work", envelope)
+    completed = schema["properties"]["outcome"]["oneOf"][0]
+    check_properties = completed["properties"]["checks"]["items"]["properties"]
+
+    assert check_properties["outcome"] == {"const": "passed"}
+    assert check_properties["artifact_revision"] == {"const": "git-base-1"}
+
+
 def test_stage_start_failure_is_sanitized():
     class FailedStart(FakeCodex):
         def thread_start(self, **kwargs):

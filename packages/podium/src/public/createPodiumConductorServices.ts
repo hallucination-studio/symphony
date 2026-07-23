@@ -5,9 +5,9 @@ import {
   LinearSdkImpl,
   type LinearPhysicalRequestObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
+import { LinearRequestObserverImpl } from "../internal/linear-gateway/internal/LinearRequestObserverImpl.js";
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
 import type { PodiumConductorServices } from "./PodiumConductorProtocolHandler.js";
-import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
 export interface PodiumConductorServiceOwner {
   services: PodiumConductorServices;
@@ -19,16 +19,17 @@ export function createPodiumConductorServices(input: {
   now?: () => string;
   sleep?: (delayMs: number) => Promise<void>;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
-  linearRunBudget?: LinearRunBudgetImpl;
+  linearRequestObserver?: LinearRequestObserverImpl;
 }): PodiumConductorServiceOwner {
   const store = new SqlitePodiumStoreImpl(input.databasePath);
+  const observer = input.linearRequestObserver;
   return {
     services: new PodiumConductorServicesImpl(store, {
       now: input.now ?? (() => new Date().toISOString()),
       sleep:
         input.sleep ??
         ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
-      createLinearSdk: (installation, observe, permit) => new LinearSdkImpl(
+      createLinearSdk: (installation, observe) => new LinearSdkImpl(
         installation.kind === "development_token"
           ? {
               kind: installation.kind,
@@ -41,14 +42,13 @@ export function createPodiumConductorServices(input: {
         {
           correlationId: randomUUID,
           now: Date.now,
-          permit,
           observe: (observation) => {
             observe(observation);
             input.observeLinearRequest?.(observation);
           },
         },
       ),
-      ...(input.linearRunBudget ? { linearRunBudget: input.linearRunBudget } : {}),
+      ...(observer ? { linearRequestObserver: observer } : {}),
     }),
     close: () => store.close(),
   };

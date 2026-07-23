@@ -76,8 +76,9 @@ test("production harness observes a real Conductor handshake and shuts down boun
   assert.equal(JSON.stringify(environment).includes("test-only-token"), false);
   await harness.close();
   assert.equal(logs.some(({ event }) => event === "e2e_child_started"), true);
-  assert.equal(logs.some(({ event }) => event === "e2e_child_log"), true);
   assert.equal(logs.some(({ event }) => event === "e2e_child_exited"), true);
+  assert.equal(logs.some(({ event }) => event === "e2e_child_failed"), false);
+  assert.deepEqual(logs.filter(({ event }) => event === "e2e_podium_response_error"), []);
   assert.equal(JSON.stringify(logs).includes("test-only-token"), false);
 });
 
@@ -215,3 +216,91 @@ test("harness rejects Linear and Codex token environment variables before spawn"
     /conductor_environment_secret_forbidden/u,
   );
 });
+
+test("harness terminates a child blocked on a failed inbound handler", async () => {
+  const logs = [];
+  const script = [
+    "const fs = require('node:fs');",
+    "const channel = fs.createWriteStream(null, { fd: 3 });",
+    "channel.write(JSON.stringify({ protocol_version: '1', request_id: 'handshake', body: { kind: 'conductor_handshake' } }) + '\\n');",
+    "setTimeout(() => channel.write(JSON.stringify({ protocol_version: '1', request_id: 'failed', body: { kind: 'fail_request' } }) + '\\n'), 10);",
+  ].join("\n");
+  const harness = await startConductorHarness({
+    podium: {
+      handler: {
+        async handle(message) {
+          if (message.body?.kind === "fail_request") throw new Error("linear_test_failure");
+          return { kind: "conductor_handshake" };
+        },
+      },
+      observeExit: () => {},
+      close: () => {},
+    },
+    environment: createChildEnvironment(),
+    executable: process.execPath,
+    arguments: ["-e", script],
+    startupTimeoutMs: 1_000,
+    shutdownTimeoutMs: 500,
+    log: (event) => logs.push(event),
+  });
+
+  await assert.rejects(
+    harness.request({ kind: "parent_request" }),
+    /conductor_protocol_failed/u,
+  );
+  await harness.close();
+  assert.equal(logs.some(({ event, reason }) => event === "e2e_child_failed" && reason === "conductor_protocol_failed"), true);
+});
+
+test("harness kills and closes a child when observation times out", async () => {
+  const logs = [];
+  let podiumClosed = 0;
+  const script = [
+    "const fs = require('node:fs');",
+    "const channel = fs.createWriteStream(null, { fd: 3 });",
+    "channel.write(JSON.stringify({ protocol_version: '1', request_id: 'handshake', body: { kind: 'conductor_handshake' } }) + '\\n');",
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  const harness = await startConductorHarness({
+    podium: {
+      handler: {
+        async handle(message) {
+          return { ...message, body: {
+            kind: "conductor_runtime_report",
+            binding_id: "binding-1",
+            instance_id: "instance-1",
+            status: "starting",
+            observed_at: new Date().toISOString(),
+          } };
+        },
+      },
+      observeExit: () => {},
+      close: () => { podiumClosed += 1; },
+    },
+    environment: createChildEnvironment(),
+    executable: process.execPath,
+    arguments: ["-e", script],
+    startupTimeoutMs: 1_000,
+    shutdownTimeoutMs: 100,
+    log: (event) => logs.push(event),
+  });
+
+  try {
+    await assert.rejects(
+      harness.waitForObservation(() => false, 20),
+      /conductor_observation_timeout/u,
+    );
+    await waitFor(() => logs.some(({ event }) => event === "e2e_child_exited"), 500);
+    assert.equal(podiumClosed, 1);
+  } finally {
+    await harness.terminateAbruptly();
+  }
+});
+
+async function waitFor(predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("test_wait_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

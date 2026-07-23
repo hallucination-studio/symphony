@@ -5,7 +5,6 @@ import {
   type LinearPhysicalRequestObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 import type { TargetWorkflowProjectConfiguration } from "../internal/linear-gateway/api/LinearClientInterface.js";
-import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 import type {
   TargetWorkflowSetupInterface,
   TargetWorkflowSetupResult,
@@ -14,54 +13,62 @@ import type {
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const CONDUCTOR_SHORT_HASH = /^[a-f0-9]{12}$/u;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
+const SETUP_REQUEST_TIMEOUT_MS = 30_000;
 
 export function createTargetWorkflowSetup(input: {
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
-  linearRunBudget?: LinearRunBudgetImpl;
 } = {}): TargetWorkflowSetupInterface {
-  if (!input.linearRunBudget || typeof input.linearRunBudget.permitPhysicalRequest !== "function" ||
-      typeof input.linearRunBudget.observe !== "function") {
-    throw new Error("linear_target_setup_budget_missing");
-  }
   return {
     initialize: (setupInput) => runWithFetch(
-      setupInput.fetch,
-      () => initializeTargetWorkflowSetup(setupInput, input.observeLinearRequest, input.linearRunBudget),
+      setupFetch(setupInput.fetch, setupInput.signal),
+      () => initializeTargetWorkflowSetup(setupInput, input.observeLinearRequest),
     ),
   };
+}
+
+function setupFetch(
+  fetch: typeof globalThis.fetch | undefined,
+  signal: AbortSignal | undefined,
+): typeof globalThis.fetch | undefined {
+  const requestFetch = fetch ?? globalThis.fetch;
+  if (!requestFetch) return undefined;
+  return (input, init = {}) => requestFetch(input, {
+    ...init,
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(SETUP_REQUEST_TIMEOUT_MS)])
+      : AbortSignal.timeout(SETUP_REQUEST_TIMEOUT_MS),
+  });
 }
 
 async function initializeTargetWorkflowSetup(
   input: Parameters<TargetWorkflowSetupInterface["initialize"]>[0],
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void,
-  linearRunBudget?: LinearRunBudgetImpl,
 ): Promise<TargetWorkflowSetupResult> {
   validateInput(input);
-  const observe = observeLinearRequest || linearRunBudget
-    ? (observation: LinearPhysicalRequestObservation) => {
-        linearRunBudget?.observe(observation);
-        observeLinearRequest?.(observation);
-      }
-    : undefined;
+  const observe = observeLinearRequest;
   const organizationId = await LinearSdkImpl.discoverDevelopmentTokenOrganizationId(
     input.developmentToken,
     observe,
-    linearRunBudget ? () => linearRunBudget.permitPhysicalRequest() : undefined,
   );
   const createSdk = (delegateActorId: string) => new LinearSdkImpl(
     { kind: "development_token", token: input.developmentToken, delegateActorId },
     organizationId,
     undefined,
-    observe || linearRunBudget
+    observe
       ? {
           correlationId: randomUUID,
           now: Date.now,
-          ...(observe ? { observe } : {}),
-          ...(linearRunBudget ? { permit: () => linearRunBudget.permitPhysicalRequest() } : {}),
+          observe,
         }
       : undefined,
   );
   const sdk = createSdk("setup");
+  const desiredConductorShortHashes = input.conductorShortHashes ?? [input.conductorShortHash];
+  if (desiredConductorShortHashes.length === 0 ||
+      desiredConductorShortHashes.some((hash) => !CONDUCTOR_SHORT_HASH.test(hash)) ||
+      !desiredConductorShortHashes.includes(input.conductorShortHash)) {
+    throw new Error("linear_target_setup_pool_invalid");
+  }
   const initial = await sdk.readTargetProjectConfiguration({
     clientId: input.clientId,
     projectSlugId: input.projectSlugId,
@@ -70,16 +77,35 @@ async function initializeTargetWorkflowSetup(
     projectId: initial.project.projectId,
     authorized: input.authorized,
   });
+  const usePool = input.conductorShortHashes !== undefined;
   const labelName = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
-  const labelPlan = await sdk.preflightConductorProjectLabel({
-    projectId: initial.project.projectId,
-    labelName,
-  });
-  if (labelPlan.kind !== "ready") throw new Error(`linear_target_setup_${labelPlan.reason}`);
-  const projectLabel = await sdk.rebindConductorProjectLabel({
-    plan: labelPlan,
-    authorized: input.authorized,
-  });
+  let projectLabel: { kind: "dry_run" | "applied" | "already_applied" };
+  let projectPool: { members: readonly string[] } | undefined;
+  if (usePool) {
+    const poolPlan = await sdk.preflightConductorProjectPool({
+      projectId: initial.project.projectId,
+      desiredMembers: desiredConductorShortHashes,
+    });
+    if (poolPlan.kind !== "ready") throw new Error(`linear_target_setup_${poolPlan.reason}`);
+    const poolResult = await sdk.reconcileConductorProjectPool({
+      plan: poolPlan,
+      authorized: input.authorized,
+    });
+    projectLabel = { kind: poolResult.kind };
+    projectPool = {
+      members: poolResult.kind === "dry_run" ? poolPlan.desiredMembers : poolResult.members,
+    };
+  } else {
+    const labelPlan = await sdk.preflightConductorProjectLabel({
+      projectId: initial.project.projectId,
+      labelName,
+    });
+    if (labelPlan.kind !== "ready") throw new Error(`linear_target_setup_${labelPlan.reason}`);
+    projectLabel = await sdk.rebindConductorProjectLabel({
+      plan: labelPlan,
+      authorized: input.authorized,
+    });
+  }
   if (!input.authorized) {
     if (workflow.kind !== "dry_run" || projectLabel.kind !== "dry_run") {
       throw new Error("linear_target_setup_dry_run_invalid");
@@ -93,11 +119,12 @@ async function initializeTargetWorkflowSetup(
       ...(initial.todoStateId ? { todoStateId: initial.todoStateId } : {}),
       workflow: "dry_run",
       projectLabel: "dry_run",
+      ...(projectPool ? { projectPool } : {}),
       identityDigest: setupIdentityDigest({
         organizationId,
         projectId: initial.project.projectId,
         teamId: initial.teamId,
-        labelName,
+        labelName: desiredConductorShortHashes.slice().sort().join(","),
       }),
     });
   }
@@ -115,6 +142,7 @@ async function initializeTargetWorkflowSetup(
     conductorShortHash: input.conductorShortHash,
   });
   if (resolution.kind !== "resolved" || resolution.projectId !== final.project.projectId ||
+      desiredConductorShortHashes.some((hash) => !resolution.conductorPool.some((member) => member.conductorShortHash === hash)) ||
       resolution.updatedAt !== final.project.updatedAt) {
     throw new Error("linear_target_setup_project_resolution_failed");
   }
@@ -127,12 +155,13 @@ async function initializeTargetWorkflowSetup(
     todoStateId: final.todoStateId,
     workflow: workflow.kind,
     projectLabel: projectLabel.kind,
+    ...(projectPool ? { projectPool: { members: resolution.conductorPool.map(({ conductorShortHash }) => conductorShortHash) } } : {}),
     resolution,
     identityDigest: setupIdentityDigest({
       organizationId,
       projectId: final.project.projectId,
       teamId: final.teamId,
-      labelName,
+      labelName: desiredConductorShortHashes.slice().sort().join(","),
     }),
   });
 }
@@ -141,6 +170,8 @@ function validateInput(input: Parameters<TargetWorkflowSetupInterface["initializ
   if (typeof input.developmentToken !== "string" || input.developmentToken.length === 0 ||
       !SAFE_ID.test(input.clientId) || !SAFE_ID.test(input.projectSlugId) ||
       !CONDUCTOR_SHORT_HASH.test(input.conductorShortHash) ||
+      (input.conductorShortHashes !== undefined && (!Array.isArray(input.conductorShortHashes) ||
+        input.conductorShortHashes.some((hash) => !CONDUCTOR_SHORT_HASH.test(hash)))) ||
       typeof input.authorized !== "boolean") {
     throw new Error("linear_target_setup_input_invalid");
   }

@@ -154,6 +154,43 @@ test("reconciliation performs one read-backed mutation per step before sealing",
   assert.equal(new Set(gateway.writes).size, gateway.writes.length);
 });
 
+test("same reconciliation loop carries relation read-back versions into the next blocked_by write", async () => {
+  const tree = approvedTree();
+  const contract = planContract([
+    { workKey: "one", dependencyWorkKeys: [] },
+    { workKey: "two", dependencyWorkKeys: ["one"] },
+  ]);
+  tree.comments.push(comment(planIssueId, "contract-record", contract));
+  const gateway = new MaterializationGateway(tree);
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("unused"); }, async cancelAndReap() {} },
+  });
+
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const result = await execution.reconcileRoot(materializationInput());
+    if (result.kind === "completed") break;
+    assert.equal(result.kind, "mutation_applied");
+  }
+
+  const relationWrites = gateway.relationCommands;
+  assert.equal(relationWrites.length, 5);
+  assert.deepEqual(relationWrites.map(({ sourceIssueId, targetIssueId }) => [sourceIssueId, targetIssueId]), [
+    ["work-1", planIssueId],
+    ["verify-1", "work-1"],
+    ["work-2", planIssueId],
+    ["work-2", "work-1"],
+    ["verify-1", "work-2"],
+  ]);
+  assert.ok(relationWrites[1]!.targetExpectedRemoteVersion.includes(relationWrites[0]!.writeId));
+  assert.ok(relationWrites[1]!.expectedRootRemoteVersion.includes(relationWrites[0]!.writeId));
+  assert.ok(relationWrites[2]!.expectedRootRemoteVersion.includes(relationWrites[1]!.writeId));
+  assert.ok(relationWrites[3]!.sourceExpectedRemoteVersion.includes(relationWrites[2]!.writeId));
+  assert.ok(relationWrites[3]!.targetExpectedRemoteVersion.includes(relationWrites[1]!.writeId));
+  assert.ok(relationWrites[3]!.expectedRootRemoteVersion.includes(relationWrites[2]!.writeId));
+});
+
 function approvedTree(): LinearWorkflowTreeSnapshot {
   const statuses = catalog();
   return {
@@ -168,6 +205,7 @@ function approvedTree(): LinearWorkflowTreeSnapshot {
       comment(cycleIssueId, "cycle-marker", { kind: "cycle_marker", version: 1, rootIssueId, cycleKey: "cycle-1", trigger: "initial", baselineRevision: "head-1" }),
       comment(planIssueId, "plan-marker", { kind: "node_marker", version: 1, rootIssueId, cycleIssueId, nodeKey: "plan-1", nodeKind: "plan", planContractDigest: "pending-plan-contract" }),
       comment(rootIssueId, "approval", { kind: "human_action", version: 1, actionId: "approval-1", rootIssueId, cycleIssueId, nodeIssueId: planIssueId, requestKind: "needs_approval", questionOrProposal: `Approve Plan ${digest}.`, reason: "Review", impact: "Materialize", contextDigest: digest, expectedRootRemoteVersion: "root-version" }),
+      { comment_id: "human-approval-1", issue_id: planIssueId, body: "Approved for materialization.", remote_version: "human-approval-1-version", updated_at: "2026-07-21T09:01:00Z" },
     ],
     relations: [],
     observed_at: "2026-07-21T09:00:00Z",
@@ -236,9 +274,11 @@ function materializationInput(): BootstrapPlanInput {
 
 class MaterializationGateway implements LinearGatewayInterface {
   readonly writes: string[] = [];
+  readonly relationCommands: Extract<LinearWorkflowMutationCommand, { kind: "create_workflow_relation" }>[] = [];
   readonly git = {
     async inspect() { return { head: "head-1", branch: "symphony/root-1", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
     async diff() { return { text: "", bytes: 0, cap: 65_536, partial: false }; },
+    async restoreWorktree() { throw new Error("unused"); },
     async checks() { return { items: [], returned: 0, cap: 32, has_more: false, partial: false }; },
     async commit() { throw new Error("unused"); },
   };
@@ -249,12 +289,42 @@ class MaterializationGateway implements LinearGatewayInterface {
   async read(): Promise<never> { throw new Error("unused"); }
   async mutate(): Promise<never> { throw new Error("unused"); }
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
+    if (command.kind === "create_workflow_relation") {
+      this.assertRelationVersions(command);
+      this.relationCommands.push(command);
+    }
     this.writes.push(command.writeId);
     apply(this.tree, command);
     const targetIssueId = command.kind === "create_workflow_issue"
       ? this.tree.issues.find((issue) => issue.managed_marker === command.managedMarker)!.issue_id
       : command.kind === "create_workflow_relation" ? command.sourceIssueId : command.target.targetIssueId;
-    return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId, remoteVersion: `${targetIssueId}:read-back` } };
+    const issueVersions = command.kind === "create_workflow_relation"
+      ? [command.rootIssueId, command.sourceIssueId, command.targetIssueId].map((issueId) => {
+          const issue = this.tree.issues.find((candidate) => candidate.issue_id === issueId)!;
+          issue.remote_version = `${issueId}:${command.writeId}:version`;
+          return { issueId, remoteVersion: issue.remote_version };
+        })
+      : undefined;
+    return {
+      kind: "applied" as const,
+      readBack: {
+        writeId: command.writeId,
+        targetIssueId,
+        remoteVersion: this.tree.issues.find((issue) => issue.issue_id === targetIssueId)!.remote_version,
+        ...(issueVersions ? { issueVersions } : {}),
+      },
+    };
+  }
+
+  private assertRelationVersions(command: Extract<LinearWorkflowMutationCommand, { kind: "create_workflow_relation" }>): void {
+    const expected = new Map([
+      [command.rootIssueId, command.expectedRootRemoteVersion],
+      [command.sourceIssueId, command.sourceExpectedRemoteVersion],
+      [command.targetIssueId, command.targetExpectedRemoteVersion],
+    ]);
+    for (const [issueId, version] of expected) {
+      assert.equal(this.tree.issues.find((issue) => issue.issue_id === issueId)?.remote_version, version, `stale relation version for ${issueId}`);
+    }
   }
 }
 

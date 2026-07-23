@@ -22,6 +22,7 @@ import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.j
 import { PodiumConductorRuntimeReporterImpl } from "./runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { LinearCycleRootWorkflowPolicyImpl } from "./root-workflow/internal/LinearCycleRootWorkflowPolicyImpl.js";
+import { createDefaultRootConvergencePolicy } from "./root-workflow/internal/RootConvergencePolicy.js";
 import type { DiscoveredRoot, RootDagView } from "./root-workflow/api/index.js";
 
 type JsonValue =
@@ -32,8 +33,12 @@ type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+const MAX_STAGE_WALL_TIME_MS = 5 * 60_000;
+const MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
 export async function runConductor(environment = process.env): Promise<void> {
   const config = runtimeConfig(environment);
+  const rootDeadlineMs = Date.parse(config.rootConvergencePolicy.deadlineAt);
   const input = createReadStream("", { fd: config.privateIpcFd, autoClose: false });
   const output = createWriteStream("", { fd: config.privateIpcFd, autoClose: false });
   const profiles = new FilePerformerProfileStoreImpl(config.dataRoot);
@@ -73,7 +78,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     async handleRequest(body, secret) {
       if (isKind(body, "shutdown_conductor")) {
         await requestStop();
-        return { kind: "shutdown_conductor" };
+        return { kind: "shutdown_conductor_ack" };
       }
       return new ConductorProfileRelayHandler(
         config.conductorId,
@@ -82,12 +87,19 @@ export async function runConductor(environment = process.env): Promise<void> {
         () => new Date().toISOString(),
       ).handleRequest(body, secret);
     },
-  });
+  }, (reason, schemaPath, details) => logEvent("error", "private_ipc_failed", {
+    sanitized_reason: reason,
+    ...(schemaPath ? { schema_path: schemaPath } : {}),
+    ...(details?.bodyKind ? { body_kind: details.bodyKind } : {}),
+    ...(details?.bodyCode ? { body_code: details.bodyCode } : {}),
+    ...(details?.bodyKeys ? { body_keys: details.bodyKeys.join(",") } : {}),
+  }));
   const gateway = new PodiumLinearGatewayClientImpl(
     config.conductorShortHash,
     protocol,
     {
-      timeoutMs: 30_000,
+      bindingId: config.bindingId,
+      timeoutMs: () => remainingRuntimeTimeout(rootDeadlineMs),
       observeDiscovery(evidence) {
         logEvent("info", "root_discovery_evidence", {
           root_header_count: String(evidence.rootHeaderCount),
@@ -149,7 +161,12 @@ export async function runConductor(environment = process.env): Promise<void> {
     admitRoot: (root: DiscoveredRoot) => ownershipClaim.claim({ root }),
     readRootDag,
   };
-  const execution = new LinearDagExecutionImpl({ linear: gateway, git, performer });
+  const execution = new LinearDagExecutionImpl(
+    { linear: gateway, git, performer },
+    undefined,
+    undefined,
+    config.rootConvergencePolicy,
+  );
   const dispatcher = new LinearRootStageDispatcher({
     execution,
     profileFor: readyProfile,
@@ -171,7 +188,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         limits: {
           maxContextBytes: 8_388_608,
           maxResultBytes: 1_048_576,
-          maxWallTimeMs: 30 * 60_000,
+          maxWallTimeMs: MAX_STAGE_WALL_TIME_MS,
           maxToolCalls: 256,
           maxCommandDurationMs: 300_000,
           reservedTotalTokens: 50_000,
@@ -188,7 +205,7 @@ export async function runConductor(environment = process.env): Promise<void> {
   const report = async (body: JsonValue) => protocol.request({
     requestId: randomUUID(),
     body,
-    timeoutMs: 30_000,
+    timeoutMs: remainingRuntimeTimeout(rootDeadlineMs),
   });
   await report({
     kind: "conductor_handshake",
@@ -212,9 +229,10 @@ export async function runConductor(environment = process.env): Promise<void> {
   });
   const runtime = new LinearConductorRuntime(
     config.conductorId,
+    config.conductorShortHash,
     targetGateway,
     new LinearPriorityRootSchedulingPolicyImpl(),
-    new LinearCycleRootWorkflowPolicyImpl(),
+    new LinearCycleRootWorkflowPolicyImpl(config.rootConvergencePolicy),
     dispatcher,
     {
       async report(value) {
@@ -233,23 +251,30 @@ export async function runConductor(environment = process.env): Promise<void> {
   const stop = () => { void requestStop().catch(() => undefined); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  const deadlineTimer = setTimeout(stop, Math.max(0, rootDeadlineMs - Date.now()));
   try {
+    let idleAttempt = 0;
     while (!stopping) {
       const disposition = await runtime.cycle();
+      const currentIdleAttempt = idleAttempt;
+      idleAttempt = disposition === "progress" ? 0 : Math.min(20, idleAttempt + 1);
       await report({
         kind: "conductor_heartbeat",
         binding_id: config.bindingId,
         instance_id: config.instanceId,
         occurred_at: new Date().toISOString(),
       });
-      await delay(conductorCycleDelayMs({
+      const cycleDelay = conductorCycleDelayMs({
         disposition,
         baseDelayMs: config.cycleDelayMs,
         ...(config.idleDelayMs === undefined ? {} : { idleDelayMs: config.idleDelayMs }),
+        idleAttempt: currentIdleAttempt,
         random: Math.random,
-      }));
+      });
+      await delay(Math.min(cycleDelay, Math.max(0, rootDeadlineMs - Date.now())));
     }
   } finally {
+    clearTimeout(deadlineTimer);
     await requestStop();
   }
 }
@@ -274,7 +299,7 @@ function stageReasoningEffort(value: string): "low" | "medium" | "high" {
 }
 
 function stageInstructions(stage: "plan" | "work" | "verify") {
-  if (stage === "plan") return "Produce a bounded Plan Contract from the supplied Root facts.";
+  if (stage === "plan") return "Produce a bounded Plan Contract from the supplied Root facts. included_scope and excluded_scope must contain only exact repository-relative path prefixes; do not put prose, actions, or rationale in those arrays.";
   if (stage === "work") return "Implement the selected Work node within the approved scope.";
   return "Verify the immutable artifact against the approved Plan Contract.";
 }
@@ -285,6 +310,14 @@ function isKind(value: JsonValue, kind: string): boolean {
 }
 
 function runtimeConfig(environment: NodeJS.ProcessEnv) {
+  const defaultRootConvergencePolicy = createDefaultRootConvergencePolicy();
+  const rootDeadlineAt = environment.SYMPHONY_ROOT_DEADLINE_AT;
+  const rootConvergencePolicy = rootDeadlineAt === undefined
+    ? defaultRootConvergencePolicy
+    : {
+      ...defaultRootConvergencePolicy,
+      deadlineAt: validTimestamp(rootDeadlineAt, "root_deadline_invalid"),
+    };
   return {
     privateIpcFd: positiveInteger(environment.SYMPHONY_PRIVATE_IPC_FD, "private_ipc_fd_invalid"),
     instanceId: required(environment.SYMPHONY_INSTANCE_ID, "instance_id_missing"),
@@ -305,7 +338,21 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     idleDelayMs: environment.SYMPHONY_CYCLE_IDLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_IDLE_DELAY_MS, "cycle_idle_delay_invalid")
       : undefined,
+    rootConvergencePolicy,
   };
+}
+
+function validTimestamp(value: string, code: string): string {
+  if (!value || value.length > 128 || /[\r\n\0]/.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new Error(code);
+  }
+  return new Date(value).toISOString();
+}
+
+function remainingRuntimeTimeout(deadlineMs: number): number {
+  const remaining = deadlineMs - Date.now();
+  if (!Number.isFinite(remaining) || remaining < 1) throw new Error("root_deadline_exceeded");
+  return Math.min(MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS, Math.floor(remaining));
 }
 
 function required(value: string | undefined, code: string): string {

@@ -96,7 +96,7 @@ function root(): DiscoveredRoot {
   return {
     issueId: "root", identifier: "SYM-1", state: "In Progress", title: "Root", description: "",
     updatedAt: "2026-07-21T09:00:00Z", projectId: "project", parentIssueId: null,
-    isDelegatedToSymphony: true, priority: "high", order: 0, blockers: [],
+    isDelegatedToSymphony: true, priority: "high", order: 0, blockers: [], rootConductorLabels: [],
   };
 }
 

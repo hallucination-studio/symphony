@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -68,4 +68,28 @@ test("Git workspace semantic read-back confirms an ambiguously reported commit",
   const result = await git.commit({ workspace, rootIssueId: "root-1", issueId: "work-1", allowedIssueIds: ["work-1"], issueIdentifier: "SYM-2", expectedHead: head });
   assert.equal(result.kind, "committed");
   assert.notEqual(result.commit, head);
+});
+
+test("Git workspace restores a failed Work attempt to its baseline", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "symphony-git-restore-"));
+  const repository = path.join(root, "repository");
+  await runCommand("git", ["init", "-b", "main", repository]);
+  await runCommand("git", ["-C", repository, "config", "user.email", "test@example.com"]);
+  await runCommand("git", ["-C", repository, "config", "user.name", "Symphony Test"]);
+  await writeFile(path.join(repository, "README.md"), "initial\n");
+  await runCommand("git", ["-C", repository, "add", "README.md"]);
+  await runCommand("git", ["-C", repository, "commit", "-m", "initial"]);
+
+  const git = new NativeGitWorkspaceImpl(repository, path.join(root, "worktrees"));
+  const workspace = await git.ensureWorkspace({ rootIssueId: "root-1", rootIdentifier: "SYM-1", baseBranch: "main" });
+  const head = (await git.inspect(workspace)).head;
+  await writeFile(path.join(workspace.worktreePath, "README.md"), "rejected\n");
+  await writeFile(path.join(workspace.worktreePath, "untracked.txt"), "rejected\n");
+  await runCommand("git", ["-C", workspace.worktreePath, "add", "README.md"]);
+
+  await assert.rejects(git.restoreWorktree(workspace, "deadbeef"), /git_restore_head_changed|git_restore_revision_invalid/);
+  assert.deepEqual(await git.restoreWorktree(workspace, head), { kind: "restored" });
+  assert.equal((await git.inspect(workspace)).status.items.length, 0);
+  assert.equal(await readFile(path.join(workspace.worktreePath, "README.md"), "utf8"), "initial\n");
+  await assert.rejects(access(path.join(workspace.worktreePath, "untracked.txt")));
 });

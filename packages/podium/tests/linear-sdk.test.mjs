@@ -185,23 +185,30 @@ test("physical SDK requests report sanitized 429 metadata", async (t) => {
   assert.doesNotMatch(JSON.stringify(observations), /secret-canary|private upstream detail|authorization/iu);
 });
 
-test("physical SDK transport checks its installation permit before fetch", async (t) => {
+test("physical SDK transport sends requests without an installation permit", async (t) => {
   let fetches = 0;
   t.mock.method(globalThis, "fetch", async () => {
     fetches += 1;
-    throw new Error("fetch should not run");
+    return new Response(JSON.stringify({
+      data: {
+        organization: { id: "organization-1", projectStatuses: [] },
+        projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   });
   const adapter = new LinearSdkImpl(
     { kind: "oauth", token: "token" }, "organization-1", undefined,
     {
       correlationId: () => "correlation-1", now: () => 0,
-      permit: () => { throw new Error("linear_request_capacity_reserved"); },
       observe: () => undefined,
     },
   );
 
-  await assert.rejects(adapter.listProjects({ limit: 1 }), /linear_request_capacity_reserved/iu);
-  assert.equal(fetches, 0);
+  await adapter.listProjects({ limit: 1 });
+  assert.equal(fetches, 2);
 });
 
 test("development-token SDK uses the persisted app user for Root delegation", async () => {
@@ -392,6 +399,7 @@ test("Root scheduling batches one and 250 Root headers with one physical fact qu
                 parent: null,
                 delegate: { id: "app-user" },
                 state: { name: "Todo" },
+                labels: { nodes: [], pageInfo: { hasNextPage: false } },
                 comments: { nodes: [], pageInfo: { hasNextPage: false } },
                 inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
               })),
@@ -437,6 +445,7 @@ test("Root scheduling batch preserves managed comments and blocker facts", async
             parent: null,
             delegate: { id: "app-user" },
             state: { name: "In Progress" },
+            labels: { nodes: [], pageInfo: { hasNextPage: false } },
             comments: { nodes: [{
               id: "primary-1",
               body: primary,
@@ -478,7 +487,7 @@ test("Root scheduling batch exposes new workflow ownership records", async () =>
     project: async () => ({ issues: async () => connection([root]) }),
     client: {
       async rawRequest(query, variables) {
-        assert.match(query, /workflowManagedComments: comments\(first: 64, filter:/u);
+        assert.match(query, /workflowManagedComments: comments\(first: 25, filter:/u);
         assert.equal(variables.workflowCommentMarker, "<!-- symphony managed-record\n");
         return { data: {
           viewer: { id: "app-user" },
@@ -487,6 +496,7 @@ test("Root scheduling batch exposes new workflow ownership records", async () =>
             priority: 2, sortOrder: 3, updatedAt: "2026-07-16T00:00:00Z",
             project: { id: "project-1" }, parent: null, delegate: { id: "app-user" },
             state: { name: "In Progress" },
+            labels: { nodes: [], pageInfo: { hasNextPage: false } },
             comments: { nodes: [], pageInfo: { hasNextPage: false } },
             workflowManagedComments: { nodes: [{
               id: "ownership-1", body: ownership, updatedAt: "2026-07-16T00:00:00Z", issue: { id: "root-1" },
@@ -723,7 +733,7 @@ test("official SDK adapter resolves the unique Project label and reads complete 
     id: "project-1",
     name: "Project",
     updatedAt: new Date("2026-07-16T00:00:00Z"),
-    labels: async () => connection([projectLabel]),
+    labels: async () => connection([projectLabel, projectLabel2]),
     issues: async () => connection([root]),
   };
   const projectLabel = {
@@ -735,6 +745,16 @@ test("official SDK adapter resolves the unique Project label and reads complete 
     organization: Promise.resolve({ id: "organization-1" }),
     projects: async () => connection([project]),
   };
+  const projectLabel2 = {
+    id: "label-2",
+    name: "symphony:conductor/def456",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: undefined,
+    organization: Promise.resolve({ id: "organization-1" }),
+    projects: async () => connection([project]),
+  };
+  root.labels = async () => connection([{ name: "symphony:conductor/abc123" }]);
   const sdk = {
     viewer: Promise.resolve({ id: "app-user" }),
     projectLabels: async () => connection([projectLabel]),
@@ -749,12 +769,14 @@ test("official SDK adapter resolves the unique Project label and reads complete 
     kind: "resolved",
     projectId: "project-1",
     updatedAt: "2026-07-16T00:00:00.000Z",
+    conductorPool: [{ conductorShortHash: "abc123" }, { conductorShortHash: "def456" }],
   });
   const roots = await adapter.listRootIssues({
     projectId: "project-1",
     limit: 250,
   });
   assert.equal(roots.items[0].isDelegatedToSymphony, true);
+  assert.deepEqual(roots.items[0].rootConductorLabels, [{ conductorShortHash: "abc123" }]);
   const tree = await adapter.getIssueTree({
     projectId: "project-1",
     rootIssueId: "root-1",
@@ -764,6 +786,7 @@ test("official SDK adapter resolves the unique Project label and reads complete 
     ["root-1", 0],
     ["work-1", 1],
   ]);
+  assert.deepEqual(tree.rootConductorLabels, [{ conductorShortHash: "abc123" }]);
 });
 
 test("official SDK adapter reads each lazy issue state exactly once", async () => {
@@ -922,6 +945,7 @@ test("complete Issue Tree batches preserve depth-first ordering and Human answer
 });
 
 test("workflow Issue Tree maps every bounded comment, relation, and Team status", async () => {
+  const queries = [];
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "Root description",
     sortOrder: 1, updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
@@ -948,7 +972,8 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
         ]) }),
       };
     },
-    client: { async rawRequest(_query, variables) {
+    client: { async rawRequest(query, variables) {
+      queries.push(query);
       if (variables.rootIssueId) return { data: { issue: root } };
       return { data: { issues: {
         nodes: variables.parentIds.includes("root-1") ? [child] : [],
@@ -959,6 +984,9 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
   const tree = await adapter.getWorkflowIssueTree({ projectId: "project-1", rootIssueId: "root-1" });
+
+  assert.ok(queries.some((query) => query.includes("comments(first: 8)")));
+  assert.ok(queries.some((query) => query.includes("inverseRelations(first: 8)")));
 
   assert.deepEqual(tree.statusCatalog, [
     { statusId: "state-progress", name: "In Progress", category: "started", position: 2 },
@@ -974,14 +1002,86 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   }]);
 });
 
-test("complete Issue Tree batches fail closed on incomplete nested connections", async () => {
+test("complete Issue Tree batches paginate nested comments and relations by issue", async () => {
+  const calls = [];
+  const root = {
+    id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: {
+      nodes: [{ id: "comment-1", body: "first", updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" } }],
+      pageInfo: { hasNextPage: true, endCursor: "comments-2" },
+    },
+    inverseRelations: {
+      nodes: [],
+      pageInfo: { hasNextPage: true, endCursor: "relations-2" },
+    },
+  };
+  const child = {
+    id: "work-1", identifier: "WORK-1", title: "Work", description: "", sortOrder: 1,
+    subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:03Z",
+    project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    comments: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const sdk = {
+    async issue() {
+      return {
+        projectId: "project-1",
+        team: Promise.resolve({
+          states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
+        }),
+      };
+    },
+    client: { async rawRequest(query, variables) {
+    calls.push({ query, variables });
+    if (variables.rootIssueId) return { data: { issue: root } };
+    if (query.includes("IssueTreeComments")) return { data: { issue: {
+      id: "root-1",
+      comments: {
+        nodes: [{ id: "comment-2", body: "second", updatedAt: "2026-07-16T00:00:02Z", issue: { id: "root-1" } }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    } } };
+    if (query.includes("IssueTreeRelations")) return { data: { issue: {
+      id: "root-1",
+      inverseRelations: {
+        nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    } } };
+    return { data: { issues: {
+      nodes: variables.parentIds?.includes("root-1") ? [child] : [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } };
+    } },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const tree = await adapter.getWorkflowIssueTree({ projectId: "project-1", rootIssueId: "root-1" });
+
+  assert.equal(tree.comments.length, 2);
+  assert.deepEqual(tree.relations, [{
+    relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
+  }]);
+  assert.deepEqual(calls.slice(1, 3).map(({ variables }) => variables), [
+    { issueId: "root-1", cursor: "comments-2" },
+    { issueId: "root-1", cursor: "relations-2" },
+  ]);
+});
+
+test("complete Issue Tree batches fail closed on an ambiguous nested cursor", async () => {
   const sdk = { client: { async rawRequest(_query, variables) {
     if (variables.rootIssueId) return { data: { issue: {
       id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
       updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
-      state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: true } },
-      comments: { nodes: [], pageInfo: { hasNextPage: false } },
+      state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+      comments: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "same-cursor" } },
       inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    } } };
+    if (variables.issueId) return { data: { issue: {
+      id: "root-1",
+      comments: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "same-cursor" } },
     } } };
     throw new Error("unexpected child read");
   } } };
@@ -1126,6 +1226,83 @@ test("target project configuration is read as a closed Podium value", async () =
     todoStateId: "todo-1",
   });
   assert.equal(JSON.stringify(result).includes("token"), false);
+});
+
+test("official SDK adapter creates a routed top-level Root and proves its label read-back", async () => {
+  let createdInput;
+  let created;
+  const issueLabel = {
+    id: "issue-label-1",
+    name: "symphony:conductor/abc123def456",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    organization: Promise.resolve({ id: "organization-1" }),
+  };
+  const project = {
+    id: "project-1",
+    updatedAt: new Date("2026-07-22T00:00:00Z"),
+    async labels() {
+      return connection([{ name: "symphony:conductor/abc123def456", isGroup: false, archivedAt: null, retiredById: null }]);
+    },
+    async teams() {
+      return connection([{ id: "team-1" }]);
+    },
+  };
+  const sdk = {
+    organization: Promise.resolve({ id: "organization-1" }),
+    async project() { return project; },
+    async issueLabels() { return connection([issueLabel]); },
+    async createIssue(input) {
+      createdInput = input;
+      created = issue({ id: "root-1", identifier: "SYM-1", title: input.title, description: input.description });
+      created.labels = async () => connection([issueLabel]);
+      return { success: true, issueId: "root-1" };
+    },
+    async issue() { return created; },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.createRootIssue({
+    projectId: "project-1",
+    conductorShortHash: "abc123def456",
+    title: "Routed Root",
+    description: "A user-owned Root.",
+  });
+
+  assert.deepEqual(result, { rootIssueId: "root-1", identifier: "SYM-1", projectId: "project-1" });
+  assert.deepEqual(createdInput.labelIds, ["issue-label-1"]);
+  assert.equal(createdInput.parentId, undefined);
+  assert.equal(createdInput.stateId, undefined);
+});
+
+test("Root creation rejects an out-of-pool member before issueCreate", async () => {
+  let createCalls = 0;
+  const sdk = {
+    organization: Promise.resolve({ id: "organization-1" }),
+    async project() {
+      return {
+        id: "project-1",
+        updatedAt: new Date("2026-07-22T00:00:00Z"),
+        async labels() { return connection([{ name: "symphony:conductor/abc123def456", isGroup: false, archivedAt: null, retiredById: null }]); },
+        async teams() { return connection([{ id: "team-1" }]); },
+      };
+    },
+    async createIssue() { createCalls += 1; return { success: true, issueId: "never" }; },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await assert.rejects(
+    adapter.createRootIssue({
+      projectId: "project-1",
+      conductorShortHash: "def456abc123",
+      title: "Rejected",
+      description: "Must fail closed.",
+    }),
+    /linear_root_creation_conductor_not_in_pool/u,
+  );
+  assert.equal(createCalls, 0);
 });
 
 test("official SDK adapter creates a managed node and proves it by exact Marker read-back", async () => {

@@ -1,4 +1,4 @@
-import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy.js";
+import { discoverCurrentRoots, isRootRoutedToConductor } from "../root-discovery/MultiRootDiscoveryPolicy.js";
 import type { RootOwnershipClaimResult } from "../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import type { DiscoveredRoot } from "../root-workflow/api/Models.js";
@@ -15,7 +15,11 @@ export interface RuntimeReporter {
 
 export interface LinearWorkflowRuntimeGateway {
   resolveProject(): Promise<
-    | { kind: "resolved"; projectId: string }
+    | {
+        kind: "resolved";
+        projectId: string;
+        conductorPool: Array<{ conductorShortHash: string }>;
+      }
     | { kind: "unbound" | "ambiguous" | "label_conflict" }
   >;
   listRoots(projectId: string): Promise<DiscoveredRoot[]>;
@@ -33,6 +37,7 @@ export interface LinearWorkflowStageDispatcher {
 export class LinearConductorRuntime {
   constructor(
     private readonly conductorId: string,
+    private readonly conductorShortHash: string,
     private readonly gateway: LinearWorkflowRuntimeGateway,
     private readonly scheduling: RootSchedulingPolicyInterface,
     private readonly workflow: RootWorkflowPolicyInterface,
@@ -51,14 +56,34 @@ export class LinearConductorRuntime {
         projectId: project.projectId,
         roots: await this.gateway.listRoots(project.projectId),
         conductorId: this.conductorId,
+        conductorShortHash: this.conductorShortHash,
+        conductorPool: project.conductorPool,
       });
       const scheduled = this.scheduling.evaluate(roots);
       let waitingHuman = false;
       let needsAttention = scheduled.blocked.length > 0;
       for (const root of scheduled.orderedEligible) {
+        const freshRoot = (await this.gateway.listRoots(project.projectId))
+          .find(({ issueId }) => issueId === root.issueId);
+        if (
+          !freshRoot ||
+          !isRootRoutedToConductor(
+            freshRoot,
+            this.conductorShortHash,
+            project.conductorPool,
+          )
+        ) {
+          needsAttention = true;
+          await this.reporter.report({
+            status: "blocked",
+            rootId: root.issueId,
+            sanitizedReason: "root_routing_changed",
+          });
+          continue;
+        }
         let admission: RootOwnershipClaimResult;
         try {
-          admission = await this.gateway.admitRoot(root);
+          admission = await this.gateway.admitRoot(freshRoot);
         } catch (error) {
           needsAttention = true;
           await this.reporter.report({
@@ -77,10 +102,10 @@ export class LinearConductorRuntime {
           });
           continue;
         }
-        const view = await this.gateway.readRootDag(root.issueId);
+        const view = await this.gateway.readRootDag(freshRoot.issueId);
         const assessment = this.workflow.assess(view);
         if (view.root.issue.status_name === "Canceled") {
-          const result = await this.dispatcher.dispatch({ root, view });
+          const result = await this.dispatcher.dispatch({ root: freshRoot, view });
           await this.reporter.report({
             status: result.kind === "needs-attention" ? "blocked" : "ready",
             rootId: root.issueId,
@@ -100,7 +125,7 @@ export class LinearConductorRuntime {
           needsAttention ||= assessment.readiness === "needs_attention";
           continue;
         }
-        const result = await this.dispatcher.dispatch({ root, view });
+        const result = await this.dispatcher.dispatch({ root: freshRoot, view });
         await this.reporter.report({
           status: result.kind === "needs-attention" ? "blocked" : "ready",
           rootId: root.issueId,

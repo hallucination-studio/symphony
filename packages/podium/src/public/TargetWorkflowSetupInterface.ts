@@ -4,6 +4,10 @@ export interface TargetWorkflowSetupProject {
   updatedAt: string;
 }
 
+export interface TargetWorkflowSetupPool {
+  members: readonly string[];
+}
+
 export type TargetWorkflowSetupMutationKind = "dry_run" | "applied" | "already_applied";
 
 export type TargetWorkflowSetupResult =
@@ -16,6 +20,7 @@ export type TargetWorkflowSetupResult =
       todoStateId?: string;
       workflow: "dry_run";
       projectLabel: "dry_run";
+      projectPool?: TargetWorkflowSetupPool;
       identityDigest: string;
     }
   | {
@@ -27,6 +32,7 @@ export type TargetWorkflowSetupResult =
       todoStateId: string;
       workflow: Exclude<TargetWorkflowSetupMutationKind, "dry_run">;
       projectLabel: Exclude<TargetWorkflowSetupMutationKind, "dry_run">;
+      projectPool?: TargetWorkflowSetupPool;
       resolution: {
         kind: "resolved";
         projectId: string;
@@ -41,7 +47,9 @@ export interface TargetWorkflowSetupInterface {
     clientId: string;
     projectSlugId: string;
     conductorShortHash: string;
+    conductorShortHashes?: readonly string[];
     authorized: boolean;
     fetch?: typeof globalThis.fetch;
+    signal?: AbortSignal;
   }): Promise<TargetWorkflowSetupResult>;
 }

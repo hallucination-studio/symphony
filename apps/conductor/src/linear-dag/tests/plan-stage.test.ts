@@ -15,7 +15,7 @@ const rootIssueId = "root-1";
 const now = "2026-07-21T09:00:00Z";
 
 test("executes the Bootstrap Plan with idempotent, read-backed mutation steps", async () => {
-  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: true });
+  const fake = new FakeLinearGateway({ firstWriteUnconfirmed: true, commentUpdatesRootVersion: true });
   let stageEnvelope: JsonValue | undefined;
   let stageSawExecutionRecord = false;
   const performer: PerformerStageClientInterface = {
@@ -310,15 +310,18 @@ class FakeLinearGateway implements LinearGatewayInterface {
   readonly git: GitWorkspaceInterface = {
     async inspect() { return { head: "head-1", branch: "symphony/root-1", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
     async diff() { return { text: "", bytes: 0, cap: 65_536, partial: false }; },
+    async restoreWorktree() { throw new Error("unused"); },
     async checks() { return { items: [], returned: 0, cap: 32, has_more: false, partial: false }; },
     async commit() { throw new Error("unused"); },
   };
   tree: ReturnType<typeof initialTree>;
   private readonly firstWriteUnconfirmed: boolean;
+  private readonly commentUpdatesRootVersion: boolean;
 
-  constructor(options: { firstWriteUnconfirmed: boolean }) {
+  constructor(options: { firstWriteUnconfirmed: boolean; commentUpdatesRootVersion?: boolean }) {
     this.tree = initialTree();
     this.firstWriteUnconfirmed = options.firstWriteUnconfirmed;
+    this.commentUpdatesRootVersion = options.commentUpdatesRootVersion === true;
   }
 
   async readWorkflowIssueTree() { this.treeReads += 1; return structuredClone(this.tree); }
@@ -345,13 +348,15 @@ class FakeLinearGateway implements LinearGatewayInterface {
       const target = this.tree.issues.find((issue) => issue.issue_id === command.target.targetIssueId)!;
       const commentId = `comment-${this.tree.comments.length + 1}`;
       this.tree.comments.push({ comment_id: commentId, issue_id: target.issue_id, body: command.body, managed_marker: `${target.issue_id}:managed-record:${commentId}`, remote_version: `${commentId}-version`, updated_at: now });
-      return this.outcome(command.writeId, target.issue_id, `${target.issue_id}-version`);
+      const root = this.tree.issues.find((issue) => issue.issue_id === rootIssueId)!;
+      if (this.commentUpdatesRootVersion) root.remote_version = `${commentId}-root-version`;
+      return this.outcome(command.writeId, target.issue_id, `${target.issue_id}-version`, this.commentUpdatesRootVersion ? [{ issueId: rootIssueId, remoteVersion: root.remote_version }] : undefined);
     }
     throw new Error("unused");
   }
 
-  private outcome(writeId: string, targetIssueId: string, remoteVersion: string) {
-    const result = { writeId, targetIssueId, remoteVersion };
+  private outcome(writeId: string, targetIssueId: string, remoteVersion: string, issueVersions?: Array<{ issueId: string; remoteVersion: string }>) {
+    const result = { writeId, targetIssueId, remoteVersion, ...(issueVersions ? { issueVersions } : {}) };
     if (this.firstWriteUnconfirmed && this.writes.length === 1) return { kind: "write_unconfirmed" as const, readBackTarget: result };
     return { kind: "applied" as const, readBack: result };
   }

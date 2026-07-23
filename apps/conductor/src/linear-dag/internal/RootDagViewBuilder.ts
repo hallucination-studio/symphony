@@ -145,7 +145,10 @@ function validateIssues(
       ? new Set(["Todo", "In Progress", "In Review", "Done", "Failed", "Canceled"])
       : new Set(["Todo", "In Progress", "Done", "Failed", "Canceled"]);
     if (!allowed.has(issue.status_name)) fail(`${issue.issue_kind}_status_invalid`);
-    if (!Number.isInteger(issue.depth) || issue.depth < 0 || !Number.isInteger(issue.order)) fail("tree_order_invalid");
+    if (!Number.isInteger(issue.depth) || issue.depth < 0 ||
+        !Number.isFinite(issue.order) || issue.order < -1_000_000_000 || issue.order > 1_000_000_000) {
+      fail("tree_order_invalid");
+    }
   }
   const root = tree.issues.find((issue) => issue.issue_id === tree.root_issue_id);
   if (!root || root.issue_kind !== "root" || roots !== 1 || root.depth !== 0 || root.parent_issue_id !== undefined) fail("root_scope_invalid");

@@ -165,6 +165,7 @@ function discoveredRoot() {
     priority: "high" as const,
     order: 0,
     blockers: [],
+    rootConductorLabels: [],
   };
 }
 

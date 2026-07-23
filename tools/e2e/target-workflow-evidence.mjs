@@ -2,7 +2,7 @@ import { evaluateTargetWorkflowEvidence, TARGET_WORKFLOW_SCENARIOS } from "./tar
 
 const SCENARIO_SET = new Set(TARGET_WORKFLOW_SCENARIOS);
 
-export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = false, setup, budgetEvidence } = {}) {
+export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = false, setup, observationEvidence } = {}) {
   if (!Array.isArray(results) || results.length !== TARGET_WORKFLOW_SCENARIOS.length) {
     throw new Error("target_evidence_scenarios_invalid");
   }
@@ -23,7 +23,7 @@ export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = fal
   return Object.freeze({
     status: "failed",
     setup: projectSetupEvidence(setup),
-    ...(budgetEvidence ? { linearBudget: projectBudgetEvidence(budgetEvidence) } : {}),
+    ...(observationEvidence ? { linearObservation: projectObservationEvidence(observationEvidence) } : {}),
     scenarioEvidence: Object.freeze({
       success: Object.freeze({ ...baseFacts, status: byScenario.get("success")?.status }),
       repair_escalation: Object.freeze({ ...repairFacts, status: byScenario.get("repair_escalation")?.status }),
@@ -39,14 +39,12 @@ export function assembleTargetWorkflowEvidence({ results, cleanupCompleted = fal
   });
 }
 
-function projectBudgetEvidence(value) {
+function projectObservationEvidence(value) {
   const snapshot = (entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return { status: "invalid" };
     return Object.freeze({
       logicalOperations: entry.logicalOperations,
       physicalRequests: entry.physicalRequests,
-      reservedRequests: entry.reservedRequests,
-      reservedComplexity: entry.reservedComplexity,
       complexityConsumed: entry.complexityConsumed,
       rateLimited: entry.rateLimited,
       ...(entry.requestWindow ? { requestWindow: { ...entry.requestWindow } } : {}),

@@ -29,6 +29,25 @@ test("target restart boundary passes the lifecycle capability and closes resourc
   assert.equal(events[1][1].runner.marker, "runner");
 });
 
+test("target restart boundary supplies the five-minute deadline when none is provided", async () => {
+  let boundaryDeadline;
+  let scenarioTimeout;
+  await runTargetRestartBoundary({
+    now: () => 1_000,
+    startBoundary: async (input) => {
+      boundaryDeadline = input.deadlineAtMs;
+      return { runner: {}, async restart() {}, async close() {} };
+    },
+    runRestart: async ({ timeoutMs }) => {
+      scenarioTimeout = timeoutMs;
+      return { scenario: "restart" };
+    },
+  });
+
+  assert.equal(boundaryDeadline, 301_000);
+  assert.equal(scenarioTimeout, 300_000);
+});
+
 test("target restart boundary preserves scenario failure while closing resources", async () => {
   const events = [];
   await assert.rejects(

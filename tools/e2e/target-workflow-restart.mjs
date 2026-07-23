@@ -1,6 +1,6 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
-const DIGEST = /^[0-9a-f]{64}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const OBSERVATION_FIELDS = new Set(["git"]);
 const TRANSIENT_PENDING_ERRORS = new Set([
   "target_facts_human_action_missing",

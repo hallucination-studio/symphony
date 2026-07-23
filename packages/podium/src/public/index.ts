@@ -30,10 +30,9 @@ export type {
   LinearRequestWindowObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 export {
-  LinearRunBudgetImpl,
-  type LinearRunBudgetReservation,
-  type LinearRunBudgetSnapshot,
-} from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
+  LinearRequestObserverImpl,
+  type LinearRequestObservationSnapshot,
+} from "../internal/linear-gateway/internal/LinearRequestObserverImpl.js";
 export {
   createPodiumClientServices,
   type PodiumClientServiceOwner,
@@ -62,6 +61,7 @@ export {
 export type {
   TargetWorkflowSetupInterface,
   TargetWorkflowSetupMutationKind,
+  TargetWorkflowSetupPool,
   TargetWorkflowSetupProject,
   TargetWorkflowSetupResult,
 } from "./TargetWorkflowSetupInterface.js";

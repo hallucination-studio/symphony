@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { runTargetSchedulingScenario } from "../../tools/e2e/target-workflow-scheduling.mjs";
 import { readTargetSchedulingEvidence } from "../../tools/e2e/target-workflow-scheduling-live.mjs";
-import { LinearRunBudgetImpl } from "@symphony/podium";
+import { LinearRequestObserverImpl } from "@symphony/podium";
 
 test("target scheduling accepts bounded blocker-aware single-writer evidence", async () => {
   const result = await runTargetSchedulingScenario({
@@ -28,12 +28,12 @@ test("target scheduling rejects a selected Root whose blocker is unresolved", as
 });
 
 test("target scheduling reader derives the single writer from Linear priority and blockers", async () => {
-  const budget = new LinearRunBudgetImpl();
+  const observer = new LinearRequestObserverImpl();
   const result = await readTargetSchedulingEvidence({
     developmentToken: "linear-secret",
     projectId: "project-1",
     delegateActorId: "actor-1",
-    linearRunBudget: budget,
+    observer,
     fetch: async (_url, request) => {
       const body = JSON.parse(request.body);
       assert.equal(body.operationName, "TargetWorkflowSchedulingRoots");
@@ -57,20 +57,41 @@ test("target scheduling reader derives the single writer from Linear priority an
     maxConcurrentRoots: 1,
     blockerRespected: true,
   });
-  assert.equal(budget.snapshot().logicalOperations, 1);
-  assert.equal(budget.snapshot().physicalRequests, 1);
+  assert.equal(observer.snapshot().logicalOperations, 1);
+  assert.equal(observer.snapshot().physicalRequests, 1);
 });
 
-test("target scheduling reader rejects a credentialed call without a run budget", async () => {
+test("target scheduling reader allows an observation-free credentialed call", async () => {
   await assert.rejects(
     readTargetSchedulingEvidence({
       developmentToken: "linear-secret",
       projectId: "project-1",
       delegateActorId: "actor-1",
-      fetch: async () => { throw new Error("must_not_fetch"); },
+      fetch: async () => { throw new Error("expected_transport_failure"); },
     }),
-    /target_scheduling_reader_input_invalid/u,
+    /target_scheduling_request_failed/u,
   );
+});
+
+test("target scheduling requests combine caller cancellation with request timeout", async () => {
+  const controller = new AbortController();
+  let observedSignal;
+  await assert.rejects(
+    readTargetSchedulingEvidence({
+      developmentToken: "linear-secret",
+      projectId: "project-1",
+      delegateActorId: "actor-1",
+      signal: controller.signal,
+      fetch: async (_url, request) => {
+        observedSignal = request.signal;
+        controller.abort();
+        throw new Error("request_aborted");
+      },
+    }),
+    /target_scheduling_request_failed/u,
+  );
+  assert.notEqual(observedSignal, controller.signal);
+  assert.equal(observedSignal.aborted, true);
 });
 
 function root(id, priority, sortOrder, state, relations) {

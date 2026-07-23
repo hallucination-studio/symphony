@@ -21,6 +21,7 @@ export interface GitWorkspaceSnapshot {
 export interface GitWorkspaceInterface {
   inspect(workspace: GitWorkspace): Promise<GitWorkspaceSnapshot>;
   diff(workspace: GitWorkspace, options?: { staged?: boolean; path?: string; fromRevision?: string; toRevision?: string }): Promise<{ text: string; bytes: number; cap: number; partial: boolean }>;
+  restoreWorktree(workspace: GitWorkspace, expectedHead: string): Promise<{ kind: "restored" }>;
   checks(workspace: GitWorkspace, names: string[]): Promise<BoundedGitItems<{ name: string; status: "passed" | "failed" }>>;
   commit(input: {
     workspace: GitWorkspace;

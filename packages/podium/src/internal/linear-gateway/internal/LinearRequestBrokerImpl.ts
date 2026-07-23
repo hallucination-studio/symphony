@@ -1,4 +1,4 @@
-import type { LinearRunBudgetImpl } from "./LinearRunBudgetImpl.js";
+import type { LinearRequestObserverImpl } from "./LinearRequestObserverImpl.js";
 
 export type InstallationRequestClass =
   | "control"
@@ -7,15 +7,11 @@ export type InstallationRequestClass =
   | "read-back"
   | "background";
 
-interface WindowValue {
-  limit?: number;
-  remaining?: number;
-  reset?: number;
-}
+const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 interface QueuedRequest<T> {
   requestClass: InstallationRequestClass;
-  deadlineAtMs?: number;
+  deadlineAtMs: number;
   run(): Promise<T>;
   resolve(value: T | PromiseLike<T>): void;
   reject(reason: unknown): void;
@@ -30,18 +26,17 @@ export class LinearRequestBrokerImpl {
   readonly #maxHighPriorityBurst: number;
   readonly #now: () => number;
   readonly #random: () => number;
-  readonly #budget: LinearRunBudgetImpl | undefined;
-  readonly #physicalReservations: Array<{ release(): void }> = [];
+  readonly #observer: LinearRequestObserverImpl | undefined;
+  readonly #requestTimeoutMs: number;
   #active = 0;
   #highPriorityBurst = 0;
   #generation = 0;
-  #requestWindow: WindowValue | undefined;
-  #complexityWindow: WindowValue | undefined;
 
   constructor(options: {
     maxConcurrent: number;
     maxHighPriorityBurst: number;
-    budget?: LinearRunBudgetImpl;
+    observer?: LinearRequestObserverImpl;
+    requestTimeoutMs?: number;
     now?: () => number;
     random?: () => number;
   }) {
@@ -56,27 +51,19 @@ export class LinearRequestBrokerImpl {
     this.#maxHighPriorityBurst = options.maxHighPriorityBurst;
     this.#now = options.now ?? Date.now;
     this.#random = options.random ?? Math.random;
-    this.#budget = options.budget;
+    this.#observer = options.observer;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.#requestTimeoutMs) || this.#requestTimeoutMs < 1 || this.#requestTimeoutMs > DEFAULT_REQUEST_TIMEOUT_MS) {
+      throw new Error("linear_request_timeout_invalid");
+    }
   }
 
   observe(observation: {
-    requestWindow?: WindowValue;
-    complexityWindow?: WindowValue;
+    status?: number;
+    requestWindow?: { limit?: number; remaining?: number; reset?: number };
+    complexityWindow?: { limit?: number; remaining?: number; reset?: number };
   }): void {
-    this.#budget?.observe(observation);
-    this.#physicalReservations.shift()?.release();
-    if (observation.requestWindow) this.#requestWindow = { ...observation.requestWindow };
-    if (observation.complexityWindow) this.#complexityWindow = { ...observation.complexityWindow };
-    this.#drain();
-  }
-
-  assertPermit(requestClass: InstallationRequestClass): void {
-    if (requestClass === "background" && !this.#backgroundCapacityAvailable()) {
-      throw new Error("linear_request_capacity_reserved");
-    }
-    if (this.#budget) {
-      this.#physicalReservations.push(this.#budget.reservePhysicalRequest());
-    }
+    this.#observer?.observe(observation);
   }
 
   run<T>(
@@ -84,10 +71,13 @@ export class LinearRequestBrokerImpl {
     run: () => Promise<T>,
     options: { deadlineAtMs?: number; coalesceKey?: string } = {},
   ): Promise<T> {
-    this.#budget?.recordLogicalOperation();
-    if (requestClass === "background" && !this.#backgroundCapacityAvailable()) {
-      return Promise.reject(new Error("linear_request_capacity_reserved"));
+    this.#observer?.recordLogicalOperation();
+    const now = this.#now();
+    const maximumDeadlineAtMs = now + this.#requestTimeoutMs;
+    if (options.deadlineAtMs !== undefined && !Number.isSafeInteger(options.deadlineAtMs)) {
+      throw new Error("linear_request_deadline_invalid");
     }
+    const deadlineAtMs = Math.min(options.deadlineAtMs ?? maximumDeadlineAtMs, maximumDeadlineAtMs);
     if (requestClass === "mutation") {
       this.#generation += 1;
       this.#inFlight.clear();
@@ -101,7 +91,7 @@ export class LinearRequestBrokerImpl {
     const promise = new Promise<T>((resolve, reject) => {
       this.#queues[requestClass].push({
         requestClass, run, resolve, reject,
-        ...(options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
+        deadlineAtMs,
       } as QueuedRequest<unknown>);
       this.#drain();
     });
@@ -128,32 +118,30 @@ export class LinearRequestBrokerImpl {
     return Math.min(input.maxDelayMs, Math.max(jittered, input.retryAfterMs ?? 0));
   }
 
-  #backgroundCapacityAvailable(): boolean {
-    return [this.#requestWindow, this.#complexityWindow].every((window) => {
-      if (window?.limit === undefined || window.remaining === undefined) return false;
-      return window.remaining > window.limit * 0.75;
-    });
-  }
-
   #drain(): void {
     while (this.#active < this.#maxConcurrent) {
       const next = this.#next();
       if (!next) return;
-      if (next.deadlineAtMs !== undefined && this.#now() > next.deadlineAtMs) {
-        next.reject(new Error("linear_request_budget_exhausted"));
+      if (next.deadlineAtMs !== undefined && this.#now() >= next.deadlineAtMs) {
+        next.reject(new Error("linear_request_deadline_exceeded"));
         continue;
       }
       this.#active += 1;
-      const remainingMs = next.deadlineAtMs === undefined
-        ? undefined : Math.max(0, next.deadlineAtMs - this.#now());
-      const deadline = remainingMs === undefined ? undefined : setTimeout(() => {
-        next.reject(new Error("linear_request_budget_exhausted"));
-      }, remainingMs);
-      void next.run().then(next.resolve, next.reject).finally(() => {
-        if (deadline) clearTimeout(deadline);
+      const remainingMs = next.deadlineAtMs - this.#now();
+      let released = false;
+      const timeout = { current: undefined as NodeJS.Timeout | undefined };
+      const release = () => {
+        if (released) return;
+        released = true;
+        if (timeout.current) clearTimeout(timeout.current);
         this.#active -= 1;
         this.#drain();
-      });
+      };
+      timeout.current = setTimeout(() => {
+        next.reject(new Error("linear_request_deadline_exceeded"));
+        release();
+      }, remainingMs);
+      void next.run().then(next.resolve, next.reject).finally(release);
     }
   }
 
@@ -176,8 +164,6 @@ export class LinearRequestBrokerImpl {
       return workflow;
     }
     this.#highPriorityBurst = 0;
-    return this.#backgroundCapacityAvailable()
-      ? this.#queues.background.shift()
-      : undefined;
+    return this.#queues.background.shift();
   }
 }

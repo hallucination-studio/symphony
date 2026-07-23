@@ -3,7 +3,6 @@ const INPUT_KEYS = Object.freeze({
   linearClientId: "LINEAR_CLIENT_ID",
   projectSlugId: "SYMPHONY_E2E_PROJECT_SLUG_ID",
   linearSetupAuthorized: "SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED",
-  linearPhysicalRequestComplexity: "SYMPHONY_E2E_LINEAR_PHYSICAL_REQUEST_COMPLEXITY",
   codexApiKey: "SYMPHONY_E2E_CODEX_API_KEY",
   codexBaseUrl: "SYMPHONY_E2E_CODEX_BASE_URL",
   codexModel: "SYMPHONY_E2E_CODEX_MODEL",
@@ -41,10 +40,6 @@ export function loadE2EConfig({
   const codexApiKey = required(environment, INPUT_KEYS.codexApiKey, "codex_api_key_missing", issues);
   const rawBaseUrl = required(environment, INPUT_KEYS.codexBaseUrl, "codex_base_url_missing", issues);
   const model = required(environment, INPUT_KEYS.codexModel, "codex_model_missing", issues);
-  const physicalRequestComplexity = optionalBoundedInteger(
-    environment[INPUT_KEYS.linearPhysicalRequestComplexity], 0, 100_000,
-    "linear_physical_request_complexity_invalid", issues,
-  ) ?? 10_000;
   const baseUrl = validateBaseUrl(rawBaseUrl, { ci, allowedCodexHosts, issues });
   validateModel(model, issues);
   validateLinearClientId(linearClientId, issues);
@@ -58,7 +53,6 @@ export function loadE2EConfig({
       clientId: linearClientId,
       projectSlugId,
       setupAuthorized: linearSetupAuthorized,
-      physicalRequestComplexity,
     }),
     secrets: Object.freeze({ linearDevToken, codexApiKey }),
     codex: Object.freeze({ baseUrl, model }),
@@ -70,7 +64,6 @@ export function summarizeConfig(config) {
     platform: config.platform,
     linear: Object.freeze({
       projectSlugId: config.linear.projectSlugId,
-      physicalRequestComplexity: config.linear.physicalRequestComplexity,
     }),
     codex: Object.freeze({ ...config.codex }),
     secretPresence: Object.freeze({
@@ -110,17 +103,6 @@ function required(environment, key, issue, issues) {
     return undefined;
   }
   return value;
-}
-
-function optionalBoundedInteger(value, minimum, maximum, issue, issues) {
-  if (value === undefined || value === "") return undefined;
-  if (!/^\d{1,6}$/u.test(value)) {
-    issues.push(issue);
-    return undefined;
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) issues.push(issue);
-  return parsed;
 }
 
 function validateBaseUrl(rawValue, { ci, allowedCodexHosts, issues }) {

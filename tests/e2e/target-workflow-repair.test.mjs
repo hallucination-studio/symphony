@@ -58,6 +58,38 @@ test("target repair orchestration processes each approval action once and re-rea
   assert.ok(calls.filter(([kind]) => kind === "readObservationInput").length >= 2);
 });
 
+test("target repair retries a partially materialized Root during polling", async () => {
+  let pendingReads = 0;
+  let factsReads = 0;
+  const facts = repairFacts();
+  const result = await runTargetRepairEscalationScenario({
+    runner: {
+      async createRoot() { return { rootIssueId: "root-1", projectId: "project-1" }; },
+      async observePendingHuman() {
+        pendingReads += 1;
+        if (pendingReads === 1) throw new Error("target_transport_issue_kind_invalid");
+        return { pendingHuman: { status: "not_waiting" } };
+      },
+      async appendHumanResponse() { throw new Error("must_not_append"); },
+      async observeRoot() {
+        factsReads += 1;
+        if (factsReads === 1) throw new Error("target_transport_issue_kind_invalid");
+        return { facts };
+      },
+    },
+    rootInput: { title: "Repair" },
+    observationInput: { git: { head: "a".repeat(40), branch: "symphony/runs/root-1" } },
+    humanResponseBody: "Approved.",
+    timeoutMs: 1_000,
+    pollIntervalMs: 0,
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(result, { facts });
+  assert.ok(pendingReads >= 2);
+  assert.equal(factsReads, 2);
+});
+
 test("target repair orchestration fails closed on a needs-info action", async () => {
   await assert.rejects(
     runTargetRepairEscalationScenario({

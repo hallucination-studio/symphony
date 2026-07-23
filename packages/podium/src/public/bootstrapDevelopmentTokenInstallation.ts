@@ -3,7 +3,6 @@ import {
   type LinearPhysicalRequestObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
-import type { LinearRunBudgetImpl } from "../internal/linear-gateway/internal/LinearRunBudgetImpl.js";
 
 export interface DevelopmentTokenInstallationView {
   installationId: string;
@@ -15,11 +14,9 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
   developmentToken: string;
   delegateActorId: string;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
-  linearRunBudget?: LinearRunBudgetImpl;
   discoverOrganizationId?: (
     accessToken: string,
     observe?: (observation: LinearPhysicalRequestObservation) => void,
-    permit?: () => void,
   ) => Promise<string>;
 }): Promise<DevelopmentTokenInstallationView> {
   if (!input.developmentToken) throw new Error("linear_development_token_missing");
@@ -29,16 +26,10 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
     LinearSdkImpl.discoverDevelopmentTokenOrganizationId;
   let organizationId: string;
   try {
-    const observe = input.observeLinearRequest || input.linearRunBudget
-      ? (observation: LinearPhysicalRequestObservation) => {
-          input.linearRunBudget?.observe(observation);
-          input.observeLinearRequest?.(observation);
-        }
-      : undefined;
+    const observe = input.observeLinearRequest;
     organizationId = await discoverOrganizationId(
       input.developmentToken,
       observe,
-      input.linearRunBudget ? () => input.linearRunBudget!.permitPhysicalRequest() : undefined,
     );
   } catch {
     throw new Error("linear_development_token_invalid");

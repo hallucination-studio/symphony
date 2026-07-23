@@ -35,8 +35,14 @@ export function ConductorsPage({
           <ul className="selection-list">
             {conductors.map((conductor) => (
               <li key={conductor.conductorId}>
-                <button type="button" onClick={() => onSelect(conductor.conductorId)}>
-                  <span><strong>{conductor.displayName}</strong>{conductor.projectName ?? "Unbound"}</span>
+              <button type="button" onClick={() => onSelect(conductor.conductorId)}>
+                  <span>
+                    <strong>{conductor.displayName}</strong>
+                    <span>{conductor.projectName ?? "Unbound"}</span>
+                    {conductor.projectPool && (
+                      <small>Pool: {conductor.projectPool.join(", ")}</small>
+                    )}
+                  </span>
                   <StatusBadge label={labelFromIdentifier(conductor.status)} {...(conductor.status === "ready" ? { tone: "positive" } : {})} />
                 </button>
               </li>
@@ -52,7 +58,14 @@ export function ConductorsPage({
       <PageHeading title={conductor.displayName} description={`${conductor.projectName ?? "Unbound"} · ${conductor.repositoryDisplayName ?? "Repository unavailable"}`} headingRef={headingRef} />
       <div className="page-stack">
         <section className="panel action-row">
-          <div><h2>Runtime</h2><StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} /></div>
+          <div>
+            <h2>Runtime</h2>
+            <StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} />
+            {conductor.projectPool && <p>Project pool: {conductor.projectPool.join(", ")}</p>}
+            {conductor.projectResolutionStatus && conductor.projectResolutionStatus !== "resolved" && (
+              <p role="alert">Project resolution: {labelFromIdentifier(conductor.projectResolutionStatus)}</p>
+            )}
+          </div>
           <div className="button-row">
             <button className="button" onClick={() => onCommand({ kind: "stop_conductor", conductorId: conductor.conductorId })}>Stop</button>
             <button className="button primary" onClick={() => onCommand({ kind: "restart_conductor", conductorId: conductor.conductorId })}>Restart</button>

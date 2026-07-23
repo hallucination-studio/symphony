@@ -171,6 +171,95 @@ test("keeps workflow read only and delegates human actions to Linear", () => {
   expect(openExternal).toHaveBeenCalledWith("https://linear.app/acme/issue/SYM-42");
 });
 
+test("surfaces routed, unrouted, and conflicting Roots without takeover controls", () => {
+  const routedRoot = {
+    ...connectedOverview.activeRoots[0]!,
+    rootIssueId: "root-routed",
+    identifier: "SYM-40",
+    title: "Routed Root",
+    routingStatus: "routed" as const,
+    routingConductorShortHash: "abc123",
+  };
+  const unroutedRoot = {
+    ...connectedOverview.activeRoots[0]!,
+    rootIssueId: "root-unrouted",
+    identifier: "SYM-41",
+    title: "Unrouted Root",
+    routingStatus: "unrouted" as const,
+  };
+  const conflictingRoot = {
+    ...connectedOverview.activeRoots[0]!,
+    rootIssueId: "root-conflict",
+    identifier: "SYM-43",
+    title: "Conflicting Root",
+    routingStatus: "conflict" as const,
+    ownershipStatus: "mismatch" as const,
+  };
+
+  render(<App initialState={{
+    kind: "ready",
+    overview: {
+      ...connectedOverview,
+      activeRoots: [routedRoot, unroutedRoot],
+      reviewRoots: [conflictingRoot],
+    },
+  }} />);
+
+  expect(screen.getByText(/Routed Root/)).toBeInTheDocument();
+  expect(screen.getByText(/· Unrouted/)).toBeInTheDocument();
+  expect(screen.getByText(/Routing conflict/)).toBeInTheDocument();
+  expect(screen.getByText(/Ownership conflict/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /take over|claim|assign/i })).not.toBeInTheDocument();
+  expect(document.body.textContent).not.toMatch(/issue-label-|access[_ ]?token|graphql/i);
+});
+
+test("shows an unrouted Root as paused in its detail without a transfer action", () => {
+  const onCommand = vi.fn().mockResolvedValue({ kind: "confirmed" });
+  render(<App initialState={{
+    kind: "ready",
+    overview: connectedOverview,
+    rootDetail: {
+      ...rootDetail,
+      summary: {
+        ...rootDetail.summary,
+        routingStatus: "unrouted",
+        ownershipStatus: "unknown",
+      },
+    },
+  }} onCommand={onCommand} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Work" }));
+  fireEvent.click(screen.getByRole("button", { name: /SYM-42/ }));
+
+  expect(screen.getByRole("heading", { name: "Root routing" })).toBeInTheDocument();
+  expect(screen.getByText("Unrouted: this Root is paused.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /take over|claim|assign|transfer/i })).not.toBeInTheDocument();
+  expect(onCommand).not.toHaveBeenCalled();
+});
+
+test.each(["unbound", "ambiguous", "conflict"] as const)(
+  "shows Project resolution state %s without raw Linear metadata",
+  (resolutionStatus) => {
+    const summary = {
+      ...connectedOverview.conductors[0]!,
+      projectResolutionStatus: resolutionStatus,
+      ...(resolutionStatus === "unbound" ? {} : { projectPool: ["abc123", "def456"] }),
+    };
+    render(<App initialState={{
+      kind: "ready",
+      overview: { ...connectedOverview, conductors: [summary] },
+      conductorDetail: { ...conductorDetail, summary },
+    }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Conductors" }));
+    fireEvent.click(screen.getByRole("button", { name: /Studio conductor/ }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(`Project resolution: ${resolutionStatus[0]!.toUpperCase()}${resolutionStatus.slice(1)}`);
+    expect(document.body.textContent).not.toMatch(/issue-label-|access[_ ]?token|graphql|raw Linear/i);
+    expect(screen.queryByRole("button", { name: /take over|claim|assign/i })).not.toBeInTheDocument();
+  },
+);
+
 test("acknowledges only the displayed Root retry observation", () => {
   const sendCommand = vi.fn().mockResolvedValue({ kind: "confirmed" });
   render(<App initialState={{

@@ -101,7 +101,7 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
     },
   });
   const body = {
-    kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
+    kind: "get_workflow_issue_tree", binding_id: "binding-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1",
   };
   const first = services.handle(body);
@@ -129,7 +129,7 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
   assert.equal(sdkCreations, 1);
 });
 
-test("physical rate observations reserve installation capacity from background reads", async () => {
+test("physical rate observations do not block background reads", async () => {
   let observe;
   let usageReads = 0;
   const services = await createConductorServices({
@@ -147,11 +147,11 @@ test("physical rate observations reserve installation capacity from background r
     complexityWindow: { limit: 250000, remaining: 187500, reset: 60 },
   });
 
-  await assert.rejects(
-    services.handle({ kind: "list_root_usage", project_id: "project-1", page: { limit: 250 } }),
-    /linear_request_capacity_reserved/u,
-  );
-  assert.equal(usageReads, 0);
+  const result = await services.handle({
+    kind: "list_root_usage", project_id: "project-1", page: { limit: 250 },
+  });
+  assert.equal(result.kind, "root_usage_page");
+  assert.equal(usageReads, 1);
 });
 
 test("mutation conflict rereads and never executes stale state", async () => {
@@ -380,6 +380,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
                 isDelegatedToSymphony: true,
                 priority: "high",
                 blockers: [],
+                rootConductorLabels: [],
                 rootManagedComments: [],
               }],
               pageInfo: { hasNextPage: false },
@@ -390,6 +391,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
                 isDelegatedToSymphony: true,
                 priority: "urgent",
                 blockers: [],
+                rootConductorLabels: [],
                 rootManagedComments: [],
               }],
               pageInfo: { hasNextPage: true, endCursor: "next" },
@@ -412,6 +414,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
             isDelegatedToSymphony: true,
             priority: "normal",
             blockers: [],
+            rootConductorLabels: [],
             rootManagedComments: [],
           }],
           pageInfo: { hasNextPage: false },
@@ -433,6 +436,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
               isDelegatedToSymphony: false,
               priority: "low",
               blockers: [],
+              rootConductorLabels: [],
               rootManagedComments: [],
             }],
             pageInfo: { hasNextPage: false },
@@ -454,6 +458,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
                   targetState: "In Progress",
                 },
               ],
+              rootConductorLabels: [],
               rootManagedComments: [{
                 commentId: "comment-1",
                 issueId: "root-1",
@@ -500,6 +505,7 @@ test("Root scheduling gateway rejects malformed closed values", async () => {
     isDelegatedToSymphony: true,
     priority: "normal",
     blockers: [],
+    rootConductorLabels: [],
     rootManagedComments: [],
   };
   const invalidRoots = [
@@ -561,6 +567,7 @@ test("issue tree reads all pages and validates root parent depth and order", asy
           ? {
               nodes: [{ ...issue("child-1", "project-1"), parentIssueId: "root-1", depth: 1, order: 2 }],
               rootPhaseLabels: ["planning"],
+              rootConductorLabels: [],
               rootManagedComments: [],
               humanAnswers: [],
               observedAt: "2026-07-16T00:00:01Z",
@@ -569,6 +576,7 @@ test("issue tree reads all pages and validates root parent depth and order", asy
           : {
               nodes: [issue("root-1", "project-1")],
               rootPhaseLabels: ["planning"],
+              rootConductorLabels: [],
               rootManagedComments: [],
               humanAnswers: [],
               observedAt: "2026-07-16T00:00:00Z",
@@ -591,6 +599,7 @@ test("issue tree rejects invalid Root managed-state facts", async () => {
         return {
           nodes: [issue("root-1", "project-1")],
           rootPhaseLabels: ["invented-phase"],
+          rootConductorLabels: [],
           rootManagedComments: [],
           humanAnswers: [],
           observedAt: "2026-07-16T00:00:00Z",
@@ -652,6 +661,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
 
   const result = await services.handle({
     kind: "get_workflow_issue_tree",
+    binding_id: "binding-1",
     conductor_short_hash: "abc123",
     expected_project_id: "project-1",
     root_issue_id: "root-1",
@@ -664,6 +674,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   await assert.rejects(
     services.handle({
       kind: "get_workflow_issue_tree",
+      binding_id: "binding-1",
       conductor_short_hash: "wrong-hash",
       expected_project_id: "project-1",
       root_issue_id: "root-1",
@@ -725,6 +736,7 @@ test("affected Root detail projects its sanitized scheduling observation", async
         return {
           nodes: [issue("root-1", "project-1")],
           rootPhaseLabels: ["blocked"],
+          rootConductorLabels: [],
           rootManagedComments: [{
             commentId: "comment-1", issueId: "root-1", updatedAt: "2026-07-19T00:00:01Z",
             managedMarker: "root-1:root-comment", body: [

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LinearRunBudgetImpl } from "@symphony/podium";
+import { LinearRequestObserverImpl } from "@symphony/podium";
 
 import { startTargetProductionBoundary } from "../../tools/e2e/target-workflow-production.mjs";
 
@@ -40,7 +40,7 @@ function dependencies(events) {
 test("target production boundary composes real boundary adapters without leaking setup state", async () => {
   const events = [];
   const runner = { marker: "runner" };
-  const linearRunBudget = new LinearRunBudgetImpl();
+  const observer = new LinearRequestObserverImpl();
   const result = await startTargetProductionBoundary({
     developmentToken: "linear-development-token",
     codexApiKey: "codex-api-key",
@@ -54,7 +54,7 @@ test("target production boundary composes real boundary adapters without leaking
     environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
     fetch: () => {},
     log: () => {},
-    linearRunBudget,
+    observer,
     dependencies: dependencies(events),
     createRunner() {
       return runner;
@@ -67,11 +67,115 @@ test("target production boundary composes real boundary adapters without leaking
     "bootstrapInstallation", "savePodiumState", "createPodiumOwner", "startConductor", "provisionProfile",
   ].join(","));
   assert.equal(events.find(([kind]) => kind === "provisionProfile")[1].apiKey, "length:13");
-  assert.equal(events.find(([kind]) => kind === "bootstrapInstallation")[1].linearRunBudget, linearRunBudget);
-  assert.equal(events.find(([kind]) => kind === "createPodiumOwner")[1].linearRunBudget, linearRunBudget);
+  assert.equal(events.find(([kind]) => kind === "bootstrapInstallation")[1].observeLinearRequest !== undefined, true);
+  assert.equal(events.find(([kind]) => kind === "createPodiumOwner")[1].linearRequestObserver, observer);
   assert.equal(JSON.stringify(result).includes("linear-development-token"), false);
   await result.close();
   assert.deepEqual(events.slice(-2).map(([kind]) => kind), ["conductorClose", "podiumClose"]);
+});
+
+test("target production boundary bounds setup to five minutes when no deadline is provided", async () => {
+  const events = [];
+  const result = await startTargetProductionBoundary({
+    developmentToken: "linear-development-token",
+    codexApiKey: "codex-api-key",
+    databasePath: "/tmp/podium.db",
+    project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+    binding: {
+      bindingId: "binding-1", conductorId: "conductor-1", conductorShortHash: "hash-1",
+      repositoryHandle: "repository-1", repositoryRoot: "/tmp/repository", baseBranch: "main",
+    },
+    delegateActorId: "actor-1",
+    environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
+    fetch: () => {},
+    log: () => {},
+    now: () => 1_000,
+    dependencies: {
+      ...dependencies(events),
+      async startConductor(input) {
+        events.push(["startConductor", input]);
+        return { close() {} };
+      },
+    },
+    createRunner() { return {}; },
+  });
+
+  assert.equal(events.find(([kind]) => kind === "startConductor")[1].startupTimeoutMs, 300_000);
+  await result.close();
+});
+
+test("target production boundary reports bootstrap requests to the shared observer", async () => {
+  const observer = new LinearRequestObserverImpl();
+  const events = [];
+  const productionDependencies = dependencies(events);
+  productionDependencies.bootstrapInstallation = async (input) => {
+    input.observeLinearRequest({
+      operation: "organization",
+      correlationId: "bootstrap-1",
+      durationMs: 1,
+      status: 200,
+    });
+    return { installationId: "installation-1", organizationId: "organization-1" };
+  };
+
+  const result = await startTargetProductionBoundary({
+    developmentToken: "linear-development-token",
+    codexApiKey: "codex-api-key",
+    databasePath: "/tmp/podium.db",
+    project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+    binding: {
+      bindingId: "binding-1", conductorId: "conductor-1", conductorShortHash: "hash-1",
+      repositoryHandle: "repository-1", repositoryRoot: "/tmp/repository", baseBranch: "main",
+    },
+    delegateActorId: "actor-1",
+    environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
+    fetch: () => {},
+    log: () => {},
+    observer,
+    dependencies: productionDependencies,
+    createRunner() { return { marker: "runner" }; },
+  });
+
+  assert.equal(observer.snapshot().physicalRequests, 1);
+  await result.close();
+});
+
+test("target production boundary aborts shared resources on a real 429", async () => {
+  const events = [];
+  const observer = new LinearRequestObserverImpl();
+  const result = await startTargetProductionBoundary({
+    developmentToken: "linear-development-token",
+    codexApiKey: "codex-api-key",
+    databasePath: "/tmp/podium.db",
+    project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+    binding: {
+      bindingId: "binding-1", conductorId: "conductor-1", conductorShortHash: "hash-1",
+      repositoryHandle: "repository-1", repositoryRoot: "/tmp/repository", baseBranch: "main",
+    },
+    delegateActorId: "actor-1",
+    environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
+    fetch: () => {},
+    log: () => {},
+    observer,
+    dependencies: {
+      ...dependencies(events),
+      async startConductor(input) {
+        events.push(["startConductor", input]);
+        return {
+          abortSignal: input.abortSignal,
+          async terminateAbruptly() { events.push(["terminate"]); },
+          async close() { events.push(["conductorClose"]); },
+        };
+      },
+    },
+    createRunner() { return { marker: "runner" }; },
+  });
+
+  observer.observe({ status: 429 });
+  assert.equal(events.find(([kind]) => kind === "startConductor")[1].abortSignal.aborted, true);
+  assert.equal(events.some(([kind]) => kind === "terminate"), true);
+  assert.equal(events.some(([kind]) => kind === "podiumClose"), true);
+  await result.close();
 });
 
 test("target production boundary cleans the Podium owner when Conductor startup fails", async () => {
@@ -144,4 +248,37 @@ test("target production boundary restarts Conductor with a fresh secret-free ins
   await result.close();
   assert.deepEqual(events.filter(([kind]) => kind === "terminate"), [["terminate", "instance-1"]]);
   assert.deepEqual(events.filter(([kind]) => kind === "conductorClose"), [["conductorClose", "instance-1-restart-1"]]);
+});
+
+test("target production boundary aborts Conductor when profile provisioning reaches its deadline", async () => {
+  const events = [];
+  await assert.rejects(
+    startTargetProductionBoundary({
+      developmentToken: "linear-development-token",
+      codexApiKey: "codex-api-key",
+      databasePath: "/tmp/podium.db",
+      project: { projectId: "project-1", name: "Target", updatedAt: "2026-07-22T00:00:00Z" },
+      binding: {
+        bindingId: "binding-1", conductorId: "conductor-1", conductorShortHash: "hash-1",
+        repositoryHandle: "repository-1", repositoryRoot: "/tmp/repository", baseBranch: "main",
+      },
+      delegateActorId: "actor-1",
+      environment: { SYMPHONY_INSTANCE_ID: "instance-1" },
+      fetch: () => {},
+      log: () => {},
+      deadlineAtMs: Date.now() + 20,
+      dependencies: {
+        ...dependencies(events),
+        async startConductor() {
+          return {
+            async terminateAbruptly() { events.push(["terminate"]); },
+            async close() { events.push(["conductorClose"]); },
+          };
+        },
+        async provisionProfile() { return new Promise(() => {}); },
+      },
+    }),
+    /target_live_timeout/u,
+  );
+  assert.equal(events.some(([kind]) => kind === "terminate"), true);
 });

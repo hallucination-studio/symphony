@@ -85,7 +85,14 @@ test("local entrypoint builds without passing pipeline secrets to the build", as
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   const makefile = await readFile("Makefile", "utf8");
   const entry = await readFile("tools/e2e/target-workflow-entry.mjs", "utf8");
-  assert.equal(manifest.scripts["e2e:target-live"], "node tools/e2e/target-workflow-entry.mjs --live-all");
+  assert.equal(
+    manifest.scripts["e2e:target-live"],
+    "node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-all",
+  );
+  assert.equal(
+    manifest.scripts["test:e2e:runner"],
+    "node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node --test tests/e2e/*.test.mjs",
+  );
   const makeCommands = [
     "npm run build -w @symphony/podium",
     "npm run build -w @symphony/conductor",
@@ -108,7 +115,7 @@ test("local entrypoint builds without passing pipeline secrets to the build", as
   }
   assert.match(
     makefile,
-    /E2E_LIVE := node --env-file-if-exists=\.env tools\/e2e\/target-workflow-entry\.mjs --live-all/u,
+    /E2E_LIVE := node --env-file-if-exists=\.env tools\/e2e\/run-with-timeout\.mjs --timeout-ms 300000 -- node tools\/e2e\/target-workflow-entry\.mjs --live-all/u,
   );
   assert.match(makeTarget, /\n\t\$\(E2E_LIVE\)\n/u);
   assert.doesNotMatch(makeTarget, /E2E_SECRET_FREE.*\$\(E2E_LIVE\)/u);

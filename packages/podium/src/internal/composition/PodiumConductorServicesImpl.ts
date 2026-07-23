@@ -6,7 +6,7 @@ import {
   LinearRequestBrokerImpl,
   type InstallationRequestClass,
 } from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
-import type { LinearRunBudgetImpl } from "../linear-gateway/internal/LinearRunBudgetImpl.js";
+import type { LinearRequestObserverImpl } from "../linear-gateway/internal/LinearRequestObserverImpl.js";
 import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
 import type {
   LinearIssueState,
@@ -19,8 +19,10 @@ import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
 
+const MAX_LINEAR_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
-  #activeInstanceId: string | undefined;
+  readonly #activeInstances = new Map<string, string>();
   readonly #linearRequests: LinearRequestBrokerImpl;
   readonly #linearGateways = new Map<InstallationRequestClass, {
     installation: LinearInstallation;
@@ -35,15 +37,14 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       createLinearSdk(
         installation: LinearInstallation,
         observe: (observation: LinearPhysicalRequestObservation) => void,
-        permit: () => void,
       ): LinearClientInterface;
-      linearRunBudget?: LinearRunBudgetImpl;
+      linearRequestObserver?: LinearRequestObserverImpl;
     },
   ) {
     this.#linearRequests = new LinearRequestBrokerImpl({
       maxConcurrent: 8,
       maxHighPriorityBurst: 4,
-      ...(this.options.linearRunBudget ? { budget: this.options.linearRunBudget } : {}),
+      ...(this.options.linearRequestObserver ? { observer: this.options.linearRequestObserver } : {}),
     });
   }
 
@@ -53,16 +54,15 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     observedAt: string;
     sanitizedReason?: string;
   }): void {
-    const binding = this.store.getConductorBinding();
+    const binding = this.#bindingForId(input.bindingId);
+    const activeInstanceId = this.#activeInstances.get(input.bindingId);
     if (
       !binding ||
-      binding.bindingId !== input.bindingId ||
-      (this.#activeInstanceId !== undefined &&
-        this.#activeInstanceId !== input.instanceId)
+      (activeInstanceId !== undefined && activeInstanceId !== input.instanceId)
     ) {
       throw new Error("conductor_exit_observation_mismatch");
     }
-    this.#activeInstanceId = undefined;
+    this.#activeInstances.delete(input.bindingId);
     this.store.saveRuntimeObservation({
       bindingId: binding.bindingId,
       status: "crashed",
@@ -80,9 +80,10 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     ) {
       return this.#runtime(body);
     }
-    if (!this.#activeInstanceId) throw new Error("conductor_handshake_required");
-    const binding = this.store.getConductorBinding();
-    if (!binding) throw new Error("conductor_binding_missing");
+    const binding = this.#requestBinding(body);
+    if (!this.#activeInstances.has(binding.bindingId)) {
+      throw new Error("conductor_handshake_required");
+    }
     const installation = this.store.getLinearCredential(
       binding.linearInstallationId,
     );
@@ -125,7 +126,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         throw new Error("conductor_request_unsupported");
       }
     }, {
-      deadlineAtMs: Date.now() + 30_000,
+      deadlineAtMs: Date.now() + MAX_LINEAR_REQUEST_TIMEOUT_MS,
       ...(classification === "mutation" ? {} : {
         coalesceKey: JSON.stringify(body),
       }),
@@ -147,7 +148,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const gateway = new LinearGatewayProtocolHandlerImpl(
       this.options.createLinearSdk(installation, (observation) => {
         this.#linearRequests.observe(observation);
-      }, () => this.#linearRequests.assertPermit(classification)),
+      }),
       {
         maxAttempts: 4,
         baseDelayMs: 250,
@@ -161,14 +162,14 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
   }
 
   #runtime(body: Body): JsonValue {
-    const binding = this.store.getConductorBinding();
+    const bindingId = requiredString(body.binding_id, "conductor_binding_missing");
+    const binding = this.#bindingForId(bindingId);
     const instanceId = requiredString(
       body.instance_id,
       "conductor_instance_missing",
     );
     if (
       !binding ||
-      body.binding_id !== binding.bindingId ||
       (body.kind === "conductor_handshake" &&
         (body.conductor_id !== binding.conductorId ||
           body.conductor_short_hash !== binding.conductorShortHash ||
@@ -179,14 +180,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       throw new Error("conductor_handshake_mismatch");
     }
     if (body.kind === "conductor_handshake") {
-      if (
-        this.#activeInstanceId &&
-        this.#activeInstanceId !== instanceId
-      ) {
+      const activeInstanceId = this.#activeInstances.get(bindingId);
+      if (activeInstanceId && activeInstanceId !== instanceId) {
         throw new Error("conductor_instance_already_active");
       }
-      this.#activeInstanceId = instanceId;
-    } else if (this.#activeInstanceId !== instanceId) {
+      this.#activeInstances.set(bindingId, instanceId);
+    } else if (this.#activeInstances.get(bindingId) !== instanceId) {
       throw new Error("conductor_instance_mismatch");
     }
     const status =
@@ -242,14 +241,19 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     );
     const resolution = await gateway.resolveProject(conductorShortHash);
     if (resolution.kind === "resolved") {
-      const binding = this.store.getConductorBinding();
-      if (!binding) throw new Error("conductor_binding_missing");
+      const binding = this.#requestBinding(body);
+      if (binding.conductorShortHash !== conductorShortHash) {
+        throw new Error("conductor_binding_mismatch");
+      }
       const project = this.store.getProject(resolution.projectId);
       if (!project) throw new Error("linear_project_catalog_missing");
       return {
         kind: "resolved",
         resolved_project: {
           conductor_short_hash: conductorShortHash,
+          conductor_pool: resolution.conductorPool.map(({ conductorShortHash: hash }) => ({
+            conductor_short_hash: hash,
+          })),
           project: {
             project_id: project.projectId,
             organization_id: project.organizationId,
@@ -294,6 +298,9 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           target_issue_id: blocker.targetIssueId,
           target_state: blocker.targetState,
         })),
+        root_conductor_labels: root.rootConductorLabels.map(({ conductorShortHash }) => ({
+          conductor_short_hash: conductorShortHash,
+        })),
         root_managed_comments: root.rootManagedComments.map((comment) => ({
           comment_id: comment.commentId,
           issue_id: comment.issueId,
@@ -325,6 +332,9 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         root_issue_id: tree.rootIssueId,
         nodes: tree.nodes.map(issueSnapshot),
         root_phase_labels: tree.rootPhaseLabels,
+        root_conductor_labels: tree.rootConductorLabels.map(({ conductorShortHash }) => ({
+          conductor_short_hash: conductorShortHash,
+        })),
         root_managed_comments: tree.rootManagedComments.map((comment) => ({
           comment_id: comment.commentId,
           issue_id: comment.issueId,
@@ -374,7 +384,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       body.conductor_short_hash,
       "linear_conductor_short_hash_missing",
     );
-    const binding = this.store.getConductorBinding();
+    const binding = this.#requestBinding(body);
     if (!binding || binding.conductorShortHash !== conductorShortHash) {
       throw new Error("linear_conductor_short_hash_mismatch");
     }
@@ -427,6 +437,54 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         observed_at: tree.observedAt,
       },
     };
+  }
+
+  #requestBinding(body: Body) {
+    const requestedId = typeof body.binding_id === "string"
+      ? body.binding_id
+      : undefined;
+    if (requestedId) {
+      const binding = this.#bindingForId(requestedId);
+      if (!binding) throw new Error("conductor_binding_missing");
+      return binding;
+    }
+    const requestedHash = typeof body.conductor_short_hash === "string"
+      ? body.conductor_short_hash
+      : typeof body.project === "object" && body.project !== null && !Array.isArray(body.project) &&
+          typeof body.project.conductor_short_hash === "string"
+        ? body.project.conductor_short_hash
+        : undefined;
+    if (!requestedHash && this.#activeInstances.size === 1) {
+      return this.#bindingForId([...this.#activeInstances.keys()][0]!)!;
+    }
+    if (!requestedHash) throw new Error("conductor_binding_missing");
+    const candidates = this.#allBindings().filter(
+      ({ conductorShortHash }) => conductorShortHash === requestedHash,
+    );
+    if (candidates.length === 1) return candidates[0]!;
+    if (candidates.length > 1) throw new Error("conductor_binding_ambiguous");
+    throw new Error("conductor_binding_missing");
+  }
+
+  #bindingForId(bindingId: string) {
+    const store = this.store as PodiumConductorStoreInterface & {
+      getConductorBindingById?: (id: string) => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>;
+      listConductorBindings?: () => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>[];
+    };
+    const byId = store.getConductorBindingById?.(bindingId);
+    if (byId) return byId;
+    const listed = store.listConductorBindings?.().find(({ bindingId: id }) => id === bindingId);
+    if (listed) return listed;
+    const legacy = store.getConductorBinding();
+    return legacy?.bindingId === bindingId ? legacy : undefined;
+  }
+
+  #allBindings() {
+    const store = this.store as PodiumConductorStoreInterface & {
+      listConductorBindings?: () => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>[];
+    };
+    const listed = store.listConductorBindings?.();
+    return listed ?? (store.getConductorBinding() ? [store.getConductorBinding()!] : []);
   }
 
 }

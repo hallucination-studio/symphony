@@ -2,6 +2,7 @@
   "schema": "podium-conductor.schema.json#/$defs/CreateManagedNodeCommand",
   "value": {
     "kind": "create_managed_node",
+    "binding_id": "binding-1",
     "project": {
       "conductor_short_hash": "abc123",
       "expected_project_id": "project-1",

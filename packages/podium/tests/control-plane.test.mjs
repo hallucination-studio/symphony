@@ -149,7 +149,7 @@ test("Project catalog consumes every SDK page", async () => {
   store.close();
 });
 
-test("Binding creation labels one Project and rejects a second Binding", async () => {
+test("Binding creation allows multiple Conductors to join one Project pool", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
     kind: "oauth",
@@ -167,14 +167,15 @@ test("Binding creation labels one Project and rejects a second Binding", async (
     updatedAt: "2026-07-16T00:00:00Z",
   });
   const labels = [];
+  let sequence = 0;
   const client = {
     async assignConductorProjectLabel(input) {
       labels.push(input);
     },
   };
   const useCase = new ConductorBindingUseCase(store, client, {
-    createBindingId: () => "binding-1",
-    createConductorId: () => "conductor-1234567890",
+    createBindingId: () => `binding-${++sequence}`,
+    createConductorId: () => `conductor-${++sequence}`,
   });
   const repositoryContext = {
     repositoryHandle: "repo-handle-1",
@@ -197,14 +198,14 @@ test("Binding creation labels one Project and rejects a second Binding", async (
     },
   ]);
 
-  await assert.rejects(
-    useCase.create({
-      installationId: "installation-1",
-      projectId: "project-1",
-      repositoryContext,
-    }),
-    /conductor_binding_already_exists/,
-  );
+  const second = await useCase.create({
+    installationId: "installation-1",
+    projectId: "project-1",
+    repositoryContext,
+  });
+  assert.notEqual(second.conductorShortHash, binding.conductorShortHash);
+  assert.equal(store.listConductorBindings().length, 2);
+  assert.equal(labels.length, 2);
   store.close();
 });
 
@@ -274,6 +275,78 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     ["team", { projectId: "project-1", authorized: true }],
     ["project", { projectId: "project-1", labelName: `symphony:conductor/${binding.conductorShortHash}` }],
   ]);
+});
+
+test("product Root creation routes through the selected Conductor without seeding workflow facts", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  store.saveConductorBinding({
+    bindingId: "binding-1",
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123def456",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-1",
+      repositoryIdentity: "repo-1",
+      repositoryDisplayName: "Repo",
+      repositoryRoot: "/private/repo",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+  });
+  let input;
+  const sdk = {
+    async createRootIssue(value) {
+      input = value;
+      return { rootIssueId: "root-1", identifier: "SYM-1", projectId: "project-1" };
+    },
+  };
+  const services = new PodiumClientServicesImpl(
+    store,
+    {},
+    {},
+    { async startConductor() {} },
+    () => "2026-07-16T00:00:00Z",
+    () => sdk,
+  );
+
+  const result = await services.command({
+    kind: "create_root",
+    project_id: "project-1",
+    conductor_id: "conductor-1",
+    title: "A Root",
+    description: "A user-owned Root.",
+  });
+
+  assert.deepEqual(result, {
+    kind: "root_created",
+    root_issue_id: "root-1",
+    identifier: "SYM-1",
+    project_id: "project-1",
+    conductor_short_hash: "abc123def456",
+  });
+  assert.deepEqual(input, {
+    projectId: "project-1",
+    conductorShortHash: "abc123def456",
+    title: "A Root",
+    description: "A user-owned Root.",
+  });
+  store.close();
 });
 
 test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {

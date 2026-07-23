@@ -1,10 +1,12 @@
+import { createTargetWorkflowRequestSignal } from "./target-workflow-deadline.mjs";
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const MAX_TITLE_LENGTH = 256;
 const MAX_DESCRIPTION_LENGTH = 16_384;
 const MAX_HUMAN_BODY_LENGTH = 8_192;
 const MANAGED_RECORD_PREFIX = "<!-- symphony managed-record";
-const ROOT_INPUT_FIELDS = new Set(["teamId", "projectId", "stateId", "delegateId", "title", "description"]);
+const ROOT_INPUT_FIELDS = new Set(["teamId", "projectId", "stateId", "delegateId", "conductorShortHash", "title", "description"]);
 const HUMAN_INPUT_FIELDS = new Set(["projectId", "issueId", "body"]);
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -12,7 +14,20 @@ const CREATE_ROOT_MUTATION = `
   mutation TargetWorkflowCreateRoot($input: IssueCreateInput!) {
     issueCreate(input: $input) {
       success
-      issue { id identifier project { id } parent { id } state { name } }
+      issue { id identifier project { id } parent { id } state { name } labels { nodes { name } } }
+    }
+  }
+`;
+
+const VALIDATE_ROOT_ROUTE_QUERY = `
+  query TargetWorkflowValidateRootRoute($projectId: String!, $labelName: String!) {
+    project(id: $projectId) {
+      id
+      labels(first: 250) { nodes { name isGroup archivedAt } pageInfo { hasNextPage } }
+    }
+    issueLabels(first: 10, filter: { name: { eq: $labelName } }) {
+      nodes { id name isGroup archivedAt }
+      pageInfo { hasNextPage }
     }
   }
 `;
@@ -28,14 +43,14 @@ const APPEND_HUMAN_RESPONSE_MUTATION = `
 
 export function createTargetWorkflowExternalInputs({
   developmentToken,
-  budget,
+  observer,
+  signal,
   fetch = globalThis.fetch,
   log = () => {},
 } = {}) {
   if (typeof developmentToken !== "string" || developmentToken.length === 0) {
     throw new Error("target_inputs_token_missing");
   }
-  if (!hasRunBudget(budget)) throw new Error("target_inputs_budget_missing");
   if (typeof fetch !== "function") throw new Error("target_inputs_fetch_invalid");
   if (typeof log !== "function") throw new Error("target_inputs_log_invalid");
 
@@ -46,13 +61,41 @@ export function createTargetWorkflowExternalInputs({
 
   async function createRoot(input) {
     const root = validateRootInput(input);
-    budget?.recordLogicalOperation();
+    let issueLabelId;
+    if (root.conductorShortHash !== undefined) {
+      const labelName = `symphony:conductor/${root.conductorShortHash}`;
+      observer?.recordLogicalOperation();
+      const route = await graphql(VALIDATE_ROOT_ROUTE_QUERY, {
+        projectId: root.projectId,
+        labelName,
+      });
+      const projectLabels = route.project?.labels;
+      const pool = Array.isArray(projectLabels?.nodes)
+        ? projectLabels.nodes.filter((label) => label?.isGroup !== true &&
+            label?.archivedAt === null && typeof label?.name === "string" &&
+            label.name.startsWith("symphony:conductor/")).map((label) => label.name.slice("symphony:conductor/".length))
+        : [];
+      const issueLabels = route.issueLabels;
+      const matches = Array.isArray(issueLabels?.nodes)
+        ? issueLabels.nodes.filter((label) => label?.name === labelName &&
+            label?.isGroup !== true && label?.archivedAt === null)
+        : [];
+      if (route.project?.id !== root.projectId || projectLabels?.pageInfo?.hasNextPage !== false ||
+          issueLabels?.pageInfo?.hasNextPage !== false || pool.length === 0 ||
+          !pool.includes(root.conductorShortHash) || matches.length !== 1 ||
+          !isSafeId(matches[0]?.id)) {
+        throw new Error("target_inputs_root_route_invalid");
+      }
+      issueLabelId = matches[0].id;
+    }
+    observer?.recordLogicalOperation();
     const data = await graphql(CREATE_ROOT_MUTATION, {
       input: {
         teamId: root.teamId,
         projectId: root.projectId,
         stateId: root.stateId,
         ...(root.delegateId === undefined ? {} : { delegateId: root.delegateId }),
+        ...(issueLabelId === undefined ? {} : { labelIds: [issueLabelId] }),
         title: root.title,
         description: root.description,
       },
@@ -61,7 +104,9 @@ export function createTargetWorkflowExternalInputs({
     if (!issue || issue.success !== true || !issue.issue ||
         !isSafeId(issue.issue.id) || typeof issue.issue.identifier !== "string" ||
         !isSafeId(issue.issue.identifier) || issue.issue.project?.id !== root.projectId ||
-        issue.issue.parent !== null || typeof issue.issue.state?.name !== "string") {
+        issue.issue.parent !== null || typeof issue.issue.state?.name !== "string" ||
+        (root.conductorShortHash !== undefined &&
+          !issue.issue.labels?.nodes?.some((label) => label?.name === `symphony:conductor/${root.conductorShortHash}`))) {
       throw new Error("target_inputs_root_scope_invalid");
     }
     return Object.freeze({
@@ -75,7 +120,7 @@ export function createTargetWorkflowExternalInputs({
 
   async function appendHumanResponse(input) {
     const response = validateHumanInput(input);
-    budget?.recordLogicalOperation();
+    observer?.recordLogicalOperation();
     const data = await graphql(APPEND_HUMAN_RESPONSE_MUTATION, {
       input: { issueId: response.issueId, body: response.body },
     });
@@ -95,7 +140,6 @@ export function createTargetWorkflowExternalInputs({
   async function graphql(query, variables) {
     const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
     log({ event: "target_inputs_request_started", operation });
-    const reservation = budget?.reservePhysicalRequest();
     let observed = false;
     let response;
     try {
@@ -103,16 +147,19 @@ export function createTargetWorkflowExternalInputs({
         method: "POST",
         headers: { authorization: developmentToken, "content-type": "application/json" },
         body: JSON.stringify({ query, variables, operationName: operation }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: createTargetWorkflowRequestSignal(signal, REQUEST_TIMEOUT_MS),
       });
-      budget?.observe({ status: response.status, ...readRateWindows(response.headers) });
+      observer?.observe({ status: response.status, ...readRateWindows(response.headers) });
       observed = true;
-    } catch {
-      if (!observed) budget?.observe({});
+      if (response.status === 429) throw new Error("target_inputs_rate_limited");
+    } catch (error) {
+      if (!observed) observer?.observe({});
+      if (observer?.snapshot?.()?.rateLimited === true) {
+        throw new Error("target_inputs_rate_limited");
+      }
+      if (error?.message === "target_inputs_rate_limited") throw error;
       log({ event: "target_inputs_request_failed", operation, timeoutMs: REQUEST_TIMEOUT_MS });
       throw new Error("target_inputs_request_failed");
-    } finally {
-      reservation?.release();
     }
     let body;
     try {
@@ -153,16 +200,13 @@ export function createTargetWorkflowExternalInputs({
       ? undefined : { ...(limit === undefined ? {} : { limit }), ...(remaining === undefined ? {} : { remaining }), ...(reset === undefined ? {} : { reset }) };
   }
 
-  function hasRunBudget(value) {
-    return Boolean(value) && typeof value.recordLogicalOperation === "function" &&
-      typeof value.reservePhysicalRequest === "function" && typeof value.observe === "function";
-  }
 }
 
 function validateRootInput(input) {
   assertClosedObject(input, ROOT_INPUT_FIELDS, "target_inputs_root_input_invalid");
   if (!isSafeId(input.teamId) || !isSafeId(input.projectId) || !isSafeId(input.stateId) ||
       (input.delegateId !== undefined && !isSafeId(input.delegateId)) ||
+      (input.conductorShortHash !== undefined && !/^[a-f0-9]{12}$/u.test(input.conductorShortHash)) ||
       !boundedText(input.title, MAX_TITLE_LENGTH) ||
       !boundedText(input.description, MAX_DESCRIPTION_LENGTH)) {
     throw new Error("target_inputs_root_input_invalid");

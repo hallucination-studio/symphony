@@ -1,27 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LinearRunBudgetImpl } from "@symphony/podium";
+import { LinearRequestObserverImpl } from "@symphony/podium";
 import { projectTargetWorkflowFacts } from "../../tools/e2e/target-workflow-facts.mjs";
 import { createTargetWorkflowSnapshotTransport as createRawTargetWorkflowSnapshotTransport } from "../../tools/e2e/target-workflow-transport.mjs";
 
 function createTargetWorkflowSnapshotTransport(input = {}) {
-  return createRawTargetWorkflowSnapshotTransport({ budget: new LinearRunBudgetImpl(), ...input });
+  return createRawTargetWorkflowSnapshotTransport({ observer: new LinearRequestObserverImpl(), ...input });
 }
 
-test("target snapshot transport rejects a credentialed transport without a run budget", () => {
-  assert.throws(
-    () => createRawTargetWorkflowSnapshotTransport({ developmentToken: "linear-token", fetch: async () => {} }),
-    /target_transport_budget_missing/u,
-  );
+test("target snapshot transport allows a credentialed transport without local admission", () => {
+  assert.doesNotThrow(() => createRawTargetWorkflowSnapshotTransport({ developmentToken: "linear-token", fetch: async () => {} }));
 });
 
 test("target transport paginates Linear facts and feeds the durable projection", async () => {
   const calls = [];
-  const budget = new LinearRunBudgetImpl();
+  const observer = new LinearRequestObserverImpl();
   const transport = createTargetWorkflowSnapshotTransport({
     developmentToken: "linear-dev-token",
-    budget,
+    observer,
     fetch: fakeFetch(calls),
   });
 
@@ -33,8 +30,8 @@ test("target transport paginates Linear facts and feeds the durable projection",
   const facts = projectTargetWorkflowFacts(snapshot);
 
   assert.equal(calls.length, 7);
-  assert.equal(budget.snapshot().physicalRequests, 7);
-  assert.equal(budget.snapshot().logicalOperations, 1);
+  assert.equal(observer.snapshot().physicalRequests, 7);
+  assert.equal(observer.snapshot().logicalOperations, 1);
   assert.deepEqual(facts.plan.workNodeIds, ["work-1"]);
   assert.equal(facts.plan.dagSealed, true);
   assert.equal(snapshot.issues.find(({ id }) => id === "work-1").nodeKey, "work-key-1");
@@ -43,6 +40,67 @@ test("target transport paginates Linear facts and feeds the durable projection",
     { relationKind: "blocks", sourceIssueId: "plan-1", targetIssueId: "work-1" },
     { relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "verify-1" },
   ]);
+});
+
+test("target snapshot transport terminates immediately on a real 429", async () => {
+  const observer = { statuses: [], recordLogicalOperation() {}, observe(value) { this.statuses.push(value.status); } };
+  const transport = createRawTargetWorkflowSnapshotTransport({
+    developmentToken: "linear-token",
+    observer,
+    fetch: async () => response({ errors: [{ message: "rate limited" }] }, 429),
+  });
+  await assert.rejects(
+    transport.readSnapshot({
+      rootIssueId: "root-1", projectId: "project-1",
+      git: { head: "a".repeat(40), branch: "main" },
+    }),
+    /target_transport_rate_limited/u,
+  );
+  assert.deepEqual(observer.statuses, [429]);
+});
+
+test("target snapshot transport preserves a shared 429 when the request is aborted concurrently", async () => {
+  const observer = {
+    recordLogicalOperation() {},
+    observe() {},
+    snapshot() { return { rateLimited: true }; },
+  };
+  const transport = createRawTargetWorkflowSnapshotTransport({
+    developmentToken: "linear-token",
+    observer,
+    fetch: async () => { throw new DOMException("aborted", "AbortError"); },
+  });
+  await assert.rejects(
+    transport.readSnapshot({
+      rootIssueId: "root-1", projectId: "project-1",
+      git: { head: "a".repeat(40), branch: "main" },
+    }),
+    /target_transport_rate_limited/u,
+  );
+});
+
+test("target snapshot transport combines caller cancellation with request timeout", async () => {
+  const controller = new AbortController();
+  let observedSignal;
+  const transport = createRawTargetWorkflowSnapshotTransport({
+    developmentToken: "linear-token",
+    signal: controller.signal,
+    fetch: async (_url, request) => {
+      observedSignal = request.signal;
+      controller.abort();
+      throw new Error("request_aborted");
+    },
+  });
+
+  await assert.rejects(
+    transport.readSnapshot({
+      rootIssueId: "root-1", projectId: "project-1",
+      git: { head: "a".repeat(40), branch: "main" },
+    }),
+    /target_transport_request_failed/u,
+  );
+  assert.notEqual(observedSignal, controller.signal);
+  assert.equal(observedSignal.aborted, true);
 });
 
 test("target transport consumes paginated Issue comments without duplicating records", async () => {
@@ -65,7 +123,7 @@ test("root-scoped transport batches facts by tree depth instead of querying each
   const calls = [];
   const transport = createTargetWorkflowSnapshotTransport({
     developmentToken: "linear-dev-token",
-    budget: new LinearRunBudgetImpl(),
+    observer: new LinearRequestObserverImpl(),
     rootScoped: true,
     fetch: rootScopedFetch(calls),
   });
@@ -75,16 +133,23 @@ test("root-scoped transport batches facts by tree depth instead of querying each
     git: { head: "b".repeat(40), branch: "symphony/runs/root-1" },
   });
   assert.equal(snapshot.issues.length, 5);
-  assert.ok(calls.length <= 6);
+  assert.equal(calls.length, 4);
   assert.equal(calls.some(({ operation }) => operation === "TargetWorkflowIssueDetails"), false);
+  const childQueries = calls.filter(({ operation }) => operation === "TargetWorkflowRootScopedChildren");
+  assert.ok(childQueries.length > 0);
+  assert.ok(childQueries.every(({ query }) => query.includes("comments(first: 8")));
+  assert.ok(childQueries.every(({ query }) => query.includes("inverseRelations(first: 16")));
+  assert.equal(calls.some(({ operation }) => operation === "TargetWorkflowProjectIssues"), false);
+  assert.ok(childQueries.every(({ query }) => query.includes("parent: { id: { in: $parentIds } }")));
+  assert.ok(childQueries.every(({ variables }) => Array.isArray(variables.parentIds)));
 });
 
 test("root-scoped transport paginates nested comments and relations by cursor groups", async () => {
   const calls = [];
-  const budget = new LinearRunBudgetImpl();
+  const observer = new LinearRequestObserverImpl();
   const transport = createTargetWorkflowSnapshotTransport({
     developmentToken: "linear-dev-token",
-    budget,
+    observer,
     rootScoped: true,
     fetch: rootScopedFetch(calls, { paginateRootDetails: true }),
   });
@@ -97,7 +162,7 @@ test("root-scoped transport paginates nested comments and relations by cursor gr
   assert.equal(snapshot.issues.length, 5);
   assert.equal(snapshot.comments.length, 12);
   assert.equal(snapshot.relations.length, 2);
-  assert.equal(budget.snapshot().physicalRequests, calls.length);
+  assert.equal(observer.snapshot().physicalRequests, calls.length);
   assert.ok(calls.some(({ variables }) => variables.commentsAfter === "root-comment-cursor"));
   assert.ok(calls.some(({ variables }) => variables.relationsAfter === "work-relation-cursor"));
 });
@@ -149,7 +214,7 @@ test("target transport rejects foreign, incomplete, or malformed GraphQL facts",
 function fakeFetch(calls, options = {}) {
   return async (_url, request) => {
     const body = JSON.parse(request.body);
-    calls.push({ operation: body.operationName, variables: body.variables });
+    calls.push({ operation: body.operationName, query: body.query, variables: body.variables });
     if (options.malformed) return response({ data: { project: null } });
     if (body.operationName === "TargetWorkflowProjectIssues") {
       if (options.foreignProject) return response({ data: { project: { id: "project-2", issues: page([]) } } });
@@ -191,7 +256,7 @@ function fakeFetch(calls, options = {}) {
 function rootScopedFetch(calls, options = {}) {
   return async (_url, request) => {
     const body = JSON.parse(request.body);
-    calls.push({ operation: body.operationName, variables: body.variables });
+    calls.push({ operation: body.operationName, query: body.query, variables: body.variables });
     const variables = body.variables;
     const allIds = ["root-1", "cycle-1", "plan-1", "work-1", "verify-1"];
     const ids = variables.parentIds
@@ -321,6 +386,6 @@ function page(nodes, endCursor) {
   return { nodes, pageInfo: { hasNextPage: endCursor !== undefined, endCursor: endCursor ?? null } };
 }
 
-function response(body) {
-  return { ok: true, status: 200, async json() { return body; } };
+function response(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, async json() { return body; } };
 }

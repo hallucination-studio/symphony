@@ -12,6 +12,7 @@ Root是Symphony跨Root调度、workspace和恢复单位：
 ```text
 RootRunView
   = Root Issue custom status
+  + Root Conductor Label routing
   + Root Primary Status Comment
   + ordered Cycle Issues
   + each Cycle's Bootstrap Plan or sealed Work | Verify DAG
@@ -29,6 +30,11 @@ RootRunView
 1 worktree
 0..N sibling Cycle Issues
 ```
+
+Root Issue上的唯一Root Conductor Label必须属于Project Conductor Pool，并在claim前选择唯一eligible
+Conductor。该Label是routing而不是ownership；Root Primary Status Comment中的full `conductor_id`才是
+claim后的durable ownership。Project只有一个pool member时，未标记Root隐式路由给该member；Project有
+多个member时，未标记、多个或pool外Label都使Root fail closed。Cycle和typed Node不得携带Conductor Label。
 
 Cycle Issue是Root direct child和一轮bootstrap-to-sealed DAG lifecycle的container。Cycle自身不可dispatch；它的children是closed
 typed Plan、Work、Verify Nodes。Root、Cycle和Node都使用Linear Team workflow中的真实Issue status；
@@ -179,7 +185,7 @@ Activity evidence最少满足：
 | `failed` | stable error code、相关Cycle/node、Git HEAD/check result（如相关） |
 | `delivered` | passed Cycle/Verify、verified HEAD、PR/branch identity和required checks |
 
-Primary marker保存closed ownership、Profile和delivery identity，不保存authoritative current Cycle、ready
+Primary marker保存closed ownership、Profile和delivery identity，不保存Root routing、authoritative current Cycle、ready
 node、accepted Result、Queue或Provider transcript。
 
 ### 3.2 Stage execution comments

@@ -32,8 +32,11 @@
 | Conductor Short Hash | `ConductorShortHash` / `conductor_short_hash` | 用于Linear Label的短公开标识 |
 | Repository Context | `RepositoryContext` / `repository_context` | repository identity、display、root和base branch的绑定输入 |
 | Conductor Binding | `ConductorBinding` | Podium持久化的Conductor Identity + Repository Context + desired state；不包含权威Project |
-| Conductor Project Label | `ConductorProjectLabel` | Linear Project上的`symphony:conductor/<short-hash>` |
-| Resolved Conductor Project | `ResolvedConductorProject` | 当前唯一携带Conductor Project Label的Project |
+| Conductor Project Label | `ConductorProjectLabel` | Linear Project上的`symphony:conductor/<short-hash>`；表示该Conductor是Project Conductor Pool成员 |
+| Project Conductor Pool | `ProjectConductorPool` | 一个Project上全部唯一Conductor Project Labels形成的非空执行成员集合 |
+| Root Conductor Label | `RootConductorLabel` | Root Issue上的唯一`symphony:conductor/<short-hash>`；从Project Conductor Pool中选择该Root的唯一执行者 |
+| Root Routing | `RootRouting` | 由Project Conductor Pool和Root Conductor Label派生的routed、unrouted或conflict路由事实；不是runtime ownership或lease |
+| Resolved Conductor Project | `ResolvedConductorProject` | 当前唯一携带本Conductor Project Label的Project；该Project可以同时携带其他Conductor Project Labels |
 | Project Resolution | `ProjectResolutionResult` | unique、unbound或conflict的解析结果 |
 | Last Resolved Project | `lastResolvedProjectId` / `last_resolved_project_id` | Podium保存的可丢弃观察，仅用于Desktop解释Project变化 |
 

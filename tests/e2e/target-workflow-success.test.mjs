@@ -81,6 +81,96 @@ test("target success orchestration creates, approves, and returns only durable f
   assert.equal(Object.hasOwn(result, "snapshot"), false);
 });
 
+test("target success retries a partial Human action for the same Root", async () => {
+  let pendingReads = 0;
+  const validPending = {
+    status: "waiting", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
+    requestKind: "needs_approval", actionId: "action-1", contextDigest: "a".repeat(64),
+  };
+  const runner = {
+    async createRoot() { return { rootIssueId: "root-1", projectId: "project-1" }; },
+    async observePendingHuman() {
+      pendingReads += 1;
+      return { pendingHuman: pendingReads === 1
+        ? { status: "waiting", rootIssueId: "root-1", requestKind: "needs_approval" }
+        : validPending };
+    },
+    async appendHumanResponse() {},
+    async observeRoot() {
+      return { facts: { root: { projectId: "project-1", rootIssueId: "root-1" }, plan: {}, stageExecutions: [], progress: {} } };
+    },
+  };
+
+  await runTargetSuccessScenario({
+    runner,
+    rootInput: { title: "Target success" },
+    observationInput: { git: { head: "b".repeat(40), branch: "symphony/runs/root-1" } },
+    humanResponseBody: "Approved.",
+    timeoutMs: 1_000,
+    pollIntervalMs: 0,
+    sleep: async () => {},
+  });
+  assert.equal(pendingReads, 2);
+});
+
+test("target success accepts the generated sha256-prefixed Human context digest", async () => {
+  let appended = false;
+  const runner = {
+    async createRoot() { return { rootIssueId: "root-1", projectId: "project-1" }; },
+    async observePendingHuman() {
+      return { pendingHuman: {
+        status: "waiting", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
+        requestKind: "needs_approval", actionId: "action-1", contextDigest: `sha256:${"a".repeat(64)}`,
+      } };
+    },
+    async appendHumanResponse() { appended = true; },
+    async observeRoot() {
+      return { facts: { root: { projectId: "project-1", rootIssueId: "root-1" }, plan: {}, stageExecutions: [], progress: {} } };
+    },
+  };
+
+  await runTargetSuccessScenario({
+    runner,
+    rootInput: { title: "Target success" },
+    observationInput: { git: { head: "b".repeat(40), branch: "symphony/runs/root-1" } },
+    humanResponseBody: "Approved.",
+    timeoutMs: 1_000,
+    pollIntervalMs: 0,
+    sleep: async () => {},
+  });
+  assert.equal(appended, true);
+});
+
+test("target success fails malformed pending output instead of retrying to the deadline", async () => {
+  let pendingReads = 0;
+  const runner = {
+    async createRoot() { return { rootIssueId: "root-1", projectId: "project-1" }; },
+    async observePendingHuman() {
+      pendingReads += 1;
+      return { pendingHuman: {
+        status: "waiting", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
+        requestKind: "needs_approval", actionId: "action-1", contextDigest: "malformed",
+      } };
+    },
+    async appendHumanResponse() { throw new Error("must_not_write"); },
+    async observeRoot() { throw new Error("must_not_observe_root"); },
+  };
+
+  await assert.rejects(
+    runTargetSuccessScenario({
+      runner,
+      rootInput: { title: "Target success" },
+      observationInput: { git: { head: "b".repeat(40), branch: "symphony/runs/root-1" } },
+      humanResponseBody: "Approved.",
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      sleep: async () => {},
+    }),
+    /target_success_pending_observation_invalid/u,
+  );
+  assert.equal(pendingReads, 1);
+});
+
 test("target success orchestration fails closed on a non-approval Human action", async () => {
   const progress = [];
   const runner = {

@@ -208,7 +208,10 @@ def _stage_sandbox(envelope: dict[str, Any]) -> Sandbox:
 
 def _stage_prompt(envelope: dict[str, Any]) -> str:
     instructions = envelope["instruction_bundle"]["stage_instructions"]
-    output_schema = _stage_output_schema(envelope["stage_execution"]["stage"])
+    output_schema = _stage_output_schema(
+        envelope["stage_execution"]["stage"],
+        envelope,
+    )
     context = {
         "stage": envelope["stage_execution"]["stage"],
         "target": envelope["target"],
@@ -220,8 +223,15 @@ def _stage_prompt(envelope: dict[str, Any]) -> str:
         "limits": envelope["limits"],
         "context_digest": envelope["context_digest"],
     }
+    work_guidance = (
+        "For Work, execute every check you report before returning. Every returned check "
+        "must have outcome=passed and artifact_revision equal to the repository baseline.\n"
+        if envelope["stage_execution"]["stage"] == "work"
+        else ""
+    )
     return (
         f"STAGE INSTRUCTIONS:\n{instructions}\n"
+        f"{work_guidance}"
         "Return one JSON object with an outcome property matching this schema:\n"
         f"{json.dumps(output_schema, separators=(',', ':'))}\n"
         "STAGE CONTEXT (JSON):\n"
@@ -229,12 +239,15 @@ def _stage_prompt(envelope: dict[str, Any]) -> str:
     )
 
 
-def _stage_output_schema(stage: str) -> dict[str, Any]:
+def _stage_output_schema(
+    stage: str,
+    envelope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         completed_definition = STAGE_COMPLETED_OUTCOME_DEFINITION[stage]
     except KeyError as error:
         raise ValueError("unsupported_stage") from error
-    return {
+    schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -253,6 +266,57 @@ def _stage_output_schema(stage: str) -> dict[str, Any]:
         },
         "required": ["outcome"],
     }
+    if stage == "verify" and envelope is not None:
+        _restrict_verify_keys(schema, envelope)
+    if stage == "work" and envelope is not None:
+        _restrict_work_checks(schema, envelope)
+    return schema
+
+
+def _restrict_verify_keys(schema: dict[str, Any], envelope: dict[str, Any]) -> None:
+    workflow_context = envelope.get("workflow_context")
+    if not isinstance(workflow_context, dict):
+        return
+    approved_plan = workflow_context.get("approved_plan")
+    verify_contract = approved_plan.get("verify_contract") if isinstance(approved_plan, dict) else None
+    criteria = verify_contract.get("acceptance_criteria") if isinstance(verify_contract, dict) else None
+    checks = workflow_context.get("required_checks")
+    criterion_keys = _unique_contract_keys(criteria)
+    check_keys = _unique_contract_keys(checks)
+    completed = schema["properties"]["outcome"]["oneOf"][0]
+    if criterion_keys:
+        criteria_schema = completed["properties"]["criteria_results"]
+        criteria_schema["minItems"] = len(criterion_keys)
+        criteria_schema["maxItems"] = len(criterion_keys)
+        criteria_schema["items"]["properties"]["criterion_key"]["enum"] = criterion_keys
+    if check_keys:
+        checks_schema = completed["properties"]["checks"]
+        checks_schema["minItems"] = len(check_keys)
+        checks_schema["maxItems"] = len(check_keys)
+        checks_schema["items"]["properties"]["check_key"]["enum"] = check_keys
+
+
+def _restrict_work_checks(schema: dict[str, Any], envelope: dict[str, Any]) -> None:
+    completed = schema["properties"]["outcome"]["oneOf"][0]
+    checks_schema = completed["properties"]["checks"]
+    checks_schema["items"]["properties"]["outcome"] = {"const": "passed"}
+    repository_context = envelope.get("repository_context")
+    baseline_revision = repository_context.get("workspace_revision") if isinstance(repository_context, dict) else None
+    if isinstance(baseline_revision, str):
+        checks_schema["items"]["properties"]["artifact_revision"] = {"const": baseline_revision}
+
+
+def _unique_contract_keys(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    keys: list[str] = []
+    for entry in value:
+        if not isinstance(entry, dict) or not isinstance(entry.get("criterion_key", entry.get("check_key")), str):
+            return []
+        key = entry.get("criterion_key", entry.get("check_key"))
+        if key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _resolve_contract_schema(reference: str, current_schema_id: str) -> Any:

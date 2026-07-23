@@ -14,8 +14,16 @@ import type {
 import {
   DEFAULT_ROOT_CONVERGENCE_POLICY,
   assessRootConvergence,
+  createDefaultRootConvergencePolicy,
   toConvergenceRecord,
 } from "../internal/RootConvergencePolicy.js";
+
+test("default Root convergence policy has a finite five-minute deadline", () => {
+  const policy = createDefaultRootConvergencePolicy(Date.parse("2026-07-23T00:00:00.000Z"));
+
+  assert.equal(policy.deadlineAt, "2026-07-23T00:05:00.000Z");
+  assert.notEqual(DEFAULT_ROOT_CONVERGENCE_POLICY.deadlineAt, "9999-12-31T23:59:59.999Z");
+});
 
 test("rebuilds cycle, finding, no-progress, and token facts from the full Root history", () => {
   const view = rootView([

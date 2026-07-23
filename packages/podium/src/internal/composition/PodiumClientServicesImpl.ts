@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
-import type { ConductorSummaryView } from "../../public/DesktopViewInterface.js";
+import type { ConductorSummaryView, RootSummaryView } from "../../public/DesktopViewInterface.js";
 import type { PodiumClientServices } from "../../public/PodiumClientProtocolHandler.js";
 import type { PodiumDesktopHostPorts } from "../../public/PodiumDesktopHostPorts.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
@@ -88,6 +88,8 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       }
       case "create_conductor":
         return this.#createConductor(body);
+      case "create_root":
+        return this.#createRoot(body);
       case "start_conductor":
       case "stop_conductor":
       case "restart_conductor":
@@ -197,6 +199,44 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     return accepted("create_conductor", "starting");
   }
 
+  async #createRoot(body: Body): Promise<JsonValue> {
+    const installation = this.store.getOnlyLinearCredential();
+    if (!installation) throw new Error("linear_installation_missing");
+    const projectId = requiredString(body.project_id, "project_id_missing");
+    const project = this.store.getProject(projectId);
+    if (!project || project.installationId !== installation.installationId || project.organizationId !== installation.organizationId) {
+      throw new Error("conductor_project_invalid");
+    }
+    const bindings = this.#bindings();
+    const conductorId = body.conductor_id === undefined
+      ? undefined
+      : requiredString(body.conductor_id, "conductor_id_invalid");
+    const sdk = this.createLinearSdk(installation);
+    let binding = conductorId === undefined
+      ? undefined
+      : bindings.find((candidate) => candidate.conductorId === conductorId);
+    if (conductorId !== undefined && !binding) throw new Error("conductor_binding_missing");
+    if (!binding) {
+      const pool = await sdk.readConductorProjectPool({ projectId });
+      if (pool.members.length !== 1) throw new Error("root_conductor_selection_required");
+      binding = bindings.find((candidate) => candidate.conductorShortHash === pool.members[0]);
+      if (!binding) throw new Error("conductor_binding_missing");
+    }
+    const created = await sdk.createRootIssue({
+      projectId,
+      conductorShortHash: binding.conductorShortHash,
+      title: requiredString(body.title, "root_title_missing"),
+      description: requiredString(body.description, "root_description_missing"),
+    });
+    return {
+      kind: "root_created",
+      root_issue_id: created.rootIssueId,
+      identifier: created.identifier,
+      project_id: created.projectId,
+      conductor_short_hash: binding.conductorShortHash,
+    };
+  }
+
   async #controlConductor(body: Body): Promise<JsonValue> {
     const binding = this.#binding(
       requiredString(body.conductor_id, "conductor_id_missing"),
@@ -227,57 +267,100 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   async #overview(): Promise<JsonValue> {
     const now = this.now();
     const installation = this.store.getOnlyLinearCredential();
-    const binding = this.store.getConductorBinding();
-    const observation = binding
-      ? this.store.getRuntimeObservation(binding.bindingId)
-      : undefined;
-    const profiles = binding
-      ? await this.#profiles(binding.conductorId)
-      : [];
+    const bindings = this.#bindings();
+    const observations = new Map(
+      bindings.map((binding) => [
+        binding.bindingId,
+        this.store.getRuntimeObservation(binding.bindingId),
+      ]),
+    );
+    const profiles = (await Promise.all(
+      bindings.map((binding) => this.#profiles(binding.conductorId)),
+    )).flat();
     const problems: Array<{
       object_kind: string;
       summary: string;
       impact: string;
       observed_at: string;
     }> = [];
-    let roots: Awaited<
+    const roots: Array<Awaited<
       ReturnType<LinearGatewayProtocolHandlerImpl["listAllRootIssues"]>
-    > = [];
-    let usage: Awaited<
+    >[number]> = [];
+    const usage: Array<Awaited<
       ReturnType<LinearGatewayProtocolHandlerImpl["listAllRootUsage"]>
-    > = [];
-    if (installation && observation?.lastResolvedProjectId) {
+    >[number]> = [];
+    const projectPools = new Map<string, string[]>();
+    const resolutions = new Map<string, Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["resolveProject"]>>>();
+    if (installation) {
       const gateway = this.#gateway(installation);
-      try {
-        roots = await gateway.listAllRootIssues(
-          observation.lastResolvedProjectId,
-        );
-        usage = await gateway.listAllRootUsage(
-          observation.lastResolvedProjectId,
-        );
-      } catch (error) {
+      for (const binding of bindings) {
+        try {
+          const resolution = await gateway.resolveProject(binding.conductorShortHash);
+          resolutions.set(binding.bindingId, resolution);
+          if (resolution.kind === "resolved") {
+            projectPools.set(
+              resolution.projectId,
+              resolution.conductorPool.map(({ conductorShortHash }) => conductorShortHash),
+            );
+          }
+        } catch (error) {
+          problems.push({
+            object_kind: "conductor_project",
+            summary: sanitizedReason(error),
+            impact: "The Conductor Project cannot be resolved; its Roots remain paused.",
+            observed_at: now,
+          });
+        }
+      }
+      const projectIds = [...new Set(
+        bindings
+          .map((binding) => observations.get(binding.bindingId)?.lastResolvedProjectId)
+          .filter((projectId): projectId is string => projectId !== undefined),
+      )];
+      for (const projectId of projectIds) {
+        try {
+          const [projectRoots, projectUsage] = await Promise.all([
+            gateway.listAllRootIssues(projectId),
+            gateway.listAllRootUsage(projectId),
+          ]);
+          roots.push(...projectRoots);
+          usage.push(...projectUsage);
+        } catch (error) {
+          problems.push({
+            object_kind: "linear_gateway",
+            summary: sanitizedReason(error),
+            impact:
+              "Linear workflow data is unavailable; execution remains blocked until a fresh read succeeds.",
+            observed_at: now,
+          });
+        }
+      }
+    }
+    for (const binding of bindings) {
+      const observation = observations.get(binding.bindingId);
+      if (
+        observation &&
+        observation.status === "ready" &&
+        Date.parse(now) - Date.parse(observation.observedAt) > 60_000
+      ) {
         problems.push({
-          object_kind: "linear_gateway",
-          summary: sanitizedReason(error),
+          object_kind: "conductor",
+          summary: "conductor_not_responding",
           impact:
-            "Linear workflow data is unavailable; execution remains blocked until a fresh read succeeds.",
-          observed_at: now,
+            "The last heartbeat is stale. Symphony will not start a replacement until the old process tree is confirmed exited.",
+          observed_at: observation.observedAt,
+        });
+      }
+      if (observation && observation.status !== "ready") {
+        problems.push({
+          object_kind: "conductor",
+          summary: observation.sanitizedSummary,
+          impact: "Local execution is paused until this problem is resolved.",
+          observed_at: observation.observedAt,
         });
       }
     }
-    if (
-      observation &&
-      observation.status === "ready" &&
-      Date.parse(now) - Date.parse(observation.observedAt) > 60_000
-    ) {
-      problems.push({
-        object_kind: "conductor",
-        summary: "conductor_not_responding",
-        impact:
-          "The last heartbeat is stale. Symphony will not start a replacement until the old process tree is confirmed exited.",
-        observed_at: observation.observedAt,
-      });
-    }
+    const uniqueRoots = [...new Map(roots.map((root) => [root.issue.issueId, root])).values()];
     const totals = usage.reduce(
       (sum, item) => ({
         input_tokens: sum.input_tokens + item.inputTokens,
@@ -314,35 +397,36 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
             observed_at: project.updatedAt,
           }))
         : [],
-      conductors: binding ? [conductorSummary(binding, observation, now)] : [],
+      conductors: bindings.map((binding) => conductorSummary(
+        binding,
+        observations.get(binding.bindingId),
+        now,
+        resolutions.get(binding.bindingId),
+      )),
       profiles,
-      active_roots: roots
+      active_roots: uniqueRoots
         .filter(({ issue }) =>
           issue.state !== "Done" &&
           issue.state !== "Canceled" &&
           issue.state !== "In Review",
         )
-        .map(({ issue }) => rootSummary(issue, now)),
-      review_roots: roots
+        .map(({ issue }) => rootSummary(issue, now, {
+          pool: issue.projectId ? projectPools.get(issue.projectId) ?? [] : [],
+          bindings,
+        })),
+      review_roots: uniqueRoots
         .filter(({ issue }) => issue.state === "In Review")
-        .map(({ issue }) => rootSummary(issue, now)),
-      completed_root_count: roots.filter(
+        .map(({ issue }) => rootSummary(issue, now, {
+          pool: issue.projectId ? projectPools.get(issue.projectId) ?? [] : [],
+          bindings,
+        })),
+      completed_root_count: uniqueRoots.filter(
         ({ issue }) =>
           issue.state === "Done" &&
           usage.some(({ rootIssueId }) => rootIssueId === issue.issueId),
       ).length,
       usage: totals,
-      problems: [
-        ...problems,
-        ...(observation && observation.status !== "ready"
-          ? [{
-              object_kind: "conductor",
-              summary: observation.sanitizedSummary,
-              impact: "Local execution is paused until this problem is resolved.",
-              observed_at: observation.observedAt,
-            }]
-          : []),
-      ],
+      problems,
     });
   }
 
@@ -365,17 +449,45 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
 
   async #rootDetail(rootIssueId: string): Promise<JsonValue> {
     const installation = this.store.getOnlyLinearCredential();
-    const binding = this.store.getConductorBinding();
-    if (!installation || !binding) throw new Error("conductor_binding_missing");
-    const observation = this.store.getRuntimeObservation(binding.bindingId);
-    if (!observation?.lastResolvedProjectId) {
-      throw new Error("conductor_project_unresolved");
-    }
+    const bindings = this.#bindings();
+    if (!installation || bindings.length === 0) throw new Error("conductor_binding_missing");
     const gateway = this.#gateway(installation);
-    const tree = await gateway.getCompleteIssueTree(
-      observation.lastResolvedProjectId,
-      rootIssueId,
-    );
+    let binding: NonNullable<ReturnType<PodiumClientStoreInterface["getConductorBinding"]>> | undefined;
+    let tree: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["getCompleteIssueTree"]>> | undefined;
+    for (const candidate of bindings) {
+      const observation = this.store.getRuntimeObservation(candidate.bindingId);
+      if (!observation?.lastResolvedProjectId) continue;
+      let candidateTree;
+      try {
+        candidateTree = await gateway.getCompleteIssueTree(
+          observation.lastResolvedProjectId,
+          rootIssueId,
+        );
+      } catch {
+        continue;
+      }
+      if (candidateTree.nodes.some(({ issueId }) => issueId === rootIssueId)) {
+        binding = candidate;
+        tree = candidateTree;
+        break;
+      }
+    }
+    if (!binding || !tree) throw new Error("linear_tree_root_missing");
+    const observation = this.store.getRuntimeObservation(binding.bindingId);
+    if (!observation?.lastResolvedProjectId) throw new Error("conductor_project_unresolved");
+    let pool = tree.rootConductorLabels.map(({ conductorShortHash }) => conductorShortHash);
+    try {
+      const resolution = await gateway.resolveProject(binding.conductorShortHash);
+      if (resolution.kind === "resolved") {
+        pool = resolution.conductorPool.map(({ conductorShortHash }) => conductorShortHash);
+      }
+    } catch (error) {
+      if (error instanceof TypeError && /readProjectResolution is not a function/u.test(error.message)) {
+        if (pool.length === 0) pool = [binding.conductorShortHash];
+      } else {
+        pool = [];
+      }
+    }
     const root = tree.nodes.find(({ issueId }) => issueId === rootIssueId);
     if (!root) throw new Error("linear_tree_root_missing");
     const usage = (await gateway.listAllRootUsage(observation.lastResolvedProjectId))
@@ -386,7 +498,12 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     );
     const retryObservedAt = rootRetryObservedAt(tree.rootManagedComments);
     return {
-      summary: rootSummary(root, tree.observedAt),
+      summary: { ...rootSummary(root, tree.observedAt, {
+        pool,
+        bindings,
+        rootConductorLabels: tree.rootConductorLabels,
+        rootManagedComments: tree.rootManagedComments,
+      }) },
       workflow_nodes: tree.nodes
         .filter(({ issueId }) => issueId !== rootIssueId)
         .map(workflowNode),
@@ -431,11 +548,19 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   }
 
   #binding(conductorId: string) {
-    const binding = this.store.getConductorBinding();
+    const binding = this.#bindings().find(({ conductorId: id }) => id === conductorId);
     if (!binding || binding.conductorId !== conductorId) {
       throw new Error("conductor_binding_missing");
     }
     return binding;
+  }
+
+  #bindings() {
+    const store = this.store as PodiumClientStoreInterface & {
+      listConductorBindings?: () => ReturnType<PodiumClientStoreInterface["getConductorBinding"]>[];
+    };
+    const listed = store.listConductorBindings?.();
+    return listed ?? (store.getConductorBinding() ? [store.getConductorBinding()!] : []);
   }
 }
 
@@ -515,8 +640,14 @@ function conductorSummary(
   binding: NonNullable<ReturnType<PodiumClientStoreInterface["getConductorBinding"]>>,
   observation: ReturnType<PodiumClientStoreInterface["getRuntimeObservation"]>,
   now: string,
+  resolution?: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["resolveProject"]>>,
 ): ConductorSummaryView {
-  const status = observation
+  const resolutionStatus = resolution?.kind === "resolved"
+    ? "resolved"
+    : resolution?.kind;
+  const status = resolution && resolution.kind !== "resolved"
+    ? resolution.kind === "unbound" ? "unbound" : "project_conflict"
+    : observation
     ? Date.parse(now) - Date.parse(observation.observedAt) > 60_000 &&
       binding.desiredState === "running"
       ? "not_responding"
@@ -528,6 +659,13 @@ function conductorSummary(
     conductor_id: binding.conductorId,
     display_name: binding.repositoryContext.repositoryDisplayName,
     status,
+    ...(resolution?.kind === "resolved"
+      ? {
+          project_id: resolution.projectId,
+          project_pool: resolution.conductorPool.map(({ conductorShortHash }) => conductorShortHash),
+        }
+      : {}),
+    ...(resolutionStatus ? { project_resolution_status: resolutionStatus } : {}),
     ...(observation?.lastResolvedProjectId
       ? { project_name: observation.lastResolvedProjectId }
       : {}),
@@ -545,14 +683,73 @@ function runtimeViewStatus(
   return status;
 }
 
-function rootSummary(issue: { issueId: string; identifier?: string; title?: string; state?: string; updatedAt: string }, observedAt: string) {
+function rootSummary(
+  issue: {
+    issueId: string;
+    identifier?: string;
+    title?: string;
+    state?: string;
+    updatedAt: string;
+    rootConductorLabels?: readonly { conductorShortHash: string }[];
+    rootManagedComments?: readonly { body: string }[];
+  },
+  observedAt: string,
+  options: {
+    pool: readonly string[];
+    bindings: readonly NonNullable<ReturnType<PodiumClientStoreInterface["getConductorBinding"]>>[];
+    rootConductorLabels?: readonly { conductorShortHash: string }[];
+    rootManagedComments?: readonly { body: string }[];
+  } = { pool: [], bindings: [] },
+): RootSummaryView {
+  const labels = [...new Set(
+    (options.rootConductorLabels ?? issue.rootConductorLabels ?? [])
+      .map(({ conductorShortHash }) => conductorShortHash),
+  )];
+  const routed = options.pool.length === 1 && labels.length === 0
+    ? options.pool[0]
+    : labels.length === 1 && options.pool.includes(labels[0]!)
+      ? labels[0]
+      : undefined;
+  const routingStatus = routed
+    ? "routed"
+    : options.pool.length === 0 || labels.length === 0
+      ? "unrouted"
+      : "conflict";
+  const ownerConductorId = rootOwnerConductorId(
+    options.rootManagedComments ?? issue.rootManagedComments ?? [],
+  );
+  const owner = ownerConductorId
+    ? options.bindings.find(({ conductorId }) => conductorId === ownerConductorId)
+    : undefined;
   return {
     root_issue_id: issue.issueId,
     identifier: requiredString(issue.identifier, "linear_issue_identifier_missing"),
     title: requiredString(issue.title, "linear_issue_title_missing"),
     status: requiredString(issue.state, "linear_issue_state_missing"),
+    ...(routed ? { routing_conductor_short_hash: routed } : {}),
+    routing_status: routingStatus,
+    ownership_status: !ownerConductorId
+      ? "unknown"
+      : owner && routed === owner.conductorShortHash
+        ? "matched"
+        : "mismatch",
     observed_at: observedAt,
   };
+}
+
+function rootOwnerConductorId(comments: readonly { body: string }[]): string | undefined {
+  for (const comment of comments) {
+    const marker = comment.body.match(/<!-- symphony root\n([\s\S]*?)\n-->/u);
+    if (!marker) continue;
+    for (const line of marker[1]!.split("\n")) {
+      const separator = line.indexOf(":");
+      if (separator > 0 && line.slice(0, separator).trim() === "conductor_id") {
+        const value = line.slice(separator + 1).trim();
+        return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value) ? value : undefined;
+      }
+    }
+  }
+  return undefined;
 }
 
 function workflowNode(issue: { issueId: string; parentIssueId?: string; nodeKind?: string; humanKind?: string; state?: string; order?: number; depth?: number; title?: string }) {

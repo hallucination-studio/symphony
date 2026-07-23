@@ -11,4 +11,4 @@ export type {
   StageNodeState,
   StageKind,
 } from "./RootWorkflowPolicyInterface.js";
-export { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";
+export { discoverCurrentRoots, isRootRoutedToConductor } from "../../root-discovery/MultiRootDiscoveryPolicy.js";

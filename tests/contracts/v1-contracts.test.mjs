@@ -130,6 +130,21 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
   ]);
 });
 
+test("Project resolution carries a closed Conductor pool and Root routing labels", async () => {
+  const schema = await loadSchema("podium-conductor");
+  const resolved = schema.$defs.ResolvedConductorProject;
+  const root = schema.$defs.RootIssueSnapshot;
+  const pool = schema.$defs.ConductorPool;
+
+  assert.ok(resolved.required.includes("conductor_pool"));
+  assert.equal(resolved.properties.conductor_pool.items.$ref, "#/$defs/ConductorPool");
+  assert.deepEqual(pool.required, ["conductor_short_hash"]);
+  assert.equal(pool.additionalProperties, false);
+  assert.ok(root.required.includes("root_conductor_labels"));
+  assert.equal(root.properties.root_conductor_labels.maxItems, 1);
+  assert.equal(root.properties.root_conductor_labels.items.$ref, "#/$defs/ConductorPool");
+});
+
 test("Agent execution policies are closed, bounded, and shared by Profile contracts", async () => {
   const client = await loadSchema("podium-client");
   const relay = await loadSchema("podium-conductor");

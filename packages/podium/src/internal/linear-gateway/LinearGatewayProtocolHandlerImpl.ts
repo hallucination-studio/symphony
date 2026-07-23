@@ -8,6 +8,7 @@ import type {
   WorkflowMutationResult,
   RemotePrecondition,
   RootIssueValue,
+  ConductorPoolValue,
   RootUsageValue,
   LinearIssueValue,
 } from "./types.js";
@@ -30,7 +31,6 @@ function errorRecord(error: unknown): Record<string, unknown> {
 }
 
 const retryableLinearErrors = new Set([
-  "RatelimitedLinearError",
   "NetworkLinearError",
   "InternalLinearError",
 ]);
@@ -193,6 +193,7 @@ export class LinearGatewayProtocolHandlerImpl {
     rootIssueId: string;
     nodes: LinearIssueValue[];
     rootPhaseLabels: string[];
+    rootConductorLabels: ConductorPoolValue[];
     rootManagedComments: Array<{
       commentId: string;
       issueId: string;
@@ -212,6 +213,7 @@ export class LinearGatewayProtocolHandlerImpl {
     const nodes: LinearIssueValue[] = [];
     let observedAt = "";
     let rootPhaseLabels: string[] = [];
+    let rootConductorLabels: ConductorPoolValue[] = [];
     let rootManagedComments: Array<{
       commentId: string;
       issueId: string;
@@ -257,6 +259,17 @@ export class LinearGatewayProtocolHandlerImpl {
         throw new Error("linear_root_phase_labels_invalid");
       }
       if (
+        !Array.isArray(page.rootConductorLabels) ||
+        page.rootConductorLabels.length > 1 ||
+        page.rootConductorLabels.some(
+          (entry) =>
+            !entry ||
+            !identifier(entry.conductorShortHash, 128),
+        )
+      ) {
+        throw new Error("linear_root_conductor_labels_invalid");
+      }
+      if (
         !Array.isArray(page.rootManagedComments) ||
         page.rootManagedComments.length > 2 ||
         page.rootManagedComments.some(
@@ -272,6 +285,7 @@ export class LinearGatewayProtocolHandlerImpl {
         throw new Error("linear_root_managed_comments_invalid");
       }
       rootPhaseLabels = [...page.rootPhaseLabels];
+      rootConductorLabels = page.rootConductorLabels.map((entry) => ({ ...entry }));
       rootManagedComments = page.rootManagedComments.map((comment) => ({
         ...comment,
       }));
@@ -313,6 +327,7 @@ export class LinearGatewayProtocolHandlerImpl {
       rootIssueId,
       nodes,
       rootPhaseLabels,
+      rootConductorLabels,
       rootManagedComments,
       humanAnswers,
       observedAt,
@@ -891,10 +906,22 @@ function validateRootScheduling(root: RootIssueValue): void {
     !linearPriority(root.priority) ||
     !Array.isArray(root.blockers) ||
     root.blockers.length > MAX_TREE_NODES ||
+    !Array.isArray(root.rootConductorLabels) ||
+    root.rootConductorLabels.length > 1 ||
     !Array.isArray(root.rootManagedComments) ||
     root.rootManagedComments.length > 2
   ) {
     throw new Error("linear_root_scheduling_invalid");
+  }
+  const rootConductorHashes = new Set<string>();
+  for (const entry of root.rootConductorLabels) {
+    if (
+      !identifier(entry.conductorShortHash, 128) ||
+      rootConductorHashes.has(entry.conductorShortHash)
+    ) {
+      throw new Error("linear_root_scheduling_invalid");
+    }
+    rootConductorHashes.add(entry.conductorShortHash);
   }
   for (const blocker of root.blockers) {
     const value = errorRecord(blocker);

@@ -65,8 +65,6 @@ export class SqlitePodiumStoreImpl
         repository_root TEXT NOT NULL,
         base_branch TEXT NOT NULL,
         desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped')),
-        singleton INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),
-        UNIQUE (singleton),
         FOREIGN KEY (linear_installation_id) REFERENCES linear_installations(installation_id)
       );
       CREATE TABLE IF NOT EXISTS runtime_observations (
@@ -100,6 +98,7 @@ export class SqlitePodiumStoreImpl
       "repository_handle",
       "TEXT NOT NULL DEFAULT 'legacy-repository-handle'",
     );
+    this.#migrateConductorBindingSingleton();
   }
 
   saveLinearInstallation(installation: LinearInstallation): void {
@@ -298,41 +297,25 @@ export class SqlitePodiumStoreImpl
       );
   }
 
+  listConductorBindings(): ConductorBinding[] {
+    const rows = this.#database
+      .prepare("SELECT * FROM conductor_bindings ORDER BY conductor_id")
+      .all() as BindingRow[];
+    return rows.map(bindingFromRow);
+  }
+
+  getConductorBindingById(bindingId: string): ConductorBinding | undefined {
+    const row = this.#database
+      .prepare("SELECT * FROM conductor_bindings WHERE binding_id = ?")
+      .get(bindingId) as BindingRow | undefined;
+    return row ? bindingFromRow(row) : undefined;
+  }
+
   getConductorBinding(): ConductorBinding | undefined {
     const row = this.#database
-      .prepare("SELECT * FROM conductor_bindings LIMIT 1")
-      .get() as
-      | {
-          binding_id: string;
-          conductor_id: string;
-          conductor_short_hash: string;
-          linear_installation_id: string;
-          organization_id: string;
-          repository_handle: string;
-          repository_identity: string;
-          repository_display_name: string;
-          repository_root: string;
-          base_branch: string;
-          desired_state: "running" | "stopped";
-        }
-      | undefined;
-    if (!row) return undefined;
-    const repositoryContext: RepositoryContext = {
-      repositoryHandle: row.repository_handle,
-      repositoryIdentity: row.repository_identity,
-      repositoryDisplayName: row.repository_display_name,
-      repositoryRoot: row.repository_root,
-      baseBranch: row.base_branch,
-    };
-    return {
-      bindingId: row.binding_id,
-      conductorId: row.conductor_id,
-      conductorShortHash: row.conductor_short_hash,
-      linearInstallationId: row.linear_installation_id,
-      organizationId: row.organization_id,
-      repositoryContext,
-      desiredState: row.desired_state,
-    };
+      .prepare("SELECT * FROM conductor_bindings ORDER BY conductor_id LIMIT 1")
+      .get() as BindingRow | undefined;
+    return row ? bindingFromRow(row) : undefined;
   }
 
   setConductorDesiredState(
@@ -550,9 +533,87 @@ export class SqlitePodiumStoreImpl
     }
   }
 
+  #migrateConductorBindingSingleton(): void {
+    const columns = this.#database
+      .prepare("PRAGMA table_info(conductor_bindings)")
+      .all() as Array<{ name: string }>;
+    if (!columns.some(({ name }) => name === "singleton")) return;
+
+    this.#database.pragma("foreign_keys = OFF");
+    try {
+      this.#database.exec(`
+        BEGIN;
+        ALTER TABLE conductor_bindings RENAME TO conductor_bindings_legacy;
+        CREATE TABLE conductor_bindings (
+          binding_id TEXT PRIMARY KEY,
+          conductor_id TEXT NOT NULL UNIQUE,
+          conductor_short_hash TEXT NOT NULL UNIQUE,
+          linear_installation_id TEXT NOT NULL,
+          organization_id TEXT NOT NULL,
+          repository_handle TEXT NOT NULL,
+          repository_identity TEXT NOT NULL,
+          repository_display_name TEXT NOT NULL,
+          repository_root TEXT NOT NULL,
+          base_branch TEXT NOT NULL,
+          desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped')),
+          FOREIGN KEY (linear_installation_id) REFERENCES linear_installations(installation_id)
+        );
+        INSERT INTO conductor_bindings (
+          binding_id, conductor_id, conductor_short_hash, linear_installation_id,
+          organization_id, repository_handle, repository_identity, repository_display_name,
+          repository_root, base_branch, desired_state
+        )
+        SELECT binding_id, conductor_id, conductor_short_hash, linear_installation_id,
+               organization_id, repository_handle, repository_identity, repository_display_name,
+               repository_root, base_branch, desired_state
+        FROM conductor_bindings_legacy;
+        DROP TABLE conductor_bindings_legacy;
+        COMMIT;
+      `);
+    } catch (error) {
+      if (this.#database.inTransaction) this.#database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.#database.pragma("foreign_keys = ON");
+    }
+  }
+
   close(): void {
     this.#database.close();
   }
+}
+
+interface BindingRow {
+  binding_id: string;
+  conductor_id: string;
+  conductor_short_hash: string;
+  linear_installation_id: string;
+  organization_id: string;
+  repository_handle: string;
+  repository_identity: string;
+  repository_display_name: string;
+  repository_root: string;
+  base_branch: string;
+  desired_state: "running" | "stopped";
+}
+
+function bindingFromRow(row: BindingRow): ConductorBinding {
+  const repositoryContext: RepositoryContext = {
+    repositoryHandle: row.repository_handle,
+    repositoryIdentity: row.repository_identity,
+    repositoryDisplayName: row.repository_display_name,
+    repositoryRoot: row.repository_root,
+    baseBranch: row.base_branch,
+  };
+  return {
+    bindingId: row.binding_id,
+    conductorId: row.conductor_id,
+    conductorShortHash: row.conductor_short_hash,
+    linearInstallationId: row.linear_installation_id,
+    organizationId: row.organization_id,
+    repositoryContext,
+    desiredState: row.desired_state,
+  };
 }
 
 function openDatabase(databasePath: string): Database.Database {

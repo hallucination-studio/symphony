@@ -1,6 +1,6 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
-const DIGEST = /^[0-9a-f]{64}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const MANAGED_RECORD_PREFIX = "<!-- symphony managed-record";
 const ROOT_RESULT_FIELDS = new Set(["rootIssueId", "identifier", "projectId", "parentIssueId", "stateName"]);
 const OBSERVATION_FIELDS = new Set(["git"]);
@@ -8,6 +8,9 @@ const FACTS_FIELDS = new Set(["root", "plan", "stageExecutions", "progress", "re
 const REPAIR_FIELDS = new Set(["findingId", "sourceVerifyId", "disposition", "breaker"]);
 const BREAKER_FIELDS = new Set(["checked", "decision", "cycleCount", "maxCycles", "openFindingCount"]);
 import { createAdaptivePoller } from "./target-workflow-polling.mjs";
+const TRANSIENT_PENDING_ERRORS = new Set([
+  "target_transport_issue_kind_invalid",
+]);
 const TRANSIENT_FACTS_ERRORS = new Set([
   "target_facts_cycle_invalid",
   "target_facts_dag_incomplete",
@@ -19,6 +22,7 @@ const TRANSIENT_FACTS_ERRORS = new Set([
   "target_facts_work_incomplete",
   "target_facts_verify_result_invalid",
   "target_facts_delivery_revision_mismatch",
+  "target_transport_issue_kind_invalid",
 ]);
 
 export async function runTargetRepairEscalationScenario({
@@ -57,10 +61,18 @@ export async function runTargetRepairEscalationScenario({
   });
 
   while (now() < deadline) {
-    const pending = validatePendingObservation(
-      await runner.observePendingHuman(await readInput("pending_human")),
-      created.rootIssueId,
-    );
+    let pending;
+    try {
+      pending = validatePendingObservation(
+        await runner.observePendingHuman(await readInput("pending_human")),
+        created.rootIssueId,
+      );
+    } catch (error) {
+      if (!TRANSIENT_PENDING_ERRORS.has(reason(error))) throw error;
+      onProgress({ phase: "pending_human", reason: reason(error) });
+      await pause(deadline, now, sleep, pollIntervalMs, pollers, "pending_human", error.message);
+      continue;
+    }
     if (pending.status === "waiting") {
       if (pending.requestKind !== "needs_approval") {
         throw new Error("target_repair_pending_kind_invalid");

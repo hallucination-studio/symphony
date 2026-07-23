@@ -114,15 +114,15 @@ test("target verdict rejects unknown top-level evidence fields", () => {
   assert.ok(result.failures.includes("evidence_shape_invalid"));
 });
 
-test("target verdict rejects malformed Linear budget evidence", () => {
+test("target verdict rejects malformed Linear observation evidence", () => {
   const evidence = passingEvidence();
-  evidence.linearBudget = {
+  evidence.linearObservation = {
     setup: { logicalOperations: 0, physicalRequests: "unknown" },
     scenarios: Object.fromEntries(TARGET_WORKFLOW_SCENARIOS.map((scenario) => [scenario, {}])),
     total: {},
   };
   const result = evaluateTargetWorkflowEvidence(evidence);
-  assert.ok(result.failures.includes("linear_budget_evidence_invalid"));
+  assert.ok(result.failures.includes("linear_observation_evidence_invalid"));
 });
 
 function passingEvidence() {

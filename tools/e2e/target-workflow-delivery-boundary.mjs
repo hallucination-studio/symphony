@@ -1,8 +1,12 @@
 import { startTargetProductionBoundary } from "./target-workflow-production.mjs";
 import { runTargetDeliveryScenario } from "./target-workflow-delivery.mjs";
+import {
+  createTargetWorkflowDeadline,
+  remainingTargetWorkflowTimeout,
+  TARGET_E2E_TIMEOUT_MS,
+  withTargetWorkflowDeadline,
+} from "./target-workflow-deadline.mjs";
 import { runTargetSuccessScenario } from "./target-workflow-success.mjs";
-
-const TARGET_E2E_TIMEOUT_MS = 5 * 60_000;
 
 export async function runTargetDeliveryBoundary({
   startBoundary = startTargetProductionBoundary,
@@ -18,34 +22,41 @@ export async function runTargetDeliveryBoundary({
     throw new Error("target_delivery_boundary_dependency_invalid");
   }
   if (typeof now !== "function") throw new Error("target_delivery_deadline_invalid");
-  const effectiveDeadlineAtMs = deadlineAtMs ?? now() + TARGET_E2E_TIMEOUT_MS;
-  if (!Number.isSafeInteger(effectiveDeadlineAtMs)) throw new Error("target_delivery_deadline_invalid");
-  const boundary = await startBoundary(boundaryInput);
+  const effectiveDeadlineAtMs = deadlineAtMs ?? createTargetWorkflowDeadline(TARGET_E2E_TIMEOUT_MS, now);
+  const boundary = await withTargetWorkflowDeadline(
+    () => startBoundary({ ...boundaryInput, deadlineAtMs: effectiveDeadlineAtMs }),
+    effectiveDeadlineAtMs,
+    { now },
+  );
   if (typeof boundary?.runner === "undefined" || typeof boundary?.close !== "function") {
     throw new Error("target_delivery_boundary_invalid");
   }
   let result;
   let failure;
+  let closePromise;
+  const closeBoundary = (options) => closePromise ??= Promise.resolve().then(() => boundary.close(options));
   try {
-    const success = await runSuccess({
+    const successTimeoutMs = remainingTimeout(effectiveDeadlineAtMs, now);
+    const success = await withTargetWorkflowDeadline(() => runSuccess({
       ...successInput,
-      timeoutMs: remainingTimeout(effectiveDeadlineAtMs, now),
+      timeoutMs: successTimeoutMs,
       runner: boundary.runner,
-    });
+    }), effectiveDeadlineAtMs, { now, onTimeout: () => closeBoundary({ force: true }) });
     const resolvedDeliveryInput = typeof deliveryInput === "function"
       ? await deliveryInput({ success, runner: boundary.runner })
       : deliveryInput;
-    const delivery = await runDelivery({
+    const deliveryTimeoutMs = remainingTimeout(effectiveDeadlineAtMs, now);
+    const delivery = await withTargetWorkflowDeadline(() => runDelivery({
       ...resolvedDeliveryInput,
-      timeoutMs: remainingTimeout(effectiveDeadlineAtMs, now),
+      timeoutMs: deliveryTimeoutMs,
       runner: boundary.runner,
-    });
+    }), effectiveDeadlineAtMs, { now, onTimeout: () => closeBoundary({ force: true }) });
     result = { success, delivery };
   } catch (error) {
     failure = error;
   }
   try {
-    await boundary.close();
+    await closeBoundary();
   } catch {
     if (!failure) throw new Error("target_delivery_cleanup_failed");
   }

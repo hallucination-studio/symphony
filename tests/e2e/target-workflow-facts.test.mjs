@@ -32,6 +32,15 @@ test("target facts project durable Plan, Work, Verify, and delivery records", ()
   });
 });
 
+test("target facts accept a Linear UUID Cycle ID distinct from its logical cycle key", () => {
+  const value = uuidSnapshot();
+
+  const facts = projectTargetWorkflowFacts(value);
+
+  assert.equal(facts.root.cycleIssueId, "6c2b6d52-2d7d-4d8d-a8bf-5dc2b54efce1");
+  assert.equal(facts.root.planIssueId, "b4d929f8-0ac6-4a8d-a7f6-8c3c4d6db31d");
+});
+
 test("target facts reject duplicate or mismatched durable records", () => {
   const duplicate = snapshot();
   duplicate.comments.push(comment("work-1", "work-terminal-duplicate", {
@@ -54,6 +63,18 @@ test("target facts reject duplicate or mismatched durable records", () => {
   assert.throws(() => projectTargetWorkflowFacts(wrongRevision), /target_facts_delivery_revision_mismatch/u);
 });
 
+test("target facts fail closed when a stage has a durable failed terminal", () => {
+  const failed = snapshot();
+  failed.comments = failed.comments.map((entry) => entry.id === "verify-terminal"
+    ? comment("verify-1", "verify-terminal-failed", {
+      ...record(entry), outcome: "failed", failure_code: "verify_criteria_invalid",
+      summary: "Verify result validation failed: verify_criteria_invalid.",
+    })
+    : entry);
+
+  assert.throws(() => projectTargetWorkflowFacts(failed), /target_facts_stage_failed/u);
+});
+
 test("target facts reject records that cross Root, Cycle, Node, or Issue boundaries", () => {
   const wrongExecutionRoot = snapshot();
   wrongExecutionRoot.comments = wrongExecutionRoot.comments.map((entry) => entry.id === "work-execution"
@@ -74,7 +95,7 @@ test("target facts reject records that cross Root, Cycle, Node, or Issue boundar
   const wrongCycleKey = snapshot();
   wrongCycleKey.comments = wrongCycleKey.comments.map((entry) => entry.id === "cycle-marker"
     ? comment("cycle-1", "cycle-marker-wrong-key", {
-      ...record(entry), cycle_key: "cycle-2",
+      ...record(entry), cycle_key: "cycle 1",
     })
     : entry);
   assert.throws(() => projectTargetWorkflowFacts(wrongCycleKey), /target_facts_cycle_invalid/u);
@@ -350,6 +371,41 @@ function snapshot() {
       }),
     ],
   };
+}
+
+function uuidSnapshot() {
+  const value = snapshot();
+  const rootIssueId = "a7e07c0a-7c1b-4fcb-b3a8-6f5f9f7c4210";
+  const cycleIssueId = "6c2b6d52-2d7d-4d8d-a8bf-5dc2b54efce1";
+  const issueIds = new Map([
+    ["root-1", rootIssueId],
+    ["cycle-1", cycleIssueId],
+    ["plan-1", "b4d929f8-0ac6-4a8d-a7f6-8c3c4d6db31d"],
+    ["work-1", "e5536bb2-84e3-4c40-8c31-e0b9d1fa8a7f"],
+    ["verify-1", "77e92f26-1e1c-46d5-9709-3d87a1d4f7f8"],
+  ]);
+  const remap = (value_) => issueIds.get(value_) ?? value_;
+  value.rootIssueId = rootIssueId;
+  value.projectId = "project-uuid-1";
+  value.issues = value.issues.map((entry) => ({
+    ...entry,
+    id: remap(entry.id),
+    projectId: value.projectId,
+    ...(entry.parentIssueId ? { parentIssueId: remap(entry.parentIssueId) } : {}),
+  }));
+  value.relations = value.relations.map((relation) => ({
+    ...relation,
+    sourceIssueId: remap(relation.sourceIssueId),
+    targetIssueId: remap(relation.targetIssueId),
+  }));
+  value.comments = value.comments.map((entry) => {
+    const recordValue = record(entry);
+    for (const key of ["root_issue_id", "cycle_issue_id", "node_issue_id", "predecessor_cycle_issue_id"]) {
+      if (recordValue[key] !== undefined) recordValue[key] = remap(recordValue[key]);
+    }
+    return comment(remap(entry.issueId), entry.id, recordValue);
+  });
+  return value;
 }
 
 function successorSnapshot({ cycleState }) {

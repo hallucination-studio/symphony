@@ -12,6 +12,7 @@ test("Linear composition skips Waiting Human and dispatches the highest runnable
   const started: string[] = [];
   const runtime = new LinearConductorRuntime(
     "conductor-1",
+    "conductor-1",
     gateway(roots, (rootId) => view(rootId, rootId === "waiting" ? "Needs Approval" : "In Progress")),
     new LinearPriorityRootSchedulingPolicyImpl(),
     new LinearCycleRootWorkflowPolicyImpl(),
@@ -27,6 +28,7 @@ test("Linear composition releases a waiting lane without creating a queue entry"
   let dispatches = 0;
   const runtime = new LinearConductorRuntime(
     "conductor-1",
+    "conductor-1",
     gateway([root("waiting", "high", 1)], () => view("waiting", "Needs Info")),
     new LinearPriorityRootSchedulingPolicyImpl(),
     new LinearCycleRootWorkflowPolicyImpl(),
@@ -40,7 +42,7 @@ test("Linear composition releases a waiting lane without creating a queue entry"
 
 function gateway(roots: DiscoveredRoot[], read: (rootId: string) => RootDagView) {
   return {
-    async resolveProject() { return { kind: "resolved" as const, projectId: "project-1" }; },
+    async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "conductor-1" }] }; },
     async listRoots() { return roots; },
     async admitRoot(root: DiscoveredRoot) { return { kind: "already_owned" as const, ownership: {
       kind: "root_ownership" as const, version: 1 as const, rootIssueId: root.issueId,
@@ -55,7 +57,7 @@ function root(issueId: string, priority: DiscoveredRoot["priority"], order: numb
   return {
     issueId, identifier: issueId.toUpperCase(), state: "In Progress", title: issueId, description: "",
     updatedAt: "2026-07-21T09:00:00Z", projectId: "project-1", parentIssueId: null,
-    isDelegatedToSymphony: true, managedConductorId: "conductor-1", priority, order, blockers: [],
+    isDelegatedToSymphony: true, managedConductorId: "conductor-1", priority, order, blockers: [], rootConductorLabels: [],
   };
 }
 

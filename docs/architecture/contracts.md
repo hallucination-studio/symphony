@@ -55,6 +55,11 @@ ConductorRuntimeReportingProtocol
 `LinearGatewayProtocol`使用generated request/result schemas传输业务DTO。Podium Handler验证
 organization、Project、pagination、payload大小和remote response shape，再调用Linear SDK。
 
+每个Conductor发出的Linear查询和mutation都必须携带所属`binding_id`；Podium按该字段选择
+Binding和安装凭据，并维护`binding_id -> instance_id`的活跃实例映射。同一Binding的第二个
+实例fail closed，不同Binding可以在同一条private IPC通道上并行请求。不能用“最近一次
+handshake”或单例Binding推断请求归属。
+
 `GetIssueTreeQuery`同时返回resolved Team的closed workflow status catalog。Status DTO只包含`status_id`、
 精确display name、category和position；Conductor按
 [Root Issue工作流](root-issue.md)验证Root/Cycle/Node允许子集。SDK status
@@ -71,7 +76,7 @@ conductor_short_hash
 expected_project_id
 ```
 
-Root/Issue mutation还携带full Conductor ownership、Root、显式target、expected remote version/state/
+Root/Issue mutation还携带完整Project Conductor Pool摘要、唯一Root routing、full Conductor ownership、Root、显式target、expected remote version/state/
 parent和stable `write_id`。Protocol没有arbitrary GraphQL、arbitrary JSON mutation或SDK passthrough。
 
 ## 4. Conductor-Performer Stage boundary

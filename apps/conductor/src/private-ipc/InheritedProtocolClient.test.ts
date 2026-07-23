@@ -13,7 +13,7 @@ test("private protocol correlates a closed response", async () => {
 
   const pending = client.request({
     requestId: "request-1",
-    body: { kind: "resolve_conductor_project", conductor_short_hash: "abc123" },
+    body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -35,7 +35,7 @@ test("private protocol times out and ignores a late response", async () => {
   await assert.rejects(
     client.request({
       requestId: "request-late",
-      body: { kind: "resolve_conductor_project", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
       timeoutMs: 5,
     }),
     /private_ipc_request_timeout/,
@@ -49,7 +49,7 @@ test("private protocol times out and ignores a late response", async () => {
 
   const next = client.request({
     requestId: "request-next",
-    body: { kind: "resolve_conductor_project", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
   responses.write(`${JSON.stringify({
@@ -66,13 +66,45 @@ test("invalid private response fails all pending requests closed", async () => {
   const client = new InheritedProtocolClient(responses, requests);
   const pending = client.request({
     requestId: "request-1",
-    body: { kind: "resolve_conductor_project", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
 
   responses.write("not-json\n");
 
   await assert.rejects(pending, /private_ipc_json_invalid/);
+});
+
+test("private protocol reports the nested workflow tree schema path", async () => {
+  const responses = new PassThrough();
+  const requests = new PassThrough();
+  const failures: { reason: string; schemaPath?: string }[] = [];
+  const client = new InheritedProtocolClient(responses, requests, undefined, (reason, schemaPath) => {
+    failures.push({ reason, ...(schemaPath ? { schemaPath } : {}) });
+  });
+  const pending = client.request({
+    requestId: "workflow-tree-response",
+    body: {
+      kind: "get_workflow_issue_tree",
+      binding_id: "binding-1",
+      conductor_short_hash: "abc123",
+      expected_project_id: "project-1",
+      root_issue_id: "root-1",
+    },
+    timeoutMs: 1_000,
+  });
+
+  responses.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "workflow-tree-response",
+    body: { kind: "workflow_issue_tree", tree: {} },
+  })}\n`);
+
+  await assert.rejects(pending, /private_ipc_handler_result_schema_invalid/);
+  assert.deepEqual(failures, [{
+    reason: "private_ipc_handler_result_schema_invalid",
+    schemaPath: "$.body.tree",
+  }]);
 });
 
 test("private protocol dispatches an incoming Profile request and correlates its result", async () => {
@@ -107,6 +139,43 @@ test("private protocol dispatches an incoming Profile request and correlates its
     },
   );
   void client;
+});
+
+test("private protocol accepts the shutdown acknowledgement result", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const frames: Buffer[] = [];
+  output.on("data", (chunk: Buffer) => frames.push(chunk));
+  new InheritedProtocolClient(input, output, {
+    async handleRequest(body) {
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        throw new Error("unexpected_shutdown_body");
+      }
+      assert.equal(body.kind, "shutdown_conductor");
+      return { kind: "shutdown_conductor_ack" };
+    },
+  });
+
+  input.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "shutdown-request-1",
+    body: {
+      kind: "shutdown_conductor",
+      binding_id: "binding-1",
+      instance_id: "instance-1",
+      deadline_at: "2026-07-23T00:00:00.000Z",
+    },
+  })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    JSON.parse(Buffer.concat(frames).toString("utf8")),
+    {
+      protocol_version: "1",
+      request_id: "shutdown-request-1",
+      body: { kind: "shutdown_conductor_ack" },
+    },
+  );
 });
 
 test("private protocol reads one length-delimited API Key frame and clears it after dispatch", async () => {
@@ -151,4 +220,29 @@ test("private protocol reads one length-delimited API Key frame and clears it af
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual([...observedSecret!], Array(10).fill(0));
+});
+
+test("private protocol reports a sanitized handler response failure", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const failures: string[] = [];
+  const schemaPaths: (string | undefined)[] = [];
+  new InheritedProtocolClient(input, output, {
+    async handleRequest() {
+      return { kind: "not-a-profile-result" };
+    },
+  }, (reason, schemaPath) => {
+    failures.push(reason);
+    schemaPaths.push(schemaPath);
+  });
+
+  input.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "profile-invalid-result",
+    body: { kind: "get_profiles", conductor_id: "conductor-1" },
+  })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(failures, ["private_ipc_handler_result_schema_invalid"]);
+  assert.deepEqual(schemaPaths, ["$.body"]);
 });

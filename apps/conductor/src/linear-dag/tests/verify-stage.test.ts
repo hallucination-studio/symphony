@@ -46,6 +46,59 @@ test("executes Verify against an immutable revision and writes the accepted conc
   assert.equal((gateway.lastEnvelope?.workflow_context as Record<string, JsonValue>).artifact && ((gateway.lastEnvelope?.workflow_context as Record<string, JsonValue>).artifact as Record<string, JsonValue>).target_revision, "commit-1");
 });
 
+test("rebuilds an in-flight Verify from its persisted execution window", async () => {
+  const gateway = new VerifyGateway();
+  const input = verifyInput();
+  let nowCalls = 0;
+  input.options.now = () => {
+    nowCalls += 1;
+    return nowCalls === 1 ? "2026-07-21T09:00:00Z" : "2026-07-21T10:00:00Z";
+  };
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "cycle_verifying" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_in_progress" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+
+  gateway.reverseRelations = true;
+  const ready = await execution.reconcileVerify(input, undefined, "verify-execution-1");
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("verify_stage_not_ready");
+  const stageExecution = (ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>;
+  assert.equal(stageExecution.started_at, "2026-07-21T09:00:00Z");
+  assert.equal(stageExecution.deadline_at, "2026-07-21T10:00:00.000Z");
+});
+
+test("bounds a new Verify execution by the Root convergence deadline", async () => {
+  const gateway = new VerifyGateway();
+  const input = verifyInput();
+  input.options.now = () => "2026-07-21T09:00:00Z";
+  const execution = new LinearDagExecutionImpl(
+    {
+      linear: gateway,
+      git: gateway.git,
+      performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+    },
+    undefined,
+    undefined,
+    { ...DEFAULT_ROOT_CONVERGENCE_POLICY, deadlineAt: "2026-07-21T09:30:00Z" },
+  );
+
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "cycle_verifying" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_in_progress" });
+  assert.deepEqual(await execution.reconcileVerify(input), { kind: "mutation_applied", step: "verify_execution_created" });
+
+  const ready = await execution.reconcileVerify(input, undefined, "verify-execution-1");
+  assert.equal(ready.kind, "stage_ready");
+  if (ready.kind !== "stage_ready") throw new Error("verify_stage_not_ready");
+  const stageExecution = (ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>;
+  assert.equal(stageExecution.deadline_at, "2026-07-21T09:30:00.000Z");
+});
+
 test("persists one suspended Verify action and releases the Stage", async () => {
   const gateway = new VerifyGateway();
   let performerCalls = 0;
@@ -160,6 +213,28 @@ test("persists a retryable Verify Provider failure and creates a fresh execution
   assert.notEqual(latestVerifyExecution(gateway).stageExecutionId, firstExecution.stageExecutionId);
 });
 
+test("persists a terminal failure when the Verify process throws after execution creation", async () => {
+  const gateway = new VerifyGateway();
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: {
+      async runStage() { throw new Error("performer_stage_timeout"); },
+      async cancelAndReap() {},
+    },
+  });
+
+  await assert.rejects(execution.executeVerifyStage(verifyInput()), /performer_stage_timeout/u);
+
+  const stageExecution = latestVerifyExecution(gateway);
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) =>
+    record.ok && record.value.kind === "stage_terminal" && record.value.stageExecutionId === stageExecution.stageExecutionId);
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("verify_process_failure_terminal_missing");
+  assert.equal(terminal.value.outcome, "failed");
+  assert.equal(terminal.value.failureCode, "performer_stage_timeout");
+});
+
 test("resumes a suspended Verify with a fresh execution identity", async () => {
   const gateway = new VerifyGateway();
   const execution = new LinearDagExecutionImpl({
@@ -205,7 +280,7 @@ test("resumes a suspended Verify with a fresh execution identity", async () => {
   assert.equal(((ready.envelope as Record<string, JsonValue>).stage_execution as Record<string, JsonValue>).stage_execution_id, retryExecution.value.stageExecutionId);
 });
 
-test("rejects a Verify result for a changed revision before persisting terminal evidence", async () => {
+test("persists a failed terminal for a Verify result with a changed revision", async () => {
   const gateway = new VerifyGateway();
   gateway.resultRevision = "commit-2";
   const performer: PerformerStageClientInterface = {
@@ -226,8 +301,41 @@ test("rejects a Verify result for a changed revision before persisting terminal 
   const execution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer });
 
   await assert.rejects(execution.executeVerifyStage(verifyInput()), /verify_revision_invalid/u);
-  assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"kind":"stage_terminal"') && comment.body.includes('"stage":"verify"')), false);
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) =>
+    record.ok && record.value.kind === "stage_terminal" && record.value.stage === "verify");
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("verify_validation_failure_terminal_missing");
+  assert.equal(terminal.value.outcome, "failed");
+  assert.equal(terminal.value.failureCode, "verify_revision_invalid");
+  assert.match(terminal.value.summary, /^Verify result validation failed: verify_revision_invalid\.$/u);
   assert.equal(gateway.tree.issues.find((issue) => issue.issue_id === "cycle-1")?.status_name, "Verifying");
+});
+
+test("persists a failed terminal for Verify criteria that do not match the Plan Contract", async () => {
+  const gateway = new VerifyGateway();
+  const execution = new LinearDagExecutionImpl({ linear: gateway, git: gateway.git, performer: {
+    async runStage(input) {
+      const envelope = input.envelope as Record<string, JsonValue>;
+      const target = envelope.target as Record<string, JsonValue>;
+      const stageExecution = envelope.stage_execution as Record<string, JsonValue>;
+      return { result: {
+        protocol_version: "1", stage_execution_id: stageExecution.stage_execution_id, stage: "verify",
+        root_issue_id: target.root_issue_id, cycle_issue_id: target.cycle_issue_id, node_issue_id: target.node_issue_id,
+        context_digest: envelope.context_digest, completed_at: "2026-07-21T09:02:00Z",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 2 },
+        outcome: { kind: "verify_completed", conclusion: "passed", criteria_results: [{ criterion_key: "wrong", outcome: "passed", summary: "Verified." }], checks: [], new_findings: [], finding_dispositions: [], verified_revision: "commit-1" },
+      } as unknown as JsonValue };
+    },
+    async cancelAndReap() {},
+  } });
+
+  await assert.rejects(execution.executeVerifyStage(verifyInput()), /verify_criteria_invalid/u);
+  const terminal = gateway.tree.comments.map((comment) => parseManagedRecord(comment.body)).find((record) =>
+    record.ok && record.value.kind === "stage_terminal" && record.value.stage === "verify");
+  assert.equal(terminal?.ok, true);
+  if (!terminal?.ok || terminal.value.kind !== "stage_terminal") throw new Error("verify_criteria_failure_terminal_missing");
+  assert.equal(terminal.value.outcome, "failed");
+  assert.equal(terminal.value.failureCode, "verify_criteria_invalid");
 });
 
 test("rejects a durable Verify result that targets a different node during reconstruction", async () => {
@@ -411,15 +519,21 @@ function prepareRepairTree(tree: LinearWorkflowTreeSnapshot): void {
 class VerifyGateway implements LinearGatewayInterface {
   readonly tree = verifyTree();
   readonly gitState = { head: "commit-1" };
+  reverseRelations = false;
   readonly git: GitWorkspaceInterface = {
     inspect: async () => ({ head: this.gitState.head, branch: "symphony/root-1", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }),
     diff: async () => ({ text: "diff --git a/apps/conductor/src/changed.ts b/apps/conductor/src/changed.ts", bytes: 1, cap: 65_536, partial: false }),
+    restoreWorktree: async () => ({ kind: "restored" as const }),
     checks: async () => ({ items: [], returned: 0, cap: 32, has_more: false, partial: false }),
     commit: async () => { throw new Error("verify_must_not_commit"); },
   };
   lastEnvelope?: Record<string, JsonValue>;
   resultRevision = "commit-1";
-  async readWorkflowIssueTree() { return structuredClone(this.tree); }
+  async readWorkflowIssueTree() {
+    const tree = structuredClone(this.tree);
+    if (this.reverseRelations) tree.relations.reverse();
+    return tree;
+  }
   async readFreshRootScope(): Promise<never> { throw new Error("unused"); }
   async read(): Promise<never> { throw new Error("unused"); }
   async mutate(): Promise<never> { throw new Error("unused"); }

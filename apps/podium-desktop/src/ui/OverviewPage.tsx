@@ -102,7 +102,13 @@ function RootSection({
               <div>
                 <strong>{root.identifier}</strong>
                 <span>{root.title}</span>
-                <small>{root.currentNodeSummary ?? root.status}</small>
+                <small>
+                  {root.currentNodeSummary ?? root.status}
+                  {root.routingStatus === "unrouted" ? " · Unrouted" : ""}
+                  {root.routingStatus === "conflict" ? " · Routing conflict" : ""}
+                  {root.ownershipStatus === "mismatch" ? " · Ownership conflict" : ""}
+                  {root.routingConductorShortHash ? ` · ${root.routingConductorShortHash}` : ""}
+                </small>
               </div>
               {root.linearUrl && (
                 <button className="button quiet-button" onClick={() => onOpenExternal(root.linearUrl!)} type="button">

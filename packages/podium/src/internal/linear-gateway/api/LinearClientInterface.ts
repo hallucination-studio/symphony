@@ -79,7 +79,50 @@ export type ConductorProjectLabelRebindResult =
       projectId: string;
       labelName: string;
       fingerprint: string;
+  };
+
+export type ConductorProjectPoolPlan =
+  | {
+      kind: "ready";
+      projectId: string;
+      expectedProjectUpdatedAt: string;
+      fingerprint: string;
+      currentMembers: readonly string[];
+      desiredMembers: readonly string[];
+      addMembers: readonly string[];
+      removeMembers: readonly string[];
+      routeRoots: readonly {
+        rootIssueId: string;
+        conductorShortHash: string;
+      }[];
+    }
+  | {
+      kind: "blocked";
+      projectId: string;
+      reason:
+        | "project_invalid"
+        | "desired_members_invalid"
+        | "member_label_ambiguous"
+        | "member_label_owned_by_other_project"
+        | "project_roots_invalid"
+        | "root_routing_conflict"
+        | "member_in_use";
     };
+
+export type ConductorProjectPoolResult =
+  | { kind: "dry_run"; plan: ConductorProjectPoolPlan }
+  | {
+      kind: "already_applied" | "applied";
+      projectId: string;
+      fingerprint: string;
+      members: readonly string[];
+  };
+
+export interface ConductorProjectPoolValue {
+  projectId: string;
+  updatedAt: string;
+  members: readonly string[];
+}
 
 export interface LinearClientInterface {
   readTargetProjectConfiguration(input: {
@@ -107,6 +150,31 @@ export interface LinearClientInterface {
     authorized: boolean;
   }): Promise<ConductorProjectLabelRebindResult>;
 
+  preflightConductorProjectPool(input: {
+    projectId: string;
+    desiredMembers: readonly string[];
+  }): Promise<ConductorProjectPoolPlan>;
+
+  readConductorProjectPool(input: {
+    projectId: string;
+  }): Promise<ConductorProjectPoolValue>;
+
+  createRootIssue(input: {
+    projectId: string;
+    conductorShortHash: string;
+    title: string;
+    description: string;
+  }): Promise<{
+    rootIssueId: string;
+    identifier: string;
+    projectId: string;
+  }>;
+
+  reconcileConductorProjectPool(input: {
+    plan: Extract<ConductorProjectPoolPlan, { kind: "ready" }>;
+    authorized: boolean;
+  }): Promise<ConductorProjectPoolResult>;
+
   initializeTargetTeamWorkflow(input: {
     projectId: string;
     authorized: boolean;
@@ -115,7 +183,12 @@ export interface LinearClientInterface {
   readProjectResolution(input: {
     conductorShortHash: string;
   }): Promise<
-    | { kind: "resolved"; projectId: string; updatedAt: string }
+    | {
+        kind: "resolved";
+        projectId: string;
+        updatedAt: string;
+        conductorPool: readonly { conductorShortHash: string }[];
+      }
     | { kind: "unbound" }
     | { kind: "ambiguous" }
     | { kind: "conflict" }
@@ -181,6 +254,7 @@ export interface LinearClientInterface {
   }): Promise<{
     nodes: import("../types.js").LinearIssueValue[];
     rootPhaseLabels: string[];
+    rootConductorLabels: import("../types.js").ConductorPoolValue[];
     rootManagedComments: Array<{
       commentId: string;
       issueId: string;

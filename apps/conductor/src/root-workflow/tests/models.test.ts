@@ -12,7 +12,7 @@ test("Root discovery returns every owned or delegated current Root without selec
     issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const,
     title: "Build it", description: "Follow the approved architecture.", updatedAt: "2026-07-16T00:00:00Z",
     projectId: "project-1", parentIssueId: null, isDelegatedToSymphony: true,
-    priority: "normal" as const, order: 1, blockers: [],
+    priority: "normal" as const, order: 1, blockers: [], rootConductorLabels: [],
   };
   assert.deepEqual(discoverCurrentRoots({
     projectId: "project-1",
@@ -28,11 +28,32 @@ test("Root discovery returns every owned or delegated current Root without selec
       { ...candidate, issueId: "root-owned-elsewhere", managedConductorId: "conductor-2" },
     ],
     conductorId: "conductor-1",
+    conductorShortHash: "conductor-1",
+    conductorPool: [{ conductorShortHash: "conductor-1" }],
   }), [candidate, {
     ...candidate, issueId: "root-owned", isDelegatedToSymphony: false, managedConductorId: "conductor-1",
   }, {
     ...candidate, issueId: "root-canceled-owned", state: "Canceled", isDelegatedToSymphony: false, managedConductorId: "conductor-1",
   }]);
+});
+
+test("Root discovery routes only one in-pool Root label to the current Conductor", () => {
+  const candidate = {
+    issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const,
+    title: "Build it", description: "", updatedAt: "2026-07-16T00:00:00Z",
+    projectId: "project-1", parentIssueId: null, isDelegatedToSymphony: true,
+    priority: "normal" as const, order: 1, blockers: [], rootConductorLabels: [{ conductorShortHash: "conductor-2" }],
+  };
+  const roots = [
+    candidate,
+    { ...candidate, issueId: "root-unrouted", rootConductorLabels: [] },
+    { ...candidate, issueId: "root-conflict", rootConductorLabels: [{ conductorShortHash: "conductor-2" }, { conductorShortHash: "conductor-1" }] },
+    { ...candidate, issueId: "root-current", rootConductorLabels: [{ conductorShortHash: "conductor-1" }] },
+  ];
+  assert.deepEqual(discoverCurrentRoots({
+    projectId: "project-1", roots, conductorId: "conductor-1", conductorShortHash: "conductor-1",
+    conductorPool: [{ conductorShortHash: "conductor-1" }, { conductorShortHash: "conductor-2" }],
+  }).map(({ issueId }) => issueId), ["root-current"]);
 });
 
 test("Profile store atomically preserves fixed authentication and activates only ready Profiles", async () => {

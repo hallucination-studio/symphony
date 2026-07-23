@@ -7,6 +7,7 @@ import type {
   LinearIssueState,
   LinearPriority,
 } from "../../root-workflow/api/Models.js";
+import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
 import { parseManagedRecord } from "../../root-workflow/api/index.js";
 
 type JsonValue =
@@ -56,7 +57,8 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     private readonly conductorShortHash: string,
     private readonly protocol: ProtocolClient,
     private readonly options: {
-      timeoutMs: number;
+      bindingId?: string;
+      timeoutMs: number | (() => number);
       observeDiscovery?(evidence: {
         rootHeaderCount: number;
         listPageCount: number;
@@ -66,12 +68,13 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   ) {}
 
   async resolveProject(): Promise<
-    | { kind: "resolved"; projectId: string }
+    | { kind: "resolved"; projectId: string; conductorPool: ConductorPoolMember[] }
     | { kind: "unbound" | "ambiguous" | "label_conflict" }
   > {
     const response = record(
       await this.#request({
         kind: "resolve_conductor_project",
+        binding_id: this.#bindingId(),
         conductor_short_hash: this.conductorShortHash,
       }),
     );
@@ -79,15 +82,16 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     if (response.kind === "conductor_project_ambiguous") {
       return { kind: "ambiguous" };
     }
-    if (response.kind === "conductor_project_label_conflict") {
-      return { kind: "label_conflict" };
-    }
     if (response.kind !== "resolved") throw protocolError(response);
     const resolved = record(response.resolved_project);
     const project = record(resolved.project);
     const projectId = string(project.project_id, "linear_project_id_invalid");
+    const conductorPool = pool(resolved.conductor_pool);
+    if (!conductorPool.some(({ conductorShortHash }) => conductorShortHash === this.conductorShortHash)) {
+      throw new Error("linear_conductor_pool_membership_invalid");
+    }
     this.#projectId = projectId;
-    return { kind: "resolved", projectId };
+    return { kind: "resolved", projectId, conductorPool };
   }
 
   async listRoots(projectId: string) {
@@ -113,6 +117,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       const response = record(
         await this.#request({
           kind: "list_root_issues",
+          binding_id: this.#bindingId(),
           project_id: projectId,
           page: {
             limit: 250,
@@ -145,6 +150,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
           blockers: array(item.blockers, "linear_blockers_invalid").map(
             (blocker) => linearBlocker(issue.issue_id, blocker),
           ),
+          rootConductorLabels: pool(item.root_conductor_labels),
           ...(managedConductorId ? { managedConductorId } : {}),
         };
         roots.push(discovered);
@@ -176,6 +182,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     if (!this.#projectId) throw new Error("linear_project_not_resolved");
     const response = record(await this.#request({
       kind: "get_workflow_issue_tree",
+      binding_id: this.#bindingId(),
       conductor_short_hash: this.conductorShortHash,
       expected_project_id: this.#projectId,
       root_issue_id: rootIssueId,
@@ -188,7 +195,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
   ): Promise<import("../api/LinearGatewayInterface.js").LinearWorkflowMutationOutcome> {
     this.#assertProject(input.expectedProjectId);
-    const response = record(await this.#request(workflowMutationBody(input, this.conductorShortHash)));
+    const response = record(await this.#request(workflowMutationBody(input, this.conductorShortHash, this.#bindingId())));
     if (response.kind === "precondition_conflict") return { kind: "precondition_conflict" };
     if (response.kind === "applied" || response.kind === "already_applied") {
       return {
@@ -220,10 +227,13 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       if (body.kind === "get_issue_tree") this.#activeDiscovery.getIssueTreeCount += 1;
     }
     this.#sequence += 1;
+    const timeoutMs = typeof this.options.timeoutMs === "function"
+      ? this.options.timeoutMs()
+      : this.options.timeoutMs;
     return this.protocol.request({
       requestId: `conductor-${this.#sequence}`,
       body,
-      timeoutMs: this.options.timeoutMs,
+      timeoutMs,
     });
   }
 
@@ -231,6 +241,10 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     if (this.#projectId !== projectId) {
       throw new Error("linear_project_resolution_changed");
     }
+  }
+
+  #bindingId(): string {
+    return this.options.bindingId ?? "binding-1";
   }
 }
 
@@ -263,6 +277,21 @@ function number(value: JsonValue | undefined, code: string): number {
 function boolean(value: JsonValue | undefined, code: string): boolean {
   if (typeof value !== "boolean") throw new Error(code);
   return value;
+}
+
+function pool(value: JsonValue | undefined): ConductorPoolMember[] {
+  const entries = array(value, "linear_conductor_pool_invalid");
+  if (entries.length > 64) throw new Error("linear_conductor_pool_invalid");
+  const seen = new Set<string>();
+  return entries.map((item) => {
+    const entry = record(item);
+    const conductorShortHash = string(entry.conductor_short_hash, "linear_conductor_hash_invalid");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(conductorShortHash) || seen.has(conductorShortHash)) {
+      throw new Error("linear_conductor_pool_invalid");
+    }
+    seen.add(conductorShortHash);
+    return { conductorShortHash };
+  });
 }
 
 function rootManagedConductorId(value: JsonValue | undefined, rootIssueId: string): string | undefined {
@@ -485,8 +514,10 @@ function protocolError(response: Record<string, JsonValue>): Error {
 function workflowMutationBody(
   input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
   conductorShortHash: string,
+  bindingId: string,
 ): Record<string, JsonValue> {
   const common = {
+    binding_id: bindingId,
     write_id: input.writeId,
     conductor_short_hash: conductorShortHash,
     expected_project_id: input.expectedProjectId,

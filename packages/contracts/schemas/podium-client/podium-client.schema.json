@@ -93,6 +93,30 @@
         "repository": { "$ref": "#/$defs/RepositorySelection" }
       }
     },
+    "CreateRootCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project_id", "title", "description"],
+      "properties": {
+        "kind": { "const": "create_root" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "RootCreatedResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "identifier", "project_id", "conductor_short_hash"],
+      "properties": {
+        "kind": { "const": "root_created" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "identifier": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
     "StartConductorCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -318,6 +342,15 @@
           "enum": ["stopped", "starting", "ready", "recovering", "not_responding", "crashed", "unbound", "project_conflict"]
         },
         "project_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "project_pool": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "common.schema.json#/$defs/Identifier" }
+        },
+        "project_resolution_status": {
+          "enum": ["resolved", "unbound", "ambiguous", "conflict"]
+        },
         "repository_display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
         "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
@@ -338,6 +371,9 @@
           "maxLength": 2048,
           "pattern": "^https://"
         },
+        "routing_conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "routing_status": { "enum": ["routed", "unrouted", "conflict"] },
+        "ownership_status": { "enum": ["matched", "mismatch", "unknown"] },
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
@@ -535,6 +571,7 @@
             "connect_linear",
             "reconnect_linear",
             "create_conductor",
+            "create_root",
             "start_conductor",
             "stop_conductor",
             "restart_conductor",
@@ -554,6 +591,7 @@
         { "$ref": "#/$defs/ConnectLinearCommand" },
         { "$ref": "#/$defs/ReconnectLinearCommand" },
         { "$ref": "#/$defs/CreateConductorCommand" },
+        { "$ref": "#/$defs/CreateRootCommand" },
         { "$ref": "#/$defs/StartConductorCommand" },
         { "$ref": "#/$defs/StopConductorCommand" },
         { "$ref": "#/$defs/RestartConductorCommand" },
@@ -572,6 +610,7 @@
         { "$ref": "#/$defs/DesktopOverviewView" },
         { "$ref": "#/$defs/ConductorDetailView" },
         { "$ref": "#/$defs/RootDetailView" },
+        { "$ref": "#/$defs/RootCreatedResult" },
         { "$ref": "#/$defs/LinearConnectionView" },
         { "$ref": "#/$defs/ConductorSummaryView" },
         { "$ref": "#/$defs/RootSummaryView" },

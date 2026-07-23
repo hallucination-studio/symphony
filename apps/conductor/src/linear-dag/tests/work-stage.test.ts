@@ -80,6 +80,40 @@ test("executes one dependency-ready Work node and persists commit evidence befor
   assert.deepEqual(gateway.lastEnvelope?.target, { root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, node_issue_id: readyWorkIssueId, plan_contract_digest: "digest-1" });
 });
 
+test("allocates Work execution ids across all nodes in one Cycle", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("must_not_run"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const firstExecution = latestExecution(gateway);
+  const doneStatus = gateway.tree.status_catalog.find((status) => status.name === "Done")!;
+  const firstWork = gateway.tree.issues.find((issue) => issue.issue_id === readyWorkIssueId)!;
+  Object.assign(firstWork, {
+    status_id: doneStatus.status_id,
+    status_name: doneStatus.name,
+    status_category: doneStatus.category,
+    status_position: doneStatus.position,
+  });
+  gateway.tree.comments.push(comment(readyWorkIssueId, "first-work-completion", {
+    kind: "work_completion", version: 1, stageExecutionId: firstExecution.stageExecutionId,
+    rootIssueId, cycleIssueId, nodeIssueId: readyWorkIssueId, workKey: "one",
+    contextDigest: firstExecution.contextDigest, summary: "First Work is complete.",
+    changedPaths: [], checks: [], commitRevision: "head-1",
+  }));
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const secondExecution = latestExecution(gateway);
+
+  assert.notEqual(secondExecution.stageExecutionId, firstExecution.stageExecutionId);
+  assert.equal(secondExecution.stageExecutionId, "work-execution-2");
+});
+
 test("rejects a Work result that widens the approved scope before commit", async () => {
   const gateway = new WorkGateway(workTree());
   const performer: PerformerStageClientInterface = {
@@ -116,7 +150,46 @@ test("rejects a Work result that widens the approved scope before commit", async
   assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"kind":"work_completion"')), false);
 });
 
-test("rejects a stale Work result before writing terminal or commit evidence", async () => {
+test("records invalid Work evidence and restores the dedicated worktree before retry", async () => {
+  const gateway = new WorkGateway(workTree());
+  const execution = new LinearDagExecutionImpl({
+    linear: gateway,
+    git: gateway.git,
+    performer: { async runStage() { throw new Error("unused"); }, async cancelAndReap() {} },
+  });
+
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_in_progress" });
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+  const stageExecution = parseExecution(gateway);
+  gateway.gitState.dirtyPaths = ["apps/conductor/src/changed.ts"];
+  const invalid = {
+    protocol_version: "1",
+    stage_execution_id: stageExecution.stageExecutionId,
+    stage: "work",
+    root_issue_id: rootIssueId,
+    cycle_issue_id: cycleIssueId,
+    node_issue_id: readyWorkIssueId,
+    context_digest: stageExecution.contextDigest,
+    completed_at: "2026-07-21T09:01:00Z",
+    outcome: {
+      kind: "work_completed",
+      summary: "The check was not executed.",
+      changed_paths: ["apps/conductor/src/changed.ts"],
+      checks: [{ check_key: "work-check", command_or_method: "test", outcome: "not_run", summary: "Not run.", artifact_revision: "head-1" }],
+      observed_workspace_revision: "head-1",
+    },
+  } as unknown as JsonValue;
+
+  assert.deepEqual(await execution.reconcileWork(workInput(), invalid, undefined, stageExecution.stageExecutionId), {
+    kind: "mutation_applied", step: "work_stage_validation_failure_terminal:work_checks_invalid",
+  });
+  assert.equal(gateway.restoreCalls, 1);
+  assert.deepEqual(gateway.gitState.dirtyPaths, []);
+  assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"failure_code":"work_checks_invalid"')), true);
+  assert.deepEqual(await execution.reconcileWork(workInput()), { kind: "mutation_applied", step: "work_execution_created" });
+});
+
+test("persists a failed terminal for a stale Work result before releasing the Stage", async () => {
   const gateway = new WorkGateway(workTree());
   const performer: PerformerStageClientInterface = {
     async runStage(input) {
@@ -143,7 +216,7 @@ test("rejects a stale Work result before writing terminal or commit evidence", a
 
   await assert.rejects(execution.executeWorkStage(workInput()), /work_result_correlation_invalid/u);
   assert.equal(gateway.commitCalls, 0);
-  assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"kind":"stage_terminal"')), false);
+  assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"kind":"stage_terminal"')), true);
   assert.equal(gateway.tree.comments.some((comment) => comment.body.includes('"kind":"work_completion"')), false);
 });
 
@@ -308,7 +381,11 @@ test("restarts after a real Performer exit using a real Git worktree", async () 
   parsedOwnership.value.deliveryBranch = workspace.branch;
   ownership.body = serializeManagedRecord(parsedOwnership.value);
   const gateway = new WorkGateway(tree, git);
-  const input = { ...workInput(), workspace };
+  const input = {
+    ...workInput(),
+    workspace,
+    options: { ...workInput().options, now: () => new Date().toISOString() },
+  };
   const execution = new LinearDagExecutionImpl({ linear: gateway, git, performer });
 
   await assert.rejects(execution.executeWorkStage(input), /performer_stage_result_missing/u);
@@ -580,6 +657,7 @@ class WorkGateway implements LinearGatewayInterface {
   readonly gitState = { head: "head-1", dirtyPaths: [] as string[] };
   readonly git: GitWorkspaceInterface;
   readonly writes: string[] = [];
+  restoreCalls = 0;
   readonly tree: LinearWorkflowTreeSnapshot;
   lastEnvelope?: Record<string, JsonValue>;
   lastTargetIssueId?: string;
@@ -595,6 +673,12 @@ class WorkGateway implements LinearGatewayInterface {
         return { text: paths.map((path) => `diff --git a/${path} b/${path}`).join("\n"), bytes: paths.length, cap: 65_536, partial: false };
       },
       checks: async (_workspace, names) => ({ items: names.map((name) => ({ name, status: "passed" as const })), returned: names.length, cap: 32, has_more: false, partial: false }),
+      restoreWorktree: async (_workspace, expectedHead) => {
+        assert.equal(expectedHead, "head-1");
+        this.restoreCalls += 1;
+        this.gitState.dirtyPaths = [];
+        return { kind: "restored" as const };
+      },
       commit: async (input) => {
         this.commitCalls += 1;
         assert.equal(input.rootIssueId, rootIssueId);

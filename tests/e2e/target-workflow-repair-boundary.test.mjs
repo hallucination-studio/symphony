@@ -24,6 +24,25 @@ test("target repair boundary closes production resources after escalation", asyn
   assert.equal(Object.hasOwn(result, "runner"), false);
 });
 
+test("target repair boundary supplies the five-minute deadline when none is provided", async () => {
+  let boundaryDeadline;
+  let scenarioTimeout;
+  await runTargetRepairBoundary({
+    now: () => 1_000,
+    startBoundary: async (input) => {
+      boundaryDeadline = input.deadlineAtMs;
+      return { runner: {}, async close() {} };
+    },
+    runRepair: async ({ timeoutMs }) => {
+      scenarioTimeout = timeoutMs;
+      return { scenario: "repair" };
+    },
+  });
+
+  assert.equal(boundaryDeadline, 301_000);
+  assert.equal(scenarioTimeout, 300_000);
+});
+
 test("target repair boundary preserves scenario failure while closing resources", async () => {
   const events = [];
   await assert.rejects(

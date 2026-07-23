@@ -7,7 +7,7 @@ const TARGET_WORKFLOW_SCENARIOS = Object.freeze([
 ]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
-const DIGEST = /^[0-9a-f]{64}$/u;
+const DIGEST = /^(?:sha256:)?[0-9a-f]{64}$/u;
 const SECRET_KEY = /(?:api[_-]?key|authorization|cookie|credential|password|secret|token)/iu;
 const TARGET_EVIDENCE_FIELDS = new Set([
   "status",
@@ -23,7 +23,7 @@ const TARGET_EVIDENCE_FIELDS = new Set([
   "scheduling",
   "cleanup",
   "scenarioEvidence",
-  "linearBudget",
+  "linearObservation",
 ]);
 const TARGET_SETUP_FIELDS = new Set([
   "status",
@@ -40,8 +40,8 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
   if (![...Object.keys(evidence)].every((key) => TARGET_EVIDENCE_FIELDS.has(key))) {
     failures.add("evidence_shape_invalid");
   }
-  if (evidence.linearBudget !== undefined && !validLinearBudget(evidence.linearBudget)) {
-    failures.add("linear_budget_evidence_invalid");
+  if (evidence.linearObservation !== undefined && !validLinearObservation(evidence.linearObservation)) {
+    failures.add("linear_observation_evidence_invalid");
   }
   if (evidence.scenarioEvidence !== undefined) {
     if (!validSetup(evidence.setup)) failures.add("setup_evidence_invalid");
@@ -86,14 +86,13 @@ export function evaluateTargetWorkflowEvidence(input, { secrets = [] } = {}) {
   });
 }
 
-function validLinearBudget(value) {
+function validLinearObservation(value) {
   const snapshot = (entry) => entry && typeof entry === "object" && !Array.isArray(entry) &&
     Object.keys(entry).every((key) => [
-      "logicalOperations", "physicalRequests", "reservedRequests", "reservedComplexity",
-      "complexityConsumed", "rateLimited", "requestWindow", "complexityWindow", "status",
+      "logicalOperations", "physicalRequests", "complexityConsumed", "rateLimited", "requestWindow", "complexityWindow", "status",
     ].includes(key)) &&
     (entry.status === "invalid" ||
-      ["logicalOperations", "physicalRequests", "reservedRequests", "reservedComplexity", "complexityConsumed"]
+      ["logicalOperations", "physicalRequests", "complexityConsumed"]
         .every((key) => Number.isSafeInteger(entry[key]) && entry[key] >= 0) &&
       typeof entry.rateLimited === "boolean" &&
       (!entry.requestWindow || validWindow(entry.requestWindow)) &&

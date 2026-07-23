@@ -41,6 +41,10 @@ export interface LinearWorkflowTreeSnapshot {
   observed_at: string;
 }
 
+export interface ConductorPoolMember {
+  conductorShortHash: string;
+}
+
 export type LinearWorkflowMutationCommand =
   | {
       kind: "create_workflow_issue";

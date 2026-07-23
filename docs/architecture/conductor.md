@@ -1,13 +1,14 @@
 # Conductor无数据库Root调度、Cycle Policy与Linear DAG Execution设计
 
-状态：目标架构提案。Conductor通过Conductor Project Label解析Resolved Conductor Project；它没有
+状态：目标架构提案。Conductor通过自己的Conductor Project Label解析Resolved Conductor Project，
+再通过Root Conductor Label只调度路由给自己的Root；它没有
 Workflow数据库、DAG镜像、durable Queue或checkpoint。
 
 ## 1. 职责
 
 Conductor负责：
 
-- 通过`LinearGatewayInterface`解析Project、发现Root headers并按需读取完整Cycle Tree；
+- 通过`LinearGatewayInterface`解析Project Conductor Pool、过滤Root routing并按需读取完整Cycle Tree；
 - 从Root、Cycle/node markers、comments、relations和Git重建可丢弃`RootDagView`；
 - 验证Team workflow status catalog和每类Issue允许的status/transition；
 - 判断Root是runnable、waiting human、needs attention还是terminal；
@@ -99,6 +100,7 @@ apps/conductor/src/
 ```text
 RootDagView
   root_issue
+  root_routing
   resolved_conductor_project
   root_primary_status_comment
   pending_human_action?
@@ -136,7 +138,8 @@ startup:
   start webhook observation and periodic poll
 
 on wake-up or poll:
-  discover ordered Root headers
+  discover ordered Root headers and validate Root routing
+  discard Roots routed to another pool member
   for each candidate Root:
     view = fresh read complete Cycle Tree + Git
     assessment = rootWorkflowPolicy.assess(view, git) including convergence gate
@@ -170,6 +173,12 @@ RootDispatchAssessment
 
 Cycle或Stage node不得进入Needs Approval/Needs Info。问题消失后下一次fresh assessment自然恢复，不需要
 local resume command。
+
+Project Conductor Pool只声明成员资格，Root Conductor Label只声明路由，Root Primary Status Comment
+才是已claim后的durable ownership。Conductor只能claim路由给自己的Root，并在每次Cycle/Node mutation、
+Stage dispatch、Result materialization和delivery前fresh验证以下事实：自己的Project Label仍在pool、Root
+恰有一个匹配自己的routing Label、Root Primary ownership为空或匹配自己的full `conductor_id`。任一事实
+变化都使Root进入`needs_attention`并终止active Stage Wire；不得自动接管或热迁移。
 
 ## 7. DAG node claim与Stage execution
 
@@ -223,14 +232,14 @@ Conductor启动顺序：
 1. 读取Binding和Profile配置；
 2. 验证当前Conductor generation唯一；
 3. 连接Podium private channel；
-4. 解析Conductor Project Label；
+4. 解析Conductor Project Label和完整Project Conductor Pool；
 5. 立即执行一次完整Root discovery/reconciliation；
 6. 启动webhook observation和periodic poll；
 7. 每次dispatch前fresh读取selected Root DAG和Git。
 
 Conductor不恢复旧snapshot、decision、Wire、process或Result。若旧generation未退出，Host
-不得启动第二实例；没有DB不等于允许双控制器。普通Linear Issue create没有CAS/unique constraint，当前因此
-明确只支持每个Binding/Root一个writer。Cycle/node create使用deterministic key和semantic read-back；发现
+不得启动同一Binding的第二实例；没有DB不等于允许同一身份双控制器。一个Project可以运行多个不同Binding，
+但每个Root通过Root Conductor Label和full ownership只允许一个writer。Cycle/node create使用deterministic key和semantic read-back；发现
 duplicate key时停止该Root mutation并进入attention，不能任选一份继续。
 
 ## 11. 错误与可见性

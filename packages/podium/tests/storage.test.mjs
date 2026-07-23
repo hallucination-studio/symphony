@@ -103,6 +103,50 @@ test("podium.db persists only approved control-plane facts", async () => {
     "2026-07-16T00:00:03Z",
   );
 
+  store.saveConductorBinding({
+    bindingId: "binding-2",
+    conductorId: "conductor-2",
+    conductorShortHash: "def456",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-handle-2",
+      repositoryIdentity: "repo-2",
+      repositoryDisplayName: "symphony-2",
+      repositoryRoot: "/private/repository-2",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+  });
+  await services.handle({
+    kind: "conductor_handshake",
+    binding_id: "binding-2",
+    instance_id: "instance-2",
+    conductor_id: "conductor-2",
+    conductor_short_hash: "def456",
+    linear_installation_id: "installation-1",
+    organization_id: "organization-1",
+    repository: {
+      repository_handle: "repo-handle-2",
+      canonical_path: "/private/repository-2",
+      base_branch: "main",
+    },
+  });
+  await services.handle({
+    kind: "conductor_heartbeat",
+    binding_id: "binding-2",
+    instance_id: "instance-2",
+    occurred_at: "2026-07-16T00:00:05Z",
+  });
+  services.observeExit({
+    bindingId: "binding-1",
+    instanceId: "instance-1",
+    observedAt: "2026-07-16T00:00:06Z",
+    sanitizedReason: "conductor_process_exited",
+  });
+  assert.equal(store.getRuntimeObservation("binding-1")?.status, "crashed");
+  assert.equal(store.getRuntimeObservation("binding-2")?.status, "ready");
+
   assert.deepEqual(store.listTableNames(), [
     "conductor_bindings",
     "linear_installations",

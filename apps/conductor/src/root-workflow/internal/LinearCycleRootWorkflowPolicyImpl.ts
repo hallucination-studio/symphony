@@ -6,7 +6,7 @@ import type {
 } from "../api/RootWorkflowPolicyInterface.js";
 import {
   assessRootConvergence,
-  DEFAULT_ROOT_CONVERGENCE_POLICY,
+  createDefaultRootConvergencePolicy,
   type RootConvergencePolicy,
 } from "./RootConvergencePolicy.js";
 
@@ -14,7 +14,7 @@ const terminalRootStates = new Set(["Done", "Canceled"]);
 const terminalCycleStates = new Set(["Succeeded", "Changes Required", "Canceled"]);
 
 export class LinearCycleRootWorkflowPolicyImpl implements RootWorkflowPolicyInterface {
-  constructor(private readonly convergencePolicy: RootConvergencePolicy = DEFAULT_ROOT_CONVERGENCE_POLICY) {}
+  constructor(private readonly convergencePolicy: RootConvergencePolicy = createDefaultRootConvergencePolicy()) {}
 
   assess(view: RootDagView): RootDispatchAssessment {
     const base = { rootIssueId: view.root.issue.issue_id };
@@ -24,7 +24,13 @@ export class LinearCycleRootWorkflowPolicyImpl implements RootWorkflowPolicyInte
     const convergence = assessRootConvergence({ view, now: view.observedAt, policy: this.convergencePolicy });
     if (convergence.decision !== "allow") return attention(base, `convergence_${convergence.trigger}`);
     const activeCycles = view.cycles.filter(({ issue }) => !terminalCycleStates.has(issue.status_name));
-    if (activeCycles.length === 0) return rootState === "In Review" ? { ...base, readiness: "terminal" } : { ...base, readiness: "runnable" };
+    if (activeCycles.length === 0) {
+      const latestCycle = [...view.cycles]
+        .sort((left, right) => left.issue.order - right.issue.order || left.issue.issue_id.localeCompare(right.issue.issue_id))
+        .at(-1);
+      if (latestCycle?.issue.status_name === "Succeeded") return { ...base, readiness: "terminal" };
+      return rootState === "In Review" ? { ...base, readiness: "terminal" } : { ...base, readiness: "runnable" };
+    }
     const cycle = activeCycles[0]!;
     const plan = cycle.nodes.find((node) => node.issue.issue_kind === "plan");
     if (!plan) return attention(base, "plan_node_missing");

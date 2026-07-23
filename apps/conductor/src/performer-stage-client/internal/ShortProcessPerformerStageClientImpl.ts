@@ -17,6 +17,9 @@ import { stageProcessEnvironment } from "./StageProcessEnvironment.js";
 
 type JsonRecord = { [key: string]: JsonValue };
 interface StageEnvelope extends JsonRecord {
+  stage_execution: {
+    deadline_at: string;
+  };
   execution_policy: { performer_profile_id: string };
   limits: {
     max_context_bytes: number;
@@ -174,9 +177,14 @@ export class ShortProcessPerformerStageClientImpl
       input.input.signal?.addEventListener("abort", onAbort, { once: true });
       child.once("spawn", () => {
         if (startupTimer) clearTimeout(startupTimer);
+        const remainingWallTimeMs = remainingStageWallTimeMs(input.envelope);
+        if (remainingWallTimeMs <= 0) {
+          terminate(new Error("performer_stage_timeout"));
+          return;
+        }
         wallTimer = setTimeout(
           () => terminate(new Error("performer_stage_timeout")),
-          input.envelope.limits.max_wall_time_ms,
+          remainingWallTimeMs,
         );
       });
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -226,6 +234,12 @@ function decodeEnvelope(value: JsonValue): StageEnvelope {
   } catch {
     throw new Error("performer_stage_context_invalid");
   }
+}
+
+function remainingStageWallTimeMs(envelope: StageEnvelope): number {
+  const deadlineMs = Date.parse(envelope.stage_execution.deadline_at);
+  if (!Number.isFinite(deadlineMs)) return 0;
+  return Math.min(envelope.limits.max_wall_time_ms, deadlineMs - Date.now());
 }
 
 function envelopeCorrelation(envelope: JsonRecord): StageCorrelation {
