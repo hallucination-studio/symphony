@@ -195,16 +195,16 @@ impl DesktopController {
                 .map_err(|_| ControllerError::ProtocolIoFailed)?
                 .remove(request_id)
             {
-                let accepted =
+                let completed =
                     request.get("body").and_then(|body| body.get("kind")).and_then(Value::as_str)
-                        == Some("host_command_accepted");
+                        == Some("host_operation_completed");
                 if let Some(sender) = self
                     .host_acks
                     .lock()
                     .map_err(|_| ControllerError::ProtocolIoFailed)?
                     .remove(request_id)
                 {
-                    let _ = sender.send(accepted);
+                    let _ = sender.send(completed);
                 }
                 continue;
             }
@@ -255,7 +255,7 @@ impl DesktopController {
                     .opener()
                     .open_url(url, None::<&str>)
                     .map_err(|_| ControllerError::ExternalOpenFailed)?;
-                Ok(accepted("open_external_url"))
+                Ok(completed("open_external_url"))
             }
             Some("resolve_repository") => {
                 let handle = map_string(body, "repository_handle")?;
@@ -270,15 +270,15 @@ impl DesktopController {
             }
             Some("start_conductor") => {
                 self.start_conductor(parse_conductor(body)?).await?;
-                Ok(accepted("start_conductor"))
+                Ok(completed("start_conductor"))
             }
             Some("stop_conductor") => {
                 self.stop_conductor(map_string(body, "conductor_id")?).await?;
-                Ok(accepted("stop_conductor"))
+                Ok(completed("stop_conductor"))
             }
             Some("restart_conductor") => {
                 self.restart_conductor(map_string(body, "conductor_id")?).await?;
-                Ok(accepted("restart_conductor"))
+                Ok(completed("restart_conductor"))
             }
             _ => Err(ControllerError::HostCommandUnsupported),
         }
@@ -566,8 +566,8 @@ fn repository_value(repository: &RepositoryContext) -> Value {
     })
 }
 
-fn accepted(kind: &str) -> Value {
-    json!({ "kind": "host_command_accepted", "command_kind": kind })
+fn completed(operation: &str) -> Value {
+    json!({ "kind": "host_operation_completed", "operation": operation })
 }
 
 fn protocol_error(error: ControllerError) -> Value {

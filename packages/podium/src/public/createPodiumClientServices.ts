@@ -6,6 +6,7 @@ import { LinearOAuthHttpClientImpl } from "../internal/linear-auth/LinearOAuthHt
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
 import type { PodiumClientServices } from "./PodiumClientProtocolHandler.js";
 import type { PodiumDesktopHostPorts } from "./PodiumDesktopHostPorts.js";
+import type { ConductorPresence } from "./ConductorPresence.js";
 
 export interface PodiumClientServiceOwner {
   services: PodiumClientServices;
@@ -22,6 +23,7 @@ export function createPodiumClientServices(input: {
   linearClientSecret: string;
   linearRedirectUri: string;
   host: PodiumDesktopHostPorts;
+  presence: ConductorPresence;
   now?: () => string;
   fetch?: typeof globalThis.fetch;
 }): PodiumClientServiceOwner {
@@ -36,6 +38,7 @@ export function createPodiumClientServices(input: {
   });
   const implementation = new PodiumClientServicesImpl(
     store,
+    input.presence,
     createLinearAuth(store, oauthHttp, now),
     oauthHttp,
     input.host,

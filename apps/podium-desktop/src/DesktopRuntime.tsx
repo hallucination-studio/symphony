@@ -9,7 +9,6 @@ import { App } from "./App";
 import {
   decodeConductorDetailView,
   decodeDesktopOverviewView,
-  decodeRootDetailView,
 } from "./client/GeneratedPodiumClient";
 import type {
   DesktopCommand,
@@ -55,14 +54,11 @@ export function DesktopRuntime() {
         setState({ kind: "profile-setup", conductorDetail });
         return;
       }
-      setState((current) => ({
+      setState({
         kind: "ready",
         overview,
         conductorDetail,
-        ...(current.kind === "ready" && current.rootDetail
-          ? { rootDetail: current.rootDetail }
-          : {}),
-      }));
+      });
     } catch (error) {
       setState({
         kind: "unavailable",
@@ -117,17 +113,6 @@ export function DesktopRuntime() {
       onChooseRepository={chooseRepository}
       onBeginCreateConductor={() => {
         void refresh();
-      }}
-      onOpenExternal={(url) => {
-        void invoke("open_external_url", { url });
-      }}
-      onSelectRoot={async (rootId) => {
-        const detail = await decodeRootDetailView(
-          await request({ kind: "get_root_detail", root_issue_id: rootId }),
-        );
-        setState((current) =>
-          current.kind === "ready" ? { ...current, rootDetail: detail } : current,
-        );
       }}
       onSelectConductor={async (conductorId) => {
         const detail = await decodeConductorDetailView(
@@ -207,14 +192,6 @@ function commandBody(command: DesktopCommand): JsonValue {
           base_branch: command.repository.baseBranch,
         },
       };
-    case "create_root":
-      return {
-        kind: command.kind,
-        project_id: command.projectId,
-        ...(command.conductorId === undefined ? {} : { conductor_id: command.conductorId }),
-        title: command.title,
-        description: command.description,
-      };
     case "start_conductor":
     case "stop_conductor":
     case "restart_conductor":
@@ -243,12 +220,6 @@ function commandBody(command: DesktopCommand): JsonValue {
         kind: command.kind,
         conductor_id: command.conductorId,
         profile_id: command.profileId,
-      };
-    case "acknowledge_root_retry_block":
-      return {
-        kind: command.kind,
-        root_issue_id: command.rootIssueId,
-        retry_observed_at: command.retryObservedAt,
       };
   }
 }

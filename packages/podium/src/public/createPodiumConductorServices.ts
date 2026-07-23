@@ -8,6 +8,7 @@ import {
 import { LinearRequestObserverImpl } from "../internal/linear-gateway/internal/LinearRequestObserverImpl.js";
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
 import type { PodiumConductorServices } from "./PodiumConductorProtocolHandler.js";
+import type { ConductorPresence } from "./ConductorPresence.js";
 
 export interface PodiumConductorServiceOwner {
   services: PodiumConductorServices;
@@ -20,11 +21,12 @@ export function createPodiumConductorServices(input: {
   sleep?: (delayMs: number) => Promise<void>;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
   linearRequestObserver?: LinearRequestObserverImpl;
+  presence: ConductorPresence;
 }): PodiumConductorServiceOwner {
   const store = new SqlitePodiumStoreImpl(input.databasePath);
   const observer = input.linearRequestObserver;
   return {
-    services: new PodiumConductorServicesImpl(store, {
+    services: new PodiumConductorServicesImpl(store, input.presence, {
       now: input.now ?? (() => new Date().toISOString()),
       sleep:
         input.sleep ??

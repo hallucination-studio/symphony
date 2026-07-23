@@ -10,9 +10,14 @@ test("private Backend serves correlated bounded Podium Client frames", async () 
   const chunks: Buffer[] = [];
   output.on("data", (chunk: Buffer) => chunks.push(chunk));
   const query = vi.fn().mockResolvedValue({
-    kind: "command_accepted",
-    command_kind: "connect_linear",
-    status: "accepted",
+    linear_connection: {
+      status: "disconnected",
+      observed_at: "2026-07-16T00:00:00Z",
+    },
+    projects: [],
+    conductors: [],
+    recent_logs: [],
+    observed_at: "2026-07-16T00:00:00Z",
   });
   const serving = servePodiumClient(
     {
@@ -34,7 +39,7 @@ test("private Backend serves correlated bounded Podium Client frames", async () 
 
   const response = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   expect(response.request_id).toBe("request-1");
-  expect(response.body.kind).toBe("command_accepted");
+  expect(response.body.linear_connection.status).toBe("disconnected");
   expect(query).toHaveBeenCalledOnce();
 });
 

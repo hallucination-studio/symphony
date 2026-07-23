@@ -1,4 +1,5 @@
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
+import type { ConductorPresence } from "../../public/ConductorPresence.js";
 import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
@@ -31,6 +32,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
 
   constructor(
     private readonly store: PodiumConductorStoreInterface,
+    private readonly presence: ConductorPresence,
     private readonly options: {
       now(): string;
       sleep(delayMs: number): Promise<void>;
@@ -63,12 +65,10 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       throw new Error("conductor_exit_observation_mismatch");
     }
     this.#activeInstances.delete(input.bindingId);
-    this.store.saveRuntimeObservation({
+    this.presence.observeOffline({
       bindingId: binding.bindingId,
-      status: "crashed",
       observedAt: input.observedAt,
-      sanitizedSummary:
-        input.sanitizedReason ?? "conductor_process_observed_exit",
+      ...(input.sanitizedReason ? { sanitizedError: input.sanitizedReason } : {}),
     });
   }
 
@@ -188,12 +188,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     } else if (this.#activeInstances.get(bindingId) !== instanceId) {
       throw new Error("conductor_instance_mismatch");
     }
-    const status =
-      body.kind === "conductor_runtime_report" && typeof body.status === "string"
-        ? runtimeStatus(body.status)
-        : body.kind === "conductor_handshake"
-          ? "starting"
-          : "ready";
     const observedAt =
       typeof body.observed_at === "string"
         ? body.observed_at
@@ -203,30 +197,20 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const sanitizedSummary =
       typeof body.sanitized_summary === "string"
         ? body.sanitized_summary
-        : `conductor_${status.replaceAll("-", "_")}`;
-    this.store.saveRuntimeObservation({
+        : body.kind === "conductor_handshake"
+          ? "Conductor private channel connected."
+          : "Conductor private channel heartbeat received.";
+    this.presence.observeOnline({
       bindingId: binding.bindingId,
-      status,
       observedAt,
-      sanitizedSummary,
-      ...(typeof body.current_project_id === "string"
-        ? { lastResolvedProjectId: body.current_project_id }
-        : {}),
-      ...(body.runtime_problem ? { problem: runtimeProblem(body.runtime_problem) } : {}),
+      protocolVersion: "1",
+      ...(body.kind === "conductor_runtime_report" ? { summary: sanitizedSummary } : {}),
     });
-    if (typeof body.active_root_issue_id === "string") {
-      this.store.saveRootRuntimeObservation({
-        bindingId: binding.bindingId,
-        rootIssueId: body.active_root_issue_id,
-        observedAt,
-        sanitizedSummary,
-      });
-    }
     return {
       kind: "conductor_runtime_report",
       binding_id: binding.bindingId,
       instance_id: instanceId,
-      status,
+      status: "ready",
       observed_at: this.options.now(),
     };
   }
@@ -566,22 +550,6 @@ function requiredString(value: JsonValue | undefined, code: string): string {
   return value;
 }
 
-function runtimeStatus(value: string) {
-  if (
-    value === "stopped" ||
-    value === "starting" ||
-    value === "ready" ||
-    value === "recovering" ||
-    value === "not-responding" ||
-    value === "crashed" ||
-    value === "unbound" ||
-    value === "project-conflict"
-  ) {
-    return value;
-  }
-  throw new Error("conductor_runtime_status_invalid");
-}
-
 function failure(kind: string) {
   return {
     kind,
@@ -882,27 +850,6 @@ function recordValue(value: JsonValue | undefined, code: string) {
   return value;
 }
 
-function runtimeProblem(value: JsonValue) {
-  const problem = recordValue(value, "runtime_problem_invalid");
-  const scope = requiredString(problem.scope, "runtime_problem_scope_invalid");
-  const severity = requiredString(problem.severity, "runtime_problem_severity_invalid");
-  if (!(["application", "binding", "root", "stage", "profile", "workspace"] as string[])
-    .includes(scope) || (severity !== "warning" && severity !== "error")) {
-    throw new Error("runtime_problem_invalid");
-  }
-  return {
-    code: requiredString(problem.code, "runtime_problem_code_invalid"),
-    scope: scope as "application" | "binding" | "root" | "stage" | "profile" | "workspace",
-    severity: severity as "warning" | "error",
-    sanitizedReason: requiredString(problem.sanitized_reason, "runtime_problem_reason_invalid"),
-    firstObservedAt: requiredString(problem.first_observed_at, "runtime_problem_first_invalid"),
-    lastObservedAt: requiredString(problem.last_observed_at, "runtime_problem_last_invalid"),
-    ...(typeof problem.action_required === "string" ? { actionRequired: problem.action_required } : {}),
-    ...(typeof problem.root_issue_id === "string" ? { rootIssueId: problem.root_issue_id } : {}),
-    ...(typeof problem.performer_profile_id === "string"
-      ? { performerProfileId: problem.performer_profile_id } : {}),
-  };
-}
 
 function requiredNumber(value: JsonValue | undefined, code: string) {
   if (typeof value !== "number") throw new Error(code);

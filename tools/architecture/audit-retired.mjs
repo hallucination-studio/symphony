@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -93,10 +93,16 @@ async function trackedSources(root) {
     maxBuffer: 16 * 1024 * 1024,
   });
   const files = stdout.toString("utf8").split("\0").filter(Boolean).sort();
-  return new Map(await Promise.all(files.map(async (file) => {
+  const sources = await Promise.all(files.map(async (file) => {
+    try {
+      await stat(path.join(root, file));
+    } catch {
+      return undefined;
+    }
     if (!textExtensions.has(path.extname(file)) || file === inventoryPath) return [file, ""];
     return [file, await readFile(path.join(root, file), "utf8")];
-  })));
+  }));
+  return new Map(sources.filter((entry) => entry !== undefined));
 }
 
 export async function auditRetiredInventory(root, options) {

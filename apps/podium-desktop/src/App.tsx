@@ -11,7 +11,6 @@ import type {
   RepositorySelection,
   SecretHandler,
 } from "./ui/types";
-import { WorkPage } from "./ui/WorkPage";
 
 export function App({
   initialState,
@@ -19,8 +18,6 @@ export function App({
   onSecret,
   onChooseRepository,
   onBeginCreateConductor,
-  onOpenExternal,
-  onSelectRoot,
   onSelectConductor,
 }: {
   initialState: DesktopState;
@@ -28,18 +25,15 @@ export function App({
   onSecret: SecretHandler;
   onChooseRepository: () => Promise<RepositorySelection | undefined>;
   onBeginCreateConductor: () => void;
-  onOpenExternal: (url: string) => void;
-  onSelectRoot: (rootId: string) => Promise<void>;
   onSelectConductor: (conductorId: string) => Promise<void>;
 }) {
   const [page, setPage] = useState<Page>("overview");
-  const [rootId, setRootId] = useState<string>();
   const [conductorId, setConductorId] = useState<string>();
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     headingRef.current?.focus();
-  }, [page, rootId, conductorId]);
+  }, [page, conductorId]);
 
   if (initialState.kind !== "ready") {
     return (
@@ -53,30 +47,16 @@ export function App({
     );
   }
 
-  const { overview, rootDetail, conductorDetail } = initialState;
+  const { overview, conductorDetail } = initialState;
   function navigate(nextPage: Page) {
     setPage(nextPage);
-    setRootId(undefined);
     setConductorId(undefined);
   }
 
   return (
     <Shell page={page} onNavigate={navigate}>
       {page === "overview" && (
-        <OverviewPage view={overview} headingRef={headingRef} onOpenExternal={onOpenExternal} />
-      )}
-      {page === "work" && (
-        <WorkPage
-          roots={[...overview.activeRoots, ...overview.reviewRoots]}
-          detail={rootId && rootDetail?.summary.rootIssueId === rootId ? rootDetail : undefined}
-          headingRef={headingRef}
-          onSelect={(nextRootId) => {
-            setRootId(nextRootId);
-            void onSelectRoot(nextRootId);
-          }}
-          onOpenExternal={onOpenExternal}
-          onCommand={onCommand}
-        />
+        <OverviewPage view={overview} headingRef={headingRef} />
       )}
       {page === "conductors" && (
         <ConductorsPage

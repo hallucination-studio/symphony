@@ -39,11 +39,8 @@ export function ConductorsPage({
                   <span>
                     <strong>{conductor.displayName}</strong>
                     <span>{conductor.projectName ?? "Unbound"}</span>
-                    {conductor.projectPool && (
-                      <small>Pool: {conductor.projectPool.join(", ")}</small>
-                    )}
                   </span>
-                  <StatusBadge label={labelFromIdentifier(conductor.status)} {...(conductor.status === "ready" ? { tone: "positive" } : {})} />
+                  <StatusBadge label={labelFromIdentifier(conductor.status)} {...(conductor.status === "online" ? { tone: "positive" } : {})} />
                 </button>
               </li>
             ))}
@@ -61,10 +58,6 @@ export function ConductorsPage({
           <div>
             <h2>Runtime</h2>
             <StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} />
-            {conductor.projectPool && <p>Project pool: {conductor.projectPool.join(", ")}</p>}
-            {conductor.projectResolutionStatus && conductor.projectResolutionStatus !== "resolved" && (
-              <p role="alert">Project resolution: {labelFromIdentifier(conductor.projectResolutionStatus)}</p>
-            )}
           </div>
           <div className="button-row">
             <button className="button" onClick={() => onCommand({ kind: "stop_conductor", conductorId: conductor.conductorId })}>Stop</button>
@@ -99,7 +92,7 @@ export function ConductorsPage({
             ))}
           </ul>
         </section>
-        <section className="panel"><h2>Recent runtime events</h2>{detail.events.length ? detail.events.map((event) => <p key={event.occurredAt}>{event.summary}</p>) : <p className="quiet">No recent events.</p>}</section>
+        <section className="panel"><h2>Recent runtime logs</h2>{detail.logs.length ? detail.logs.map((event) => <p key={event.occurredAt}>{event.summary}</p>) : <p className="quiet">No recent logs.</p>}</section>
       </div>
       {showProfile && <ProfileDialog conductorId={conductor.conductorId} onClose={() => setShowProfile(false)} onCommand={onCommand} />}
       {editProfile && <ProfileDialog conductorId={conductor.conductorId} profile={editProfile} onClose={() => setEditProfile(undefined)} onCommand={onCommand} />}

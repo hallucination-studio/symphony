@@ -1,9 +1,5 @@
 export {
   decodePodiumClientConductorDetailView,
   decodePodiumClientDesktopOverviewView,
-  decodePodiumClientNextActionView,
-  decodePodiumClientPerformerUsageView,
-  decodePodiumClientRootSummaryView,
-  decodePodiumClientRuntimeEventView,
-  decodePodiumClientWorkflowNodeView,
+  decodePodiumClientRuntimeLogView,
 } from "@symphony/contracts";

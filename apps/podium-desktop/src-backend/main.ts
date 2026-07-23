@@ -9,6 +9,7 @@ import {
 import {
   createPodiumClientServices,
   createPodiumConductorServices,
+  createConductorPresence,
   PodiumClientProtocolHandler,
   PodiumConductorProtocolHandler,
   type PodiumDesktopHostPorts,
@@ -142,10 +143,7 @@ export async function runPodiumBackend(
             ? { sanitizedReason: event.sanitized_reason }
             : {}),
         });
-        return {
-          kind: "host_command_accepted",
-          command_kind: "process_observed_exit",
-        };
+        return event;
       }
       if (event.kind !== "oauth_return" || !clientServices.current) {
         throw new Error("host_event_unsupported");
@@ -157,10 +155,7 @@ export async function runPodiumBackend(
           "oauth_authorization_code_missing",
         ),
       });
-      return {
-        kind: "host_command_accepted",
-        command_kind: "open_external_url",
-      };
+      return event;
     },
   });
   const host = hostPorts(hostPeer, conductorPeer, dataRoot);
@@ -183,8 +178,10 @@ async function createProductionComposition({
   environment: NodeJS.ProcessEnv;
   dataRoot: string;
 }): Promise<PodiumBackendComposition> {
+  const presence = createConductorPresence();
   const conductorOwner = createPodiumConductorServices({
     databasePath: path.join(dataRoot, "podium.db"),
+    presence,
     observeLinearRequest: (observation) => {
       process.stderr.write(`${JSON.stringify({
         event: "linear_physical_request",
@@ -208,6 +205,7 @@ async function createProductionComposition({
         ),
         linearRedirectUri: "symphony://oauth/linear/callback",
         host,
+        presence,
       });
       return clientOwner.services;
     },

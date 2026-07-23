@@ -2,14 +2,9 @@ export type {
   DesktopOverviewInput,
   DesktopOverviewView,
   DesktopViewInterface,
-  AttentionItemView,
   ConductorSummaryView,
   LinearConnectionView,
-  NextActionView,
-  PerformerProfileSummaryView,
-  PerformerUsageInput,
-  RootSummaryView,
-  WorkflowNodeView,
+  RuntimeLogView,
 } from "./DesktopViewInterface.js";
 export type { PodiumDesktopInterface } from "./PodiumDesktopInterface.js";
 export {
@@ -38,6 +33,8 @@ export {
   type PodiumClientServiceOwner,
 } from "./createPodiumClientServices.js";
 export type { PodiumDesktopHostPorts } from "./PodiumDesktopHostPorts.js";
+export type { ConductorPresence, ConductorPresenceSnapshot } from "./ConductorPresence.js";
+export { createConductorPresence } from "./createConductorPresence.js";
 export {
   bootstrapDevelopmentTokenInstallation,
   type DevelopmentTokenInstallationView,

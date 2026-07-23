@@ -8,8 +8,9 @@ import Database from "better-sqlite3";
 import { bootstrapDevelopmentTokenInstallation } from "../dist/public/index.js";
 import { SqlitePodiumStoreImpl } from "../dist/internal/storage/SqlitePodiumStoreImpl.js";
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
+import { ConductorPresenceImpl } from "../dist/internal/conductor-presence/ConductorPresenceImpl.js";
 
-test("podium.db persists only approved control-plane facts", async () => {
+test("podium.db excludes transient Conductor presence and workflow observations", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-"));
   const store = new SqlitePodiumStoreImpl(path.join(directory, "podium.db"));
 
@@ -43,14 +44,8 @@ test("podium.db persists only approved control-plane facts", async () => {
     },
     desiredState: "running",
   });
-  store.saveRuntimeObservation({
-    bindingId: "binding-1",
-    status: "ready",
-    observedAt: "2026-07-16T00:00:01Z",
-    sanitizedSummary: "Ready",
-    lastResolvedProjectId: "project-1",
-  });
-  const services = new PodiumConductorServicesImpl(store, {
+  const presence = new ConductorPresenceImpl();
+  const services = new PodiumConductorServicesImpl(store, presence, {
     now: () => "2026-07-16T00:00:04Z",
     sleep: async () => undefined,
     createLinearSdk: () => { throw new Error("unused"); },
@@ -93,15 +88,9 @@ test("podium.db persists only approved control-plane facts", async () => {
     store.getConductorBinding()?.repositoryContext.baseBranch,
     "main",
   );
-  assert.equal(store.getRuntimeObservation("binding-1")?.status, "ready");
-  assert.equal(
-    store.getRootRuntimeObservation("binding-1", "root-1")?.sanitizedSummary,
-    "root_dependency_cycle",
-  );
-  assert.equal(
-    store.getRootRuntimeObservation("binding-1", "root-2")?.observedAt,
-    "2026-07-16T00:00:03Z",
-  );
+  assert.equal(presence.snapshot("binding-1")?.presence, "online");
+  assert.equal(presence.recentLogs("binding-1").length, 2);
+  assert.doesNotMatch(JSON.stringify(presence.recentLogs()), /root-1|root-2/);
 
   store.saveConductorBinding({
     bindingId: "binding-2",
@@ -144,16 +133,14 @@ test("podium.db persists only approved control-plane facts", async () => {
     observedAt: "2026-07-16T00:00:06Z",
     sanitizedReason: "conductor_process_exited",
   });
-  assert.equal(store.getRuntimeObservation("binding-1")?.status, "crashed");
-  assert.equal(store.getRuntimeObservation("binding-2")?.status, "ready");
+  assert.equal(presence.snapshot("binding-1")?.presence, "offline");
+  assert.equal(presence.snapshot("binding-2")?.presence, "online");
 
   assert.deepEqual(store.listTableNames(), [
     "conductor_bindings",
     "linear_installations",
     "oauth_attempts",
     "project_catalog",
-    "root_runtime_observations",
-    "runtime_observations",
   ]);
 
   store.close();
@@ -185,7 +172,8 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
     },
     desiredState: "running",
   });
-  const services = new PodiumConductorServicesImpl(store, {
+  const presence = new ConductorPresenceImpl();
+  const services = new PodiumConductorServicesImpl(store, presence, {
     now: () => "2026-07-17T00:00:00Z",
     sleep: async () => undefined,
     createLinearSdk: () => {
@@ -200,7 +188,7 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
     sanitizedReason: "conductor_process_exited",
   });
 
-  assert.equal(store.getRuntimeObservation("binding-1")?.status, "crashed");
+  assert.equal(presence.snapshot("binding-1")?.presence, "offline");
   await services.handle({
     kind: "conductor_handshake",
     binding_id: "binding-1",

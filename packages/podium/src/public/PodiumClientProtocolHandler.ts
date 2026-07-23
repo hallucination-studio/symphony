@@ -44,7 +44,6 @@ export type PodiumClientResponse =
 const queryKinds = new Set([
   "get_desktop_overview",
   "get_conductor_detail",
-  "get_root_detail",
   "get_performer_profiles",
   "get_performer_profile_status",
 ]);

@@ -1,17 +1,15 @@
-import { formatNumber, formatObservedAt } from "./format";
-import { EmptyState, NextAction, PageHeading, StaleNote, StatusBadge } from "./components";
+import { formatObservedAt } from "./format";
+import { PageHeading, StatusBadge } from "./components";
 import type { DesktopOverviewView } from "./types";
 
 export function OverviewPage({
   view,
   headingRef,
-  onOpenExternal,
 }: {
   view: DesktopOverviewView;
   headingRef: React.RefObject<HTMLHeadingElement>;
-  onOpenExternal: (url: string) => void;
 }) {
-  const readyConductors = view.conductors.filter(({ status }) => status === "ready").length;
+  const onlineConductors = view.conductors.filter(({ status }) => status === "online").length;
   return (
     <>
       <PageHeading
@@ -20,7 +18,6 @@ export function OverviewPage({
         headingRef={headingRef}
       />
       <div className="page-stack">
-        <NextAction action={view.nextAction} onOpenExternal={onOpenExternal} />
         <section className="panel">
           <div className="section-heading">
             <h2>System readiness</h2>
@@ -39,38 +36,24 @@ export function OverviewPage({
             </div>
             <div>
               <dt>Conductors</dt>
-              <dd>{readyConductors} ready</dd>
+              <dd>{onlineConductors} online</dd>
             </div>
             <div>
               <dt>Execution</dt>
-              <dd>{readyConductors ? "Ready" : "Not checked yet"}</dd>
-            </div>
-          </dl>
-        </section>
-        <section className="metrics" aria-label="Usage">
-          <article>
-            <span>Total tokens</span>
-            <strong>{formatNumber(view.usage.totalTokens)}</strong>
-            {view.usage.isStale && <StaleNote observedAt={view.usage.observedAt} />}
-          </article>
-          <article>
-            <span>Completed roots</span>
-            <strong>{formatNumber(view.usage.completedRootCount)}</strong>
-            <small>Best-effort usage, not billing data</small>
-          </article>
-        </section>
-        <RootSection title="Active work" roots={view.activeRoots} onOpenExternal={onOpenExternal} />
-        <RootSection title="Ready for review" roots={view.reviewRoots} onOpenExternal={onOpenExternal} />
+              <dd>{onlineConductors ? "Online" : "Offline"}</dd>
+          </div>
+        </dl>
+      </section>
         <section className="panel">
-          <h2>Recent problems</h2>
-          {view.recentProblems.length === 0 ? (
-            <p className="quiet">No current problems.</p>
+          <h2>Recent runtime logs</h2>
+          {view.recentLogs.length === 0 ? (
+            <p className="quiet">No recent runtime logs.</p>
           ) : (
             <ul className="plain-list">
-              {view.recentProblems.map((problem) => (
-                <li key={`${problem.objectKind}-${problem.observedAt}`}>
-                  <strong>{problem.summary}</strong>
-                  <span>{problem.impact}</span>
+              {view.recentLogs.map((log) => (
+                <li key={`${log.eventKind}-${log.occurredAt}`}>
+                  <strong>{log.eventKind}</strong>
+                  <span>{log.summary}</span>
                 </li>
               ))}
             </ul>
@@ -78,47 +61,5 @@ export function OverviewPage({
         </section>
       </div>
     </>
-  );
-}
-
-function RootSection({
-  title,
-  roots,
-  onOpenExternal,
-}: {
-  title: string;
-  roots: DesktopOverviewView["activeRoots"];
-  onOpenExternal: (url: string) => void;
-}) {
-  return (
-    <section className="panel">
-      <h2>{title}</h2>
-      {roots.length === 0 ? (
-        <EmptyState title={`No ${title.toLowerCase()}`} body="There is nothing to show right now." />
-      ) : (
-        <ul className="root-list">
-          {roots.map((root) => (
-            <li key={root.rootIssueId}>
-              <div>
-                <strong>{root.identifier}</strong>
-                <span>{root.title}</span>
-                <small>
-                  {root.currentNodeSummary ?? root.status}
-                  {root.routingStatus === "unrouted" ? " · Unrouted" : ""}
-                  {root.routingStatus === "conflict" ? " · Routing conflict" : ""}
-                  {root.ownershipStatus === "mismatch" ? " · Ownership conflict" : ""}
-                  {root.routingConductorShortHash ? ` · ${root.routingConductorShortHash}` : ""}
-                </small>
-              </div>
-              {root.linearUrl && (
-                <button className="button quiet-button" onClick={() => onOpenExternal(root.linearUrl!)} type="button">
-                  Open in Linear
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
   );
 }

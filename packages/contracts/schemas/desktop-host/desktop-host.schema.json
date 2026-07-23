@@ -125,20 +125,18 @@
         "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
-    "HostCommandAccepted": {
+    "HostOperationCompleted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "command_kind"],
+      "required": ["kind", "operation"],
       "properties": {
-        "kind": { "const": "host_command_accepted" },
-        "command_kind": {
+        "kind": { "const": "host_operation_completed" },
+        "operation": {
           "enum": [
             "open_external_url",
             "start_conductor",
             "stop_conductor",
-            "restart_conductor",
-            "process_observed_exit",
-            "shutdown_host"
+            "restart_conductor"
           ]
         }
       }
@@ -176,7 +174,7 @@
         { "$ref": "#/$defs/StartConductorCommand" },
         { "$ref": "#/$defs/StopConductorCommand" },
         { "$ref": "#/$defs/RestartConductorCommand" },
-        { "$ref": "#/$defs/HostCommandAccepted" },
+        { "$ref": "#/$defs/HostOperationCompleted" },
         { "$ref": "#/$defs/ProcessObservedExit" },
         { "$ref": "#/$defs/ShutdownHostCommand" },
         { "$ref": "common.schema.json#/$defs/ProtocolError" }

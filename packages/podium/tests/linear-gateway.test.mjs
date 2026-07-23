@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
-import { PodiumClientServicesImpl } from "../dist/internal/composition/PodiumClientServicesImpl.js";
+import { ConductorPresenceImpl } from "../dist/internal/conductor-presence/ConductorPresenceImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 
 function project() {
@@ -15,7 +15,6 @@ function project() {
 
 async function createConductorServices(
   linearSdk,
-  onObservation = () => undefined,
   onLinearObserver = () => undefined,
 ) {
   const binding = {
@@ -43,9 +42,8 @@ async function createConductorServices(
         accessToken: "test-token",
         delegateActorId: "app-user-1",
       }),
-      saveRuntimeObservation: onObservation,
-      saveRootRuntimeObservation() {},
     },
+    new ConductorPresenceImpl(),
     {
       now: () => "2026-07-16T00:00:00Z",
       sleep: async () => undefined,
@@ -71,24 +69,6 @@ async function createConductorServices(
   });
   return services;
 }
-
-test("Runtime Problem observations preserve only closed correlation fields", async () => {
-  let observation;
-  const services = await createConductorServices({}, (value) => { observation = value; });
-  await services.handle({
-    kind: "conductor_runtime_report", binding_id: "binding-1", instance_id: "instance-1",
-    status: "recovering", observed_at: "2026-07-19T00:00:00Z",
-    sanitized_summary: "Linear rate limited.",
-    runtime_problem: {
-      code: "linear_rate_limited", scope: "stage", severity: "error",
-      sanitized_reason: "Linear rate limited.", action_required: "Retry later.",
-      first_observed_at: "2026-07-19T00:00:00Z", last_observed_at: "2026-07-19T00:00:00Z",
-      root_issue_id: "root-1", performer_profile_id: "profile-1",
-    },
-  });
-  assert.equal(observation.problem.code, "linear_rate_limited");
-  assert.equal(observation.problem.performerProfileId, "profile-1");
-});
 
 test("installation broker coalesces identical concurrent Podium reads", async () => {
   let reads = 0;
@@ -117,7 +97,7 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
   let sdkCreations = 0;
   const services = await createConductorServices({
     async getWorkflowIssueTree() { return workflowTree("project-1"); },
-  }, undefined, () => { sdkCreations += 1; });
+  }, () => { sdkCreations += 1; });
   const body = {
     kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1",
@@ -135,7 +115,7 @@ test("physical rate observations do not block background reads", async () => {
   const services = await createConductorServices({
     async getWorkflowIssueTree() { return workflowTree("project-1"); },
     async listRootUsage() { usageReads += 1; return { items: [], pageInfo: { hasNextPage: false } }; },
-  }, undefined, (value) => { observe = value; });
+  }, (value) => { observe = value; });
   await services.handle({
     kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1",
@@ -682,95 +662,6 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
     /linear_conductor_short_hash_mismatch/u,
   );
   assert.equal(reads, 1);
-});
-
-test("affected Root detail projects its sanitized scheduling observation", async () => {
-  const binding = {
-    bindingId: "binding-1",
-    conductorId: "conductor-1",
-    conductorShortHash: "abc123",
-    linearInstallationId: "installation-1",
-    organizationId: "organization-1",
-    repositoryContext: {
-      repositoryHandle: "repo-1",
-      repositoryIdentity: "repository-1",
-      repositoryDisplayName: "symphony",
-      repositoryRoot: "/repository",
-      baseBranch: "main",
-    },
-    desiredState: "running",
-  };
-  const services = new PodiumClientServicesImpl(
-    {
-      getOnlyLinearCredential: () => ({
-        kind: "development_token",
-        installationId: "installation-1",
-        organizationId: "organization-1",
-        delegateActorId: "app-user",
-        accessToken: "not-observed",
-      }),
-      getConductorBinding: () => binding,
-      getRuntimeObservation: () => ({
-        bindingId: "binding-1",
-        status: "ready",
-        observedAt: "2026-07-19T00:00:00Z",
-        sanitizedSummary: "conductor_ready",
-        lastResolvedProjectId: "project-1",
-      }),
-      getRootRuntimeObservation: (_bindingId, rootIssueId) =>
-        rootIssueId === "root-1"
-          ? {
-              bindingId: "binding-1",
-              rootIssueId,
-              observedAt: "2026-07-19T00:00:01Z",
-              sanitizedSummary: "root_dependency_cycle",
-            }
-          : undefined,
-    },
-    {},
-    {},
-    {},
-    () => "2026-07-19T00:00:02Z",
-    () => ({
-      async getIssueTree() {
-        return {
-          nodes: [issue("root-1", "project-1")],
-          rootPhaseLabels: ["blocked"],
-          rootConductorLabels: [],
-          rootManagedComments: [{
-            commentId: "comment-1", issueId: "root-1", updatedAt: "2026-07-19T00:00:01Z",
-            managedMarker: "root-1:root-comment", body: [
-              "Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
-              "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
-              "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
-              "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
-              "performer_profile_id: profile-1", "delivery_branch: symphony/runs/root-1",
-              "pull_request: none", "retry_blocked: true", "retry_failure_code: none",
-              "retry_observed_at: 2026-07-19T00:00:01Z", "-->",
-            ].join("\n"),
-          }],
-          humanAnswers: [],
-          observedAt: "2026-07-19T00:00:01Z",
-          pageInfo: { hasNextPage: false },
-        };
-      },
-      async listRootUsage() {
-        return { items: [], pageInfo: { hasNextPage: false } };
-      },
-    }),
-  );
-
-  const detail = await services.query({
-    kind: "get_root_detail",
-    root_issue_id: "root-1",
-  });
-
-  assert.deepEqual(detail.events, [{
-    event_kind: "root_scheduling_observation",
-    summary: "root_dependency_cycle",
-    occurred_at: "2026-07-19T00:00:01Z",
-  }]);
-  assert.equal(detail.retry_observed_at, "2026-07-19T00:00:01Z");
 });
 
 test("ambiguous update reads back desired remote state before retry", async () => {

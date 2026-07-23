@@ -1,107 +1,38 @@
-export type Page = "overview" | "work" | "conductors" | "settings";
-
-export interface ProtocolError {
-  code: string;
-  sanitizedReason: string;
-  retryable: boolean;
-  nextAction: string;
-}
-
-export interface NextActionView {
-  kind: string;
-  summary: string;
-  impact: string;
-  actionLabel: string;
-  linearUrl?: string;
-}
+export type Page = "overview" | "conductors" | "settings";
 
 export interface LinearConnectionView {
-  status: "disconnected" | "connected" | "reconnect_required" | "failed";
+  status: "disconnected" | "connected";
   workspaceName?: string;
   observedAt: string;
-  error?: ProtocolError;
 }
 
-export interface PerformerUsageView {
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-  completedRootCount: number;
-  observedAt: string;
-  isStale: boolean;
-}
-
-export interface ConductorSummaryView {
-  conductorId: string;
-  displayName: string;
-  status:
-    | "stopped"
-    | "starting"
-    | "ready"
-    | "recovering"
-    | "not_responding"
-    | "crashed"
-    | "unbound"
-    | "project_conflict";
-  projectName?: string;
-  projectId?: string;
-  projectPool?: string[];
-  projectResolutionStatus?: "resolved" | "unbound" | "ambiguous" | "conflict";
-  repositoryDisplayName?: string;
-  baseBranch?: string;
-  observedAt: string;
-}
-
-export interface RootSummaryView {
-  rootIssueId: string;
-  identifier: string;
-  title: string;
-  status: string;
-  currentNodeSummary?: string;
-  linearUrl?: string;
-  routingConductorShortHash?: string;
-  routingStatus?: "routed" | "unrouted" | "conflict";
-  ownershipStatus?: "matched" | "mismatch" | "unknown";
-  observedAt: string;
-}
-
-export interface RuntimeEventView {
+export interface RuntimeLogView {
   eventKind: string;
   summary: string;
   occurredAt: string;
 }
 
-export interface AttentionItemView {
-  objectKind: string;
-  summary: string;
-  impact: string;
+export interface ConductorSummaryView {
+  conductorId: string;
+  displayName: string;
+  status: "online" | "offline";
+  projectName?: string;
+  repositoryDisplayName?: string;
+  baseBranch?: string;
   observedAt: string;
-  nextAction?: NextActionView;
 }
 
-export interface WorkflowNodeView {
-  issueId: string;
-  parentIssueId?: string;
-  kind:
-    | "work_group"
-    | "work_leaf"
-    | "plan_approval"
-    | "planned_input"
-    | "runtime_input";
-  state: string;
-  order: number;
-  depth: number;
-  title: string;
-  isCanceled: boolean;
-  isCurrent?: boolean;
-  waitingReason?: string;
-}
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 
 export interface CodexTurnSettings {
   model: string;
-  reasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoningEffort: ReasoningEffort;
   isFastModeEnabled: boolean;
 }
 
@@ -136,31 +67,17 @@ export interface PerformerProfileSummaryView {
 }
 
 export interface DesktopOverviewView {
-  nextAction?: NextActionView;
   linearConnection: LinearConnectionView;
   projects: { projectId: string; name: string; observedAt: string }[];
   conductors: ConductorSummaryView[];
-  activeRoots: RootSummaryView[];
-  reviewRoots: RootSummaryView[];
-  recentProblems: AttentionItemView[];
-  usage: PerformerUsageView;
+  recentLogs: RuntimeLogView[];
   observedAt: string;
 }
 
 export interface ConductorDetailView {
   summary: ConductorSummaryView;
   profiles: PerformerProfileSummaryView[];
-  events: RuntimeEventView[];
-  nextAction?: NextActionView;
-}
-
-export interface RootDetailView {
-  summary: RootSummaryView;
-  workflowNodes: WorkflowNodeView[];
-  usage: PerformerUsageView;
-  events: RuntimeEventView[];
-  nextAction?: NextActionView;
-  retryObservedAt?: string;
+  logs: RuntimeLogView[];
 }
 
 export type DesktopState =
@@ -171,7 +88,6 @@ export type DesktopState =
   | {
       kind: "ready";
       overview: DesktopOverviewView;
-      rootDetail?: RootDetailView;
       conductorDetail?: ConductorDetailView;
     }
   | { kind: "unavailable"; summary: string; nextAction: string };
@@ -182,13 +98,6 @@ export type DesktopCommand =
       kind: "create_conductor";
       projectId: string;
       repository: RepositorySelection;
-    }
-  | {
-      kind: "create_root";
-      projectId: string;
-      conductorId?: string;
-      title: string;
-      description: string;
     }
   | { kind: "start_conductor" | "stop_conductor" | "restart_conductor"; conductorId: string }
   | {
@@ -208,11 +117,9 @@ export type DesktopCommand =
       executionPolicy: AgentExecutionPolicy;
     }
   | { kind: "start_codex_chatgpt_login"; conductorId: string; profileId: string }
-  | { kind: "activate_performer_profile"; conductorId: string; profileId: string }
-  | { kind: "acknowledge_root_retry_block"; rootIssueId: string; retryObservedAt: string };
+  | { kind: "activate_performer_profile"; conductorId: string; profileId: string };
 
 export type DesktopCommandResult =
-  | { kind: "accepted" }
   | { kind: "confirmed" }
   | { kind: "rejected"; sanitizedReason: string };
 

@@ -10,16 +10,12 @@ import type {
   OAuthAttempt,
   ProjectCatalogEntry,
   RepositoryContext,
-  RootRuntimeObservation,
-  RuntimeObservation,
 } from "../models.js";
-import type { RuntimeObservationStoreInterface } from "../runtime-observations/api/RuntimeObservationStoreInterface.js";
 
 export class SqlitePodiumStoreImpl
   implements
     LinearInstallationStoreInterface,
-    ConductorBindingStoreInterface,
-    RuntimeObservationStoreInterface
+    ConductorBindingStoreInterface
 {
   readonly #database: Database.Database;
 
@@ -66,23 +62,6 @@ export class SqlitePodiumStoreImpl
         base_branch TEXT NOT NULL,
         desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped')),
         FOREIGN KEY (linear_installation_id) REFERENCES linear_installations(installation_id)
-      );
-      CREATE TABLE IF NOT EXISTS runtime_observations (
-        binding_id TEXT PRIMARY KEY,
-        status TEXT NOT NULL,
-        observed_at TEXT NOT NULL,
-        sanitized_summary TEXT NOT NULL,
-        last_resolved_project_id TEXT,
-        project_resolution_conflict TEXT,
-        FOREIGN KEY (binding_id) REFERENCES conductor_bindings(binding_id)
-      );
-      CREATE TABLE IF NOT EXISTS root_runtime_observations (
-        binding_id TEXT NOT NULL,
-        root_issue_id TEXT NOT NULL,
-        observed_at TEXT NOT NULL,
-        sanitized_summary TEXT NOT NULL,
-        PRIMARY KEY (binding_id, root_issue_id),
-        FOREIGN KEY (binding_id) REFERENCES conductor_bindings(binding_id)
       );
       CREATE TABLE IF NOT EXISTS oauth_attempts (
         attempt_id TEXT PRIMARY KEY,
@@ -330,104 +309,6 @@ export class SqlitePodiumStoreImpl
     if (result.changes !== 1) {
       throw new Error("conductor_binding_missing");
     }
-  }
-
-  saveRuntimeObservation(observation: RuntimeObservation): void {
-    this.#database
-      .prepare(`
-        INSERT INTO runtime_observations (
-          binding_id, status, observed_at, sanitized_summary,
-          last_resolved_project_id, project_resolution_conflict
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(binding_id) DO UPDATE SET
-          status = excluded.status,
-          observed_at = excluded.observed_at,
-          sanitized_summary = excluded.sanitized_summary,
-          last_resolved_project_id = excluded.last_resolved_project_id,
-          project_resolution_conflict = excluded.project_resolution_conflict
-      `)
-      .run(
-        observation.bindingId,
-        observation.status,
-        observation.observedAt,
-        observation.sanitizedSummary,
-        observation.lastResolvedProjectId ?? null,
-        observation.projectResolutionConflict ?? null,
-      );
-  }
-
-  getRuntimeObservation(bindingId: string): RuntimeObservation | undefined {
-    const row = this.#database
-      .prepare("SELECT * FROM runtime_observations WHERE binding_id = ?")
-      .get(bindingId) as
-      | {
-          binding_id: string;
-          status: RuntimeObservation["status"];
-          observed_at: string;
-          sanitized_summary: string;
-          last_resolved_project_id: string | null;
-          project_resolution_conflict: string | null;
-        }
-      | undefined;
-    if (!row) return undefined;
-    return {
-      bindingId: row.binding_id,
-      status: row.status,
-      observedAt: row.observed_at,
-      sanitizedSummary: row.sanitized_summary,
-      ...(row.last_resolved_project_id
-        ? { lastResolvedProjectId: row.last_resolved_project_id }
-        : {}),
-      ...(row.project_resolution_conflict
-        ? { projectResolutionConflict: row.project_resolution_conflict }
-        : {}),
-    };
-  }
-
-  saveRootRuntimeObservation(observation: RootRuntimeObservation): void {
-    this.#database
-      .prepare(`
-        INSERT INTO root_runtime_observations (
-          binding_id, root_issue_id, observed_at, sanitized_summary
-        ) VALUES (?, ?, ?, ?)
-        ON CONFLICT(binding_id, root_issue_id) DO UPDATE SET
-          observed_at = excluded.observed_at,
-          sanitized_summary = excluded.sanitized_summary
-      `)
-      .run(
-        observation.bindingId,
-        observation.rootIssueId,
-        observation.observedAt,
-        observation.sanitizedSummary,
-      );
-  }
-
-  getRootRuntimeObservation(
-    bindingId: string,
-    rootIssueId: string,
-  ): RootRuntimeObservation | undefined {
-    const row = this.#database
-      .prepare(`
-        SELECT binding_id, root_issue_id, observed_at, sanitized_summary
-        FROM root_runtime_observations
-        WHERE binding_id = ? AND root_issue_id = ?
-      `)
-      .get(bindingId, rootIssueId) as
-      | {
-          binding_id: string;
-          root_issue_id: string;
-          observed_at: string;
-          sanitized_summary: string;
-        }
-      | undefined;
-    return row
-      ? {
-          bindingId: row.binding_id,
-          rootIssueId: row.root_issue_id,
-          observedAt: row.observed_at,
-          sanitizedSummary: row.sanitized_summary,
-        }
-      : undefined;
   }
 
   saveOAuthAttempt(attempt: OAuthAttempt): void {

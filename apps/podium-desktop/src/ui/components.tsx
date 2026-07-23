@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import { formatObservedAt, labelFromIdentifier } from "./format";
-import type { NextActionView, Page } from "./types";
+import type { Page } from "./types";
 
 function NavIcon({ page }: { page: Page }) {
   const common = {
@@ -21,14 +21,6 @@ function NavIcon({ page }: { page: Page }) {
           <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.5" />
           <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.5" />
           <rect x="9" y="9" width="5.5" height="5.5" rx="1.5" />
-        </svg>
-      );
-    case "work":
-      return (
-        <svg {...common}>
-          <path d="M3.5 1.5h6l3 3v10h-9z" />
-          <path d="M9.5 1.5v3h3" />
-          <path d="M5.5 8h5M5.5 11h5" />
         </svg>
       );
     case "conductors":
@@ -58,7 +50,7 @@ export function Shell({
   onNavigate: (page: Page) => void;
   children: ReactNode;
 }) {
-  const entries: Page[] = ["overview", "work", "conductors", "settings"];
+  const entries: Page[] = ["overview", "conductors", "settings"];
   return (
     <div className="app">
       <div aria-hidden="true" className="drag-region" />
@@ -81,9 +73,6 @@ export function Shell({
             </button>
           ))}
         </nav>
-        <p className="desktop-note">
-          Closing Desktop pauses local execution. Work resumes from Linear and Git.
-        </p>
       </aside>
       <main className="main">{children}</main>
     </div>
@@ -115,42 +104,6 @@ export function StatusBadge({ label, tone, testId }: { label: string; tone?: str
       <span aria-hidden="true" className="status-dot" />
       {label}
     </span>
-  );
-}
-
-export function NextAction({
-  action,
-  onOpenExternal,
-}: {
-  action: NextActionView | undefined;
-  onOpenExternal: (url: string) => void;
-}) {
-  if (!action) {
-    return (
-      <section className="next-action" aria-label="Next action">
-        <p className="eyebrow">Next action</p>
-        <h2>No action needed</h2>
-        <p>Symphony is working from the latest confirmed Linear state.</p>
-      </section>
-    );
-  }
-  return (
-    <section className="next-action" aria-label="Next action">
-      <div>
-        <p className="eyebrow">Next action</p>
-        <h2>{action.summary}</h2>
-        <p>{action.impact}</p>
-      </div>
-      {action.linearUrl && (
-        <button
-          className="button primary"
-          onClick={() => onOpenExternal(action.linearUrl!)}
-          type="button"
-        >
-          {action.actionLabel}
-        </button>
-      )}
-    </section>
   );
 }
 

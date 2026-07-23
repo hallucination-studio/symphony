@@ -15,9 +15,14 @@ test("Podium Client handler validates and correlates closed queries", async () =
     async query(body) {
       queries.push(body);
       return {
-        kind: "command_accepted",
-        command_kind: "connect_linear",
-        status: "accepted",
+        linear_connection: {
+          status: "disconnected",
+          observed_at: "2026-07-16T00:00:00Z",
+        },
+        projects: [],
+        conductors: [],
+        recent_logs: [],
+        observed_at: "2026-07-16T00:00:00Z",
       };
     },
     async command() {
@@ -31,7 +36,7 @@ test("Podium Client handler validates and correlates closed queries", async () =
   const response = await handler.handle(envelope({ kind: "get_desktop_overview" }));
 
   assert.equal(response.request_id, "request-1");
-  assert.equal(response.body.kind, "command_accepted");
+  assert.equal(response.body.linear_connection.status, "disconnected");
   assert.deepEqual(queries, [{ kind: "get_desktop_overview" }]);
 });
 
@@ -83,7 +88,24 @@ test("Podium Client handler validates and clears the one-shot API Key frame", as
     async command() { throw new Error("not a command"); },
     async setApiKey(input) {
       observed = [...input.secret];
-      return { kind: "command_accepted", command_kind: "set_codex_api_key", status: "accepted" };
+      return {
+        profile_id: "profile-1",
+        display_name: "Default",
+        authentication_method: "api_key",
+        codex_turn_settings: {
+          model: "gpt-5",
+          reasoning_effort: "high",
+          is_fast_mode_enabled: false,
+        },
+        execution_policy: {
+          sandbox_mode: "workspace_write",
+          command_allowlist: [],
+          command_denylist: [],
+        },
+        readiness: "ready",
+        is_active: true,
+        observed_at: "2026-07-16T00:00:00Z",
+      };
     },
   });
 
@@ -99,7 +121,7 @@ test("Podium Client handler validates and clears the one-shot API Key frame", as
 
   assert.deepEqual(observed, [11, 22, 33]);
   assert.deepEqual([...secret], [0, 0, 0]);
-  assert.equal(response.body.kind, "command_accepted");
+  assert.equal(response.body.profile_id, "profile-1");
 });
 
 test("Podium Client failures are concrete and sanitized", async () => {

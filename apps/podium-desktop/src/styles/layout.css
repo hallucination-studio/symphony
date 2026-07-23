@@ -103,14 +103,6 @@ h1:focus {
   color: var(--color-accent-contrast);
 }
 
-.desktop-note {
-  margin-top: auto;
-  padding: 0 var(--space-2);
-  color: var(--color-label-tertiary);
-  font-size: var(--font-size-caption);
-  line-height: var(--line-height-caption);
-}
-
 .main {
   flex: 1;
   min-width: 0;
@@ -665,10 +657,6 @@ h1:focus {
 
   .nav-link {
     justify-content: center;
-  }
-
-  .desktop-note {
-    display: none;
   }
 
   .main {
