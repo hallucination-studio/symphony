@@ -56,6 +56,7 @@ type WorkflowVersionScopeIssue = {
 
 type WorkflowPreflightIssue = WorkflowScopeIssue & {
   updatedAt?: string;
+  archivedAt?: string | null;
   title?: string;
   description?: string | null;
   state?: { id?: string } | null;
@@ -134,7 +135,7 @@ const ROOT_HEADER_FACTS_QUERY = `
     viewer { id }
     issues(first: 250, filter: { id: { in: $rootIds } }) {
       nodes {
-        id identifier title description priority sortOrder updatedAt
+        id identifier title description priority sortOrder updatedAt archivedAt
         project { id }
         parent { id }
         delegate { id }
@@ -164,7 +165,7 @@ const ROOT_HEADER_FACTS_QUERY = `
 const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
   query SymphonyIssueTreeRoot($rootIssueId: String!) {
     issue(id: $rootIssueId) {
-      id identifier title description sortOrder updatedAt
+      id identifier title description sortOrder updatedAt archivedAt
       project { id }
       parent { id }
       state { name }
@@ -184,7 +185,7 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
   query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
     issues(first: 25, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
       nodes {
-        id identifier title description sortOrder subIssueSortOrder updatedAt
+        id identifier title description sortOrder subIssueSortOrder updatedAt archivedAt
         project { id }
         parent { id }
         state { name }
@@ -288,6 +289,7 @@ interface RootHeaderFact {
   identifier: string;
   title: string;
   description?: string | null;
+  archivedAt?: string | null;
   priority: number;
   sortOrder: number;
   updatedAt: string;
@@ -336,6 +338,7 @@ interface IssueTreeFact {
   sortOrder: number;
   subIssueSortOrder?: number | null;
   updatedAt: string;
+  archivedAt?: string | null;
   project?: { id: string } | null;
   parent?: { id: string } | null;
   state: { name: string };
@@ -1384,6 +1387,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           depth: 0,
           title: fact.title,
           description: parseManagedDescription(fact.description ?? "").businessDescription,
+          isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
           updatedAt: timestampValue(fact.updatedAt),
         },
         isDelegatedToSymphony: fact.delegate?.id === delegateActorId,
@@ -1558,6 +1562,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         depth: issue.depth,
         title: issue.title,
         description: issue.description,
+        isArchived: issue.isArchived,
         ...(issue.managedMarker ? { managedMarker: issue.managedMarker } : {}),
         ...(issue.issueId === input.rootIssueId
           ? { issueKind: "root" as const }
@@ -1618,10 +1623,10 @@ export class LinearSdkImpl implements LinearClientInterface {
       issues(filter: { id: { in: [${issueIds.map(quoteGraphql).join(", ")}] } }) {
         nodes {
           ${workflowScopeSelection(32)}
-          updatedAt title description state { id }
+          updatedAt archivedAt title description state { id }
           team { id states(first: 64) { nodes { id } pageInfo { hasNextPage } } }
           comments(first: 64) { nodes { id body updatedAt issue { id } } pageInfo { hasNextPage } }
-          children(first: 64) { nodes { id updatedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } }
+          children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } }
           inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } }
         }
       }
@@ -1711,6 +1716,28 @@ export class LinearSdkImpl implements LinearClientInterface {
           issueId: command.target.targetIssueId,
           body: serializeWorkflowComment(command.body, command.writeId),
         });
+        return;
+      }
+      case "archive_workflow_issue":
+      case "restore_workflow_issue": {
+        const issue = await this.#client.issue(command.target.targetIssueId);
+        if (issue.projectId !== command.expectedProjectId) {
+          throw new Error("linear_workflow_target_project_invalid");
+        }
+        const expectedArchived = command.kind === "archive_workflow_issue";
+        const currentArchived = issue.archivedAt !== null && issue.archivedAt !== undefined;
+        if (command.target.expectedIsArchived !== undefined &&
+            currentArchived !== command.target.expectedIsArchived) {
+          throw preconditionConflictError();
+        }
+        const payload = expectedArchived
+          ? await issue.archive()
+          : await issue.unarchive();
+        if (!payload.success) {
+          throw new Error(expectedArchived
+            ? "linear_workflow_issue_archive_failed"
+            : "linear_workflow_issue_restore_failed");
+        }
         return;
       }
       case "create_workflow_relation": {
@@ -1908,6 +1935,23 @@ export class LinearSdkImpl implements LinearClientInterface {
           issueVersions: [{ issueId: command.target.targetIssueId, remoteVersion: issue.updatedAt.toISOString() }] }
         : undefined;
     }
+    if (command.kind === "archive_workflow_issue" || command.kind === "restore_workflow_issue") {
+      const compact = await this.#readCompactWorkflowTarget(
+        command.target.targetIssueId, command.expectedProjectId, command.rootIssueId,
+      );
+      const issue = compact ?? await this.#client.issue(command.target.targetIssueId)
+        .then((value) => workflowMutationTargetValue(value));
+      const desiredArchived = command.kind === "archive_workflow_issue";
+      return issue && issue.projectId === command.expectedProjectId &&
+        issue.isArchived === desiredArchived &&
+        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId) &&
+        (command.target.expectedManagedMarker === undefined ||
+          issue.managedMarker === command.target.expectedManagedMarker)
+        ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
+          issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
+        : undefined;
+    }
+    if (command.kind !== "create_workflow_relation") return undefined;
     const compactRelation = await this.#readCompactWorkflowRelationOutcome(command);
     if (compactRelation.available) return compactRelation.value;
     const tree = await this.getWorkflowIssueTree({
@@ -1946,7 +1990,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
     const response = await rawRequest(
-      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64) { nodes { id updatedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } } } }`,
+      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } } } }`,
     );
     const data = (response as {
       data?: { issue?: { updatedAt?: unknown; children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: unknown } } | null } | null };
@@ -1968,7 +2012,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #readCompactWorkflowTarget(issueId: string, projectId: string, rootIssueId: string) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
-    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt title description state { id } } }`);
+    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt archivedAt title description state { id } } }`);
     const issue = (response as { data?: { issue?: WorkflowPreflightIssue | null } }).data?.issue;
     if (!issue || !workflowScopeIssueBelongsToRoot(issue, projectId, rootIssueId)) return undefined;
     return workflowPreflightTargetValue(issue);
@@ -2506,6 +2550,7 @@ async function workflowMutationTargetValue(issue: Issue) {
     issueId: issue.id,
     projectId: issue.projectId,
     updatedAt: timestampValue(issue.updatedAt),
+    isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
     statusId: state.id,
     title: issue.title,
@@ -2524,6 +2569,7 @@ function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
     issueId: issue.id,
     projectId: issue.project.id,
     updatedAt: issue.updatedAt,
+    isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parent?.id ? { parentIssueId: issue.parent.id } : {}),
     statusId: issue.state.id,
     title: issue.title,
@@ -2559,6 +2605,13 @@ function workflowPreflightOutcome(
       (command.target.expectedManagedMarker === undefined || target.managedMarker === command.target.expectedManagedMarker)
       ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt } : undefined;
   }
+  if (command.kind === "archive_workflow_issue" || command.kind === "restore_workflow_issue") {
+    const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
+    const desiredArchived = command.kind === "archive_workflow_issue";
+    return target.isArchived === desiredArchived
+      ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt }
+      : undefined;
+  }
   if (command.kind === "append_workflow_comment") {
     const comments = facts.get(command.target.targetIssueId)?.comments;
     if (!comments || comments.pageInfo?.hasNextPage !== false || !Array.isArray(comments.nodes)) {
@@ -2571,6 +2624,7 @@ function workflowPreflightOutcome(
       ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: matches[0].updatedAt }
       : undefined;
   }
+  if (command.kind !== "create_workflow_relation") return undefined;
   const sourceIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
   const targetIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
   const relations = facts.get(targetIssueId)?.inverseRelations;
@@ -2614,6 +2668,7 @@ function workflowPreconditionMismatch(
   if (command.target.expectedStatusId !== undefined && target.statusId !== command.target.expectedStatusId) return "target_status";
   if (command.target.expectedParentIssueId !== undefined && target.parentIssueId !== command.target.expectedParentIssueId) return "target_parent";
   if (command.target.expectedManagedMarker !== undefined && target.managedMarker !== command.target.expectedManagedMarker) return "target_managed_marker";
+  if (command.target.expectedIsArchived !== undefined && target.isArchived !== command.target.expectedIsArchived) return "target_archive";
   return command.kind !== "update_workflow_issue" || workflowPreflightHasStatus(facts.get(command.target.targetIssueId)!, command.statusId)
     ? undefined : "target_status_catalog";
 }
@@ -2629,6 +2684,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
   const raw = value as {
     id?: unknown;
     updatedAt?: unknown;
+    archivedAt?: unknown;
     project?: { id?: unknown } | null;
     parent?: { id?: unknown } | null;
     state?: { id?: unknown } | null;
@@ -2638,7 +2694,8 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
   if (typeof raw.id !== "string" || typeof raw.updatedAt !== "string" ||
       typeof raw.project?.id !== "string" || raw.parent?.id !== expectedParentIssueId ||
       typeof raw.state?.id !== "string" || typeof raw.title !== "string" ||
-      typeof raw.description !== "string") {
+      typeof raw.description !== "string" ||
+      (raw.archivedAt !== null && raw.archivedAt !== undefined && typeof raw.archivedAt !== "string")) {
     throw new Error("linear_workflow_target_invalid");
   }
   const managed = parseManagedDescription(raw.description);
@@ -2646,6 +2703,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     issueId: raw.id,
     projectId: raw.project.id,
     updatedAt: raw.updatedAt,
+    isArchived: raw.archivedAt !== null && raw.archivedAt !== undefined,
     parentIssueId: expectedParentIssueId,
     statusId: raw.state.id,
     title: raw.title,
@@ -2749,6 +2807,7 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     depth,
     title: fact.title,
     description: managed.businessDescription,
+    isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
     ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
     ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
     ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
@@ -2784,6 +2843,7 @@ async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
     depth,
     title: issue.title,
     description: managed.businessDescription,
+    isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(managed.managedMarker
       ? { managedMarker: managed.managedMarker }
       : {}),

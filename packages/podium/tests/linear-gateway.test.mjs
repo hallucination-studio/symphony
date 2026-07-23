@@ -502,6 +502,7 @@ function issue(issueId, projectId) {
     depth: 0,
     title: "Title",
     description: "",
+    isArchived: false,
     updatedAt: "2026-07-16T00:00:00Z",
   };
 }

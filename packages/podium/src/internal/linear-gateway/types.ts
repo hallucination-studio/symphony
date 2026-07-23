@@ -25,6 +25,7 @@ export interface LinearIssueValue {
   depth?: number;
   title?: string;
   description?: string;
+  isArchived: boolean;
   managedMarker?: string;
   workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
   nodeKind?: "work" | "human";
@@ -83,6 +84,7 @@ export interface WorkflowIssueValue {
   depth: number;
   title: string;
   description: string;
+  isArchived: boolean;
   managedMarker?: string;
   issueKind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
   remoteVersion: string;
@@ -122,6 +124,7 @@ export interface WorkflowMutationTargetValue {
   statusId: string;
   title: string;
   description: string;
+  isArchived: boolean;
   managedMarker?: string;
   workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
 }
@@ -155,6 +158,7 @@ export type WorkflowMutationCommand =
         expectedStatusId?: string;
         expectedParentIssueId?: string;
         expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
       };
       statusId: string;
       title: string;
@@ -168,8 +172,20 @@ export type WorkflowMutationCommand =
         expectedStatusId?: string;
         expectedParentIssueId?: string;
         expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
       };
       body: string;
+    })
+  | (WorkflowMutationBase & {
+      kind: "archive_workflow_issue" | "restore_workflow_issue";
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
+      };
     })
   | (WorkflowMutationBase & {
       kind: "create_workflow_relation";

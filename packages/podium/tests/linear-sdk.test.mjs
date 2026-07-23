@@ -1015,6 +1015,7 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   const target = await targetAdapter.readWorkflowMutationTarget("work-1");
   assert.deepEqual(target, {
     issueId: "work-1", projectId: "project-1", updatedAt: "2026-07-16T00:00:00.000Z",
+    isArchived: false,
     parentIssueId: "root-1", statusId: "state-todo", title: "Work",
     description: "Work description", managedMarker: "work-marker", workflowKind: "work",
   });
@@ -1026,6 +1027,54 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.match(updatedInput.description, /managed_marker: work-marker/u);
+});
+
+test("workflow SDK archive mutations use native Linear calls and preserve archive preconditions", async () => {
+  const root = issue({ id: "root-1" });
+  const target = issue({ id: "work-1", parentId: "root-1" });
+  let archiveCalls = 0;
+  let restoreCalls = 0;
+  target.archive = async () => {
+    archiveCalls += 1;
+    target.archivedAt = new Date("2026-07-16T00:00:01Z");
+    return { success: true };
+  };
+  target.unarchive = async () => {
+    restoreCalls += 1;
+    target.archivedAt = null;
+    return { success: true };
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    issue: async (issueId) => issueId === "root-1" ? root : target,
+  });
+  const command = {
+    kind: "archive_workflow_issue", writeId: "write-archive", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt.toISOString(),
+    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: false },
+  };
+
+  await adapter.executeWorkflowMutation(command);
+  assert.equal(archiveCalls, 1);
+  assert.equal(restoreCalls, 0);
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "write-archive", targetIssueId: "work-1", remoteVersion: target.updatedAt.toISOString(),
+    issueVersions: [{ issueId: "work-1", remoteVersion: target.updatedAt.toISOString() }],
+  });
+
+  await assert.rejects(
+    adapter.executeWorkflowMutation(command),
+    /linear_precondition_conflict/u,
+  );
+  assert.equal(archiveCalls, 1);
+
+  await adapter.executeWorkflowMutation({
+    ...command,
+    kind: "restore_workflow_issue",
+    writeId: "write-restore",
+    target: { ...command.target, expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: true },
+  });
+  assert.equal(restoreCalls, 1);
+  assert.equal(target.archivedAt, null);
 });
 
 test("workflow relation compact read-back returns the source Issue updatedAt", async () => {

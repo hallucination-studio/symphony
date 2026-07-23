@@ -20,6 +20,7 @@
         "title": "Root",
         "description": "Build the target workflow.",
         "issue_kind": "root",
+        "is_archived": false,
         "remote_version": "2026-07-21T09:00:00Z",
         "updated_at": "2026-07-21T09:00:00Z"
       },
@@ -38,6 +39,7 @@
         "description": "Implement the bounded gateway.",
         "managed_marker": "root-1:work-1",
         "issue_kind": "work",
+        "is_archived": false,
         "remote_version": "2026-07-21T09:01:00Z",
         "updated_at": "2026-07-21T09:01:00Z"
       }

@@ -391,7 +391,8 @@ export class LinearGatewayProtocolHandlerImpl {
     ) &&
       (command.target.expectedStatusId === undefined || target?.statusId === command.target.expectedStatusId) &&
       (command.target.expectedParentIssueId === undefined || target?.parentIssueId === command.target.expectedParentIssueId) &&
-      (command.target.expectedManagedMarker === undefined || target?.managedMarker === command.target.expectedManagedMarker)
+      (command.target.expectedManagedMarker === undefined || target?.managedMarker === command.target.expectedManagedMarker) &&
+      (command.target.expectedIsArchived === undefined || target?.isArchived === command.target.expectedIsArchived)
       ? undefined : { kind: "precondition_conflict" };
   }
 
@@ -477,6 +478,7 @@ function validateIssue(issue: LinearIssueValue, projectId: string): void {
     codePointLength(issue.title) > 16_384 ||
     typeof issue.description !== "string" ||
     codePointLength(issue.description) > 16_384 ||
+    typeof issue.isArchived !== "boolean" ||
     !timestamp(issue.updatedAt)
   ) throw new Error("linear_issue_invalid");
   if (!managedNodeShapeValid(issue)) {
@@ -493,7 +495,8 @@ function validateRootScheduling(root: RootIssueValue): void {
     !Array.isArray(root.rootConductorLabels) ||
     root.rootConductorLabels.length > 1 ||
     !Array.isArray(root.rootManagedComments) ||
-    root.rootManagedComments.length > 2
+    root.rootManagedComments.length > 2 ||
+    typeof root.issue.isArchived !== "boolean"
   ) {
     throw new Error("linear_root_scheduling_invalid");
   }

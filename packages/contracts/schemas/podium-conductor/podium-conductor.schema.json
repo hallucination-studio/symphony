@@ -122,6 +122,7 @@
         "depth",
         "title",
         "description",
+        "is_archived",
         "updated_at"
       ],
       "properties": {
@@ -155,6 +156,9 @@
         },
         "description": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "is_archived": {
+          "type": "boolean"
         },
         "managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"
@@ -533,6 +537,7 @@
         "depth",
         "title",
         "description",
+        "is_archived",
         "remote_version",
         "updated_at"
       ],
@@ -578,6 +583,9 @@
         },
         "description": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "is_archived": {
+          "type": "boolean"
         },
         "managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"
@@ -775,6 +783,9 @@
         },
         "expected_managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "expected_is_archived": {
+          "type": "boolean"
         }
       }
     },
@@ -953,6 +964,54 @@
         }
       }
     },
+    "ArchiveWorkflowIssueCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "binding_id",
+        "write_id",
+        "conductor_short_hash",
+        "expected_project_id",
+        "root_issue_id",
+        "expected_root_remote_version",
+        "target"
+      ],
+      "properties": {
+        "kind": { "const": "archive_workflow_issue" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target": { "$ref": "#/$defs/WorkflowMutationTarget" }
+      }
+    },
+    "RestoreWorkflowIssueCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "binding_id",
+        "write_id",
+        "conductor_short_hash",
+        "expected_project_id",
+        "root_issue_id",
+        "expected_root_remote_version",
+        "target"
+      ],
+      "properties": {
+        "kind": { "const": "restore_workflow_issue" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target": { "$ref": "#/$defs/WorkflowMutationTarget" }
+      }
+    },
     "CreateWorkflowRelationCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -1023,6 +1082,12 @@
         },
         {
           "$ref": "#/$defs/AppendWorkflowCommentCommand"
+        },
+        {
+          "$ref": "#/$defs/ArchiveWorkflowIssueCommand"
+        },
+        {
+          "$ref": "#/$defs/RestoreWorkflowIssueCommand"
         },
         {
           "$ref": "#/$defs/CreateWorkflowRelationCommand"

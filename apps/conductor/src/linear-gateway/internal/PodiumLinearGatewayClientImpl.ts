@@ -36,6 +36,7 @@ type WireIssue = {
   depth: number;
   title: string;
   description: string;
+  is_archived: boolean;
   updated_at: string;
   node_kind?: "work" | "human";
   managed_marker?: string;
@@ -403,6 +404,7 @@ function workflowTree(
       depth: number(issue.depth, "linear_workflow_issue_invalid"),
       title: string(issue.title, "linear_workflow_issue_invalid"),
       description: string(issue.description, "linear_workflow_issue_invalid"),
+      is_archived: boolean(issue.is_archived, "linear_workflow_issue_invalid"),
       ...(issue.managed_marker === undefined ? {} : { managed_marker: string(issue.managed_marker, "linear_workflow_issue_invalid") }),
       ...(issue.issue_kind === undefined ? {} : { issue_kind: workflowIssueKind(issue.issue_kind) }),
       remote_version: string(issue.remote_version, "linear_workflow_issue_invalid"),
@@ -541,6 +543,8 @@ function workflowMutationBody(
       };
     case "update_workflow_issue":
     case "append_workflow_comment":
+    case "archive_workflow_issue":
+    case "restore_workflow_issue":
       return {
         ...common,
         kind: input.kind,
@@ -550,10 +554,11 @@ function workflowMutationBody(
           ...(input.target.expectedStatusId === undefined ? {} : { expected_status_id: input.target.expectedStatusId }),
           ...(input.target.expectedParentIssueId === undefined ? {} : { expected_parent_issue_id: input.target.expectedParentIssueId }),
           ...(input.target.expectedManagedMarker === undefined ? {} : { expected_managed_marker: input.target.expectedManagedMarker }),
+          ...(input.target.expectedIsArchived === undefined ? {} : { expected_is_archived: input.target.expectedIsArchived }),
         },
         ...(input.kind === "update_workflow_issue"
           ? { status_id: input.statusId, title: input.title, description: input.description }
-          : { body: input.body }),
+          : input.kind === "append_workflow_comment" ? { body: input.body } : {}),
       };
     case "create_workflow_relation":
       return {

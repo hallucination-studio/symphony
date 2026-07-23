@@ -292,12 +292,16 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "#/$defs/CreateWorkflowIssueCommand",
     "#/$defs/UpdateWorkflowIssueCommand",
     "#/$defs/AppendWorkflowCommentCommand",
+    "#/$defs/ArchiveWorkflowIssueCommand",
+    "#/$defs/RestoreWorkflowIssueCommand",
     "#/$defs/CreateWorkflowRelationCommand",
   ]);
   for (const name of [
     "CreateWorkflowIssueCommand",
     "UpdateWorkflowIssueCommand",
     "AppendWorkflowCommentCommand",
+    "ArchiveWorkflowIssueCommand",
+    "RestoreWorkflowIssueCommand",
     "CreateWorkflowRelationCommand",
   ]) {
     assert.ok(schema.$defs[name].required.includes("write_id"), name);

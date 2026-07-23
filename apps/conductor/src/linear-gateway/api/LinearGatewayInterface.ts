@@ -19,6 +19,7 @@ export interface LinearWorkflowTreeSnapshot {
     depth: number;
     title: string;
     description: string;
+    is_archived: boolean;
     managed_marker?: string;
     issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
     remote_version: string;
@@ -76,6 +77,7 @@ export type LinearWorkflowMutationCommand =
         expectedStatusId?: string;
         expectedParentIssueId?: string;
         expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
       };
       statusId: string;
       title: string;
@@ -94,8 +96,25 @@ export type LinearWorkflowMutationCommand =
         expectedStatusId?: string;
         expectedParentIssueId?: string;
         expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
       };
       body: string;
+    }
+  | {
+      kind: "archive_workflow_issue" | "restore_workflow_issue";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedManagedMarker?: string;
+        expectedIsArchived?: boolean;
+      };
     }
   | {
       kind: "create_workflow_relation";
