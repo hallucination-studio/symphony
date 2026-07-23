@@ -178,8 +178,8 @@ export class RootReconciliationRuntime {
   private async persistStageResult(view: RootReconciliationView, directiveId: string, result: StageResult): Promise<void> {
     const target = view.tree.issues.find((issue) => issue.issue_id === result.targetIssueId);
     const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
-    if (!target || !rootIssue) throw new Error("stage_result_target_missing");
-    const marker = `<!-- symphony stage-result ${result.resultId} -->`;
+    if (!target || !rootIssue) throw new Error("role_result_target_missing");
+    const marker = `<!-- symphony role-result ${result.resultId} -->`;
     if (view.tree.comments.some((comment) => comment.body.includes(marker))) return;
     const outcome = await this.dependencies.linear.mutateWorkflow({
       kind: "append_workflow_comment",
@@ -195,11 +195,11 @@ export class RootReconciliationRuntime {
       body: `${marker}\n${JSON.stringify(result)}`,
     });
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      throw new Error(`stage_result_write_${outcome.kind}`);
+      throw new Error(`role_result_write_${outcome.kind}`);
     }
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
     if (!readBack.comments.some((comment) => comment.body.includes(marker))) {
-      throw new Error("stage_result_read_back_missing");
+      throw new Error("role_result_read_back_missing");
     }
   }
 }

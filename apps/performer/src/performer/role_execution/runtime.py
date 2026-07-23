@@ -44,10 +44,16 @@ class RoleExecutionRuntime:
 
     def _execute(self, role: str, request: dict[str, Any], *, cancel_event: Event | None) -> dict[str, Any]:
         cancel_event = cancel_event or Event()
-        root_issue_id = _required_text(request, "root_issue_id")
+        root_issue_id = (
+            _required_text(request, "root_issue_id")
+            if role != "root_reconciler"
+            else _root_issue_id(request)
+        )
         cycle_issue_id = _optional_text(request, "cycle_issue_id")
-        session_id = _required_text(request, "role_session_id")
-        turn_id = _required_text(request, "role_turn_id")
+        session_key = "reconciler_session_id" if role == "root_reconciler" else "role_session_id"
+        turn_key = "reconciler_turn_id" if role == "root_reconciler" else "role_turn_id"
+        session_id = _required_text(request, session_key)
+        turn_id = _required_text(request, turn_key)
         record = self._sessions.get(
             session_id,
             role=role,  # type: ignore[arg-type]
@@ -110,17 +116,16 @@ def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
     _required_text(request, "observed_tree_digest")
     _required_text(request, "target_issue_id")
     policy = request.get("execution_policy")
+    repository_context = request.get("repository_context")
     if isinstance(policy, dict):
         expected = "workspace_write" if role == "work" else "read_only"
-        if policy.get("sandbox_mode") != expected or policy.get("workspace_access") not in {
-            "read_write" if role == "work" else "read_only",
-            expected,
-        }:
+        expected_access = "read_write" if role == "work" else "read_only"
+        if policy.get("sandbox_mode") != expected or not isinstance(repository_context, dict) or repository_context.get("workspace_access") != expected_access:
             raise ValueError("role_capability_invalid")
     if role == "work":
-        if self_workspace := request.get("workspace_capability"):
-            if not isinstance(self_workspace, dict) or self_workspace.get("access") != "workspace_write":
-                raise ValueError("workspace_capability_invalid")
+        context = request.get("context")
+        if not isinstance(context, dict) or context.get("workspace_capability") != "workspace_write":
+            raise ValueError("workspace_capability_invalid")
 
 
 def _terminal(
@@ -132,9 +137,9 @@ def _terminal(
 ) -> dict[str, Any]:
     if role == "root_reconciler":
         payload = {
-            "reconciler_session_id": request["role_session_id"],
-            "reconciler_turn_id": request["role_turn_id"],
-            "root_issue_id": request["root_issue_id"],
+            "reconciler_session_id": request["reconciler_session_id"],
+            "reconciler_turn_id": request["reconciler_turn_id"],
+            "root_issue_id": _root_issue_id(request),
             "observed_root_tree_digest": request["observed_root_tree_digest"],
             "directive": result,
             "completed_at": _timestamp(completed_at),
@@ -143,6 +148,8 @@ def _terminal(
             payload["usage"] = provider_output["usage"]
         return payload
     payload = {
+        "protocol_version": "1",
+        "request_id": request["request_id"],
         "role": role,
         "role_session_id": request["role_session_id"],
         "role_turn_id": request["role_turn_id"],
@@ -152,7 +159,7 @@ def _terminal(
         "target_issue_id": request.get("target_issue_id"),
         "observed_tree_digest": request["observed_tree_digest"],
         "context_digest": request.get("context_digest"),
-        "result": result,
+        "outcome": result,
         "completed_at": _timestamp(completed_at),
     }
     if provider_output and provider_output.get("usage") is not None:
@@ -176,6 +183,13 @@ def _required_text(value: dict[str, Any], key: str) -> str:
     if not isinstance(result, str) or not result:
         raise ValueError(f"{key}_invalid")
     return result
+
+
+def _root_issue_id(request: dict[str, Any]) -> str:
+    root = request.get("root")
+    if not isinstance(root, dict) or not isinstance(root.get("issue"), dict):
+        raise ValueError("root_issue_id_invalid")
+    return _required_text(root["issue"], "issue_id")
 
 
 def _optional_text(value: dict[str, Any], key: str) -> str | None:

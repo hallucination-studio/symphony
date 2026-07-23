@@ -1,4 +1,14 @@
 import type { SerializedPerformerProcessRunnerInterface } from "../../performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
+import {
+  decodeConductorPerformerCloseCycleStageSessionsResult,
+  decodeConductorPerformerCloseRootReconcilerResult,
+  decodeConductorPerformerPlanResult,
+  decodeConductorPerformerRootDirective,
+  decodeConductorPerformerRootReconcilerOpenedResult,
+  decodeConductorPerformerVerifyResult,
+  decodeConductorPerformerWorkResult,
+  type JsonValue,
+} from "@symphony/contracts";
 import type {
   PerformerAgentClientInterface,
 } from "../api/PerformerAgentClientInterface.js";
@@ -12,7 +22,6 @@ import type {
   StageTurnInput,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type JsonRecord = Record<string, unknown>;
 
 export interface SessionPerformerAgentClientOptions {
@@ -44,7 +53,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         network_policy: "disabled",
       },
       limits: defaultLimits(this.options.deadlineMs),
-    })
+    }, decodeConductorPerformerRootReconcilerOpenedResult)
       .then((response) => {
         if (response.kind !== "root_reconciler_opened" || typeof response.reconciler_session_id !== "string") {
           throw new Error("root_reconciler_open_result_invalid");
@@ -59,19 +68,9 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     observation: RootReconciliationObservation;
   }): Promise<RootReconcilerAdvanceResult> {
     const observation = input.observation;
-    return this.invoke(input.requestId, observation.root.issueId, {
-      protocol_version: "1",
-      request_id: input.requestId,
-      kind: "advance_root_reconciler",
-      role_session_id: input.sessionId,
-      role_turn_id: observation.reconcilerTurnId,
-      root_issue_id: observation.root.issueId,
-      observed_root_tree_digest: observation.treeDigest,
-      observation: toWireObservation(observation),
-    })
+    return this.invoke(input.requestId, observation.root.issueId, toWireObservation(observation), decodeConductorPerformerRootDirective)
       .then((response) => {
-        if (response.kind !== "root_directive") throw new Error("root_reconciler_directive_missing");
-        return { kind: "directive", directive: decodeDirective(response.directive) };
+        return { kind: "directive", directive: decodeDirective(response) };
       });
   }
 
@@ -91,14 +90,14 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     await this.invoke(input.requestId, input.rootIssueId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_cycle_stage_sessions",
       root_issue_id: input.rootIssueId, cycle_issue_id: input.cycleIssueId, reason: "cycle_terminal",
-    });
+    }, decodeConductorPerformerCloseCycleStageSessionsResult);
   }
 
   async closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void> {
     await this.invoke(input.requestId, input.sessionId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_root_reconciler",
       root_issue_id: input.rootIssueId, reason: "root_terminal",
-    });
+    }, decodeConductorPerformerCloseRootReconcilerResult);
   }
 
   async cancelAndReap(): Promise<void> {
@@ -106,14 +105,18 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   }
 
   private async executeStage(kind: "execute_plan_turn" | "execute_work_turn" | "execute_verify_turn", input: StageTurnInput): Promise<StageResult> {
+    const decoder = kind === "execute_plan_turn"
+      ? decodeConductorPerformerPlanResult
+      : kind === "execute_work_turn"
+        ? decodeConductorPerformerWorkResult
+        : decodeConductorPerformerVerifyResult;
     const response = await this.invoke(input.requestId, input.profileId, {
-      protocol_version: "1", request_id: input.requestId, kind, ...toWireStageInput(input),
-    });
-    if (response.kind !== "stage_result") throw new Error("stage_result_missing");
-    return decodeStageResult(response.result);
+      protocol_version: "1", request_id: input.requestId, ...toWireStageInput(input),
+    }, decoder);
+    return decodeStageResult(response);
   }
 
-  private async invoke(requestId: string, profileId: string, body: JsonRecord): Promise<JsonRecord> {
+  private async invoke(requestId: string, profileId: string, body: JsonRecord, decoder: (value: JsonValue) => JsonValue): Promise<JsonRecord> {
     const output = await this.options.lane.run({
       executable: this.options.executable,
       arguments: ["--agent"],
@@ -128,7 +131,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     const response = record(value);
     if (response.protocol_version !== "1" || response.request_id !== requestId) throw new Error("performer_agent_correlation_invalid");
     if (response.kind === "error") throw new Error(sanitizedError(response));
-    return response;
+    return record(decoder(value as JsonValue));
   }
 }
 
@@ -145,22 +148,98 @@ function defaultLimits(deadlineMs: number | (() => number)) {
 }
 
 function toWireObservation(input: RootReconciliationObservation): JsonRecord {
+  const rootIssue = input.tree.issues.find((issue) => issue.issue_id === input.root.issueId);
+  if (!rootIssue) throw new Error("root_observation_root_issue_missing");
+  const objective = input.root.description || input.root.title;
   return {
     protocol_version: "1",
     request_id: input.requestId,
     reconciler_session_id: input.reconcilerSessionId,
     reconciler_turn_id: input.reconcilerTurnId,
     observed_at: input.observedAt,
-    root: input.root,
-    cycles: input.cycles,
+    root: {
+      issue: toWireIssue(rootIssue, "root"),
+      objective,
+      scope: input.root.title,
+      acceptance_criteria: [{
+        criterion_key: `${input.root.issueId}:objective`,
+        statement: objective,
+        verification_method: "provider-defined verification",
+      }],
+      constraints: [],
+      root_status: rootIssue.status_name,
+      ownership: { record_id: input.root.issueId, record_kind: "root_ownership", version: rootIssue.remote_version },
+      convergence_summary: "Root convergence is governed by durable Linear and Git facts.",
+    },
+    cycles: input.cycles.map((cycle) => ({
+      cycle_issue: toWireIssue(cycle.cycleIssue, "cycle"),
+      predecessor_cycle_issue_id: cycle.cycleIssue.parent_issue_id ?? "none",
+      cycle_status: cycle.cycleIssue.status_name,
+      is_archived: cycle.isArchived,
+      issues: cycle.issues.map((issue) => toWireIssue(issue)),
+      relations: cycle.relations,
+      plan_results: [],
+      work_results: [],
+      verify_results: [],
+      findings: [],
+      human_action_records: [],
+      human_action_resolutions: [],
+    })),
     root_human_actions: [],
-    accepted_root_directives: input.acceptedDirectives,
-    root_reconciler_failures: input.rootReconcilerFailures,
-    pending_user_comments: input.pendingUserComments,
-    reconciler_reply_records: input.reconcilerReplies,
-    external_linear_changes: input.externalLinearChanges,
+    accepted_root_directives: input.acceptedDirectives.map((directive) => ({
+      record_id: directive.rootDirectiveId,
+      record_kind: "accepted_root_directive",
+      version: directive.basedOnRootTreeDigest,
+    })),
+    root_reconciler_failures: input.rootReconcilerFailures.map((failure) => ({
+      failure_id: failure.failureId,
+      reconciler_session_id: failure.reconcilerSessionId,
+      reconciler_turn_id: failure.reconcilerTurnId,
+      observed_root_tree_digest: failure.observedRootTreeDigest,
+      category: failure.category,
+      sanitized_reason: failure.sanitizedReason,
+      failed_at: failure.failedAt,
+    })),
+    pending_user_comments: input.pendingUserComments.map((comment) => ({
+      comment_id: comment.commentId,
+      comment_version: comment.commentVersion,
+      issue_id: comment.issueId,
+      issue_kind: comment.issueKind === "human" ? "human_action" : comment.issueKind,
+      ...(comment.cycleIssueId ? { cycle_issue_id: comment.cycleIssueId } : {}),
+      author_user_id: comment.authorUserId,
+      body: comment.body,
+      created_at: comment.createdAt,
+      updated_at: comment.updatedAt,
+    })),
+    reconciler_reply_records: input.reconcilerReplies.map((reply) => ({
+      reply_id: reply.replyId,
+      root_directive_id: reply.rootDirectiveId,
+      source_comment_id: reply.sourceCommentId,
+      source_comment_version: reply.sourceCommentVersion,
+      target_issue_id: reply.targetIssueId,
+      materialized_outcome_refs: reply.materializedOutcomeRefs.map((referenceId) => ({ reference_id: referenceId, source_kind: "result" })),
+      rendered_schema_version: "1",
+      replied_at: reply.repliedAt,
+    })),
+    external_linear_changes: input.externalLinearChanges.map((change) => ({
+      change_id: change.changeId,
+      actor_kind: change.actorKind,
+      target_issue_id: change.targetIssueId,
+      issue_kind: change.issueKind === "human" ? "human_action" : change.issueKind,
+      change_kind: change.changeKind,
+      before_version_or_digest: change.beforeVersionOrDigest,
+      after_version_or_digest: change.afterVersionOrDigest,
+      changed_field_names: change.changedFieldNames,
+      relation_ids: change.relationIds,
+      observed_at: change.observedAt,
+    })),
     workflow_change_resolutions: [],
-    git_facts: input.git,
+    git_facts: {
+      head_revision: input.git.head,
+      baseline_revision: input.git.head,
+      status_summary: input.git.status.items.join("\n") || "clean",
+      changed_paths: input.git.status.items,
+    },
     delivery: { record_id: "none", record_kind: "none", version: "none" },
     source_manifest: [],
     coverage: { is_complete: input.complete, omissions: [] },
@@ -170,6 +249,48 @@ function toWireObservation(input: RootReconciliationObservation): JsonRecord {
 }
 
 function toWireStageInput(input: StageTurnInput): JsonRecord {
+  const rootIssue = input.tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
+  const cycleIssue = input.tree.issues.find((issue) => issue.issue_id === input.cycleIssueId);
+  const targetIssue = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
+  if (!rootIssue || !cycleIssue || !targetIssue) throw new Error("stage_context_issue_missing");
+  const rootContract = planRootContract(rootIssue);
+  const planContract = planContractFor(input, rootIssue);
+  const planDag = planDagFor(input);
+  const gitFacts = gitFactsFor(input);
+  const context = input.role === "plan"
+    ? {
+      root_contract: rootContract,
+      cycle: { cycle_issue_id: cycleIssue.issue_id, trigger: "initial" },
+      current_plan_issue: toWireIssue(targetIssue),
+      prior_plan_results: [],
+      prior_plan_contracts: [],
+      unresolved_findings: [],
+      human_resolutions: [],
+      current_git_facts: gitFacts,
+      required_output: input.goal,
+    }
+    : input.role === "work"
+      ? {
+        approved_plan_contract: planContract,
+        current_active_work_dag: planDag,
+        selected_work: toWireIssue(targetIssue),
+        completed_work_evidence: [],
+        prior_turn_results: [],
+        human_resolutions: [],
+        git_baseline: gitFacts,
+        workspace_capability: "workspace_write",
+      }
+      : {
+        approved_plan_contract: planContract,
+        complete_active_cycle_dag: planDag,
+        archived_cycle_nodes: input.tree.issues.filter((issue) => issue.is_archived).map((issue) => toWireIssue(issue)),
+        completed_work_results: [],
+        unresolved_findings: [],
+        human_resolutions: [],
+        verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
+        immutable_target_revision: input.git.head,
+        repository_snapshot: gitFacts,
+      };
   return {
     stage_execution_id: input.stageExecutionId,
     role: input.role,
@@ -184,14 +305,14 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
     instruction_bundle: {
       instruction_set_id: "symphony-stage-v1",
       instructions: input.goal,
-      output_schema: "stage_result",
+      output_schema: `${input.role}_result`,
     },
     repository_context: {
       repository_identity: input.rootIssueId,
       base_branch: input.git.branch,
       workspace_revision: input.git.head,
       baseline_revision: input.git.head,
-      status_summary: input.git.status.items.join("\n"),
+      status_summary: input.git.status.items.join("\n") || "clean",
       relevant_paths: input.git.status.items,
       workspace_access: input.executionPolicy.workspace_access,
       instructions: [],
@@ -204,7 +325,94 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
     },
     limits: defaultLimits(300_000),
     context_digest: input.contextDigest,
-    context: input,
+    context,
+  };
+}
+
+function toWireIssue(issue: RootReconciliationObservation["tree"]["issues"][number], fallbackKind?: "root" | "cycle"): JsonRecord {
+  return {
+    issue_id: issue.issue_id,
+    issue_kind: issue.issue_kind ?? fallbackKind ?? "work",
+    ...(issue.parent_issue_id ? { parent_issue_id: issue.parent_issue_id } : {}),
+    title: issue.title,
+    description: issue.description,
+    status: issue.status_name,
+    is_archived: issue.is_archived,
+    remote_version: issue.remote_version,
+  };
+}
+
+function gitFactsFor(input: StageTurnInput): JsonRecord {
+  return {
+    head_revision: input.git.head,
+    baseline_revision: input.git.head,
+    status_summary: input.git.status.items.join("\n") || "clean",
+    changed_paths: input.git.status.items,
+  };
+}
+
+function planRootContract(rootIssue: JsonRecord): JsonRecord {
+  const objective = typeof rootIssue.description === "string" && rootIssue.description
+    ? rootIssue.description
+    : String(rootIssue.title);
+  return {
+    objective,
+    requested_scope: String(rootIssue.title),
+    constraints: [],
+    acceptance_criteria: [{
+      criterion_key: `${String(rootIssue.issue_id)}:objective`,
+      statement: objective,
+      verification_method: "provider-defined verification",
+    }],
+  };
+}
+
+function planContractFor(input: StageTurnInput, rootIssue: JsonRecord): JsonRecord {
+  const objective = typeof rootIssue.description === "string" && rootIssue.description
+    ? rootIssue.description
+    : input.goal;
+  return {
+    objective,
+    included_scope: [input.goal],
+    excluded_scope: [],
+    assumptions: [],
+    constraints: [],
+    acceptance_criteria: [{
+      criterion_key: `${input.targetIssueId}:acceptance`,
+      statement: objective,
+      verification_method: "provider-defined verification",
+    }],
+    verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
+  };
+}
+
+function planDagFor(input: StageTurnInput): JsonRecord {
+  const workIssues = input.tree.issues.filter((issue) => issue.issue_kind === "work" && !issue.is_archived);
+  const fallback = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
+  if (!fallback) throw new Error("stage_context_target_issue_missing");
+  const selected = workIssues.length > 0 ? workIssues : [fallback];
+  const workNodes = selected.filter(Boolean).map((issue) => ({
+    proposal_key: issue.issue_id,
+    title: issue.title,
+    description: issue.description,
+    expected_outcome: issue.description || issue.title,
+    required_checks: ["provider-defined verification"],
+    dependency_proposal_keys: input.tree.relations
+      .filter((relation) => relation.target_issue_id === issue.issue_id && relation.relation_kind === "blocks")
+      .map((relation) => relation.source_issue_id),
+  }));
+  return {
+    work_nodes: workNodes,
+    dependency_edges: input.tree.relations,
+    verify_node: {
+      title: "Verify cycle",
+      acceptance_criteria: [{
+        criterion_key: `${input.cycleIssueId}:verify`,
+        statement: "The cycle objective is complete.",
+        verification_method: "provider-defined verification",
+      }],
+      required_checks: ["provider-defined verification"],
+    },
   };
 }
 
@@ -226,7 +434,7 @@ function decodeStageResult(value: unknown): StageResult {
   const result = record(value);
   const outcome = record(result.outcome);
   if (typeof result.stage_execution_id !== "string" || typeof result.role !== "string" || typeof outcome.kind !== "string") {
-    throw new Error("stage_result_shape_invalid");
+    throw new Error("role_result_shape_invalid");
   }
   return {
     ...result,

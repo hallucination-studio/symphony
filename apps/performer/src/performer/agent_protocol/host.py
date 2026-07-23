@@ -11,6 +11,7 @@ from performer.agent_protocol.protocol import (
     response,
     validate_request,
 )
+from performer.contracts import validate
 from performer.backends.provider_backend_interface import ProviderBackendInterface
 from performer.role_execution.runtime import RoleExecutionRuntime
 from performer.root_reconciler.runtime import RootReconcilerRuntime
@@ -34,20 +35,20 @@ class AgentProtocolHost:
         try:
             request = validate_request(value)
             payload = request
-            kind = request["kind"]
+            kind = request.get("kind")
             if kind == "open_root_reconciler":
                 return response(request["request_id"], "root_reconciler_opened", self._root.open(payload))
-            if kind == "advance_root_reconciler":
-                return response(request["request_id"], "root_directive", self._root.advance(payload))
-            if kind == "execute_plan_turn":
+            if kind is None and "reconciler_session_id" in request:
+                return validate("RootDirective", self._root.advance(payload))
+            if kind is None and request.get("role") == "plan":
                 self._ensure_stage_session(payload, "plan")
-                return response(request["request_id"], "stage_result", self._roles.execute_plan(payload))
-            if kind == "execute_work_turn":
+                return validate("PlanResult", self._roles.execute_plan(payload))
+            if kind is None and request.get("role") == "work":
                 self._ensure_stage_session(payload, "work")
-                return response(request["request_id"], "stage_result", self._roles.execute_work(payload))
-            if kind == "execute_verify_turn":
+                return validate("WorkResult", self._roles.execute_work(payload))
+            if kind is None and request.get("role") == "verify":
                 self._ensure_stage_session(payload, "verify")
-                return response(request["request_id"], "stage_result", self._roles.execute_verify(payload))
+                return validate("VerifyResult", self._roles.execute_verify(payload))
             if kind == "close_cycle_stage_sessions":
                 return response(request["request_id"], "cycle_stage_sessions_closed", self._close_cycle(payload))
             if kind == "close_root_reconciler":

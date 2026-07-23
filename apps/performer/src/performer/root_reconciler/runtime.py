@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from performer.role_execution.runtime import RoleExecutionRuntime
 from performer.session_runtime.manager import SessionManager
+from performer.contracts import validate
 
 
 class RootReconcilerRuntime:
@@ -32,16 +33,17 @@ class RootReconcilerRuntime:
         directive = result.get("directive")
         if not isinstance(directive, dict):
             raise ValueError("root_directive_missing")
-        if directive.get("protocol_version") == 1 and isinstance(directive.get("root_directive_id"), str):
-            return result
-        return {
-            **result,
-            "directive": {
+        root_issue_id = request["root"]["issue"]["issue_id"]
+        if directive.get("protocol_version") == "1" and isinstance(directive.get("root_directive_id"), str):
+            return validate("RootDirective", directive)
+        return validate(
+            "RootDirective",
+            {
                 "protocol_version": "1",
                 "request_id": request["request_id"],
-                "root_directive_id": f"{request['root_issue_id']}:{request['role_turn_id']}",
-                "reconciler_session_id": request["role_session_id"],
-                "reconciler_turn_id": request["role_turn_id"],
+                "root_directive_id": f"{root_issue_id}:{request['reconciler_turn_id']}",
+                "reconciler_session_id": request["reconciler_session_id"],
+                "reconciler_turn_id": request["reconciler_turn_id"],
                 "based_on_root_tree_digest": request["observed_root_tree_digest"],
                 "rationale": str(directive.get("rationale", "Provider returned a Root directive.")),
                 "evidence_refs": directive.get("evidence_refs", []),
@@ -49,7 +51,7 @@ class RootReconcilerRuntime:
                 "external_change_dispositions": directive.get("external_change_dispositions", []),
                 "action": directive.get("action", directive),
             },
-        }
+        )
 
     def close(self, request: dict[str, Any]) -> dict[str, Any]:
         root_issue_id = _text(request, "root_issue_id")

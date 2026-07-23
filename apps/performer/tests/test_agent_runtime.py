@@ -21,8 +21,8 @@ class FakeBackend:
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         self.turns.append((session.provider_handle, request, workspace_root))
         if session.role == "root_reconciler":
-            return {"output": {"kind": "directive", "action": {"kind": "wait", "reason_code": "human"}}}
-        return {"output": {"kind": f"{session.role}_completed"}, "usage": {"total_tokens": 2}}
+            return {"output": {"kind": "directive", "action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]}}}
+        return {"output": {"kind": "canceled", "sanitized_reason": "test cancellation"}, "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
 
     def interrupt_turn(self, session) -> None:
         pass
@@ -33,6 +33,94 @@ class FakeBackend:
 
 def envelope(request_id: str, kind: str, payload: dict[str, object]) -> dict[str, object]:
     return {"protocol_version": "1", "request_id": request_id, "kind": kind, **payload}
+
+
+def root_observation(request_id: str, session_id: str, turn_id: str) -> dict[str, object]:
+    return {
+        "protocol_version": "1",
+        "request_id": request_id,
+        "reconciler_session_id": session_id,
+        "reconciler_turn_id": turn_id,
+        "observed_at": "2026-07-23T00:00:00Z",
+        "root": {
+            "issue": {
+                "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": "Root description",
+                "status": "Todo", "is_archived": False, "remote_version": "root-v1",
+            },
+            "objective": "Complete the root objective",
+            "scope": "The requested root scope",
+            "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}],
+            "constraints": [],
+            "root_status": "Todo",
+            "ownership": {"record_id": "owner-1", "record_kind": "root_ownership", "version": "1"},
+            "convergence_summary": "No convergence limit has been reached.",
+        },
+        "cycles": [],
+        "root_human_actions": [],
+        "accepted_root_directives": [],
+        "root_reconciler_failures": [],
+        "pending_user_comments": [],
+        "reconciler_reply_records": [],
+        "external_linear_changes": [],
+        "workflow_change_resolutions": [],
+        "git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
+        "delivery": {"record_id": "delivery-1", "record_kind": "delivery", "version": "1"},
+        "source_manifest": [],
+        "coverage": {"is_complete": True, "omissions": []},
+        "observed_root_tree_digest": "tree-1",
+        "limits": {
+            "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
+            "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
+        },
+    }
+
+
+def issue_snapshot(kind: str) -> dict[str, object]:
+    return {
+        "issue_id": f"{kind}-1", "issue_kind": kind, "title": kind.title(), "description": f"{kind} description",
+        "status": "Todo", "is_archived": False, "remote_version": f"{kind}-v1",
+    }
+
+
+def plan_contract() -> dict[str, object]:
+    return {
+        "objective": "Complete the cycle objective", "included_scope": ["the selected work"], "excluded_scope": [],
+        "assumptions": [], "constraints": [],
+        "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The work is complete", "verification_method": "automated test"}],
+        "verification_requirements": ["automated test"],
+    }
+
+
+def plan_dag() -> dict[str, object]:
+    return {
+        "work_nodes": [{"proposal_key": "work-1", "title": "Work", "description": "Work description", "expected_outcome": "Work complete", "required_checks": ["test"], "dependency_proposal_keys": []}],
+        "dependency_edges": [],
+        "verify_node": {"title": "Verify", "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The work is complete", "verification_method": "automated test"}], "required_checks": ["test"]},
+    }
+
+
+def stage_context(role: str) -> dict[str, object]:
+    if role == "plan":
+        return {
+            "root_contract": {"objective": "Complete the root objective", "requested_scope": "the requested scope", "constraints": [], "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}]},
+            "cycle": {"cycle_issue_id": "cycle-1", "trigger": "initial"},
+            "current_plan_issue": issue_snapshot("plan"), "prior_plan_results": [], "prior_plan_contracts": [],
+            "unresolved_findings": [], "human_resolutions": [],
+            "current_git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
+            "required_output": "return a PlanResult",
+        }
+    if role == "work":
+        return {
+            "approved_plan_contract": plan_contract(), "current_active_work_dag": plan_dag(), "selected_work": issue_snapshot("work"),
+            "completed_work_evidence": [], "prior_turn_results": [], "human_resolutions": [],
+            "git_baseline": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
+            "workspace_capability": "workspace_write",
+        }
+    return {
+        "approved_plan_contract": plan_contract(), "complete_active_cycle_dag": plan_dag(), "archived_cycle_nodes": [],
+        "completed_work_results": [], "unresolved_findings": [], "human_resolutions": [], "verification_requirements": ["automated test"],
+        "immutable_target_revision": "head-1", "repository_snapshot": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
+    }
 
 
 def test_host_keeps_root_session_and_returns_root_directive():
@@ -46,17 +134,10 @@ def test_host_keeps_root_session_and_returns_root_directive():
         "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
         "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2026-07-23T00:00:00Z"},
     }))
-    result = host.handle(envelope("turn", "advance_root_reconciler", {
-        "role_session_id": opened["reconciler_session_id"],
-        "role_turn_id": "turn-1",
-        "root_issue_id": "root-1",
-        "observed_root_tree_digest": "tree-1",
-            "observation": {"root": "complete tree"},
-    }))
+    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
 
     assert opened["kind"] == "root_reconciler_opened"
-    assert result["kind"] == "root_directive"
-    assert result["directive"]["action"]["kind"] == "wait"
+    assert result["action"]["kind"] == "wait"
     assert backend.turns[0][0] == "provider-1"
 
 
@@ -78,7 +159,7 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "cycle_issue_id": "cycle-1",
         "observed_tree_digest": "tree-1",
         "context_digest": "context-1",
-        "execution_policy": {"sandbox_mode": "read_only", "workspace_access": "read_only"},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
         "target_issue_id": "target-1",
         "source_manifest": [],
         "coverage": {"is_complete": True, "omissions": []},
@@ -95,15 +176,18 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "context": {},
     }
     for role in ("plan", "verify"):
-        result = host.handle(envelope(role, f"execute_{role}_turn", {
+        result = host.handle({
+            "protocol_version": "1", "request_id": role,
             **common,
             "role": role,
             "role_session_id": f"{role}-session",
             "role_turn_id": f"{role}-turn",
             "stage_execution_id": f"{role}-execution",
-        }))
-        assert result["kind"] == "stage_result"
-        assert result["result"]["kind"] == f"{role}_completed"
+            "context": stage_context(role),
+        })
+        assert "kind" not in result
+        assert result["role"] == role
+        assert result["outcome"]["kind"] == "canceled"
 
     work_payload = {
         **common,
@@ -111,11 +195,13 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "role_session_id": "work-session",
         "role_turn_id": "work-turn",
         "stage_execution_id": "work-execution",
-        "execution_policy": {"sandbox_mode": "workspace_write", "workspace_access": "read_write"},
-        "workspace_capability": {"access": "workspace_write"},
+        "execution_policy": {"sandbox_mode": "workspace_write", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "repository_context": {**common["repository_context"], "workspace_access": "read_write"},
+        "context": stage_context("work"),
     }
-    result = host.handle(envelope("work", "execute_work_turn", work_payload))
-    assert result["result"]["kind"] == "work_completed"
+    work_payload = {"protocol_version": "1", "request_id": "work", **work_payload}
+    result = host.handle(work_payload)
+    assert result["outcome"]["kind"] == "canceled"
     assert backend.turns[-1][2] == tmp_path
     assert len({handle for handle, _, _ in backend.turns}) == 3
 

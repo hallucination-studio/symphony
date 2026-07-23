@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from performer.contracts import validate
+
 PROTOCOL_VERSION = "1"
 REQUEST_KINDS = frozenset(
     {
         "open_root_reconciler",
-        "advance_root_reconciler",
         "execute_plan_turn",
         "execute_work_turn",
         "execute_verify_turn",
@@ -28,28 +29,47 @@ def validate_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProtocolError("request_invalid", "The Performer request must be an object.")
     request = dict(value)
-    if set(request) < {"protocol_version", "request_id", "kind"}:
+    if set(request) < {"protocol_version", "request_id"}:
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
     if "payload" in request:
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
     if request.get("protocol_version") != PROTOCOL_VERSION:
         raise ProtocolError("protocol_version_unsupported", "The Performer protocol version is unsupported.")
-    _text(request, "request_id")
-    kind = _text(request, "kind")
-    if kind not in REQUEST_KINDS:
+    request_id = _text(request, "request_id")
+    kind = request.get("kind")
+    if kind is None:
+        if "reconciler_session_id" in request:
+            _validate_contract("RootReconcilerObservation", request, request_id)
+            return request
+        role = request.get("role")
+        stage_contract = {"plan": "PlanTurnRequest", "work": "WorkTurnRequest", "verify": "VerifyTurnRequest"}.get(role)
+        if stage_contract is None:
+            raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
+        _validate_contract(stage_contract, request, request_id)
+        return request
+    if not isinstance(kind, str) or kind not in REQUEST_KINDS:
         raise ProtocolError("request_kind_unsupported", "The Performer request kind is unsupported.")
     required_fields = {
         "open_root_reconciler": {"root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "limits"},
-        "advance_root_reconciler": {"role_session_id", "role_turn_id", "root_issue_id", "observed_root_tree_digest", "observation"},
-        "execute_plan_turn": {"stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"},
-        "execute_work_turn": {"stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"},
-        "execute_verify_turn": {"stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "limits", "context_digest", "context"},
         "close_cycle_stage_sessions": {"root_issue_id", "cycle_issue_id", "reason"},
         "close_root_reconciler": {"root_issue_id", "reason"},
     }[kind]
     if not required_fields.issubset(request):
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
+    contract_name = {
+        "open_root_reconciler": "OpenRootReconcilerRequest",
+        "close_cycle_stage_sessions": "CloseCycleStageSessionsCommand",
+        "close_root_reconciler": "CloseRootReconcilerCommand",
+    }[kind]
+    _validate_contract(contract_name, request, request_id)
     return request
+
+
+def _validate_contract(name: str, request: dict[str, Any], request_id: str) -> None:
+    try:
+        validate(name, request)
+    except ValueError as error:
+        raise ProtocolError("request_shape_invalid", "The Performer request does not match its closed contract.") from error
 
 
 def response(request_id: str, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
