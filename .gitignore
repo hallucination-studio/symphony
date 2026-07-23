@@ -25,7 +25,3 @@ skills-lock.json
 logs/
 tmp
 tasks/*
-!tasks/scope-ledgers/
-!tasks/scope-ledgers/*.md
-!tasks/reviews/
-!tasks/reviews/*.md
