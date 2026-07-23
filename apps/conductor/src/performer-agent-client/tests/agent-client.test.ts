@@ -4,12 +4,33 @@ import {
   decodeConductorPerformerPlanTurnRequest,
   decodeConductorPerformerVerifyTurnRequest,
   decodeConductorPerformerWorkTurnRequest,
+  type JsonValue,
 } from "@symphony/contracts";
 
-import type { SerializedPerformerProcessRunnerInterface } from "../../performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
+import {
+  PersistentPerformerAgentChannelFactory,
+  type PerformerAgentChannelFactory,
+} from "../internal/PerformerAgentChannel.js";
 import type { RootReconcilerOpenInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import type { StageTurnInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import { SessionPerformerAgentClientImpl } from "../internal/SessionPerformerAgentClientImpl.js";
+
+function channelFactoryFor(
+  respond: (input: { requestId: string; body: Record<string, unknown> }) => JsonValue | Promise<JsonValue>,
+  calls?: Record<string, unknown>[],
+): PerformerAgentChannelFactory {
+  return {
+    open() {
+      return {
+        async request(input) {
+          calls?.push(input.body);
+          return await respond({ requestId: input.requestId, body: input.body });
+        },
+        async close() {},
+      };
+    },
+  };
+}
 
 function stageInput(role: "plan" | "work" | "verify"): StageTurnInput {
   return {
@@ -115,27 +136,17 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string) 
 }
 
 test("agent client sends the closed direct OpenRootReconcilerRequest", async () => {
-  const calls: Parameters<SerializedPerformerProcessRunnerInterface["run"]>[0][] = [];
-  const runner: SerializedPerformerProcessRunnerInterface = {
-    async run(input) {
-      calls.push(input);
-      return {
-        stdout: JSON.stringify({
-          protocol_version: "1",
-          request_id: "request-1",
-          kind: "root_reconciler_opened",
-          root_issue_id: "root-1",
-          reconciler_session_id: "session-1",
-        }) + "\n",
-        stderr: "",
-      };
-    },
-    async cancelAndReap() {},
-  };
+  const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
     environment: () => ({ CODEX_HOME: "/tmp/profile" }),
-    lane: runner,
+    channelFactory: channelFactoryFor(({ requestId }) => ({
+      protocol_version: "1",
+      request_id: requestId,
+      kind: "root_reconciler_opened",
+      root_issue_id: "root-1",
+      reconciler_session_id: "session-1",
+    }), calls),
     deadlineMs: 30_000,
   });
   const input: RootReconcilerOpenInput = {
@@ -148,7 +159,7 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
 
   assert.deepEqual(await client.openRootReconciler(input), { kind: "opened", sessionId: "session-1" });
   assert.equal(calls.length, 1);
-  const sent = JSON.parse(Buffer.from(calls[0]?.stdin ?? "").toString("utf8").trim()) as Record<string, unknown>;
+  const sent = calls[0]!;
   assert.equal(sent.protocol_version, "1");
   assert.equal(sent.kind, "open_root_reconciler");
   assert.equal("payload" in sent, false);
@@ -156,22 +167,58 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal(sent.performer_profile_id, "profile-1");
 });
 
-test("agent client decodes direct role-specific results", async () => {
-  const runner: SerializedPerformerProcessRunnerInterface = {
-    async run(input) {
-      const sent = JSON.parse(Buffer.from(input.stdin ?? "").toString("utf8").trim()) as { request_id: string; role: "plan" | "work" | "verify" };
-      const request = JSON.parse(Buffer.from(input.stdin ?? "").toString("utf8").trim());
-      if (sent.role === "plan") decodeConductorPerformerPlanTurnRequest(request);
-      if (sent.role === "work") decodeConductorPerformerWorkTurnRequest(request);
-      if (sent.role === "verify") decodeConductorPerformerVerifyTurnRequest(request);
-      return { stdout: `${JSON.stringify(directStageResult(sent.role, sent.request_id))}\n`, stderr: "" };
+test("agent client reuses one Profile channel for a Root session lifecycle", async () => {
+  let openedChannels = 0;
+  const requestKinds: string[] = [];
+  const channelFactory: PerformerAgentChannelFactory = {
+    open() {
+      openedChannels += 1;
+      return {
+        async request({ requestId, body }) {
+          requestKinds.push(String(body.kind));
+          return (body.kind === "open_root_reconciler"
+            ? {
+              protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
+              root_issue_id: "root-1", reconciler_session_id: "session-1",
+            }
+            : {
+              protocol_version: "1", request_id: requestId, kind: "root_reconciler_closed", root_issue_id: "root-1",
+            }) as JsonValue;
+        },
+        async close() {},
+      };
     },
-    async cancelAndReap() {},
   };
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
     environment: () => ({}),
-    lane: runner,
+    channelFactory,
+    deadlineMs: 30_000,
+  });
+  await client.openRootReconciler({
+    protocolVersion: 1,
+    requestId: "open-request",
+    rootIssueId: "root-1",
+    profileId: "profile-1",
+    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
+  });
+  await client.closeRootReconciler({ requestId: "close-request", rootIssueId: "root-1", sessionId: "session-1" });
+  assert.equal(openedChannels, 1);
+  assert.deepEqual(requestKinds, ["open_root_reconciler", "close_root_reconciler"]);
+});
+
+test("agent client decodes direct role-specific results", async () => {
+  const channelFactory = channelFactoryFor(({ requestId, body }) => {
+    const role = body.role as "plan" | "work" | "verify";
+    if (role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
+    if (role === "work") decodeConductorPerformerWorkTurnRequest(body as JsonValue);
+    if (role === "verify") decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
+    return directStageResult(role, requestId) as JsonValue;
+  });
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory,
     deadlineMs: 30_000,
   });
 
@@ -188,26 +235,25 @@ test("agent client decodes direct role-specific results", async () => {
 });
 
 test("agent client sends role-specific closed stage contexts", async () => {
-  const calls: Parameters<SerializedPerformerProcessRunnerInterface["run"]>[0][] = [];
-  const runner: SerializedPerformerProcessRunnerInterface = {
-    async run(input) {
-      calls.push(input);
-      const sent = JSON.parse(Buffer.from(input.stdin ?? "").toString("utf8").trim()) as { request_id: string; role: "plan" | "work" | "verify" };
-      const request = JSON.parse(Buffer.from(input.stdin ?? "").toString("utf8").trim());
-      if (sent.role === "plan") decodeConductorPerformerPlanTurnRequest(request);
-      if (sent.role === "work") decodeConductorPerformerWorkTurnRequest(request);
-      if (sent.role === "verify") decodeConductorPerformerVerifyTurnRequest(request);
-      return { stdout: `${JSON.stringify(directStageResult(sent.role, sent.request_id))}\n`, stderr: "" };
-    },
-    async cancelAndReap() {},
-  };
-  const client = new SessionPerformerAgentClientImpl({ executable: "performer", environment: () => ({}), lane: runner, deadlineMs: 30_000 });
+  const calls: Record<string, unknown>[] = [];
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => {
+      const role = body.role as "plan" | "work" | "verify";
+      if (role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
+      if (role === "work") decodeConductorPerformerWorkTurnRequest(body as JsonValue);
+      if (role === "verify") decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
+      return directStageResult(role, requestId) as JsonValue;
+    }, calls),
+    deadlineMs: 30_000,
+  });
 
   await client.executePlanTurn(stageInput("plan"));
   await client.executeWorkTurn(stageInput("work"));
   await client.executeVerifyTurn(stageInput("verify"));
 
-  const requests = calls.map((call) => JSON.parse(Buffer.from(call.stdin ?? "").toString("utf8").trim()) as Record<string, unknown>);
+  const requests = calls;
   assert.deepEqual(requests.map((request) => request.role), ["plan", "work", "verify"]);
   assert.equal("kind" in requests[0]!, false);
   assert.equal("payload" in requests[0]!, false);
@@ -227,27 +273,38 @@ test("agent client sends role-specific closed stage contexts", async () => {
 });
 
 test("agent client rejects the retired stage_result envelope", async () => {
-  const runner: SerializedPerformerProcessRunnerInterface = {
-    async run(input) {
-      const sent = JSON.parse(Buffer.from(input.stdin ?? "").toString("utf8").trim()) as { request_id: string };
-      return {
-        stdout: `${JSON.stringify({
-          protocol_version: "1",
-          request_id: sent.request_id,
-          kind: "stage_result",
-          result: directStageResult("plan", sent.request_id),
-        })}\n`,
-        stderr: "",
-      };
-    },
-    async cancelAndReap() {},
-  };
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
     environment: () => ({}),
-    lane: runner,
+    channelFactory: channelFactoryFor(({ requestId }) => ({
+      protocol_version: "1",
+      request_id: requestId,
+      kind: "stage_result",
+      result: directStageResult("plan", requestId),
+    }) as JsonValue),
     deadlineMs: 30_000,
   });
 
   await assert.rejects(client.executePlanTurn(stageInput("plan")), /unknown field|expected exactly one union variant|stage_result/u);
+});
+
+test("persistent Performer channel keeps one process across multiple requests", async () => {
+  const script = [
+    "const readline=require('node:readline');",
+    "readline.createInterface({input:process.stdin}).on('line',line=>{",
+    "const request=JSON.parse(line);",
+    "process.stdout.write(JSON.stringify({protocol_version:'1',request_id:request.request_id,kind:'echo',pid:process.pid})+'\\n');",
+    "});",
+  ].join("");
+  const channel = new PersistentPerformerAgentChannelFactory(["-e", script]).open({
+    executable: process.execPath,
+    environment: { ...process.env },
+  });
+
+  const first = await channel.request({ requestId: "first", body: { request_id: "first" }, deadlineMs: 5_000 });
+  const second = await channel.request({ requestId: "second", body: { request_id: "second" }, deadlineMs: 5_000 });
+  assert.equal((first as { request_id: string }).request_id, "first");
+  assert.equal((second as { request_id: string }).request_id, "second");
+  assert.equal((first as { pid: number }).pid, (second as { pid: number }).pid);
+  await channel.close(1_000);
 });

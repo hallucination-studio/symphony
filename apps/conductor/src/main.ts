@@ -13,6 +13,7 @@ import { ConductorProfileRelayHandler } from "./performer-profiles/internal/Cond
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
 import { SerializedPerformerProcessRunnerImpl } from "./performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
 import { SessionPerformerAgentClientImpl } from "./performer-agent-client/internal/SessionPerformerAgentClientImpl.js";
+import { PersistentPerformerAgentChannelFactory } from "./performer-agent-client/internal/PerformerAgentChannel.js";
 import { PerformerRootReconcilerClientImpl } from "./root-reconciler-client/internal/PerformerRootReconcilerClientImpl.js";
 import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
@@ -56,7 +57,7 @@ export async function runConductor(environment = process.env): Promise<void> {
       config.codexBaseUrl,
       { CODEX_HOME: profiles.codexHome(profileId) },
     ),
-    lane: processRunner,
+    channelFactory: new PersistentPerformerAgentChannelFactory(),
     deadlineMs: 300_000,
   });
   const reconciler = new PerformerRootReconcilerClientImpl(performer);

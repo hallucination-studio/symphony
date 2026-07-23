@@ -73,7 +73,17 @@ export class RootReconciliationRuntime {
     if (scheduled.orderedEligible.length === 0) return roots.length === 0 ? "empty" : "needs-attention";
 
     for (const root of scheduled.orderedEligible) {
-      const result = await this.reconcileRoot(root);
+      let result: RootRuntimeDisposition;
+      try {
+        result = await this.reconcileRoot(root);
+      } catch (error) {
+        this.sessions.delete(root.issueId);
+        this.dependencies.log("root_reconciliation_failed", {
+          root_issue_id: root.issueId,
+          reason: sanitizedFailureReason(error),
+        });
+        result = "needs-attention";
+      }
       if (result === "progress") return result;
     }
     return "needs-attention";
@@ -255,4 +265,10 @@ function stageInput(
 
 function digest(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url").slice(0, 128);
+}
+
+function sanitizedFailureReason(error: unknown): string {
+  if (!(error instanceof Error)) return "root_reconciliation_failed";
+  const reason = error.message.trim();
+  return /^[a-z0-9_:-]{1,128}$/u.test(reason) ? reason : "root_reconciliation_failed";
 }

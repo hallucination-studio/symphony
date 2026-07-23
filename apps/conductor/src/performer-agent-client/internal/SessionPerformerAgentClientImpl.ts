@@ -1,4 +1,3 @@
-import type { SerializedPerformerProcessRunnerInterface } from "../../performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
 import {
   decodeConductorPerformerCloseCycleStageSessionsResult,
   decodeConductorPerformerCloseRootReconcilerResult,
@@ -9,6 +8,7 @@ import {
   decodeConductorPerformerWorkResult,
   type JsonValue,
 } from "@symphony/contracts";
+import type { PerformerAgentChannel, PerformerAgentChannelFactory } from "./PerformerAgentChannel.js";
 import type {
   PerformerAgentClientInterface,
 } from "../api/PerformerAgentClientInterface.js";
@@ -27,11 +27,15 @@ type JsonRecord = Record<string, unknown>;
 export interface SessionPerformerAgentClientOptions {
   executable: string;
   environment(profileId: string): NodeJS.ProcessEnv;
-  lane: SerializedPerformerProcessRunnerInterface;
+  channelFactory: PerformerAgentChannelFactory;
   deadlineMs: number | (() => number);
 }
 
 export class SessionPerformerAgentClientImpl implements PerformerAgentClientInterface {
+  private readonly channels = new Map<string, PerformerAgentChannel>();
+  private readonly profileByRoot = new Map<string, string>();
+  private readonly profileByRootSession = new Map<string, string>();
+
   constructor(private readonly options: SessionPerformerAgentClientOptions) {}
 
   openRootReconciler(input: RootReconcilerOpenInput): Promise<RootReconcilerOpenResult> {
@@ -58,6 +62,8 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         if (response.kind !== "root_reconciler_opened" || typeof response.reconciler_session_id !== "string") {
           throw new Error("root_reconciler_open_result_invalid");
         }
+        this.profileByRoot.set(input.rootIssueId, input.profileId);
+        this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
         return { kind: "opened", sessionId: response.reconciler_session_id };
       });
   }
@@ -68,7 +74,9 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     observation: RootReconciliationObservation;
   }): Promise<RootReconcilerAdvanceResult> {
     const observation = input.observation;
-    return this.invoke(input.requestId, observation.root.issueId, toWireObservation(observation), decodeConductorPerformerRootDirective)
+    const profileId = this.profileByRootSession.get(input.sessionId);
+    if (!profileId) return Promise.reject(new Error("root_reconciler_session_profile_unknown"));
+    return this.invoke(input.requestId, profileId, toWireObservation(observation), decodeConductorPerformerRootDirective)
       .then((response) => {
         return { kind: "directive", directive: decodeDirective(response) };
       });
@@ -87,24 +95,33 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   }
 
   async closeCycleStageSessions(input: { requestId: string; rootIssueId: string; cycleIssueId: string }): Promise<void> {
-    await this.invoke(input.requestId, input.rootIssueId, {
+    const profileId = this.profileByRoot.get(input.rootIssueId);
+    if (!profileId) return;
+    await this.invoke(input.requestId, profileId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_cycle_stage_sessions",
       root_issue_id: input.rootIssueId, cycle_issue_id: input.cycleIssueId, reason: "cycle_terminal",
     }, decodeConductorPerformerCloseCycleStageSessionsResult);
   }
 
   async closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void> {
-    await this.invoke(input.requestId, input.sessionId, {
+    const profileId = this.profileByRootSession.get(input.sessionId);
+    if (!profileId) throw new Error("root_reconciler_session_profile_unknown");
+    await this.invoke(input.requestId, profileId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_root_reconciler",
       root_issue_id: input.rootIssueId, reason: "root_terminal",
     }, decodeConductorPerformerCloseRootReconcilerResult);
+    this.profileByRootSession.delete(input.sessionId);
+    this.profileByRoot.delete(input.rootIssueId);
   }
 
   async cancelAndReap(): Promise<void> {
-    await this.options.lane.cancelAndReap(1_000);
+    const channels = [...this.channels.values()];
+    this.channels.clear();
+    await Promise.all(channels.map((channel) => channel.close(1_000)));
   }
 
   private async executeStage(kind: "execute_plan_turn" | "execute_work_turn" | "execute_verify_turn", input: StageTurnInput): Promise<StageResult> {
+    this.profileByRoot.set(input.rootIssueId, input.profileId);
     const decoder = kind === "execute_plan_turn"
       ? decodeConductorPerformerPlanResult
       : kind === "execute_work_turn"
@@ -117,21 +134,41 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   }
 
   private async invoke(requestId: string, profileId: string, body: JsonRecord, decoder: (value: JsonValue) => JsonValue): Promise<JsonRecord> {
-    const output = await this.options.lane.run({
+    try {
+      const value = await this.channelFor(profileId).request({
+        requestId,
+        body,
+        deadlineMs: typeof this.options.deadlineMs === "function" ? this.options.deadlineMs() : this.options.deadlineMs,
+      });
+      const response = record(value);
+      if (response.protocol_version !== "1" || response.request_id !== requestId) throw new Error("performer_agent_correlation_invalid");
+      if (response.kind === "error") throw new Error(sanitizedError(response));
+      return record(decoder(value as JsonValue));
+    } catch (error) {
+      this.dropProfile(profileId);
+      throw error;
+    }
+  }
+
+  private channelFor(profileId: string): PerformerAgentChannel {
+    const existing = this.channels.get(profileId);
+    if (existing) return existing;
+    const channel = this.options.channelFactory.open({
       executable: this.options.executable,
-      arguments: ["--agent"],
       environment: this.options.environment(profileId),
-      deadlineMs: typeof this.options.deadlineMs === "function" ? this.options.deadlineMs() : this.options.deadlineMs,
-      stdin: Buffer.from(`${JSON.stringify(body)}\n`, "utf8"),
     });
-    const line = output.stdout.trim().split("\n").filter(Boolean).at(-1);
-    if (!line) throw new Error("performer_agent_response_missing");
-    let value: unknown;
-    try { value = JSON.parse(line); } catch { throw new Error("performer_agent_response_invalid"); }
-    const response = record(value);
-    if (response.protocol_version !== "1" || response.request_id !== requestId) throw new Error("performer_agent_correlation_invalid");
-    if (response.kind === "error") throw new Error(sanitizedError(response));
-    return record(decoder(value as JsonValue));
+    this.channels.set(profileId, channel);
+    return channel;
+  }
+
+  private dropProfile(profileId: string): void {
+    this.channels.delete(profileId);
+    for (const [rootIssueId, mappedProfileId] of this.profileByRoot) {
+      if (mappedProfileId === profileId) this.profileByRoot.delete(rootIssueId);
+    }
+    for (const [sessionId, mappedProfileId] of this.profileByRootSession) {
+      if (mappedProfileId === profileId) this.profileByRootSession.delete(sessionId);
+    }
   }
 }
 
