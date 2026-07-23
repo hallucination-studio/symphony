@@ -26,7 +26,7 @@
 | 结构化失败 | `*Error` | `ProtocolError` |
 | 可丢弃观察 | `*Event` | `PerformerHeartbeatEvent` |
 | 外部事实副本 | `*Snapshot` | `LinearIssueTreeSnapshot` |
-| 组合后的当前视图 | `*View` | `RootRunView` |
+| 组合后的当前视图 | `*View` | `RootReconciliationView` |
 | 模块间纯决策边界 | `*PolicyInterface` | `RootSchedulingPolicyInterface` |
 | 模块内纯规则 | `*Policy` | `LinearPriorityPolicy` |
 | 应用编排 | `*UseCase` | `RunRootStageUseCase` |
@@ -99,13 +99,13 @@ timeline-projections
 performer-profiles
 git-workspaces
 root-delivery
-runtime-reporting
+runtime-logs
 ```
 
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
 `RootReconciliationView`和`LinearIssueTreeSnapshot`只存在于内存。
 
-`root-reconciliation`拥有不调用模型的`RootReconciliationPolicyInterface`；
+`root-reconciliation`拥有只验证ownership、lifecycle、budget和convergence不变量的`RootInvariantPolicyInterface`；
 `root-reconciler-client`构造完整Root observation并调用Performer；
 `root-directive-materialization`验证和执行closed directive；`performer-agent-client`拥有Root Reconciler和三个
 Stage role session/turn
@@ -190,7 +190,7 @@ TypeScript：
 
 ```text
 LinearGatewayInterface.ts
-RootReconciliationPolicyInterface.ts
+RootInvariantPolicyInterface.ts
 RootReconcilerClientInterface.ts
 RootDirectiveMaterializerInterface.ts
 RootReconcilerReplyWriterInterface.ts
@@ -199,7 +199,7 @@ WorkflowTimelinePublisherInterface.ts
 PodiumLinearGatewayClientImpl.ts
 LinearGatewayProtocolHandlerImpl.ts
 GetIssueTreeQuery.ts
-RootRunView.ts
+RootReconciliationView.ts
 ```
 
 Python：

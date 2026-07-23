@@ -177,7 +177,7 @@ PerformerProfileSummaryView
 PerformerProfileDetailView
   summary
   sanitizedLastError?
-  nextAction?
+  recommendedProfileOperation?
 ```
 
 View不包含`CODEX_HOME`、API Key、auth文件内容、SDK object或原始error。
@@ -305,7 +305,7 @@ active Profile未确认ready前不claim新的Root。
 ## 10. Active Profile与Agent调用
 
 Conductor在`profiles.json`保存一个`activeProfileId`。新Root claim时把ready active Profile固定到
-Root Primary Status Comment；切换active Profile只影响之后claim的Root，不抢占active turn。
+Root Control Record Comment；切换active Profile只影响之后claim的Root，不抢占active turn。
 
 Root Reconciler以及每个Cycle的Plan、Work和Verify role都使用该Profile的`CODEX_HOME`创建互相隔离的
 Provider thread。Profile复用认证、Provider设置和SDK cache；Root Reconciler thread只在matching Root内复用，
@@ -328,28 +328,13 @@ StageUsageSnapshot
 `cached_input_tokens`是`input_tokens`的子集，`total_tokens`按SDK语义或
 `input_tokens + output_tokens`计算，不能把cached token重复相加。
 
-每个有效Root Reconciler/Stage Result可以携带`usage`。Conductor先把settlement写入matching execution managed comment，
-再从完整Root execution history重建累计值；Root Primary Status Comment只投影观察值：
-
-```text
-usage_input_tokens
-usage_cached_input_tokens
-usage_output_tokens
-usage_reasoning_output_tokens
-usage_total_tokens
-last_usage_stage_execution_id
-```
-
-`last_usage_stage_execution_id`防止同一个Result重复结算。Root已经Done/Canceled或Result correlation
-失效时，不为记录usage而绕过Root终止规则。
+每个有效Root Reconciler/Stage Result可以携带`usage`。Conductor把settlement写入matching execution managed comment，
+并从完整Root execution history重建累计值。execution identity防止同一个Result重复结算；不另写Root累计值、Control
+Record Comment投影或Desktop计数器。Root已经Done/Canceled或Result correlation失效时，不为记录usage而绕过Root终止规则。
 
 Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
-settlement写入失败时，turn启动前的Linear token reservation继续全额计入，不能因少计而绕过Root
-convergence gate；Primary投影写入失败只产生可见warning。
-
-Desktop只显示当前Stage完整Result携带的usage，不设计跨Root累计数量或实时token推测。Conductor可以在
-Root managed comment中投影已接受Result的累计usage。Workflow gate读取execution settlements和open
-reservations，不读取Desktop或Primary projection。
+settlement写入失败时当前Root停止，turn启动前的Linear token reservation继续全额计入，不能因少计而绕过Root
+convergence gate。Workflow gate只读取execution settlements和open reservations。
 
 SDK actual usage是operator-facing observation，不是账单；Root token budget correctness由保守reservation保证：
 
@@ -375,26 +360,13 @@ Conductor Detail增加`Performer Profiles`区域：
 
 API Key保存后只显示`Configured`，不能重新显示或复制原值。
 
-如果当前Stage使用的Profile和active Profile不同，Desktop同时显示：
-
-```text
-Current Stage Profile
-Active Profile for new Roots
-```
-
-Overview增加两个低密度指标：
-
-- Total tokens；
-- Completed roots。
-
-Conductor Detail显示该Conductor的usage breakdown；Root Detail显示该Root的Profile和
-token usage。指标必须带`observedAt`和stale状态。
+Desktop只显示Profile配置和认证操作的真实Result，不显示当前Root/Stage使用的Profile、usage或完成数量。
 
 ## 13. 错误与恢复
 
 | 错误 | 行为 |
 |---|---|
-| Profile不存在 | 新Root不启动；Desktop提示选择有效Profile |
+| Profile不存在 | 新Root不启动；Profile操作返回失败并写脱敏日志 |
 | active Profile未登录 | Conductor不claim新Root |
 | SDK login失败 | Profile保持`login-required`，保留安全原因并允许重试 |
 | login process随重启丢失 | SDK account未认证时回到`login-required` |

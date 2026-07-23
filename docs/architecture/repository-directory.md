@@ -59,9 +59,9 @@ apps/conductor/
     │       └── LinearPriorityRootSchedulingPolicyImpl.ts
     ├── root-reconciliation/
     │   ├── api/
-    │   │   └── RootReconciliationPolicyInterface.ts
+    │   │   └── RootInvariantPolicyInterface.ts
     │   └── internal/
-    │       └── LinearRootReconciliationPolicyImpl.ts
+    │       └── LinearRootInvariantPolicyImpl.ts
     ├── root-reconciler-client/
     │   ├── api/
     │   │   └── RootReconcilerClientInterface.ts
@@ -107,11 +107,11 @@ apps/conductor/
     │   │   └── RootDeliveryInterface.ts
     │   └── internal/
     │       └── GitRootDeliveryImpl.ts
-    ├── runtime-reporting/
+    ├── runtime-logs/
     │   ├── api/
-    │   │   └── ConductorRuntimeReporterInterface.ts
+    │   │   └── RuntimeLogPublisherInterface.ts
     │   └── internal/
-    │       └── PodiumConductorRuntimeReporterImpl.ts
+    │       └── PodiumRuntimeLogPublisherImpl.ts
     └── private-ipc/
 ```
 
@@ -191,9 +191,9 @@ packages/podium/
         │   │   └── PerformerProfileRelayInterface.ts
         │   └── internal/
         │       └── ConductorPerformerProfileRelayImpl.ts
-        ├── runtime-observations/
-        │   └── api/
-        │       └── RuntimeObservationStoreInterface.ts
+        ├── conductor-presence/
+        │   └── internal/
+        │       └── PrivateChannelConductorPresenceImpl.ts
         ├── desktop-views/
         │   └── internal/
         │       └── PodiumDesktopViewImpl.ts

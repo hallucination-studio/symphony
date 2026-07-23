@@ -53,8 +53,8 @@ Convergence Override
 ```
 
 每个Action必须有`Human Action`和恰好一个kind label。Label只表达Issue/action kind，不表达生命周期或
-resolution；生命周期只由Action status和原生archive flag表达。缺失、重复或错误kind label使matching Root
-进入attention，Conductor不能根据title猜测类型。
+resolution；生命周期只由Action status和原生archive flag表达。缺失、重复或错误kind label使matching Root fail
+closed并写Linear timeline，Conductor不能根据title猜测类型。
 
 ## 4. 状态模型
 
@@ -142,7 +142,8 @@ What happens after Approved / Rejected / Answered / Canceled
 ```
 
 Action必须让用户无需阅读Provider transcript即可做决定。description不能包含secret、raw reasoning、内部command
-或要求用户输入机器标识。内容超过bound时，Root Reconciler必须缩小请求或返回attention；Conductor不能创建内容
+或要求用户输入机器标识。内容超过bound时，Root Reconciler必须缩小请求；仍不合法则directive失败并写matching
+Linear managed failure record。Conductor不能创建内容
 不完整的审批。
 
 ## 7. Durable records
@@ -165,8 +166,8 @@ expected_parent_remote_version
 created_at
 ```
 
-canonical record写在Action Issue managed comment；Root Primary Status只投影active waiting identities，不是第二份
-authority。
+canonical record写在Action Issue managed comment。Root waiting status由matching active Action机械约束；Root Control
+Record Comment不复制Action identity、status或resolution。
 
 ### 7.2 HumanActionResolutionRecord
 
@@ -267,7 +268,7 @@ capability，并再次验证当前Root/Cycle/target和grant digest。
 - restore不是reopen，不能重放旧resolution；
 - stale status/comment、非Human actor、旧proposal digest、重复terminal transition不推进workflow；
 - 用户修改Root/Cycle/DAG或Action期间产生的旧Root directive在digest检查时被拒绝；
-- relation或parent冲突进入attention，不能按title或时间猜测target。
+- relation或parent冲突使matching Root fail closed并写Linear timeline，不能按title或时间猜测target。
 
 ## 12. 不变量
 

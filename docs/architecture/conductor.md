@@ -46,7 +46,7 @@ apps/conductor/src/
   workflow-events/
   timeline-projections/
   performer-profiles/
-  runtime-reporting/
+  runtime-logs/
   private-ipc/
 ```
 
@@ -54,7 +54,7 @@ apps/conductor/src/
 |---|---|
 | `root-discovery` | Project、Root routing、ownership和header discovery |
 | `root-scheduling` | blocker、Priority、Root order和capacity |
-| `root-reconciliation` | deterministic host、Root action和convergence gate |
+| `root-reconciliation` | deterministic host、invariant validation和convergence gate；不产生业务下一步 |
 | `root-reconciler-client` | 构造完整Root observation并调用Root Reconciler |
 | `root-directive-materialization` | 校验、幂等执行和read-back Root directive及required user replies |
 | `performer-agent-client` | Root Reconciler和三个Stage role session/turn transport |
@@ -91,12 +91,11 @@ include-archived读取并分页到完整；无法证明完整时fail closed。
 
 ```text
 fresh view
--> deterministic Root action
--> if semantic workflow decision required:
-     advance Root Reconciler
-     validate RootDirective
-     persist accepted directive
--> materialize one action
+-> validate ownership, lifecycle and convergence invariants
+-> if an accepted directive is incomplete: finish the same materialization
+-> otherwise advance Root Reconciler
+-> validate and persist one RootDirective
+-> materialize that directive
 -> semantic read-back
 -> materialize and read back required user-comment replies
 -> publish and materialize typed timeline event
@@ -128,7 +127,9 @@ Root Reconciler通过closed directive请求Cycle或Root Action；Conductor验证
 relations、description和managed record。用户Action status/comment变化由Conductor验证并形成resolution，再把完整
 Root Tree交回Reconciler。Plan/Work/Verify不能直接创建Action。
 
-Root convergence Action由机械Root gate产生，不能被Reconciler放宽。完整交互由
+Root convergence Action也只能来自Root Reconciler directive。机械Root gate可以拒绝successor或其他超限directive，
+但不能自行创建Action或选择替代动作；Root Reconciler在下一份完整observation中决定是否请求Action。gate限制不能被
+Reconciler放宽。完整交互由
 [Human Action](human-actions.md)定义。
 
 ## 7. Timeline事件
@@ -146,7 +147,9 @@ verified HEAD。
 
 ## 9. 错误与恢复
 
-- malformed/stale directive或Result不materialize，错误作为durable observation/attention进入下一轮；
+- malformed/stale directive或Result不materialize；Reconciler失败写`RootReconcilerFailureRecord`，Stage失败写matching
+  execution record，并materialize required timeline；
+  read-back后下一轮只从该Linear事实处理；
 - process crash后不恢复内存decision，从Linear/Git重建；
 - duplicate webhook只wake，同一stable ID不会产生重复mutation/comment；
 - Root terminal、ownership/Profile变化立即取消matching sessions并拒绝late output；
@@ -162,3 +165,4 @@ verified HEAD。
 5. 每次accepted Result先durable，再交给Root Reconciler。
 6. 时间轴通过event subscriber解耦；用户comment reply属于RootDirective materialization，两者都必须Linear read-back。
 7. Conductor不保存Workflow数据库、durable Queue或Providerconversation pointer。
+8. Conductor invariant policy只能返回valid/invalid及机械原因，不能返回Stage、Human Action、DAG、Cycle或delivery动作。

@@ -68,19 +68,24 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 | OAuth、Token、installation、Project catalog | `podium.db` | Podium |
 | Conductor Binding和Repository Context | `podium.db` | Podium Desktop |
 | Root routing和Project Conductor Pool | Linear labels | Podium / Conductor |
-| Root ownership、Profile、convergence policy、delivery | Root managed records | Conductor |
+| Root ownership、Profile和convergence policy | Root managed records | Conductor |
 | Root/Cycle/Node status与archive membership | Linear | Conductor reconciles |
 | Cycle DAG、relations、Plan Contract和Human Action | Linear Issue Tree | Root Reconciler proposes; Conductor writes |
 | Root directives和Plan/Work/Verify Results | Linear managed records | Conductor validates |
 | Human status/comments/resolutions | Linear | Human / Conductor / Root Reconciler |
-| 用户comment disposition与reply | Linear managed comments | Root Reconciler proposes; subscriber writes |
-| branch、commits、diff、checks | Git | Conductor / Performer Work |
+| 用户comment disposition与reply | Linear managed comments | Root Reconciler proposes; directive materializer writes |
+| branch、commits、diff、checks和delivery | Git | Conductor / Performer Work |
 | Provider auth/session runtime | Profile `CODEX_HOME` and live Performer | Codex SDK / Performer |
 | Root/Cycle user timeline | Linear comments | Timeline subscribers |
-| heartbeat和tool progress | best-effort Event/Desktop | 不参与Workflow |
+| Conductor online/offline | 当前private channel | Podium Desktop只观察，不持久化 |
+| heartbeat和tool progress | process memory/log | 不进入Desktop Workflow View，不参与Workflow |
 
 Conductor内存View、runtime event、process handle、opaque session handle和Provider thread都可丢弃。accepted业务
 事实只有在Linear/Git read-back后才成立。
+
+Podium Desktop不显示或修改Root、Cycle、Node、Human Action、Result、Finding、delivery或Workflow next action。
+所有Workflow查看和人工交互只在Linear完成；Desktop只显示Linear connected/disconnected和Conductor
+online/offline，并提供Conductor/Profile配置与脱敏运行日志。
 
 ## 4. 调用与恢复
 

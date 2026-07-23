@@ -8,7 +8,7 @@
 ```text
 LinearGatewayInterface                 <- PodiumLinearGatewayClientImpl
 RootSchedulingPolicyInterface          <- LinearPriorityRootSchedulingPolicyImpl
-RootReconciliationPolicyInterface      <- LinearRootReconciliationPolicyImpl
+RootInvariantPolicyInterface           <- LinearRootInvariantPolicyImpl
 RootReconcilerClientInterface          <- PerformerRootReconcilerClientImpl
 RootDirectiveMaterializerInterface     <- LinearRootDirectiveMaterializerImpl
 PerformerAgentClientInterface          <- SessionPerformerAgentClientImpl
@@ -124,6 +124,7 @@ Linear durable records使用同一schema生成机制：
 RootOwnershipRecord
 RootConvergencePolicy
 RootDirectiveRecord
+RootReconcilerFailureRecord
 RootReconcilerReplyRecord
 WorkflowChangeResolutionRecord
 StageExecutionRecord
@@ -142,7 +143,7 @@ record marker有schema version、stable identity和source references。Issue正�
 
 ## 9. Interface ownership
 
-- Conductor定义Linear consumer、Root policy、Root Reconciler client、directive materializer、Performer client和timeline
+- Conductor定义Linear consumer、Root invariant policy、Root Reconciler client、directive materializer、Performer client和timeline
   publisher/projection interfaces；
 - Podium实现Linear protocol handler和内部Linear SDK；
 - Performer定义Provider backend、Root Reconciler和三个Stage role session runtime；

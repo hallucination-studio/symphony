@@ -54,6 +54,10 @@ This file contains the repository-wide working rules for coding agents.
   workflow modules do not render timeline comments directly. Required Linear
   timeline or Reconciler reply writes must read back successfully before the
   Root can advance; failures stop that Root and emit correlated sanitized logs.
+- Podium Desktop is a control-plane and observability surface only. It must not
+  expose or mutate Root, Cycle, Stage, Human Action, Result, Finding, delivery,
+  or workflow-next-step state. Workflow interaction stays in Linear; Desktop
+  exposes only Linear connected/disconnected and Conductor online/offline.
 - Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
   directories, and are controlled through the approved profile-control
   boundary. Symphony must not read or rewrite Codex-owned configuration files.

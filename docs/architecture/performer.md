@@ -112,7 +112,7 @@ Performer不保存workflow数据库。live session可以在进程内维持Provid
 | turn transport失败 | interrupt matching turn；无validated Result则不产生业务结论 |
 | Provider thread丢失 | close Symphony session；Conductor用fresh facts打开fresh role session |
 | Performer process崩溃 | Reconciler和Stage sessions全部丢弃；Conductor从Root facts重建 |
-| Work留下部分修改 | fresh Git/worktree facts进入恢复request，由Conductor决定是否继续 |
+| Work留下部分修改 | fresh Git/worktree facts进入完整Root observation，由Root Reconciler决定继续、rerun、replan或supersede；Conductor只验证和materialize directive |
 | stale/late Result | correlation/digest/precondition检查拒绝 |
 | Human等待 | turn结束并释放active execution；session可保留或丢弃，恢复结果相同 |
 
