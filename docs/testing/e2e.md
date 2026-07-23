@@ -65,9 +65,11 @@ node tools/e2e/target-workflow-entry.mjs --dry-run
 - `SYMPHONY_E2E_CODEX_API_KEY`
 - `SYMPHONY_E2E_CODEX_BASE_URL`
 - `SYMPHONY_E2E_CODEX_MODEL`
-- `SYMPHONY_E2E_RUN_ID`
+- `SYMPHONY_E2E_RUN_ID` (CI supplies this explicitly; local CLI runs generate a
+  `local-...` value when it is absent)
 
-缺少必要配置时，入口在任何 scope 或外部 mutation 之前输出 `unverified`。凭据只进入
+缺少必要凭据或授权配置时，入口在任何 scope 或外部 mutation 之前输出 `unverified`；本地
+缺少 run ID 不属于错误，入口会先生成本次运行的安全关联 ID。凭据只进入
 Podium/approved Profile boundary；Conductor child environment、Linear snapshot、Git
 observation、日志和 evidence 均不得包含 secret。
 

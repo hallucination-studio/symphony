@@ -6,6 +6,7 @@ import test from "node:test";
 import { TARGET_WORKFLOW_SCENARIOS } from "../../tools/e2e/target-workflow-verdict.mjs";
 import {
   composeTargetWorkflowScenarioInput,
+  createTargetWorkflowCliEnvironment,
   targetWorkflowCliExitCode,
   runTargetWorkflowAllLive,
   runTargetWorkflowDryRun,
@@ -24,6 +25,23 @@ function scenarioOutcome(scenario, status = "passed", observation = {}) {
     cleanupCompleted: true,
   };
 }
+
+test("target workflow CLI generates a safe local run ID when none is provided", () => {
+  const environment = createTargetWorkflowCliEnvironment({
+    environment: { PATH: "/usr/bin" },
+    now: () => 1_721_707_200_000,
+    randomUuid: () => "00000000-0000-4000-8000-000000000001",
+  });
+
+  assert.equal(environment.PATH, "/usr/bin");
+  assert.equal(environment.SYMPHONY_E2E_RUN_ID, "local-lyxw0hs0-00000000-0000-4000-8000-000000000001");
+});
+
+test("target workflow CLI preserves an explicit CI run ID", () => {
+  const environment = { PATH: "/usr/bin", SYMPHONY_E2E_RUN_ID: "gha-123-1" };
+
+  assert.deepEqual(createTargetWorkflowCliEnvironment({ environment }), environment);
+});
 
 test("target workflow dry-run performs no mutation and reports the static audit", async () => {
   const result = await runTargetWorkflowDryRun();

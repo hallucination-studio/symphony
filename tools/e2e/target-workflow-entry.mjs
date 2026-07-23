@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -28,6 +29,7 @@ import {
 } from "./target-workflow-deadline.mjs";
 
 const TARGET_E2E_TIMEOUT_MS = 5 * 60_000;
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const TARGET_RATE_LIMIT_REASONS = new Set([
   "target_inputs_rate_limited",
   "target_transport_rate_limited",
@@ -46,6 +48,30 @@ const TARGET_SOURCE_FILES = Object.freeze({
   inputs: "tools/e2e/target-workflow-inputs.mjs",
   transport: "tools/e2e/target-workflow-transport.mjs",
 });
+
+export function createTargetWorkflowCliEnvironment({
+  environment = process.env,
+  now = Date.now,
+  randomUuid = randomUUID,
+} = {}) {
+  if (!environment || typeof environment !== "object" || Array.isArray(environment) ||
+      typeof now !== "function" || typeof randomUuid !== "function") {
+    throw stableError("target_entry_environment_invalid");
+  }
+  const explicitRunId = environment.SYMPHONY_E2E_RUN_ID;
+  if (explicitRunId !== undefined) {
+    if (!RUN_ID.test(explicitRunId)) throw stableError("target_live_run_id_invalid");
+    return Object.freeze({ ...environment });
+  }
+  const timestamp = now();
+  const uuid = randomUuid();
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0 || typeof uuid !== "string") {
+    throw stableError("target_live_run_id_invalid");
+  }
+  const runId = `local-${timestamp.toString(36)}-${uuid}`;
+  if (!RUN_ID.test(runId)) throw stableError("target_live_run_id_invalid");
+  return Object.freeze({ ...environment, SYMPHONY_E2E_RUN_ID: runId });
+}
 
 export async function runTargetWorkflowDryRun({ readSource = readFile } = {}) {
   const sources = {};
@@ -77,6 +103,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       runTargetWorkflowLive(arguments_[1], {
         deadlineAtMs,
         signal,
+        environment: createTargetWorkflowCliEnvironment(),
         preparedSetup,
         emitObservation: true,
       })))
@@ -94,7 +121,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       ? LIVE_SCENARIO_ARGUMENTS[arguments_[0]]
       : undefined;
     if (liveScenario) {
-      runCliWithDeadline(({ deadlineAtMs, signal }) => runTargetWorkflowLive(liveScenario, { deadlineAtMs, signal }))
+      runCliWithDeadline(({ deadlineAtMs, signal }) => runTargetWorkflowLive(liveScenario, {
+        deadlineAtMs,
+        signal,
+        environment: createTargetWorkflowCliEnvironment(),
+      }))
         .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
         .catch((error) => {
           process.stderr.write(`${JSON.stringify({
@@ -105,7 +136,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
           process.exitCode = 2;
         });
     } else if (arguments_.length === 1 && arguments_[0] === "--live-all") {
-      runCliWithDeadline(({ deadlineAtMs, signal }) => runTargetWorkflowLive("all", { deadlineAtMs, signal }))
+      runCliWithDeadline(({ deadlineAtMs, signal }) => runTargetWorkflowLive("all", {
+        deadlineAtMs,
+        signal,
+        environment: createTargetWorkflowCliEnvironment(),
+      }))
         .then((result) => {
           process.stdout.write(`${JSON.stringify(result)}\n`);
           process.exitCode = targetWorkflowCliExitCode(result);
@@ -159,6 +194,7 @@ function runCliWithDeadline(run) {
 async function runTargetWorkflowLive(scenario = "success", {
   deadlineAtMs,
   signal,
+  environment = process.env,
   preparedSetup,
   emitObservation = false,
 } = {}) {
@@ -171,7 +207,7 @@ async function runTargetWorkflowLive(scenario = "success", {
   }
   const observer = new LinearRequestObserverImpl();
   const log = createE2ELogger({
-    runId: process.env.SYMPHONY_E2E_RUN_ID,
+    runId: environment.SYMPHONY_E2E_RUN_ID,
     secrets: [config.secrets.linearDevToken, config.secrets.codexApiKey],
   });
   const effectiveDeadlineAtMs = deadlineAtMs ?? createTargetWorkflowDeadline(TARGET_E2E_TIMEOUT_MS);
@@ -180,7 +216,7 @@ async function runTargetWorkflowLive(scenario = "success", {
   if (preparedSetup !== undefined && scenario !== "all") {
     result = await runPreparedTargetWorkflowScenario(scenario, {
       config,
-      environment: process.env,
+      environment,
       fetch: globalThis.fetch,
       log,
       observer,
@@ -189,17 +225,17 @@ async function runTargetWorkflowLive(scenario = "success", {
       signal: effectiveSignal,
     });
   } else if (scenario === "repair") {
-    result = await runTargetRepairLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetRepairLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   } else if (scenario === "delivery") {
-    result = await runTargetDeliveryLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetDeliveryLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   } else if (scenario === "restart_recovery") {
-    result = await runTargetRestartLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetRestartLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   } else if (scenario === "scheduling") {
-    result = await runTargetSchedulingLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetSchedulingLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   } else if (scenario === "all") {
-    result = await runTargetWorkflowAllLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetWorkflowAllLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   } else {
-    result = await runTargetSuccessLive({ config, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
+    result = await runTargetSuccessLive({ config, environment, observer, log, deadlineAtMs: effectiveDeadlineAtMs, signal: effectiveSignal });
   }
   return emitObservation ? Object.freeze({ result, observation: observer.snapshot() }) : result;
 }
@@ -208,7 +244,7 @@ async function runPreparedTargetWorkflowScenario(scenario, input) {
   return withTargetWorkflowDeadline(
     () => defaultRunScenario(scenario, {
       ...input,
-      environment: process.env,
+      environment: input.environment,
       timeoutMs: remainingTargetWorkflowTimeout(input.deadlineAtMs),
       deadlineAtMs: input.deadlineAtMs,
       setup: input.setup,
