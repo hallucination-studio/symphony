@@ -158,19 +158,47 @@ export interface StageTerminalRecord {
   failureCode?: string;
 }
 
-export interface WorkCompletionRecord {
-  kind: "work_completion";
+export type StageResultOutcomeKind =
+  | "plan_completed"
+  | "plan_needs_information"
+  | "plan_blocked"
+  | "work_completed"
+  | "work_blocked"
+  | "work_plan_assumption_invalid"
+  | "work_scope_conflict"
+  | "work_permission_required"
+  | "work_information_required"
+  | "verify_passed"
+  | "verify_changes_required"
+  | "verify_inconclusive"
+  | "verify_plan_contract_violation"
+  | "verify_blocked"
+  | "budget_exhausted"
+  | "canceled"
+  | "execution_failed";
+
+export interface StageResultRecord {
+  kind: "stage_result";
   version: ManagedRecordVersion;
-  stageExecutionId: string;
+  resultId: string;
   rootIssueId: string;
   cycleIssueId: string;
   nodeIssueId: string;
-  workKey: string;
+  stage: "plan" | "work" | "verify";
+  roleSessionId: string;
+  roleTurnId: string;
+  observedTreeDigest: string;
   contextDigest: string;
+  outcomeKind: StageResultOutcomeKind;
   summary: string;
-  changedPaths: string[];
-  checks: CheckEvidence[];
-  commitRevision: string;
+  sourceManifest: string[];
+  completedAt: string;
+  planContractDigest?: string;
+  changedPaths?: string[];
+  commitRevision?: string;
+  verifyConclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
+  verifiedRevision?: string;
+  failureCode?: string;
 }
 
 export interface HumanActionRequestRecord {
@@ -324,7 +352,7 @@ export type ManagedRecord =
   | PlanContract
   | StageExecutionRecord
   | StageTerminalRecord
-  | WorkCompletionRecord
+  | StageResultRecord
   | HumanActionRequestRecord
   | HumanActionResolutionRecord
   | FindingRecord

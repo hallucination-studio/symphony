@@ -40,7 +40,16 @@ export interface RootCycleObservation {
   issues: RootIssueSnapshot[];
   relations: RootRelationSnapshot[];
   comments: RootCommentSnapshot[];
+  planResults: ManagedRecordReference[];
+  workResults: ManagedRecordReference[];
+  verifyResults: ManagedRecordReference[];
   humanActionRecords: HumanActionObservationRecord[];
+}
+
+export interface ManagedRecordReference {
+  recordId: string;
+  recordKind: string;
+  version: string;
 }
 
 export interface HumanActionObservationRecord {
@@ -385,10 +394,15 @@ export interface StageTurnInput {
 export interface StageResultBase {
   protocolVersion: 1;
   resultId: string;
+  stageExecutionId: string;
   rootIssueId: string;
   cycleIssueId: string;
   targetIssueId: string;
   role: StageRole;
+  roleSessionId: string;
+  roleTurnId: string;
+  observedTreeDigest: string;
+  contextDigest: string;
   summary: string;
   sourceManifest: string[];
   completedAt: string;
@@ -396,8 +410,5 @@ export interface StageResultBase {
 
 export type StageResult = StageResultBase & {
   outcome:
-    | { kind: "plan_completed"; planContractDigest: string }
-    | { kind: "work_completed"; changedPaths: string[]; commitRevision: string; checks: string[] }
-    | { kind: "verify_completed"; conclusion: "passed" | "changes_required" | "inconclusive" | "escalate_human"; findings: string[]; verifiedRevision: string }
-    | { kind: "blocked"; category: "business" | "capability" | "budget"; reason: string };
+    | { kind: string; planContractDigest?: string; changedPaths?: string[]; commitRevision?: string; checks?: string[]; conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human"; findings?: string[]; verifiedRevision?: string; errorCode?: string };
 };

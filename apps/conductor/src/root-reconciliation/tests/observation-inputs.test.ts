@@ -6,6 +6,7 @@ import { buildRootObservationInputs } from "../internal/RootObservationInputs.js
 
 test("observation inputs preserve every Cycle and only expose unhandled human comments", () => {
   const tree = fixture();
+  tree.comments.push(managedStageResultComment());
   const inputs = buildRootObservationInputs({
     tree,
     handledCommentVersions: new Set(["comment-replied:2026-07-23T00:00:02Z"]),
@@ -18,7 +19,7 @@ test("observation inputs preserve every Cycle and only expose unhandled human co
     comments: cycle.comments.map((comment) => comment.comment_id),
   })), [
     { id: "cycle-1", archived: true, issues: ["plan-1"], comments: ["comment-archived"] },
-    { id: "cycle-2", archived: false, issues: ["work-2"], comments: ["comment-replied", "comment-work"] },
+    { id: "cycle-2", archived: false, issues: ["work-2"], comments: ["comment-replied", "comment-work", "stage-result-comment"] },
   ]);
   assert.deepEqual(inputs.pendingUserComments, [{
     commentId: "comment-work",
@@ -40,6 +41,11 @@ test("observation inputs preserve every Cycle and only expose unhandled human co
     body: "The archived attempt is still relevant.",
     createdAt: "2026-07-23T00:00:03Z",
     updatedAt: "2026-07-23T00:00:04Z",
+  }]);
+  assert.deepEqual(inputs.cycles.find(({ cycleIssue }) => cycleIssue.issue_id === "cycle-2")?.workResults, [{
+    recordId: "work-execution-1",
+    recordKind: "stage_result",
+    version: "2026-07-23T00:00:07Z",
   }]);
 });
 
@@ -166,5 +172,19 @@ function fixture(): LinearWorkflowTreeSnapshot {
     ],
     relations: [{ relation_id: "relation-1", relation_kind: "blocks", source_issue_id: "work-2", target_issue_id: "cycle-2" }],
     observed_at: "2026-07-23T00:00:10Z",
+  };
+}
+
+function managedStageResultComment(): LinearWorkflowTreeSnapshot["comments"][number] {
+  return {
+    comment_id: "stage-result-comment",
+    issue_id: "work-2",
+    body: "<!-- symphony managed-record\n{\"kind\":\"stage_result\",\"version\":1,\"result_id\":\"work-execution-1\",\"root_issue_id\":\"root-1\",\"cycle_issue_id\":\"cycle-2\",\"node_issue_id\":\"work-2\",\"stage\":\"work\",\"role_session_id\":\"work-session-1\",\"role_turn_id\":\"work-turn-1\",\"observed_tree_digest\":\"tree-v1\",\"context_digest\":\"context-v1\",\"outcome_kind\":\"work_completed\",\"summary\":\"Work completed\",\"source_manifest\":[],\"completed_at\":\"2026-07-23T00:00:06Z\"}\n-->",
+    author_kind: "symphony",
+    author_id: "symphony",
+    created_at: "2026-07-23T00:00:06Z",
+    remote_version: "2026-07-23T00:00:07Z",
+    updated_at: "2026-07-23T00:00:07Z",
+    managed_marker: "stage_result:work-execution-1",
   };
 }

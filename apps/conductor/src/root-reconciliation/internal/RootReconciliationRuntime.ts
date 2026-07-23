@@ -16,6 +16,8 @@ import type {
   StageResult,
   StageTurnInput,
 } from "../api/index.js";
+import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
+import type { StageResultRecord, StageResultOutcomeKind } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootObservationInputs } from "./RootObservationInputs.js";
 
@@ -189,11 +191,13 @@ export class RootReconciliationRuntime {
       const targetIssueId = action.kind === "execute_plan"
         ? action.planIssueId
         : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
+      const input = stageInput(view, root, profileId, role, targetIssueId, action);
       const stageResult = role === "plan"
-        ? await this.dependencies.performer.executePlanTurn(stageInput(view, root, profileId, role, targetIssueId, action))
+        ? await this.dependencies.performer.executePlanTurn(input)
         : role === "work"
-          ? await this.dependencies.performer.executeWorkTurn(stageInput(view, root, profileId, role, targetIssueId, action))
-          : await this.dependencies.performer.executeVerifyTurn(stageInput(view, root, profileId, role, targetIssueId, action));
+          ? await this.dependencies.performer.executeWorkTurn(input)
+          : await this.dependencies.performer.executeVerifyTurn(input);
+      validateStageResult(input, stageResult);
       await this.persistStageResult(view, directive.rootDirectiveId, stageResult);
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
@@ -204,8 +208,22 @@ export class RootReconciliationRuntime {
     const target = view.tree.issues.find((issue) => issue.issue_id === result.targetIssueId);
     const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
     if (!target || !rootIssue) throw new Error("role_result_target_missing");
-    const marker = `<!-- symphony role-result ${result.resultId} -->`;
-    if (view.tree.comments.some((comment) => comment.body.includes(marker))) return;
+    if (
+      result.rootIssueId !== view.root.issueId ||
+      result.cycleIssueId !== target.parent_issue_id ||
+      target.issue_kind !== result.role
+    ) {
+      throw new Error("role_result_target_invalid");
+    }
+    const record = toStageResultRecord(result);
+    const body = serializeManagedRecord(record);
+    for (const comment of view.tree.comments) {
+      if (!comment.body.startsWith("<!-- symphony managed-record\n")) continue;
+      const parsed = parseManagedRecord(comment.body);
+      if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) continue;
+      if (comment.body === body) return;
+      throw new Error("role_result_conflict");
+    }
     const outcome = await this.dependencies.linear.mutateWorkflow({
       kind: "append_workflow_comment",
       writeId: `${directiveId}:result:${result.resultId}`,
@@ -217,16 +235,85 @@ export class RootReconciliationRuntime {
         expectedRemoteVersion: target.remote_version,
         expectedStatusId: target.status_id,
       },
-      body: `${marker}\n${JSON.stringify(result)}`,
+      body,
     });
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
       throw new Error(`role_result_write_${outcome.kind}`);
     }
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
-    if (!readBack.comments.some((comment) => comment.body.includes(marker))) {
+    const readBackComment = readBack.comments.find((comment) => comment.body === body);
+    if (!readBackComment) {
       throw new Error("role_result_read_back_missing");
     }
+    const parsed = parseManagedRecord(readBackComment.body);
+    if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) {
+      throw new Error("role_result_read_back_invalid");
+    }
   }
+}
+
+function validateStageResult(input: StageTurnInput, result: StageResult): void {
+  if (
+    result.protocolVersion !== 1 ||
+    result.resultId !== input.stageExecutionId ||
+    result.stageExecutionId !== input.stageExecutionId ||
+    result.role !== input.role ||
+    result.roleSessionId !== input.roleSessionId ||
+    result.roleTurnId !== input.roleTurnId ||
+    result.rootIssueId !== input.rootIssueId ||
+    result.cycleIssueId !== input.cycleIssueId ||
+    result.targetIssueId !== input.targetIssueId ||
+    result.observedTreeDigest !== input.observedTreeDigest ||
+    result.contextDigest !== input.contextDigest
+  ) {
+    throw new Error("role_result_correlation_invalid");
+  }
+}
+
+function toStageResultRecord(result: StageResult): StageResultRecord {
+  const outcome = result.outcome as unknown as {
+    kind: StageResultOutcomeKind;
+    planContractDigest?: string;
+    changedPaths?: string[];
+    commitRevision?: string;
+    conclusion?: StageResultRecord["verifyConclusion"];
+    verifiedRevision?: string;
+    errorCode?: string;
+  };
+  if (!isStageResultOutcomeKind(outcome.kind)) throw new Error("role_result_outcome_invalid");
+  const record: StageResultRecord = {
+    kind: "stage_result",
+    version: 1,
+    resultId: result.resultId,
+    rootIssueId: result.rootIssueId,
+    cycleIssueId: result.cycleIssueId,
+    nodeIssueId: result.targetIssueId,
+    stage: result.role,
+    roleSessionId: result.roleSessionId,
+    roleTurnId: result.roleTurnId,
+    observedTreeDigest: result.observedTreeDigest,
+    contextDigest: result.contextDigest,
+    outcomeKind: outcome.kind,
+    summary: result.summary,
+    sourceManifest: result.sourceManifest,
+    completedAt: result.completedAt,
+    ...(outcome.planContractDigest === undefined ? {} : { planContractDigest: outcome.planContractDigest }),
+    ...(outcome.changedPaths === undefined ? {} : { changedPaths: outcome.changedPaths }),
+    ...(outcome.commitRevision === undefined ? {} : { commitRevision: outcome.commitRevision }),
+    ...(outcome.conclusion === undefined ? {} : { verifyConclusion: outcome.conclusion }),
+    ...(outcome.verifiedRevision === undefined ? {} : { verifiedRevision: outcome.verifiedRevision }),
+    ...(outcome.errorCode === undefined ? {} : { failureCode: outcome.errorCode }),
+  };
+  return record;
+}
+
+function isStageResultOutcomeKind(value: unknown): value is StageResultOutcomeKind {
+  return typeof value === "string" && new Set<StageResultOutcomeKind>([
+    "plan_completed", "plan_needs_information", "plan_blocked", "work_completed", "work_blocked",
+    "work_plan_assumption_invalid", "work_scope_conflict", "work_permission_required", "work_information_required",
+    "verify_passed", "verify_changes_required", "verify_inconclusive", "verify_plan_contract_violation", "verify_blocked",
+    "budget_exhausted", "canceled", "execution_failed",
+  ]).has(value as StageResultOutcomeKind);
 }
 
 function stageInput(

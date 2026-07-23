@@ -215,9 +215,9 @@ function toWireObservation(input: RootReconciliationObservation): JsonRecord {
       is_archived: cycle.isArchived,
       issues: cycle.issues.map((issue) => toWireIssue(issue)),
       relations: cycle.relations,
-      plan_results: [],
-      work_results: [],
-      verify_results: [],
+      plan_results: cycle.planResults.map(toWireRecordReference),
+      work_results: cycle.workResults.map(toWireRecordReference),
+      verify_results: cycle.verifyResults.map(toWireRecordReference),
       findings: [],
       human_action_records: cycle.humanActionRecords.map(toWireHumanActionRecord),
       human_action_resolutions: [],
@@ -295,6 +295,14 @@ function toWireHumanActionRecord(record: RootReconciliationObservation["rootHuma
     status: record.status,
     is_archived: record.isArchived,
     related_issue_ids: record.relatedIssueIds,
+  };
+}
+
+function toWireRecordReference(reference: RootReconciliationObservation["cycles"][number]["planResults"][number]): JsonRecord {
+  return {
+    record_id: reference.recordId,
+    record_kind: reference.recordKind,
+    version: reference.version,
   };
 }
 
@@ -486,21 +494,72 @@ function decodeStageResult(value: unknown): StageResult {
   if (typeof result.stage_execution_id !== "string" || typeof result.role !== "string" || typeof outcome.kind !== "string") {
     throw new Error("role_result_shape_invalid");
   }
+  const normalizedOutcome = normalizeStageOutcome(outcome);
   return {
-    ...result,
     resultId: result.stage_execution_id,
     protocolVersion: 1,
     rootIssueId: result.root_issue_id,
     cycleIssueId: result.cycle_issue_id,
     targetIssueId: result.target_issue_id,
+    role: result.role as StageResult["role"],
     roleSessionId: result.role_session_id,
     roleTurnId: result.role_turn_id,
     stageExecutionId: result.stage_execution_id,
     observedTreeDigest: result.observed_tree_digest,
     contextDigest: result.context_digest,
+    summary: stageResultSummary(outcome),
+    sourceManifest: [],
     completedAt: result.completed_at,
-    outcome,
-  } as unknown as StageResult;
+    outcome: normalizedOutcome,
+  } as StageResult;
+}
+
+function normalizeStageOutcome(outcome: JsonRecord): StageResult["outcome"] {
+  const kind = outcome.kind;
+  if (typeof kind !== "string") throw new Error("role_result_outcome_invalid");
+  if (kind === "work_completed") {
+    const changes = record(outcome.actual_changes);
+    return {
+      kind,
+      changedPaths: stringArray(changes.changed_paths, "role_result_changed_paths_invalid"),
+      commitRevision: string(changes.target_revision, "role_result_target_revision_invalid"),
+    };
+  }
+  if (kind === "verify_passed" || kind === "verify_changes_required" || kind === "verify_inconclusive" || kind === "verify_plan_contract_violation" || kind === "verify_blocked") {
+    const targetRevision = outcome.target_revision;
+    return {
+      kind,
+      ...(typeof targetRevision === "string" ? { verifiedRevision: targetRevision } : {}),
+      ...(kind === "verify_passed" ? { conclusion: "passed" as const } : {}),
+      ...(kind === "verify_changes_required" ? { conclusion: "changes_required" as const } : {}),
+      ...(kind === "verify_inconclusive" ? { conclusion: "inconclusive" as const } : {}),
+    };
+  }
+  if (kind === "execution_failed") {
+    return { kind, errorCode: string(outcome.error_code, "role_result_error_code_invalid") };
+  }
+  return { kind };
+}
+
+function stageResultSummary(outcome: JsonRecord): string {
+  for (const key of ["summary", "sanitized_reason", "impact"]) {
+    if (typeof outcome[key] === "string" && outcome[key]) return outcome[key] as string;
+  }
+  const changes = outcome.actual_changes;
+  if (changes && typeof changes === "object" && !Array.isArray(changes) && typeof (changes as JsonRecord).summary === "string") {
+    return (changes as JsonRecord).summary as string;
+  }
+  return typeof outcome.kind === "string" ? outcome.kind : "stage_result";
+}
+
+function string(value: unknown, code: string): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error(code);
+  return value;
+}
+
+function stringArray(value: unknown, code: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) throw new Error(code);
+  return value as string[];
 }
 
 function record(value: unknown): JsonRecord {

@@ -1,6 +1,8 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { parseManagedRecord } from "../api/index.js";
 import type {
   HumanActionObservationRecord,
+  ManagedRecordReference,
   RootCycleObservation,
   RootIssueKind,
   UserCommentInput,
@@ -44,6 +46,43 @@ export function buildRootObservationInputs(input: {
     humanActionsByCycle.set(action.cycleIssueId, current);
   }
 
+  const stageResultsByCycle = new Map<string, {
+    planResults: ManagedRecordReference[];
+    workResults: ManagedRecordReference[];
+    verifyResults: ManagedRecordReference[];
+  }>();
+  const stageResultIds = new Set<string>();
+  for (const comment of input.tree.comments) {
+    if (!comment.body.startsWith("<!-- symphony managed-record\n")) continue;
+    const parsed = parseManagedRecord(comment.body);
+    if (!parsed.ok) throw new Error(`root_managed_record_invalid:${parsed.error}`);
+    if (parsed.value.kind !== "stage_result") continue;
+    const record = parsed.value;
+    if (record.rootIssueId !== input.tree.root_issue_id || comment.issue_id !== record.nodeIssueId || !issueById.has(record.nodeIssueId)) {
+      throw new Error("root_stage_result_scope_invalid");
+    }
+    const node = issueById.get(record.nodeIssueId)!;
+    if (node.issue_kind !== record.stage || node.parent_issue_id !== record.cycleIssueId) {
+      throw new Error("root_stage_result_target_invalid");
+    }
+    if (stageResultIds.has(record.resultId)) throw new Error("root_stage_result_duplicate");
+    stageResultIds.add(record.resultId);
+    const current = stageResultsByCycle.get(record.cycleIssueId) ?? {
+      planResults: [],
+      workResults: [],
+      verifyResults: [],
+    };
+    const reference = {
+      recordId: record.resultId,
+      recordKind: record.kind,
+      version: comment.remote_version,
+    };
+    if (record.stage === "plan") current.planResults.push(reference);
+    if (record.stage === "work") current.workResults.push(reference);
+    if (record.stage === "verify") current.verifyResults.push(reference);
+    stageResultsByCycle.set(record.cycleIssueId, current);
+  }
+
   const cycles = input.tree.issues
     .filter((issue) => issue.issue_kind === "cycle")
     .map((cycleIssue) => {
@@ -60,6 +99,11 @@ export function buildRootObservationInputs(input: {
         relations: input.tree.relations.filter((relation) =>
           scope.has(relation.source_issue_id) && scope.has(relation.target_issue_id)),
         comments: input.tree.comments.filter((comment) => scope.has(comment.issue_id)),
+        ...(stageResultsByCycle.get(cycleIssue.issue_id) ?? {
+          planResults: [],
+          workResults: [],
+          verifyResults: [],
+        }),
         humanActionRecords: humanActionsByCycle.get(cycleIssue.issue_id) ?? [],
       };
     });

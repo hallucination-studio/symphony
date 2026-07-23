@@ -18,13 +18,14 @@ import type {
   StageContextCoverage,
   StageContextSource,
   StageExecutionRecord,
+  StageResultOutcomeKind,
+  StageResultRecord,
   StageLimits,
   StageTerminalRecord,
   StageUsage,
   VerifyNodeContract,
   VerifyResultRecord,
   WorkNodeContract,
-  WorkCompletionRecord,
 } from "../api/ManagedRecords.js";
 
 const marker = "<!-- symphony managed-record\n";
@@ -76,7 +77,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "plan_contract": return decodePlanContract(object);
     case "stage_execution": return decodeStageExecution(object);
     case "stage_terminal": return decodeStageTerminal(object);
-    case "work_completion": return decodeWorkCompletion(object);
+    case "stage_result": return decodeStageResult(object);
     case "human_action_request": return decodeHumanActionRequest(object);
     case "human_action_resolution": return decodeHumanActionResolution(object);
     case "finding": return decodeFinding(object);
@@ -158,10 +159,56 @@ function decodeStageTerminal(o: Record<string, unknown>): StageTerminalRecord {
   return { kind: "stage_terminal", version: 1, stageExecutionId: id(o, "stage_execution_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), stage: stageValue(o, "stage"), contextDigest: id(o, "context_digest"), outcome, completedAt: timestamp(o, "completed_at"), summary: text(o, "summary"), usage: decodeUsage(requiredObject(o, "usage")), ...(o.failure_code === undefined ? {} : { failureCode: id(o, "failure_code") }) };
 }
 
-function decodeWorkCompletion(o: Record<string, unknown>): WorkCompletionRecord {
-  fields(o, ["kind", "version", "stage_execution_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "work_key", "context_digest", "summary", "changed_paths", "checks", "commit_revision"]);
+function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
+  fields(o, [
+    "kind", "version", "result_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "stage",
+    "role_session_id", "role_turn_id", "observed_tree_digest", "context_digest", "outcome_kind", "summary",
+    "source_manifest", "completed_at", "plan_contract_digest", "changed_paths", "commit_revision",
+    "verify_conclusion", "verified_revision", "failure_code",
+  ], ["plan_contract_digest", "changed_paths", "commit_revision", "verify_conclusion", "verified_revision", "failure_code"]);
+  const stage = stageValue(o, "stage");
+  const outcomeKind: StageResultOutcomeKind = enumValue(o, "outcome_kind", [
+    "plan_completed", "plan_needs_information", "plan_blocked",
+    "work_completed", "work_blocked", "work_plan_assumption_invalid", "work_scope_conflict",
+    "work_permission_required", "work_information_required", "verify_passed", "verify_changes_required",
+    "verify_inconclusive", "verify_plan_contract_violation", "verify_blocked", "budget_exhausted", "canceled",
+    "execution_failed",
+  ] as const);
+  const commonOutcomes = new Set(["budget_exhausted", "canceled", "execution_failed"]);
+  const roleMatches = stage === "plan"
+    ? outcomeKind.startsWith("plan_")
+    : stage === "work"
+      ? outcomeKind.startsWith("work_")
+      : outcomeKind.startsWith("verify_");
+  if (!roleMatches && !commonOutcomes.has(outcomeKind)) fail("managed_record_stage_result_role_invalid");
+  if (o.plan_contract_digest !== undefined && (stage !== "plan" || outcomeKind !== "plan_completed")) {
+    fail("managed_record_stage_result_field_invalid");
+  }
+  if (o.changed_paths !== undefined || o.commit_revision !== undefined) {
+    if (stage !== "work" || outcomeKind !== "work_completed" || o.changed_paths === undefined || o.commit_revision === undefined) {
+      fail("managed_record_stage_result_field_invalid");
+    }
+  }
+  if (o.verify_conclusion !== undefined || o.verified_revision !== undefined) {
+    if (stage !== "verify" || !outcomeKind.startsWith("verify_")) {
+      fail("managed_record_stage_result_field_invalid");
+    }
+  }
+  if (o.failure_code !== undefined && outcomeKind !== "execution_failed") {
+    fail("managed_record_stage_result_field_invalid");
+  }
   return {
-    kind: "work_completion", version: 1, stageExecutionId: id(o, "stage_execution_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), nodeIssueId: id(o, "node_issue_id"), workKey: id(o, "work_key"), contextDigest: id(o, "context_digest"), summary: text(o, "summary"), changedPaths: paths(o, "changed_paths"), checks: array(o, "checks", decodeCheck), commitRevision: id(o, "commit_revision"),
+    kind: "stage_result", version: 1,
+    resultId: id(o, "result_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"),
+    nodeIssueId: id(o, "node_issue_id"), stage, roleSessionId: id(o, "role_session_id"), roleTurnId: id(o, "role_turn_id"),
+    observedTreeDigest: id(o, "observed_tree_digest"), contextDigest: id(o, "context_digest"), outcomeKind,
+    summary: text(o, "summary"), sourceManifest: strings(o, "source_manifest"), completedAt: timestamp(o, "completed_at"),
+    ...(o.plan_contract_digest === undefined ? {} : { planContractDigest: id(o, "plan_contract_digest") }),
+    ...(o.changed_paths === undefined ? {} : { changedPaths: paths(o, "changed_paths") }),
+    ...(o.commit_revision === undefined ? {} : { commitRevision: id(o, "commit_revision") }),
+    ...(o.verify_conclusion === undefined ? {} : { verifyConclusion: enumValue(o, "verify_conclusion", ["passed", "changes_required", "inconclusive", "escalate_human"]) }),
+    ...(o.verified_revision === undefined ? {} : { verifiedRevision: id(o, "verified_revision") }),
+    ...(o.failure_code === undefined ? {} : { failureCode: id(o, "failure_code") }),
   };
 }
 
@@ -252,7 +299,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objectiveSummary", "includedScope", "excludedScope", "acceptanceCriteria", "workNodes", "verifyNode"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_terminal: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "contextDigest", "outcome", "completedAt", "summary", "usage", "failureCode"], optional: ["failureCode"] },
-    work_completion: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "workKey", "contextDigest", "summary", "changedPaths", "checks", "commitRevision"] },
+    stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "planContractDigest", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
     human_action_request: { allowed: ["kind", "version", "actionId", "actionIssueId", "actionKind", "parentScope", "rootIssueId", "cycleIssueId", "relatedIssueIds", "sourceRootDirectiveId", "sourceRootGateRecordId", "basedOnTreeDigest", "proposalDigest", "expectedParentRemoteVersion", "createdAt"], optional: ["cycleIssueId", "sourceRootDirectiveId", "sourceRootGateRecordId", "basedOnTreeDigest"] },
     human_action_resolution: { allowed: ["kind", "version", "resolutionId", "actionId", "actionIssueId", "actionKind", "outcome", "terminalStatus", "terminalRemoteVersion", "sourceCommentIds", "sourceCommentVersions", "actorKind", "proposalDigest", "resolvedAt"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
@@ -276,7 +323,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "plan_contract": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest, objective_summary: record.objectiveSummary, included_scope: record.includedScope, excluded_scope: record.excludedScope, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion), work_nodes: record.workNodes.map(encodeWorkNode), verify_node: encodeVerifyNode(record.verifyNode) });
     case "stage_execution": return encodeStageExecution(record);
     case "stage_terminal": return encodeStageTerminal(record);
-    case "work_completion": return encodeWorkCompletion(record);
+    case "stage_result": return encodeStageResult(record);
     case "human_action_request": return encodeSimple(record, { action_id: record.actionId, action_issue_id: record.actionIssueId, action_kind: record.actionKind, parent_scope: record.parentScope, root_issue_id: record.rootIssueId, ...(record.cycleIssueId === undefined ? {} : { cycle_issue_id: record.cycleIssueId }), related_issue_ids: record.relatedIssueIds, ...(record.sourceRootDirectiveId === undefined ? {} : { source_root_directive_id: record.sourceRootDirectiveId }), ...(record.sourceRootGateRecordId === undefined ? {} : { source_root_gate_record_id: record.sourceRootGateRecordId }), ...(record.basedOnTreeDigest === undefined ? {} : { based_on_tree_digest: record.basedOnTreeDigest }), proposal_digest: record.proposalDigest, expected_parent_remote_version: record.expectedParentRemoteVersion, created_at: record.createdAt });
     case "human_action_resolution": return encodeSimple(record, { resolution_id: record.resolutionId, action_id: record.actionId, action_issue_id: record.actionIssueId, action_kind: record.actionKind, outcome: record.outcome, terminal_status: record.terminalStatus, terminal_remote_version: record.terminalRemoteVersion, source_comment_ids: record.sourceCommentIds, source_comment_versions: record.sourceCommentVersions, actor_kind: record.actorKind, proposal_digest: record.proposalDigest, resolved_at: record.resolvedAt });
     case "finding": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, category: record.category, severity: record.severity, evidence: record.evidence.map(encodeFindingEvidence), affected_scope: record.affectedScope.map(encodeAffectedScope), retryable: record.retryable, suggested_remediation: record.suggestedRemediation, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion) });
@@ -290,7 +337,15 @@ function encodeRecord(value: unknown): Record<string, unknown> {
 function encodeRootOwnership(record: RootOwnershipRecord): Record<string, unknown> { return encodeSimple(record, { root_issue_id: record.rootIssueId, conductor_id: record.conductorId, performer_profile_id: record.performerProfileId, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), owner_generation: record.ownerGeneration }); }
 function encodeStageExecution(record: StageExecutionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }), context_digest: record.contextDigest, source_manifest: record.sourceManifest.map(encodeSource), coverage: encodeCoverage(record.coverage), instruction_set_id: record.instructionSetId, execution_policy_id: record.executionPolicyId, limits: encodeLimits(record.limits), repository_revision: record.repositoryRevision, started_at: record.startedAt, deadline_at: record.deadlineAt }); }
 function encodeStageTerminal(record: StageTerminalRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, context_digest: record.contextDigest, outcome: record.outcome, completed_at: record.completedAt, summary: record.summary, usage: encodeUsage(record.usage), ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }) }); }
-function encodeWorkCompletion(record: WorkCompletionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, work_key: record.workKey, context_digest: record.contextDigest, summary: record.summary, changed_paths: record.changedPaths, checks: record.checks.map(encodeCheck), commit_revision: record.commitRevision }); }
+function encodeStageResult(record: StageResultRecord): Record<string, unknown> { return encodeSimple(record, {
+  result_id: record.resultId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId,
+  stage: record.stage, role_session_id: record.roleSessionId, role_turn_id: record.roleTurnId, observed_tree_digest: record.observedTreeDigest,
+  context_digest: record.contextDigest, outcome_kind: record.outcomeKind, summary: record.summary, source_manifest: record.sourceManifest,
+  completed_at: record.completedAt, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }),
+  ...(record.changedPaths === undefined ? {} : { changed_paths: record.changedPaths }), ...(record.commitRevision === undefined ? {} : { commit_revision: record.commitRevision }),
+  ...(record.verifyConclusion === undefined ? {} : { verify_conclusion: record.verifyConclusion }), ...(record.verifiedRevision === undefined ? {} : { verified_revision: record.verifiedRevision }),
+  ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }),
+}); }
 function encodeCriterion(value: AcceptanceCriterion): Record<string, unknown> { recordFields(value, ["criterionKey", "statement", "verificationMethod"]); return { criterion_key: value.criterionKey, statement: value.statement, verification_method: value.verificationMethod }; }
 function encodeCheck(value: CheckEvidence): Record<string, unknown> { recordFields(value, ["checkKey", "commandOrMethod", "outcome", "summary", "artifactRevision"]); return { check_key: value.checkKey, command_or_method: value.commandOrMethod, outcome: value.outcome, summary: value.summary, artifact_revision: value.artifactRevision }; }
 function encodeSource(value: StageContextSource): Record<string, unknown> { recordFields(value, ["sourceKind", "sourceId", "versionOrDigest"]); return { source_kind: value.sourceKind, source_id: value.sourceId, version_or_digest: value.versionOrDigest }; }
