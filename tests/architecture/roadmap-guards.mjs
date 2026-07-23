@@ -233,7 +233,7 @@ export function inspectAuthoredFile(file, source) {
   }
 
   if (
-    /(?:readFile|readFileSync|open|read_to_string)[\s\S]{0,300}(?:auth\.json|config\.toml|CODEX_HOME)/.test(
+    /\b(?:readFile|readFileSync|open|read_to_string)\s*\([\s\S]{0,300}(?:auth\.json|config\.toml|CODEX_HOME)/.test(
       source,
     )
   ) {
