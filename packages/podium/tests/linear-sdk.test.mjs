@@ -1339,8 +1339,9 @@ function retainedWorkflowStates() {
   ].map(([id, name, type], position) => ({ id, name, type, position }));
 }
 
-function workflowSetupSdk(states, { failAfterCreate } = {}) {
-  const observations = { projects: 0, teams: 0, states: 0, batches: 0, updates: [], creates: [] };
+function workflowSetupSdk(states, { failAfterCreate, issueLabelNames = [] } = {}) {
+  const observations = { projects: 0, teams: 0, states: 0, batches: 0, updates: [], creates: [], labelCreates: [] };
+  const labels = issueLabelNames.map((name, index) => issueLabel(name, index));
   const team = {
     id: "team-1",
     states: async () => {
@@ -1376,6 +1377,13 @@ function workflowSetupSdk(states, { failAfterCreate } = {}) {
           return { operation0: { success: true } };
         },
       },
+      issueLabels: async ({ filter }) => connection(labels.filter(({ name }) => name === filter?.name?.eq)),
+      async createIssueLabel(input) {
+        observations.labelCreates.push(input.name);
+        const label = issueLabel(input.name, labels.length);
+        labels.push(label);
+        return { success: true, issueLabel: Promise.resolve(label) };
+      },
       organization: Promise.resolve({ id: "organization-1" }),
       project: async (projectId) => {
         observations.projects += 1;
@@ -1406,6 +1414,18 @@ function workflowSetupSdk(states, { failAfterCreate } = {}) {
   };
 }
 
+function issueLabel(name, index) {
+  return {
+    id: `label-${index + 1}`,
+    name,
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    organization: Promise.resolve({ id: "organization-1" }),
+  };
+}
+
 test("Team workflow setup returns a bounded dry-run without explicit authorization", async () => {
   const { sdk } = workflowSetupSdk(retainedWorkflowStates());
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
@@ -1417,6 +1437,9 @@ test("Team workflow setup returns a bounded dry-run without explicit authorizati
   assert.equal(result.nativeDuplicate.category, "duplicate");
   assert.equal(result.operations.length, 12);
   assert.equal(result.operations.at(-1)?.name, "Failed");
+  assert.deepEqual(result.humanActionLabels, [
+    "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
+  ]);
 });
 
 test("Team workflow setup renames Backlog, creates missing states, and reads back each write", async () => {
@@ -1442,6 +1465,9 @@ test("Team workflow setup renames Backlog, creates missing states, and reads bac
     ["Inconclusive", "started"], ["Escalated", "started"], ["Succeeded", "completed"],
     ["Changes Required", "completed"], ["Failed", "canceled"],
   ].map(([name, type]) => ({ name, type })));
+  assert.deepEqual(observations.labelCreates, [
+    "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
+  ]);
   assert.equal(observations.states, 2);
 });
 
@@ -1501,7 +1527,7 @@ test("Team workflow setup treats a lost create response as applied when read-bac
   assert.equal(result.canonicalStatuses.find(({ name }) => name === "Planning")?.category, "started");
 });
 
-test("Team workflow setup is a no-op after the canonical catalog is complete", async () => {
+test("Team workflow setup is a no-op after the canonical catalog and labels are complete", async () => {
   const states = [
     ["draft-1", "Draft", "backlog"], ["todo-1", "Todo", "unstarted"],
     ["planning-1", "Planning", "started"], ["sealed-1", "Sealed", "started"],
@@ -1513,12 +1539,20 @@ test("Team workflow setup is a no-op after the canonical catalog is complete", a
     ["done-1", "Done", "completed"], ["canceled-1", "Canceled", "canceled"],
     ["failed-1", "Failed", "canceled"], ["duplicate-1", "Duplicate", "duplicate"],
   ].map(([id, name, type], position) => ({ id, name, type, position }));
-  const { sdk, observations } = workflowSetupSdk(states);
+  const { sdk, observations } = workflowSetupSdk(states, {
+    issueLabelNames: [
+      "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
+    ],
+  });
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
   const result = await adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true });
 
   assert.equal(result.kind, "already_applied");
+  assert.deepEqual(result.humanActionLabels, [
+    "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
+  ]);
   assert.equal(observations.updates.length, 0);
   assert.equal(observations.creates.length, 0);
+  assert.equal(observations.labelCreates.length, 0);
 });

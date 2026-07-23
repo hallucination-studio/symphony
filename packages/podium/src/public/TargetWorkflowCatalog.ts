@@ -22,6 +22,16 @@ export type TargetWorkflowStatusName = keyof typeof TARGET_WORKFLOW_STATUS_CATEG
 export const TARGET_WORKFLOW_STATUS_NAMES = Object.freeze(
   Object.keys(TARGET_WORKFLOW_STATUS_CATEGORIES) as TargetWorkflowStatusName[],
 );
+
+export const HUMAN_ACTION_LABEL_NAMES = Object.freeze([
+  "Human Action",
+  "Plan Review",
+  "Clarification",
+  "Permission",
+  "Finding Waiver",
+  "Convergence Override",
+] as const);
+
 export function isTargetWorkflowStatusName(value: unknown): value is TargetWorkflowStatusName {
   return typeof value === "string" && value in TARGET_WORKFLOW_STATUS_CATEGORIES;
 }

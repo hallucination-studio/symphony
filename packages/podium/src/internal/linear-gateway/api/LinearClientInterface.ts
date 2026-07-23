@@ -33,6 +33,7 @@ export type TargetWorkflowInitializationResult =
       teamId: string;
       currentStatuses: readonly LinearWorkflowStateValue[];
       operations: readonly import("../../../public/TargetWorkflowCatalog.js").TargetWorkflowInitializationOperation[];
+      humanActionLabels: readonly string[];
       nativeDuplicate: LinearWorkflowStateValue;
     }
   | {
@@ -40,6 +41,7 @@ export type TargetWorkflowInitializationResult =
       projectId: string;
       teamId: string;
       canonicalStatuses: readonly LinearWorkflowStateValue[];
+      humanActionLabels: readonly string[];
       nativeDuplicate: LinearWorkflowStateValue;
     };
 

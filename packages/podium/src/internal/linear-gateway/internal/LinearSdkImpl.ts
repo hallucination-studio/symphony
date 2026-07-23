@@ -28,6 +28,7 @@ import type {
 import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
 import {
   inspectTargetWorkflowCatalog,
+  HUMAN_ACTION_LABEL_NAMES,
   isTargetWorkflowStatusName,
   planTargetWorkflowInitialization,
   type TargetWorkflowInitializationOperation,
@@ -1011,6 +1012,9 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (plan.kind !== "ready") {
       throw new Error(`linear_workflow_setup_${plan.reason}`);
     }
+    const initialHumanActionLabels = input.authorized === true
+      ? await this.#readHumanActionLabels(target.teamId)
+      : [];
     if (input.authorized !== true) {
       return {
         kind: "dry_run" as const,
@@ -1018,36 +1022,47 @@ export class LinearSdkImpl implements LinearClientInterface {
         teamId: target.teamId,
         currentStatuses: target.states.map(linearWorkflowStateValueFromRaw),
         operations: plan.operations,
+        humanActionLabels: [...HUMAN_ACTION_LABEL_NAMES],
         nativeDuplicate: linearWorkflowStateValueFromRaw(
           target.states.find(({ type }) => type === "duplicate")!,
         ),
       };
     }
-    if (plan.operations.length === 0) {
-      return this.#targetWorkflowResult("already_applied", target);
-    }
-
-    try {
-      await this.#applyTargetWorkflowOperationsBatch(input.projectId, target, plan.operations);
-    } catch (error) {
-      // A lost batch response is recoverable only when the final catalog proves
-      // that the complete authorized mutation was applied.
-      const observed = await this.#readTargetTeamWorkflow(input.projectId).catch(() => undefined);
-      if (!observed || observed.teamId !== target.teamId ||
-          inspectTargetWorkflowCatalog(observed.states).kind !== "complete") {
-        throw error;
+    if (plan.operations.length !== 0) {
+      try {
+        await this.#applyTargetWorkflowOperationsBatch(input.projectId, target, plan.operations);
+      } catch (error) {
+        // A lost batch response is recoverable only when the final catalog proves
+        // that the complete authorized mutation was applied.
+        const observed = await this.#readTargetTeamWorkflow(input.projectId).catch(() => undefined);
+        if (!observed || observed.teamId !== target.teamId ||
+            inspectTargetWorkflowCatalog(observed.states).kind !== "complete") {
+          throw error;
+        }
       }
+    }
+    for (const labelName of HUMAN_ACTION_LABEL_NAMES) {
+      await this.#uniqueIssueLabel(labelName, target.teamId);
     }
     const finalTarget = await this.#readTargetTeamWorkflow(input.projectId);
     const inspection = inspectTargetWorkflowCatalog(finalTarget.states);
     if (inspection.kind !== "complete") {
       throw ambiguousError("linear_workflow_setup_read_back_failed");
     }
+    const humanActionLabels = await this.#readHumanActionLabels(finalTarget.teamId);
+    if (humanActionLabels.length !== HUMAN_ACTION_LABEL_NAMES.length ||
+        HUMAN_ACTION_LABEL_NAMES.some((name, index) => humanActionLabels[index] !== name)) {
+      throw ambiguousError("linear_human_action_labels_read_back_failed");
+    }
     return {
-      kind: "applied" as const,
+      kind: plan.operations.length === 0 &&
+        initialHumanActionLabels.length === HUMAN_ACTION_LABEL_NAMES.length
+        ? "already_applied" as const
+        : "applied" as const,
       projectId: finalTarget.projectId,
       teamId: finalTarget.teamId,
       canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
+      humanActionLabels,
       nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
     };
   }
@@ -1217,27 +1232,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (matches.length !== 1) {
       throw ambiguousError("linear_workflow_setup_read_back_failed");
     }
-  }
-
-  #targetWorkflowResult(
-    kind: "already_applied",
-    target: {
-      projectId: string;
-      teamId: string;
-      states: Array<{ id: string; name: string; type: string; position: number }>;
-    },
-  ) {
-    const inspection = inspectTargetWorkflowCatalog(target.states);
-    if (inspection.kind !== "complete") {
-      throw ambiguousError("linear_workflow_setup_read_back_failed");
-    }
-    return {
-      kind,
-      projectId: target.projectId,
-      teamId: target.teamId,
-      canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
-      nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
-    };
   }
 
   async readProjectResolution(input: {
@@ -2287,6 +2281,35 @@ export class LinearSdkImpl implements LinearClientInterface {
     name: string,
     teamId?: string,
   ): Promise<IssueLabel> {
+    const matches = await this.#issueLabelsNamed(name, teamId);
+    if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
+    if (matches[0]) return matches[0];
+    const payload = await this.#client.createIssueLabel({
+      name,
+      color: "#5E6AD2",
+      isGroup: false,
+      ...(teamId ? { teamId } : {}),
+    });
+    const label = payload.issueLabel ? await payload.issueLabel : undefined;
+    if (!payload.success || !label) throw new Error("linear_issue_label_create_failed");
+    const organization = await label.organization;
+    if (organization.id !== this.organizationId) {
+      throw new Error("linear_label_organization_mismatch");
+    }
+    return label;
+  }
+
+  async #readHumanActionLabels(teamId: string): Promise<string[]> {
+    const names: string[] = [];
+    for (const name of HUMAN_ACTION_LABEL_NAMES) {
+      const matches = await this.#issueLabelsNamed(name, teamId);
+      if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
+      if (matches.length === 1) names.push(name);
+    }
+    return names;
+  }
+
+  async #issueLabelsNamed(name: string, teamId?: string): Promise<IssueLabel[]> {
     const labels = await allNodes(
       this.#client.issueLabels({
         first: 3,
@@ -2309,21 +2332,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         throw new Error("linear_label_organization_mismatch");
       }
     }
-    if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
-    if (matches[0]) return matches[0];
-    const payload = await this.#client.createIssueLabel({
-      name,
-      color: "#5E6AD2",
-      isGroup: false,
-      ...(teamId ? { teamId } : {}),
-    });
-    const label = payload.issueLabel ? await payload.issueLabel : undefined;
-    if (!payload.success || !label) throw new Error("linear_issue_label_create_failed");
-    const organization = await label.organization;
-    if (organization.id !== this.organizationId) {
-      throw new Error("linear_label_organization_mismatch");
-    }
-    return label;
+    return matches;
   }
 }
 
