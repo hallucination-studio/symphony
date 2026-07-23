@@ -399,6 +399,9 @@
         "comment_id",
         "issue_id",
         "body",
+        "author_kind",
+        "author_id",
+        "created_at",
         "updated_at"
       ],
       "properties": {
@@ -410,6 +413,24 @@
         },
         "body": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "author_kind": {
+          "enum": [
+            "human",
+            "symphony",
+            "linear_integration",
+            "external_automation",
+            "unknown"
+          ]
+        },
+        "author_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "author_user_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "created_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
         },
         "managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"
@@ -615,6 +636,9 @@
         "comment_id",
         "issue_id",
         "body",
+        "author_kind",
+        "author_id",
+        "created_at",
         "remote_version",
         "updated_at"
       ],
@@ -627,6 +651,24 @@
         },
         "body": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "author_kind": {
+          "enum": [
+            "human",
+            "symphony",
+            "linear_integration",
+            "external_automation",
+            "unknown"
+          ]
+        },
+        "author_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "author_user_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "created_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
         },
         "managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"

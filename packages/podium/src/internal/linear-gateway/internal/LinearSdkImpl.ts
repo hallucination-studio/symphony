@@ -22,6 +22,7 @@ import type {
   ConductorPoolValue,
   RootIssueValue,
   WorkflowCommentValue,
+  WorkflowCommentAuthorKind,
   WorkflowRelationValue,
 } from "../types.js";
 import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
@@ -142,11 +143,11 @@ const ROOT_HEADER_FACTS_QUERY = `
         state { name }
         labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         comments(first: 2, filter: { body: { contains: $commentMarker } }) {
-          nodes { id body updatedAt issue { id } }
+          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
           pageInfo { hasNextPage }
         }
         workflowManagedComments: comments(first: 25, filter: { body: { contains: $workflowCommentMarker } }) {
-          nodes { id body updatedAt issue { id } }
+          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
           pageInfo { hasNextPage }
         }
         inverseRelations(first: 25) {
@@ -171,7 +172,7 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
       state { name }
       labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
       comments(first: 8) {
-        nodes { id body updatedAt issue { id } }
+        nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
         pageInfo { hasNextPage endCursor }
       }
       inverseRelations(first: 8) {
@@ -190,7 +191,7 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
         parent { id }
         state { name }
         comments(first: 8) {
-          nodes { id body updatedAt issue { id } }
+          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
           pageInfo { hasNextPage endCursor }
         }
         inverseRelations(first: 8) {
@@ -207,7 +208,7 @@ const WORKFLOW_ISSUE_TREE_COMMENTS_PAGE_QUERY = `
     issue(id: $issueId) {
       id
       comments(first: 25, after: $cursor) {
-        nodes { id body updatedAt issue { id } }
+        nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -273,7 +274,11 @@ interface IssueTreePageInfo {
 interface IssueTreeComment {
   id: string;
   body: string;
+  createdAt: string;
   updatedAt: string;
+  user?: { id: string } | null;
+  botActor?: { id: string } | null;
+  externalUser?: { id: string } | null;
   issue: { id: string };
 }
 
@@ -305,7 +310,11 @@ interface RootHeaderFact {
     nodes: Array<{
       id: string;
       body: string;
+      createdAt: string;
       updatedAt: string;
+      user?: { id: string } | null;
+      botActor?: { id: string } | null;
+      externalUser?: { id: string } | null;
       issue: { id: string };
     }>;
     pageInfo: { hasNextPage: boolean };
@@ -314,7 +323,11 @@ interface RootHeaderFact {
     nodes: Array<{
       id: string;
       body: string;
+      createdAt: string;
       updatedAt: string;
+      user?: { id: string } | null;
+      botActor?: { id: string } | null;
+      externalUser?: { id: string } | null;
       issue: { id: string };
     }>;
     pageInfo: { hasNextPage: boolean };
@@ -1356,15 +1369,9 @@ export class LinearSdkImpl implements LinearClientInterface {
           throw new Error("linear_root_comment_identity_mismatch");
         }
         if (!isRootManagedComment(comment.body) && !isRootOwnershipComment(comment.body)) return [];
-        return [{
-          commentId: comment.id,
-          issueId: fact.id,
-          updatedAt: timestampValue(comment.updatedAt),
-          managedMarker: isRootManagedComment(comment.body)
-            ? rootCommentMarker(fact.id)
-            : `${fact.id}:managed-record:${comment.id}`,
-          body: comment.body,
-        }];
+        return [rootManagedCommentValue(comment, fact.id, delegateActorId, isRootManagedComment(comment.body)
+          ? rootCommentMarker(fact.id)
+          : `${fact.id}:managed-record:${comment.id}`)];
       });
       const blockers = fact.inverseRelations.nodes.flatMap((relation) => {
         if (relation.type !== "blocks") return [];
@@ -1405,6 +1412,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   ) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) throw new Error("linear_workflow_tree_raw_request_unavailable");
+    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const rootResponse = await rawRequest<IssueTreeRootData, {
       rootIssueId: string;
       commentMarker?: string;
@@ -1515,7 +1523,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       });
     });
     const comments = [...facts.values()].flatMap(({ fact }) =>
-      fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id)),
+      fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id, delegateActorId)),
     );
     if (comments.length > MAX_ROOT_COMMENTS) {
       throw new Error("linear_workflow_comments_too_many");
@@ -1581,6 +1589,10 @@ export class LinearSdkImpl implements LinearClientInterface {
       commentId: comment.commentId,
       issueId: comment.issueId,
       body: comment.body,
+      authorKind: comment.authorKind,
+      authorId: comment.authorId,
+      ...(comment.authorUserId ? { authorUserId: comment.authorUserId } : {}),
+      createdAt: comment.createdAt,
       ...(comment.managedMarker ? { managedMarker: comment.managedMarker } : {}),
       remoteVersion: comment.updatedAt,
       updatedAt: comment.updatedAt,
@@ -2188,15 +2200,15 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (comments.length > 2) {
       throw new Error("linear_root_comments_too_many");
     }
-    return comments.map((comment) => ({
-      commentId: comment.id,
-      issueId: issue.id,
-      updatedAt: comment.updatedAt.toISOString(),
-      managedMarker: isRootManagedComment(comment.body)
+    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
+    return comments.map((comment) => rootManagedCommentValue(
+      comment,
+      issue.id,
+      delegateActorId,
+      isRootManagedComment(comment.body)
         ? rootCommentMarker(issue.id)
         : `${issue.id}:managed-record:${comment.id}`,
-      body: comment.body,
-    }));
+    ));
   }
 
   async #createProjectLabelWithReadBack(labelName: string): Promise<ProjectLabel> {
@@ -2470,8 +2482,9 @@ function errorRecord(error: unknown): Record<string, unknown> {
 }
 
 function workflowCommentValue(
-  comment: { id: string; issue?: unknown; issueId?: string | null; body: string; updatedAt: string | Date },
+  comment: WorkflowCommentSource,
   issueId: string,
+  delegateActorId: string,
 ): WorkflowCommentValue {
   const commentIssue = comment.issue as { id?: unknown } | undefined;
   if (
@@ -2480,15 +2493,80 @@ function workflowCommentValue(
   ) {
     throw new Error("linear_workflow_comment_identity_mismatch");
   }
+  const actor = workflowCommentActor(comment, delegateActorId);
   const managedMarker = commentManagedMarker(comment.body, issueId, comment.id);
   return {
     commentId: comment.id,
     issueId,
+    authorKind: actor.kind,
+    authorId: actor.id,
+    ...(actor.userId ? { authorUserId: actor.userId } : {}),
     body: comment.body,
+    createdAt: timestampValue(comment.createdAt),
     ...(managedMarker ? { managedMarker } : {}),
     remoteVersion: timestampValue(comment.updatedAt),
     updatedAt: timestampValue(comment.updatedAt),
   };
+}
+
+type WorkflowCommentSource = {
+  id: string;
+  issue?: unknown;
+  issueId?: string | null;
+  body: string;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  user?: unknown;
+  userId?: string | null | undefined;
+  botActor?: unknown;
+  externalUser?: unknown;
+  externalUserId?: string | null | undefined;
+};
+
+function rootManagedCommentValue(
+  comment: WorkflowCommentSource,
+  issueId: string,
+  delegateActorId: string,
+  managedMarker: string,
+) {
+  const value = workflowCommentValue(comment, issueId, delegateActorId);
+  return {
+    commentId: value.commentId,
+    issueId: value.issueId,
+    authorKind: value.authorKind,
+    authorId: value.authorId,
+    ...(value.authorUserId ? { authorUserId: value.authorUserId } : {}),
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    managedMarker,
+    body: value.body,
+  };
+}
+
+function workflowCommentActor(
+  comment: WorkflowCommentSource,
+  delegateActorId: string,
+): { kind: WorkflowCommentAuthorKind; id: string; userId?: string } {
+  const userId: string | undefined = comment.userId ?? readActorId(comment.user);
+  const botId: string | undefined = readActorId(comment.botActor);
+  const externalUserId: string | undefined = comment.externalUserId ?? readActorId(comment.externalUser);
+  const selectedActorId = [userId, botId, externalUserId].find((value) => value === delegateActorId)
+    ?? botId
+    ?? externalUserId
+    ?? userId;
+  if (!selectedActorId || !SAFE_ID.test(selectedActorId)) throw new Error("linear_workflow_comment_actor_missing");
+  if (selectedActorId === delegateActorId) {
+    return { kind: "symphony", id: selectedActorId, ...(userId ? { userId } : {}) };
+  }
+  if (botId) return { kind: "external_automation", id: botId };
+  if (externalUserId) return { kind: "linear_integration", id: externalUserId };
+  return { kind: "human", id: userId!, userId: userId! };
+}
+
+function readActorId(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object" || !("id" in value)) return undefined;
+  const id = (value as { id?: unknown }).id;
+  return typeof id === "string" ? id : undefined;
 }
 
 function workflowRelationValues(

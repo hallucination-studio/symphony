@@ -52,6 +52,10 @@ export interface ConductorPoolValue {
 export interface RootManagedCommentValue {
   commentId: string;
   issueId: string;
+  authorKind: WorkflowCommentAuthorKind;
+  authorId: string;
+  authorUserId?: string;
+  createdAt: string;
   updatedAt: string;
   managedMarker: string;
   body: string;
@@ -94,11 +98,22 @@ export interface WorkflowIssueValue {
 export interface WorkflowCommentValue {
   commentId: string;
   issueId: string;
+  authorKind: WorkflowCommentAuthorKind;
+  authorId: string;
+  authorUserId?: string;
   body: string;
+  createdAt: string;
   managedMarker?: string;
   remoteVersion: string;
   updatedAt: string;
 }
+
+export type WorkflowCommentAuthorKind =
+  | "human"
+  | "symphony"
+  | "linear_integration"
+  | "external_automation"
+  | "unknown";
 
 export interface WorkflowRelationValue {
   relationId: string;

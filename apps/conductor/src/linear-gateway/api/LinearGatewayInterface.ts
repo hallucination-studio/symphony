@@ -29,6 +29,10 @@ export interface LinearWorkflowTreeSnapshot {
     comment_id: string;
     issue_id: string;
     body: string;
+    author_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
+    author_id: string;
+    author_user_id?: string;
+    created_at: string;
     managed_marker?: string;
     remote_version: string;
     updated_at: string;

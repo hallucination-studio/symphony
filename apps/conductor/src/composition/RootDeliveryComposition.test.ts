@@ -75,7 +75,7 @@ class FakeGateway {
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
     this.mutations.push(command);
     if (command.kind === "append_workflow_comment") {
-      this.tree.comments.push({ comment_id: command.writeId, issue_id: command.target.targetIssueId, body: command.body, managed_marker: command.writeId, remote_version: command.writeId, updated_at: "2026-07-21T10:00:00Z" });
+      this.tree.comments.push({ comment_id: command.writeId, issue_id: command.target.targetIssueId, body: command.body, author_kind: "symphony", author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: "2026-07-21T10:00:00Z", managed_marker: command.writeId, remote_version: command.writeId, updated_at: "2026-07-21T10:00:00Z" });
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: command.writeId } };
     }
     if (command.kind === "update_workflow_issue") {

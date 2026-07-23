@@ -239,6 +239,10 @@ export class LinearGatewayProtocolHandlerImpl {
         !identifier(comment.commentId, 128) ||
         !issueIds.has(comment.issueId) ||
         !boundedText(comment.body) ||
+        !workflowCommentAuthorKind(comment.authorKind) ||
+        !identifier(comment.authorId, 128) ||
+        (comment.authorUserId !== undefined && !identifier(comment.authorUserId, 128)) ||
+        !timestamp(comment.createdAt) ||
         !identifier(comment.remoteVersion, 512) ||
         !timestamp(comment.updatedAt) ||
         commentIds.has(comment.commentId)
@@ -530,6 +534,10 @@ function validateRootScheduling(root: RootIssueValue): void {
       !rootManagedCommentMarkerValid(comment.managedMarker, root.issue.issueId) ||
       typeof comment.body !== "string" ||
       codePointLength(comment.body) > 16_384 ||
+      !workflowCommentAuthorKind(comment.authorKind) ||
+      !identifier(comment.authorId, 128) ||
+      (comment.authorUserId !== undefined && !identifier(comment.authorUserId, 128)) ||
+      !timestamp(comment.createdAt) ||
       !timestamp(comment.updatedAt)
     ) {
       throw new Error("linear_root_scheduling_invalid");
@@ -585,6 +593,11 @@ function linearPriority(value: string | undefined): boolean {
 function workflowStatusCategory(value: string | undefined): boolean {
   return value === "backlog" || value === "unstarted" || value === "started" ||
     value === "completed" || value === "canceled";
+}
+
+function workflowCommentAuthorKind(value: string | undefined): boolean {
+  return value === "human" || value === "symphony" || value === "linear_integration" ||
+    value === "external_automation" || value === "unknown";
 }
 
 function workflowRelationKind(value: string | undefined): boolean {

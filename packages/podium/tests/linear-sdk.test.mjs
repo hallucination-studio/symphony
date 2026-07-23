@@ -350,7 +350,9 @@ test("Root scheduling batch preserves managed comments and blocker facts", async
             comments: { nodes: [{
               id: "primary-1",
               body: primary,
+              createdAt: "2026-07-16T00:00:00Z",
               updatedAt: "2026-07-16T00:00:00Z",
+              user: { id: "app-user" },
               issue: { id: "root-1" },
             }], pageInfo: { hasNextPage: false } },
             inverseRelations: { nodes: [{
@@ -400,7 +402,7 @@ test("Root scheduling batch exposes new workflow ownership records", async () =>
             labels: { nodes: [], pageInfo: { hasNextPage: false } },
             comments: { nodes: [], pageInfo: { hasNextPage: false } },
             workflowManagedComments: { nodes: [{
-              id: "ownership-1", body: ownership, updatedAt: "2026-07-16T00:00:00Z", issue: { id: "root-1" },
+              id: "ownership-1", body: ownership, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", user: { id: "app-user" }, issue: { id: "root-1" },
             }], pageInfo: { hasNextPage: false } },
             inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
           }], pageInfo: { hasNextPage: false } },
@@ -556,14 +558,14 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
     sortOrder: 1, updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "In Progress" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
-    comments: { nodes: [{ id: "comment-root", body: "Root status", updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" } }], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [{ id: "comment-root", body: "Root status", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" } }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }], pageInfo: { hasNextPage: false } },
   };
   const child = {
     id: "work-1", identifier: "WORK-1", title: "Work", description: "Work description",
     sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:02Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
-    comments: { nodes: [{ id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->", updatedAt: "2026-07-16T00:00:03Z", issue: { id: "work-1" } }], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [{ id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->", createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z", user: { id: "symphony-bot" }, issue: { id: "work-1" } }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
@@ -586,7 +588,7 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
       } } };
     } },
   };
-  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "development_token", token: "token", delegateActorId: "symphony-bot" }, "organization-1", sdk);
 
   const tree = await adapter.getWorkflowIssueTree({ projectId: "project-1", rootIssueId: "root-1" });
 
@@ -602,6 +604,10 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
     { commentId: "comment-root", issueId: "root-1", managedMarker: undefined },
     { commentId: "comment-work", issueId: "work-1", managedMarker: "write-1" },
   ]);
+  assert.deepEqual(tree.comments.map(({ commentId, authorKind, authorId, authorUserId, createdAt }) => ({ commentId, authorKind, authorId, authorUserId, createdAt })), [
+    { commentId: "comment-root", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00.000Z" },
+    { commentId: "comment-work", authorKind: "symphony", authorId: "symphony-bot", authorUserId: "symphony-bot", createdAt: "2026-07-16T00:00:02.000Z" },
+  ]);
   assert.deepEqual(tree.relations, [{
     relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
   }]);
@@ -614,7 +620,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: {
-      nodes: [{ id: "comment-1", body: "first", updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" } }],
+      nodes: [{ id: "comment-1", body: "first", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" } }],
       pageInfo: { hasNextPage: true, endCursor: "comments-2" },
     },
     inverseRelations: {
@@ -630,6 +636,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
+    viewer: Promise.resolve({ id: "viewer-1" }),
     async issue() {
       return {
         projectId: "project-1",
@@ -644,7 +651,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     if (query.includes("IssueTreeComments")) return { data: { issue: {
       id: "root-1",
       comments: {
-        nodes: [{ id: "comment-2", body: "second", updatedAt: "2026-07-16T00:00:02Z", issue: { id: "root-1" } }],
+        nodes: [{ id: "comment-2", body: "second", createdAt: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:02Z", user: { id: "human-2" }, issue: { id: "root-1" } }],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
     } } };

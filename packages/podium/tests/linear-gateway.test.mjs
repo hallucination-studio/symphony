@@ -205,6 +205,9 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
               rootManagedComments: [{
                 commentId: "comment-1",
                 issueId: "root-1",
+                authorKind: "symphony",
+                authorId: "symphony-bot",
+                createdAt: "2026-07-16T00:00:00Z",
                 updatedAt: "2026-07-16T00:00:00Z",
                 managedMarker: "root-1:root-comment",
                 body: v3PrimaryComment(),
@@ -518,7 +521,7 @@ function workflowTree(projectId) {
       { ...issue("root-1", projectId), statusId: "status-progress", statusName: "In Progress", statusCategory: "started", statusPosition: 2, depth: 0, remoteVersion: "2026-07-16T00:00:00Z" },
       { ...issue("work-1", projectId), parentIssueId: "root-1", statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted", statusPosition: 1, depth: 1, remoteVersion: "2026-07-16T00:00:00Z" },
     ],
-    comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
+    comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
     relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
     observedAt: "2026-07-16T00:00:02Z",
   };

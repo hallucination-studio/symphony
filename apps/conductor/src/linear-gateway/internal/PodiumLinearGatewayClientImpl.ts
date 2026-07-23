@@ -438,6 +438,10 @@ function workflowTree(
       comment_id: string(comment.comment_id, "linear_workflow_comment_invalid"),
       issue_id: string(comment.issue_id, "linear_workflow_comment_invalid"),
       body: string(comment.body, "linear_workflow_comment_invalid"),
+      author_kind: workflowCommentAuthorKind(comment.author_kind),
+      author_id: string(comment.author_id, "linear_workflow_comment_invalid"),
+      ...(comment.author_user_id === undefined ? {} : { author_user_id: string(comment.author_user_id, "linear_workflow_comment_invalid") }),
+      created_at: string(comment.created_at, "linear_workflow_comment_invalid"),
       ...(comment.managed_marker === undefined ? {} : { managed_marker: string(comment.managed_marker, "linear_workflow_comment_invalid") }),
       remote_version: string(comment.remote_version, "linear_workflow_comment_invalid"),
       updated_at: string(comment.updated_at, "linear_workflow_comment_invalid"),
@@ -501,6 +505,11 @@ function workflowStatusCategory(value: JsonValue | undefined): LinearWorkflowTre
 function workflowIssueKind(value: JsonValue | undefined): NonNullable<LinearWorkflowTreeSnapshot["issues"][number]["issue_kind"]> {
   if (value === "root" || value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") return value;
   throw new Error("linear_workflow_issue_kind_invalid");
+}
+
+function workflowCommentAuthorKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["comments"][number]["author_kind"] {
+  if (value === "human" || value === "symphony" || value === "linear_integration" || value === "external_automation" || value === "unknown") return value;
+  throw new Error("linear_workflow_comment_author_kind_invalid");
 }
 
 function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {

@@ -17,6 +17,7 @@ import type {
   StageTurnInput,
 } from "../api/index.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
+import { buildRootObservationInputs } from "./RootObservationInputs.js";
 
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
@@ -123,14 +124,15 @@ export class RootReconciliationRuntime {
       treeDigest: digest(tree),
       complete: true,
     };
+    const observationInputs = buildRootObservationInputs({ tree });
     const observation: RootReconciliationObservation = {
       ...view,
       protocolVersion: 1,
       requestId: randomUUID(),
       reconcilerSessionId: sessionId,
       reconcilerTurnId: randomUUID(),
-      cycles: [],
-      pendingUserComments: [],
+      cycles: observationInputs.cycles,
+      pendingUserComments: observationInputs.pendingUserComments,
       externalLinearChanges: [],
       acceptedDirectives: [],
       rootReconcilerFailures: [],
