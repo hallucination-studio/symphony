@@ -68,6 +68,14 @@
         ]
       }
     },
+    "e2e": {
+      "path_patterns": [
+        "^tools/e2e/cleanup\\.mjs$",
+        "^tests/e2e/(?:runner|quiesce)\\.test\\.mjs$"
+      ],
+      "paths": [],
+      "symbols": {}
+    },
     "agent-workflow": {
       "path_patterns": [
         "^apps/conductor/src/linear-dag/",
