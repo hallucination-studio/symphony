@@ -137,6 +137,7 @@ export interface WorkflowMutationTargetValue {
   issueId: string;
   projectId: string;
   updatedAt: string;
+  labels: string[];
   parentIssueId?: string;
   statusId: string;
   title: string;
@@ -165,6 +166,7 @@ export type WorkflowMutationCommand =
       description: string;
       statusId: string;
       managedMarker: string;
+      labelNames: string[];
       order?: number;
     })
   | (WorkflowMutationBase & {

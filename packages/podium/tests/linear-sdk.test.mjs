@@ -56,9 +56,21 @@ function issue(input) {
     children: async () => connection(input.children ?? []),
     inverseRelations: async () => input.inverseRelations ?? connection([]),
     comments: async () => connection([]),
-    labels: async () => connection([]),
+    labels: async () => connection((input.labels ?? []).map((name, index) => workflowIssueLabel(name, index))),
   };
   return value;
+}
+
+function workflowIssueLabel(name, index) {
+  return {
+    id: `issue-label-${index + 1}`,
+    name,
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    organization: Promise.resolve({ id: "organization-1" }),
+  };
 }
 
 function blocks(source, target) {
@@ -966,6 +978,11 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
       createdInput = input;
       return { success: true, issueId: "cycle-1" };
     },
+    async issueLabels({ filter }) {
+      return connection(["Human Action", "Plan Review"]
+        .filter((name) => name === filter?.name?.eq)
+        .map((name) => workflowIssueLabel(name, name === "Human Action" ? 0 : 1)));
+    },
     async updateIssue(_issueId, input) { updatedInput = input; },
     async createComment(input) { commentInput = input; },
     async createIssueRelation(input) { relationInput = input; return { success: true }; },
@@ -977,9 +994,10 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     parentExpectedRemoteVersion: "parent-version", parentExpectedStatusId: "state-todo",
     parentIssueId: "root-1", issueKind: "cycle", title: "Cycle", description: "Plan it",
-    statusId: "state-todo", managedMarker: "cycle-marker", order: 3,
+    statusId: "state-todo", managedMarker: "cycle-marker", labelNames: ["Human Action", "Plan Review"], order: 3,
   });
   assert.equal(createdInput.stateId, "state-todo");
+  assert.deepEqual(createdInput.labelIds, ["issue-label-1", "issue-label-2"]);
   assert.equal(createdInput.subIssueSortOrder, 3);
   assert.match(createdInput.description, /managed_marker: cycle-marker/u);
   assert.match(createdInput.description, /issue_kind: cycle/u);
@@ -1024,6 +1042,7 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   const target = await targetAdapter.readWorkflowMutationTarget("work-1");
   assert.deepEqual(target, {
     issueId: "work-1", projectId: "project-1", updatedAt: "2026-07-16T00:00:00.000Z",
+    labels: [],
     isArchived: false,
     parentIssueId: "root-1", statusId: "state-todo", title: "Work",
     description: "Work description", managedMarker: "work-marker", workflowKind: "work",
@@ -1036,6 +1055,34 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.match(updatedInput.description, /managed_marker: work-marker/u);
+});
+
+test("workflow issue creation rejects unknown and duplicate label names", async () => {
+  const parent = issue({ id: "root-1" });
+  parent.team = Promise.resolve({
+    states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
+  });
+  const sdk = {
+    issue: async () => parent,
+    async issueLabels({ filter }) {
+      return connection(filter?.name?.eq === "Human Action"
+        ? [workflowIssueLabel("Human Action", 0)] : []);
+    },
+    async createIssue() { throw new Error("issueCreate should not run"); },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const command = {
+    kind: "create_workflow_issue", writeId: "write-label", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    parentExpectedRemoteVersion: "parent-version", parentExpectedStatusId: "state-todo",
+    parentIssueId: "root-1", issueKind: "human", title: "Human Action", description: "Decide",
+    statusId: "state-todo", managedMarker: "action-marker", labelNames: ["Unknown label"],
+  };
+  await assert.rejects(adapter.executeWorkflowMutation(command), /linear_workflow_label_missing/u);
+  await assert.rejects(
+    adapter.executeWorkflowMutation({ ...command, writeId: "write-duplicate", labelNames: ["Human Action", "Human Action"] }),
+    /linear_workflow_label_duplicate/u,
+  );
 });
 
 test("workflow SDK archive mutations use native Linear calls and preserve archive preconditions", async () => {
@@ -1241,6 +1288,7 @@ test("workflow issue read-back batches child status facts", async () => {
             id: "work-1", updatedAt: "2026-07-22T00:00:00Z", project: { id: "project-1" },
             parent: { id: "root-1" }, state: { id: "state-todo" }, title: "Implement",
             description: childDescription,
+            labels: { nodes: [], pageInfo: { hasNextPage: false } },
           }],
           pageInfo: { hasNextPage: false },
         } } } };
@@ -1252,7 +1300,7 @@ test("workflow issue read-back batches child status facts", async () => {
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: parent.updatedAt,
     parentExpectedRemoteVersion: parent.updatedAt, parentExpectedStatusId: "state-todo",
     parentIssueId: "root-1", issueKind: "work", title: "Implement", description: "Implement",
-    statusId: "state-todo", managedMarker: "work-marker",
+    statusId: "state-todo", managedMarker: "work-marker", labelNames: [],
   };
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-child-read", targetIssueId: "work-1", remoteVersion: "2026-07-22T00:00:00Z",
@@ -1260,6 +1308,10 @@ test("workflow issue read-back batches child status facts", async () => {
   });
   assert.equal(rawQueries.filter((query) => query.includes("WorkflowMutationChildren")).length, 1);
   assert.equal(rawQueries.length, 1);
+  await assert.rejects(
+    adapter.readWorkflowMutationOutcome({ ...command, writeId: "write-child-label-mismatch", labelNames: ["Human Action"] }),
+    /linear_precondition_conflict/u,
+  );
 });
 
 test("workflow SDK compact preflight validates all update facts in one physical request", async () => {

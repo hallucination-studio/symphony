@@ -109,6 +109,20 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
   assert.equal(sdkCreations, 1);
 });
 
+test("workflow issue creation rejects a missing label_names field before dispatch", async () => {
+  const services = await createConductorServices({});
+  await assert.rejects(
+    services.handle({
+      kind: "create_workflow_issue", binding_id: "binding-1", conductor_short_hash: "abc123",
+      write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
+      expected_root_remote_version: "root-version", parent_expected_remote_version: "parent-version",
+      parent_expected_status_id: "status-todo", parent_issue_id: "root-1", issue_kind: "work",
+      title: "Work", description: "Do it", status_id: "status-todo", managed_marker: "work-marker",
+    }),
+    /linear_workflow_label_names_missing/u,
+  );
+});
+
 
 test("gateway reads fully paginate and reject cross-project issue data", async () => {
   const cursors = [];

@@ -43,6 +43,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
       description: body,
       statusId: status.status_id,
       managedMarker: marker,
+      labelNames: ["Human Action", actionLabelFor(directive.actionKind)],
     });
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(`human_action_write_${outcome.kind}`);
     const readBack = await this.linear.readWorkflowIssueTree(view.root.issueId);
@@ -62,6 +63,17 @@ function titleFor(directive: RequestHumanActionDirective): string {
     convergence_override: "Convergence override required",
   };
   return labels[directive.actionKind];
+}
+
+function actionLabelFor(actionKind: RequestHumanActionDirective["actionKind"]): string {
+  const labels: Record<RequestHumanActionDirective["actionKind"], string> = {
+    plan_review: "Plan Review",
+    clarification: "Clarification",
+    permission: "Permission",
+    finding_waiver: "Finding Waiver",
+    convergence_override: "Convergence Override",
+  };
+  return labels[actionKind];
 }
 
 function renderDescription(directive: RequestHumanActionDirective, rootDirectiveId: string): string {

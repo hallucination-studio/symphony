@@ -67,6 +67,7 @@ export type LinearWorkflowMutationCommand =
       description: string;
       statusId: string;
       managedMarker: string;
+      labelNames: string[];
       order?: number;
     }
   | {

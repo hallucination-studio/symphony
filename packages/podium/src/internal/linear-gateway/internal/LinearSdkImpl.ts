@@ -61,6 +61,7 @@ type WorkflowPreflightIssue = WorkflowScopeIssue & {
   archivedAt?: string | null;
   title?: string;
   description?: string | null;
+  labels?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean } };
   state?: { id?: string } | null;
   team?: {
     id?: string;
@@ -1638,9 +1639,10 @@ export class LinearSdkImpl implements LinearClientInterface {
         nodes {
           ${workflowScopeSelection(32)}
           updatedAt archivedAt title description state { id }
+          labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
           team { id states(first: 64) { nodes { id } pageInfo { hasNextPage } } }
           comments(first: 64) { nodes { id body updatedAt issue { id } } pageInfo { hasNextPage } }
-          children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } }
+          children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } }
           inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } }
         }
       }
@@ -1697,6 +1699,7 @@ export class LinearSdkImpl implements LinearClientInterface {
             command.issueKind,
           ),
           stateId: command.statusId,
+          labelIds: await this.#workflowIssueLabelIds(command.labelNames, teamId),
           ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
         });
         if (!payload.success || !payload.issueId) {
@@ -1909,7 +1912,8 @@ export class LinearSdkImpl implements LinearClientInterface {
       if (!issue) return undefined;
       if (issue.projectId !== command.expectedProjectId ||
         issue.parentIssueId !== command.parentIssueId || issue.statusId !== command.statusId ||
-        issue.title !== command.title || issue.description !== command.description) {
+        issue.title !== command.title || issue.description !== command.description ||
+        !workflowLabelsMatch(issue.labels, command.labelNames)) {
         throw preconditionConflictError();
       }
       return {
@@ -2004,7 +2008,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
     const response = await rawRequest(
-      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description } pageInfo { hasNextPage } } } }`,
+      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }`,
     );
     const data = (response as {
       data?: { issue?: { updatedAt?: unknown; children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: unknown } } | null } | null };
@@ -2026,7 +2030,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #readCompactWorkflowTarget(issueId: string, projectId: string, rootIssueId: string) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
-    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt archivedAt title description state { id } } }`);
+    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt archivedAt title description state { id } labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } }`);
     const issue = (response as { data?: { issue?: WorkflowPreflightIssue | null } }).data?.issue;
     if (!issue || !workflowScopeIssueBelongsToRoot(issue, projectId, rootIssueId)) return undefined;
     return workflowPreflightTargetValue(issue);
@@ -2297,6 +2301,19 @@ export class LinearSdkImpl implements LinearClientInterface {
       throw new Error("linear_label_organization_mismatch");
     }
     return label;
+  }
+
+  async #workflowIssueLabelIds(labelNames: readonly string[], teamId: string): Promise<string[]> {
+    const names = validateWorkflowLabelNames(labelNames);
+    const ids: string[] = [];
+    for (const name of names) {
+      const matches = await this.#issueLabelsNamed(name, teamId);
+      if (matches.length === 0) throw new Error("linear_workflow_label_missing");
+      if (matches.length > 1) throw new Error("linear_workflow_label_ambiguous");
+      if (!SAFE_ID.test(matches[0]!.id)) throw new Error("linear_workflow_label_id_invalid");
+      ids.push(matches[0]!.id);
+    }
+    return ids;
   }
 
   async #readHumanActionLabels(teamId: string): Promise<string[]> {
@@ -2641,10 +2658,12 @@ async function workflowMutationTargetValue(issue: Issue) {
   const state = await issue.state;
   if (!state || !issue.projectId) throw new Error("linear_workflow_target_invalid");
   const managed = parseManagedDescription(issue.description ?? "");
+  const labels = workflowIssueLabelNames(await allNodes(issue.labels({ first: 64 }), 64));
   return {
     issueId: issue.id,
     projectId: issue.projectId,
     updatedAt: timestampValue(issue.updatedAt),
+    labels,
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
     statusId: state.id,
@@ -2664,6 +2683,7 @@ function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
     issueId: issue.id,
     projectId: issue.project.id,
     updatedAt: issue.updatedAt,
+    labels: workflowRawLabelNames(issue.labels),
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parent?.id ? { parentIssueId: issue.parent.id } : {}),
     statusId: issue.state.id,
@@ -2689,7 +2709,8 @@ function workflowPreflightOutcome(
     const issue = matches[0];
     if (!issue) return undefined;
     if (issue.projectId !== command.expectedProjectId || issue.statusId !== command.statusId ||
-        issue.title !== command.title || issue.description !== command.description) throw preconditionConflictError();
+        issue.title !== command.title || issue.description !== command.description ||
+        !workflowLabelsMatch(issue.labels, command.labelNames)) throw preconditionConflictError();
     return { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt };
   }
   if (command.kind === "update_workflow_issue") {
@@ -2785,6 +2806,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     state?: { id?: unknown } | null;
     title?: unknown;
     description?: unknown;
+    labels?: unknown;
   };
   if (typeof raw.id !== "string" || typeof raw.updatedAt !== "string" ||
       typeof raw.project?.id !== "string" || raw.parent?.id !== expectedParentIssueId ||
@@ -2798,6 +2820,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     issueId: raw.id,
     projectId: raw.project.id,
     updatedAt: raw.updatedAt,
+    labels: workflowRawLabelNames(raw.labels, true),
     isArchived: raw.archivedAt !== null && raw.archivedAt !== undefined,
     parentIssueId: expectedParentIssueId,
     statusId: raw.state.id,
@@ -2806,6 +2829,51 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
     ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
   };
+}
+
+function validateWorkflowLabelNames(labelNames: readonly string[]): string[] {
+  if (!Array.isArray(labelNames) || labelNames.length > 64 ||
+      labelNames.some((name) => !shortText(name))) {
+    throw new Error("linear_workflow_label_names_invalid");
+  }
+  const names = [...labelNames];
+  if (new Set(names).size !== names.length) throw new Error("linear_workflow_label_duplicate");
+  return names;
+}
+
+function workflowIssueLabelNames(labels: Array<{ name?: unknown }>): string[] {
+  if (!Array.isArray(labels) || labels.length > 64 ||
+      labels.some((label) => !label || !shortText(label.name as string | undefined))) {
+    throw new Error("linear_workflow_labels_invalid");
+  }
+  const names = labels.map(({ name }) => name as string);
+  if (new Set(names).size !== names.length) throw new Error("linear_workflow_labels_ambiguous");
+  return names;
+}
+
+function workflowRawLabelNames(value: unknown, required = false): string[] {
+  if (value === undefined) {
+    if (required) throw new Error("linear_workflow_labels_incomplete");
+    return [];
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("linear_workflow_labels_invalid");
+  }
+  const raw = value as { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } };
+  if (!Array.isArray(raw.nodes) || raw.nodes.length > 64 || raw.pageInfo?.hasNextPage !== false) {
+    throw new Error("linear_workflow_labels_incomplete");
+  }
+  return workflowIssueLabelNames(raw.nodes.map((label) => {
+    if (!label || typeof label !== "object" || Array.isArray(label)) return { name: undefined };
+    return { name: (label as { name?: unknown }).name };
+  }));
+}
+
+function workflowLabelsMatch(observed: string[], expected: readonly string[]): boolean {
+  const expectedNames = validateWorkflowLabelNames(expected).sort();
+  const observedNames = workflowIssueLabelNames(observed.map((name) => ({ name }))).sort();
+  return expectedNames.length === observedNames.length &&
+    expectedNames.every((name, index) => observedNames[index] === name);
 }
 
 function serializeWorkflowIssueDescription(

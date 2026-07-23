@@ -550,6 +550,7 @@ function workflowMutationBody(
         description: input.description,
         status_id: input.statusId,
         managed_marker: input.managedMarker,
+        label_names: input.labelNames,
         ...(input.order === undefined ? {} : { order: input.order }),
       };
     case "update_workflow_issue":

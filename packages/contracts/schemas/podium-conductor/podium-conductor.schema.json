@@ -865,7 +865,8 @@
         "title",
         "description",
         "status_id",
-        "managed_marker"
+        "managed_marker",
+        "label_names"
       ],
       "properties": {
         "kind": {
@@ -918,6 +919,14 @@
         },
         "managed_marker": {
           "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "label_names": {
+          "items": {
+            "$ref": "common.schema.json#/$defs/ShortText"
+          },
+          "maxItems": 64,
+          "uniqueItems": true,
+          "type": "array"
         },
         "order": {
           "type": "number",

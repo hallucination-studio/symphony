@@ -310,6 +310,11 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     assert.ok(schema.$defs[name].required.includes("root_issue_id"), name);
     assert.ok(schema.$defs[name].required.includes("expected_root_remote_version"), name);
   }
+  assert.ok(schema.$defs.CreateWorkflowIssueCommand.required.includes("label_names"));
+  assert.equal(schema.$defs.CreateWorkflowIssueCommand.properties.label_names.type, "array");
+  assert.equal(schema.$defs.CreateWorkflowIssueCommand.properties.label_names.items.$ref,
+    "common.schema.json#/$defs/ShortText");
+  assert.equal(schema.$defs.CreateWorkflowIssueCommand.properties.label_names.uniqueItems, true);
   assert.deepEqual(schema.$defs.WorkflowMutationResult.oneOf.map(({ properties }) => properties.kind.const), [
     "applied", "already_applied", "write_unconfirmed", "precondition_conflict", "failed",
   ]);

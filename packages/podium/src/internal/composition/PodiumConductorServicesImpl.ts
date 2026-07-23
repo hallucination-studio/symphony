@@ -492,6 +492,7 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       description: requiredString(body.description, "linear_workflow_description_missing"),
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
       managedMarker: requiredString(body.managed_marker, "linear_workflow_marker_missing"),
+      labelNames: requiredStringArray(body.label_names, "linear_workflow_label_names_missing"),
       ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
     };
   }
@@ -585,4 +586,13 @@ function recordValue(value: JsonValue | undefined, code: string) {
 function requiredNumber(value: JsonValue | undefined, code: string) {
   if (typeof value !== "number") throw new Error(code);
   return value;
+}
+
+function requiredStringArray(value: JsonValue | undefined, code: string): string[] {
+  if (!Array.isArray(value) || value.length > 64 || value.some((item) => typeof item !== "string")) {
+    throw new Error(code);
+  }
+  const labels = value as string[];
+  if (new Set(labels).size !== labels.length) throw new Error("linear_workflow_label_duplicate");
+  return labels;
 }

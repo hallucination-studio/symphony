@@ -119,6 +119,7 @@ function operationCommand(
       description: operation.description,
       statusId: status.status_id,
       managedMarker: `${directive.rootDirectiveId}:${operation.issueId}`,
+      labelNames: [],
       order: operation.order,
     };
   }
