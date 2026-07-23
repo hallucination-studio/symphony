@@ -89,9 +89,13 @@ Linear OAuth/credential只能出现在Podium。Codex credential由SDK保存在Pr
 linear-gateway
 root-discovery
 root-scheduling
-root-workflow
-linear-dag
-performer-stage-client
+root-reconciliation
+cycle-supervisor-client
+cycle-directive-materialization
+performer-agent-client
+human-actions
+workflow-events
+timeline-projections
 performer-profiles
 git-workspaces
 root-delivery
@@ -99,16 +103,14 @@ runtime-reporting
 ```
 
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
-`RootDagView`和`LinearIssueTreeSnapshot`只存在于内存。
+`RootReconciliationView`和`LinearIssueTreeSnapshot`只存在于内存。
 
-`root-workflow`拥有`RootWorkflowPolicyInterface`，只从fresh Linear status/Cycle Tree/Git派生一个closed
-业务decision；`linear-dag`拥有`LinearDagExecutionInterface`，负责验证status、bootstrap/approved Plan Contract和
-ready node、构造stage-specific context、调用
-Performer并materialize Result。`performer-stage-client`拥有
-`PerformerStageClientInterface`和caller-side
-Wire transport；Performer没有反向Conductor client。完整边界只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。`root-scheduling`只处理跨Root
-readiness和排序；`root-workflow`不调用Performer，`linear-dag`不决定successor Cycle或delivery。
+`root-reconciliation`拥有不调用模型的`RootReconciliationPolicyInterface`；
+`cycle-supervisor-client`构造完整Cycle observation并调用Performer；
+`cycle-directive-materialization`验证和执行closed directive；`performer-agent-client`拥有四role session/turn
+transport。`workflow-events`只发布typed event，`timeline-projections`只渲染和投影Root/Cycle comments。
+完整边界分别由[Root Reconciliation](root-reconciliation.md)、[Cycle Supervisor](cycle-supervisor.md)、
+[Stage Contracts](stage-orchestration.md)和[Workflow Timeline](workflow-timeline.md)定义。
 
 Conductor可以保存`PerformerProfile`明文配置文件，但不能读取或修改Profile
 `CODEX_HOME`中的Codex-owned文件。Profile配置文件不是数据库。
@@ -126,8 +128,10 @@ SDK逻辑。
 模块：
 
 ```text
-stage_protocol
-stage_execution
+agent_protocol
+cycle_supervisor
+role_execution
+session_runtime
 profile_control
 backends
 ```
@@ -141,7 +145,8 @@ backends/<provider>/<Provider>BackendImpl.py
 `ProviderBackendInterface`和registry属于Performer内部，不进入跨角色contracts。
 `CodexTurnSettings`是批准的产品DTO；Codex SDK类型、login handle、auth/account payload
 和SDK参数映射仍只能存在于`CodexBackendImpl`。
-`StageContextEnvelope.execution_policy`可以携带`CodexTurnSettings`；不能携带任意Provider config map。
+Supervisor observation和Stage turn request可以携带approved `CodexTurnSettings`；不能携带任意Provider config
+map。四个role session和Provider thread mapping只存在于Performer `session_runtime`。
 
 ### Podium Desktop
 
@@ -182,10 +187,11 @@ TypeScript：
 
 ```text
 LinearGatewayInterface.ts
-RootWorkflowPolicyInterface.ts
-LinearDagExecutionInterface.ts
-LinearDagExecutionImpl.ts
-PerformerStageClientInterface.ts
+RootReconciliationPolicyInterface.ts
+CycleSupervisorClientInterface.ts
+CycleDirectiveMaterializerInterface.ts
+PerformerAgentClientInterface.ts
+WorkflowTimelinePublisherInterface.ts
 PodiumLinearGatewayClientImpl.ts
 LinearGatewayProtocolHandlerImpl.ts
 GetIssueTreeQuery.ts
@@ -198,7 +204,8 @@ Python：
 provider_backend_interface.py
 codex_backend_impl.py
 execute_work_request.py
-work_stage_result.py
+work_result.py
+cycle_supervisor_runtime.py
 ```
 
 语言内遵守各自惯例，但类型后缀保持一致。缩写只使用产品已确认词汇，例如`OAuth`、`SDK`、`PR`。

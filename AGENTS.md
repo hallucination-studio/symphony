@@ -23,25 +23,33 @@ This file contains the repository-wide working rules for coding agents.
   Conductor, and Performer.
 - Podium Desktop, Podium, and Conductor target TypeScript; Performer remains a
   Python process; the Desktop host uses Tauri/Rust.
-- Linear custom statuses, Issue Tree, and managed records are workflow
-  authority. Conductor must not introduce a workflow database, queue,
-  checkpoint store, or mirrored Work Node state.
+- Linear custom statuses, native archive flags, Issue Tree, and managed records
+  are workflow authority. Conductor must not introduce a workflow database,
+  queue, checkpoint store, or mirrored Work Node state.
 - Podium owns Linear OAuth, tokens, project catalog, bindings, the Linear SDK,
   and `podium.db`. Linear SDK types and credentials must not cross into
   Conductor.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
-  root state from Linear and Git, schedules Root Issues, manages one Git
-  worktree per Root, and selects Plan, one Work sub-issue, or Verify for each
-  Stage invocation. Work sub-issues remain visible structure inside the Root
-  and are not cross-Root dispatch units.
+  root state from active and archived Linear facts plus Git, runs a
+  deterministic Root Reconciliation Loop, manages one Git worktree per Root,
+  and materializes closed Cycle Supervisor directives. It does not run a model
+  or interpret Stage Results to choose the next Cycle action.
 - Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
   Team workflow. Findings, attempts, budgets, progress, and Human overrides
   are durable Linear facts; Root-level convergence limits are mechanical and
   survive every Conductor or Performer restart.
-- Conductor creates and owns each Stage Wire and calls Performer. Performer
-  exclusively owns Provider SDK integrations and uses a fresh isolated
-  Provider context for Plan, each Work invocation, and Verify. Performer never
-  calls Conductor or resumes workflow from a durable conversation pointer.
+- Conductor is always the Performer caller. Performer exclusively owns
+  Provider SDK integrations and gives each Cycle isolated Supervisor, Plan,
+  Work, and Verify role threads; the Work thread spans multiple Work Issues and
+  turns in that Cycle. Performer never calls Conductor, and Provider threads
+  are runtime continuity rather than durable workflow authority.
+- Cycle Supervisor is the only model-driven Cycle next-step decision role. It
+  reads the complete active and archived Cycle Tree and returns one closed,
+  versioned directive. Plan, Work, and Verify return strong typed Results and
+  do not mutate the DAG or create Human Actions directly.
+- Root and Cycle user timelines are projected to their corresponding Linear
+  Issue comments by typed event subscribers after durable read-back. Business
+  workflow modules do not render timeline comments directly.
 - Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
   directories, and are controlled through the approved profile-control
   boundary. Symphony must not read or rewrite Codex-owned configuration files.
@@ -54,13 +62,18 @@ This file contains the repository-wide working rules for coding agents.
 
 ## Scope discipline
 
-For every non-trivial slice, record:
+For every non-trivial slice, establish:
 
 - `authorized`
 - `required_consequences`
 - `out_of_scope`
 - `assumptions_requiring_approval`
 - `deferred_ideas`
+
+This scope record can live in the active task plan or issue; do not create a
+persistent scope-ledger task directory, and never treat a task artifact as
+architecture authority. Durable product decisions belong only in the appropriate named
+`docs/architecture/` source of truth.
 
 Production work starts only when `assumptions_requiring_approval` is empty.
 Prefer the smallest change that satisfies the authorized outcome. Do not infer

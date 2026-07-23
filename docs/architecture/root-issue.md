@@ -1,367 +1,259 @@
-# Root Issue工作流
+# Root Issue工作流事实
 
-状态：目标架构提案。本文描述一个Linear Root Issue如何承载多轮Cycle、Root状态、Root managed
-comments和delivery；Cycle内Plan、Work、Verify执行语义只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义，跨Root排序由
-[Linear端到端流转](linear-flow.md)定义。
+状态：目标架构提案。本文定义Root、Cycle、Plan/Work/Verify/Human Issue Tree、Linear status、archive和durable
+records。控制算法由[Root Reconciliation](root-reconciliation.md)定义，Cycle语义由
+[Cycle Supervisor](cycle-supervisor.md)定义。
 
-## 1. Root模型
+## 1. Root Tree
 
-Root是Symphony跨Root调度、workspace和恢复单位：
-
-```text
-RootRunView
-  = Root Issue custom status
-  + Root Conductor Label routing
-  + Root Primary Status Comment
-  + ordered Cycle Issues
-  + each Cycle's Bootstrap Plan or sealed Work | Verify DAG
-  + Finding、attempt、token budget和Human action managed records
-  + relevant comments and relations
-  + deterministic Git branch/worktree
-  + delivery facts
-```
-
-`RootRunView`每轮从Linear/Git重建并丢弃。一个Root对应：
+Root是跨Root调度、workspace、budget和恢复单位：
 
 ```text
-1 pinned performer_profile_id
-1 delivery branch
-1 worktree
-0..N sibling Cycle Issues
+Root Issue
+├── Cycle Issue 1
+│   ├── Plan Issue
+│   ├── Work Issues
+│   ├── Verify Issue
+│   └── Human Action Issues
+├── Cycle Issue 2
+│   └── ...
+└── Root Human Action Issues
 ```
 
-Root Issue上的唯一Root Conductor Label必须属于Project Conductor Pool，并在claim前选择唯一eligible
-Conductor。该Label是routing而不是ownership；Root Primary Status Comment中的full `conductor_id`才是
-claim后的durable ownership。Project只有一个pool member时，未标记Root隐式路由给该member；Project有
-多个member时，未标记、多个或pool外Label都使Root fail closed。Cycle和typed Node不得携带Conductor Label。
+一个Root对应一个固定Performer Profile、一个delivery branch和一个worktree。Cycle是Root直接子Issue；Plan、
+Work、Verify和Cycle Human Action都是Cycle直接子Issue。Root Human Action只处理Root级convergence、delivery或
+全局用户决定。
 
-Cycle Issue是Root direct child和一轮bootstrap-to-sealed DAG lifecycle的container。Cycle自身不可dispatch；它的children是closed
-typed Plan、Work、Verify Nodes。Root、Cycle和Node都使用Linear Team workflow中的真实Issue status；
-新Cycle复用Root branch/worktree，不创建独立workspace。
+Plan/Work/Verify是DAG执行节点。Human Action不参与DAG execution，只通过relations链接相关节点。一个Root同时
+最多一个nonterminal、nonarchived Cycle。
 
-## 2. Linear Team workflow与三层状态
+## 2. Linear status catalog
 
-Linear custom status按Team配置，不按Root/Cycle/Node类型分别配置。承载Symphony Root Tree的Team必须存在
-下表全部display status；Symphony再通过managed kind marker限制每类Issue允许使用的状态子集。官方Linear
-workflow语义见[Issue status](https://linear.app/docs/configuring-workflows)：Team可以在固定category中添加、
-排序和命名status。
+Linear status按Team配置。Project初始化必须验证以下display statuses、category和唯一ID：
 
-| Linear category | display status | canonical enum |
-|---|---|---|
-| Backlog | `Draft` | `DRAFT` |
-| Unstarted | `Todo` | `TODO` |
-| Started | `Planning`, `Sealed`, `Executing`, `Verifying` | `PLANNING`, `SEALED`, `EXECUTING`, `VERIFYING` |
-| Started | `In Progress`, `In Review`, `Needs Approval`, `Needs Info` | `IN_PROGRESS`, `IN_REVIEW`, `NEEDS_APPROVAL`, `NEEDS_INFO` |
-| Started | `Inconclusive`, `Escalated` | `INCONCLUSIVE`, `ESCALATED` |
-| Completed | `Succeeded`, `Changes Required`, `Done` | `SUCCEEDED`, `CHANGES_REQUIRED`, `DONE` |
-| Canceled | `Canceled`, `Failed` | `CANCELED`, `FAILED` |
+| Linear category | display statuses |
+|---|---|
+| Backlog | `Draft` |
+| Unstarted | `Todo` |
+| Started | `Planning`, `Sealed`, `Executing`, `Verifying`, `In Progress`, `In Review` |
+| Started | `Needs Approval`, `Needs Info`, `Inconclusive`, `Escalated` |
+| Completed | `Succeeded`, `Changes Required`, `Done`, `Approved`, `Answered` |
+| Canceled | `Canceled`, `Failed`, `Rejected` |
 
-`CHANGES_REQUIRED`属于Completed，因为它终结当前Cycle；repair由successor Cycle承载。`FAILED`属于Canceled，
-因为它终结当前Node而不代表业务成功。Conductor启动和每次Project重新解析时按status ID、精确名称和category
-验证catalog。缺失、同名重复、category错误、Issue kind与状态子集不匹配或非法transition都使相关Root
-fail closed；Symphony不按相似名称猜测，也不声称Linear原生提供三套独立状态机。
+Symphony通过managed kind marker限制每类Issue允许的status子集。缺失、同名重复、category错误、kind/status不
+匹配或非法transition使相关Root fail closed。Label表达Issue kind；status表达未归档期间的workflow lifecycle。
 
-### 2.1 Root Workflow State
+Linear原生archive flag是独立权威维度：
+
+```text
+IssueWorkflowFact = custom status + native archive flag + managed kind marker
+```
+
+archive不改写status，不等于Canceled/Done，也不删除comments、relations或Results。
+
+## 3. Root state
 
 ```text
 Todo -> In Progress -> In Review -> Done
 In Progress -> Needs Approval | Needs Info -> In Progress
-In Review -> In Progress  when a successor Cycle is required
+In Review -> In Progress
 Todo | In Progress | Needs Approval | Needs Info | In Review -> Canceled
 ```
 
-| Root state | 含义 |
+| Root status | 含义 |
 |---|---|
-| `Todo` | 尚未被Symphony claim |
-| `In Progress` | Conductor可以reconcile Cycle DAG、执行ready node或delivery |
-| `Needs Approval` | Root有一个已materialize且尚未解决的approval action |
-| `Needs Info` | Root有一个已materialize且尚未解决的input action |
-| `In Review` | 最新passed Cycle对应HEAD已经交付，等待人工或SCM接受 |
-| `Done` | 用户或SCM automation确认接受 |
-| `Canceled` | 用户取消；任何旧Stage不得继续产生副作用 |
+| `Todo` | 尚未claim |
+| `In Progress` | Root Loop可以推进当前Cycle或Root mutation |
+| `Needs Approval` | 存在matching active approval Human Action |
+| `Needs Info` | 存在matching active Clarification Human Action |
+| `In Review` | 最新passed Cycle对应revision已经交付 |
+| `Done` | 用户或SCM确认接受 |
+| `Canceled` | Root terminal；所有active sessions和late outputs失效 |
 
-`Needs Approval`和`Needs Info`始终只应用于Root，不能应用于Cycle或Plan/Work/Verify Node。Root custom state
-和matching Pending Human Action必须同时存在；任一缺失都进入`needs_attention`，不能猜测恢复。
+Root waiting status是Root header投影；canonical Action和resolution仍在完整Tree。Root不能在没有matching active
+Action时保持waiting，也不能在有阻塞Action时继续dispatch。
 
-pre-delivery Verify运行时Root仍为`In Progress`。只有已经In Review的Root出现外部review changes、有效
-新工作或verified HEAD失效时，Root才回到`In Progress`并创建successor Cycle。
-
-用户在Stage期间把Root置为Done/Canceled时，Conductor取消Stage并拒绝旧Result。已经产生的Git修改作为
-事实保留，但旧Result不能更新DAG、运行delivery或改变Root状态。
-
-### 2.2 Cycle State
+## 4. Cycle state
 
 ```text
 Draft -> Planning -> Sealed -> Executing -> Verifying
-           |                    |             |-> Succeeded
-           |                    |             |-> Changes Required
-           |                    |             |-> Inconclusive -> Verifying
-           |                    |             |-> Escalated
-           |                    |-> Escalated
-           |-> Escalated
-
-Escalated -> Planning | Executing | Verifying
+Planning | Sealed | Executing | Verifying -> Escalated
+Verifying -> Succeeded | Changes Required | Inconclusive
+Inconclusive -> Executing | Verifying | Changes Required
+Escalated -> Planning | Executing | Verifying | Changes Required
 any nonterminal -> Canceled
 ```
 
-| Cycle state | 含义 |
+| Cycle status | 含义 |
 |---|---|
-| `Draft` | Cycle与唯一Bootstrap Plan Node已经创建，execution DAG尚不存在，Plan尚未claim |
-| `Planning` | Bootstrap Plan正在生成/review approved Plan Contract，execution DAG尚不可调度 |
-| `Sealed` | Plan已批准，完整Work/Verify DAG已materialize并read-back，结构不可再隐式改变 |
-| `Executing` | 正在选择或执行approved Work DAG |
-| `Verifying` | Verify针对固定Git revision执行 |
-| `Succeeded` | Verify通过；当前Cycle终结且允许delivery precondition检查 |
-| `Changes Required` | Verify接受了可修复Finding且Root convergence gate通过；当前Cycle终结，可创建repair Cycle |
-| `Inconclusive` | Verify成功执行但证据不足；允许有界fresh Verify retry |
-| `Escalated` | 收敛熔断或Human decision阻止自动继续；必须由matching Root Human action解决 |
-| `Canceled` | 当前Cycle终止，旧Stage Result无效 |
+| `Draft` | Cycle已创建，尚未开始Plan |
+| `Planning` | Plan thread与Plan review阶段 |
+| `Sealed` | Plan Contract已批准，初始active DAG已materialize并read-back |
+| `Executing` | Supervisor正在推进和调整Work DAG |
+| `Verifying` | Verify thread针对固定revision运行 |
+| `Inconclusive` | Verify证据不足，Supervisor需要决定下一步 |
+| `Escalated` | matching Human Action或attention阻止继续 |
+| `Succeeded` | Cycle成功terminal |
+| `Changes Required` | Cycle非成功terminal；outcome说明repair或exhausted |
+| `Canceled` | 用户或Root取消导致terminal |
 
-`Succeeded`、`Changes Required`和`Canceled`是terminal Cycle state。`Inconclusive`和`Escalated`不是
-成功，也不能delivery。`Escalated`只有在Root matching Human action被解决且Root回到`In Progress`后，
-才能按原阻塞位置进入`Planning`、`Executing`或`Verifying`。每个Root同时最多一个非terminal Cycle。
+`Sealed`只保护Approved Plan Contract，不表示Execution DAG永久不变。Supervisor可在Contract范围内提出
+create/update/archive/restore/reorder/dependency patch；Conductor验证并materialize。触碰目标、scope、acceptance
+criteria或protected constraint时必须走Plan revision/Human Action，而不能伪装成DAG patch。
 
-### 2.3 Stage Node State
-
-所有Node使用同一`StageNodeState` enum，但kind限制transition：
+## 5. Node与Action状态
 
 ```text
-Plan:   Todo -> In Progress -> In Review -> Done
-                    |    ^        |
-                    |    +--------+  explicit Plan Contract revision
-                    +-> Failed | Canceled
-
+Plan:   Todo -> In Progress -> In Review -> Done | Failed | Canceled
 Work:   Todo -> In Progress -> Done | Failed | Canceled
 Verify: Todo -> In Progress -> Done | Failed | Canceled
+
+Approval Human Action:
+        Todo -> In Progress -> Approved | Rejected | Canceled
+
+Clarification Human Action:
+        Todo -> In Progress -> Answered | Canceled
 ```
 
-- Plan `In Review`与Root `Needs Approval`及matching Pending Human Action同时存在；approval后才进入`Done`；
-- retriable execution failure创建新的Stage execution comment，Node保持`In Progress`，不会靠状态来计数；
-- 任一Stage Node只有在non-retryable failure或Root级熔断后才进入`Failed`；resolved Root override可以把
-  matching `Failed` Node显式恢复为`In Progress`并创建fresh execution；
-- Verify Node可以为`Done`，同时Cycle以`Changes Required`、`Inconclusive`或`Escalated`记录业务结论；
-- `Inconclusive -> Verifying`或resolved `Escalated -> Verifying` retry会显式把同一Verify Node从`Done`
-  重新置为`In Progress`，并创建新的`stage_execution_id`；
-- dependency readiness只使用Linear `blockedBy`和predecessor `Done`，不增加冗余`Blocked` status；
-- Root/Cycle取消时，当前非terminal Node进入`Canceled`；已完成审计记录不重写。
+Plan/Work/Verify的status只记录durable执行生命周期；重试次数和turn identity来自matching execution records。
+Human Action状态、comments和resolution由[Human Action](human-actions.md)定义。
 
-## 3. Root Managed Comments
+archive规则：
 
-### 3.1 Root Primary Status Comment
+- active或running Node归档前必须终止matching turn并持久化原因；
+- archived Node不参与ready、dependency satisfaction或Verify required set；
+- active Node不能依赖archived Node，除非同一accepted patch重写依赖；
+- restore必须显式设置允许的active status并创建fresh execution，不能恢复旧Provider turn；
+- archived Human Action不是resolution；restore不能重放旧approval/answer；
+- 完整Root/Cycle读取始终包含archived Issues。
 
-Root claim时创建一条用户可读、按comment ID更新的Primary Status Comment：
+## 6. DAG与Plan Contract
+
+Cycle最初只有Plan：
 
 ```text
-Symphony
-Conductor: <stable full id>
-Performer profile: <profile id>
-Activity: <waiting | working | failed | delivered | none>
-Evidence: <source identities, versions and observations>
-Observed at: <timestamp>
-Current cycle: <cycle issue id or none>
-Current node: <node issue id or none>
-Branch: <delivery branch>
-Pull request: <url when available>
-Current problem: <sanitized operator action when applicable>
-
-<!-- symphony root
-conductor_id: <stable full id>
-performer_profile_id: <profile id>
-delivery_branch: <branch>
-pull_request: <url or none>
--->
+Cycle(Draft/Planning)
+└── Plan(Todo/In Progress/In Review)
 ```
 
-`Current cycle`和`Current node`只是fresh DAG observation，不是cursor。下一轮仍从完整Tree派生；Primary
-缺失、过期或冲突不能决定node readiness。
-
-Activity evidence最少满足：
-
-| Activity | 客观evidence source |
-|---|---|
-| `waiting` | Root custom state、pending action ID、target node和`updated_at` |
-| `working` | Cycle/node ID、node state、Stage execution marker和最近runtime observation |
-| `failed` | stable error code、相关Cycle/node、Git HEAD/check result（如相关） |
-| `delivered` | passed Cycle/Verify、verified HEAD、PR/branch identity和required checks |
-
-Primary marker保存closed ownership、Profile和delivery identity，不保存Root routing、authoritative current Cycle、ready
-node、accepted Result、Queue或Provider transcript。
-
-### 3.2 Stage execution comments
-
-Stage execution identity、terminal outcome和token reservation写入matching typed Node的closed managed comments。
-这些事实用于拒绝stale Result、累计Root级usage并在restart后决定是否允许fresh execution。
-Root和Node的attempt数都由matching `stage_execution_id`记录数量派生，不另存单调序号。Stage启动前先写
-token reservation；Result接受后写actual usage并结算。Result或usage丢失时reservation继续计入Root
-token budget，不能因进程崩溃而少计。不在Workflow Tree外建立本地ledger。
-
-### 3.3 Root Convergence Control
-
-Root managed comment持久化closed `RootConvergencePolicy`，默认值和Root级累计规则由
-[Stage Orchestration](stage-orchestration.md)定义。policy、deadline、token reservation、Cycle outcomes、
-Finding disposition、progress assessments和override action全部可从Linear恢复。Root `Canceled`是manual kill
-switch：它先使所有旧execution失效，再由Conductor收敛active Cycle/Node到`Canceled`。
-
-### 3.4 Pending Human Action
-
-Pending action写Root managed comment并包含action、Cycle、node、digest和remote precondition。Work/Verify
-action解决后，Conductor把必要的closed resolution投影到target Node comment，使fresh Work context仍只读取
-自己的Issue。完整字段和恢复条件由Stage Orchestration定义。
-
-### 3.5 Finding与Cycle evidence records
-
-Finding不要求成为可dispatch Issue。Accepted Verify Result在matching Verify Node managed comment中持久化
-immutable `FindingRecord`；后续Verify通过`FindingDispositionRecord`引用原`finding_id`记录`resolved`、
-`still_open`或经Human approval的`waived`。当前unresolved set由完整Root Tree重建，不能用Primary Status中的
-计数替代。
-
-Successor Cycle marker保存它承接的`finding_ids[]`和repair group identity。强耦合、相同affected scope或
-必须共同验收的Findings可进入同一个repair Cycle；互相独立的Findings才拆分。Finding本身不可dispatch，
-也不存在“一条Finding自动创建一个Cycle”的规则。
-
-### 3.6 Root Timeline Comments
-
-只把人需要理解的关键事实append到Root Timeline：Cycle创建和终结、Plan approval、terminal Stage error、
-Verify findings、review changes和delivery。Heartbeat、tool activity和普通progress只进入Event/Desktop。
-
-Timeline create使用稳定`write_id`和hidden marker去重。Comment正文是人类上下文，不作为命令；machine
-marker只提供identity/correlation，不能编码未声明的transition graph。
-
-## 4. Workflow Tree与Cycle DAG
-
-Root descendants分阶段物化。Cycle bootstrap形态：
+Plan Result产生immutable Plan Contract和initial DAG proposal。Plan review approved后，由Supervisor提出
+materialization directive，Conductor创建initial graph：
 
 ```text
-Root Issue
-└── Cycle Issue*
-    └── Bootstrap Plan Node
-```
-
-Plan Contract批准后才形成sealed execution graph：
-
-```text
-Cycle Issue(Sealed)
-├── Bootstrap Plan Node(Done, plan_contract_digest)
-├── Work Node*(plan_contract_digest)
-└── Verify Node(plan_contract_digest)
+Cycle(Sealed/Executing)
+├── Plan(Done, plan_contract_digest)
+├── Work*(plan_contract_digest, active or archived)
+├── Verify(plan_contract_digest, active or archived)
+└── Human Action*(not a DAG node)
 ```
 
 规则：
 
-- Cycle Issues是Root direct children并按创建顺序排列；
-- Bootstrap Plan Node由Conductor随Cycle创建，不是它所生成execution DAG中的调度节点；
-- Cycle创建时只有唯一Bootstrap Plan Node，不声称完整DAG已经存在；
-- accepted Plan Contract输出closed Work/Verify graph，Conductor为它计算`plan_contract_digest`；
-- Plan approval后，Conductor才创建/reconcile所有引用matching digest的Work/Verify Nodes和relations；
-- 只有expected node/relation集合与matching digest全部read-back后，Cycle才进入`Sealed`；
-- partial materialization期间Cycle保持`Planning`；已经创建的children只能按approved Plan Contract
-  补齐或判冲突，绝不参与readiness；
-- `Sealed`以后graph结构不可原地修改；新需求或Findings进入successor Cycle的新Plan Contract；
-- Work/Verify只有在全部matching nodes/relations创建并read-back且Plan已批准后参与readiness；
-- Work dependency使用同一Cycle内Linear `blockedBy` relation；每个入口Work直接依赖Done Bootstrap Plan作为
-  materialization/approval guard，但Bootstrap Plan不由该DAG反向调度；
-- Verify直接依赖全部required Work Nodes；
-- Cycle之间不使用execution dependency，以`triggeredBy` provenance形成审计链；
-- successor Plan Contract保存previous Plan、Verify evidence、unresolved Finding records、实际Git change
-  identity和attempt summaries的closed引用；
-- 旧Cycle终结后不可在其中新增隐式Rework；changes必须进入successor Cycle；
-- Canceled Cycle/Node不再执行；
-- Linear parent、relation、custom status和managed comment共同构成唯一Workflow DAG事实。
+- Plan Contract包含objective、scope、acceptance criteria、constraints和verification requirements，批准后immutable；
+- Execution DAG包含Work/Verify节点、顺序和dependencies，可以在Contract范围内演进；
+- 每个DAG patch由accepted Supervisor directive、Tree digest和remote preconditions关联；
+- Work readiness要求active、Todo/In Progress、matching Contract、全部active dependencies有Done evidence；
+- Supervisor语义选择一个ready Work，Conductor机械验证；
+- 一个Work turn只执行一个target，但同一Work thread跨Cycle内多个targets复用；
+- Verify要求所有当前required active Work完成并绑定immutable Git revision；
+- archived节点保留完整Issue历史；relation变化由accepted directive record保留，active graph明确排除archive=true；
+- Cycle之间只使用provenance relation，不建立跨Cycleexecution dependency。
 
-普通Issue文本是untrusted业务上下文。只有matching managed marker可以声明Cycle/node kind、stable key、
-contract digest或terminal outcome。
+## 7. Durable records
 
-每个Issue的authoritative custom status、derived scheduling readiness和Verify conclusion相互独立。
-Dependency由predecessor Node `Done`和matching completion evidence共同满足，不能只从Linear category
-`Completed`推断。Stage execution identity、attempt和terminal outcome写在Node managed comments；它们不形成
-Conductor本地Queue或数据库。
+Linear managed comments/records至少包含：
 
-## 5. Cycle结果
+```text
+RootOwnershipRecord
+RootConvergencePolicy
+CycleSupervisorDirectiveRecord
+PlanContractRecord
+PlanContractSupersessionRecord
+StageExecutionRecord
+PlanResult | WorkResult | VerifyResult
+FindingRecord
+FindingDispositionRecord
+ProgressAssessment
+HumanActionRequestRecord
+HumanActionResolutionRecord
+CycleOutcome
+DeliveryRecord
+TimelineProjectionRecord
+```
 
-Cycle进入`Succeeded`或`Changes Required`时必须有唯一closed result：
+managed records是closed、versioned schema，不包含SDK object、raw reasoning、secret或arbitrary metadata。
+runtime session只做内存correlation；恢复不能依赖Provider conversation pointer。
+
+## 8. Result与Finding
+
+Plan/Work/Verify Result先按role/session/turn/context/Git preconditions验证，再写matching Node managed comment并
+read-back。Result不能直接改变下一步；完整Tree交给Supervisor后，由directive决定。
+
+Verify Findings使用stable `finding_id`。后续Result通过`FindingDispositionRecord`明确`resolved`、`still_open`
+或经Human批准的`waived`。archived Node上的Finding仍参与Root persistence和convergence，除非存在closed
+disposition；archive本身不能解决Finding。
+
+## 9. Cycle outcome与Root convergence
 
 ```text
 CycleOutcome
-  succeeded
-    verify_node_id
-    verified_git_head
-  changes_required
-    verify_node_id
-    finding_ids[]
-    progress_assessment
-    successor_cycle_key
+  conclusion: succeeded | repair_required | exhausted | canceled
+  plan_contract_digest
+  completed_work_ids[]
+  unresolved_finding_ids[]
+  attempted_approach_refs[]
+  verification_evidence_refs[]
+  git_revision
+  budget_usage
+  successor_reason?
 ```
 
-`succeeded`允许上层Policy在fresh Git/Linear验证后delivery。`changes_required`必须引用同一immutable
-artifact revision上的scope内blocking findings。Root级convergence gate通过后，Conductor按耦合关系形成
-一个或多个deterministic repair groups；当前只允许一个active Cycle，因此逐个创建successor。每个新Cycle
-重新走Plan、mandatory approval、Work DAG和Verify。`Inconclusive`、`Escalated`以及Provider/runtime failure
-不能直接创建successor。
+映射：
 
-## 6. Delivery
+- `succeeded` -> Cycle `Succeeded`；
+- `repair_required`或`exhausted` -> Cycle `Changes Required`；
+- `canceled` -> Cycle `Canceled`。
 
-Conductor在delivery前重新验证Root ownership、Root state、最新Cycle outcome、DAG、blockers、verified
-Git HEAD、checks和已有delivery：
+Cycle预算耗尽结束当前Cycle，不立即打扰用户。Root Loop从全部active/archived历史重新计算cycle count、same
+Finding persistence、no-progress、token和deadline gate：允许则创建successor Cycle，不允许才创建Root级
+convergence Human Action。
 
-```text
-gh available + push + PR success -> pull_request
-otherwise push succeeds           -> remote_branch
-otherwise                         -> local_branch
-```
+## 10. Root managed status与Timeline
 
-交付事实写入Git/SCM和Root Primary Status Comment，Root进入In Review但不自动Done。重复请求先查找
-deterministic branch/PR并收敛，不能创建重复PR。
+Root Primary Status Comment保存ownership、fixed Profile、branch、delivery和当前可见activity投影，不保存
+authoritative current Cycle、ready node、Queue或Provider pointer。
 
-Root In Review后出现review changes时，Root回到In Progress并创建successor Cycle；完成新Cycle后重新
-Verify和delivery。所有Cycles复用同一Root branch/worktree。
+用户时间轴不由Root/Cycle/Stage代码直接写。Root和Cycle durable边界发布typed event，由独立subscriber分别
+投影到Root或Cycle Issue comments，规则见[Workflow Timeline](workflow-timeline.md)。Timeline comment不是
+readiness或恢复authority。
 
-## 7. Root变化与用户编辑
+## 11. 用户和外部修改
 
-变化处理只使用Linear remote version、Cycle DAG、managed comments和Git事实：
+任何合法Linear变化都进入fresh Tree和Supervisor observation：
 
-- Root目标在非终态变化：当前execution precondition失效，创建或修订current Cycle Plan；
-- Todo/In Progress Work Node变化：下次Work只使用该Node的fresh内容；
-- Done Work业务内容晚于Completion Comment：当前Cycle进入`Escalated`，不在旧Node上隐式继续；
-- Human answer变化且影响已完成Node：创建review change successor Cycle；
-- 用户新增、移动或跨Cycle连接managed node：DAG validation失败并进入`needs_attention`；
+- Root目标、scope或acceptance变化使旧Tree digest和相关directive失效；
+- 用户修改pending Work内容后，Supervisor重新评估；
+- 用户archive/restore managed Node后，Conductor验证DAG并让Supervisor决定恢复；
+- Human Action status/comment形成validated resolution后交给Supervisor；
+- 用户伪造marker、跨Root relation、非法status或造成active dependency悬空时进入attention；
 - Done/Canceled Root不自动重开。
 
-Conductor只reconcile自己创建且marker匹配的Cycle和Node。用户业务输入可以修改title、description和
-relations，但不能通过伪造marker扩大Conductor权限。
+Conductor只管理marker匹配且位于owned Root Tree中的Issue，不能因普通文本扩大权限。
 
-## 8. 错误与恢复
+## 12. Git与delivery
 
-`needs_attention`不是持久Conductor状态。Conductor从fresh事实发现DAG、ownership、Profile或Git冲突时：
+所有Cycles复用一个Root branch/worktree。Work可以修改授予的workspace；commit、push、worktree和delivery由
+Conductor负责。Verify绑定immutable revision。只有最新Cycle `Succeeded`、matching passed Verify、verified
+HEAD和checks满足时才能delivery；Root进入`In Review`而不自动`Done`。
 
-- 在Root Timeline写去重、脱敏、可执行原因；
-- 在Primary投影`failed`及客观evidence；
-- 释放Agent lane；
-- 后续reconciliation重新读取，问题消失后自然恢复。
+## 13. 不变量
 
-Stage process、connection或Provider thread丢失本身不把Node标Done。Conductor保留Linear/Git事实并为同一
-Node创建fresh execution。旧Result缺少matching execution marker或precondition时必须拒绝。
-
-任何多Issue mutation只保证逐项幂等，不假设Linear事务。partial success、timeout或read-back不一致时，
-Conductor丢弃内存计划，重新读取完整Root Tree，按stable write IDs补齐唯一合法状态或进入attention；不得从
-已发送的mutation推断最终状态。
-
-## 9. 不变量
-
-1. Root是跨Root排序、workspace和恢复单位。
-2. Linear custom status、Cycle DAG和managed records是唯一Workflow authority，Git是唯一code/delivery authority。
-3. Cycle Issue是bootstrap-to-sealed graph container，不是executable node或独立workspace。
-4. Cycle child kind只允许plan、work、verify。
-5. Finding是Linear中的一等structured record；repair grouping按耦合关系，不按Finding数量机械创建Cycle。
-6. Root是Needs Approval和Needs Info的唯一state owner。
-7. 已终结Cycle DAG结构不可变，跨Cycle只使用Linear中的stable provenance。
-8. Conductor没有current Cycle cursor、Queue、dispatch table、gate table或Workflow DB。
-9. Verify绑定immutable Git artifact revision；Git HEAD变化使旧Verify Result失效。
-10. 每个deterministic repair group最多一个successor Cycle；多个独立group按stable order逐个执行；当前只支持每个Binding/Root一个writer。
-11. Stage retry和Root convergence gate只从Linear全历史与Git事实计算，创建新Cycle不会重置计数。
-12. waiting/working/failed/delivered投影必须带客观evidence；它们不是Workflow authority。
-13. Result/Event/process exit不能替代Linear/Git read-back。
-14. 每个Root同时最多一个active Cycle。
-15. Issue kind、status ID/category和transition必须同时有效；status catalog或partial mutation含糊时fail closed。
-16. Cycle先有Bootstrap Plan、后有引用approved `plan_contract_digest`的execution DAG；`Sealed`前
-    不存在可调度的完整DAG。
+1. Linear status、native archive flag、Issue Tree、relations和managed records共同构成Workflow authority。
+2. archive不是删除、取消、完成或Finding resolution。
+3. Root同时最多一个nonterminal active Cycle。
+4. 每个Cycle有隔离Supervisor、Plan、Work、Verify四个role thread。
+5. Approved Plan Contract immutable；Execution DAG可以通过accepted Supervisor patch演进。
+6. Human Action是Root/Cycle直接子Issue，不是DAG执行节点。
+7. Stage Result必须durable后才能进入Supervisor observation。
+8. Cycle耗尽先走Root convergence gate，不机械请求用户。
+9. Timeline comment是事件投影，不是workflow输入。

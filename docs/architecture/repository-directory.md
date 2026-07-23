@@ -57,23 +57,34 @@ apps/conductor/
     │   │   └── RootSchedulingPolicyInterface.ts
     │   └── internal/
     │       └── LinearPriorityRootSchedulingPolicyImpl.ts
-    ├── root-workflow/
+    ├── root-reconciliation/
     │   ├── api/
-    │   │   └── RootWorkflowPolicyInterface.ts
+    │   │   └── RootReconciliationPolicyInterface.ts
     │   └── internal/
-    │       └── LinearCycleRootWorkflowPolicyImpl.ts
-    ├── linear-dag/
+    │       └── LinearRootReconciliationPolicyImpl.ts
+    ├── cycle-supervisor-client/
     │   ├── api/
-    │   │   └── LinearDagExecutionInterface.ts
+    │   │   └── CycleSupervisorClientInterface.ts
     │   └── internal/
-    │       ├── LinearDagExecutionImpl.ts
-    │       ├── StageContextBuilder.ts
-    │       └── ReconcileRootUseCase.ts
-    ├── performer-stage-client/
+    │       └── PerformerCycleSupervisorClientImpl.ts
+    ├── cycle-directive-materialization/
     │   ├── api/
-    │   │   └── PerformerStageClientInterface.ts
+    │   │   └── CycleDirectiveMaterializerInterface.ts
     │   └── internal/
-    │       └── ShortProcessPerformerStageClientImpl.ts
+    │       └── LinearCycleDirectiveMaterializerImpl.ts
+    ├── performer-agent-client/
+    │   ├── api/
+    │   │   └── PerformerAgentClientInterface.ts
+    │   └── internal/
+    │       └── SessionPerformerAgentClientImpl.ts
+    ├── human-actions/
+    ├── workflow-events/
+    │   └── api/
+    │       └── WorkflowTimelinePublisherInterface.ts
+    ├── timeline-projections/
+    │   └── internal/
+    │       ├── LinearRootTimelineProjectionImpl.ts
+    │       └── LinearCycleTimelineProjectionImpl.ts
     ├── performer-profiles/
     │   ├── api/
     │   │   ├── PerformerProfile.ts
@@ -133,8 +144,10 @@ apps/performer/
 └── src/performer/
     ├── __main__.py
     ├── composition/
-    ├── stage_protocol/
-    ├── stage_execution/
+    ├── agent_protocol/
+    ├── cycle_supervisor/
+    ├── role_execution/
+    ├── session_runtime/
     ├── profile_control/
     └── backends/
         ├── provider_backend_interface.py
@@ -143,8 +156,8 @@ apps/performer/
             └── codex_backend_impl.py
 ```
 
-Performer app提供Stage execution和Profile control入口。Provider SDK只允许在对应
-backend目录中导入。
+Performer app提供Cycle Supervisor、Plan/Work/Verify role execution和Profile control入口。Provider SDK只允许
+在对应backend目录中导入；session runtime只保存可丢弃的opaque role/thread mapping。
 
 ## 5. Podium类库
 

@@ -22,7 +22,7 @@ Podium不拥有：
 - Root Activity投影或Root readiness派生；
 - Root scheduling、Stage选择和Verify；
 - Git worktree/branch/PR；
-- Provider SDK、StageWire或Provider thread解释；
+- Provider SDK、Performer session transport或Provider thread解释；
 - Performer Profile、Codex auth、API Key或`CODEX_HOME`持久化；
 - Conductor workflow database。
 

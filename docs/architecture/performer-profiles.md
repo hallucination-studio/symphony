@@ -14,10 +14,10 @@ Profiles，以及Conductor、Performer和Codex SDK之间的所有权边界。
 - Desktop通过Podium发出Profile Command；Podium只做瞬时转发和View组合，active Profile由
   Conductor验证并持久化；
 - Profile切换不重启Conductor，下一次Root claim立即使用新active Profile；
-- Root固定使用claim时的Profile；每个Stage用该Profile创建fresh Provider context；
+- Root固定使用claim时的Profile；每个Cycle的Supervisor、Plan、Work、Verify创建隔离Provider threads；
 - model、reasoning effort和Fast由Conductor保存为产品设置，并由Performer映射为SDK参数；
 - sandbox mode和command allowlist/denylist由Conductor保存，并由Performer映射为Provider-native策略；
-- Token使用量来自完整Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
+- Token使用量来自validated Supervisor/Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
 
 ## 2. Canonical模型
 
@@ -266,11 +266,11 @@ Fast必须按当前认证方式和SDK公开能力解释：
 - ChatGPT Profile只有在当前账号和所选model支持Codex Fast时才允许开启；
 - API Key Profile在V1显示为`Unavailable`，`isFastModeEnabled`必须为`false`；
 - Symphony不把API Key的其他priority/service-tier计费能力冒充为Codex Fast；
-- SDK在Stage启动时仍可拒绝已失效的model/Fast组合，错误必须作为Profile/Stage设置错误
+- SDK在role turn启动时仍可拒绝已失效的model/Fast组合，错误必须作为Profile/turn设置错误
   可见，不能自动换model或关闭Fast。
 
-Profile设置在每个Stage启动时重新读取。编辑当前Root所固定Profile的model、reasoning、Fast或
-execution policy后，无需重启Conductor，下一个Stage使用新设置；当前Stage不被抢占。
+Profile设置在每个role session/turn启动时重新读取。编辑当前Root所固定Profile的model、reasoning、Fast或
+execution policy后，无需重启Conductor；新session/turn使用新设置，当前turn不被抢占。
 
 ## 9. Readiness
 
@@ -302,14 +302,15 @@ Conductor启动后刷新所有已保存Profile的状态；`GetPerformerProfilesQ
 status后再返回View。readiness和account label只存在于当前进程内，重启时重新读取。
 active Profile未确认ready前不claim新的Root。
 
-## 10. Active Profile与Stage调用
+## 10. Active Profile与Agent调用
 
 Conductor在`profiles.json`保存一个`activeProfileId`。新Root claim时把ready active Profile固定到
-Root Primary Status Comment；切换active Profile只影响之后claim的Root，不抢占active Stage。
+Root Primary Status Comment；切换active Profile只影响之后claim的Root，不抢占active turn。
 
-每个Plan、Work和Verify Stage都使用该Profile的`CODEX_HOME`创建fresh Provider context。Profile只
-复用认证、Provider设置和SDK cache，不保存Root conversation或Stage continuation。Stage契约只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
+每个Cycle的Supervisor、Plan、Work和Verify role都使用该Profile的`CODEX_HOME`创建互相隔离的Provider
+thread。Profile复用认证、Provider设置和SDK cache；live role thread只在Performer runtime中存在，不能跨Cycle
+复用或成为durable authority。契约由[Cycle Supervisor](cycle-supervisor.md)和
+[Stage Contracts](stage-orchestration.md)定义。
 
 ## 11. Token usage
 
@@ -327,7 +328,7 @@ StageUsageSnapshot
 `cached_input_tokens`是`input_tokens`的子集，`total_tokens`按SDK语义或
 `input_tokens + output_tokens`计算，不能把cached token重复相加。
 
-每个有效Stage Result可以携带`usage`。Conductor先把settlement写入matching Stage execution managed comment，
+每个有效Supervisor/Stage Result可以携带`usage`。Conductor先把settlement写入matching execution managed comment，
 再从完整Root execution history重建累计值；Root Primary Status Comment只投影观察值：
 
 ```text
@@ -343,7 +344,7 @@ last_usage_stage_execution_id
 失效时，不为记录usage而绕过Root终止规则。
 
 Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
-settlement写入失败时，Stage启动前的Linear token reservation继续全额计入，不能因少计而绕过Root
+settlement写入失败时，turn启动前的Linear token reservation继续全额计入，不能因少计而绕过Root
 convergence gate；Primary投影写入失败只产生可见warning。
 
 Desktop只显示当前Stage完整Result携带的usage，不设计跨Root累计数量或实时token推测。Conductor可以在
@@ -415,8 +416,8 @@ token usage。指标必须带`observedAt`和stale状态。
 5. Conductor只保存Profile业务字段和active Profile ID。
 6. API Key只通过secret pipe进入Performer SDK。
 7. 只有ready Profile可以处理新Root。
-8. active Profile切换不抢占Stage，也不迁移已有Root Profile。
-9. 同一Root固定一个`performer_profile_id`；Profile复用认证和设置，不复用Provider conversation。
+8. active Profile切换不抢占active turn，也不迁移已有Root Profile。
+9. 同一Root固定一个`performer_profile_id`；Profile复用认证和设置，四role thread只在各自Cycle内复用。
 10. model、reasoning和Fast只通过SDK public API生效。
 11. sandbox和command policy只通过SDK public API生效，Symphony不实现动态授权引擎。
 12. SDK usage不宣称账单精度；Root token budget只由Linear reservation与validated settlement机械执行。

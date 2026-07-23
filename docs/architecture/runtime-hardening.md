@@ -1,31 +1,31 @@
 # V3 Runtime Hardening
 
-状态：目标架构提案。本文定义Stage runtime的进程、资源、请求、升级、shutdown和cleanup边界；
-不定义Linear Workflow或Stage Context。
+状态：目标架构提案。本文定义Agent runtime的进程、session、资源、请求、升级、shutdown和cleanup边界；
+不定义Linear Workflow、Supervisor或Stage contracts。
 
 ## 1. Scope record
 
 ```text
 authorized
   - 多Conductor Binding的single-generation reconcile
-  - 全局Stage capacity与有界admission
+  - 全局role-turn capacity与有界admission
   - Root worktree single-writer和maintenance coordination
   - Linear request broker、rate-limit和bounded retry
   - structured logs、Problems、health和Desktop observations
   - immutable runtime bundle、atomic upgrade、bounded shutdown和safe cleanup
-  - Performer readiness、Stage limits、heartbeat、cancellation和child-process cleanup
+  - Performer readiness、session/turn limits、heartbeat、cancellation和child-process cleanup
   - Provider-native sandbox mode和有界command allowlist/denylist
 
 required_consequences
   - runtime state全部可丢弃，不能成为Workflow authority
-  - capacity只决定何时运行一个已选Root的Stage，不改变Linear Priority/order/blocker
+  - capacity只决定何时运行一个已选Root的Supervisor/Stage turn，不改变Linear Priority/order/blocker
   - Host/Conductor crash后从Binding、Linear和Git重新建立runtime
   - failure必须有界、脱敏、可观察并释放资源
   - execution policy只做closed DTO映射，不形成Symphony通用授权系统
 
 out_of_scope
-  - sub-agents、child Turns或fan-out/fan-in capacity
-  - Workflow DB、Root/Leaf Queue、本地dispatch table、内部attempt journal或Stage checkpoint
+  - role内部sub-agents或fan-out/fan-in capacity
+  - Workflow DB、Root/Leaf Queue、本地dispatch table、内部attempt journal或turn checkpoint
   - 多writer、per-Agent worktree、自动merge或远程Agent runtime
   - 第二Provider Backend
   - 动态RBAC、逐命令人工审批、任意策略表达式或Provider config map
@@ -42,16 +42,17 @@ deferred_ideas
 V3 runtime可以维护以下memory-only对象：
 
 ```text
-StagePermit
+AgentTurnPermit
 InstallationLinearRequestBroker
 PerformerProcessHandle
-StageTransportHandle
+PerformerSessionTransportHandle
+OpaqueRoleSessionHandle
 HeartbeatObservation
 ShutdownDeadline
 ```
 
 这些对象可以在crash后全部丢失。它们不能保存或推导current Work、Root/Cycle/Node status、accepted
-Result、pending Human request、authoritative retry attempt或下一Root。恢复需要的Stage execution identity、
+Result、pending Human request、authoritative retry attempt或下一Root。恢复需要的turn execution identity、
 lease expiry、execution attempt、token reservation、Finding、progress、retry decision和deadline只写Linear managed
 comments。重启后：
 
@@ -79,21 +80,21 @@ for each Binding:
 ```
 
 每个generation有runtime ID、PID/process identity、start time和health channel。Generation ID只允许作为
-Stage lease fencing字段写入Node managed comment，不是Root ownership或Workflow cursor，也不进入Root Primary
+turn lease fencing字段写入managed comment，不是Root ownership或Workflow cursor，也不进入Root Primary
 Status Comment。Host必须证明旧process tree已经退出，才能启动replacement。
 
 Conductor先通过Project Conductor Pool和Root Conductor Label判断routing eligibility，再通过Binding stable
 identity和Root full `conductor_id`判断ownership；generation ID不能接管或
 迁移Root。
 
-## 4. Stage runtime boundary
+## 4. Agent session/turn runtime boundary
 
-Stage capacity、StageWire lifecycle、Human等待释放capacity、deadline、cancellation和fresh
-recovery只由[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
+Supervisor/Plan/Work/Verify session、turn lifecycle、Human等待、deadline、cancellation和恢复分别由
+[Cycle Supervisor](cycle-supervisor.md)与[Stage Contracts](stage-orchestration.md)定义。
 
-Runtime Hardening只要求permit、process/connection handle和普通progress heartbeat全部memory-only；它们不能
-承载Provider thread、pending Human future或workflow continuation。参与crash recovery的bounded Stage lease
-heartbeat是例外，由Stage Orchestration定义并写Linear。
+Runtime Hardening只允许permit、process/connection handle、opaque role session mapping和普通heartbeat存在于
+memory。live Provider thread可以提供同一Cycle role的上下文连续性，但不能成为workflow authority；丢失后从
+Linear/Git打开fresh session。参与crash fencing的bounded turn lease写Linear。
 
 ## 5. Linear request broker
 
@@ -144,7 +145,7 @@ RuntimeProblem
 ```
 
 `RuntimeProblem`是Podium/Desktop observation，可过期、覆盖或在restart后重新发现。只有影响用户下一步
-的Root error才写入Root Primary/Timeline Comment；heartbeat loss和tool progress不写Linear。
+的Root error才发布timeline event；heartbeat loss和tool progress不写Linear timeline。
 
 日志使用binding/root/stage/profile correlation IDs，不记录Token、cookie、Authorization header、API
 Key、raw Profile credential、Provider transcript、SDK object或不受限Issue内容。绝对Profile path在UI和
@@ -174,16 +175,16 @@ bundle pointer和payload只属于runtime delivery，不保存Root、Provider thr
 
 application、Binding或upgrade shutdown：
 
-1. 停止新的Root/Stage admission；
-2. 停止所有Stage接受新的tool call；
+1. 停止新的Root/session/turn admission；
+2. 停止所有active turns接受新的tool call；
 3. 请求Performer graceful cancel；
 4. 在deadline内等待当前Request处理或read-back结束；
 5. terminate剩余process trees；
 6. 关闭private channels和logs；
 7. 只有确认退出后报告stopped。
 
-shutdown不会把Root标成failed或Canceled。下次启动从Linear/Git重新选择并创建fresh Stage；不恢复
-旧Wire或Provider thread。
+shutdown不会把Root标成failed或Canceled。下次启动从Linear/Git重建Root并打开fresh matching role sessions；
+不恢复raw Provider thread pointer。
 
 ## 9. Safe worktree cleanup
 
@@ -206,14 +207,14 @@ run-marker digest和确认词，将Root置为Canceled并做Project、marker、pa
 
 | 故障 | Runtime动作 | Workflow恢复 |
 |---|---|---|
-| Stage process/connection启动失败 | 释放permit，记录Problem | 写attempt terminal record，保留reservation并过Root convergence gate |
-| Linear mutation上限到达 | 拒绝mutation，结束Stage后释放permit、read-back | 从fresh Linear/Git重新选择Stage |
-| heartbeat停止/硬wall-time耗尽 | cancel、terminate、read-back | lease过期后保留reservation并过Root convergence gate |
-| Wire在terminal Result前中断 | 终止Stage、释放permit、read-back | 按Stage协议处理已持久化事实或fresh retry |
+| role session/turn启动失败 | 释放permit，记录Problem | 写attempt terminal record并交给Supervisor/Root gate |
+| Linear mutation上限到达 | 拒绝mutation，结束turn后释放permit、read-back | 从fresh Linear/Git重建并继续 |
+| heartbeat停止/硬wall-time耗尽 | cancel active turn、terminate、read-back | 保留reservation并把事实交给Supervisor |
+| transport在terminal Result前中断 | 终止turn、释放permit、read-back | 使用已持久化事实或fresh role session |
 | terminal Result重复/迟到 | 以execution identity与precondition拒绝旧Result | Workflow facts不变 |
 | Linear 429 | bounded backoff，释放超时permit | 下次full-read继续 |
 | mutation unconfirmed | semantic read-back | 以read-back事实继续 |
-| Git HEAD变化 | 拒绝旧Result/mutation | fresh Stage重新审计Git |
+| Git HEAD变化 | 拒绝旧Result/mutation | fresh observation/turn重新审计Git |
 | Host/Conductor crash | replacement前证明旧tree退出 | full-read所有Roots/Git |
 | upgrade失败 | 保留旧完整bundle | Workflow不变 |
 | cleanup证明不足 | 不删除 | Root/branch保持可恢复 |
@@ -221,24 +222,24 @@ run-marker digest和确认词，将Root置为Canceled并做Project、marker、pa
 ## 11. 验收边界
 
 1. 每个running Binding恰好一个current Conductor generation。
-2. capacity单位是active Stage invocation；Root仍是全局admission与workspace单位。
-3. Stage绑定execution identity和fresh precondition；旧Context/Result不能修改新事实。
-4. launch、heartbeat、Stage limits、cancel和child-process cleanup有界；Provider token只做Stage后观察。
+2. capacity单位是active Supervisor/Stage turn；Root仍是全局admission与workspace单位。
+3. turn绑定execution identity和fresh precondition；旧Context/Result不能修改新事实。
+4. launch、heartbeat、turn limits、cancel和child-process cleanup有界；Provider token按validated Result结算。
 5. 同一Root同时最多一个workspace writer。
 6. Linear request遵守rate-limit，ambiguous write先read-back。
 7. runtime observations不参与Root scheduling或Workflow恢复。
 8. upgrade不原地覆盖binary，失败可回到上一个完整bundle。
 9. shutdown停止新admission并确认process tree/connection退出。
 10. cleanup只删除经过完整identity和dirty-state证明的worktree。
-11. crash后不恢复permit、process、Wire或Result；status/attempt/lease/token reservation/Finding/retry从Linear managed comments重新派生。
+11. crash后不恢复permit、process、raw thread或Result；status/attempt/lease/token/Finding/directive从Linear重建。
 12. physical Linear request和protocol request分别观测，background最多使用request与complexity窗口的25%。
 
 ## 12. 不变量
 
 1. Runtime hardening不能创建第二套Workflow authority。
-2. Root是顶层排序、admission、workspace和恢复单位；active Stage invocation是capacity单位。
+2. Root是顶层排序、admission、workspace和恢复单位；active model turn是capacity单位。
 3. 所有runtime handles、permits、普通progress heartbeats和Problems都可丢弃；recovery lease写Linear。
 4. Linear/Git事实修复后Root自然恢复，不需要operation resume API。
-5. Stage protocol与Human suspend/resume只由
-   [Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
-6. 当前runtime不预建sub-agent、memory或Provider-specific capacity控制面。
+5. Supervisor与Stage protocol只由[Cycle Supervisor](cycle-supervisor.md)和
+   [Stage Contracts](stage-orchestration.md)定义。
+6. 当前runtime不预建role内部sub-agent、durable memory或Provider-specific capacity控制面。

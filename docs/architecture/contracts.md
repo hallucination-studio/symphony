@@ -1,94 +1,75 @@
 # 契约与接口边界
 
-状态：目标架构提案。所有模块交互只依赖`*Interface`和closed generated schemas；具体技术实现使用
-`*Impl`并保持内部可见。目标架构只维护一个当前Protocol版本，不为旧状态机保留兼容union。
+状态：目标架构提案。所有模块交互只依赖`*Interface`和closed generated schemas；具体实现使用`*Impl`并保持
+内部可见。目标架构只维护一个当前Protocol版本，不为旧短Stage架构保留兼容union。
 
-## 1. 模块接口
-
-```text
-LinearGatewayInterface          <- PodiumLinearGatewayClientImpl
-RootSchedulingPolicyInterface   <- LinearPriorityRootSchedulingPolicyImpl
-RootWorkflowPolicyInterface     <- LinearCycleRootWorkflowPolicyImpl
-LinearDagExecutionInterface     <- LinearDagExecutionImpl
-PerformerStageClientInterface   <- ShortProcessPerformerStageClientImpl
-GitWorkspaceInterface           <- NativeGitWorkspaceImpl
-RootDeliveryInterface           <- GitRootDeliveryImpl
-ProviderBackendInterface        <- CodexBackendImpl
-```
-
-命名规则的唯一事实源是[代码模块与命名规范](code-organization.md)。Interface不能包含SDK、数据库、
-transport、process handle或credential type。
-
-## 2. Public Desktop protocol
-
-`PodiumClientProtocol`连接React和Desktop Backend。主要Views：
+## 1. 主要接口
 
 ```text
-DesktopOverviewView
-LinearConnectionView
-ConductorSummaryView
-ConductorDetailView
-RootSummaryView
-RootDetailView
-AttentionItemView
-RuntimeEventView
-NextActionView
+LinearGatewayInterface                 <- PodiumLinearGatewayClientImpl
+RootSchedulingPolicyInterface          <- LinearPriorityRootSchedulingPolicyImpl
+RootReconciliationPolicyInterface      <- LinearRootReconciliationPolicyImpl
+CycleSupervisorClientInterface         <- PerformerCycleSupervisorClientImpl
+CycleDirectiveMaterializerInterface    <- LinearCycleDirectiveMaterializerImpl
+PerformerAgentClientInterface          <- SessionPerformerAgentClientImpl
+WorkflowTimelinePublisherInterface     <- InProcessWorkflowTimelinePublisherImpl
+RootTimelineProjectionInterface        <- LinearRootTimelineProjectionImpl
+CycleTimelineProjectionInterface       <- LinearCycleTimelineProjectionImpl
+GitWorkspaceInterface                  <- NativeGitWorkspaceImpl
+RootDeliveryInterface                  <- GitRootDeliveryImpl
+ProviderBackendInterface               <- CodexBackendImpl
 ```
 
-主要Commands覆盖Linear connection、Conductor Binding lifecycle和Performer Profile lifecycle。
-Desktop不能发送Root workflow command、任意Linear
-mutation、Provider prompt或process control handle。
+Interface不能包含SDK、database、credential、raw Provider thread、process handle或arbitrary metadata。
 
-所有响应不包含Token、cookie、Authorization header、API Key、SDK object、raw Provider output、绝对
-Profile path或arbitrary metadata。
+## 2. Podium-Conductor boundary
 
-## 3. Podium-Conductor protocol
+Podium独占Linear OAuth、Token和SDK。Conductor通过closed `LinearGatewayProtocol`读取Project、status catalog、
+Root headers以及完整Root Tree，并执行受限mutation。
 
-Podium与Conductor private protocol承载三类closed消息：
+完整Tree查询必须支持：
 
 ```text
-LinearGatewayProtocol
-PerformerProfileRelayProtocol
-ConductorRuntimeReportingProtocol
+include_archived: true
+issues + comments + relations + labels + statuses + remote versions
 ```
 
-`LinearGatewayProtocol`使用generated request/result schemas传输业务DTO。Podium Handler验证
-organization、Project、pagination、payload大小和remote response shape，再调用Linear SDK。
+Root/Issue mutation携带binding、Project pool、Root routing/ownership、explicit target、expected remote version、
+expected status/archive/parent和stable write ID。没有arbitrary GraphQL、JSON mutation或SDK passthrough。
 
-每个Conductor发出的Linear查询和mutation都必须携带所属`binding_id`；Podium按该字段选择
-Binding和安装凭据，并维护`binding_id -> instance_id`的活跃实例映射。同一Binding的第二个
-实例fail closed，不同Binding可以在同一条private IPC通道上并行请求。不能用“最近一次
-handshake”或单例Binding推断请求归属。
+## 3. Conductor-Performer boundary
 
-`GetIssueTreeQuery`同时返回resolved Team的closed workflow status catalog。Status DTO只包含`status_id`、
-精确display name、category和position；Conductor按
-[Root Issue工作流](root-issue.md)验证Root/Cycle/Node允许子集。SDK status
-object或任意custom field map不能跨Gateway。
-
-`RootIssueSnapshot`是header DTO，包含Root native fields、delegation、Priority、blockers和bounded
-`root_managed_comments`，用于发现ownership/pending action事实；它不包含descendants、phase labels、Human
-answers或完整Tree。只有候选Root的`GetIssueTreeQuery`返回这些完整事实。
-
-Conductor Project级command必须携带：
+Conductor始终是caller。公共message union覆盖：
 
 ```text
-conductor_short_hash
-expected_project_id
+OpenCycleSupervisorRequest | SupervisorOpenedResult
+CycleSupervisorObservation | CycleDirective
+PlanTurnRequest             | PlanResult
+WorkTurnRequest             | WorkResult
+VerifyTurnRequest           | VerifyResult
+CloseCycleSessionsCommand   | CloseCycleSessionsResult
+PerformerProfileControlRequest | PerformerProfileControlResult
 ```
 
-Root/Issue mutation还携带完整Project Conductor Pool摘要、唯一Root routing、full Conductor ownership、Root、显式target、expected remote version/state/
-parent和stable `write_id`。Protocol没有arbitrary GraphQL、arbitrary JSON mutation或SDK passthrough。
+Supervisor字段只由[Cycle Supervisor](cycle-supervisor.md)定义；Plan/Work/Verify字段只由
+[Performer Stage Contracts](stage-orchestration.md)定义。本文不维护第二份字段表。
 
-## 4. Conductor-Performer Stage boundary
+Protocol传输Symphony session/turn correlation，不传raw Provider conversation pointer。response/event是当前
+Conductor call的输出，不能包含Performer callback或Conductor command endpoint。
 
-Conductor-Performer只使用caller-owned StageWire。`StageContextEnvelope`明确包含Root、Cycle和typed node
-identity，并用`stage`区分Plan、Work和Verify context。Plan Result输出closed logical graph；Conductor计算
-`plan_contract_digest`并负责物化节点与relations。注入字段、workspace capability、Event、Result和correlation只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
+## 4. Workflow timeline event boundary
+
+```text
+WorkflowTimelineEvent = RootTimelineEvent | CycleTimelineEvent
+```
+
+业务模块只发布generated event。Projection subscriber负责Markdown和Linear comment；event不允许携带任意完整
+comment、raw transcript或unbounded output。字段和delivery语义只由
+[Workflow Timeline](workflow-timeline.md)定义。
 
 ## 5. Performer Profile protocol
 
-Profile login/account/status使用独立`PerformerProfileControlProtocol`，不复用StageWire：
+Profile login/account/status使用独立`PerformerProfileControlProtocol`：
 
 ```text
 GetPerformerProfileStatusQuery
@@ -96,69 +77,75 @@ StartCodexChatGPTLoginCommand
 SetCodexApiKeyCommand
 ```
 
-API Key通过bounded secret stdin frame传给Performer control process，不进入JSON、日志、View或
-Podium storage。Codex login handle只存在于当前control process。
+API Key通过bounded secret stdin frame进入Performer，不进入JSON、日志、View或Podium storage。Provider login
+handle只存在于当前control process。
 
 ## 6. Validation与correlation
 
-所有第三方响应、Issue content、comments、Provider Result和Event都在对应边界strict validate。
-Stage correlation和Result acceptance只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义；本文不维护第二份字段表。
+所有第三方responses、Issue content、comments、Supervisor directive、Stage Result和timeline event都在边界strict
+validate。JSON Schema使用`additionalProperties: false`，unknown variant/field、invalid enum、超长payload、
+digest mismatch或incomplete required coverage一律fail closed。
 
-Stage execution outcome与Verify conclusion使用不同closed union。Public contract不能把Provider/transport/
-timeout/verification error编码成`changes_required`，也不能只用Linear Completed category代替matching Node
-`Done`与completion evidence。
-Plan approval、execution attempt、token reservation、Human action、Finding、progress和terminal outcome通过版本化
-closed schemas进入Linear managed records；不允许任意metadata map。`FindingRecord`至少包含`finding_id`、
-closed category/severity、evidence、affected scope、retryable、suggested remediation、acceptance criteria和
-`source_verify_id`。`finding_id`由Conductor为accepted new Finding分配；后续Verify必须对每个prior open ID
-返回精确disposition，不定义语义fingerprint。`VerifyConclusion`必须closed为`passed | changes_required | inconclusive |
-escalate_human`；`changes_required`必须包含与matching immutable revision绑定的structured Findings。
+Supervisor directive至少关联：
 
-`RootConvergencePolicy`和`RootConvergenceView`是Conductor domain contracts，不进入Stage Envelope。
-Performer只获得当前Stage的deadline、limits和capability，不能修改limit、声明override或创建Cycle。
+```text
+cycle_id
+supervisor_session_id
+supervisor_turn_id
+observed_tree_digest
+directive_id
+evidence_refs[]
+```
 
-## 7. Error与fail-closed
+Stage Result至少关联role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。
+Timeline event至少关联source durable record identity和deterministic event ID。
 
-跨进程错误使用closed code和sanitized reason，不返回raw exception、stack中的secret、SDK object或
-任意details map。边界不能混用throw/null/partial success表达同一失败；每种Protocol使用显式Result
-union。
+## 7. Error语义
 
-未知variant、未知field、超长payload、invalid enum、status catalog缺失/重复/category错误、Issue kind/state
-mismatch、invalid transition、scope mismatch和stale Stage全部fail closed。多Issue mutation返回逐项closed
-result；partial/unknown success必须触发完整Tree read-back，不能返回推测的aggregate success。
+每个Protocol使用显式Result union，不能混用throw/null/partial success表达同一失败。跨进程错误包含closed code、
+category、sanitized reason、retryability和action required，不返回raw exception、stack、secret或任意details map。
 
-## 8. Interface ownership
+业务blocked、budget exhausted、Provider transport failure和schema-invalid output是不同variants。Conductor不能把
+execution failure伪装成Verify Finding、Cycle repair或Human rejection。
 
-- Conductor定义`LinearGatewayInterface` consumer DTO和`PerformerStageClientInterface`；
-- Podium实现`LinearGatewayProtocolHandlerImpl`和内部`LinearSdkImpl`；
-- Conductor定义`RootWorkflowPolicyInterface`、`LinearDagExecutionInterface`、
-  `RootSchedulingPolicyInterface`、`GitWorkspaceInterface`和
-  `RootDeliveryInterface`；
-- Performer定义`ProviderBackendInterface`；
-- Podium定义Desktop/Binding/installation/runtime observation interfaces；
-- Impl不从package public exports导出，调用方不能deep import另一role实现。
+## 8. Managed record contracts
 
-## 9. 当前扩展边界
+Linear durable records使用同一schema生成机制：
 
-Target architecture只保留当前StageContext/Result schemas。sub-agents、cross-Stage memory、第二Provider和
-remote transport没有当前contract。实现迁移必须作为明确授权的独立工作，不增加compatibility shim。
+```text
+RootOwnershipRecord
+RootConvergencePolicy
+CycleSupervisorDirectiveRecord
+StageExecutionRecord
+PlanContractRecord
+PlanResult | WorkResult | VerifyResult
+HumanActionRequestRecord
+HumanActionResolutionRecord
+FindingRecord
+ProgressAssessment
+CycleOutcome
+TimelineProjectionRecord
+```
+
+record marker有schema version、stable identity和source references。Issue正文和普通comment不能伪造managed record。
+
+## 9. Interface ownership
+
+- Conductor定义Linear consumer、Root policy、Supervisor client、directive materializer、Performer client和timeline
+  publisher/projection interfaces；
+- Podium实现Linear protocol handler和内部Linear SDK；
+- Performer定义Provider backend和四role session runtime；
+- schemas是唯一手写wire source，generated TypeScript/Python/Rust代码不包含业务Policy；
+- Impl不从public exports导出，role不能deep import另一role实现。
 
 ## 10. 不变量
 
-1. 所有public/cross-process inputs和outputs有closed typed schemas。
-2. Stage request明确包含Root、Cycle和typed node；Cycle container不能作为Stage target。
-3. 每个Stage使用fresh Provider context，不持久化conversation pointer。
-4. mutation必须通过fresh Linear/Git read-back，不能由payload、Issue文本、summary或缓存决定。
-5. Error shape一致、脱敏且fail closed。
-6. SDK、database、transport handle和secrets不跨public interface。
-7. Result/Event不直接决定Linear/Git状态；accepted Result必须投影到Root/target Node并read-back。
-8. 不为sub-agents、memory或未来Provider预建variant。
-9. Verify conclusion只有在successful execution和matching immutable artifact revision上才可接受。
-10. Repair successor Cycle只能来自accepted `changes_required`、Root convergence gate和deterministic repair
-    group，不能来自execution failure或一条Finding一个Cycle的机械映射。
-11. 所有影响restart恢复的status、attempt、token reservation、Finding、progress和Human override都必须有Linear closed schema。
-12. Cycle创建时只有Bootstrap Plan；引用approved `plan_contract_digest`的exact graph必须完整
-    materialize并read-back后才可dispatch。
-13. 每次Stage的source manifest、coverage、context digest、deadline和包含token reservation的limits必须先写Linear并
-    read-back；attempt数由execution records派生。
+1. 所有public/cross-process input和output有closed versioned schema。
+2. Root Loop不调用模型；Cycle下一步只来自typed Supervisor directive。
+3. Plan、Work、Verify都有独立强类型request/result，不能返回任意next-step mutation。
+4. 每个Cycle四个role thread互相隔离；Work thread跨多个Work targets复用。
+5. Linear完整Tree contract必须包含native archive flag并支持archived Issues。
+6. mutation必须fresh read-back，不能由model payload、cache或transcript决定成功。
+7. Timeline event/comment是projection，不是workflow authority。
+8. SDK、database、transport handle、raw thread和secrets不跨public interface。
+9. 不为旧短Stage、第二Provider或任意metadata保留compatibility variant。

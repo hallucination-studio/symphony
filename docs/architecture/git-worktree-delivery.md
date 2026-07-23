@@ -28,10 +28,10 @@ branch:   symphony/runs/<root-identifier-lower>
 worktree: <conductor-data-root>/worktrees/<root-issue-id>
 ```
 
-## 3. Stage integration边界
+## 3. Agent integration边界
 
-Work Stage对workspace的权限、Work Result提交、Verify Node和delivery eligibility只由
-[Linear Workflow Loop与Performer Stage Context](stage-orchestration.md)定义。
+Work turn对workspace的权限、Work Result提交、Verify和delivery eligibility只由
+[Performer Stage Contracts](stage-orchestration.md)定义。
 
 本文只补充Git所有权：Conductor拥有branch/worktree lifecycle、checks、commit、push、PR和delivery；
 Performer不能commit、修改Git topology、push、调用`gh`或执行delivery。
