@@ -743,7 +743,7 @@ test("target project configuration is read as a closed Podium value", async () =
   assert.equal(JSON.stringify(result).includes("token"), false);
 });
 
-test("official SDK adapter creates a routed top-level Root and proves its label read-back", async () => {
+test("official SDK adapter creates a delegated routed top-level Root and proves read-back", async () => {
   let createdInput;
   let created;
   const issueLabel = {
@@ -771,13 +771,23 @@ test("official SDK adapter creates a routed top-level Root and proves its label 
     async issueLabels() { return connection([issueLabel]); },
     async createIssue(input) {
       createdInput = input;
-      created = issue({ id: "root-1", identifier: "SYM-1", title: input.title, description: input.description });
+      created = issue({
+        id: "root-1",
+        identifier: "SYM-1",
+        title: input.title,
+        description: input.description,
+        delegateId: input.delegateId,
+      });
       created.labels = async () => connection([issueLabel]);
       return { success: true, issueId: "root-1" };
     },
     async issue() { return created; },
   };
-  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const adapter = new LinearSdkImpl(
+    { kind: "development_token", token: "token", delegateActorId: "app-user-1" },
+    "organization-1",
+    sdk,
+  );
 
   const result = await adapter.createRootIssue({
     projectId: "project-1",
@@ -788,6 +798,7 @@ test("official SDK adapter creates a routed top-level Root and proves its label 
 
   assert.deepEqual(result, { rootIssueId: "root-1", identifier: "SYM-1", projectId: "project-1" });
   assert.deepEqual(createdInput.labelIds, ["issue-label-1"]);
+  assert.equal(createdInput.delegateId, "app-user-1");
   assert.equal(createdInput.parentId, undefined);
   assert.equal(createdInput.stateId, undefined);
 });

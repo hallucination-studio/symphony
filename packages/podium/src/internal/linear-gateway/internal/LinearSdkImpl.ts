@@ -574,6 +574,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       teamId: plan.teamId,
       projectId: plan.projectId,
       labelIds: [plan.issueLabelId],
+      ...(this.#delegateActorId === undefined ? {} : { delegateId: this.#delegateActorId }),
       title: input.title,
       description: input.description,
     });
@@ -589,6 +590,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       issue.parentId !== undefined && issue.parentId !== null ||
       issue.title !== input.title ||
       issue.description !== input.description ||
+      this.#delegateActorId !== undefined && issue.delegateId !== this.#delegateActorId ||
       routeLabels.length !== 1 ||
       routeLabels[0]?.id !== plan.issueLabelId ||
       routeLabels[0]?.name !== plan.issueLabelName
