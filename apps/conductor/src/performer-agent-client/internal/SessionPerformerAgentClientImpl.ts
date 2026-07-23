@@ -494,7 +494,7 @@ function decodeStageResult(value: unknown): StageResult {
   if (typeof result.stage_execution_id !== "string" || typeof result.role !== "string" || typeof outcome.kind !== "string") {
     throw new Error("role_result_shape_invalid");
   }
-  const normalizedOutcome = normalizeStageOutcome(outcome);
+  const normalizedOutcome = normalizeStageResultOutcome(outcome);
   return {
     resultId: result.stage_execution_id,
     protocolVersion: 1,
@@ -514,7 +514,7 @@ function decodeStageResult(value: unknown): StageResult {
   } as StageResult;
 }
 
-function normalizeStageOutcome(outcome: JsonRecord): StageResult["outcome"] {
+function normalizeStageResultOutcome(outcome: JsonRecord): StageResult["outcome"] {
   const kind = outcome.kind;
   if (typeof kind !== "string") throw new Error("role_result_outcome_invalid");
   if (kind === "work_completed") {
