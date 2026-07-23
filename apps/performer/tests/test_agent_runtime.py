@@ -21,7 +21,7 @@ class FakeBackend:
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         self.turns.append((session.provider_handle, request, workspace_root))
         if session.role == "root_reconciler":
-            return {"output": {"kind": "directive", "action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]}}}
+            return {"output": {"action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]}}}
         return {"output": {"kind": "canceled", "sanitized_reason": "test cancellation"}, "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
 
     def interrupt_turn(self, session) -> None:

@@ -60,6 +60,9 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "Root Reconciler" in sdk.started[0]["base_instructions"]
     assert "Do not use tools or inspect the workspace" in sdk.started[0]["base_instructions"]
     assert "root-1" in sdk.thread.calls[0][0]
+    assert sdk.thread.calls[0][1]["output_schema"]["required"] == ["action"]
+    assert "RETURN ONLY THE JSON OBJECT." in sdk.thread.calls[0][0]
+    assert "additionalProperties" not in sdk.thread.calls[0][0]
 
 
 def test_work_role_receives_workspace_and_is_archived():

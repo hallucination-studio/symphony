@@ -74,7 +74,7 @@ class RoleExecutionRuntime:
                 workspace_root=self._workspace_root,
                 cancel_event=cancel_event,
             )
-            result = _provider_output(output)
+            result = _provider_output(output, role)
         except ProviderTurnCanceled as error:
             result = {"kind": "canceled", "sanitized_reason": error.sanitized_reason}
         except ProviderTurnDeadlineExpired:
@@ -167,12 +167,16 @@ def _terminal(
     return payload
 
 
-def _provider_output(value: Any) -> dict[str, Any]:
+def _provider_output(value: Any, role: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("provider_output_invalid")
     output = value.get("output")
     if not isinstance(output, dict):
         raise ValueError("provider_output_invalid")
+    if role == "root_reconciler":
+        if not isinstance(output.get("action"), dict):
+            raise ValueError("provider_output_action_invalid")
+        return output
     if not isinstance(output.get("kind"), str):
         raise ValueError("provider_output_kind_invalid")
     return output

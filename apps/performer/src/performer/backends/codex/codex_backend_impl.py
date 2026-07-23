@@ -125,6 +125,7 @@ class CodexBackendImpl(ProviderBackendInterface):
                 effort=settings.get("reasoning_effort"),
                 sandbox=_sandbox_for_role(session.role),
                 service_tier=service_tier,
+                output_schema=_role_output_schema(session.role),
             )
         except Exception as error:
             raise ProviderBackendError(
@@ -237,12 +238,10 @@ def _sandbox_for_role(role: str) -> Sandbox:
 
 def _role_prompt(role: str, request: dict[str, Any]) -> str:
     context = {key: value for key, value in request.items() if key not in {"workspace_root", "secrets"}}
-    schema = _role_output_schema(role)
     return (
         "ROLE REQUEST:\n"
         f"{json.dumps(context, separators=(',', ':'))}\n"
-        "RETURN EXACTLY ONE JSON OBJECT MATCHING THIS SHAPE:\n"
-        f"{json.dumps(schema, separators=(',', ':'))}"
+        "RETURN ONLY THE JSON OBJECT."
     )
 
 

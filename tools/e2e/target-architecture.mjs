@@ -326,8 +326,8 @@ async function createChild({
   const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
   const root = await sdk.readWorkflowMutationTarget(rootIssueId);
   const parent = await sdk.readWorkflowMutationTarget(parentIssueId);
-  const status = tree.statusCatalog.find(({ name }) => name === "Todo") ?? tree.statusCatalog[0];
-  if (!root || !parent || !status) throw new Error("target_e2e_workflow_setup_incomplete");
+  const desiredStatus = tree.statusCatalog.find(({ name }) => name === statusName);
+  if (!root || !parent || !desiredStatus) throw new Error("target_e2e_workflow_setup_incomplete");
   const outcome = await gateway.mutateWorkflow({
     kind: "create_workflow_issue",
     writeId: `${marker}:create`,
@@ -341,7 +341,7 @@ async function createChild({
     issueKind,
     title,
     description,
-    statusId: parent.statusId,
+    statusId: desiredStatus.statusId,
     managedMarker: marker,
     labelNames: [],
     ...(order === undefined ? {} : { order }),
@@ -349,33 +349,7 @@ async function createChild({
   if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
     throw new Error(`target_e2e_workflow_child_${outcome.kind}`);
   }
-  if (statusName === "Draft") return outcome.readBack.targetIssueId;
-  const createdId = outcome.readBack.targetIssueId;
-  const desiredStatus = tree.statusCatalog.find(({ name }) => name === statusName);
-  const currentRoot = await sdk.readWorkflowMutationTarget(rootIssueId);
-  const currentTarget = await sdk.readWorkflowMutationTarget(createdId);
-  if (!desiredStatus || !currentRoot || !currentTarget) throw new Error("target_e2e_workflow_status_missing");
-  const update = await gateway.mutateWorkflow({
-    kind: "update_workflow_issue",
-    writeId: `${marker}:status`,
-    conductorShortHash,
-    expectedProjectId: projectId,
-    rootIssueId,
-    expectedRootRemoteVersion: currentRoot.updatedAt,
-    target: {
-      targetIssueId: createdId,
-      expectedRemoteVersion: currentTarget.updatedAt,
-      expectedParentIssueId: parentIssueId,
-      expectedManagedMarker: marker,
-    },
-    statusId: desiredStatus.statusId,
-    title,
-    description,
-  });
-  if (update.kind !== "applied" && update.kind !== "already_applied") {
-    throw new Error(`target_e2e_workflow_status_${update.kind}`);
-  }
-  return createdId;
+  return outcome.readBack.targetIssueId;
 }
 
 export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt }) {
