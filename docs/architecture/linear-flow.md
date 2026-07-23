@@ -59,7 +59,7 @@ RootTreeQuery
 ```
 
 查询必须分页到完整并返回每个Issue的native archive flag。无法读取archived children、comments、relations或
-remote versions时，Root不能进入Supervisor或mutation。
+remote versions时，Root不能进入Root Reconciler或mutation。
 
 waiting Human、terminal、ownership conflict和invalid Tree释放execution lane，继续检查下一个Root。memory cache
 只能减少读取，不能决定readiness或mutation。
@@ -83,20 +83,20 @@ webhook只wake，不是业务event或Queue。lost、duplicate和reordered webhoo
 
 ## 6. Root内部调用
 
-Root Loop不直接从Result选择ready Stage：
+Conductor host不直接从Result选择ready Stage：
 
 ```text
 fresh complete Root/Cycle Tree
 -> deterministic Root gate
--> when Cycle semantics are needed, call Cycle Supervisor
--> persist accepted CycleDirective
+-> call Root Reconciler when semantic action is required
+-> persist accepted RootDirective and user-comment dispositions
 -> materialize directive or execute matching role turn
 -> persist Result
--> next full observation returns to Supervisor
+-> next full observation returns to Root Reconciler
 ```
 
-Cycle Supervisor、Plan、Work和Verify全部运行在Performer，且由Conductor主动调用。contract分别见
-[Cycle Supervisor](cycle-supervisor.md)和[Stage Contracts](stage-orchestration.md)。
+Root Reconciler、Plan、Work和Verify全部运行在Performer，且由Conductor主动调用。contract分别见
+[Root Reconciliation](root-reconciliation.md)和[Stage Contracts](stage-orchestration.md)。
 
 ## 7. Mutation语义
 
@@ -116,27 +116,29 @@ archive/restore使用Linear原生archive API和explicit precondition。归档后
 ## 8. Timeline comment投影
 
 业务mutation和accepted Result read-back后发布typed timeline event。Root/Cycle projection subscriber通过Linear
-Gateway创建对应Issue comment。业务模块不直接拼接comment；comment失败不回滚mutation，下一轮按
-deterministic event ID补投影。规则见[Workflow Timeline](workflow-timeline.md)。
+Gateway创建对应Issue comment。Root Reconciler对普通human comment的reply由matching `RootDirective`
+materializer写回原Issue。业务模块不直接拼接comment；任何required comment create/read-back失败都停止当前Root，
+记录correlated error，并在恢复后按同一stable ID重试，成功前不推进下一动作。规则见
+[Workflow Timeline](workflow-timeline.md)。
 
 ## 9. 端到端流程
 
 ```text
 Podium configures Linear and Project Conductor Pool
 -> Root is routed and claimed
--> Root Loop creates initial Cycle
--> Cycle Supervisor observes complete Cycle Tree
--> Supervisor requests Plan turn
+-> Conductor creates initial Cycle
+-> Root Reconciler observes complete Root Tree
+-> Root Reconciler requests Plan turn
 -> Plan Result becomes durable
--> Supervisor requests Plan Review Human Action
+-> Root Reconciler requests Plan Review Human Action
 -> user resolution becomes durable
--> Supervisor materializes/adjusts active Work DAG
+-> Root Reconciler materializes/adjusts active Work DAG
 -> one Work thread executes selected ready Work Issues across turns
--> every Work Result returns through durable Tree to Supervisor
--> Supervisor adjusts DAG, requests Human, continues Work or requests Verify
--> independent Verify Result returns to Supervisor
--> Supervisor concludes Cycle or continues within budget
--> Root Loop applies convergence and creates successor Cycle when allowed
+-> every Work Result returns through durable Root Tree to Root Reconciler
+-> Root Reconciler adjusts DAG, requests Human, continues Work or requests Verify
+-> independent Verify Result returns to Root Reconciler
+-> Root Reconciler concludes, replans or supersedes Cycle within mechanical gates
+-> Conductor applies convergence and creates successor Cycle when directed and allowed
 -> passed Root is delivered and enters In Review
 ```
 
@@ -151,6 +153,6 @@ Podium configures Linear and Project Conductor Pool
 4. Root headers用于排序；dispatch/mutation必须基于selected Root完整fresh Tree。
 5. 完整Tree包括active和archived descendants。
 6. Conductor无poll checkpoint、Queue、DAG mirror、dispatch table或Workflow DB。
-7. Root Loop不调用模型；Cycle语义来自Supervisor。
-8. mutation和timeline projection都以durable read-back和stable identity收敛。
+7. Conductor不运行模型；Root和Cycle语义来自Root Reconciler。
+8. mutation、Reconciler reply和timeline comment都以Linear durable read-back和stable identity收敛。
 9. Root convergence跨所有active/archived Cycle历史计算。

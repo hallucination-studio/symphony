@@ -14,10 +14,10 @@ Profiles，以及Conductor、Performer和Codex SDK之间的所有权边界。
 - Desktop通过Podium发出Profile Command；Podium只做瞬时转发和View组合，active Profile由
   Conductor验证并持久化；
 - Profile切换不重启Conductor，下一次Root claim立即使用新active Profile；
-- Root固定使用claim时的Profile；每个Cycle的Supervisor、Plan、Work、Verify创建隔离Provider threads；
+- Root固定使用claim时的Profile；每个Root创建Reconciler thread，每个Cycle创建隔离Plan、Work、Verify threads；
 - model、reasoning effort和Fast由Conductor保存为产品设置，并由Performer映射为SDK参数；
 - sandbox mode和command allowlist/denylist由Conductor保存，并由Performer映射为Provider-native策略；
-- Token使用量来自validated Supervisor/Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
+- Token使用量来自validated Root Reconciler/Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
 
 ## 2. Canonical模型
 
@@ -307,10 +307,10 @@ active Profile未确认ready前不claim新的Root。
 Conductor在`profiles.json`保存一个`activeProfileId`。新Root claim时把ready active Profile固定到
 Root Primary Status Comment；切换active Profile只影响之后claim的Root，不抢占active turn。
 
-每个Cycle的Supervisor、Plan、Work和Verify role都使用该Profile的`CODEX_HOME`创建互相隔离的Provider
-thread。Profile复用认证、Provider设置和SDK cache；live role thread只在Performer runtime中存在，不能跨Cycle
-复用或成为durable authority。契约由[Cycle Supervisor](cycle-supervisor.md)和
-[Stage Contracts](stage-orchestration.md)定义。
+Root Reconciler以及每个Cycle的Plan、Work和Verify role都使用该Profile的`CODEX_HOME`创建互相隔离的
+Provider thread。Profile复用认证、Provider设置和SDK cache；Root Reconciler thread只在matching Root内复用，
+Stage thread只在matching Cycle内复用，且都不能成为durable authority。契约由
+[Root Reconciliation](root-reconciliation.md)和[Stage Contracts](stage-orchestration.md)定义。
 
 ## 11. Token usage
 
@@ -328,7 +328,7 @@ StageUsageSnapshot
 `cached_input_tokens`是`input_tokens`的子集，`total_tokens`按SDK语义或
 `input_tokens + output_tokens`计算，不能把cached token重复相加。
 
-每个有效Supervisor/Stage Result可以携带`usage`。Conductor先把settlement写入matching execution managed comment，
+每个有效Root Reconciler/Stage Result可以携带`usage`。Conductor先把settlement写入matching execution managed comment，
 再从完整Root execution history重建累计值；Root Primary Status Comment只投影观察值：
 
 ```text
@@ -417,7 +417,7 @@ token usage。指标必须带`observedAt`和stale状态。
 6. API Key只通过secret pipe进入Performer SDK。
 7. 只有ready Profile可以处理新Root。
 8. active Profile切换不抢占active turn，也不迁移已有Root Profile。
-9. 同一Root固定一个`performer_profile_id`；Profile复用认证和设置，四role thread只在各自Cycle内复用。
+9. 同一Root固定一个`performer_profile_id`；Reconciler thread只在该Root复用，三个Stage threads只在各自Cycle复用。
 10. model、reasoning和Fast只通过SDK public API生效。
 11. sandbox和command policy只通过SDK public API生效，Symphony不实现动态授权引擎。
 12. SDK usage不宣称账单精度；Root token budget只由Linear reservation与validated settlement机械执行。

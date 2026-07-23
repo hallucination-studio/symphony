@@ -62,16 +62,18 @@ apps/conductor/
     │   │   └── RootReconciliationPolicyInterface.ts
     │   └── internal/
     │       └── LinearRootReconciliationPolicyImpl.ts
-    ├── cycle-supervisor-client/
+    ├── root-reconciler-client/
     │   ├── api/
-    │   │   └── CycleSupervisorClientInterface.ts
+    │   │   └── RootReconcilerClientInterface.ts
     │   └── internal/
-    │       └── PerformerCycleSupervisorClientImpl.ts
-    ├── cycle-directive-materialization/
+    │       └── PerformerRootReconcilerClientImpl.ts
+    ├── root-directive-materialization/
     │   ├── api/
-    │   │   └── CycleDirectiveMaterializerInterface.ts
+    │   │   ├── RootDirectiveMaterializerInterface.ts
+    │   │   └── RootReconcilerReplyWriterInterface.ts
     │   └── internal/
-    │       └── LinearCycleDirectiveMaterializerImpl.ts
+    │       ├── LinearRootDirectiveMaterializerImpl.ts
+    │       └── LinearRootReconcilerReplyWriterImpl.ts
     ├── performer-agent-client/
     │   ├── api/
     │   │   └── PerformerAgentClientInterface.ts
@@ -145,7 +147,7 @@ apps/performer/
     ├── __main__.py
     ├── composition/
     ├── agent_protocol/
-    ├── cycle_supervisor/
+    ├── root_reconciler/
     ├── role_execution/
     ├── session_runtime/
     ├── profile_control/
@@ -156,7 +158,7 @@ apps/performer/
             └── codex_backend_impl.py
 ```
 
-Performer app提供Cycle Supervisor、Plan/Work/Verify role execution和Profile control入口。Provider SDK只允许
+Performer app提供Root Reconciler、Plan/Work/Verify role execution和Profile control入口。Provider SDK只允许
 在对应backend目录中导入；session runtime只保存可丢弃的opaque role/thread mapping。
 
 ## 5. Podium类库

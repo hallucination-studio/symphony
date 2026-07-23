@@ -30,26 +30,30 @@ This file contains the repository-wide working rules for coding agents.
   and `podium.db`. Linear SDK types and credentials must not cross into
   Conductor.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
-  root state from active and archived Linear facts plus Git, runs a
-  deterministic Root Reconciliation Loop, manages one Git worktree per Root,
-  and materializes closed Cycle Supervisor directives. It does not run a model
-  or interpret Stage Results to choose the next Cycle action.
+  root state from active and archived Linear facts plus Git, hosts Root
+  Reconciliation, manages one Git worktree per Root, and materializes closed
+  Root Reconciler directives. It does not run a model or interpret Stage
+  Results and user comments to choose the next action.
 - Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
   Team workflow. Findings, attempts, budgets, progress, and Human overrides
   are durable Linear facts; Root-level convergence limits are mechanical and
   survive every Conductor or Performer restart.
 - Conductor is always the Performer caller. Performer exclusively owns
-  Provider SDK integrations and gives each Cycle isolated Supervisor, Plan,
-  Work, and Verify role threads; the Work thread spans multiple Work Issues and
-  turns in that Cycle. Performer never calls Conductor, and Provider threads
-  are runtime continuity rather than durable workflow authority.
-- Cycle Supervisor is the only model-driven Cycle next-step decision role. It
-  reads the complete active and archived Cycle Tree and returns one closed,
-  versioned directive. Plan, Work, and Verify return strong typed Results and
-  do not mutate the DAG or create Human Actions directly.
+  Provider SDK integrations and gives each Root one Reconciler thread plus
+  isolated Plan, Work, and Verify threads per Cycle; the Work thread spans
+  multiple Work Issues and turns in that Cycle. Performer never calls
+  Conductor, and Provider threads are runtime continuity rather than durable
+  workflow authority.
+- Root Reconciler is the only model-driven workflow next-step decision role.
+  It reads the complete active and archived Root Tree, handles ordinary human
+  comments with durable replies, and returns one closed, versioned directive.
+  Plan, Work, and Verify return strong typed Results and do not mutate the DAG
+  or create Human Actions directly.
 - Root and Cycle user timelines are projected to their corresponding Linear
   Issue comments by typed event subscribers after durable read-back. Business
-  workflow modules do not render timeline comments directly.
+  workflow modules do not render timeline comments directly. Required Linear
+  timeline or Reconciler reply writes must read back successfully before the
+  Root can advance; failures stop that Root and emit correlated sanitized logs.
 - Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
   directories, and are controlled through the approved profile-control
   boundary. Symphony must not read or rewrite Codex-owned configuration files.

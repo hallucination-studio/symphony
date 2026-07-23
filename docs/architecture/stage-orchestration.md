@@ -1,9 +1,8 @@
 # Performer Plan、Work与Verify Contracts
 
 状态：目标架构提案。本文是Conductor调用Performer执行Plan、Work和Verify的request/result contract、角色
-thread、capability和Result语义的唯一事实源。Cycle下一步由
-[Cycle Supervisor](cycle-supervisor.md)决定；Root/Cycle lifecycle由
-[Root Reconciliation Loop](root-reconciliation.md)执行。本文不定义Supervisor directive或Human Action状态。
+thread、capability和Result语义的唯一事实源。Root/Cycle下一步和用户comment处理由
+[Root Reconciliation](root-reconciliation.md)决定。本文不定义Root directive或Human Action状态。
 
 ## 1. 决定
 
@@ -20,11 +19,11 @@ Verify Thread
   -> only VerifyTurnRequest / VerifyResult
 ```
 
-它们与Cycle Supervisor thread也互相隔离。Conductor是唯一caller；Performer独占Provider SDK、thread、turn、
+它们与Root Reconciler thread也互相隔离。Conductor是唯一caller；Performer独占Provider SDK、thread、turn、
 tool loop和Provider错误归一化。Performer不调用Linear、Conductor或Git topology。
 
 Plan、Work和Verify Result只报告执行事实，不决定下一个Stage、不创建Human Action、不修改Cycle DAG。Result
-被Conductor持久化并进入完整Cycle Tree后，Supervisor才决定下一步。
+被Conductor持久化并进入完整Root Tree后，Root Reconciler才决定下一步。
 
 ## 2. 公共wire envelope
 
@@ -147,7 +146,7 @@ PlanTurnContext
 ```
 
 Plan is read-only. It may inspect repository and history but cannot edit files, mutateLinear, createIssues or execute
-delivery. A Plan turn returns a proposal; onlySupervisor can request materialization/review.
+delivery. A Plan turn returns a proposal; only Root Reconciler can request materialization/review.
 
 ### 5.2 PlanResult
 
@@ -212,12 +211,12 @@ WorkTurnContext
   workspace_capability
 ```
 
-一个Cycle只有一个Work thread。Conductor在不同turn中把Supervisor选择且机械ready的Work Issue依次交给
+一个Cycle只有一个Work thread。Conductor在不同turn中把Root Reconciler选择且机械ready的Work Issue依次交给
 它。Work thread可以在当前turn内部执行Claude Code式tool loop：读取代码、修改、运行命令、观察普通错误、
 修复和重试，直到完成、需要外部输入或达到turn预算。
 
 Work只能修改授予的Root worktree，不能commit、push、创建worktree、调用Linear、改变DAG或执行另一个
-Work Issue。发现需要调整DAG时只报告structured observation；Supervisor决定是否提出Tree revision。
+Work Issue。发现需要调整DAG时只报告structured observation；Root Reconciler决定是否提出Tree revision。
 
 ### 6.2 WorkResult
 
@@ -280,7 +279,7 @@ VerifyTurnContext
   repository_snapshot
 ```
 
-Verify使用独立、read-only thread，不继承Plan、Work或Supervisor conversation。它不能修改文件、补做Work、
+Verify使用独立、read-only thread，不继承Plan、Work或Root Reconciler conversation。它不能修改文件、补做Work、
 修改DAG、创建Human Action或改变Finding状态。每个Result绑定immutable target revision。
 
 ### 7.2 VerifyResult
@@ -328,8 +327,8 @@ VerifyInconclusiveResult
   retryable
 ```
 
-Conductor验证target revision和evidence，持久化Result后交给Supervisor。Conductor不把
-`verify_changes_required`机械映射为successor Cycle；Supervisor可以在当前Cycle预算内继续Work，也可以提出
+Conductor验证target revision和evidence，持久化Result后交给Root Reconciler。Conductor不把
+`verify_changes_required`机械映射为successor Cycle；Root Reconciler可以在当前Cycle预算内继续Work，也可以提出
 repair conclusion。
 
 ## 8. 公共terminal variants
@@ -354,7 +353,7 @@ StageExecutionFailedResult
 ```
 
 Provider transport/crash/schema failure与业务blocked必须区分。只有validated Result能进入Linear；无Result的
-process failure写execution failure record并由下一次Supervisor observation处理，不能伪造业务结论。
+process failure写execution failure record并由下一次Root Reconciler observation处理，不能伪造业务结论。
 
 ## 9. Human input边界
 
@@ -368,7 +367,7 @@ scope_conflict
 verification_blocked
 ```
 
-Conductor持久化Result后，Cycle Supervisor决定是否请求Human Action、调整DAG、继续执行或结束Cycle。
+Conductor持久化Result后，Root Reconciler决定是否请求Human Action、调整DAG、继续执行或结束Cycle。
 resolved Human Action在Conductor验证后作为closed `human_resolutions[]`进入matching下一turn。
 
 ## 10. Event、Result与materialization
@@ -385,8 +384,8 @@ fresh-read Root/Cycle/target/Git preconditions
 -> persist immutable Result record with stable execution ID
 -> semantic read-back
 -> settle token reservation
--> rebuild complete Cycle Tree
--> advance Cycle Supervisor
+-> rebuild complete Root Tree
+-> advance Root Reconciler
 ```
 
 ## 11. Provider boundary与安全
@@ -413,6 +412,6 @@ matching turn/session失效并拒绝late output。
 3. Plan/Work/Verify都不决定下一步、不修改DAG、不创建Human Action。
 4. 所有request/result是closed、versioned、generated的强类型contract。
 5. Conductor是唯一caller；Performer不反向调用Conductor。
-6. Result必须durable并read-back后才能交给Supervisor。
+6. Result必须durable并read-back后才能交给Root Reconciler。
 7. Provider thread不是durable authority；丢失后从Linear/Git facts恢复。
 8. Plan/Verify read-only，Work只能修改授予的Root worktree。
