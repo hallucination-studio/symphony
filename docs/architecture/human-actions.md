@@ -159,7 +159,7 @@ root_issue_id
 cycle_issue_id?
 related_issue_ids[]
 source_root_directive_id?
-source_root_gate_record_id?
+source_root_convergence_record_id?
 based_on_tree_digest?
 proposal_digest
 expected_parent_remote_version

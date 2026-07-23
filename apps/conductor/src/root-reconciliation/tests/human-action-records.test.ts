@@ -15,7 +15,7 @@ test("Human Action request and resolution records round-trip as closed managed r
     cycleIssueId: "cycle-1",
     relatedIssueIds: ["plan-1"],
     sourceRootDirectiveId: "directive-1",
-    sourceRootGateRecordId: "gate-1",
+    sourceRootConvergenceRecordId: "convergence-1",
     basedOnTreeDigest: "tree-digest-1",
     proposalDigest: "proposal-digest-1",
     expectedParentRemoteVersion: "parent-v1",

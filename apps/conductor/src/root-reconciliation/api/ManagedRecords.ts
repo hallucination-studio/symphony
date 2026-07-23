@@ -212,7 +212,7 @@ export interface HumanActionRequestRecord {
   cycleIssueId?: string;
   relatedIssueIds: string[];
   sourceRootDirectiveId?: string;
-  sourceRootGateRecordId?: string;
+  sourceRootConvergenceRecordId?: string;
   basedOnTreeDigest?: string;
   proposalDigest: string;
   expectedParentRemoteVersion: string;
