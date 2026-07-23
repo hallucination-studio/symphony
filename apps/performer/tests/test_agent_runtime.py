@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from performer.agent_protocol.host import AgentProtocolHost
+from performer.backends.provider_backend_interface import ProviderBackendError
 from performer.backends.provider_backend_interface import ProviderSession
 
 
@@ -29,6 +30,30 @@ class FakeBackend:
 
     def close_role_session(self, session) -> None:
         self.closed.append(session.provider_handle)
+
+
+class RootFailureBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            raise ProviderBackendError("provider turn failed", code="provider_turn_failed", retryable=True)
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
+class InvalidRootDirectiveBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            return {"output": {"action": {"kind": "wait", "reason_code": "human"}}}
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
 
 
 def envelope(request_id: str, kind: str, payload: dict[str, object]) -> dict[str, object]:
@@ -139,6 +164,37 @@ def test_host_keeps_root_session_and_returns_root_directive():
     assert opened["kind"] == "root_reconciler_opened"
     assert result["action"]["kind"] == "wait"
     assert backend.turns[0][0] == "provider-1"
+
+
+def test_host_preserves_root_provider_failure_code():
+    backend = RootFailureBackend()
+    host = AgentProtocolHost(backend)
+    opened = host.handle(envelope("open", "open_root_reconciler", {
+        "root_issue_id": "root-1",
+        "performer_profile_id": "profile-1",
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z"},
+    }))
+
+    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
+
+    assert result["code"] == "provider_turn_failed"
+
+
+def test_host_reports_root_directive_contract_failure():
+    host = AgentProtocolHost(InvalidRootDirectiveBackend())
+    opened = host.handle(envelope("open", "open_root_reconciler", {
+        "root_issue_id": "root-1",
+        "performer_profile_id": "profile-1",
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z"},
+    }))
+
+    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
+
+    assert result["code"] == "root_directive_wait_missing_blocking_fact_refs"
 
 
 def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):

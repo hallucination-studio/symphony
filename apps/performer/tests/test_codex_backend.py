@@ -51,7 +51,15 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
 
     result = backend.execute_role_turn(
         session,
-        {"root_issue_id": "root-1", "observed_root_tree_digest": "tree-1"},
+        {
+            "root_issue_id": "root-1",
+            "observed_root_tree_digest": "tree-1",
+            "root": {"issue": {"issue_id": "root-1"}},
+            "cycles": [{
+                "cycle_issue": {"issue_id": "cycle-1"},
+                "issues": [{"issue_id": "plan-1", "issue_kind": "plan"}],
+            }],
+        },
         workspace_root=None,
         cancel_event=__import__("threading").Event(),
     )
@@ -60,7 +68,23 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "Root Reconciler" in sdk.started[0]["base_instructions"]
     assert "Do not use tools or inspect the workspace" in sdk.started[0]["base_instructions"]
     assert "root-1" in sdk.thread.calls[0][0]
+    assert '"action":{"kind":"..."}' in sdk.thread.calls[0][0]
+    assert '"execute_plan"' in sdk.thread.calls[0][0]
+    assert "ROOT TARGET IDS:" in sdk.thread.calls[0][0]
+    assert '"required_outputs":"array"' in sdk.thread.calls[0][0]
+    assert "plan-1" in sdk.thread.calls[0][0]
     assert sdk.thread.calls[0][1]["output_schema"]["required"] == ["action"]
+    action_variants = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]["oneOf"]
+    execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")
+    assert execute_plan_schema["required"] == [
+        "kind",
+        "cycle_issue_id",
+        "plan_issue_id",
+        "plan_goal",
+        "required_outputs",
+        "prior_plan_result_ids",
+        "human_resolution_ids",
+    ]
     assert "RETURN ONLY THE JSON OBJECT." in sdk.thread.calls[0][0]
     assert "additionalProperties" not in sdk.thread.calls[0][0]
 
@@ -81,6 +105,25 @@ def test_work_role_receives_workspace_and_is_archived():
     assert sdk.archived == ["thread-1"]
 
 
+@pytest.mark.parametrize("role", ["plan", "work", "verify"])
+def test_stage_roles_use_the_complete_outcome_contract(role: str):
+    sdk = FakeCodex()
+    backend = CodexBackendImpl(sdk)
+    session = backend.open_role_session(role, {"model": "gpt"})
+
+    backend.execute_role_turn(
+        session,
+        {"role": role},
+        workspace_root=None,
+        cancel_event=__import__("threading").Event(),
+    )
+
+    schema = sdk.thread.calls[0][1]["output_schema"]
+    assert len(schema["oneOf"]) >= 5
+    assert all("kind" in variant["properties"] for variant in schema["oneOf"])
+    assert all(len(variant["required"]) > 1 for variant in schema["oneOf"])
+
+
 def test_invalid_provider_json_is_sanitized():
     sdk = FakeCodex(FakeThread("not-json"))
     backend = CodexBackendImpl(sdk)
@@ -94,5 +137,5 @@ def test_invalid_provider_json_is_sanitized():
             cancel_event=__import__("threading").Event(),
         )
 
-    assert raised.value.code == "provider_output_invalid"
+    assert raised.value.code == "provider_output_invalid_json"
     assert "not-json" not in raised.value.sanitized_reason

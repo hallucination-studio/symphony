@@ -37,8 +37,14 @@ test("target E2E diagnostics prefer the concrete boundary failure over the harne
       request_kind: "get_workflow_issue_tree",
       code: "podium_conductor_request_failed",
     },
-    { event: "linear_physical_request", operation: "SymphonyRootHeaderFacts", status: 200 },
+      { event: "linear_physical_request", operation: "SymphonyRootHeaderFacts", status: 200 },
   ]), "podium_conductor_request_failed_get_workflow_issue_tree_SymphonyRootHeaderFacts_200");
+  assert.equal(lastLogReason([
+    {
+      event: "e2e_child_log",
+      message: JSON.stringify({ event: "root_reconciliation_failed", reason: "root_directive_invalid" }),
+    },
+  ]), "root_directive_invalid");
   assert.equal(safeErrorCode(new TypeError("untrusted runtime detail")), "target_e2e_type_error");
 });
 
@@ -66,6 +72,20 @@ test("target E2E execution evidence reads through the Linear gateway contract", 
   });
   assert.deepEqual(result, { planResults: 1, workResults: 2, verifyResults: 1 });
   assert.equal(calls, 1);
+});
+
+test("target E2E execution evidence stops when the production boundary reports failure", async () => {
+  await assert.rejects(waitForExecutionEvidence({
+    gateway: {
+      async getWorkflowIssueTree() {
+        return { comments: [] };
+      },
+    },
+    projectId: "project-1",
+    rootIssueId: "root-1",
+    deadlineAt: new Date(Date.now() + 1_000),
+    failureReason: () => "provider_output_invalid_json",
+  }), /target_e2e_execution_evidence_boundary_failed/u);
 });
 
 const missingConfiguration = (() => {

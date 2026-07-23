@@ -485,7 +485,19 @@ function decodeDirective(value: unknown): RootDirective {
     "revise_cycle_tree", "replan_current_cycle", "supersede_cycle", "create_successor_cycle",
     "request_human_action", "conclude_cycle", "conclude_root", "wait", "acknowledge",
   ]).has(action.kind)) throw new Error("root_directive_action_invalid");
-  return directive as unknown as RootDirective;
+  return camelizeKeys(directive) as RootDirective;
+}
+
+function camelizeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(camelizeKeys);
+  if (value === null || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()),
+      camelizeKeys(child),
+    ]),
+  );
 }
 
 function decodeStageResult(value: unknown): StageResult {
@@ -569,6 +581,9 @@ function record(value: unknown): JsonRecord {
 
 function sanitizedError(value: unknown): string {
   const payload = record(value);
+  if (typeof payload.code === "string" && /^[a-z][a-z0-9_:-]{1,120}$/u.test(payload.code)) {
+    return payload.code;
+  }
   return (typeof payload.sanitized_reason === "string" ? payload.sanitized_reason : "performer_agent_failed")
     .replace(/(?:Bearer\s+|sk-)[A-Za-z0-9._-]+/giu, "[REDACTED]")
     .replace(/\s+/gu, " ")

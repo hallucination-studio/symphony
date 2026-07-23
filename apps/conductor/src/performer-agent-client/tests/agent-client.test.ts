@@ -288,6 +288,75 @@ test("agent client rejects the retired stage_result envelope", async () => {
   await assert.rejects(client.executePlanTurn(stageInput("plan")), /unknown field|expected exactly one union variant|stage_result/u);
 });
 
+test("agent client normalizes the Root directive wire fields", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
+      ? {
+        protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
+        root_issue_id: "root-1", reconciler_session_id: "session-1",
+      }
+      : {
+        protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
+        reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_root_tree_digest: "tree-1",
+        rationale: "execute the plan", evidence_refs: [], comment_dispositions: [], external_change_dispositions: [],
+        action: {
+          kind: "execute_plan", cycle_issue_id: "cycle-1", plan_issue_id: "plan-1", plan_goal: "plan",
+          required_outputs: [], prior_plan_result_ids: [], human_resolution_ids: [],
+        },
+      } as JsonValue),
+    deadlineMs: 30_000,
+  });
+  await client.openRootReconciler({
+    protocolVersion: 1,
+    requestId: "open-request",
+    rootIssueId: "root-1",
+    profileId: "profile-1",
+    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
+  });
+
+  const result = await client.advanceRootReconciler({
+    requestId: "advance-request",
+    sessionId: "session-1",
+    observation: {
+      root: { issueId: "root-1", title: "Root", description: "Root" } as never,
+      tree: {
+        root_issue_id: "root-1", status_catalog: [], issues: [{ issue_id: "root-1", issue_kind: "root", title: "Root", description: "Root", status: "In Progress" }], comments: [], relations: [], observed_at: "2026-07-23T00:00:00Z",
+      },
+      git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } },
+      observedAt: "2026-07-23T00:00:00Z", treeDigest: "tree-1", complete: true,
+      protocolVersion: 1, requestId: "observation-request", reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1",
+      cycles: [], rootHumanActions: [], pendingUserComments: [], externalLinearChanges: [], acceptedDirectives: [],
+      rootReconcilerFailures: [], reconcilerReplies: [], limits: {
+        maxObservationBytes: 1, maxDirectiveBytes: 1, maxTurnWallTimeMs: 1, reservedTotalTokens: 1,
+      },
+    } as never,
+  });
+
+  assert.equal(result.directive.action.kind, "execute_plan");
+  assert.equal(result.directive.action.planIssueId, "plan-1");
+  assert.equal(result.directive.action.cycleIssueId, "cycle-1");
+});
+
+test("agent client preserves the structured Performer error code", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId }) => ({
+      protocol_version: "1",
+      request_id: requestId,
+      kind: "error",
+      code: "provider_turn_failed",
+      sanitized_reason: "The Provider turn failed.",
+      retryable: true,
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  await assert.rejects(client.executePlanTurn(stageInput("plan")), /provider_turn_failed/u);
+});
+
 test("persistent Performer channel keeps one process across multiple requests", async () => {
   const script = [
     "const readline=require('node:readline');",

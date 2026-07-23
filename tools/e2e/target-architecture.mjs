@@ -279,7 +279,13 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       displayName: "Target architecture E2E",
       reasoningEffort: "low",
     });
-    const evidence = await waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt });
+    const evidence = await waitForExecutionEvidence({
+      gateway,
+      projectId,
+      rootIssueId,
+      deadlineAt,
+      failureReason: () => latestRootFailureReason(logs),
+    });
     if (evidence.planResults < 1 || evidence.workResults < 2 || evidence.verifyResults < 1) {
       throw new Error("target_e2e_stage_evidence_incomplete");
     }
@@ -352,10 +358,13 @@ async function createChild({
   return outcome.readBack.targetIssueId;
 }
 
-export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt }) {
+export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt, failureReason }) {
   const stopAt = Math.min(deadlineAt.getTime(), Date.now() + 180_000);
   let latest = { planResults: 0, workResults: 0, verifyResults: 0 };
   while (Date.now() < stopAt) {
+    if (typeof failureReason === "function" && failureReason()) {
+      throw new Error("target_e2e_execution_evidence_boundary_failed");
+    }
     const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     latest = {
       planResults: countStageResults(tree.comments, "plan"),
@@ -366,6 +375,21 @@ export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId
     await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
   }
   throw new Error("target_e2e_execution_evidence_timeout");
+}
+
+function latestRootFailureReason(logs) {
+  for (const event of [...logs].reverse()) {
+    if (event?.event !== "e2e_child_log" || typeof event.message !== "string") continue;
+    try {
+      const message = JSON.parse(event.message);
+      if (message?.event !== "root_reconciliation_failed") continue;
+      const reason = message.reason;
+      return typeof reason === "string" && /^[a-z][a-z0-9_:-]{1,120}$/u.test(reason) ? reason : "root_reconciliation_failed";
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 function countStageResults(comments, stage) {
@@ -442,7 +466,7 @@ function readLogReason(event, logs) {
   if (event?.event !== "e2e_child_log" || typeof event.message !== "string") return undefined;
   try {
     const message = JSON.parse(event.message);
-    for (const key of ["sanitized_reason", "error_code", "code"]) {
+    for (const key of ["sanitized_reason", "error_code", "code", "reason"]) {
       const value = message?.[key];
       if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
         return addRequestKind(value, message?.request_kind, logs);
