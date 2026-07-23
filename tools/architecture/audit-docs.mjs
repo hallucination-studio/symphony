@@ -1,6 +1,10 @@
 import { readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+
+const execFileAsync = promisify(execFile);
 
 const inlineLink = /\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/gu;
 const referenceDefinition = /^\s*\[([^\]]+)\]:\s*(<[^>]+>|\S+)/gmu;
@@ -90,6 +94,22 @@ export function inspectArchitectureSources(sources, auditedFiles = new Set(sourc
     left.file.localeCompare(right.file) || left.code.localeCompare(right.code));
 }
 
+export function inspectArchitectureAuthority(sources, trackedFiles) {
+  const violations = [];
+  for (const file of trackedFiles) {
+    if (file === "tasks" || file.startsWith("tasks/")) {
+      violations.push({ code: "tracked_execution_task", file });
+    }
+  }
+  for (const [file, source] of sources) {
+    if (/(?:^|[\s`'"(])tasks\//mu.test(source)) {
+      violations.push({ code: "architecture_references_execution_task", file });
+    }
+  }
+  return violations.sort((left, right) =>
+    left.file.localeCompare(right.file) || left.code.localeCompare(right.code));
+}
+
 export async function auditArchitectureDocs(root) {
   const directory = path.join(root, "docs", "architecture");
   const files = (await readdir(directory))
@@ -115,7 +135,16 @@ export async function auditArchitectureDocs(root) {
     }
   }
 
-  return inspectArchitectureSources(sources, new Set(files));
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z"], {
+    cwd: root,
+    encoding: "buffer",
+  });
+  const trackedFiles = stdout.toString("utf8").split("\0").filter(Boolean);
+  return [
+    ...inspectArchitectureSources(sources, new Set(files)),
+    ...inspectArchitectureAuthority(sources, trackedFiles),
+  ].sort((left, right) =>
+    left.file.localeCompare(right.file) || left.code.localeCompare(right.code));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
