@@ -65,7 +65,7 @@ project-catalog
 conductor-bindings
 linear-gateway
 performer-profile-relay
-runtime-observations
+conductor-presence
 desktop-views
 ```
 

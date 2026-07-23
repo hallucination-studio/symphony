@@ -73,7 +73,7 @@ StageTurnResultEnvelope
 
 `role`是discriminator；context和result variant必须matching。未知字段、未知variant、role/session不匹配、
 source coverage不完整、digest错误或超出bound均fail closed。所有schema使用`additionalProperties: false`，由
-JSON Schema生成TypeScript/Python codecs。
+JSON Schema生成各语言的generated codecs；生成语言集合由[契约与接口边界](contracts.md)统一定义。
 
 ## 3. Session与turn
 
