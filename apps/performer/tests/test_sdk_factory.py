@@ -14,6 +14,7 @@ def test_configured_base_url_uses_public_codex_config() -> None:
 
     config = codex.call_args.args[0]
     assert config.config_overrides == (
+        "features.plugins=false",
         'openai_base_url="http://codex.example.test/v1"',
     )
 
@@ -22,7 +23,16 @@ def test_absent_base_url_uses_sdk_default() -> None:
     with patch("performer.backends.codex.codex_backend_impl.Codex") as codex:
         create_sdk({})
 
-    codex.assert_called_once_with()
+    config = codex.call_args.args[0]
+    assert config.config_overrides == ("features.plugins=false",)
+
+
+def test_sdk_disables_remote_plugin_bootstrap_for_isolated_provider_runtime() -> None:
+    with patch("performer.backends.codex.codex_backend_impl.Codex") as codex:
+        create_sdk({"SYMPHONY_CODEX_BASE_URL": "http://codex.example.test/v1"})
+
+    config = codex.call_args.args[0]
+    assert "features.plugins=false" in config.config_overrides
 
 
 @pytest.mark.parametrize(
@@ -48,6 +58,7 @@ def test_http_with_an_explicit_port_is_available() -> None:
         create_sdk({"SYMPHONY_CODEX_BASE_URL": "http://localhost:8080/v1"})
 
     assert codex.call_args.args[0].config_overrides == (
+        "features.plugins=false",
         'openai_base_url="http://localhost:8080/v1"',
     )
 

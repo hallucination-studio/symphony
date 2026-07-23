@@ -58,6 +58,7 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
 
     assert result["output"]["action"]["kind"] == "wait"
     assert "Root Reconciler" in sdk.started[0]["base_instructions"]
+    assert "Do not use tools or inspect the workspace" in sdk.started[0]["base_instructions"]
     assert "root-1" in sdk.thread.calls[0][0]
 
 
