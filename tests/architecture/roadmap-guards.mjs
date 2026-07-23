@@ -321,7 +321,7 @@ export function inspectAuthoredFile(file, source) {
       violation(
         normalizedFile,
         "future_product_scope",
-        "Roadmap 2 implementation cannot prebuild concepts outside the active boundary",
+        "Target architecture implementation cannot prebuild unapproved concepts",
       ),
     );
   }

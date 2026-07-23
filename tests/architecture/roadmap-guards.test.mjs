@@ -18,7 +18,7 @@ function assertViolationCases(cases) {
   }
 }
 
-test("authored source and schemas obey the static Roadmap 2 guards", async () => {
+test("authored source and schemas obey the static target architecture guards", async () => {
   assert.deepEqual(await findArchitectureViolations(root), []);
 });
 
@@ -81,7 +81,7 @@ test("negative controls reject Conductor persistence", () => {
   assertViolationCases(cases);
 });
 
-test("approved Roadmap 2 scheduling vocabulary is inside the active boundary", () => {
+test("approved target scheduling vocabulary is inside the active boundary", () => {
   const cases = [
     [
       "apps/conductor/src/root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.ts",
@@ -119,8 +119,8 @@ test("retired Conductor turn observation surfaces are rejected", () => {
 
 test("approved managed evidence vocabulary is inside the active boundary", () => {
   for (const [file, source] of [
-    ["apps/conductor/src/root-workflow/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
-    ["apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts", "interface RootSelectionEvidence {}"],
+    ["apps/conductor/src/root-reconciliation/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
+    ["apps/conductor/src/root-reconciliation/internal/RootInvariantPolicy.ts", "interface RootSelectionEvidence {}"],
   ]) {
     assert.deepEqual(inspectAuthoredFile(file, source), []);
   }
@@ -151,7 +151,7 @@ test("negative controls reject browser secrets and arbitrary provider config", (
   assertViolationCases(cases);
 });
 
-test("negative controls reject every concept outside the Roadmap 2 boundary", () => {
+test("negative controls reject every concept outside the target architecture boundary", () => {
   const names = [
     "ParallelPerformerLane",
     "PlanRevisionStore",
@@ -182,8 +182,8 @@ test("negative controls reject every concept outside the Roadmap 2 boundary", ()
     "apps/conductor/src/bad.ts",
     "class ParallelPerformerLane {}",
   ).find(({ code }) => code === "future_product_scope");
-  assert.match(violation?.summary ?? "", /Roadmap 2/u);
-  assert.doesNotMatch(violation?.summary ?? "", /V1/u);
+  assert.match(violation?.summary ?? "", /Target architecture/u);
+  assert.doesNotMatch(violation?.summary ?? "", /Roadmap/u);
 });
 
 test("safe explanatory vocabulary does not trigger implementation guards", () => {
@@ -196,7 +196,7 @@ test("safe explanatory vocabulary does not trigger implementation guards", () =>
   );
   assert.deepEqual(
     inspectAuthoredFile(
-      "apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts",
+      "apps/conductor/src/root-reconciliation/internal/RootInvariantPolicy.ts",
       "interface RootWorkspaceEvidence { rootIssueId: string; }",
     ),
     [],

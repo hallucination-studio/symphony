@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "scopes": {
+    "control-profile": {
+      "path_patterns": [
+        "^packages/podium/src/internal/runtime-observations/",
+        "^apps/podium-desktop/src/ui/WorkPage\\.tsx$"
+      ],
+      "paths": [
+        "apps/podium-desktop/src/ui/WorkPage.tsx",
+        "packages/podium/src/internal/runtime-observations/api/.gitkeep",
+        "packages/podium/src/internal/runtime-observations/api/RuntimeObservationStoreInterface.ts"
+      ],
+      "symbols": {
+        "CommandAcceptedResult": [
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/podium-client/podium-client.schema.json"
+        ],
+        "CreateRootCommand": [
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/podium-client/podium-client.schema.json"
+        ],
+        "HostCommandAccepted": [
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/desktop-host/desktop-host.schema.json"
+        ],
+        "NextActionView": [
+          "apps/podium-desktop/src/client/GeneratedPodiumClient.ts",
+          "apps/podium-desktop/src/client/contracts-runtime.d.mts",
+          "apps/podium-desktop/src/client/contracts-runtime.mjs",
+          "apps/podium-desktop/src/ui/components.tsx",
+          "apps/podium-desktop/src/ui/types.ts",
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/podium-client/podium-client.schema.json",
+          "packages/podium/src/internal/desktop-views/PodiumDesktopViewImpl.ts",
+          "packages/podium/src/public/DesktopViewInterface.ts",
+          "packages/podium/src/public/index.ts"
+        ]
+      }
+    },
+    "linear-boundary": {
+      "path_patterns": [],
+      "paths": [],
+      "symbols": {
+        "ConductorHeartbeat": [
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"
+        ],
+        "ConductorRuntimeReport": [
+          "apps/conductor/src/main.ts",
+          "apps/conductor/src/runtime-reporting/api/ConductorRuntimeReporterInterface.ts",
+          "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.test.ts",
+          "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.ts",
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"
+        ]
+      }
+    },
+    "agent-workflow": {
+      "path_patterns": [
+        "^apps/conductor/src/linear-dag/",
+        "^apps/conductor/src/root-workflow/",
+        "^apps/conductor/src/performer-stage-client/",
+        "^apps/conductor/src/runtime-reporting/",
+        "^apps/conductor/src/composition/ConductorCycleDelayPolicy\\.ts$",
+        "^apps/conductor/src/composition/LinearRootStageDispatcher\\.ts$",
+        "^apps/performer/src/performer/stage_execution/",
+        "^apps/performer/src/performer/stage_protocol/",
+        "^tests/e2e/conductor-serialized-workflow\\.test\\.mjs$",
+        "^tests/e2e/target-workflow-",
+        "^tests/integration/recovery/(?:cancel|stage)-recovery\\.test\\.mjs$",
+        "^tools/e2e/serialized-workflow-boundary\\.mjs$",
+        "^tools/e2e/target-workflow-"
+      ],
+      "paths": [
+        "apps/conductor/src/composition/ConductorCycleDelayPolicy.ts",
+        "apps/conductor/src/composition/LinearRootStageDispatcher.ts",
+        "apps/conductor/src/linear-dag/api/LinearDagExecutionInterface.ts",
+        "apps/conductor/src/linear-dag/api/index.ts",
+        "apps/conductor/src/linear-dag/internal/DagMaterializer.ts",
+        "apps/conductor/src/linear-dag/internal/LinearDagExecutionImpl.ts",
+        "apps/conductor/src/linear-dag/internal/PlanContractValidator.ts",
+        "apps/conductor/src/linear-dag/internal/RootDagViewBuilder.ts",
+        "apps/conductor/src/linear-dag/internal/StageContextBuilder.ts",
+        "apps/conductor/src/linear-dag/tests/dag-materialization.test.ts",
+        "apps/conductor/src/linear-dag/tests/plan-stage.test.ts",
+        "apps/conductor/src/linear-dag/tests/root-dag-view.test.ts",
+        "apps/conductor/src/linear-dag/tests/verify-stage.test.ts",
+        "apps/conductor/src/linear-dag/tests/work-stage.test.ts",
+        "apps/conductor/src/performer-stage-client/api/PerformerStageClientInterface.ts",
+        "apps/conductor/src/performer-stage-client/internal/ShortProcessPerformerStageClientImpl.ts",
+        "apps/conductor/src/performer-stage-client/internal/StageProcessEnvironment.ts",
+        "apps/conductor/src/performer-stage-client/tests/process-environment.test.ts",
+        "apps/conductor/src/performer-stage-client/tests/stage-client.test.ts",
+        "apps/conductor/src/root-workflow/api/.gitkeep",
+        "apps/conductor/src/root-workflow/api/ManagedRecords.ts",
+        "apps/conductor/src/root-workflow/api/Models.ts",
+        "apps/conductor/src/root-workflow/api/RootWorkflowPolicyInterface.ts",
+        "apps/conductor/src/root-workflow/api/index.ts",
+        "apps/conductor/src/root-workflow/internal/.gitkeep",
+        "apps/conductor/src/root-workflow/internal/FindingPolicy.ts",
+        "apps/conductor/src/root-workflow/internal/LinearCycleRootWorkflowPolicyImpl.ts",
+        "apps/conductor/src/root-workflow/internal/ManagedRecordCodec.ts",
+        "apps/conductor/src/root-workflow/internal/ProgressPolicy.ts",
+        "apps/conductor/src/root-workflow/internal/RepairGroupingPolicy.ts",
+        "apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts",
+        "apps/conductor/src/root-workflow/tests/.gitkeep",
+        "apps/conductor/src/root-workflow/tests/convergence.test.ts",
+        "apps/conductor/src/root-workflow/tests/finding-progress.test.ts",
+        "apps/conductor/src/root-workflow/tests/managed-records.test.ts",
+        "apps/conductor/src/root-workflow/tests/models.test.ts",
+        "apps/conductor/src/root-workflow/tests/repair-grouping.test.ts",
+        "apps/conductor/src/root-workflow/tests/workflow-policy.test.ts",
+        "apps/conductor/src/runtime-reporting/api/.gitkeep",
+        "apps/conductor/src/runtime-reporting/api/ConductorRuntimeReporterInterface.ts",
+        "apps/conductor/src/runtime-reporting/internal/.gitkeep",
+        "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.test.ts",
+        "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.ts",
+        "apps/conductor/src/runtime-reporting/tests/.gitkeep",
+        "apps/performer/src/performer/stage_execution/__init__.py",
+        "apps/performer/src/performer/stage_execution/runtime.py",
+        "apps/performer/src/performer/stage_protocol/__init__.py",
+        "apps/performer/src/performer/stage_protocol/host.py",
+        "tests/e2e/conductor-serialized-workflow.test.mjs",
+        "tests/e2e/target-workflow-deadline.test.mjs",
+        "tests/e2e/target-workflow-delivery-boundary.test.mjs",
+        "tests/e2e/target-workflow-delivery.test.mjs",
+        "tests/e2e/target-workflow-entry.test.mjs",
+        "tests/e2e/target-workflow-evidence.test.mjs",
+        "tests/e2e/target-workflow-facts.test.mjs",
+        "tests/e2e/target-workflow-fixtures.test.mjs",
+        "tests/e2e/target-workflow-inputs.test.mjs",
+        "tests/e2e/target-workflow-live.test.mjs",
+        "tests/e2e/target-workflow-process.test.mjs",
+        "tests/e2e/target-workflow-production.test.mjs",
+        "tests/e2e/target-workflow-repair-boundary.test.mjs",
+        "tests/e2e/target-workflow-repair.test.mjs",
+        "tests/e2e/target-workflow-restart-boundary.test.mjs",
+        "tests/e2e/target-workflow-restart.test.mjs",
+        "tests/e2e/target-workflow-runner.test.mjs",
+        "tests/e2e/target-workflow-scheduling.test.mjs",
+        "tests/e2e/target-workflow-static-audit.test.mjs",
+        "tests/e2e/target-workflow-success-boundary.test.mjs",
+        "tests/e2e/target-workflow-success.test.mjs",
+        "tests/e2e/target-workflow-transport.test.mjs",
+        "tests/e2e/target-workflow-verdict.test.mjs",
+        "tests/integration/recovery/cancel-recovery.test.mjs",
+        "tests/integration/recovery/stage-recovery.test.mjs",
+        "tools/e2e/serialized-workflow-boundary.mjs",
+        "tools/e2e/target-workflow-deadline.mjs",
+        "tools/e2e/target-workflow-delivery-boundary.mjs",
+        "tools/e2e/target-workflow-delivery.mjs",
+        "tools/e2e/target-workflow-entry.mjs",
+        "tools/e2e/target-workflow-evidence.mjs",
+        "tools/e2e/target-workflow-facts.mjs",
+        "tools/e2e/target-workflow-fixtures.mjs",
+        "tools/e2e/target-workflow-inputs.mjs",
+        "tools/e2e/target-workflow-live.mjs",
+        "tools/e2e/target-workflow-polling.mjs",
+        "tools/e2e/target-workflow-process.mjs",
+        "tools/e2e/target-workflow-production.mjs",
+        "tools/e2e/target-workflow-repair-boundary.mjs",
+        "tools/e2e/target-workflow-repair.mjs",
+        "tools/e2e/target-workflow-restart-boundary.mjs",
+        "tools/e2e/target-workflow-restart.mjs",
+        "tools/e2e/target-workflow-runner.mjs",
+        "tools/e2e/target-workflow-scheduling-live.mjs",
+        "tools/e2e/target-workflow-scheduling.mjs",
+        "tools/e2e/target-workflow-setup.mjs",
+        "tools/e2e/target-workflow-static-audit.mjs",
+        "tools/e2e/target-workflow-success-boundary.mjs",
+        "tools/e2e/target-workflow-success.mjs",
+        "tools/e2e/target-workflow-transport.mjs",
+        "tools/e2e/target-workflow-verdict.mjs"
+      ],
+      "symbols": {
+        "ConductorRuntimeReporter": [
+          "apps/conductor/src/main.ts",
+          "apps/conductor/src/runtime-reporting/api/ConductorRuntimeReporterInterface.ts",
+          "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.test.ts",
+          "apps/conductor/src/runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.ts"
+        ],
+        "LinearDagExecution": [
+          "apps/conductor/src/composition/LinearRootStageDispatcher.test.ts",
+          "apps/conductor/src/composition/LinearRootStageDispatcher.ts",
+          "apps/conductor/src/linear-dag/api/LinearDagExecutionInterface.ts",
+          "apps/conductor/src/linear-dag/api/index.ts",
+          "apps/conductor/src/linear-dag/internal/LinearDagExecutionImpl.ts",
+          "apps/conductor/src/linear-dag/internal/StageContextBuilder.ts",
+          "apps/conductor/src/linear-dag/tests/dag-materialization.test.ts",
+          "apps/conductor/src/linear-dag/tests/plan-stage.test.ts",
+          "apps/conductor/src/linear-dag/tests/verify-stage.test.ts",
+          "apps/conductor/src/linear-dag/tests/work-stage.test.ts",
+          "apps/conductor/src/main.ts"
+        ],
+        "RootWorkflowPolicy": [
+          "apps/conductor/src/composition/ConductorRuntime.ts",
+          "apps/conductor/src/composition/LinearConductorRuntime.test.ts",
+          "apps/conductor/src/linear-dag/internal/RootDagViewBuilder.ts",
+          "apps/conductor/src/main.ts",
+          "apps/conductor/src/root-workflow/api/RootWorkflowPolicyInterface.ts",
+          "apps/conductor/src/root-workflow/api/index.ts",
+          "apps/conductor/src/root-workflow/internal/LinearCycleRootWorkflowPolicyImpl.ts",
+          "apps/conductor/src/root-workflow/internal/RootConvergencePolicy.ts",
+          "apps/conductor/src/root-workflow/tests/convergence.test.ts",
+          "apps/conductor/src/root-workflow/tests/workflow-policy.test.ts"
+        ],
+        "ShortProcessPerformerStageClient": [
+          "apps/conductor/src/linear-dag/tests/work-stage.test.ts",
+          "apps/conductor/src/main.ts",
+          "apps/conductor/src/performer-stage-client/internal/ShortProcessPerformerStageClientImpl.ts",
+          "apps/conductor/src/performer-stage-client/tests/stage-client.test.ts"
+        ],
+        "StageContextEnvelope": [
+          "apps/conductor/src/linear-dag/internal/StageContextBuilder.ts",
+          "apps/conductor/src/performer-stage-client/internal/ShortProcessPerformerStageClientImpl.ts",
+          "apps/performer/src/performer/contracts.py",
+          "apps/performer/src/performer/stage_execution/runtime.py",
+          "packages/contracts/fixtures/cross-language/invalid/stage-context-unknown.json",
+          "packages/contracts/fixtures/cross-language/valid/stage-context.json",
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/conductor-performer/conductor-performer.schema.json",
+          "tests/contracts/v1-contracts.test.mjs"
+        ],
+        "StageOutcome": [
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/conductor-performer/conductor-performer.schema.json",
+          "tests/contracts/v1-contracts.test.mjs"
+        ]
+      }
+    }
+  }
+}
