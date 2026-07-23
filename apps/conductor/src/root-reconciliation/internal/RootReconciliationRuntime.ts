@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";
 import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
@@ -270,7 +270,7 @@ export class RootReconciliationRuntime {
     setPhase(`persist_${result.role}_linear_write`);
     const command = {
       kind: "append_workflow_comment" as const,
-      writeId: `${directiveId}:result:${result.resultId}`,
+      writeId: stageResultWriteId(directiveId, result.resultId),
       expectedProjectId: target.project_id,
       rootIssueId: view.root.issueId,
       expectedRootRemoteVersion: rootIssue.remote_version,
@@ -336,6 +336,13 @@ function safeFailureCode(value: unknown): string {
   return typeof value === "string" && /^[a-z][a-z0-9_:-]{1,120}$/u.test(value)
     ? value
     : "unknown";
+}
+
+function stageResultWriteId(directiveId: string, resultId: string): string {
+  const digest = createHash("sha256")
+    .update(`${directiveId}:result:${resultId}`, "utf8")
+    .digest("hex");
+  return `stage-result:${digest}`;
 }
 
 function validateStageResult(input: StageTurnInput, result: StageResult): void {

@@ -133,7 +133,8 @@ test("Root runtime persists a typed Stage Result and observation rebuilds its Wo
   if (!parsed.ok) return;
   assert.equal(parsed.value.kind, "stage_result");
   if (parsed.value.kind !== "stage_result") return;
-  assert.equal(parsed.value.resultId, mutations[0]!.writeId.split(":result:")[1]);
+  assert.match(mutations[0]!.writeId, /^stage-result:[a-f0-9]{64}$/u);
+  assert.ok(mutations[0]!.writeId.length <= 128);
   assert.equal(parsed.value.stage, "work");
   assert.deepEqual(buildRootObservationInputs({ tree }).cycles[0]?.workResults, [{
     recordId: parsed.value.resultId,

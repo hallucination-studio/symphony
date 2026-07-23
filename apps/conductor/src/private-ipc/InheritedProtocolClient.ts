@@ -102,11 +102,21 @@ export class InheritedProtocolClient {
     ) {
       return Promise.reject(new Error("private_ipc_request_invalid"));
     }
-    const message = validateMessage({
-      protocol_version: "1",
-      request_id: input.requestId,
-      body: input.body,
-    });
+    let message: ProtocolMessage;
+    try {
+      message = validateMessage({
+        protocol_version: "1",
+        request_id: input.requestId,
+        body: input.body,
+      });
+    } catch (error) {
+      const wrapped = new Error("private_ipc_request_schema_invalid", { cause: error });
+      Object.assign(wrapped, {
+        code: "private_ipc_request_schema_invalid",
+        schemaPath: privateIpcFailureSchemaPath(error),
+      });
+      return Promise.reject(wrapped);
+    }
     const frame = `${JSON.stringify(message)}\n`;
     if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES) {
       return Promise.reject(new Error("private_ipc_frame_too_large"));

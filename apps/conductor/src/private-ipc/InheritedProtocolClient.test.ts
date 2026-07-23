@@ -27,6 +27,25 @@ test("private protocol correlates a closed response", async () => {
   assert.deepEqual(await pending, { kind: "unbound" });
 });
 
+test("private protocol exposes a stable code for an invalid outgoing request", async () => {
+  const responses = new PassThrough();
+  const requests = new PassThrough();
+  const client = new InheritedProtocolClient(responses, requests);
+
+  await assert.rejects(
+    client.request({
+      requestId: "invalid-request",
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1" },
+      timeoutMs: 1_000,
+    }),
+    (error: unknown) => {
+      assert.equal((error as Error & { code?: string }).code, "private_ipc_request_schema_invalid");
+      assert.equal((error as Error & { schemaPath?: string }).schemaPath, "$.body");
+      return true;
+    },
+  );
+});
+
 test("private protocol times out and ignores a late response", async () => {
   const responses = new PassThrough();
   const requests = new PassThrough();
