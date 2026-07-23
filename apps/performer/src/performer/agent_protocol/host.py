@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import select
 from pathlib import Path
 from threading import Event
 from typing import Any, Iterable
@@ -65,17 +66,27 @@ class AgentProtocolHost:
                 ),
             )
 
-    def iter_lines(self, stream: Iterable[bytes]) -> Iterable[dict[str, Any]]:
-        for frame in stream:
-            if len(frame) > MAX_FRAME_BYTES:
-                yield error_response("unknown", ProtocolError("request_limit_exceeded", "The Performer request is too large."))
-                continue
+    def iter_lines(self, stream: Iterable[bytes], cancel_event: Event | None = None) -> Iterable[dict[str, Any]]:
+        cancel_event = cancel_event or Event()
+        file_number = _file_number(stream)
+        if file_number is None:
+            for frame in stream:
+                if cancel_event.is_set():
+                    return
+                yield _decode_frame(self, frame)
+            return
+        reader = getattr(stream, "readline")
+        while not cancel_event.is_set():
             try:
-                value = json.loads(frame)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                yield error_response("unknown", ProtocolError("request_invalid", "The Performer request is not valid JSON."))
+                readable, _, _ = select.select([file_number], [], [], 0.1)
+            except InterruptedError:
                 continue
-            yield self.handle(value)
+            if not readable:
+                continue
+            frame = reader()
+            if not frame:
+                return
+            yield _decode_frame(self, frame)
 
     def cancel(self) -> None:
         self._sessions.cancel_all()
@@ -109,3 +120,21 @@ def _text(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{key}_invalid")
     return value
+
+
+def _file_number(stream: Iterable[bytes]) -> int | None:
+    try:
+        value = getattr(stream, "fileno")()
+    except (AttributeError, OSError, ValueError):
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _decode_frame(host: AgentProtocolHost, frame: bytes) -> dict[str, Any]:
+    if len(frame) > MAX_FRAME_BYTES:
+        return error_response("unknown", ProtocolError("request_limit_exceeded", "The Performer request is too large."))
+    try:
+        value = json.loads(frame)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return error_response("unknown", ProtocolError("request_invalid", "The Performer request is not valid JSON."))
+    return host.handle(value)

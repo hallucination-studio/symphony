@@ -33,11 +33,15 @@ def main() -> None:
     backend = CodexBackendImpl(sdk)
     if args.agent:
         cancel_event = Event()
-        previous_term = signal.signal(signal.SIGTERM, lambda *_: cancel_event.set())
-        previous_int = signal.signal(signal.SIGINT, lambda *_: cancel_event.set())
         try:
             host = AgentProtocolHost(backend, workspace_root=args.workspace_root)
-            for result in host.iter_lines(sys.stdin.buffer):
+            def request_cancel(*_: object) -> None:
+                cancel_event.set()
+                host.cancel()
+
+            previous_term = signal.signal(signal.SIGTERM, request_cancel)
+            previous_int = signal.signal(signal.SIGINT, request_cancel)
+            for result in host.iter_lines(sys.stdin.buffer, cancel_event):
                 print(json.dumps(result, separators=(",", ":")), flush=True)
         except ValueError as error:
             raise SystemExit(str(error)) from None
