@@ -259,6 +259,33 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
   assert.deepEqual(second.page_info, { has_next_page: false });
 });
 
+test("Root scheduling service emits the complete issue snapshot required by the protocol", async () => {
+  const services = await createConductorServices({
+    async listRootIssues() {
+      return {
+        items: [{
+          issue: { ...issue("root-1", "project-1"), labels: ["symphony:conductor/abc123"], isArchived: false },
+          isDelegatedToSymphony: true,
+          priority: "normal",
+          blockers: [],
+          rootConductorLabels: [{ conductorShortHash: "abc123" }],
+          rootManagedComments: [],
+        }],
+        pageInfo: { hasNextPage: false },
+      };
+    },
+  });
+
+  const result = await services.handle({
+    kind: "list_root_issues",
+    project_id: "project-1",
+    page: { limit: 250 },
+  });
+
+  assert.deepEqual(result.items[0].issue.labels, ["symphony:conductor/abc123"]);
+  assert.equal(result.items[0].issue.is_archived, false);
+});
+
 test("Root scheduling gateway rejects malformed closed values", async () => {
   const valid = {
     issue: issue("root-1", "project-1"),
@@ -372,6 +399,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
 
   assert.equal(result.kind, "workflow_issue_tree");
   assert.equal(result.tree.issues.length, 2);
+  assert.equal(result.tree.issues[0].is_archived, false);
   assert.equal(result.tree.relations[0].relation_id, "relation-1");
   assert.equal(reads, 1);
   await assert.rejects(

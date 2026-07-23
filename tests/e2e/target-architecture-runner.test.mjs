@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  lastLogReason,
   readArchitectureAcceptanceManifest,
   runTargetArchitectureEvidence,
+  safeErrorCode,
   targetArchitectureScenarioManifest,
+  waitForExecutionEvidence,
 } from "../../tools/e2e/target-architecture.mjs";
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 
@@ -21,6 +24,48 @@ test("target E2E manifest is generated from the architecture acceptance section"
       "production_process", "restart_recovery", "production_process", "production_process"],
   );
   for (const scenario of scenarios) assert.ok(scenario.statement.length > 0);
+});
+
+test("target E2E diagnostics prefer the concrete boundary failure over the harness wrapper", () => {
+  assert.equal(lastLogReason([
+    { event: "e2e_podium_handler_failed", reason: "linear_request_failed" },
+    { event: "e2e_child_failed", reason: "conductor_protocol_failed" },
+  ]), "linear_request_failed");
+  assert.equal(lastLogReason([
+    {
+      event: "e2e_podium_response_error",
+      request_kind: "get_workflow_issue_tree",
+      code: "podium_conductor_request_failed",
+    },
+    { event: "linear_physical_request", operation: "SymphonyRootHeaderFacts", status: 200 },
+  ]), "podium_conductor_request_failed_get_workflow_issue_tree_SymphonyRootHeaderFacts_200");
+  assert.equal(safeErrorCode(new TypeError("untrusted runtime detail")), "target_e2e_type_error");
+});
+
+test("target E2E execution evidence reads through the Linear gateway contract", async () => {
+  let calls = 0;
+  const result = await waitForExecutionEvidence({
+    gateway: {
+      async getWorkflowIssueTree(projectId, rootIssueId) {
+        calls += 1;
+        assert.equal(projectId, "project-1");
+        assert.equal(rootIssueId, "root-1");
+        return {
+          comments: [
+            { body: 'stage_result {"stage":"plan"}' },
+            { body: 'stage_result {"stage":"work"}' },
+            { body: 'stage_result {"stage":"work"}' },
+            { body: 'stage_result {"stage":"verify"}' },
+          ],
+        };
+      },
+    },
+    projectId: "project-1",
+    rootIssueId: "root-1",
+    deadlineAt: new Date(Date.now() + 1_000),
+  });
+  assert.deepEqual(result, { planResults: 1, workResults: 2, verifyResults: 1 });
+  assert.equal(calls, 1);
 });
 
 const missingConfiguration = (() => {

@@ -214,6 +214,13 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       delegateActorId: projectConfiguration.delegateActorId,
       accessToken: config.secrets.linearDevToken,
     });
+    store.saveProject({
+      projectId: projectConfiguration.project.projectId,
+      installationId,
+      organizationId,
+      name: projectConfiguration.project.name,
+      updatedAt: projectConfiguration.project.updatedAt,
+    });
     store.saveConductorBinding({
       bindingId,
       conductorId,
@@ -231,7 +238,10 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
     });
     store.close();
 
-    podium = await createProductionPodiumConductorOwner({ databasePath });
+    podium = await createProductionPodiumConductorOwner({
+      databasePath,
+      log: (event) => logs.push(event),
+    });
     const environmentForConductor = {
       HOME: environment.HOME,
       LANG: environment.LANG,
@@ -269,7 +279,7 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       displayName: "Target architecture E2E",
       reasoningEffort: "low",
     });
-    const evidence = await waitForExecutionEvidence({ gateway, rootIssueId, deadlineAt });
+    const evidence = await waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt });
     if (evidence.planResults < 1 || evidence.workResults < 2 || evidence.verifyResults < 1) {
       throw new Error("target_e2e_stage_evidence_incomplete");
     }
@@ -368,11 +378,11 @@ async function createChild({
   return createdId;
 }
 
-async function waitForExecutionEvidence({ gateway, rootIssueId, deadlineAt }) {
+export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt }) {
   const stopAt = Math.min(deadlineAt.getTime(), Date.now() + 180_000);
   let latest = { planResults: 0, workResults: 0, verifyResults: 0 };
   while (Date.now() < stopAt) {
-    const tree = await gateway.readWorkflowIssueTree(rootIssueId);
+    const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     latest = {
       planResults: countStageResults(tree.comments, "plan"),
       workResults: countStageResults(tree.comments, "work"),
@@ -386,7 +396,7 @@ async function waitForExecutionEvidence({ gateway, rootIssueId, deadlineAt }) {
 
 function countStageResults(comments, stage) {
   return comments.filter((comment) =>
-    comment.body.includes("stage_result") && new RegExp(`\\"stage\\"\\s*:\\s*\\"${stage}\\"`, "u").test(comment.body),
+    comment.body.includes("stage_result") && new RegExp(`"stage"\\s*:\\s*"${stage}"`, "u").test(comment.body),
   ).length;
 }
 
@@ -414,32 +424,76 @@ function remaining(deadlineAt) {
   return Math.max(1, deadlineAt.getTime() - Date.now());
 }
 
-function safeErrorCode(error) {
+export function safeErrorCode(error) {
   const code = error && typeof error === "object" && typeof error.code === "string"
     ? error.code
     : error instanceof Error ? error.message : "target_e2e_failed";
-  return /^[a-z][a-z0-9_]{1,120}$/u.test(code) ? code : "target_e2e_failed";
+  if (/^[a-z][a-z0-9_]{1,120}$/u.test(code)) return code;
+  const errorName = error instanceof Error && typeof error.name === "string"
+    ? error.name
+      .replace(/([a-z])([A-Z])/gu, "$1_$2")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "_")
+      .replace(/^_|_$/gu, "")
+    : "unknown_error";
+  return /^[a-z][a-z0-9_]{1,60}$/u.test(errorName)
+    ? `target_e2e_${errorName}`
+    : "target_e2e_unknown_error";
 }
 
-function lastLogReason(logs) {
-  for (const event of [...logs].reverse()) {
-    for (const key of ["reason", "code"]) {
-      const value = event?.[key];
-      if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) return value;
-    }
-    if (event?.event === "e2e_child_log" && typeof event.message === "string") {
-      try {
-        const message = JSON.parse(event.message);
-        for (const key of ["sanitized_reason", "error_code", "code"]) {
-          const value = message?.[key];
-          if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) return value;
-        }
-      } catch {
-        // Child logs are diagnostic only; malformed text is not a reason.
-      }
+export function lastLogReason(logs) {
+  const eventPriority = [
+    "e2e_podium_response_error",
+    "e2e_podium_handler_failed",
+    "e2e_child_log",
+    "e2e_child_failed",
+  ];
+  for (const eventName of eventPriority) {
+    for (const event of [...logs].reverse()) {
+      if (event?.event !== eventName) continue;
+      const reason = readLogReason(event, logs);
+      if (reason) return reason;
     }
   }
   return "no_sanitized_boundary_reason";
+}
+
+function readLogReason(event, logs) {
+  for (const key of ["reason", "code"]) {
+    const value = event?.[key];
+    if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
+      return addRequestKind(value, event?.request_kind, logs);
+    }
+  }
+  if (event?.event !== "e2e_child_log" || typeof event.message !== "string") return undefined;
+  try {
+    const message = JSON.parse(event.message);
+    for (const key of ["sanitized_reason", "error_code", "code"]) {
+      const value = message?.[key];
+      if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
+        return addRequestKind(value, message?.request_kind, logs);
+      }
+    }
+  } catch {
+    // Child logs are diagnostic only; malformed text is not a reason.
+  }
+  return undefined;
+}
+
+function addRequestKind(reason, requestKind, logs) {
+  if (reason !== "podium_conductor_request_failed" ||
+      typeof requestKind !== "string" || !/^[a-z][a-z0-9_]{1,80}$/u.test(requestKind)) {
+    return reason;
+  }
+  const physical = [...logs].reverse().find((event) =>
+    event?.event === "linear_physical_request" &&
+    typeof event.operation === "string" &&
+    /^[A-Za-z][A-Za-z0-9_]{0,120}$/u.test(event.operation),
+  );
+  const physicalSuffix = physical
+    ? `_${physical.operation}${Number.isSafeInteger(physical.status) ? `_${physical.status}` : ""}`
+    : "";
+  return `${reason}_${requestKind}${physicalSuffix}`;
 }
 
 function runChild({ executable, args, environment, deadlineAt, spawnProcess }) {

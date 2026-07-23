@@ -307,6 +307,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           title: issue.title,
           description: issue.description,
           labels: issue.labels,
+          is_archived: issue.isArchived,
           ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
           ...(issue.issueKind ? { issue_kind: issue.issueKind } : {}),
           remote_version: issue.remoteVersion,
@@ -426,7 +427,9 @@ function issueSnapshot(issue: LinearIssueValue) {
     issue.order === undefined ||
     issue.depth === undefined ||
     issue.title === undefined ||
-    issue.description === undefined
+    issue.description === undefined ||
+    !Array.isArray(issue.labels) ||
+    issue.labels.length > 64
   ) {
     throw new Error("linear_issue_snapshot_incomplete");
   }
@@ -440,6 +443,8 @@ function issueSnapshot(issue: LinearIssueValue) {
     depth: issue.depth,
     title: issue.title,
     description: issue.description,
+    labels: issue.labels,
+    is_archived: issue.isArchived,
     ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
     ...(issue.nodeKind ? { node_kind: issue.nodeKind } : {}),
     ...(issue.humanKind ? { human_kind: issue.humanKind } : {}),
