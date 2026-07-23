@@ -1,157 +1,143 @@
 # Target Workflow E2E
 
-本文规定 target-workflow 的真实边界验收方式。架构和产品行为以
-[`docs/architecture/`](../architecture/README.md) 为准；本文只描述运行入口、证据和
-清理边界。
+本文是 target-workflow E2E 的测试设计来源。产品行为仍由
+[`docs/architecture/`](../architecture/README.md) 定义；E2E 不拥有或复制
+Plan/Work/Verify、Performer 或 Conductor 的业务流程。
 
-## 场景
+## Test boundary
 
-credentialed all-run 先完成一次 Team/Project setup 和历史 E2E Root 清理，再并行启动五个
-相互独立的场景子进程：
+E2E 是一个黑盒外部参与者，只允许承担四类职责：
 
-1. `success`：外部 Root、Bootstrap Plan、审批、sealed Work/Verify DAG、Work 和 Verify。
-2. `repair_escalation`：真实 Finding disposition 和 Root convergence breaker。
-3. `restart_recovery`：Conductor 重启后从 Linear/Git 重建同一 Human action；stale-result
-   rejection 必须由真实 Performer late-result probe 提供。
-4. `delivery`：Verify immutable revision 与 Linear delivery read-back 一致。
-5. `scheduling`：从 Linear Root priority、state 和 blocker relation 读取单 writer 选择。
+1. 从仓库根目录的 `.env` 读取真实凭据并通过生产 Podium boundary 解析 Team、Project 和
+   Performer Profiles；历史 Root 清理后再 reconcile 本次五个 Conductor members。
+2. 清理目标测试 Project 中由闭合 `symphony e2e-run` marker 证明属于 E2E 的历史数据。
+3. 通过 Linear API 创建五个新的 Root Issues，并在真实 Pending Human Action 出现后扮演
+   Linear 用户提交批准或拒绝决定。
+4. 启动真实 Conductor 进程并只从 Linear、Git 和进程退出状态观察、断言结果。
 
-每个场景使用独立本地 Git/Conductor scope。场景之间不合并 Root、Cycle、Node 或
-stage evidence。setup、历史 Root archive 和最终 schedulable Root read-back 完成前不会
-创建任何场景 Root。
+E2E 不直接启动或调用 Performer。每次 Plan、Work 和 Verify Performer invocation 都必须由
+生产 Conductor 通过生产 Stage Wire 创建。E2E 不创建 Cycle、Plan、Work、Verify、Finding、
+managed workflow record、relation、commit 或 delivery，也不计算下一步 Stage、不伪造 Stage
+Result、不修复 workflow、不实现 retry/recovery/convergence。
 
-## Commands
+## Mandatory lifecycle
 
-无凭据的 runner contract 检查：
+每次 credentialed all-run 必须严格执行：
+
+```text
+load and validate .env
+-> resolve Team / Project and bind Performer Profiles
+-> stop and reap prior local E2E process groups
+-> cancel and archive every historical E2E-marked Root in the test Project
+-> read back that no historical E2E-marked Root is schedulable
+-> reconcile the five Conductor members for this run
+-> create all five new routed Root Issues
+-> read back all five Root identities, markers and routes
+-> start five real Conductor process groups concurrently
+-> observe Pending Human Actions and submit real Linear user decisions
+-> observe terminal Linear/Git outcomes
+-> terminate and reap all process groups
+```
+
+任何 preparation 步骤失败时启动零个 Conductor。五个 Root 必须全部创建并 read back 后才可
+启动第一个 Conductor；不得边创建边执行。历史清理是每次运行的固定步骤，不保留人工
+`quiesce` 前置流程。清理可以取消并 archive 有合法 E2E marker 的非终态历史 Root，但不得
+修改未标记 Issue、其他 Project 或非 Root Issue。
+
+## Scenarios
+
+五个场景使用五个隔离 Git fixtures、Bindings、Conductor routes、data roots 和 process groups。
+任务都应是可在五分钟内完成的确定性小改动；场景差异用于证明并行隔离和审批结果，不用于
+在测试代码中复刻内部 workflow：
+
+- `approve-1`、`approve-2`、`approve-3`、`approve-4`：观察到 matching Plan approval 后
+  提交批准，随后断言各自的小任务完成。
+- `reject-then-approve`：拒绝第一次 Plan approval 并提供原因；断言生产 Conductor 创建了
+  fresh Plan execution 和新的 action ID，再批准新 Plan，最后断言小任务完成。
+
+场景只响应与自身 Root、target Node、context digest 和 action ID 精确匹配的 Pending Human
+Action。额外的 `needs_info` 或未知 approval 不得被自动猜测；场景立即失败并输出脱敏原因。
+同一个 action 最多提交一次决定，重试只能在 Linear read-back 证明原 mutation 未应用时发生。
+
+## Human decision boundary
+
+审批是合法的 E2E 外部输入，不是 Performer 模拟。E2E 使用
+`SYMPHONY_E2E_LINEAR_DEV_TOKEN` 调用真实 Linear `commentCreate`，向 Pending Human Action
+指定的 target Node 写入架构规定的闭合 decision command：
+
+```text
+/symphony approve <action_id>
+```
+
+或：
+
+```text
+/symphony reject <action_id>
+<non-empty reason>
+```
+
+E2E 不直接更新 Root、Cycle 或 Node status。生产 Conductor 验证 comment 的 Project、Root、
+target Node、author kind、时间顺序、action ID 和 context digest，持久化 matching resolution，
+然后执行批准或拒绝语义。普通评论、错误 action ID、重复决定和 stale comment 都不能推进流程。
+
+## Assertions
+
+每个场景只断言用户可观察的真实边界：
+
+- Root、route marker 和 run marker 属于本次运行且相互隔离；
+- Pending Human Action 和提交的 decision 精确关联；拒绝场景出现新的 Plan execution 和 action；
+- Root 达到预期 `In Review` delivery state，且没有 unresolved Human Action；
+- Git HEAD 相对 fixture baseline 有真实 Conductor-owned commit，改动与 Root acceptance criteria 一致；
+- Linear delivery revision、Verify revision 和 Git HEAD 一致；
+- 没有残留 E2E process group，日志和 evidence 不包含 secret。
+
+E2E 可以读取生产持久化的事实以证明这些断言，但不得维护一套独立的 DAG/attempt/Finding/
+convergence 状态机。一个场景失败不能成为另一个场景的成功证据。
+
+## Deadline and exit
+
+整个命令从读取 `.env` 开始只有一个权威 `300000ms` wall-clock deadline。每个场景子进程继承
+该绝对 deadline，而不是重新获得五分钟；因此 preparation、五场景并行执行和最终回收的总时长
+都不能超过五分钟。
+
+coordinator 必须在绝对 deadline 前预留并完成短暂 SIGTERM grace 与 SIGKILL escalation。外层
+watchdog 在 `300000ms` 到点时不再等待 grace，直接强制终止剩余 process groups 并以退出码
+`124` 结束。此路径不等待 Conductor/Podium `close()`、IPC shutdown、evidence flush、Linear
+cleanup 或任何未 settle 的 Promise。业务 cleanup 仅为 best effort；“未 close”不能阻止进程
+退出。真实 Linear `429` 同样立即终止全部场景，不等待 reset window。
+
+## Commands and inputs
+
+无凭据 contract checks：
 
 ```bash
 npm run test:e2e:runner
 ```
 
-本地 credentialed all-run：
+真实 all-run：
 
 ```bash
 npm run e2e:target-live
 ```
 
-单场景入口（每个入口同样受 `300000ms` watchdog 约束）：
-
-```bash
-node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-success
-node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-repair
-node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-restart
-node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-delivery
-node tools/e2e/run-with-timeout.mjs --timeout-ms 300000 -- node tools/e2e/target-workflow-entry.mjs --live-scheduling
-```
-
-完整 target E2E 会由 `make e2e` 在构建和 contract 检查后调用同一入口。CI 只在受保护
-Environment 中注入凭据，并上传 `.test/e2e-target-workflow/<run-id>/verdict.json`。
-
-仅检查 target source topology：
-
-```bash
-node tools/e2e/target-workflow-entry.mjs --dry-run
-```
-
-## Inputs
-
-入口读取以下环境变量：
+入口至少读取：
 
 - `SYMPHONY_E2E_LINEAR_DEV_TOKEN`
 - `LINEAR_CLIENT_ID`
-- `SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED` (`true` is required for credentialed
-  Team workflow initialization and Project Label rebind)
+- `SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED=true`
 - `SYMPHONY_E2E_PROJECT_SLUG_ID`
 - `SYMPHONY_E2E_CODEX_API_KEY`
 - `SYMPHONY_E2E_CODEX_BASE_URL`
 - `SYMPHONY_E2E_CODEX_MODEL`
-- `SYMPHONY_E2E_RUN_ID` (CI supplies this explicitly; local CLI runs generate a
-  `local-...` value when it is absent)
+- `SYMPHONY_E2E_RUN_ID`（本地缺省时生成安全 ID）
 
-缺少必要凭据或授权配置时，入口在任何 scope 或外部 mutation 之前输出 `unverified`；本地
-缺少 run ID 不属于错误，入口会先生成本次运行的安全关联 ID。凭据只进入
-Podium/approved Profile boundary；Conductor child environment、Linear snapshot、Git
-observation、日志和 evidence 均不得包含 secret。
+缺少配置时必须在任何 mutation 或 process launch 前返回 `unverified`。token 只进入 Podium/
+Profile boundary 和 E2E 的受限 Linear user actor；不得进入 Conductor child environment、日志、
+fixture、snapshot、verdict 或最终报告。
 
-Credentialed setup 在任何 retained Root 或 Project Label mutation 之前读取目标 Project
-绑定的唯一 Team，并校验完整的 17 个 canonical workflow statuses 及其 Linear category。
-缺少 status、重复/错误 category 或 Team 绑定不唯一时，入口 fail closed；完整目录缺失时
-使用稳定原因 `target_live_workflow_catalog_incomplete`，不会创建 Root。
+## Migration rule
 
-When `SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED=false`, setup remains read-only and
-returns `authorization-required` before Root cleanup, pool reconciliation, or
-any other Linear mutation.
-
-## Evidence
-
-runner 只通过外部 Root/Human input adapter 创建 caller-owned 输入；它不创建 Cycle、Node、
-Finding、relation、commit 或 delivery。Linear snapshot 和 Git observation 通过 bounded
-read-only adapters 投影为闭合 facts DTO。
-
-最终 verdict 由 `evaluateTargetWorkflowResults` 从五个 scenario evidence 重新计算。它会
-拒绝缺失 correlation、stale result、错误 revision、未检查 convergence breaker、错误
-blocker 选择、cleanup 未完成和 secret leak。最终 evidence 还包含已完成授权 setup 的
-sanitized verdict、workflow/project-label mutation verdict 和 identity digest；不包含
-Linear IDs、SDK 对象或 mutation payload。单场景失败不会变成其他场景的成功；all-run 会
-收集已启动子进程的脱敏结果并返回 `failed`。真实 `429` 会取消并回收兄弟场景进程。
-
-## Deadline
-
-协调器从命令开始拥有一个 `300000ms` 总 deadline；每个场景再通过独立
-`run-with-timeout.mjs` 获得不超过剩余时间的 watchdog。watchdog 到期时直接终止该场景
-process group，必要时强制 kill，并以退出码 `124` 结束，不等待业务 `close()`、IPC 关闭或
-证据写入。因此挂起的 cleanup 不能把场景拖到五分钟之后。
-
-当前仓库没有 credentialed retained run。Restart boundary 已覆盖真实 Conductor 的重启、
-Linear/Git 重建和 Human correlation，但不会把 provider simulation 冒充 stale-result
-evidence；因此在 T12 late-result probe 尚未接入 target all-run 前，`restart_recovery`
-和整体 verdict 必须保持未接受/失败。
-
-## Cleanup
-
-每个场景在成功和失败路径关闭 Conductor/Podium，并删除带 run marker 的本地 scope。并行
-启动前，setup 只 archive 带合法 `symphony e2e-run` marker 且已处于 terminal state 的历史
-顶层 Root，并通过最终 active-Root read-back 确认没有旧测试 Root 仍可调度；发现带 marker
-的非 terminal Root 时直接 fail closed，不猜测它是否已失联或可接管。未标记 Issue 不会修改。Linear
-Project、Root 和 Project Label 属于 retained external evidence，不由 runner 自动删除；
-credentialed run 后必须人工检查 `.test/e2e-target-workflow/<run-id>/verdict.json` 和对应
-Linear/Git facts。未获得真实 Linear、Git、Conductor、Performer 证据时，不能报告
-credentialed acceptance 通过。
-
-当遗留的 marked Root 已确认不再由任何运行实例使用时，operator 可以显式 quiesce 它：
-
-```bash
-node --env-file-if-exists=.env tools/e2e/cleanup.mjs \
-  --quiesce-run-digest <12-hex-run-digest> QUIESCE
-```
-
-该命令只匹配目标 Project 中一个顶层 E2E marker，将 Root 置为 `Canceled`，并验证
-Project、marker、父级和最终状态；它不接受 raw Issue ID，不改变 ownership 或 routing，
-也不会自动运行在 `--live-all` 中。之后仍须由正常 preparation archive 该 terminal Root。
-
-## Parallel preparation and Root routing
-
-Credentialed E2E execution has one mandatory preparation barrier:
-
-```text
-Project identity read
-  -> archive only prior valid marked terminal E2E Roots
-  -> final active/schedulable Root read-back
-  -> reconcile the complete Project Conductor Pool
-  -> start isolated scenario children concurrently
-```
-
-The pool is reconciled only after retained marked Roots have been archived. An
-unmarked or non-terminal Root is never deleted or silently taken over; if it
-prevents routing or member removal, preparation fails closed and starts zero
-scenario children.
-
-Each child derives one unique pool member from its scenario run ID. Root input
-must select that member, validate it against the Project pool, and write exactly
-one `symphony:conductor/<short-hash>` Issue Label at creation. A child cannot
-reuse another scenario's Root, Binding, database, Git scope, observer, or
-process group.
-
-Every scenario is guarded by an authoritative `300000ms` process deadline.
-Timeout termination targets only that scenario's process group, returns exit
-code `124`, and does not await graceful close, IPC shutdown, or evidence flush.
+当前 `success/repair/restart/delivery/scheduling` scenario controllers、独立 facts projector 和
+workflow-specific verdict 属于待删除实现，不代表本设计。迁移期间不得运行 credentialed
+`--live-all`；只有 preparation-first、five-Root、real-Conductor、Linear-user-decision 和硬 deadline
+的新入口完成后才能恢复真实执行。

@@ -663,6 +663,20 @@ Stage。用户在Linear回答后，Conductor把resolved answer作为下一次fre
 `resolved_human_input`注入。Performer不等待用户、不保留thread，也没有resume token。
 
 Plan contract approval是Conductor在Linear中建立的Human gate，不需要保持Plan Performer存活。
+Human decision使用target Node上的普通Linear comment承载，但它不是任意文本约定。首个非空行必须
+精确匹配以下closed command之一：
+
+```text
+/symphony approve <action_id>
+/symphony reject <action_id>
+<non-empty reason>
+```
+
+`approve`不接受额外正文；`reject`必须有非空reason。Conductor只接受位于matching target Node、晚于
+Pending Human Action、由Human author写入且action ID与当前action精确匹配的一个decision。普通评论、
+unknown/stale action、重复或冲突decision全部不推进Workflow并产生可诊断的fail-closed结果。
+Conductor为accepted decision写closed Human resolution record；Linear comment本身是source fact，不能作为
+未校验的workflow authority。
 
 ## 12. Stage Wire与Result
 
@@ -728,16 +742,23 @@ accept Plan Result against execution/context
 -> read back all four facts and end Stage
 
 approved Human action
--> persist resolution
+-> validate exact approve command and persist resolution
 -> create/reconcile Work(Todo), Verify(Todo), blockedBy relations referencing plan_contract_digest
 -> read back exact node/relation set and matching plan_contract_digest
 -> set Bootstrap Plan Done + Cycle Sealed + Root In Progress
 -> read back before any Work claim
 
 plan revision requested
--> persist resolution + set Plan In Progress + Root In Progress
+-> validate exact reject command with reason and persist resolution
+-> set Plan In Progress + Root In Progress
 -> build a fresh Plan Envelope, append execution record with limits and keep Cycle Planning
 ```
+
+Approve和reject都由Conductor从fresh Linear Tree处理；外部用户不直接修改Root、Cycle或Node status。
+Reject必须结束当前approval action、以closed resolution明确supersede旧Plan Contract，并创建新的Plan
+execution。action ID必须关联execution或contract digest，不能只关联Root/Cycle；新Plan产生新的contract
+digest和新的action ID。旧contract、旧action和旧decision都不能被后续Plan复用。任何accepted decision
+mutation后都执行semantic read-back。
 
 ### 13.3 Work
 
