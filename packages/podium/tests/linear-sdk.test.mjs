@@ -607,6 +607,7 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
 
   assert.ok(queries.some((query) => query.includes("comments(first: 8)")));
   assert.ok(queries.some((query) => query.includes("inverseRelations(first: 8)")));
+  assert.ok(queries.some((query) => query.includes("includeArchived: true")));
 
   assert.deepEqual(tree.statusCatalog, [
     { statusId: "state-progress", name: "In Progress", category: "started", position: 2 },

@@ -186,7 +186,7 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
 `;
 const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
   query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
-    issues(first: 25, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
+    issues(first: 25, after: $cursor, includeArchived: true, filter: { parent: { id: { in: $parentIds } } }) {
       nodes {
         id identifier title description sortOrder subIssueSortOrder updatedAt archivedAt
         project { id }
@@ -778,6 +778,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         await this.#client.projectAddLabel(plan.projectId, desiredLabelId);
         targetAlreadyAttached = true;
       }
+      await this.#uniqueIssueLabel(plan.labelName);
     } catch (error) {
       mutationError = error;
     }
@@ -925,6 +926,9 @@ export class LinearSdkImpl implements LinearClientInterface {
         const labels = await this.#projectLabelsNamed(`${CONDUCTOR_LABEL_PREFIX}${member}`);
         if (labels.length !== 1) throw new Error("linear_project_pool_member_label_missing");
         await this.#client.projectRemoveLabel(plan.projectId, labels[0]!.id);
+      }
+      for (const member of plan.desiredMembers) {
+        await this.#uniqueIssueLabel(`${CONDUCTOR_LABEL_PREFIX}${member}`);
       }
     } catch (error) {
       mutationError = error;
@@ -1635,14 +1639,14 @@ export class LinearSdkImpl implements LinearClientInterface {
           : [command.target.targetIssueId]),
     ])];
     const response = await rawRequest(`query WorkflowMutationPreflight {
-      issues(filter: { id: { in: [${issueIds.map(quoteGraphql).join(", ")}] } }) {
+      issues(includeArchived: true, filter: { id: { in: [${issueIds.map(quoteGraphql).join(", ")}] } }) {
         nodes {
           ${workflowScopeSelection(32)}
           updatedAt archivedAt title description state { id }
           labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
           team { id states(first: 64) { nodes { id } pageInfo { hasNextPage } } }
           comments(first: 64) { nodes { id body updatedAt issue { id } } pageInfo { hasNextPage } }
-          children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } }
+          children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } }
           inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } }
         }
       }
@@ -1822,7 +1826,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!rawRequest) return undefined;
     const ids = issueIds.map(quoteGraphql).join(", ");
     const response = await rawRequest(
-      `query WorkflowMutationScopeBatch { issues(filter: { id: { in: [${ids}] } }) { nodes { ${workflowScopeSelection(32)} } } }`,
+      `query WorkflowMutationScopeBatch { issues(includeArchived: true, filter: { id: { in: [${ids}] } }) { nodes { ${workflowScopeSelection(32)} } } }`,
     );
     const data = (response as { data?: { issues?: { nodes?: unknown[] } } }).data;
     if (!data?.issues || !Array.isArray(data.issues.nodes) || data.issues.nodes.length !== issueIds.length) {
@@ -2008,7 +2012,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
     const response = await rawRequest(
-      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }`,
+      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }`,
     );
     const data = (response as {
       data?: { issue?: { updatedAt?: unknown; children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: unknown } } | null } | null };
