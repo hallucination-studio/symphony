@@ -194,83 +194,12 @@ export interface LinearClientInterface {
     | { kind: "conflict" }
   >;
 
-  readMutationTarget(issueId: string): Promise<
-    | {
-        issueId: string;
-        updatedAt: string;
-        state?: string;
-        parentIssueId?: string;
-        managedMarker?: string;
-      }
-    | undefined
-  >;
-
-  readCommentTarget(commentId: string): Promise<
-    | {
-        issueId: string;
-        updatedAt: string;
-        managedMarker?: string;
-      }
-    | undefined
-  >;
-
-  readRootManagedComment(rootIssueId: string): Promise<
-    | {
-        commentId: string;
-        issueId: string;
-        updatedAt: string;
-        managedMarker: string;
-        body: string;
-      }
-    | undefined
-  >;
-
-  readManagedMarkerTarget(
-    managedMarker: string,
-  ): Promise<import("../types.js").LinearIssueValue | undefined>;
-
-  executeMutation(
-    command: import("../types.js").LinearMutationCommand,
-  ): Promise<void>;
-
-  readMutationOutcome(
-    command: import("../types.js").LinearMutationCommand,
-  ): Promise<{ issue?: import("../types.js").LinearIssueValue } | undefined>;
-
   listRootIssues(input: {
     projectId: string;
     cursor?: string;
     limit: number;
   }): Promise<{
     items: import("../types.js").RootIssueValue[];
-    pageInfo: PageInfo;
-  }>;
-
-  getIssueTree(input: {
-    projectId: string;
-    rootIssueId: string;
-    cursor?: string;
-    limit: number;
-  }): Promise<{
-    nodes: import("../types.js").LinearIssueValue[];
-    rootPhaseLabels: string[];
-    rootConductorLabels: import("../types.js").ConductorPoolValue[];
-    rootManagedComments: Array<{
-      commentId: string;
-      issueId: string;
-      updatedAt: string;
-      managedMarker: string;
-      body: string;
-    }>;
-    humanAnswers: Array<{
-      humanIssueId: string;
-      commentId: string;
-      answer: string;
-      updatedAt: string;
-    }>;
-    comments: import("../types.js").WorkflowCommentValue[];
-    relations: import("../types.js").WorkflowRelationValue[];
-    observedAt: string;
     pageInfo: PageInfo;
   }>;
 
@@ -299,12 +228,4 @@ export interface LinearClientInterface {
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<import("../types.js").WorkflowMutationReadBack | undefined>;
 
-  listRootUsage(input: {
-    projectId: string;
-    cursor?: string;
-    limit: number;
-  }): Promise<{
-    items: import("../types.js").RootUsageValue[];
-    pageInfo: PageInfo;
-  }>;
 }

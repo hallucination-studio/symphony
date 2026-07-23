@@ -64,21 +64,6 @@ test("podium.db excludes transient Conductor presence and workflow observations"
       base_branch: "main",
     },
   });
-  for (const [rootIssueId, occurredAt] of [
-    ["root-1", "2026-07-16T00:00:02Z"],
-    ["root-2", "2026-07-16T00:00:03Z"],
-  ]) {
-    await services.handle({
-      kind: "conductor_runtime_report",
-      binding_id: "binding-1",
-      instance_id: "instance-1",
-      status: "ready",
-      active_root_issue_id: rootIssueId,
-      occurred_at: occurredAt,
-      sanitized_summary: "root_dependency_cycle",
-    });
-  }
-
   assert.equal(
     store.getLinearInstallation("installation-1")?.accessToken,
     "access-secret",
@@ -89,8 +74,7 @@ test("podium.db excludes transient Conductor presence and workflow observations"
     "main",
   );
   assert.equal(presence.snapshot("binding-1")?.presence, "online");
-  assert.equal(presence.recentLogs("binding-1").length, 2);
-  assert.doesNotMatch(JSON.stringify(presence.recentLogs()), /root-1|root-2/);
+  assert.equal(presence.recentLogs("binding-1").length, 0);
 
   store.saveConductorBinding({
     bindingId: "binding-2",
@@ -120,12 +104,6 @@ test("podium.db excludes transient Conductor presence and workflow observations"
       canonical_path: "/private/repository-2",
       base_branch: "main",
     },
-  });
-  await services.handle({
-    kind: "conductor_heartbeat",
-    binding_id: "binding-2",
-    instance_id: "instance-2",
-    occurred_at: "2026-07-16T00:00:05Z",
   });
   services.observeExit({
     bindingId: "binding-1",

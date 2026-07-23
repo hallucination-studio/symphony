@@ -62,7 +62,7 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "DesktopOverviewView",
     "OpenExternalUrlCommand",
     "ResolveConductorProjectQuery",
-    "LinearMutationCommand",
+    "WorkflowMutationCommand",
     "StageContextEnvelope",
     "StageResult",
     "StageEvent",
@@ -86,6 +86,15 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "GetRootScopeQuery",
     "RootScopeResult",
     "RootScopeIssueSnapshot",
+    "Conductor" + "Heartbeat",
+    "Conductor" + "RuntimeReport",
+    "GetIssueTreeQuery",
+    "IssueTreePageResult",
+    "ListRootUsageQuery",
+    "RootUsagePageResult",
+    "LinearIssueTreeSnapshot",
+    "LinearMutationCommand",
+    "LinearMutationResult",
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }
@@ -298,18 +307,6 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   assert.deepEqual(schema.$defs.WorkflowMutationResult.oneOf.map(({ properties }) => properties.kind.const), [
     "applied", "already_applied", "write_unconfirmed", "precondition_conflict", "failed",
   ]);
-});
-
-test("Root retry acknowledgement is closed across Desktop and Conductor", async () => {
-  for (const family of ["podium-client", "podium-conductor"]) {
-    const schema = await loadSchema(family);
-    const command = schema.$defs.AcknowledgeRootRetryBlockCommand;
-    assert.equal(command.additionalProperties, false);
-    assert.deepEqual(command.required, ["kind", "root_issue_id", "retry_observed_at"]);
-    assert.deepEqual(Object.keys(command.properties), [
-      "kind", "root_issue_id", "retry_observed_at",
-    ]);
-  }
 });
 
 test("generation is deterministic and check mode detects drift", async () => {

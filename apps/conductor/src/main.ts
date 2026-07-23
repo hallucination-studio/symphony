@@ -19,7 +19,6 @@ import { SerializedPerformerProcessRunnerImpl } from "./performer-profiles/inter
 import { ShortProcessPerformerStageClientImpl } from "./performer-stage-client/internal/ShortProcessPerformerStageClientImpl.js";
 import { stageProcessEnvironment, validateCodexBaseUrl } from "./performer-stage-client/internal/StageProcessEnvironment.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
-import { PodiumConductorRuntimeReporterImpl } from "./runtime-reporting/internal/PodiumConductorRuntimeReporterImpl.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { LinearCycleRootWorkflowPolicyImpl } from "./root-workflow/internal/LinearCycleRootWorkflowPolicyImpl.js";
 import { createDefaultRootConvergencePolicy } from "./root-workflow/internal/RootConvergencePolicy.js";
@@ -104,7 +103,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         logEvent("info", "root_discovery_evidence", {
           root_header_count: String(evidence.rootHeaderCount),
           list_page_count: String(evidence.listPageCount),
-          get_issue_tree_count: String(evidence.getIssueTreeCount),
+          workflow_tree_count: String(evidence.workflowTreeCount),
         });
       },
     },
@@ -221,12 +220,6 @@ export async function runConductor(environment = process.env): Promise<void> {
       base_branch: config.baseBranch,
     },
   });
-  const runtimeReporter = new PodiumConductorRuntimeReporterImpl({
-    bindingId: config.bindingId,
-    instanceId: config.instanceId,
-    now: () => new Date().toISOString(),
-    async send(body) { await report(body); },
-  });
   const runtime = new LinearConductorRuntime(
     config.conductorId,
     config.conductorShortHash,
@@ -244,7 +237,6 @@ export async function runConductor(environment = process.env): Promise<void> {
           ...(value.sanitizedReason ? { sanitized_reason: value.sanitizedReason } : {}),
           status: value.status,
         });
-        await runtimeReporter.report(value);
       },
     },
   );
@@ -258,12 +250,6 @@ export async function runConductor(environment = process.env): Promise<void> {
       const disposition = await runtime.cycle();
       const currentIdleAttempt = idleAttempt;
       idleAttempt = disposition === "progress" ? 0 : Math.min(20, idleAttempt + 1);
-      await report({
-        kind: "conductor_heartbeat",
-        binding_id: config.bindingId,
-        instance_id: config.instanceId,
-        occurred_at: new Date().toISOString(),
-      });
       const cycleDelay = conductorCycleDelayMs({
         disposition,
         baseDelayMs: config.cycleDelayMs,

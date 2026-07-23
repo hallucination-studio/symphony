@@ -12,11 +12,13 @@ const SECRET_KEYS = new Set([
 
 export async function createProductionPodiumConductorOwner({ databasePath, log, linearRequestObserver }) {
   const {
+    createConductorPresence,
     createPodiumConductorServices,
     PodiumConductorProtocolHandler,
   } = await import("@symphony/podium");
   const owner = createPodiumConductorServices({
     databasePath,
+    presence: createConductorPresence(),
     linearRequestObserver,
     observeLinearRequest: (observation) => log?.({
       event: "linear_physical_request",
@@ -98,6 +100,10 @@ export async function startConductorHarness({
   const startupTimer = setTimeout(() => fail("conductor_startup_timeout"), startupTimeoutMs);
   try {
     await handshake.promise;
+    // Do not return while the same input chunk can still contain requests
+    // issued immediately after the handshake. Callers may close the harness
+    // as soon as startup completes, so let the current drain finish first.
+    await processing;
   } catch (error) {
     closed = true;
     abortSignal?.removeEventListener("abort", abortHandler);
@@ -242,10 +248,6 @@ export async function startConductorHarness({
       });
       const observation = Object.freeze({
         kind: message.body?.kind ?? "unknown",
-        ...(typeof message.body?.status === "string" ? { status: message.body.status } : {}),
-        ...(typeof message.body?.sanitized_summary === "string"
-          ? { sanitizedSummary: message.body.sanitized_summary }
-          : {}),
       });
       observations.push(observation);
       for (const entry of observationWaiters) {

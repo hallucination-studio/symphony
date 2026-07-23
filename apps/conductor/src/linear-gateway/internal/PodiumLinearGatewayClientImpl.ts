@@ -51,7 +51,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   #activeDiscovery: {
     rootHeaderCount: number;
     listPageCount: number;
-    getIssueTreeCount: number;
+    workflowTreeCount: number;
   } | undefined;
   constructor(
     private readonly conductorShortHash: string,
@@ -62,7 +62,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       observeDiscovery?(evidence: {
         rootHeaderCount: number;
         listPageCount: number;
-        getIssueTreeCount: number;
+        workflowTreeCount: number;
       }): void;
     },
   ) {}
@@ -107,7 +107,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   }> {
     this.#assertProject(projectId);
     if (this.#activeDiscovery) throw new Error("linear_discovery_overlap");
-    const discovery = { rootHeaderCount: 0, listPageCount: 0, getIssueTreeCount: 0 };
+    const discovery = { rootHeaderCount: 0, listPageCount: 0, workflowTreeCount: 0 };
     let rootCount = 0;
     this.#activeDiscovery = discovery;
     try {
@@ -224,7 +224,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   #request(body: JsonValue) {
     if (this.#activeDiscovery && body && typeof body === "object" && !Array.isArray(body)) {
       if (body.kind === "list_root_issues") this.#activeDiscovery.listPageCount += 1;
-      if (body.kind === "get_issue_tree") this.#activeDiscovery.getIssueTreeCount += 1;
+      if (body.kind === "get_workflow_issue_tree") this.#activeDiscovery.workflowTreeCount += 1;
     }
     this.#sequence += 1;
     const timeoutMs = typeof this.options.timeoutMs === "function"

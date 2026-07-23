@@ -72,11 +72,11 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - create a Root only after validating one selected pool member and write only the
   matching `symphony:conductor/<short-hash>` Issue Label；
 - list Roots；
-- fetch complete Issue Tree；
+- fetch complete Workflow Issue Tree；
 - fetch resolved Team workflow status catalog；
 - read Priority/blocker/order/comments；
 - execute closed Issue mutation；
-- execute `LinearMutationCommand`；
+- execute `WorkflowMutationCommand`；
 - read-back ambiguous mutation。
 
 不暴露arbitrary GraphQL、SDK object、Token或Header。

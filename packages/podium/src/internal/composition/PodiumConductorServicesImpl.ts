@@ -9,12 +9,7 @@ import {
 } from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
 import type { LinearRequestObserverImpl } from "../linear-gateway/internal/LinearRequestObserverImpl.js";
 import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
-import type {
-  LinearIssueState,
-  LinearIssueValue,
-  LinearMutationCommand,
-  WorkflowMutationCommand,
-} from "../linear-gateway/types.js";
+import type { LinearIssueValue, WorkflowMutationCommand } from "../linear-gateway/types.js";
 import type { LinearInstallation } from "../models.js";
 import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
@@ -73,11 +68,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
   }
 
   async handle(body: Body): Promise<JsonValue> {
-    if (
-      body.kind === "conductor_handshake" ||
-      body.kind === "conductor_heartbeat" ||
-      body.kind === "conductor_runtime_report"
-    ) {
+    if (body.kind === "conductor_handshake") {
       return this.#runtime(body);
     }
     const binding = this.#requestBinding(body);
@@ -96,25 +87,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         return this.#resolveProject(gateway, body);
       case "list_root_issues":
         return this.#listRoots(gateway, body);
-      case "get_issue_tree":
-        return this.#getTree(gateway, body);
       case "get_workflow_issue_tree":
         return this.#getWorkflowTree(gateway, body);
-      case "list_root_usage":
-        return this.#listUsage(gateway, body);
-      case "create_managed_node":
-      case "update_managed_node":
-      case "update_issue_state":
-      case "update_issue_assignee":
-      case "update_issue_label":
-      case "create_issue_comment":
-      case "reorder_issue_node":
-      case "replace_root_phase_label":
-      case "upsert_root_managed_comment":
-      case "project_root_comment":
-        return mutationResult(
-          await gateway.mutate(mutationCommand(body)),
-        ) as unknown as JsonValue;
       case "create_workflow_issue":
       case "update_workflow_issue":
       case "append_workflow_comment":
@@ -188,29 +162,16 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     } else if (this.#activeInstances.get(bindingId) !== instanceId) {
       throw new Error("conductor_instance_mismatch");
     }
-    const observedAt =
-      typeof body.observed_at === "string"
-        ? body.observed_at
-        : typeof body.occurred_at === "string"
-          ? body.occurred_at
-          : this.options.now();
-    const sanitizedSummary =
-      typeof body.sanitized_summary === "string"
-        ? body.sanitized_summary
-        : body.kind === "conductor_handshake"
-          ? "Conductor private channel connected."
-          : "Conductor private channel heartbeat received.";
+    const observedAt = this.options.now();
     this.presence.observeOnline({
       bindingId: binding.bindingId,
       observedAt,
       protocolVersion: "1",
-      ...(body.kind === "conductor_runtime_report" ? { summary: sanitizedSummary } : {}),
     });
     return {
-      kind: "conductor_runtime_report",
+      kind: "conductor_handshake_ack",
       binding_id: binding.bindingId,
       instance_id: instanceId,
-      status: "ready",
       observed_at: this.options.now(),
     };
   }
@@ -299,64 +260,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           ? { end_cursor: page.pageInfo.endCursor }
           : {}),
       },
-    };
-  }
-
-  async #getTree(
-    gateway: LinearGatewayProtocolHandlerImpl,
-    body: Body,
-  ): Promise<JsonValue> {
-    const tree = await gateway.getCompleteIssueTree(
-      requiredString(body.project_id, "linear_project_id_missing"),
-      requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
-    );
-    return {
-      kind: "issue_tree_page",
-      tree: {
-        root_issue_id: tree.rootIssueId,
-        nodes: tree.nodes.map(issueSnapshot),
-        root_phase_labels: tree.rootPhaseLabels,
-        root_conductor_labels: tree.rootConductorLabels.map(({ conductorShortHash }) => ({
-          conductor_short_hash: conductorShortHash,
-        })),
-        root_managed_comments: tree.rootManagedComments.map((comment) => ({
-          comment_id: comment.commentId,
-          issue_id: comment.issueId,
-          body: comment.body,
-          managed_marker: comment.managedMarker,
-          updated_at: comment.updatedAt,
-        })),
-        human_answers: tree.humanAnswers.map((answer) => ({
-          human_issue_id: answer.humanIssueId,
-          comment_id: answer.commentId,
-          answer: answer.answer,
-          updated_at: answer.updatedAt,
-        })),
-        observed_at: tree.observedAt,
-      },
-      page_info: { has_next_page: false },
-    };
-  }
-
-  async #listUsage(
-    gateway: LinearGatewayProtocolHandlerImpl,
-    body: Body,
-  ): Promise<JsonValue> {
-    const items = await gateway.listAllRootUsage(
-      requiredString(body.project_id, "linear_project_id_missing"),
-    );
-    return {
-      kind: "root_usage_page",
-      items: items.map((usage) => ({
-        root_issue_id: usage.rootIssueId,
-        input_tokens: usage.inputTokens,
-        cached_input_tokens: usage.cachedInputTokens,
-        output_tokens: usage.outputTokens,
-        reasoning_output_tokens: usage.reasoningOutputTokens,
-        total_tokens: usage.totalTokens,
-        observed_at: usage.observedAt,
-      })),
-      page_info: { has_next_page: false },
     };
   }
 
@@ -486,12 +389,7 @@ function sameInstallation(left: LinearInstallation, right: LinearInstallation): 
 
 function requestClass(kind: string): InstallationRequestClass {
   if (kind === "resolve_conductor_project") return "control";
-  if (
-    kind === "get_issue_tree" ||
-    kind === "get_workflow_issue_tree" ||
-    kind === "list_root_issues"
-  ) return "workflow";
-  if (kind === "list_root_usage") return "background";
+  if (kind === "get_workflow_issue_tree" || kind === "list_root_issues") return "workflow";
   return "mutation";
 }
 
@@ -564,121 +462,6 @@ function failure(kind: string) {
   };
 }
 
-function mutationCommand(body: Body): LinearMutationCommand {
-  const project = recordValue(body.project, "linear_project_precondition_invalid");
-  const projectPrecondition = {
-    conductorShortHash: requiredString(
-      project.conductor_short_hash,
-      "linear_conductor_short_hash_missing",
-    ),
-    expectedProjectId: requiredString(
-      project.expected_project_id,
-      "linear_expected_project_id_missing",
-    ),
-    expectedProjectUpdatedAt: requiredString(
-      project.expected_project_updated_at,
-      "linear_expected_project_updated_at_missing",
-    ),
-  };
-  const common = { project: projectPrecondition };
-  switch (body.kind) {
-    case "create_managed_node":
-      return {
-        ...common,
-        kind: body.kind,
-        parentIssueId: requiredString(body.parent_issue_id, "linear_parent_issue_id_missing"),
-        managedMarker: requiredString(body.managed_marker, "linear_managed_marker_missing"),
-        nodeKind: requiredNodeKind(body.node_kind),
-        ...(typeof body.human_kind === "string"
-          ? { humanKind: requiredHumanKind(body.human_kind) }
-          : {}),
-        ...(typeof body.target_issue_id === "string"
-          ? { targetIssueId: body.target_issue_id }
-          : {}),
-        order: requiredNumber(body.order, "linear_order_missing"),
-        title: requiredString(body.title, "linear_title_missing"),
-        description: requiredString(body.description, "linear_description_missing"),
-      } as LinearMutationCommand;
-    case "update_managed_node":
-      return {
-        ...common,
-        kind: body.kind,
-        precondition: remotePrecondition(body.precondition),
-        nodeKind: requiredNodeKind(body.node_kind),
-        ...(typeof body.human_kind === "string"
-          ? { humanKind: requiredHumanKind(body.human_kind) }
-          : {}),
-        ...(typeof body.target_issue_id === "string"
-          ? { targetIssueId: body.target_issue_id }
-          : {}),
-        ...(typeof body.completed_input_hash === "string"
-          ? { completedInputHash: body.completed_input_hash }
-          : {}),
-        title: requiredString(body.title, "linear_title_missing"),
-        description: requiredString(body.description, "linear_description_missing"),
-      } as LinearMutationCommand;
-    case "update_issue_state":
-      return {
-        ...common,
-        kind: body.kind,
-        precondition: remotePrecondition(body.precondition),
-        state: requiredState(body.state),
-      };
-    case "update_issue_assignee":
-      return {
-        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
-        assigneeId: requiredString(body.assignee_id, "linear_assignee_id_missing"),
-      };
-    case "update_issue_label":
-      return {
-        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
-        label: requiredString(body.label, "linear_label_missing"),
-        operation: requiredLabelOperation(body.operation),
-      };
-    case "create_issue_comment":
-      return {
-        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
-        writeId: requiredString(body.write_id, "linear_write_id_missing"),
-        body: requiredString(body.body, "linear_comment_body_missing"),
-      };
-    case "reorder_issue_node":
-      return {
-        ...common,
-        kind: body.kind,
-        precondition: remotePrecondition(body.precondition),
-        parentIssueId: requiredString(body.parent_issue_id, "linear_parent_issue_id_missing"),
-        order: requiredNumber(body.order, "linear_order_missing"),
-      };
-    case "replace_root_phase_label":
-      return {
-        ...common,
-        kind: body.kind,
-        precondition: remotePrecondition(body.precondition),
-        phase: requiredPhase(body.phase),
-      };
-    case "upsert_root_managed_comment":
-      return {
-        ...common,
-        kind: body.kind,
-        rootPrecondition: remotePrecondition(body.root_precondition),
-        ...(body.comment_precondition
-          ? { commentPrecondition: remotePrecondition(body.comment_precondition) }
-          : {}),
-        managedMarker: requiredString(body.managed_marker, "linear_managed_marker_missing"),
-        body: requiredString(body.body, "linear_comment_body_missing"),
-      };
-    case "project_root_comment":
-      return {
-        ...common,
-        kind: body.kind,
-        rootIssueId: requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
-        ...rootCommentIdentity(body),
-        body: requiredString(body.body, "linear_comment_body_missing"),
-      };
-  }
-  throw new Error("linear_mutation_kind_unsupported");
-}
-
 function workflowMutationCommand(body: Body): WorkflowMutationCommand {
   const target = body.target === undefined ? undefined : recordValue(body.target, "linear_workflow_target_invalid");
   const common = {
@@ -737,19 +520,6 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
   throw new Error("linear_workflow_kind_unsupported");
 }
 
-function rootCommentIdentity(body: Body):
-  | { commentId: string; eventKey?: never }
-  | { eventKey: string; commentId?: never } {
-  const hasCommentId = body.comment_id !== undefined;
-  const hasEventKey = body.event_key !== undefined;
-  if (hasCommentId === hasEventKey) {
-    throw new Error("linear_root_comment_identity_invalid");
-  }
-  return hasCommentId
-    ? { commentId: requiredString(body.comment_id, "linear_comment_id_invalid") }
-    : { eventKey: requiredString(body.event_key, "linear_event_key_invalid") };
-}
-
 function workflowIssueKind(value: JsonValue | undefined): "cycle" | "plan" | "work" | "verify" | "human" {
   if (value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") {
     return value;
@@ -795,54 +565,6 @@ function workflowMutationResult(
   } };
 }
 
-function mutationResult(result: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["mutate"]>>) {
-  if (result.kind === "failed") {
-    return {
-      kind: result.kind,
-      error: {
-        code: result.error.code,
-        category: result.error.category,
-        sanitized_reason: result.error.sanitizedReason,
-        retryable: result.error.retryable,
-        action_required: result.error.actionRequired,
-        next_action: result.error.nextAction,
-      },
-    };
-  }
-  if (result.kind === "write_unconfirmed") {
-    return {
-      kind: result.kind,
-      read_back_target: {
-        kind: result.readBackTarget.kind,
-        target_id: result.readBackTarget.targetId,
-      },
-    };
-  }
-  return {
-    kind: result.kind,
-    ...("issue" in result && result.issue
-      ? { issue: issueSnapshot(result.issue) }
-      : {}),
-  };
-}
-
-function remotePrecondition(value: JsonValue | undefined) {
-  const input = recordValue(value, "linear_remote_precondition_invalid");
-  return {
-    expectedIssueId: requiredString(input.expected_issue_id, "linear_expected_issue_id_missing"),
-    expectedUpdatedAt: requiredString(input.expected_updated_at, "linear_expected_updated_at_missing"),
-    ...(typeof input.expected_state === "string"
-      ? { expectedState: requiredState(input.expected_state) }
-      : {}),
-    ...(typeof input.expected_parent_issue_id === "string"
-      ? { expectedParentIssueId: input.expected_parent_issue_id }
-      : {}),
-    ...(typeof input.expected_managed_marker === "string"
-      ? { expectedManagedMarker: input.expected_managed_marker }
-      : {}),
-  };
-}
-
 function recordValue(value: JsonValue | undefined, code: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(code);
@@ -854,35 +576,4 @@ function recordValue(value: JsonValue | undefined, code: string) {
 function requiredNumber(value: JsonValue | undefined, code: string) {
   if (typeof value !== "number") throw new Error(code);
   return value;
-}
-
-function requiredNodeKind(value: JsonValue | undefined) {
-  if (value === "work" || value === "human") return value;
-  throw new Error("linear_node_kind_invalid");
-}
-
-function requiredHumanKind(value: string) {
-  if (value === "plan_approval" || value === "planned_input" || value === "runtime_input") return value;
-  throw new Error("linear_human_kind_invalid");
-}
-
-function requiredLabelOperation(value: JsonValue | undefined): "add" | "remove" {
-  if (value !== "add" && value !== "remove") {
-    throw new Error("linear_label_operation_invalid");
-  }
-  return value;
-}
-
-function requiredState(value: JsonValue | undefined): LinearIssueState {
-  if (value === "Todo" || value === "In Progress" || value === "In Review" || value === "Done" || value === "Canceled") return value;
-  throw new Error("linear_issue_state_invalid");
-}
-
-function requiredPhase(value: JsonValue | undefined) {
-  if (
-    value === "planning" || value === "awaiting-human" || value === "working" ||
-    value === "gating" || value === "delivering" || value === "in-review" ||
-    value === "blocked" || value === "failed"
-  ) return value;
-  throw new Error("linear_root_phase_invalid");
 }

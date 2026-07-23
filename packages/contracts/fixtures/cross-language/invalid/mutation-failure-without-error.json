@@ -1,6 +1,0 @@
-{
-  "schema": "podium-conductor.schema.json#/$defs/LinearMutationResult",
-  "value": {
-    "kind": "failed"
-  }
-}

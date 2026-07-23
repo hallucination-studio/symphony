@@ -82,7 +82,7 @@ test("production harness observes a real Conductor handshake and shuts down boun
   assert.equal(JSON.stringify(logs).includes("test-only-token"), false);
 });
 
-test("real Conductor reports ready with an unbound generated-protocol result", async () => {
+test("real Conductor continues with an unbound project after handshake", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "symphony-unbound-harness-"));
   const environment = createChildEnvironment({ additions: {
     SYMPHONY_PRIVATE_IPC_FD: "3",
@@ -104,12 +104,11 @@ test("real Conductor reports ready with an unbound generated-protocol result", a
       let result;
       if (body.kind === "resolve_conductor_project") {
         result = { kind: "unbound" };
-      } else {
+      } else if (body.kind === "conductor_handshake") {
         result = {
-          kind: "conductor_runtime_report",
-          binding_id: "binding-1",
-          instance_id: "instance-1",
-          status: body.status ?? (body.kind === "conductor_handshake" ? "starting" : "ready"),
+          kind: "conductor_handshake_ack",
+          binding_id: body.binding_id,
+          instance_id: body.instance_id,
           observed_at: new Date().toISOString(),
         };
       }
@@ -130,13 +129,9 @@ test("real Conductor reports ready with an unbound generated-protocol result", a
   });
 
   const observation = await harness.waitForObservation(
-    (value) => value.kind === "conductor_runtime_report",
+    (value) => value.kind === "resolve_conductor_project",
   );
-  assert.deepEqual(observation, {
-    kind: "conductor_runtime_report",
-    status: "recovering",
-    sanitizedSummary: "project_unbound",
-  });
+  assert.deepEqual(observation, { kind: "resolve_conductor_project" });
   await harness.close();
 });
 
@@ -150,14 +145,12 @@ test("real Conductor can be restarted after an abrupt process exit", async () =>
       let result;
       if (body.kind === "resolve_conductor_project") {
         result = { kind: "unbound" };
-      } else {
+      } else if (body.kind === "conductor_handshake") {
         result = {
-          kind: "conductor_runtime_report",
-          binding_id: body.binding_id ?? "binding-1",
-          instance_id: body.instance_id ?? "instance-1",
-          status: body.status ?? "recovering",
+          kind: "conductor_handshake_ack",
+          binding_id: body.binding_id,
+          instance_id: body.instance_id,
           observed_at: new Date().toISOString(),
-          ...(body.status === "blocked" ? { sanitized_summary: body.sanitized_reason ?? "blocked" } : {}),
         };
       }
       return { ...message, body: result };
@@ -187,7 +180,7 @@ test("real Conductor can be restarted after an abrupt process exit", async () =>
     startupTimeoutMs: 5_000,
     shutdownTimeoutMs: 1_000,
   });
-  await first.waitForObservation((value) => value.kind === "conductor_runtime_report");
+  await first.waitForObservation((value) => value.kind === "resolve_conductor_project");
   const firstExit = await first.terminateAbruptly();
   assert.equal(firstExit.signal, "SIGKILL");
 
@@ -200,7 +193,7 @@ test("real Conductor can be restarted after an abrupt process exit", async () =>
     shutdownTimeoutMs: 1_000,
   });
   assert.deepEqual(second.observations[0], { kind: "conductor_handshake" });
-  await second.waitForObservation((value) => value.kind === "conductor_runtime_report");
+  await second.waitForObservation((value) => value.kind === "resolve_conductor_project");
   assert.ok(requests.filter((kind) => kind === "conductor_handshake").length >= 2);
   const secondExit = await second.terminateAbruptly();
   assert.equal(secondExit.signal, "SIGKILL");
@@ -266,10 +259,9 @@ test("harness kills and closes a child when observation times out", async () => 
       handler: {
         async handle(message) {
           return { ...message, body: {
-            kind: "conductor_runtime_report",
-            binding_id: "binding-1",
-            instance_id: "instance-1",
-            status: "starting",
+            kind: "conductor_handshake_ack",
+            binding_id: message.body.binding_id,
+            instance_id: message.body.instance_id,
             observed_at: new Date().toISOString(),
           } };
         },

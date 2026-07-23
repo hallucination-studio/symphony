@@ -88,7 +88,7 @@ baseBranch
 
 | Canonical Term | 代码类型/字段 | 定义 |
 |---|---|---|
-| Linear Issue Tree | `LinearIssueTreeSnapshot` | Root Issue的完整active和archived Linear descendant tree |
+| Linear Issue Tree | `WorkflowRootTreeSnapshot` | Root Issue的完整active和archived Linear descendant tree |
 | Root Cycle DAG | `RootCycleDagSnapshot` | Root下全部Cycle Issues及其typed nodes、relations和managed outcomes |
 | Cycle Issue | `CycleIssueSnapshot` | Root direct child；一轮bootstrap-to-sealed graph lifecycle的container和结果汇总，不可dispatch |
 | Cycle State | `CycleState` | Cycle authoritative Linear custom status：draft、planning、sealed、executing、verifying、succeeded、changes_required、inconclusive、escalated或canceled |
@@ -167,12 +167,12 @@ LinearGatewayInterface
 |---|---|
 | `LinearProjectSnapshot` | Gateway读取到的Project外部事实副本 |
 | `RootIssueSnapshot` | Root header、delegation、Priority、blockers和bounded Control Record外部事实副本；不含完整Tree |
-| `LinearIssueTreeSnapshot` | 一个Root的完整descendant tree副本 |
+| `WorkflowRootTreeSnapshot` | 一个Root的完整descendant tree副本 |
 | `LinearIssueNodeSnapshot` | Tree中的单个Issue节点副本 |
 | `LinearCommentSnapshot` | Linear Comment外部事实副本 |
 | `LinearBlockerSnapshot` | Root blocker relation外部事实副本 |
 | `ProjectResolutionResult` | unique、unbound或conflict的Project解析结果 |
-| `LinearMutationResult` | 一个closed Linear mutation的执行结果 |
+| `WorkflowMutationResult` | 一个closed Workflow mutation的执行结果 |
 | `ProtocolError` | 跨进程Protocol统一使用的结构化、脱敏失败 |
 
 ### 7.3 Query
@@ -180,20 +180,17 @@ LinearGatewayInterface
 ```text
 ResolveConductorProjectQuery
 ListRootIssuesQuery
-GetIssueTreeQuery
-ListRootUsageQuery
+GetWorkflowIssueTreeQuery
 ```
 
 ### 7.4 Command
 
 ```text
-LinearMutationCommand
-  = CreateManagedNodeCommand
-  | UpdateManagedNodeCommand
-  | UpdateIssueStateCommand
-  | ReorderIssueNodeCommand
-  | UpsertRootControlRecordCommentCommand
-  | ProjectRootCommentCommand
+WorkflowMutationCommand
+  = CreateWorkflowIssueCommand
+  | UpdateWorkflowIssueCommand
+  | AppendWorkflowCommentCommand
+  | CreateWorkflowRelationCommand
 ```
 
 不使用含义不完整的`RootProjectionCommand`或只有字符串variant的

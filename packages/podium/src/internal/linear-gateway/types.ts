@@ -15,114 +15,6 @@ export interface LinearBlockerValue {
   targetState: LinearIssueState;
 }
 
-export interface ProjectPrecondition {
-  conductorShortHash: string;
-  expectedProjectId: string;
-  expectedProjectUpdatedAt: string;
-}
-
-export interface RemotePrecondition {
-  expectedIssueId: string;
-  expectedUpdatedAt: string;
-  expectedState?: LinearIssueState;
-  expectedParentIssueId?: string;
-  expectedManagedMarker?: string;
-}
-
-interface MutationBase {
-  project: ProjectPrecondition;
-}
-
-type ManagedNodeDescriptor =
-  | {
-      nodeKind: "work";
-      humanKind?: never;
-      targetIssueId?: never;
-    }
-  | {
-      nodeKind: "human";
-      humanKind: "plan_approval";
-      targetIssueId?: never;
-    }
-  | {
-      nodeKind: "human";
-      humanKind: "planned_input" | "runtime_input";
-      targetIssueId: string;
-    };
-
-export type LinearMutationCommand =
-  | (MutationBase & ManagedNodeDescriptor & {
-      kind: "create_managed_node";
-      parentIssueId: string;
-      managedMarker: string;
-      order: number;
-      title: string;
-      description: string;
-    })
-  | (MutationBase & ManagedNodeDescriptor & {
-      kind: "update_managed_node";
-      precondition: RemotePrecondition;
-      title: string;
-      description: string;
-      completedInputHash?: string;
-    })
-  | (MutationBase & {
-      kind: "update_issue_state";
-      precondition: RemotePrecondition;
-      state: LinearIssueState;
-    })
-  | (MutationBase & {
-      kind: "update_issue_assignee";
-      precondition: RemotePrecondition;
-      assigneeId: string;
-    })
-  | (MutationBase & {
-      kind: "update_issue_label";
-      precondition: RemotePrecondition;
-      label: string;
-      operation: "add" | "remove";
-    })
-  | (MutationBase & {
-      kind: "create_issue_comment";
-      precondition: RemotePrecondition;
-      writeId: string;
-      body: string;
-    })
-  | (MutationBase & {
-      kind: "reorder_issue_node";
-      precondition: RemotePrecondition;
-      parentIssueId: string;
-      order: number;
-    })
-  | (MutationBase & {
-      kind: "replace_root_phase_label";
-      precondition: RemotePrecondition;
-      phase:
-        | "planning"
-        | "awaiting-human"
-        | "working"
-        | "gating"
-        | "delivering"
-        | "in-review"
-        | "blocked"
-        | "failed";
-    })
-  | (MutationBase & {
-      kind: "upsert_root_managed_comment";
-      rootPrecondition: RemotePrecondition;
-      commentPrecondition?: RemotePrecondition;
-      managedMarker: string;
-      body: string;
-    })
-  | (MutationBase & {
-      kind: "project_root_comment";
-      rootIssueId: string;
-      body: string;
-    } & (
-      | { commentId: string; eventKey?: never }
-      | { eventKey: string; commentId?: never }
-    ));
-
 export interface LinearIssueValue {
   issueId: string;
   identifier?: string;
@@ -162,16 +54,6 @@ export interface RootManagedCommentValue {
   updatedAt: string;
   managedMarker: string;
   body: string;
-}
-
-export interface RootUsageValue {
-  rootIssueId: string;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-  observedAt: string;
 }
 
 export type WorkflowStatusCategory =
@@ -310,18 +192,4 @@ export type WorkflowMutationResult =
   | { kind: "already_applied"; readBack: WorkflowMutationReadBack }
   | { kind: "write_unconfirmed"; readBackTarget: WorkflowMutationReadBack }
   | { kind: "precondition_conflict" }
-  | { kind: "failed"; error: ProtocolError };
-
-export type LinearMutationResult =
-  | { kind: "applied"; issue?: LinearIssueValue }
-  | { kind: "already_applied"; issue?: LinearIssueValue }
-  | { kind: "linear_precondition_conflict" }
-  | { kind: "conductor_project_resolution_changed" }
-  | {
-      kind: "write_unconfirmed";
-      readBackTarget: {
-        kind: "issue" | "managed_marker" | "comment_write";
-        targetId: string;
-      };
-    }
   | { kind: "failed"; error: ProtocolError };

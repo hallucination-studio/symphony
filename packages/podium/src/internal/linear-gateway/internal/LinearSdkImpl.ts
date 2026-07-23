@@ -18,11 +18,9 @@ import type {
   LinearIssueValue,
   LinearIssueState,
   LinearBlockerValue,
-  LinearMutationCommand,
   LinearPriority,
   ConductorPoolValue,
   RootIssueValue,
-  RootUsageValue,
   WorkflowCommentValue,
   WorkflowRelationValue,
 } from "../types.js";
@@ -39,7 +37,6 @@ const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
 const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
-const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_HEADER_MARKER = "<!-- symphony root\n";
 const MAX_ROOT_TITLE_LENGTH = 256;
 const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
@@ -164,25 +161,6 @@ const ROOT_HEADER_FACTS_QUERY = `
     }
   }
 `;
-const ISSUE_TREE_ROOT_QUERY = `
-  query SymphonyIssueTreeRoot($rootIssueId: String!, $commentMarker: String!) {
-    issue(id: $rootIssueId) {
-      id identifier title description sortOrder updatedAt
-      project { id }
-      parent { id }
-      state { name }
-      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
-      comments(first: 2, filter: { body: { contains: $commentMarker } }) {
-        nodes { id body updatedAt issue { id } }
-        pageInfo { hasNextPage endCursor }
-      }
-      inverseRelations(first: 250) {
-        nodes { type issue { id state { name } } relatedIssue { id } }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-`;
 const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
   query SymphonyIssueTreeRoot($rootIssueId: String!) {
     issue(id: $rootIssueId) {
@@ -199,27 +177,6 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
         nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
         pageInfo { hasNextPage endCursor }
       }
-    }
-  }
-`;
-const ISSUE_TREE_CHILDREN_QUERY = `
-  query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
-    issues(first: 250, after: $cursor, filter: { parent: { id: { in: $parentIds } } }) {
-      nodes {
-        id identifier title description sortOrder subIssueSortOrder updatedAt
-        project { id }
-        parent { id }
-        state { name }
-        comments(first: 64) {
-          nodes { id body updatedAt issue { id } }
-          pageInfo { hasNextPage endCursor }
-        }
-        inverseRelations(first: 250) {
-          nodes { type issue { id state { name } } relatedIssue { id } }
-          pageInfo { hasNextPage endCursor }
-        }
-      }
-      pageInfo { hasNextPage endCursor }
     }
   }
 `;
@@ -244,8 +201,8 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
     }
   }
 `;
-const ISSUE_TREE_COMMENTS_PAGE_QUERY = `
-  query SymphonyIssueTreeComments($issueId: String!, $cursor: String!) {
+const WORKFLOW_ISSUE_TREE_COMMENTS_PAGE_QUERY = `
+  query SymphonyWorkflowIssueTreeComments($issueId: String!, $cursor: String!) {
     issue(id: $issueId) {
       id
       comments(first: 25, after: $cursor) {
@@ -255,8 +212,8 @@ const ISSUE_TREE_COMMENTS_PAGE_QUERY = `
     }
   }
 `;
-const ISSUE_TREE_RELATIONS_PAGE_QUERY = `
-  query SymphonyIssueTreeRelations($issueId: String!, $cursor: String!) {
+const WORKFLOW_ISSUE_TREE_RELATIONS_PAGE_QUERY = `
+  query SymphonyWorkflowIssueTreeRelations($issueId: String!, $cursor: String!) {
     issue(id: $issueId) {
       id
       inverseRelations(first: 25, after: $cursor) {
@@ -271,18 +228,8 @@ const WORKFLOW_ISSUE_MARKER =
   /\n*<!-- symphony workflow issue\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nissue_kind: (cycle|plan|work|verify|human)\n-->\s*$/;
 const WORKFLOW_WRITE_MARKER =
   /\n*<!-- symphony workflow write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
-const TURN_EVENT_MARKER =
-  /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
-const AGENT_WRITE_MARKER =
-  /\n*<!-- symphony agent write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
-const MANAGED_IDENTITY_MARKER =
-  /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const MANAGED_RECORD_MARKER = "<!-- symphony managed-record\n";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const HUMAN_MARKER =
-  /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nkind: human\nhuman_kind: (plan_approval|planned_input|runtime_input)\ntarget_issue_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/;
-const WORK_METADATA =
-  /\n*<!-- symphony work metadata\nkind: work\norigin: (user|symphony)\ncompleted_input_hash: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/;
 
 export type LinearSdkCredential =
   | { kind: "oauth"; token: string }
@@ -1315,313 +1262,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
   }
 
-  async readMutationTarget(issueId: string) {
-    const issue = await this.#client.issue(issueId);
-    return mutationTarget(issue);
-  }
-
-  async readCommentTarget(commentId: string) {
-    const comment = await this.#client.comment({ id: commentId });
-    if (!comment.issueId) return undefined;
-    return {
-      issueId: comment.issueId,
-      updatedAt: comment.updatedAt.toISOString(),
-      ...(isRootManagedComment(comment.body)
-        ? { managedMarker: rootCommentMarker(comment.issueId) }
-        : {}),
-    };
-  }
-
-  async readRootManagedComment(rootIssueId: string) {
-    const comments = await this.#rootManagedComments(rootIssueId);
-    if (comments.length > 1) throw new Error("linear_root_comment_ambiguous");
-    const comment = comments[0];
-    return comment
-      ? {
-          commentId: comment.id,
-          issueId: rootIssueId,
-          updatedAt: comment.updatedAt.toISOString(),
-          managedMarker: rootCommentMarker(rootIssueId),
-          body: comment.body,
-        }
-      : undefined;
-  }
-
-  async readManagedMarkerTarget(
-    managedMarker: string,
-  ): Promise<LinearIssueValue | undefined> {
-    const page = await this.#client.issues({
-      first: PAGE_LIMIT,
-      filter: { description: { contains: managedMarker } },
-    });
-    const matches: Issue[] = [];
-    for (const issue of page.nodes) {
-      if (parseManagedDescription(issue.description ?? "").managedMarker === managedMarker) {
-        matches.push(issue);
-      }
-    }
-    if (page.pageInfo.hasNextPage) {
-      throw new Error("linear_managed_marker_lookup_unbounded");
-    }
-    if (matches.length > 1) {
-      throw new Error("linear_managed_marker_ambiguous");
-    }
-    return matches[0] ? issueValue(matches[0]) : undefined;
-  }
-
-  async executeMutation(
-    command: LinearMutationCommand,
-  ): Promise<void> {
-    switch (command.kind) {
-      case "create_managed_node": {
-        const parent = await this.#client.issue(command.parentIssueId);
-        if (!parent.teamId || parent.projectId !== command.project.expectedProjectId) {
-          throw new Error("linear_managed_parent_invalid");
-        }
-        const payload = await this.#client.createIssue({
-          teamId: parent.teamId,
-          projectId: command.project.expectedProjectId,
-          parentId: command.parentIssueId,
-          title: command.title,
-          description: serializeManagedDescription(
-            command.description,
-            command,
-          ),
-          stateId: await this.#stateId(parent, "Todo"),
-          subIssueSortOrder: command.order,
-        });
-        if (!payload.success || !payload.issueId) {
-          throw new Error("linear_create_managed_node_failed");
-        }
-        return;
-      }
-      case "update_managed_node": {
-        const managedMarker = requiredMarker(command.precondition);
-        const current = await this.#client.issue(
-          command.precondition.expectedIssueId,
-        );
-        const parsed = parseManagedDescription(current.description ?? "");
-        if (
-          parsed.managedMarker !== managedMarker ||
-          parsed.nodeKind !== command.nodeKind
-        ) {
-          throw preconditionConflictError();
-        }
-        await this.#client.updateIssue(command.precondition.expectedIssueId, {
-          title: command.title,
-          description: serializeManagedDescription(
-            command.description,
-            {
-              ...command,
-              managedMarker,
-            },
-            command.completedInputHash ?? parsed.completedInputHash,
-          ),
-        });
-        return;
-      }
-      case "update_issue_state": {
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        await this.#client.updateIssue(issue.id, {
-          stateId: await this.#stateId(issue, command.state),
-        });
-        return;
-      }
-      case "update_issue_assignee":
-        await this.#client.updateIssue(command.precondition.expectedIssueId, {
-          assigneeId: command.assigneeId,
-        });
-        return;
-      case "update_issue_label": {
-        const issueId = command.precondition.expectedIssueId;
-        const issue = await this.#client.issue(issueId);
-        const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
-        const matches = labels.filter(({ name }) => name === command.label);
-        if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
-        if (command.operation === "remove") {
-          if (matches[0]) await this.#client.issueRemoveLabel(issueId, matches[0].id);
-          return;
-        }
-        const label = await this.#uniqueIssueLabel(command.label, issue.teamId);
-        if (!labels.some(({ id }) => id === label.id)) {
-          await this.#client.issueAddLabel(issueId, label.id);
-        }
-        return;
-      }
-      case "create_issue_comment": {
-        if (command.body.match(AGENT_WRITE_MARKER)?.[1] !== command.writeId) {
-          throw new Error("linear_agent_comment_marker_invalid");
-        }
-        await this.#client.createComment({
-          issueId: command.precondition.expectedIssueId,
-          body: command.body,
-        });
-        return;
-      }
-      case "reorder_issue_node":
-        await this.#client.updateIssue(command.precondition.expectedIssueId, {
-          parentId: command.parentIssueId,
-          subIssueSortOrder: command.order,
-        });
-        return;
-      case "replace_root_phase_label":
-        await this.#replaceRootPhase(command);
-        return;
-      case "upsert_root_managed_comment":
-        await this.#upsertRootComment(command);
-        return;
-      case "project_root_comment":
-        await this.#projectRootComment(command);
-        return;
-    }
-  }
-
-  async #stateId(issue: Issue, state: LinearIssueState): Promise<string> {
-    if (!issue.team) throw new Error("linear_issue_team_missing");
-    const team = await issue.team;
-    const states = await allNodes(team.states({
-      first: 2,
-      includeArchived: false,
-      filter: { name: { eq: state } },
-    }), 2);
-    const matches = states.filter(({ name }) => name === state);
-    if (matches.length !== 1) throw new Error("linear_state_ambiguous");
-    return matches[0]!.id;
-  }
-
-  async readMutationOutcome(
-    command: LinearMutationCommand,
-  ): Promise<{ issue?: LinearIssueValue } | undefined> {
-    switch (command.kind) {
-      case "create_managed_node": {
-        const issue = await this.readManagedMarkerTarget(command.managedMarker);
-        return issue &&
-          issue.projectId === command.project.expectedProjectId &&
-          issue.parentIssueId === command.parentIssueId &&
-          issue.title === command.title &&
-          issue.description === command.description &&
-          managedNodeMatches(issue, command)
-          ? { issue }
-          : undefined;
-      }
-      case "update_managed_node": {
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        const value = await issueValue(issue);
-        return value.title === command.title &&
-          value.description === command.description &&
-          value.managedMarker === command.precondition.expectedManagedMarker &&
-          (command.completedInputHash === undefined ||
-            value.completedInputHash === command.completedInputHash) &&
-          managedNodeMatches(value, command)
-          ? { issue: value }
-          : undefined;
-      }
-      case "update_issue_state": {
-        const issue = await issueValue(
-          await this.#client.issue(command.precondition.expectedIssueId),
-        );
-        return issue.state === command.state
-          ? { issue }
-          : undefined;
-      }
-      case "update_issue_assignee": {
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        return issue.assigneeId === command.assigneeId
-          ? { issue: await issueValue(issue) }
-          : undefined;
-      }
-      case "update_issue_label": {
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
-        const present = labels.some(({ name }) => name === command.label);
-        return present === (command.operation === "add")
-          ? { issue: await issueValue(issue) }
-          : undefined;
-      }
-      case "create_issue_comment": {
-        if (command.body.match(AGENT_WRITE_MARKER)?.[1] !== command.writeId) {
-          return undefined;
-        }
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        const comments = await this.#rootComments(issue);
-        const matches = comments.filter(({ body }) =>
-          body.match(AGENT_WRITE_MARKER)?.[1] === command.writeId);
-        if (matches.length > 1) throw new Error("linear_agent_comment_ambiguous");
-        if (matches[0] && matches[0].body !== command.body) {
-          throw new Error("linear_agent_comment_mismatch");
-        }
-        return matches.length === 1 ? { issue: await issueValue(issue) } : undefined;
-      }
-      case "reorder_issue_node": {
-        const issue = await issueValue(
-          await this.#client.issue(command.precondition.expectedIssueId),
-        );
-        return issue.parentIssueId === command.parentIssueId &&
-          issue.order === command.order
-          ? { issue }
-          : undefined;
-      }
-      case "replace_root_phase_label": {
-        const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
-        const phases = labels.filter(({ name }) =>
-          name.startsWith(ROOT_PHASE_PREFIX),
-        );
-        return phases.length === 1 &&
-          phases[0]!.name === `${ROOT_PHASE_PREFIX}${command.phase}`
-          ? { issue: await issueValue(issue) }
-          : undefined;
-      }
-      case "upsert_root_managed_comment": {
-        if (
-          command.managedMarker !==
-          rootCommentMarker(command.rootPrecondition.expectedIssueId)
-        ) {
-          return undefined;
-        }
-        const comments = await this.#rootManagedComments(
-          command.rootPrecondition.expectedIssueId,
-        );
-        return comments.length === 1 && comments[0]!.body === command.body
-          ? {
-              issue: await issueValue(
-                await this.#client.issue(
-                  command.rootPrecondition.expectedIssueId,
-                ),
-              ),
-            }
-          : undefined;
-      }
-      case "project_root_comment": {
-        const issue = await this.#client.issue(command.rootIssueId);
-        const value = await issueValue(issue);
-        if (value.projectId !== command.project.expectedProjectId) return undefined;
-        if (command.commentId) {
-          const comment = await this.#client.comment({ id: command.commentId });
-          return isPrimaryCommentForRoot(
-            comment,
-            command.rootIssueId,
-            command.body,
-          ) &&
-            comment.body === command.body
-            ? { issue: value }
-            : undefined;
-        }
-        if (command.eventKey === undefined) return undefined;
-        const comments = await this.#rootComments(issue);
-        const matches = timelineComments(comments, command.eventKey);
-        if (matches.length > 1) {
-          throw new Error("linear_turn_event_comment_ambiguous");
-        }
-        if (matches[0] && matches[0].body !== command.body) {
-          throw new Error("linear_turn_event_comment_mismatch");
-        }
-        if (matches.length !== 1) return undefined;
-        return { issue: value };
-      }
-    }
-  }
-
   async listRootIssues(input: {
     projectId: string;
     cursor?: string;
@@ -1755,78 +1395,18 @@ export class LinearSdkImpl implements LinearClientInterface {
     });
   }
 
-  async getIssueTree(input: {
-    projectId: string;
-    rootIssueId: string;
-    cursor?: string;
-    limit: number;
-  }): Promise<{
-    nodes: LinearIssueValue[];
-    rootPhaseLabels: string[];
-    rootConductorLabels: ConductorPoolValue[];
-    rootManagedComments: Array<{
-      commentId: string;
-      issueId: string;
-      updatedAt: string;
-      managedMarker: string;
-      body: string;
-    }>;
-    humanAnswers: Array<{
-      humanIssueId: string;
-      commentId: string;
-      answer: string;
-      updatedAt: string;
-    }>;
-    comments: WorkflowCommentValue[];
-    relations: WorkflowRelationValue[];
-    observedAt: string;
-    pageInfo: PageInfo;
-  }> {
-    if (input.cursor) throw new Error("linear_tree_cursor_invalid");
-    const batched = await this.#batchedIssueTree(input.projectId, input.rootIssueId, false);
-    if (batched) return batched;
-    const root = await this.#client.issue(input.rootIssueId);
-    if (root.projectId !== input.projectId || root.parentId) {
-      throw new Error("linear_tree_root_invalid");
-    }
-    const nodes: LinearIssueValue[] = [];
-    const workflowFacts: Issue[] = [];
-    await collectTree(root, input.projectId, 0, nodes, workflowFacts);
-    const labels = await allNodes(root.labels({ first: PAGE_LIMIT }), 64);
-    const rootPhaseLabels = labels
-      .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
-      .map(({ name }) => name.slice(ROOT_PHASE_PREFIX.length));
-    if (rootPhaseLabels.length > 2) {
-      throw new Error("linear_root_phase_labels_too_many");
-    }
-    const rootConductorLabels = conductorPoolFromLabels(labels.map(({ name }) => name));
-    const rootManagedComments = await this.#rootManagedCommentValues(root);
-    return {
-      nodes,
-      rootPhaseLabels,
-      rootConductorLabels,
-      rootManagedComments,
-      humanAnswers: await this.#humanAnswers(nodes),
-      comments: await workflowCommentsFromIssues(workflowFacts),
-      relations: await workflowRelationsFromIssues(workflowFacts, input.projectId),
-      observedAt: new Date().toISOString(),
-      pageInfo: { hasNextPage: false },
-    };
-  }
-
   async #batchedIssueTree(
     projectId: string,
     rootIssueId: string,
-    workflow = false,
   ) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
-    if (!rawRequest) return undefined;
+    if (!rawRequest) throw new Error("linear_workflow_tree_raw_request_unavailable");
     const rootResponse = await rawRequest<IssueTreeRootData, {
       rootIssueId: string;
       commentMarker?: string;
     }>(
-      workflow ? WORKFLOW_ISSUE_TREE_ROOT_QUERY : ISSUE_TREE_ROOT_QUERY,
-      workflow ? { rootIssueId } : { rootIssueId, commentMarker: ROOT_HEADER_MARKER },
+      WORKFLOW_ISSUE_TREE_ROOT_QUERY,
+      { rootIssueId },
     );
     const root = rootResponse.data?.issue;
     if (!root || root.id !== rootIssueId || root.project?.id !== projectId || root.parent !== null) {
@@ -1851,7 +1431,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         const response = await rawRequest<IssueTreeChildrenData, {
           parentIds: string[];
           cursor?: string;
-        }>(workflow ? WORKFLOW_ISSUE_TREE_CHILDREN_QUERY : ISSUE_TREE_CHILDREN_QUERY, {
+        }>(WORKFLOW_ISSUE_TREE_CHILDREN_QUERY, {
           parentIds,
           ...(cursor ? { cursor } : {}),
         });
@@ -1902,10 +1482,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
     append(root.id);
 
-    const rootPhaseLabels = root.labels.nodes
-      .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
-      .map(({ name }) => name.slice(ROOT_PHASE_PREFIX.length));
-    if (rootPhaseLabels.length > 2) throw new Error("linear_root_phase_labels_too_many");
     const rootConductorLabels = conductorPoolFromLabels(root.labels.nodes.map(({ name }) => name));
     const rootManagedComments = root.comments.nodes.flatMap((comment) => {
       if (comment.issue.id !== root.id) throw new Error("linear_root_comment_identity_mismatch");
@@ -1937,16 +1513,15 @@ export class LinearSdkImpl implements LinearClientInterface {
     const comments = [...facts.values()].flatMap(({ fact }) =>
       fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id)),
     );
-    if (workflow && comments.length > MAX_ROOT_COMMENTS) {
+    if (comments.length > MAX_ROOT_COMMENTS) {
       throw new Error("linear_workflow_comments_too_many");
     }
-    const relations = workflow ? workflowRelationValues(facts, projectId) : [];
+    const relations = workflowRelationValues(facts, projectId);
     if (relations.length > 1_024) {
       throw new Error("linear_workflow_relations_too_many");
     }
     return {
       nodes,
-      rootPhaseLabels,
       rootConductorLabels,
       rootManagedComments,
       humanAnswers,
@@ -1961,8 +1536,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const tree = await this.#batchedIssueTree(
       input.projectId,
       input.rootIssueId,
-      true,
-    ) ?? await this.getIssueTree({ ...input, limit: PAGE_LIMIT });
+    );
     const statusCatalog = await this.#workflowStatusCatalog(input.projectId, input.rootIssueId);
     const statusByName = new Map(statusCatalog.map((status) => [status.name, status]));
     const issues = tree.nodes.map((issue) => {
@@ -2551,125 +2125,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     return catalog;
   }
 
-  async #humanAnswers(nodes: LinearIssueValue[]) {
-    const answers = [];
-    for (const node of nodes) {
-      if (node.nodeKind !== "human" || node.state !== "Done") continue;
-      const issue = await this.#client.issue(node.issueId);
-      const comments = await allNodes(issue.comments({ first: PAGE_LIMIT }), 64);
-      for (const comment of comments) {
-        const answer = comment.body.trim();
-        if (!answer) continue;
-        answers.push({
-          humanIssueId: node.issueId,
-          commentId: comment.id,
-          answer,
-          updatedAt: comment.updatedAt.toISOString(),
-        });
-      }
-    }
-    return answers;
-  }
-
-  async listRootUsage(input: {
-    projectId: string;
-    cursor?: string;
-    limit: number;
-  }): Promise<{ items: RootUsageValue[]; pageInfo: PageInfo }> {
-    const roots = await this.listRootIssues(input);
-    for (const root of roots.items) {
-      const comments = root.rootManagedComments;
-      if (comments.length > 1) throw new Error("linear_root_comment_ambiguous");
-    }
-    return { items: [], pageInfo: roots.pageInfo };
-  }
-
-  async #replaceRootPhase(
-    command: Extract<LinearMutationCommand, { kind: "replace_root_phase_label" }>,
-  ) {
-    const issueId = command.precondition.expectedIssueId;
-    const issue = await this.#client.issue(issueId);
-    const desired = await this.#uniqueIssueLabel(
-      `${ROOT_PHASE_PREFIX}${command.phase}`,
-      issue.teamId,
-    );
-    const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
-    for (const label of labels) {
-      if (label.name.startsWith(ROOT_PHASE_PREFIX) && label.id !== desired.id) {
-        await this.#client.issueRemoveLabel(issueId, label.id);
-      }
-    }
-    if (!labels.some(({ id }) => id === desired.id)) {
-      await this.#client.issueAddLabel(issueId, desired.id);
-    }
-  }
-
-  async #upsertRootComment(
-    command: Extract<LinearMutationCommand, { kind: "upsert_root_managed_comment" }>,
-  ) {
-    if (
-      command.managedMarker !==
-      rootCommentMarker(command.rootPrecondition.expectedIssueId)
-    ) {
-      throw new Error("linear_root_comment_marker_invalid");
-    }
-    if (!isRootManagedComment(command.body)) {
-      throw new Error("linear_root_comment_marker_invalid");
-    }
-    if (command.commentPrecondition) {
-      await this.#client.updateComment(
-        command.commentPrecondition.expectedIssueId,
-        { body: command.body },
-      );
-      return;
-    }
-    const existing = await this.#rootManagedComments(
-      command.rootPrecondition.expectedIssueId,
-    );
-    if (existing.length > 1) throw new Error("linear_root_comment_ambiguous");
-    if (existing[0]) {
-      throw preconditionConflictError();
-    }
-    await this.#client.createComment({
-      issueId: command.rootPrecondition.expectedIssueId,
-      body: command.body,
-    });
-  }
-
-  async #projectRootComment(
-    command: Extract<LinearMutationCommand, { kind: "project_root_comment" }>,
-  ) {
-    const issue = await this.#client.issue(command.rootIssueId);
-    const value = await issueValue(issue);
-    if (value.projectId !== command.project.expectedProjectId) {
-      throw new Error("linear_project_mismatch");
-    }
-    if (command.commentId) {
-      const comment = await this.#client.comment({ id: command.commentId });
-      if (!isPrimaryCommentForRoot(comment, command.rootIssueId, command.body)) {
-        throw new Error("linear_root_comment_identity_mismatch");
-      }
-      await this.#client.updateComment(command.commentId, { body: command.body });
-      return;
-    }
-    if (command.eventKey === undefined) {
-      throw new Error("linear_root_comment_identity_missing");
-    }
-    if (command.body.match(TURN_EVENT_MARKER)?.[1] !== command.eventKey) {
-      throw new Error("linear_turn_event_marker_invalid");
-    }
-    const comments = await this.#rootComments(issue);
-    const matches = timelineComments(comments, command.eventKey);
-    if (matches.length > 1) throw new Error("linear_turn_event_comment_ambiguous");
-    if (matches[0]) {
-      if (matches[0].body !== command.body) {
-        throw new Error("linear_turn_event_comment_mismatch");
-      }
-      throw preconditionConflictError();
-    }
-    await this.#client.createComment({ issueId: command.rootIssueId, body: command.body });
-  }
-
   async #rootComments(issue: Issue): Promise<Comment[]> {
     return allNodes(
       issue.comments({ first: PAGE_LIMIT }),
@@ -2806,22 +2261,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     return label;
   }
-}
-
-function isPrimaryCommentForRoot(
-  comment: Comment | undefined,
-  rootIssueId: string,
-  nextBody: string,
-): comment is Comment {
-  return comment?.issueId === rootIssueId &&
-    isRootManagedComment(comment.body) &&
-    isRootManagedComment(nextBody);
-}
-
-function timelineComments(comments: Comment[], eventKey: string): Comment[] {
-  return comments.filter(({ body }) =>
-    body.match(TURN_EVENT_MARKER)?.[1] === eventKey
-  );
 }
 
 function clientOptions(credential: LinearSdkCredential):
@@ -2986,84 +2425,6 @@ function errorRecord(error: unknown): Record<string, unknown> {
     : {};
 }
 
-async function collectTree(
-  issue: Issue,
-  projectId: string,
-  depth: number,
-  output: LinearIssueValue[],
-  workflowFacts?: Issue[],
-): Promise<void> {
-  if (depth > 32 || output.length >= MAX_TREE_NODES) {
-    throw new Error("linear_tree_bounds_exceeded");
-  }
-  if (issue.projectId !== projectId) throw new Error("linear_project_mismatch");
-  output.push(await issueValue(issue, depth));
-  workflowFacts?.push(issue);
-  const children = await allNodes(issue.children({ first: PAGE_LIMIT }), MAX_TREE_NODES);
-  children.sort(
-    (left, right) =>
-      (left.subIssueSortOrder ?? left.sortOrder) -
-        (right.subIssueSortOrder ?? right.sortOrder) ||
-      left.identifier.localeCompare(right.identifier),
-  );
-  for (const child of children) {
-    if (child.parentId !== issue.id) throw new Error("linear_parent_mismatch");
-    await collectTree(child, projectId, depth + 1, output, workflowFacts);
-  }
-}
-
-async function workflowCommentsFromIssues(
-  issues: Issue[],
-): Promise<WorkflowCommentValue[]> {
-  const comments: WorkflowCommentValue[] = [];
-  for (const issue of issues) {
-    const values = await allNodes(issue.comments({ first: PAGE_LIMIT }), MAX_ROOT_COMMENTS);
-    for (const comment of values) {
-      if (comment.issueId !== issue.id) throw new Error("linear_workflow_comment_identity_mismatch");
-      comments.push(workflowCommentValue(comment, issue.id));
-    }
-  }
-  return comments;
-}
-
-async function workflowRelationsFromIssues(
-  issues: Issue[],
-  projectId: string,
-): Promise<WorkflowRelationValue[]> {
-  const issueIds = new Set(issues.map(({ id }) => id));
-  const relations: WorkflowRelationValue[] = [];
-  const relationIds = new Set<string>();
-  for (const issue of issues) {
-    const values = await allNodes(issue.inverseRelations({ first: PAGE_LIMIT }), MAX_TREE_NODES);
-    for (const relation of values) {
-      const relationKind = workflowRelationKindValue(relation.type);
-      if (!relationKind) continue;
-      if (
-        !relation.id ||
-        !relation.issueId ||
-        relation.relatedIssueId !== issue.id ||
-        relation.issueId === issue.id ||
-        relationIds.has(relation.id)
-      ) {
-        throw new Error("linear_workflow_relation_invalid");
-      }
-      const source = await relation.issue;
-      if (!source || source.id !== relation.issueId || source.projectId !== projectId) {
-        throw new Error("linear_workflow_relation_project_invalid");
-      }
-      if (!issueIds.has(source.id)) continue;
-      relationIds.add(relation.id);
-      relations.push({
-        relationId: relation.id,
-        relationKind,
-        sourceIssueId: source.id,
-        targetIssueId: issue.id,
-      });
-    }
-  }
-  return relations;
-}
-
 function workflowCommentValue(
   comment: { id: string; issue?: unknown; issueId?: string | null; body: string; updatedAt: string | Date },
   issueId: string,
@@ -3134,9 +2495,7 @@ function workflowRelationKindValue(
 function commentManagedMarker(body: string, issueId: string, commentId: string): string | undefined {
   if (isRootManagedComment(body)) return rootCommentMarker(issueId);
   if (body.startsWith(MANAGED_RECORD_MARKER)) return `${issueId}:managed-record:${commentId}`;
-  return body.match(AGENT_WRITE_MARKER)?.[1]
-    ?? body.match(WORKFLOW_WRITE_MARKER)?.[1]
-    ?? body.match(TURN_EVENT_MARKER)?.[1];
+  return body.match(WORKFLOW_WRITE_MARKER)?.[1];
 }
 
 async function workflowMutationTargetValue(issue: Issue) {
@@ -3343,7 +2702,7 @@ async function completeNestedIssueTreeFact(
       const response = await rawRequest<IssueTreeNestedPageData, {
         issueId: string;
         cursor: string;
-      }>(ISSUE_TREE_COMMENTS_PAGE_QUERY, { issueId: fact.id, cursor });
+      }>(WORKFLOW_ISSUE_TREE_COMMENTS_PAGE_QUERY, { issueId: fact.id, cursor });
       const page = response.data?.issue;
       if (!page || page.id !== fact.id || !page.comments) {
         throw new Error("linear_tree_batch_incomplete");
@@ -3366,7 +2725,7 @@ async function completeNestedIssueTreeFact(
       const response = await rawRequest<IssueTreeNestedPageData, {
         issueId: string;
         cursor: string;
-      }>(ISSUE_TREE_RELATIONS_PAGE_QUERY, { issueId: fact.id, cursor });
+      }>(WORKFLOW_ISSUE_TREE_RELATIONS_PAGE_QUERY, { issueId: fact.id, cursor });
       const page = response.data?.issue;
       if (!page || page.id !== fact.id || !page.inverseRelations) {
         throw new Error("linear_tree_batch_incomplete");
@@ -3411,17 +2770,6 @@ function validateTreeRelations(fact: IssueTreeFact): void {
   }
 }
 
-async function mutationTarget(issue: Issue) {
-  const value = await issueValue(issue);
-  return {
-    issueId: value.issueId,
-    updatedAt: value.updatedAt,
-    ...(value.state ? { state: value.state } : {}),
-    ...(value.parentIssueId ? { parentIssueId: value.parentIssueId } : {}),
-    ...(value.managedMarker ? { managedMarker: value.managedMarker } : {}),
-  };
-}
-
 async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
   const statePromise = issue.state;
   const state = statePromise ? await statePromise : undefined;
@@ -3453,20 +2801,6 @@ async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
   };
 }
 
-function serializeManagedDescription(
-  description: string,
-  command: Extract<
-    LinearMutationCommand,
-    { kind: "create_managed_node" | "update_managed_node" }
-  > & { managedMarker: string },
-  completedInputHash?: string,
-) {
-  if (command.nodeKind === "work") {
-    return `${description.trim()}\n\n<!-- symphony managed marker\nmanaged_marker: ${command.managedMarker}\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: ${completedInputHash ?? "none"}\n-->`;
-  }
-  return `${description.trim()}\n\n<!-- symphony managed marker\nmanaged_marker: ${command.managedMarker}\nkind: human\nhuman_kind: ${command.humanKind}\ntarget_issue_id: ${command.targetIssueId ?? "none"}\n-->`;
-}
-
 function parseManagedDescription(description: string): {
   businessDescription: string;
   managedMarker?: string;
@@ -3487,74 +2821,7 @@ function parseManagedDescription(description: string): {
       ...(workflow[2] === "human" ? { nodeKind: "human" as const } : {}),
     };
   }
-  const work = description.match(WORK_METADATA);
-  if (work?.index !== undefined) {
-    const beforeWork = description.slice(0, work.index);
-    const identity = beforeWork.match(MANAGED_IDENTITY_MARKER);
-    if (work[1] === "symphony" && !identity) {
-      throw new Error("linear_work_managed_marker_missing");
-    }
-    return {
-      businessDescription: identity?.index === undefined
-        ? beforeWork.trim()
-        : beforeWork.slice(0, identity.index).trim(),
-      ...(identity ? { managedMarker: identity[1]! } : {}),
-      nodeKind: "work",
-      origin: work[1] as "user" | "symphony",
-      ...(work[2] !== "none" ? { completedInputHash: work[2]! } : {}),
-    };
-  }
-  const human = description.match(HUMAN_MARKER);
-  if (human?.index !== undefined) {
-    const humanKind = human[2] as
-      | "plan_approval"
-      | "planned_input"
-      | "runtime_input";
-    const targetIssueId = human[3]!;
-    if (
-      (humanKind === "plan_approval" && targetIssueId !== "none") ||
-      (humanKind !== "plan_approval" && targetIssueId === "none")
-    ) {
-      throw new Error("linear_human_managed_marker_invalid");
-    }
-    return {
-      businessDescription: description.slice(0, human.index).trim(),
-      managedMarker: human[1]!,
-      nodeKind: "human",
-      humanKind,
-      ...(targetIssueId !== "none" ? { targetIssueId } : {}),
-    };
-  }
-  if (
-    description.includes("symphony managed marker") ||
-    description.includes("symphony work metadata")
-  ) {
-    throw new Error("linear_managed_metadata_invalid");
-  }
   return { businessDescription: description };
-}
-
-function requiredMarker(precondition: { expectedManagedMarker?: string }) {
-  if (!precondition.expectedManagedMarker) {
-    throw new Error("linear_managed_marker_missing");
-  }
-  return precondition.expectedManagedMarker;
-}
-
-function managedNodeMatches(
-  issue: LinearIssueValue,
-  command: Extract<
-    LinearMutationCommand,
-    { kind: "create_managed_node" | "update_managed_node" }
-  >,
-): boolean {
-  return (
-    issue.nodeKind === command.nodeKind &&
-    (command.nodeKind === "work"
-      ? issue.origin === "symphony"
-      : issue.humanKind === command.humanKind &&
-        issue.targetIssueId === command.targetIssueId)
-  );
 }
 
 function rootCommentMarker(issueId: string) {
