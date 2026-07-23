@@ -60,8 +60,9 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
       });
       requireApplied(outcome, "root_ownership_state_write_failed");
       tree = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);
-      if (rootIssue(tree, input.root.issueId).status_name !== "In Progress") {
-        throw new Error("root_ownership_state_read_back_failed");
+      const updatedRoot = rootIssue(tree, input.root.issueId);
+      if (updatedRoot.status_name !== "In Progress") {
+        throw new Error(`root_ownership_state_read_back_${statusCode(updatedRoot.status_name)}`);
       }
     }
 
@@ -118,8 +119,9 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);
     const persisted = rootOwnership(readBack, input.root.issueId);
     if (!persisted || !sameOwnership(persisted, ownership)) throw new Error("root_ownership_read_back_failed");
-    if (rootIssue(readBack, input.root.issueId).status_name !== "In Progress") {
-      throw new Error("root_ownership_state_read_back_failed");
+    const persistedRoot = rootIssue(readBack, input.root.issueId);
+    if (persistedRoot.status_name !== "In Progress") {
+      throw new Error(`root_ownership_state_read_back_${statusCode(persistedRoot.status_name)}`);
     }
     return { kind: "claimed", ownership: persisted, workspace };
   }
@@ -176,4 +178,9 @@ function requireApplied(
 
 function sameOwnership(left: RootOwnershipRecord, right: RootOwnershipRecord): boolean {
   return serializeManagedRecord(left) === serializeManagedRecord(right);
+}
+
+function statusCode(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/gu, "_").replace(/^_|_$/gu, "");
+  return /^[a-z][a-z0-9_]{0,48}$/u.test(normalized) ? normalized : "unknown";
 }

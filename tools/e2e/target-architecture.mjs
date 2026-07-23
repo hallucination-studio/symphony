@@ -383,7 +383,10 @@ function latestRootFailureReason(logs) {
     try {
       const message = JSON.parse(event.message);
       if (message?.event !== "root_reconciliation_failed") continue;
-      const reason = message.reason;
+      const fields = message.fields && typeof message.fields === "object" && !Array.isArray(message.fields)
+        ? message.fields
+        : message;
+      const reason = fields.reason;
       return typeof reason === "string" && /^[a-z][a-z0-9_:-]{1,120}$/u.test(reason) ? reason : "root_reconciliation_failed";
     } catch {
       continue;
@@ -460,16 +463,25 @@ function readLogReason(event, logs) {
   for (const key of ["reason", "code"]) {
     const value = event?.[key];
     if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
+      if (value === "root_reconciliation_failed" && typeof event?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(event.phase)) {
+        return `root_reconciliation_${event.phase}`;
+      }
       return addRequestKind(value, event?.request_kind, logs);
     }
   }
   if (event?.event !== "e2e_child_log" || typeof event.message !== "string") return undefined;
   try {
     const message = JSON.parse(event.message);
+    const fields = message?.fields && typeof message.fields === "object" && !Array.isArray(message.fields)
+      ? { ...message, ...message.fields }
+      : message;
     for (const key of ["sanitized_reason", "error_code", "code", "reason"]) {
-      const value = message?.[key];
+      const value = fields?.[key];
       if (typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value)) {
-        return addRequestKind(value, message?.request_kind, logs);
+        if (value === "root_reconciliation_failed" && typeof fields?.phase === "string" && /^[a-z][a-z0-9_]{1,80}$/u.test(fields.phase)) {
+          return `root_reconciliation_${fields.phase}`;
+        }
+        return addRequestKind(value, fields?.request_kind, logs);
       }
     }
   } catch {

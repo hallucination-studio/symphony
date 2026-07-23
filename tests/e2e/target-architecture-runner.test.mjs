@@ -42,7 +42,7 @@ test("target E2E diagnostics prefer the concrete boundary failure over the harne
   assert.equal(lastLogReason([
     {
       event: "e2e_child_log",
-      message: JSON.stringify({ event: "root_reconciliation_failed", reason: "root_directive_invalid" }),
+      message: JSON.stringify({ event: "root_reconciliation_failed", fields: { reason: "root_directive_invalid" } }),
     },
   ]), "root_directive_invalid");
   assert.equal(safeErrorCode(new TypeError("untrusted runtime detail")), "target_e2e_type_error");

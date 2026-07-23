@@ -285,7 +285,7 @@ test("agent client rejects the retired stage_result envelope", async () => {
     deadlineMs: 30_000,
   });
 
-  await assert.rejects(client.executePlanTurn(stageInput("plan")), /unknown field|expected exactly one union variant|stage_result/u);
+  await assert.rejects(client.executePlanTurn(stageInput("plan")), /unknown field|expected exactly one union variant|stage_result|plan_result_response_contract_invalid/u);
 });
 
 test("agent client normalizes the Root directive wire fields", async () => {

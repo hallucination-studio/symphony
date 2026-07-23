@@ -57,7 +57,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         network_policy: "disabled",
       },
       limits: defaultLimits(this.options.deadlineMs),
-    }, decodeConductorPerformerRootReconcilerOpenedResult)
+    }, decodeConductorPerformerRootReconcilerOpenedResult, "root_reconciler_open_response_contract_invalid")
       .then((response) => {
         if (response.kind !== "root_reconciler_opened" || typeof response.reconciler_session_id !== "string") {
           throw new Error("root_reconciler_open_result_invalid");
@@ -76,7 +76,13 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     const observation = input.observation;
     const profileId = this.profileByRootSession.get(input.sessionId);
     if (!profileId) return Promise.reject(new Error("root_reconciler_session_profile_unknown"));
-    return this.invoke(input.requestId, profileId, toWireObservation(observation), decodeConductorPerformerRootDirective)
+    return this.invoke(
+      input.requestId,
+      profileId,
+      toWireObservation(observation),
+      decodeConductorPerformerRootDirective,
+      "root_directive_response_contract_invalid",
+    )
       .then((response) => {
         return { kind: "directive", directive: decodeDirective(response) };
       });
@@ -100,7 +106,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     await this.invoke(input.requestId, profileId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_cycle_stage_sessions",
       root_issue_id: input.rootIssueId, cycle_issue_id: input.cycleIssueId, reason: "cycle_terminal",
-    }, decodeConductorPerformerCloseCycleStageSessionsResult);
+    }, decodeConductorPerformerCloseCycleStageSessionsResult, "cycle_stage_close_response_contract_invalid");
   }
 
   async closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void> {
@@ -109,7 +115,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     await this.invoke(input.requestId, profileId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_root_reconciler",
       root_issue_id: input.rootIssueId, reason: "root_terminal",
-    }, decodeConductorPerformerCloseRootReconcilerResult);
+    }, decodeConductorPerformerCloseRootReconcilerResult, "root_reconciler_close_response_contract_invalid");
     this.profileByRootSession.delete(input.sessionId);
     this.profileByRoot.delete(input.rootIssueId);
   }
@@ -127,13 +133,30 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
       : kind === "execute_work_turn"
         ? decodeConductorPerformerWorkResult
         : decodeConductorPerformerVerifyResult;
+    const responseContractCode = kind === "execute_plan_turn"
+      ? "plan_result_response_contract_invalid"
+      : kind === "execute_work_turn"
+        ? "work_result_response_contract_invalid"
+        : "verify_result_response_contract_invalid";
     const response = await this.invoke(input.requestId, input.profileId, {
       protocol_version: "1", request_id: input.requestId, ...toWireStageInput(input),
-    }, decoder);
-    return decodeStageResult(response);
+    }, decoder, responseContractCode);
+    try {
+      return decodeStageResult(response);
+    } catch (error) {
+      const wrapped = new Error("stage_result_normalization_invalid", { cause: error });
+      Object.assign(wrapped, { code: "stage_result_normalization_invalid" });
+      throw wrapped;
+    }
   }
 
-  private async invoke(requestId: string, profileId: string, body: JsonRecord, decoder: (value: JsonValue) => JsonValue): Promise<JsonRecord> {
+  private async invoke(
+    requestId: string,
+    profileId: string,
+    body: JsonRecord,
+    decoder: (value: JsonValue) => JsonValue,
+    responseContractCode: string,
+  ): Promise<JsonRecord> {
     try {
       const value = await this.channelFor(profileId).request({
         requestId,
@@ -143,7 +166,13 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
       const response = record(value);
       if (response.protocol_version !== "1" || response.request_id !== requestId) throw new Error("performer_agent_correlation_invalid");
       if (response.kind === "error") throw new Error(sanitizedError(response));
-      return record(decoder(value as JsonValue));
+      try {
+        return record(decoder(value as JsonValue));
+      } catch (error) {
+        const wrapped = new Error(responseContractCode, { cause: error });
+        Object.assign(wrapped, { code: responseContractCode });
+        throw wrapped;
+      }
     } catch (error) {
       this.dropProfile(profileId);
       throw error;

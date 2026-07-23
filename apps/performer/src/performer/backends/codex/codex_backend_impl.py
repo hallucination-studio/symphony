@@ -37,19 +37,22 @@ ROLE_BASE_INSTRUCTIONS = {
     ),
     "plan": (
         "You are the Symphony Plan role.\n"
-        "Read the supplied Root and Cycle facts and return exactly one PlanResult JSON object.\n"
+        "Read the supplied Root and Cycle facts and return exactly one PlanResult outcome JSON object.\n"
+        "The Performer runtime wraps this outcome into the closed PlanResult envelope.\n"
         "Do not modify files, call Linear or decide the next workflow action."
     ),
     "work": (
         "You are the Symphony Work role.\n"
         "Use the supplied workspace capability to complete exactly one selected Work Issue.\n"
         "Diagnose ordinary command errors, repair and retry within the supplied limits.\n"
-        "Return exactly one WorkResult JSON object. Do not call Linear or modify the Cycle DAG.\n"
+        "Return exactly one WorkResult outcome JSON object. The Performer runtime wraps this outcome into the closed WorkResult envelope.\n"
+        "Do not call Linear or modify the Cycle DAG.\n"
         "Do not commit, push or create worktrees."
     ),
     "verify": (
         "You are the Symphony Verify role.\n"
-        "Inspect the supplied immutable target revision and return exactly one VerifyResult JSON object.\n"
+        "Inspect the supplied immutable target revision and return exactly one VerifyResult outcome JSON object.\n"
+        "The Performer runtime wraps this outcome into the closed VerifyResult envelope.\n"
         "You are read-only. Do not modify files, call Linear, repair Work or decide the next workflow action."
     ),
 }
@@ -261,6 +264,18 @@ def _role_prompt(role: str, request: dict[str, Any]) -> str:
             f"{json.dumps(_root_target_ids(request), separators=(',', ':'))}"
             " Use only these exact IDs for cycle_issue_id and stage issue IDs."
         )
+    elif role in {"plan", "work", "verify"}:
+        prompt += (
+            "\nSTAGE RESPONSE SHAPE: return the outcome object directly, with kind selecting exactly one supplied variant."
+            " Do not return the outer protocol envelope."
+            " Include every required field for the selected outcome kind."
+            "\nSTAGE OUTCOME REQUIRED FIELDS:\n"
+            f"{json.dumps(_stage_output_requirements(role), separators=(',', ':'))}"
+            "\nSTAGE OUTCOME FIELD SHAPES:\n"
+            f"{json.dumps(_stage_output_field_shapes(role), separators=(',', ':'))}"
+            "\nSTAGE OUTCOME NESTED CONTRACT SHAPES:\n"
+            f"{json.dumps(_stage_output_contract_shapes(role), separators=(',', ':'))}"
+        )
     return prompt
 
 
@@ -322,6 +337,67 @@ def _root_action_field_shapes() -> dict[str, dict[str, str]]:
         }
         for variant in schema["oneOf"]
     }
+
+
+def _stage_output_requirements(role: str) -> dict[str, list[str]]:
+    schema = _role_output_schema(role)
+    requirements: dict[str, list[str]] = {}
+    for variant in schema["oneOf"]:
+        fields = [str(field) for field in variant["required"]]
+        for kind in _variant_kinds(variant):
+            requirements[kind] = fields
+    return requirements
+
+
+def _stage_output_field_shapes(role: str) -> dict[str, dict[str, str]]:
+    schema = _role_output_schema(role)
+    shapes: dict[str, dict[str, str]] = {}
+    for variant in schema["oneOf"]:
+        fields = {
+            str(field): _schema_shape(variant["properties"][field])
+            for field in variant["required"]
+            if field != "kind"
+        }
+        for kind in _variant_kinds(variant):
+            shapes[kind] = fields
+    return shapes
+
+
+def _stage_output_contract_shapes(role: str) -> dict[str, Any]:
+    return _prompt_schema(_role_output_schema(role))
+
+
+def _prompt_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "oneOf" in value:
+            return {"one_of": [_prompt_schema(variant) for variant in value["oneOf"]]}
+        result: dict[str, Any] = {}
+        for key in ("type", "const", "enum", "required"):
+            if key in value:
+                result[key] = value[key]
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            result["properties"] = {
+                str(key): _prompt_schema(child)
+                for key, child in properties.items()
+            }
+        items = value.get("items")
+        if items is not None:
+            result["items"] = _prompt_schema(items)
+        return result
+    if isinstance(value, list):
+        return [_prompt_schema(item) for item in value]
+    return value
+
+
+def _variant_kinds(variant: dict[str, Any]) -> list[str]:
+    kind_schema = variant["properties"]["kind"]
+    if isinstance(kind_schema.get("const"), str):
+        return [kind_schema["const"]]
+    enum = kind_schema.get("enum")
+    if isinstance(enum, list) and all(isinstance(value, str) for value in enum):
+        return list(enum)
+    raise ValueError("stage_output_kind_schema_invalid")
 
 
 def _schema_shape(value: dict[str, Any]) -> str:

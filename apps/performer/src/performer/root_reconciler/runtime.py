@@ -145,4 +145,7 @@ def _action_contract_code(kind: str, detail: str) -> str:
     field_type = re.search(r"\$\.([A-Za-z0-9_]+): expected (object|array|string|boolean|number|integer)", detail)
     if field_type:
         return f"{prefix}_{field_type.group(1)}_type_invalid"
+    field = re.search(r"\$\.([A-Za-z0-9_]+)", detail)
+    if field:
+        return f"{prefix}_{field.group(1)}_invalid"
     return f"{prefix}_invalid"

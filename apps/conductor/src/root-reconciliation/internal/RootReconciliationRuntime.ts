@@ -83,6 +83,7 @@ export class RootReconciliationRuntime {
         this.dependencies.log("root_reconciliation_failed", {
           root_issue_id: root.issueId,
           reason: sanitizedFailureReason(error),
+          ...(error instanceof RootReconciliationPhaseError ? { phase: error.phase } : {}),
         });
         result = "needs-attention";
       }
@@ -92,11 +93,25 @@ export class RootReconciliationRuntime {
   }
 
   private async reconcileRoot(root: DiscoveredRoot): Promise<RootRuntimeDisposition> {
+    let phase = "admission";
+    try {
+      return await this.reconcileRootBody(root, (nextPhase) => { phase = nextPhase; });
+    } catch (error) {
+      throw new RootReconciliationPhaseError(phase, error);
+    }
+  }
+
+  private async reconcileRootBody(
+    root: DiscoveredRoot,
+    setPhase: (phase: string) => void,
+  ): Promise<RootRuntimeDisposition> {
+    setPhase("admission");
     const admission = await this.dependencies.ownership.claim({ root });
     if (admission.kind !== "claimed" && admission.kind !== "already_owned") {
       this.dependencies.log("root_admission_blocked", { root_issue_id: root.issueId, reason: admission.kind });
       return "needs-attention";
     }
+    setPhase("profile");
     const profileId = await this.dependencies.profileIdFor(root);
     if (!profileId) {
       this.dependencies.log("root_profile_missing", { root_issue_id: root.issueId });
@@ -104,6 +119,7 @@ export class RootReconciliationRuntime {
     }
     let sessionId = this.sessions.get(root.issueId);
     if (!sessionId) {
+      setPhase("open_reconciler");
       const opened = await this.dependencies.reconciler.open({
         protocolVersion: 1,
         requestId: randomUUID(),
@@ -114,7 +130,9 @@ export class RootReconciliationRuntime {
       sessionId = opened.sessionId;
       this.sessions.set(root.issueId, sessionId);
     }
+    setPhase("read_tree");
     const tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
+    setPhase("validate_tree");
     const invariants = this.dependencies.invariants.validate({ root, tree });
     if (invariants.kind === "invalid") {
       this.dependencies.log("root_invariant_blocked", {
@@ -123,11 +141,13 @@ export class RootReconciliationRuntime {
       });
       return "needs-attention";
     }
+    setPhase("git_workspace");
     const workspace = await this.dependencies.git.ensureWorkspace({
       rootIssueId: root.issueId,
       rootIdentifier: root.identifier,
       baseBranch: this.dependencies.baseBranch,
     });
+    setPhase("build_observation");
     const view: RootReconciliationView = {
       root,
       tree,
@@ -157,12 +177,20 @@ export class RootReconciliationRuntime {
         reservedTotalTokens: 50_000,
       },
     };
+    setPhase("root_reconciler_advance");
     const result = await this.dependencies.reconciler.advance({
       requestId: observation.requestId,
       sessionId,
       observation,
     });
-    const materialization = await this.materializeDirective(result.directive, view, root, profileId);
+    setPhase(`materialize_${result.directive.action.kind}`);
+    const materialization = await this.materializeDirective(
+      result.directive,
+      view,
+      root,
+      profileId,
+      setPhase,
+    );
     this.dependencies.log("root_directive_received", {
       root_issue_id: root.issueId,
       directive_kind: result.directive.action.kind,
@@ -184,6 +212,7 @@ export class RootReconciliationRuntime {
     view: RootReconciliationView,
     root: DiscoveredRoot,
     profileId: string,
+    setPhase: (phase: string) => void,
   ) {
     const action = directive.action;
     if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify") {
@@ -192,19 +221,28 @@ export class RootReconciliationRuntime {
         ? action.planIssueId
         : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
       const input = stageInput(view, root, profileId, role, targetIssueId, action);
+      setPhase(`execute_${role}_turn`);
       const stageResult = role === "plan"
         ? await this.dependencies.performer.executePlanTurn(input)
         : role === "work"
           ? await this.dependencies.performer.executeWorkTurn(input)
           : await this.dependencies.performer.executeVerifyTurn(input);
+      setPhase(`validate_${role}_result`);
       validateStageResult(input, stageResult);
-      await this.persistStageResult(view, directive.rootDirectiveId, stageResult);
+      setPhase(`persist_${role}_result`);
+      await this.persistStageResult(view, directive.rootDirectiveId, stageResult, setPhase);
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
     return this.dependencies.materializer.materialize({ directive, view });
   }
 
-  private async persistStageResult(view: RootReconciliationView, directiveId: string, result: StageResult): Promise<void> {
+  private async persistStageResult(
+    view: RootReconciliationView,
+    directiveId: string,
+    result: StageResult,
+    setPhase: (phase: string) => void,
+  ): Promise<void> {
+    setPhase(`persist_${result.role}_target`);
     const target = view.tree.issues.find((issue) => issue.issue_id === result.targetIssueId);
     const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
     if (!target || !rootIssue) throw new Error("role_result_target_missing");
@@ -215,6 +253,7 @@ export class RootReconciliationRuntime {
     ) {
       throw new Error("role_result_target_invalid");
     }
+    setPhase(`persist_${result.role}_record`);
     const record = toStageResultRecord(result);
     const body = serializeManagedRecord(record);
     for (const comment of view.tree.comments) {
@@ -224,6 +263,7 @@ export class RootReconciliationRuntime {
       if (comment.body === body) return;
       throw new Error("role_result_conflict");
     }
+    setPhase(`persist_${result.role}_linear_write`);
     const outcome = await this.dependencies.linear.mutateWorkflow({
       kind: "append_workflow_comment",
       writeId: `${directiveId}:result:${result.resultId}`,
@@ -240,6 +280,7 @@ export class RootReconciliationRuntime {
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
       throw new Error(`role_result_write_${outcome.kind}`);
     }
+    setPhase(`persist_${result.role}_linear_read_back`);
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
     const readBackComment = readBack.comments.find((comment) => comment.body === body);
     if (!readBackComment) {
@@ -249,6 +290,12 @@ export class RootReconciliationRuntime {
     if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) {
       throw new Error("role_result_read_back_invalid");
     }
+  }
+}
+
+class RootReconciliationPhaseError extends Error {
+  constructor(readonly phase: string, cause: unknown) {
+    super("root_reconciliation_phase_failed", { cause });
   }
 }
 
@@ -355,7 +402,14 @@ function digest(value: unknown): string {
 }
 
 function sanitizedFailureReason(error: unknown): string {
-  if (!(error instanceof Error)) return "root_reconciliation_failed";
-  const reason = error.message.trim();
-  return /^[a-z0-9_:-]{1,128}$/u.test(reason) ? reason : "root_reconciliation_failed";
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!(current instanceof Error)) break;
+    const code = (current as Error & { code?: unknown }).code;
+    if (typeof code === "string" && /^[a-z0-9_:-]{1,128}$/u.test(code)) return code;
+    const reason = current.message.trim();
+    if (/^[a-z0-9_:-]{1,128}$/u.test(reason) && reason !== "root_reconciliation_phase_failed") return reason;
+    current = current.cause;
+  }
+  return "root_reconciliation_failed";
 }

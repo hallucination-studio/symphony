@@ -122,6 +122,14 @@ def test_stage_roles_use_the_complete_outcome_contract(role: str):
     assert len(schema["oneOf"]) >= 5
     assert all("kind" in variant["properties"] for variant in schema["oneOf"])
     assert all(len(variant["required"]) > 1 for variant in schema["oneOf"])
+    assert "STAGE OUTCOME REQUIRED FIELDS:" in sdk.thread.calls[0][0]
+    assert "STAGE OUTCOME FIELD SHAPES:" in sdk.thread.calls[0][0]
+    assert "STAGE OUTCOME NESTED CONTRACT SHAPES:" in sdk.thread.calls[0][0]
+    assert "plan_completed" in sdk.thread.calls[0][0] or role != "plan"
+    assert "work_completed" in sdk.thread.calls[0][0] or role != "work"
+    assert "verify_passed" in sdk.thread.calls[0][0] or role != "verify"
+    assert "actual_changes" in sdk.thread.calls[0][0] or role != "work"
+    assert "acceptance_results" in sdk.thread.calls[0][0] or role != "verify"
 
 
 def test_invalid_provider_json_is_sanitized():
