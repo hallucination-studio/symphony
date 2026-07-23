@@ -76,11 +76,7 @@ test("observation inputs expose Root and Cycle Human Actions from direct parents
     target_issue_id: "work-2",
   });
 
-  const inputs = buildRootObservationInputs({ tree }) as typeof buildRootObservationInputs extends (...args: never[]) => infer _
-    ? ReturnType<typeof buildRootObservationInputs> & {
-      rootHumanActions?: unknown;
-    }
-    : never;
+  const inputs = buildRootObservationInputs({ tree });
 
   assert.deepEqual(inputs.rootHumanActions, [{
     actionId: "root-action",
@@ -91,9 +87,7 @@ test("observation inputs expose Root and Cycle Human Actions from direct parents
     isArchived: false,
     relatedIssueIds: [],
   }]);
-  assert.deepEqual((inputs.cycles.find(({ cycleIssue }) => cycleIssue.issue_id === "cycle-2") as unknown as {
-    humanActionRecords?: unknown;
-  }).humanActionRecords, [{
+  assert.deepEqual(inputs.cycles.find(({ cycleIssue }) => cycleIssue.issue_id === "cycle-2")?.humanActionRecords, [{
     actionId: "cycle-action",
     actionIssueId: "cycle-action",
     actionKind: "plan_review",
