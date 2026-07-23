@@ -132,6 +132,7 @@ export class RootReconciliationRuntime {
       reconcilerSessionId: sessionId,
       reconcilerTurnId: randomUUID(),
       cycles: observationInputs.cycles,
+      rootHumanActions: observationInputs.rootHumanActions,
       pendingUserComments: observationInputs.pendingUserComments,
       externalLinearChanges: [],
       acceptedDirectives: [],

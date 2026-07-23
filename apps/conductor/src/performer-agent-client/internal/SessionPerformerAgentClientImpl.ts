@@ -182,10 +182,10 @@ function toWireObservation(input: RootReconciliationObservation): JsonRecord {
       work_results: [],
       verify_results: [],
       findings: [],
-      human_action_records: [],
+      human_action_records: cycle.humanActionRecords.map(toWireHumanActionRecord),
       human_action_resolutions: [],
     })),
-    root_human_actions: [],
+    root_human_actions: input.rootHumanActions.map(toWireHumanActionRecord),
     accepted_root_directives: input.acceptedDirectives.map((directive) => ({
       record_id: directive.rootDirectiveId,
       record_kind: "accepted_root_directive",
@@ -245,6 +245,19 @@ function toWireObservation(input: RootReconciliationObservation): JsonRecord {
     coverage: { is_complete: input.complete, omissions: [] },
     observed_root_tree_digest: input.treeDigest,
     limits: defaultLimits(input.limits.maxTurnWallTimeMs),
+  };
+}
+
+function toWireHumanActionRecord(record: RootReconciliationObservation["rootHumanActions"][number]): JsonRecord {
+  return {
+    action_id: record.actionId,
+    action_issue_id: record.actionIssueId,
+    action_kind: record.actionKind,
+    parent_scope: record.parentScope,
+    ...(record.cycleIssueId ? { cycle_issue_id: record.cycleIssueId } : {}),
+    status: record.status,
+    is_archived: record.isArchived,
+    related_issue_ids: record.relatedIssueIds,
   };
 }
 

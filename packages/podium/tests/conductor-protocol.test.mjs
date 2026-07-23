@@ -42,6 +42,7 @@ test("Podium-Conductor handler accepts target workflow states in root discovery"
             depth: 0,
             title: "Completed root",
             description: "",
+            labels: [],
             is_archived: false,
             updated_at: "2026-07-22T00:00:00.000Z",
           },

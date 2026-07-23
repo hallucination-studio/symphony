@@ -52,6 +52,81 @@ test("observation input construction fails closed when a human comment has no us
   );
 });
 
+test("observation inputs expose Root and Cycle Human Actions from direct parents and labels", () => {
+  const tree = fixture();
+  const rootAction = Object.assign(issueForTest({
+    issue_id: "root-action",
+    issue_kind: "human",
+    title: "Convergence decision",
+    parent_issue_id: "root-1",
+    depth: 1,
+  }), { labels: ["Human Action", "Convergence Override"] });
+  const cycleAction = Object.assign(issueForTest({
+    issue_id: "cycle-action",
+    issue_kind: "human",
+    title: "Approve the plan",
+    parent_issue_id: "cycle-2",
+    depth: 2,
+  }), { labels: ["Human Action", "Plan Review"] });
+  tree.issues.push(rootAction, cycleAction);
+  tree.relations.push({
+    relation_id: "relation-action-work",
+    relation_kind: "blocks",
+    source_issue_id: "cycle-action",
+    target_issue_id: "work-2",
+  });
+
+  const inputs = buildRootObservationInputs({ tree }) as typeof buildRootObservationInputs extends (...args: never[]) => infer _
+    ? ReturnType<typeof buildRootObservationInputs> & {
+      rootHumanActions?: unknown;
+    }
+    : never;
+
+  assert.deepEqual(inputs.rootHumanActions, [{
+    actionId: "root-action",
+    actionIssueId: "root-action",
+    actionKind: "convergence_override",
+    parentScope: "root",
+    status: "In Progress",
+    isArchived: false,
+    relatedIssueIds: [],
+  }]);
+  assert.deepEqual((inputs.cycles.find(({ cycleIssue }) => cycleIssue.issue_id === "cycle-2") as unknown as {
+    humanActionRecords?: unknown;
+  }).humanActionRecords, [{
+    actionId: "cycle-action",
+    actionIssueId: "cycle-action",
+    actionKind: "plan_review",
+    parentScope: "cycle",
+    cycleIssueId: "cycle-2",
+    status: "In Progress",
+    isArchived: false,
+    relatedIssueIds: ["work-2"],
+  }]);
+});
+
+function issueForTest(
+  input: Partial<LinearWorkflowTreeSnapshot["issues"][number]> &
+    Pick<LinearWorkflowTreeSnapshot["issues"][number], "issue_id" | "issue_kind" | "title">,
+) {
+  return {
+    identifier: input.issue_id,
+    project_id: "project-1",
+    status_id: "status-1",
+    status_name: "In Progress",
+    status_category: "started" as const,
+    status_position: 1,
+    order: 1,
+    depth: 0,
+    description: input.title,
+    labels: [],
+    is_archived: false,
+    remote_version: `${input.issue_id}:v1`,
+    updated_at: "2026-07-23T00:00:00Z",
+    ...input,
+  };
+}
+
 function fixture(): LinearWorkflowTreeSnapshot {
   const issue = (input: Partial<LinearWorkflowTreeSnapshot["issues"][number]> & Pick<LinearWorkflowTreeSnapshot["issues"][number], "issue_id" | "issue_kind" | "title">) => ({
     identifier: input.issue_id,
@@ -63,6 +138,7 @@ function fixture(): LinearWorkflowTreeSnapshot {
     order: 1,
     depth: 0,
     description: input.title,
+    labels: [],
     is_archived: false,
     remote_version: `${input.issue_id}:v1`,
     updated_at: "2026-07-23T00:00:00Z",

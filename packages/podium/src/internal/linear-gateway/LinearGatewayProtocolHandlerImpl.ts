@@ -204,6 +204,10 @@ export class LinearGatewayProtocolHandlerImpl {
         issue.depth > 32 ||
         !shortText(issue.title) ||
         !boundedText(issue.description) ||
+        !Array.isArray(issue.labels) ||
+        issue.labels.length > 64 ||
+        issue.labels.some((label) => !shortText(label)) ||
+        new Set(issue.labels).size !== issue.labels.length ||
         !identifier(issue.remoteVersion, 512) ||
         !timestamp(issue.updatedAt) ||
         (issue.parentIssueId !== undefined &&

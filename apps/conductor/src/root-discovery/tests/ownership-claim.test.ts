@@ -212,7 +212,7 @@ class FakeLinear {
         issue_id: rootId, identifier: "SYM-1", project_id: projectId,
         status_id: rootState.statusId, status_name: rootState.statusName,
         status_category: rootState.statusCategory, status_position: rootState.statusPosition, order: 0, depth: 0, title: "Root", description: "Build it",
-        issue_kind: "root", is_archived: false, remote_version: "root-v1", updated_at: now,
+        issue_kind: "root", labels: [], is_archived: false, remote_version: "root-v1", updated_at: now,
       }],
       comments: record ? [{
         comment_id: "ownership-comment", issue_id: rootId, body: serializeManagedRecord(record),

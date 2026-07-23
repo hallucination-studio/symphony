@@ -23,6 +23,7 @@ export interface RootReconciliationObservation extends RootReconciliationView {
   reconcilerSessionId: string;
   reconcilerTurnId: string;
   cycles: RootCycleObservation[];
+  rootHumanActions: HumanActionObservationRecord[];
   pendingUserComments: UserCommentInput[];
   externalLinearChanges: ExternalLinearChangeInput[];
   acceptedDirectives: AcceptedRootDirective[];
@@ -39,6 +40,18 @@ export interface RootCycleObservation {
   issues: RootIssueSnapshot[];
   relations: RootRelationSnapshot[];
   comments: RootCommentSnapshot[];
+  humanActionRecords: HumanActionObservationRecord[];
+}
+
+export interface HumanActionObservationRecord {
+  actionId: string;
+  actionIssueId: string;
+  actionKind: HumanActionKind;
+  parentScope: "root" | "cycle";
+  cycleIssueId?: string;
+  status: string;
+  isArchived: boolean;
+  relatedIssueIds: string[];
 }
 
 export interface ReconcilerLimits {

@@ -306,6 +306,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           depth: issue.depth,
           title: issue.title,
           description: issue.description,
+          labels: issue.labels,
           ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
           ...(issue.issueKind ? { issue_kind: issue.issueKind } : {}),
           remote_version: issue.remoteVersion,

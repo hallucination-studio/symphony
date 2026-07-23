@@ -404,6 +404,8 @@ function workflowTree(
       depth: number(issue.depth, "linear_workflow_issue_invalid"),
       title: string(issue.title, "linear_workflow_issue_invalid"),
       description: string(issue.description, "linear_workflow_issue_invalid"),
+      labels: array(issue.labels, "linear_workflow_issue_labels_invalid").map((label) =>
+        string(label, "linear_workflow_issue_label_invalid")),
       is_archived: boolean(issue.is_archived, "linear_workflow_issue_invalid"),
       ...(issue.managed_marker === undefined ? {} : { managed_marker: string(issue.managed_marker, "linear_workflow_issue_invalid") }),
       ...(issue.issue_kind === undefined ? {} : { issue_kind: workflowIssueKind(issue.issue_kind) }),

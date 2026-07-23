@@ -565,6 +565,7 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
     id: "work-1", identifier: "WORK-1", title: "Work", description: "Work description",
     sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:02Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{ id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->", createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z", user: { id: "symphony-bot" }, issue: { id: "work-1" } }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };
@@ -632,6 +633,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     id: "work-1", identifier: "WORK-1", title: "Work", description: "", sortOrder: 1,
     subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:03Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };

@@ -19,6 +19,7 @@ export interface LinearWorkflowTreeSnapshot {
     depth: number;
     title: string;
     description: string;
+    labels: string[];
     is_archived: boolean;
     managed_marker?: string;
     issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";

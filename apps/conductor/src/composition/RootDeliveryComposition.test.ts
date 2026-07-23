@@ -63,7 +63,7 @@ class FakeGateway {
     ],
     issues: [{
       issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 1,
-      order: 0, depth: 0, title: "Root", description: "Build it", remote_version: "root-version-1", updated_at: "2026-07-21T09:00:00Z",
+      order: 0, depth: 0, title: "Root", description: "Build it", labels: [], remote_version: "root-version-1", updated_at: "2026-07-21T09:00:00Z",
       is_archived: false,
     }],
     comments: [], relations: [], observed_at: "2026-07-21T09:00:00Z",

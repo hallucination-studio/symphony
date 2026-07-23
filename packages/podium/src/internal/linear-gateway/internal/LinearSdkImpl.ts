@@ -190,6 +190,7 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
         project { id }
         parent { id }
         state { name }
+        labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         comments(first: 8) {
           nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
           pageInfo { hasNextPage endCursor }
@@ -355,6 +356,10 @@ interface IssueTreeFact {
   project?: { id: string } | null;
   parent?: { id: string } | null;
   state: { name: string };
+  labels: {
+    nodes: Array<{ name: string }>;
+    pageInfo: { hasNextPage: boolean };
+  };
   comments: {
     nodes: IssueTreeComment[];
     pageInfo: IssueTreePageInfo;
@@ -1310,7 +1315,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           allNodes(issue.labels({ first: 64 }), 64),
         ]);
         return {
-          issue: value,
+          issue: { ...value, labels: labels.map(({ name }) => name) },
           isDelegatedToSymphony: issue.delegateId === delegateActorId,
           priority,
           blockers,
@@ -1394,6 +1399,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           depth: 0,
           title: fact.title,
           description: parseManagedDescription(fact.description ?? "").businessDescription,
+          labels: fact.labels.nodes.map(({ name }) => name),
           isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
           updatedAt: timestampValue(fact.updatedAt),
         },
@@ -1424,7 +1430,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!root || root.id !== rootIssueId || root.project?.id !== projectId || root.parent !== null) {
       throw new Error("linear_tree_root_invalid");
     }
-    if (root.labels.pageInfo.hasNextPage) throw new Error("linear_tree_batch_incomplete");
+  issueLabels(root.labels);
     await completeNestedIssueTreeFact(rawRequest, root);
     validateTreeRelations(root);
 
@@ -1457,6 +1463,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           ) {
             throw new Error("linear_tree_batch_invalid");
           }
+          issueLabels(fact.labels);
           await completeNestedIssueTreeFact(rawRequest, fact);
           if (facts.has(fact.id)) throw new Error("linear_tree_batch_ambiguous");
           if (childDepth > 32 || facts.size >= MAX_TREE_NODES) {
@@ -1570,6 +1577,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         depth: issue.depth,
         title: issue.title,
         description: issue.description,
+        labels: issue.labels,
         isArchived: issue.isArchived,
         ...(issue.managedMarker ? { managedMarker: issue.managedMarker } : {}),
         ...(issue.issueId === input.rootIssueId
@@ -2885,6 +2893,7 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     depth,
     title: fact.title,
     description: managed.businessDescription,
+    labels: issueLabels(fact.labels),
     isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
     ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
     ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
@@ -2895,6 +2904,29 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     ...(managed.targetIssueId ? { targetIssueId: managed.targetIssueId } : {}),
     updatedAt: timestampValue(fact.updatedAt),
   };
+}
+
+function issueLabels(value: IssueTreeFact["labels"] | undefined): string[] {
+  if (
+    !value ||
+    !Array.isArray(value.nodes) ||
+    !value.pageInfo ||
+    typeof value.pageInfo.hasNextPage !== "boolean" ||
+    value.pageInfo.hasNextPage ||
+    value.nodes.length > 64 ||
+    value.nodes.some((label) => !label || !shortText(label.name))
+  ) {
+    throw new Error("linear_tree_labels_incomplete");
+  }
+  const labels = value.nodes.map(({ name }) => name);
+  if (new Set(labels).size !== labels.length) {
+    throw new Error("linear_tree_labels_ambiguous");
+  }
+  return labels;
+}
+
+function shortText(value: string | undefined): boolean {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
 }
 
 function validateTreeRelations(fact: IssueTreeFact): void {
@@ -2921,6 +2953,7 @@ async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
     depth,
     title: issue.title,
     description: managed.businessDescription,
+    labels: [],
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(managed.managedMarker
       ? { managedMarker: managed.managedMarker }

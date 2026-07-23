@@ -122,6 +122,7 @@
         "depth",
         "title",
         "description",
+        "labels",
         "is_archived",
         "updated_at"
       ],
@@ -156,6 +157,13 @@
         },
         "description": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "labels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "common.schema.json#/$defs/ShortText"
+          }
         },
         "is_archived": {
           "type": "boolean"
@@ -558,6 +566,7 @@
         "depth",
         "title",
         "description",
+        "labels",
         "is_archived",
         "remote_version",
         "updated_at"
@@ -604,6 +613,13 @@
         },
         "description": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "labels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "common.schema.json#/$defs/ShortText"
+          }
         },
         "is_archived": {
           "type": "boolean"

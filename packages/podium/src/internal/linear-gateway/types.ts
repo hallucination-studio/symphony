@@ -25,6 +25,7 @@ export interface LinearIssueValue {
   depth?: number;
   title?: string;
   description?: string;
+  labels: string[];
   isArchived: boolean;
   managedMarker?: string;
   workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
@@ -88,6 +89,7 @@ export interface WorkflowIssueValue {
   depth: number;
   title: string;
   description: string;
+  labels: string[];
   isArchived: boolean;
   managedMarker?: string;
   issueKind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
