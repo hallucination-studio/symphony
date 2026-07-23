@@ -13,6 +13,11 @@ test("static alignment passes the committed target model", async () => {
   assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), []);
 });
 
+test("full alignment audit composes architecture, retired, and static checks", async () => {
+  const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
+  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "full" }), []);
+});
+
 test("alignment reports missing target paths with their owning architecture source", () => {
   assert.deepEqual(
     inspectArchitectureTargets([

@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { auditArchitectureDocs } from "./audit-docs.mjs";
+import { auditRetiredInventory } from "./audit-retired.mjs";
 
 const execFileAsync = promisify(execFile);
 const textExtensions = new Set([
@@ -299,10 +301,10 @@ async function architectureSources(root) {
 }
 
 export async function auditArchitectureAlignment(root, options = {}) {
-  if (options.mode !== "static") throw new Error("alignment_mode_required");
+  if (options.mode !== "static" && options.mode !== "full") throw new Error("alignment_mode_required");
   const sources = await trackedSources(root);
   const architecture = await architectureSources(root);
-  const violations = [
+  const staticViolations = [
     ...inspectArchitectureTargets(targetRules, sources),
     ...inspectInterfaceRules(interfaceRules, sources),
     ...inspectArchitectureReferences([...targetRules, ...interfaceRules, ...evidenceRules], architecture),
@@ -310,7 +312,12 @@ export async function auditArchitectureAlignment(root, options = {}) {
     ...inspectSchemaCoverage(sources),
     ...inspectOwnerRules(sources),
   ];
-  return violations.sort(compareViolation);
+  if (options.mode === "static") return staticViolations.sort(compareViolation);
+  const [documentationViolations, retiredViolations] = await Promise.all([
+    auditArchitectureDocs(root),
+    auditRetiredInventory(root, { mode: "final" }),
+  ]);
+  return [...staticViolations, ...documentationViolations, ...retiredViolations].sort(compareViolation);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
