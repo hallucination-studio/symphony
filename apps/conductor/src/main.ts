@@ -13,11 +13,14 @@ import { ConductorProfileRelayHandler } from "./performer-profiles/internal/Cond
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
 import { SerializedPerformerProcessRunnerImpl } from "./performer-profiles/internal/SerializedPerformerProcessRunnerImpl.js";
 import { SessionPerformerAgentClientImpl } from "./performer-agent-client/internal/SessionPerformerAgentClientImpl.js";
+import { PerformerRootReconcilerClientImpl } from "./root-reconciler-client/internal/PerformerRootReconcilerClientImpl.js";
 import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
 import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
+import { LinearRootInvariantPolicyImpl } from "./root-reconciliation/internal/LinearRootInvariantPolicyImpl.js";
+import { PodiumRuntimeLogPublisherImpl } from "./runtime-logs/internal/PodiumRuntimeLogPublisherImpl.js";
 import type { DiscoveredRoot } from "./root-reconciliation/api/RootModels.js";
 
 type JsonValue =
@@ -56,6 +59,8 @@ export async function runConductor(environment = process.env): Promise<void> {
     lane: processRunner,
     deadlineMs: 300_000,
   });
+  const reconciler = new PerformerRootReconcilerClientImpl(performer);
+  const logs = new PodiumRuntimeLogPublisherImpl();
   let stopping = false;
   let shutdown: Promise<void> | undefined;
   const requestStop = () => {
@@ -79,13 +84,13 @@ export async function runConductor(environment = process.env): Promise<void> {
         () => new Date().toISOString(),
       ).handleRequest(body, secret);
     },
-  }, (reason, schemaPath, details) => logEvent("error", "private_ipc_failed", {
+  }, (reason, schemaPath, details) => logs.publish({ level: "error", event: "private_ipc_failed", fields: {
     sanitized_reason: reason,
     ...(schemaPath ? { schema_path: schemaPath } : {}),
     ...(details?.bodyKind ? { body_kind: details.bodyKind } : {}),
     ...(details?.bodyCode ? { body_code: details.bodyCode } : {}),
     ...(details?.bodyKeys ? { body_keys: details.bodyKeys.join(",") } : {}),
-  }));
+  }}));
   const gateway = new PodiumLinearGatewayClientImpl(
     config.conductorShortHash,
     protocol,
@@ -93,11 +98,11 @@ export async function runConductor(environment = process.env): Promise<void> {
       bindingId: config.bindingId,
       timeoutMs: () => remainingRuntimeTimeout(rootDeadlineMs),
       observeDiscovery(evidence) {
-        logEvent("info", "root_discovery_evidence", {
+        logs.publish({ level: "info", event: "root_discovery_evidence", fields: {
           root_header_count: String(evidence.rootHeaderCount),
           list_page_count: String(evidence.listPageCount),
           workflow_tree_count: String(evidence.workflowTreeCount),
-        });
+        }});
       },
     },
   );
@@ -153,6 +158,8 @@ export async function runConductor(environment = process.env): Promise<void> {
     git,
     ownership: ownershipClaim,
     scheduling: new LinearPriorityRootSchedulingPolicyImpl(),
+    invariants: new LinearRootInvariantPolicyImpl(),
+    reconciler,
     performer,
     materializer: new LinearRootDirectiveMaterializerImpl(
       gateway,
@@ -177,7 +184,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         isFastModeEnabled: profile.codexTurnSettings.isFastModeEnabled,
       };
     },
-    log: (event, fields) => logEvent("info", event, fields),
+    log: (event, fields) => logs.publish({ level: "info", event, fields }),
   });
   const stop = () => { void requestStop().catch(() => undefined); };
   process.once("SIGTERM", stop);
@@ -267,18 +274,6 @@ function positiveInteger(value: string | undefined, code: string): number {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function logEvent(level: "info" | "warning" | "error", event: string, fields: Record<string, string>): void {
-  const line = JSON.stringify({
-    event,
-    level,
-    ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [
-      key,
-      value.replace(/(?:Bearer\s+|sk-)[A-Za-z0-9._-]+/gi, "[REDACTED]"),
-    ])),
-  });
-  (level === "info" ? process.stdout : process.stderr).write(`${line}\n`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

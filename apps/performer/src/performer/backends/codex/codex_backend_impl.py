@@ -13,6 +13,7 @@ from openai_codex import Codex, CodexConfig, Sandbox
 
 from performer.backends.provider_backend_interface import (
     ProviderBackendError,
+    ProviderBackendInterface,
     ProviderSession,
     ProviderTurnCanceled,
 )
@@ -73,7 +74,7 @@ def _validate_base_url(value: str) -> None:
         raise ValueError("codex_base_url_invalid")
 
 
-class CodexBackendImpl:
+class CodexBackendImpl(ProviderBackendInterface):
     """The only module allowed to depend on the Provider SDK."""
 
     def __init__(self, sdk: Any | None = None) -> None:

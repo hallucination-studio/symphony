@@ -3,9 +3,11 @@ import { randomUUID } from "node:crypto";
 import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";
 import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../../root-scheduling/api/RootSchedulingPolicyInterface.js";
+import type { RootInvariantPolicyInterface } from "../api/RootInvariantPolicyInterface.js";
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
+import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
 import type { RootDirectiveMaterializerInterface } from "../../root-directive-materialization/api/RootDirectiveMaterializerInterface.js";
 import type {
   RootDirective,
@@ -32,6 +34,8 @@ export interface RootReconciliationRuntimeDependencies {
   git: GitWorkspaceProvisionerInterface;
   ownership: { claim(input: { root: DiscoveredRoot }): Promise<RootOwnershipClaimResult> };
   scheduling: RootSchedulingPolicyInterface;
+  invariants: RootInvariantPolicyInterface;
+  reconciler: RootReconcilerClientInterface;
   performer: PerformerAgentClientInterface;
   materializer: RootDirectiveMaterializerInterface;
   profileIdFor(root: DiscoveredRoot): Promise<string | undefined>;
@@ -87,7 +91,7 @@ export class RootReconciliationRuntime {
     }
     let sessionId = this.sessions.get(root.issueId);
     if (!sessionId) {
-      const opened = await this.dependencies.performer.openRootReconciler({
+      const opened = await this.dependencies.reconciler.open({
         protocolVersion: 1,
         requestId: randomUUID(),
         rootIssueId: root.issueId,
@@ -98,6 +102,14 @@ export class RootReconciliationRuntime {
       this.sessions.set(root.issueId, sessionId);
     }
     const tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
+    const invariants = this.dependencies.invariants.validate({ root, tree });
+    if (invariants.kind === "invalid") {
+      this.dependencies.log("root_invariant_blocked", {
+        root_issue_id: root.issueId,
+        reason: invariants.reason,
+      });
+      return "needs-attention";
+    }
     const workspace = await this.dependencies.git.ensureWorkspace({
       rootIssueId: root.issueId,
       rootIdentifier: root.identifier,
@@ -130,7 +142,7 @@ export class RootReconciliationRuntime {
         reservedTotalTokens: 50_000,
       },
     };
-    const result = await this.dependencies.performer.advanceRootReconciler({
+    const result = await this.dependencies.reconciler.advance({
       requestId: observation.requestId,
       sessionId,
       observation,
