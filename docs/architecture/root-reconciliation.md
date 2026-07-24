@@ -168,6 +168,18 @@ workflow DB、checkpoint或Linear镜像。合法directive返回后baseline推进
 已有session永远只看到从已确认baseline到新target的当前值/tombstone增量。任何把完整Tree塞入advance request的实现都
 违反本架构，即使它同时附带了delta或声称只是为了安全校验。
 
+### 4.3 Delta不是第二套状态模型
+
+`RootDelta`是一次Root Reconciler turn的传输输入，不是Linear revision、change event或独立的业务状态对象。它没有
+自己的创建、确认、重试、完成、失效或恢复生命周期；Conductor不得把delta写入Linear、Workflow DB、queue、checkpoint
+或本地revision store。Conductor只在本轮内存中将fresh Linear/Git facts与当前session baseline比较，生成一份delta；
+Performer在成功消费并返回directive后，仅推进自己的runtime baseline。
+
+delta传输失败、过期、不连续、schema无效或session丢失时，不补发旧delta、不猜测缺失变化、不引入revision事件状态机。
+Conductor关闭不可证明的session，从新的完整Linear/Git事实发送一次`RootBootstrapSnapshot`。Linear中实际存在的Issue、
+comment、relation、managed record和accepted directive仍是唯一durable事实；delta只是把这些事实交给同一个Root
+Reconciler session的增量边界。
+
 `root_digest`只覆盖canonical Root Reconciler Fact Set：业务Issue当前值、relations、业务managed records、普通human
 comments、Git/delivery事实和mechanical violations。Raw SDK对象、Timeline comments、Reconciler reply comments、
 transport heartbeat和其他明确排除的automation comments不属于该fact set，其写入不会改变digest或触发模型。

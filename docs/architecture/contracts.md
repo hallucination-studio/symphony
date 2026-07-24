@@ -125,6 +125,9 @@ human_action_resolutions[]
 full snapshot、before/after diff或兼容union。baseline不匹配返回closed failure并要求fresh session bootstrap。
 Conductor可以为了计算delta在自己的单轮内存视图中读取完整active和archived Tree，但不得把该视图、完整source manifest
 或历史activity复制到advance message。只有新建session、session丢失或baseline无法证明时，才允许再次发送完整bootstrap。
+`RootDelta`没有独立的Linear revision/event lifecycle，也不进入任何durable queue、checkpoint或本地镜像；它只表示
+本轮从已确认baseline到fresh target的当前值/tombstone传输。传输失败或不连续时必须丢弃session并重新bootstrap，不能
+重放、补猜或兼容旧delta。
 
 Stage Result至少关联role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。
 Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment
