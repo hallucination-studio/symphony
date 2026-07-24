@@ -190,6 +190,10 @@ PlanCompletedResult
 `PlanBlockedResult`报告无法形成有效Plan的closed reason和attempts。Plan Contract digest由Conductor对validated
 canonical Result计算并持久化，不信任模型自报digest。
 
+`proposed_work_dag.work_nodes[].dependency_proposal_keys[]`是Plan阶段唯一可解析的Work dependency identity；
+Plan尚未materialize时不存在Work Issue ID。Conductor只在matching approved Contract DAG materialization时把这些keys解析为
+`blocks` relations，并对每个created Work/Verify写Contract digest的`NodeMarker`。
+
 ## 6. Work contract
 
 ### 6.1 WorkTurnRequest

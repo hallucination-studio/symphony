@@ -11,6 +11,7 @@ import type {
   RootDirectiveMaterializationResult,
   RootDirectiveMaterializerInterface,
 } from "../api/RootDirectiveMaterializerInterface.js";
+import { LinearApprovedPlanDagMaterializerImpl } from "./LinearApprovedPlanDagMaterializerImpl.js";
 
 export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMaterializerInterface {
   constructor(
@@ -30,6 +31,9 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
     }
     if (["execute_plan", "execute_work", "execute_verify", "rerun_stage"].includes(action.kind)) {
       return failed(directive, "stage_directive_requires_result_materializer");
+    }
+    if (action.kind === "materialize_approved_plan_dag") {
+      return new LinearApprovedPlanDagMaterializerImpl(this.linear).materialize({ directive, view });
     }
     if (action.kind === "revise_root_tree") return this.applyTreeOperations(directive, view, action.operations);
     if (action.kind === "create_cycle") return this.createCycle(directive, view, action);

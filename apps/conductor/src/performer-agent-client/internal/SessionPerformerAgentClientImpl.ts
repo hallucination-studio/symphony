@@ -710,6 +710,7 @@ function decodeDirective(value: unknown): RootDirective {
   }
   if (typeof action.kind !== "string" || !new Set([
     "execute_plan", "execute_work", "execute_verify", "rerun_stage", "revise_root_tree",
+    "materialize_approved_plan_dag",
     "replan_current_cycle", "supersede_cycle", "create_cycle", "request_human_action",
     "conclude_cycle", "conclude_root", "cancel_root", "wait", "acknowledge",
   ]).has(action.kind)) throw new Error("root_directive_action_invalid");

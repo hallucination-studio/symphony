@@ -417,6 +417,7 @@ RootDirective
     ExecuteWorkDirective |
     ExecuteVerifyDirective |
     RerunStageDirective |
+    MaterializeApprovedPlanDagDirective |
     ReviseRootTreeDirective |
     ReplanCurrentCycleDirective |
     SupersedeCycleDirective |
@@ -495,6 +496,24 @@ RerunStageDirective
 
 Conductor机械验证Cycle active、target membership、ready conditions、Plan Contract、Git revision、budget和
 capability。rerun总是创建fresh execution/turn；不能恢复旧turn或只改status伪造重跑。
+
+### 7.1.1 已批准Plan的DAG materialization
+
+```text
+MaterializeApprovedPlanDagDirective
+  kind: materialize_approved_plan_dag
+  cycle_issue_id
+  plan_issue_id
+  plan_contract_digest
+  approval_action_issue_id
+  approval_resolution_id
+```
+
+它只能引用同一directive中由Root Reconciler接受的`plan_review/approved` resolution。Conductor从已read-back的
+Plan Contract、Plan completed Result、Plan Review Request/Resolution和Plan relation机械验证所有identity、scope和digest，
+随后创建Contract的Work/Verify DAG、dependency/Plan relations和每个节点的`NodeMarker`，并逐步read-back。只有完整
+DAG durable后才能把Plan转为`Done`、Cycle转为`Sealed`。缺少、stale、rejected、canceled或wrong-digest resolution，以及
+任何未绑定或冲突的existing Work/Verify节点都会fail closed；该directive本身不dispatch Work。
 
 ### 7.2 Root Tree patch
 

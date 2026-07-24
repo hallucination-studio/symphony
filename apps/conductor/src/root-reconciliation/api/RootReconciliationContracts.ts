@@ -240,6 +240,7 @@ export type RootDirective = RootDirectiveBase & {
     | ExecuteWorkDirective
     | ExecuteVerifyDirective
     | RerunStageDirective
+    | MaterializeApprovedPlanDagDirective
     | ReviseRootTreeDirective
     | ReplanCurrentCycleDirective
     | SupersedeCycleDirective
@@ -323,6 +324,14 @@ export interface RerunStageDirective {
   invalidatedExecutionIds: string[];
   reason: string;
   preservedEvidenceRefs: EvidenceRef[];
+}
+export interface MaterializeApprovedPlanDagDirective {
+  kind: "materialize_approved_plan_dag";
+  cycleIssueId: string;
+  planIssueId: string;
+  planContractDigest: string;
+  approvalActionIssueId: string;
+  approvalResolutionId: string;
 }
 
 export type TreePrecondition = {

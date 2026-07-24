@@ -602,7 +602,7 @@
     "RootDirectiveAction": {
       "oneOf": [
         { "$ref": "#/$defs/ExecutePlanDirective" }, { "$ref": "#/$defs/ExecuteWorkDirective" }, { "$ref": "#/$defs/ExecuteVerifyDirective" },
-        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/ReviseRootTreeDirective" },
+        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/MaterializeApprovedPlanDagDirective" }, { "$ref": "#/$defs/ReviseRootTreeDirective" },
         { "$ref": "#/$defs/ReplanCurrentCycleDirective" }, { "$ref": "#/$defs/SupersedeCycleDirective" }, { "$ref": "#/$defs/CreateCycleDirective" },
         { "$ref": "#/$defs/RequestHumanActionDirective" }, { "$ref": "#/$defs/ConcludeCycleDirective" }, { "$ref": "#/$defs/ConcludeRootDirective" },
         { "$ref": "#/$defs/CancelRootDirective" }, { "$ref": "#/$defs/WaitDirective" }, { "$ref": "#/$defs/AcknowledgeDirective" }
@@ -647,6 +647,18 @@
         "kind": { "const": "rerun_stage" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "enum": ["plan", "work", "verify"] },
         "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
         "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
+      }
+    },
+    "MaterializeApprovedPlanDagDirective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cycle_issue_id", "plan_issue_id", "plan_contract_digest", "approval_action_issue_id", "approval_resolution_id"],
+      "properties": {
+        "kind": { "const": "materialize_approved_plan_dag" },
+        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "approval_action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "approval_resolution_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
     "TreeOperation": {

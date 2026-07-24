@@ -70,6 +70,7 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "RootDirective",
     "UserCommentReply",
     "CancelRootDirective",
+    "MaterializeApprovedPlanDagDirective",
     "PlanTurnRequest",
     "WorkTurnRequest",
     "VerifyTurnRequest",
