@@ -77,6 +77,22 @@ if (rawSpacing.length > 0) {
   );
 }
 
+// Durations and easings must come from the motion tokens. Raw time values
+// are only allowed inside the reduced-motion guard (marked !important).
+const rawTimes = [...layout.matchAll(/^.*\b\d+(?:\.\d+)?m?s\b.*$/gm)]
+  .map((match) => match[0].trim())
+  .filter(
+    (line) =>
+      !line.includes("!important") &&
+      !line.startsWith("/*") &&
+      !line.startsWith("*"),
+  );
+if (rawTimes.length > 0) {
+  errors.push(
+    `layout.css must consume motion tokens: ${rawTimes.join(" | ")}`,
+  );
+}
+
 // Components must not carry inline styles; presentation lives in the
 // token-driven stylesheets.
 const srcDir = new URL("../src", import.meta.url);

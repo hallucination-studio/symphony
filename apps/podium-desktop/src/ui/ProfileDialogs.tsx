@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   AgentExecutionPolicy,
@@ -25,8 +25,6 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
         }
   );
   const [status, setStatus] = useState<SubmissionStatus>("editing");
-  const dialogRef = useRef<HTMLElement>(null);
-  useDialogFocus(dialogRef, onClose);
 
   async function submit(form: HTMLFormElement) {
     const formData = new FormData(form);
@@ -67,10 +65,12 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
   }
 
   return (
-    <DialogFrame dialogRef={dialogRef} labelId="profile-title" testId="profile-dialog">
+    <DialogFrame labelId="profile-title" testId="profile-dialog" onClose={onClose}>
+      {(requestClose) => (
+        <>
       <h2 id="profile-title">{profile ? "Edit Codex profile" : "Configure Codex profile"}</h2>
       {status === "pending" && <StatusMessage title="Waiting for Conductor confirmation" body="Settings remain unchanged until Conductor accepts them." />}
-      {status === "confirmed" && <StatusMessage title="Profile confirmed" body="Complete login, then activate it for new Roots." action={<button data-testid="profile-done" className="button primary" onClick={onClose}>Done</button>} />}
+      {status === "confirmed" && <StatusMessage title="Profile confirmed" body="Complete login, then activate it for new Roots." action={<button data-testid="profile-done" className="button primary" onClick={requestClose}>Done</button>} />}
       {status === "error" && <StatusMessage isError title="Profile was not created" body="Conductor rejected the change. Review the settings and try again." action={<button className="button" onClick={() => setStatus("editing")}>Try again</button>} />}
       {status === "editing" && (
         <form onSubmit={(event) => { event.preventDefault(); void submit(event.currentTarget); }}>
@@ -97,8 +97,10 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
             rules={executionPolicy.commandDenylist}
             onChange={(commandDenylist) => setExecutionPolicy((current) => ({ ...current, commandDenylist }))}
           />
-          <div className="button-row"><button className="button" type="button" onClick={onClose}>Cancel</button><button data-testid="profile-save" className="button primary" type="submit">Save profile</button></div>
+          <div className="button-row"><button className="button" type="button" onClick={requestClose}>Cancel</button><button data-testid="profile-save" className="button primary" type="submit">Save profile</button></div>
         </form>
+      )}
+        </>
       )}
     </DialogFrame>
   );
@@ -106,8 +108,6 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
 
 export function ApiKeyDialog({ conductorId, profileId, onClose, onSecret }: { conductorId: string; profileId: string; onClose: () => void; onSecret: SecretHandler }) {
   const [status, setStatus] = useState<SubmissionStatus>("editing");
-  const dialogRef = useRef<HTMLElement>(null);
-  useDialogFocus(dialogRef, onClose);
 
   async function submit(form: HTMLFormElement) {
     const secret = String(new FormData(form).get("apiKey") ?? "");
@@ -122,23 +122,50 @@ export function ApiKeyDialog({ conductorId, profileId, onClose, onSecret }: { co
   }
 
   return (
-    <DialogFrame dialogRef={dialogRef} labelId="api-key-title" testId="api-key-dialog">
+    <DialogFrame labelId="api-key-title" testId="api-key-dialog" onClose={onClose}>
+      {(requestClose) => (
+        <>
       <h2 id="api-key-title">Set Codex API Key</h2>
       {status === "pending" && <StatusMessage title="Waiting for Conductor confirmation" body="The key will not be displayed again." />}
-      {status === "confirmed" && <StatusMessage title="API Key configured" body="The key will not be displayed again." action={<button data-testid="api-key-done" className="button primary" onClick={onClose}>Done</button>} />}
+      {status === "confirmed" && <StatusMessage title="API Key configured" body="The key will not be displayed again." action={<button data-testid="api-key-done" className="button primary" onClick={requestClose}>Done</button>} />}
       {status === "error" && <StatusMessage isError title="API Key was not accepted" body="Nothing was saved. Enter the key again to retry." action={<button className="button" onClick={() => setStatus("editing")}>Try again</button>} />}
       {status === "editing" && (
         <form onSubmit={(event) => { event.preventDefault(); void submit(event.currentTarget); }}>
           <label>API Key<input name="apiKey" aria-label="API Key" type="password" autoComplete="off" required /></label>
-          <div className="button-row"><button className="button" type="button" onClick={onClose}>Cancel</button><button data-testid="api-key-submit" className="button primary" type="submit">Set API Key</button></div>
+          <div className="button-row"><button className="button" type="button" onClick={requestClose}>Cancel</button><button data-testid="api-key-submit" className="button primary" type="submit">Set API Key</button></div>
         </form>
+      )}
+        </>
       )}
     </DialogFrame>
   );
 }
 
-function DialogFrame({ dialogRef, labelId, testId, children }: { dialogRef: React.RefObject<HTMLElement>; labelId: string; testId: string; children: React.ReactNode }) {
-  return <div className="dialog-backdrop"><section ref={dialogRef} data-testid={testId} className="dialog" role="dialog" aria-modal="true" aria-labelledby={labelId}>{children}</section></div>;
+function DialogFrame({ labelId, testId, onClose, children }: { labelId: string; testId: string; onClose: () => void; children: (requestClose: () => void) => React.ReactNode }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const [closing, setClosing] = useState(false);
+  // Every close path (Escape, Cancel, Done) goes through requestClose so the
+  // exit animation always completes before the dialog unmounts.
+  const requestClose = useCallback(() => setClosing(true), []);
+  useDialogFocus(dialogRef, requestClose);
+  return (
+    <div className="dialog-backdrop" data-closing={closing}>
+      <section
+        ref={dialogRef}
+        data-testid={testId}
+        className="dialog"
+        data-closing={closing}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelId}
+        onAnimationEnd={(event) => {
+          if (closing && event.target === event.currentTarget) onClose();
+        }}
+      >
+        {children(requestClose)}
+      </section>
+    </div>
+  );
 }
 
 function StatusMessage({ title, body, action, isError = false }: { title: string; body: string; action?: React.ReactNode; isError?: boolean }) {

@@ -109,6 +109,7 @@ motion:
   duration-brand: 600ms
   duration-sweep: 1400ms
   duration-pulse: 2s
+  duration-stagger: 30ms
   easing-standard: cubic-bezier(0.2, 0, 0, 1)
   easing-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1)
 spacing:
@@ -141,7 +142,8 @@ The visual language follows the Apple Human Interface Guidelines for macOS:
   be paired with text or an icon; color is never the only signal.
 - Base font size is 13px (SF Pro via `system-ui`). Use the type scale above;
   do not introduce web fonts, decorative gradients, or dense dashboard
-  styling.
+  styling. The mono face (`ui-monospace`) is for identifiers, log event
+  kinds, and command literals — not for prose.
 - Controls use macOS metrics: 28px-high push buttons with 6px radius,
   5-6px radius inputs, and a translucent accent focus halo instead of a
   hard outline.
