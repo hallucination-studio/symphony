@@ -40,6 +40,13 @@ colors:
   status-orange-dark: "#ff9f0a"
   status-gray: "#8e8e93"
   status-gray-dark: "#98989d"
+  status-red-soft: "rgba(255, 59, 48, 0.12)"
+  status-red-soft-dark: "rgba(255, 69, 58, 0.18)"
+font-weights:
+  regular: "400"
+  medium: "500"
+  semibold: "600"
+  bold: "700"
 typography:
   display:
     fontFamily: system-ui
@@ -82,6 +89,18 @@ rounded:
   card: 10px
   dialog: 12px
   pill: 999px
+metrics:
+  control-height: 28px
+  sidebar-width: 232px
+  content-column: 840px
+shadows:
+  button: "0 0.5px 1.5px rgba(0, 0, 0, 0.12)"
+  button-dark: "0 0.5px 1.5px rgba(0, 0, 0, 0.4)"
+  dialog: "0 12px 40px rgba(0, 0, 0, 0.22), 0 0 0 1px rgba(0, 0, 0, 0.06)"
+  dialog-dark: "0 12px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08)"
+z-index:
+  drag-region: 1
+  dialog: 100
 spacing:
   1: 4px
   2: 8px
@@ -126,4 +145,7 @@ The visual language follows the Apple Human Interface Guidelines for macOS:
   or SDK payloads.
 - Use the CSS custom properties in `src/styles/tokens.css`; do not introduce
   a second token system. `src/styles/layout.css` must not contain raw color
-  values.
+  values, numeric font weights, or raw spacing-scale values (4/8/12/16/24/32/
+  48px) in margin, padding, or gap declarations; use the font-weight, size,
+  spacing, and z-index tokens instead. Every color value in `tokens.css` must
+  be declared in the YAML manifest above (checked both directions).

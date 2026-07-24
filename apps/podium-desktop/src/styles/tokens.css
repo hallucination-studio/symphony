@@ -22,11 +22,8 @@
   --status-positive: #34c759;
   --status-negative: #ff3b30;
   --status-warning: #ff9500;
-  --status-info: #007aff;
   --status-neutral: #8e8e93;
-  --status-positive-soft: rgba(52, 199, 89, 0.14);
   --status-negative-soft: rgba(255, 59, 48, 0.12);
-  --status-warning-soft: rgba(255, 149, 0, 0.14);
 
   /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
@@ -43,7 +40,14 @@
   --line-height-body: 16px;
   --font-size-caption: 11px;
   --line-height-caption: 13px;
-  --font-weight-label: 600;
+
+  /* Font weights / letter spacing */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --font-weight-label: var(--font-weight-semibold);
+  --letter-spacing-caps: 0.04em;
 
   /* Spacing scale */
   --space-1: 4px;
@@ -61,6 +65,13 @@
   --radius-pill: 999px;
   --size-status-dot: 8px;
   --size-titlebar: 52px;
+  --size-control-height: 28px;
+  --size-sidebar: 232px;
+  --size-content-column: 840px;
+
+  /* Layering */
+  --z-drag-region: 1;
+  --z-dialog: 100;
   --shadow-button: 0 0.5px 1.5px rgba(0, 0, 0, 0.12);
   --shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.22), 0 0 0 1px rgba(0, 0, 0, 0.06);
 
@@ -88,11 +99,8 @@
     --status-positive: #30d158;
     --status-negative: #ff453a;
     --status-warning: #ff9f0a;
-    --status-info: #0a84ff;
     --status-neutral: #98989d;
-    --status-positive-soft: rgba(48, 209, 88, 0.18);
     --status-negative-soft: rgba(255, 69, 58, 0.18);
-    --status-warning-soft: rgba(255, 159, 10, 0.18);
 
     --shadow-button: 0 0.5px 1.5px rgba(0, 0, 0, 0.4);
     --shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -140,6 +148,6 @@ h1,
 h2,
 h3 {
   margin: 0;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0;
 }

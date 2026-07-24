@@ -11,7 +11,7 @@
     "build:backend": "tsc -p src-backend/tsconfig.json",
     "build:sidecars": "node tools/build-sidecars.mjs",
     "typecheck": "tsc -b --pretty false && tsc -p src-backend/tsconfig.json --noEmit",
-    "lint": "eslint src src-backend --ext .ts,.tsx --max-warnings 0",
+    "lint": "eslint src src-backend --ext .ts,.tsx --max-warnings 0 && npm run design:lint",
     "design:lint": "node tools/lint-design.mjs",
     "test": "vitest run",
     "test:host": "cargo test --manifest-path src-tauri/Cargo.toml --",

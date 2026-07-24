@@ -21,7 +21,7 @@ h1:focus {
    is draggable while interactive controls opt out. */
 .drag-region {
   position: fixed;
-  z-index: 1;
+  z-index: var(--z-drag-region);
   top: 0;
   left: 0;
   right: 0;
@@ -35,7 +35,7 @@ h1:focus {
 }
 
 .sidebar {
-  width: 232px;
+  width: var(--size-sidebar);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -51,7 +51,7 @@ h1:focus {
   padding: 0 var(--space-2);
   color: var(--color-label);
   font-size: var(--font-size-title);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .brand-mark {
@@ -96,7 +96,7 @@ h1:focus {
 .nav-link[data-active="true"] {
   background: var(--color-accent);
   color: var(--color-accent-contrast);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .nav-link[data-active="true"] svg {
@@ -112,13 +112,13 @@ h1:focus {
 }
 
 .page-header {
-  max-width: 840px;
+  max-width: var(--size-content-column);
   margin-bottom: var(--space-5);
 }
 
 .page-header h1 {
   font-size: var(--font-size-h1);
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
   line-height: var(--line-height-h1);
 }
 
@@ -136,13 +136,11 @@ h1:focus {
 .page-stack {
   display: grid;
   gap: var(--space-4);
-  max-width: 840px;
+  max-width: var(--size-content-column);
 }
 
 /* Inset grouped cards (System Settings style) */
 .panel,
-.next-action,
-.metrics article,
 .empty-state,
 .selection-list {
   border: 1px solid var(--color-separator);
@@ -156,8 +154,7 @@ h1:focus {
 }
 
 .panel h2,
-.empty-state h2,
-.next-action h2 {
+.empty-state h2 {
   font-size: var(--font-size-title);
   line-height: var(--line-height-title);
 }
@@ -167,27 +164,13 @@ h1:focus {
   margin-bottom: 0;
 }
 
-.next-action {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  border-color: var(--color-separator-strong);
-}
-
-.next-action p {
-  margin: var(--space-2) 0 0;
-  color: var(--color-label-secondary);
-}
-
 .eyebrow {
   margin: 0 0 var(--space-2);
   color: var(--color-label-tertiary);
   font-size: var(--font-size-caption);
   font-weight: var(--font-weight-label);
   line-height: var(--line-height-caption);
-  letter-spacing: 0.04em;
+  letter-spacing: var(--letter-spacing-caps);
   text-transform: uppercase;
 }
 
@@ -196,7 +179,7 @@ h1:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 28px;
+  min-height: var(--size-control-height);
   padding: 3px var(--space-3);
   border: 1px solid var(--color-separator-strong);
   border-radius: var(--radius-control);
@@ -204,7 +187,7 @@ h1:focus {
   box-shadow: var(--shadow-button);
   color: var(--color-label);
   font-size: var(--font-size-body);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   cursor: pointer;
 }
 
@@ -234,7 +217,7 @@ h1:focus {
   background: transparent;
   box-shadow: none;
   color: var(--color-accent);
-  font-weight: 400;
+  font-weight: var(--font-weight-regular);
 }
 
 .button.quiet-button:hover:not(:disabled) {
@@ -245,37 +228,17 @@ h1:focus {
   min-height: 22px;
   padding: 2px var(--space-2);
   font-size: var(--font-size-caption);
-  font-weight: 400;
+  font-weight: var(--font-weight-regular);
 }
 
 .full-width {
   width: 100%;
 }
 
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-}
-
-.metrics article {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-4);
-}
-
-.metrics span,
-.metrics small,
 .stale-note {
   color: var(--color-label-secondary);
   font-size: var(--font-size-caption);
   line-height: var(--line-height-caption);
-}
-
-.metrics strong {
-  font-size: var(--font-size-display);
-  font-weight: 700;
-  line-height: var(--line-height-display);
 }
 
 .section-heading,
@@ -350,57 +313,38 @@ h1:focus {
   background: var(--status-warning);
 }
 
-.root-list,
 .plain-list,
-.selection-list,
-.workflow-tree {
+.selection-list {
   margin: var(--space-3) 0 0;
   padding: 0;
   list-style: none;
 }
 
-.root-list li,
 .plain-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
+  min-width: 0;
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--color-separator);
 }
 
-.root-list li:last-child,
 .plain-list li:last-child {
   border-bottom: 0;
 }
 
-.root-list div,
-.plain-list li {
-  min-width: 0;
-}
-
-.root-list strong,
-.root-list span,
-.root-list small,
 .plain-list strong,
 .plain-list span {
   display: block;
 }
 
-.root-list strong,
 .plain-list strong {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
-.root-list span,
-.plain-list span,
-.root-list small {
+.plain-list span {
   color: var(--color-label-secondary);
-}
-
-.root-list small {
-  margin-top: 2px;
-  font-size: var(--font-size-caption);
 }
 
 .selection-list {
@@ -433,32 +377,10 @@ h1:focus {
 
 .selection-list span strong {
   display: block;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .selection-list span {
-  color: var(--color-label-secondary);
-}
-
-.workflow-tree {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.workflow-tree li {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-3);
-  margin-left: calc(var(--tree-depth) * var(--space-5));
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-separator);
-  border-radius: var(--radius-control);
-  background: var(--color-content-bg);
-}
-
-.workflow-tree small {
-  display: block;
   color: var(--color-label-secondary);
 }
 
@@ -531,7 +453,7 @@ h1:focus {
 /* Dialogs */
 .dialog-backdrop {
   position: fixed;
-  z-index: 10;
+  z-index: var(--z-dialog);
   inset: 0;
   display: grid;
   place-items: center;
@@ -571,7 +493,7 @@ h1:focus {
 .dialog select,
 .setup-card input,
 .setup-card select {
-  min-height: 28px;
+  min-height: var(--size-control-height);
   padding: 3px var(--space-2);
   border: 1px solid var(--color-separator-strong);
   border-radius: var(--radius-control);
@@ -664,20 +586,10 @@ h1:focus {
     padding: var(--space-5) var(--space-4);
   }
 
-  .metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .next-action,
   .action-row,
   .section-heading {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .workflow-tree li {
-    grid-template-columns: 1fr;
-    margin-left: calc(var(--tree-depth) * var(--space-3));
   }
 }
 
