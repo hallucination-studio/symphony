@@ -24,14 +24,14 @@ test("alignment reports missing target paths with their owning architecture sour
       {
         path: "apps/conductor/src/root-reconciliation/api/RootModels.ts",
         owner: "conductor",
-        source: "docs/architecture/root-reconciliation.md#rootreconcilerobservation-contract",
+        source: "docs/architecture/root-reconciliation.md#4-bootstrap与delta-contract",
       },
     ], new Map()),
     [{
       code: "missing_target",
       owner: "conductor",
       path: "apps/conductor/src/root-reconciliation/api/RootModels.ts",
-      source: "docs/architecture/root-reconciliation.md#rootreconcilerobservation-contract",
+      source: "docs/architecture/root-reconciliation.md#4-bootstrap与delta-contract",
     }],
   );
 });
