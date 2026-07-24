@@ -171,6 +171,8 @@ function fixture(): LinearWorkflowTreeSnapshot {
       comment({ comment_id: "comment-symphony", issue_id: "root-1", body: "System", author_kind: "symphony", author_id: "symphony-bot", author_user_id: "symphony-bot", remote_version: "2026-07-23T00:00:06Z", updated_at: "2026-07-23T00:00:06Z" }),
     ],
     relations: [{ relation_id: "relation-1", relation_kind: "blocks", source_issue_id: "work-2", target_issue_id: "cycle-2" }],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:10Z",
   };
 }

@@ -66,7 +66,7 @@ class FakeGateway {
       order: 0, depth: 0, title: "Root", description: "Build it", labels: [], remote_version: "root-version-1", updated_at: "2026-07-21T09:00:00Z",
       is_archived: false,
     }],
-    comments: [], relations: [], observed_at: "2026-07-21T09:00:00Z",
+    comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-21T09:00:00Z",
   };
   mutations: LinearWorkflowMutationCommand[] = [];
 

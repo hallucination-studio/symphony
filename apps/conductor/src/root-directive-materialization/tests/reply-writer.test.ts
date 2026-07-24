@@ -158,6 +158,8 @@ class FakeLinear {
       author_user_id: "user-1", created_at: "2026-07-23T00:00:01Z", remote_version: "comment-v1", updated_at: "2026-07-23T00:00:01Z",
     }],
     relations: [],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:02Z",
   };
   mutations: LinearWorkflowMutationCommand[] = [];

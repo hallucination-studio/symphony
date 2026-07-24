@@ -124,12 +124,38 @@ export interface WorkflowRelationValue {
   targetIssueId: string;
 }
 
+export type WorkflowSourceKind =
+  | "linear_issue"
+  | "linear_comment"
+  | "linear_relation"
+  | "linear_status_catalog";
+
+export interface WorkflowSourceManifestEntryValue {
+  sourceKind: WorkflowSourceKind;
+  sourceId: string;
+  sourceVersion: string;
+  actorKind: WorkflowCommentAuthorKind;
+  stableWriteId?: string;
+}
+
+export interface WorkflowSourceCoverageOmissionValue {
+  sourceId: string;
+  reason: string;
+}
+
+export interface WorkflowSourceCoverageValue {
+  isComplete: boolean;
+  omissions: WorkflowSourceCoverageOmissionValue[];
+}
+
 export interface WorkflowRootTreeValue {
   rootIssueId: string;
   statusCatalog: WorkflowStatusValue[];
   issues: WorkflowIssueValue[];
   comments: WorkflowCommentValue[];
   relations: WorkflowRelationValue[];
+  sourceManifest: WorkflowSourceManifestEntryValue[];
+  coverage: WorkflowSourceCoverageValue;
   observedAt: string;
 }
 

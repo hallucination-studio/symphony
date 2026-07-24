@@ -220,6 +220,8 @@ class FakeLinear {
         managed_marker: `${rootId}:ownership`, remote_version: "comment-v1", updated_at: now,
       }] : [],
       relations: [],
+      source_manifest: [],
+      coverage: { is_complete: true, omissions: [] },
       observed_at: now,
     };
   }

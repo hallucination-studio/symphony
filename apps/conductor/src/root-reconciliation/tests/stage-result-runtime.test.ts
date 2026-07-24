@@ -169,6 +169,8 @@ function workflowTree(): LinearWorkflowTreeSnapshot {
     issues: [issue("root-1", "root"), issue("cycle-1", "cycle", "root-1"), issue("work-1", "work", "cycle-1")],
     comments: [],
     relations: [],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:00Z",
   };
 }

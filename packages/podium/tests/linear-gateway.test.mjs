@@ -354,6 +354,8 @@ test("workflow Issue Tree validates status identity, comments, relations, and sc
     { ...valid, issues: [{ ...valid.issues[0], projectId: "project-foreign" }, valid.issues[1]] },
     { ...valid, comments: [{ ...valid.comments[0], issueId: "missing-issue" }] },
     { ...valid, relations: [{ ...valid.relations[0], targetIssueId: "missing-issue" }] },
+    { ...valid, sourceManifest: [] },
+    { ...valid, coverage: { isComplete: false, omissions: [{ sourceId: "root-1", reason: "incomplete" }] } },
   ];
   for (const tree of invalid) {
     const handler = new LinearGatewayProtocolHandlerImpl(
@@ -401,6 +403,9 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   assert.equal(result.tree.issues.length, 2);
   assert.equal(result.tree.issues[0].is_archived, false);
   assert.equal(result.tree.relations[0].relation_id, "relation-1");
+  assert.equal(result.tree.coverage.is_complete, true);
+  assert.ok(result.tree.source_manifest.some(({ source_kind, source_id }) =>
+    source_kind === "linear_comment" && source_id === "comment-1"));
   assert.equal(reads, 1);
   await assert.rejects(
     services.handle({
@@ -566,6 +571,14 @@ function workflowTree(projectId) {
     ],
     comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
     relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
+    sourceManifest: [
+      { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown" },
+      { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown", stableWriteId: "root-1:work-1" },
+      { sourceKind: "linear_comment", sourceId: "comment-1", sourceVersion: "2026-07-16T00:00:01Z", actorKind: "human" },
+      { sourceKind: "linear_relation", sourceId: "relation-1", sourceVersion: "relation-1", actorKind: "unknown" },
+      { sourceKind: "linear_status_catalog", sourceId: "project-1:status-catalog", sourceVersion: "status-catalog-v1", actorKind: "unknown" },
+    ],
+    coverage: { isComplete: true, omissions: [] },
     observedAt: "2026-07-16T00:00:02Z",
   };
 }

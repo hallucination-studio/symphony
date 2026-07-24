@@ -103,6 +103,8 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
       }],
       comments: [],
       relations: [],
+      source_manifest: [],
+      coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-23T00:00:00Z",
     },
     git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } },
@@ -336,7 +338,7 @@ test("agent client normalizes the Root directive wire fields", async () => {
     observation: {
       root: { issueId: "root-1", title: "Root", description: "Root" } as never,
       tree: {
-        root_issue_id: "root-1", status_catalog: [], issues: [{ issue_id: "root-1", issue_kind: "root", title: "Root", description: "Root", status: "In Progress" }], comments: [], relations: [], observed_at: "2026-07-23T00:00:00Z",
+        root_issue_id: "root-1", status_catalog: [], issues: [{ issue_id: "root-1", issue_kind: "root", title: "Root", description: "Root", status: "In Progress" }], comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-23T00:00:00Z",
       },
       git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } },
       observedAt: "2026-07-23T00:00:00Z", treeDigest: "tree-1", complete: true,

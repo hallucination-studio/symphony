@@ -316,7 +316,14 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   const tree = schema.$defs.WorkflowRootTreeSnapshot;
   assert.deepEqual(tree.required, [
     "root_issue_id", "status_catalog", "issues", "comments", "relations", "observed_at",
+    "source_manifest", "coverage",
   ]);
+  assert.equal(schema.$defs.WorkflowSourceManifestEntry.additionalProperties, false);
+  assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.required, [
+    "source_kind", "source_id", "source_version", "actor_kind",
+  ]);
+  assert.equal(schema.$defs.WorkflowSourceCoverage.additionalProperties, false);
+  assert.deepEqual(schema.$defs.WorkflowSourceCoverage.required, ["is_complete", "omissions"]);
   assert.equal(schema.$defs.WorkflowIssueSnapshot.properties.remote_version.$ref,
     "common.schema.json#/$defs/OpaqueIdentifier");
   assert.equal(schema.$defs.WorkflowCommentSnapshot.properties.remote_version.$ref,

@@ -331,6 +331,20 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           source_issue_id: relation.sourceIssueId,
           target_issue_id: relation.targetIssueId,
         })),
+        source_manifest: tree.sourceManifest.map((source) => ({
+          source_kind: source.sourceKind,
+          source_id: source.sourceId,
+          source_version: source.sourceVersion,
+          actor_kind: source.actorKind,
+          ...(source.stableWriteId ? { stable_write_id: source.stableWriteId } : {}),
+        })),
+        coverage: {
+          is_complete: tree.coverage.isComplete,
+          omissions: tree.coverage.omissions.map((omission) => ({
+            source_id: omission.sourceId,
+            reason: omission.reason,
+          })),
+        },
         observed_at: tree.observedAt,
       },
     };

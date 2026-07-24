@@ -625,6 +625,15 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   assert.deepEqual(tree.relations, [{
     relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
   }]);
+  assert.deepEqual(tree.sourceManifest, [
+    { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00.000Z", actorKind: "unknown" },
+    { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:02.000Z", actorKind: "unknown" },
+    { sourceKind: "linear_comment", sourceId: "comment-root", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "human" },
+    { sourceKind: "linear_comment", sourceId: "comment-work", sourceVersion: "2026-07-16T00:00:03.000Z", actorKind: "symphony", stableWriteId: "write-1" },
+    { sourceKind: "linear_relation", sourceId: "relation-1", sourceVersion: "relation-1", actorKind: "unknown" },
+    { sourceKind: "linear_status_catalog", sourceId: "project-1:status-catalog", sourceVersion: "f241b6b4887e72321a11ea914516224280ff68d55aa6709c0113557f6409e874", actorKind: "unknown" },
+  ]);
+  assert.deepEqual(tree.coverage, { isComplete: true, omissions: [] });
 });
 
 test("complete Workflow Issue Tree batches paginate nested comments and relations by issue", async () => {

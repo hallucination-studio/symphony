@@ -213,6 +213,8 @@ function fixture(input: {
     ],
     comments: input.comments ?? [],
     relations: [],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:04Z",
   };
 }

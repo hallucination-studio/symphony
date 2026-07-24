@@ -135,6 +135,6 @@ function workflowTree() {
       { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], issue_kind: "root", remote_version: now, updated_at: now },
       { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: [], managed_marker: "root-1:work-1", issue_kind: "work", remote_version: now, updated_at: now },
     ],
-    comments: [], relations: [], observed_at: now,
+    comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
   };
 }

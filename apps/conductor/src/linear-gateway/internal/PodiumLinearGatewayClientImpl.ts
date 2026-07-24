@@ -479,6 +479,31 @@ function workflowTree(
     }
     relationIds.add(relation.relation_id);
   }
+  const sourceManifest = array(value.source_manifest, "linear_workflow_source_manifest_invalid").map((item) => {
+    const source = record(item);
+    return {
+      source_kind: workflowSourceKind(source.source_kind),
+      source_id: string(source.source_id, "linear_workflow_source_manifest_invalid"),
+      source_version: string(source.source_version, "linear_workflow_source_manifest_invalid"),
+      actor_kind: workflowCommentAuthorKind(source.actor_kind),
+      ...(source.stable_write_id === undefined ? {} : {
+        stable_write_id: string(source.stable_write_id, "linear_workflow_source_manifest_invalid"),
+      }),
+    };
+  });
+  if (sourceManifest.length > 8_192) throw new Error("linear_workflow_source_manifest_invalid");
+  const coverageValue = record(value.coverage);
+  const omissions = array(coverageValue.omissions, "linear_workflow_source_coverage_invalid").map((item) => {
+    const omission = record(item);
+    return {
+      source_id: string(omission.source_id, "linear_workflow_source_coverage_invalid"),
+      reason: string(omission.reason, "linear_workflow_source_coverage_invalid"),
+    };
+  });
+  const coverage = {
+    is_complete: boolean(coverageValue.is_complete, "linear_workflow_source_coverage_invalid"),
+    omissions,
+  };
   const rootIssue = issues.find(({ issue_id }) => issue_id === rootIssueId);
   if (
     root !== rootIssueId ||
@@ -495,6 +520,8 @@ function workflowTree(
     issues,
     comments,
     relations,
+    source_manifest: sourceManifest,
+    coverage,
     observed_at: string(value.observed_at, "linear_workflow_tree_invalid"),
   };
 }
@@ -517,6 +544,11 @@ function workflowCommentAuthorKind(value: JsonValue | undefined): LinearWorkflow
 function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {
   if (value === "blocks" || value === "blocked_by" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
+}
+
+function workflowSourceKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["source_manifest"][number]["source_kind"] {
+  if (value === "linear_issue" || value === "linear_comment" || value === "linear_relation" || value === "linear_status_catalog") return value;
+  throw new Error("linear_workflow_source_manifest_invalid");
 }
 
 function protocolError(response: Record<string, JsonValue>): Error {

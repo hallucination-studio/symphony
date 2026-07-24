@@ -68,6 +68,44 @@
         "target_issue_id": "root-1"
       }
     ],
+    "source_manifest": [
+      {
+        "source_kind": "linear_issue",
+        "source_id": "root-1",
+        "source_version": "2026-07-21T09:00:00Z",
+        "actor_kind": "unknown"
+      },
+      {
+        "source_kind": "linear_issue",
+        "source_id": "work-1",
+        "source_version": "2026-07-21T09:01:00Z",
+        "actor_kind": "unknown",
+        "stable_write_id": "root-1:work-1"
+      },
+      {
+        "source_kind": "linear_comment",
+        "source_id": "comment-1",
+        "source_version": "2026-07-21T09:00:01Z",
+        "actor_kind": "human",
+        "stable_write_id": "root-1:status"
+      },
+      {
+        "source_kind": "linear_relation",
+        "source_id": "relation-1",
+        "source_version": "relation-1",
+        "actor_kind": "unknown"
+      },
+      {
+        "source_kind": "linear_status_catalog",
+        "source_id": "project-1:status-catalog",
+        "source_version": "status-catalog-v1",
+        "actor_kind": "unknown"
+      }
+    ],
+    "coverage": {
+      "is_complete": true,
+      "omissions": []
+    },
     "observed_at": "2026-07-21T09:02:00Z"
   }
 }

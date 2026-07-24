@@ -80,6 +80,8 @@ function tree(root: DiscoveredRoot): LinearWorkflowTreeSnapshot {
     }],
     comments: [],
     relations: [],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: root.updatedAt,
   };
 }

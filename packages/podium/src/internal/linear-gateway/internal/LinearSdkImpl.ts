@@ -24,6 +24,7 @@ import type {
   WorkflowCommentValue,
   WorkflowCommentAuthorKind,
   WorkflowRelationValue,
+  WorkflowSourceManifestEntryValue,
 } from "../types.js";
 import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
 import {
@@ -1606,12 +1607,21 @@ export class LinearSdkImpl implements LinearClientInterface {
       remoteVersion: comment.updatedAt,
       updatedAt: comment.updatedAt,
     }));
+    const sourceManifest = workflowSourceManifest({
+      projectId: input.projectId,
+      statusCatalog,
+      issues,
+      comments,
+      relations: tree.relations,
+    });
     return {
       rootIssueId: input.rootIssueId,
       statusCatalog,
       issues,
       comments,
       relations: tree.relations,
+      sourceManifest,
+      coverage: { isComplete: true, omissions: [] },
       observedAt: tree.observedAt,
     };
   }
@@ -2643,6 +2653,51 @@ function workflowRelationValues(
     }
   }
   return relations;
+}
+
+function workflowSourceManifest(input: {
+  projectId: string;
+  statusCatalog: readonly WorkflowStatusCatalogEntry[];
+  issues: readonly LinearIssueValue[];
+  comments: readonly WorkflowCommentValue[];
+  relations: readonly WorkflowRelationValue[];
+}): WorkflowSourceManifestEntryValue[] {
+  const statusVersion = createHash("sha256")
+    .update(JSON.stringify(input.statusCatalog.map((status) => ({
+      statusId: status.statusId,
+      name: status.name,
+      category: status.category,
+      position: status.position,
+    }))))
+    .digest("hex");
+  return [
+    ...input.issues.map((issue) => ({
+      sourceKind: "linear_issue" as const,
+      sourceId: issue.issueId,
+      sourceVersion: issue.updatedAt,
+      actorKind: "unknown" as const,
+      ...(issue.managedMarker ? { stableWriteId: issue.managedMarker } : {}),
+    })),
+    ...input.comments.map((comment) => ({
+      sourceKind: "linear_comment" as const,
+      sourceId: comment.commentId,
+      sourceVersion: comment.updatedAt,
+      actorKind: comment.authorKind,
+      ...(comment.managedMarker ? { stableWriteId: comment.managedMarker } : {}),
+    })),
+    ...input.relations.map((relation) => ({
+      sourceKind: "linear_relation" as const,
+      sourceId: relation.relationId,
+      sourceVersion: relation.relationId,
+      actorKind: "unknown" as const,
+    })),
+    {
+      sourceKind: "linear_status_catalog" as const,
+      sourceId: `${input.projectId}:status-catalog`,
+      sourceVersion: statusVersion,
+      actorKind: "unknown" as const,
+    },
+  ];
 }
 
 function workflowRelationKindValue(

@@ -725,6 +725,80 @@
         }
       }
     },
+    "WorkflowSourceManifestEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "source_id",
+        "source_version",
+        "actor_kind"
+      ],
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "linear_issue",
+            "linear_comment",
+            "linear_relation",
+            "linear_status_catalog"
+          ]
+        },
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "source_version": {
+          "$ref": "common.schema.json#/$defs/OpaqueIdentifier"
+        },
+        "actor_kind": {
+          "enum": [
+            "human",
+            "symphony",
+            "linear_integration",
+            "external_automation",
+            "unknown"
+          ]
+        },
+        "stable_write_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        }
+      }
+    },
+    "WorkflowSourceCoverageOmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "reason"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/ShortText"
+        }
+      }
+    },
+    "WorkflowSourceCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "is_complete",
+        "omissions"
+      ],
+      "properties": {
+        "is_complete": {
+          "type": "boolean"
+        },
+        "omissions": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/WorkflowSourceCoverageOmission"
+          }
+        }
+      }
+    },
     "WorkflowRootTreeSnapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -734,7 +808,9 @@
         "issues",
         "comments",
         "relations",
-        "observed_at"
+        "observed_at",
+        "source_manifest",
+        "coverage"
       ],
       "properties": {
         "root_issue_id": {
@@ -772,6 +848,16 @@
         },
         "observed_at": {
           "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "source_manifest": {
+          "type": "array",
+          "maxItems": 8192,
+          "items": {
+            "$ref": "#/$defs/WorkflowSourceManifestEntry"
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/WorkflowSourceCoverage"
         }
       }
     },

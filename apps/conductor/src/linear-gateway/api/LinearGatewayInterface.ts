@@ -44,6 +44,17 @@ export interface LinearWorkflowTreeSnapshot {
     source_issue_id: string;
     target_issue_id: string;
   }>;
+  source_manifest: Array<{
+    source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_status_catalog";
+    source_id: string;
+    source_version: string;
+    actor_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
+    stable_write_id?: string;
+  }>;
+  coverage: {
+    is_complete: boolean;
+    omissions: Array<{ source_id: string; reason: string }>;
+  };
   observed_at: string;
 }
 

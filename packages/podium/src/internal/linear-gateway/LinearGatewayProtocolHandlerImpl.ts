@@ -269,6 +269,7 @@ export class LinearGatewayProtocolHandlerImpl {
       }
       relationIds.add(relation.relationId);
     }
+    validateWorkflowSourceFacts(tree, projectId);
     return tree;
   }
 
@@ -606,6 +607,66 @@ function workflowCommentAuthorKind(value: string | undefined): boolean {
 
 function workflowRelationKind(value: string | undefined): boolean {
   return value === "blocks" || value === "blocked_by" || value === "triggered_by";
+}
+
+function validateWorkflowSourceFacts(
+  tree: Awaited<ReturnType<LinearClientInterface["getWorkflowIssueTree"]>>,
+  projectId: string,
+): void {
+  if (
+    !tree.coverage ||
+    tree.coverage.isComplete !== true ||
+    !Array.isArray(tree.coverage.omissions) ||
+    tree.coverage.omissions.length !== 0 ||
+    !Array.isArray(tree.sourceManifest) ||
+    tree.sourceManifest.length > 8_192
+  ) {
+    throw new Error("linear_workflow_source_coverage_incomplete");
+  }
+  const expected = new Map<string, string>();
+  for (const issue of tree.issues) {
+    expected.set(`linear_issue:${issue.issueId}`, issue.remoteVersion);
+  }
+  for (const comment of tree.comments) {
+    expected.set(`linear_comment:${comment.commentId}`, comment.remoteVersion);
+  }
+  for (const relation of tree.relations) {
+    expected.set(`linear_relation:${relation.relationId}`, relation.relationId);
+  }
+  const statusSourceId = `${projectId}:status-catalog`;
+  expected.set("linear_status_catalog:" + statusSourceId, "");
+
+  const seen = new Set<string>();
+  for (const source of tree.sourceManifest) {
+    if (
+      !workflowSourceKind(source.sourceKind) ||
+      !identifier(source.sourceId, 128) ||
+      !identifier(source.sourceVersion, 512) ||
+      !workflowCommentAuthorKind(source.actorKind) ||
+      (source.stableWriteId !== undefined && !identifier(source.stableWriteId, 128))
+    ) {
+      throw new Error("linear_workflow_source_manifest_invalid");
+    }
+    const key = `${source.sourceKind}:${source.sourceId}`;
+    const expectedVersion = expected.get(key);
+    if (
+      seen.has(key) ||
+      expectedVersion === undefined ||
+      (source.sourceKind !== "linear_status_catalog" && source.sourceVersion !== expectedVersion) ||
+      (source.sourceKind === "linear_status_catalog" && source.sourceId !== statusSourceId)
+    ) {
+      throw new Error("linear_workflow_source_manifest_invalid");
+    }
+    seen.add(key);
+  }
+  if (seen.size !== expected.size) {
+    throw new Error("linear_workflow_source_manifest_incomplete");
+  }
+}
+
+function workflowSourceKind(value: string | undefined): boolean {
+  return value === "linear_issue" || value === "linear_comment" ||
+    value === "linear_relation" || value === "linear_status_catalog";
 }
 
 function managedNodeShapeValid(issue: LinearIssueValue): boolean {

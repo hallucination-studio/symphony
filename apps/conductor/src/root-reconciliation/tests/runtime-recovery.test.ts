@@ -44,6 +44,8 @@ test("Root reconciliation drops a failed session and opens a fresh one next cycl
     }],
     comments: [],
     relations: [],
+    source_manifest: [],
+    coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:00Z",
   };
   const logs: Array<{ event: string; fields: Record<string, string> }> = [];
