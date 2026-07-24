@@ -77,6 +77,14 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "PlanResult",
     "WorkResult",
     "VerifyResult",
+    "WorkflowCommentThreadChangeSnapshot",
+    "CreateCommentReplyCommand",
+    "SetCommentReceiptReactionCommand",
+    "SetCommentThreadStateCommand",
+    "TurnUsage",
+    "ModelTurnRecord",
+    "UsageAggregate",
+    "WorkflowTimelineRecord",
   ]) {
     assert.match(source, new RegExp(`"${requiredName}"`), requiredName);
   }
@@ -116,6 +124,13 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "resolve_" + "invalid_lifecycle",
     "revise_" + "cycle_tree",
     "create_" + "successor_cycle",
+    "managed" + "_marker",
+    "managed" + "Marker",
+    "expected" + "_managed" + "_marker",
+    "Usage" + "Snapshot",
+    "Archive" + "WorkflowIssueCommand",
+    "Restore" + "WorkflowIssueCommand",
+    "Remove" + "WorkflowRelationCommand",
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }
@@ -319,7 +334,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   const tree = schema.$defs.WorkflowRootTreeSnapshot;
   assert.deepEqual(tree.required, [
     "root_issue_id", "status_catalog", "issues", "comments", "relations", "observed_at",
-    "source_manifest", "coverage",
+    "comment_thread_changes", "source_manifest", "coverage",
   ]);
   assert.equal(schema.$defs.WorkflowSourceManifestEntry.additionalProperties, false);
   assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.required, [
@@ -331,23 +346,44 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "common.schema.json#/$defs/OpaqueIdentifier");
   assert.equal(schema.$defs.WorkflowCommentSnapshot.properties.remote_version.$ref,
     "common.schema.json#/$defs/OpaqueIdentifier");
+  assert.deepEqual(schema.$defs.WorkflowCommentSnapshot.required, [
+    "comment_id", "issue_id", "body", "author_kind", "author_id", "thread_root_comment_id",
+    "thread_state", "reactions", "created_at", "remote_version", "updated_at",
+  ]);
+  assert.deepEqual(
+    schema.$defs.WorkflowCommentThreadChangeSnapshot.required,
+    [
+      "thread_change_id", "source_comment_id", "thread_root_comment_id", "action",
+      "actor_kind", "occurred_at",
+    ],
+  );
+  assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.properties.source_kind.enum, [
+    "linear_issue", "linear_comment", "linear_comment_thread_change", "linear_relation",
+    "linear_status_catalog",
+  ]);
   assert.equal(schema.$defs.WorkflowRelationSnapshot.additionalProperties, false);
+  assert.ok(schema.$defs.UpdateWorkflowIssueCommand.required.includes("is_archived"));
+  assert.ok(schema.$defs.UpdateWorkflowIssueCommand.required.includes("parent_assignment"));
+  assert.deepEqual(schema.$defs.WorkflowParentAssignment.oneOf.map(({ properties }) => properties.mode.const), [
+    "retain", "set", "clear",
+  ]);
 
   assert.deepEqual(schema.$defs.WorkflowMutationCommand.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/CreateWorkflowIssueCommand",
     "#/$defs/UpdateWorkflowIssueCommand",
     "#/$defs/AppendWorkflowCommentCommand",
-    "#/$defs/ArchiveWorkflowIssueCommand",
-    "#/$defs/RestoreWorkflowIssueCommand",
+    "#/$defs/CreateCommentReplyCommand",
+    "#/$defs/SetCommentReceiptReactionCommand",
+    "#/$defs/SetCommentThreadStateCommand",
     "#/$defs/CreateWorkflowRelationCommand",
-    "#/$defs/RemoveWorkflowRelationCommand",
   ]);
   for (const name of [
     "CreateWorkflowIssueCommand",
     "UpdateWorkflowIssueCommand",
     "AppendWorkflowCommentCommand",
-    "ArchiveWorkflowIssueCommand",
-    "RestoreWorkflowIssueCommand",
+    "CreateCommentReplyCommand",
+    "SetCommentReceiptReactionCommand",
+    "SetCommentThreadStateCommand",
     "CreateWorkflowRelationCommand",
   ]) {
     assert.ok(schema.$defs[name].required.includes("write_id"), name);
@@ -363,6 +399,56 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   assert.equal(schema.$defs.CreateWorkflowIssueCommand.properties.label_names.uniqueItems, true);
   assert.deepEqual(schema.$defs.WorkflowMutationResult.oneOf.map(({ properties }) => properties.kind.const), [
     "applied", "already_applied", "write_unconfirmed", "precondition_conflict", "failed",
+  ]);
+});
+
+test("turn facts, comment replies, and timelines have one closed durable record shape", async () => {
+  const schema = await loadSchema("conductor-performer");
+
+  assert.deepEqual(schema.$defs.TurnUsage.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/MeasuredTurnUsage",
+    "#/$defs/UnavailableTurnUsage",
+  ]);
+  assert.deepEqual(schema.$defs.MeasuredTurnUsage.required, [
+    "status", "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+    "total_tokens",
+  ]);
+  assert.deepEqual(schema.$defs.UnavailableTurnUsage.properties.reason.enum, [
+    "provider_omitted", "transport_lost", "process_lost", "invalid_provider_usage",
+  ]);
+  assert.deepEqual(schema.$defs.ModelTurnRecord.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/RootReconcilerModelTurnRecord",
+    "#/$defs/StageModelTurnRecord",
+  ]);
+
+  for (const name of ["PlanResult", "WorkResult", "VerifyResult", "RootDirective", "RootReconcilerFailureRecord"]) {
+    assert.ok(schema.$defs[name].required.includes("model_turn"), name);
+    assert.equal(Object.hasOwn(schema.$defs[name].properties, "usage"), false, name);
+  }
+
+  assert.deepEqual(schema.$defs.UserCommentInput.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/UserCommentBodyInput",
+    "#/$defs/UserCommentThreadChangeInput",
+  ]);
+  assert.deepEqual(schema.$defs.UserCommentReply.required, [
+    "reply_id", "source_input_id", "source_comment_id", "source_comment_version",
+    "acknowledgement", "interpreted_request", "decided_action", "next_step", "disposition",
+    "reaction", "thread_action",
+  ]);
+  assert.deepEqual(schema.$defs.UserCommentReply.properties.disposition.enum, [
+    "accepted", "not_applied", "follow_up_required",
+  ]);
+  assert.deepEqual(schema.$defs.UserCommentReply.properties.reaction.enum, ["check", "cross", "none"]);
+  assert.deepEqual(schema.$defs.UserCommentReply.properties.thread_action.enum, [
+    "resolve", "keep_open", "reopen",
+  ]);
+
+  assert.deepEqual(schema.$defs.WorkflowTimelineRecord.required, [
+    "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids", "source_versions",
+    "write_id", "rendered_schema_version", "materialized_at",
+  ]);
+  assert.deepEqual(schema.$defs.UsageAggregate.required, [
+    "scope", "source_record_count", "source_digest", "is_complete", "unknown_turn_count", "entries",
   ]);
 });
 

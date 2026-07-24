@@ -475,8 +475,7 @@ RootDirective
   root_directive_id
   reconciler_session_id
   reconciler_turn_id
-  model
-  usage: TurnUsage
+  model_turn: ModelTurnRecord
   based_on_target_root_digest
   consumed_input_ids[]
   rationale
@@ -515,9 +514,10 @@ RootReconcilerFailureRecord
   failed_at
 ```
 
-`model`和`usage`由Performer根据实际Provider调用填充，不属于模型structured output；accepted、canceled、timeout、
-schema-invalid和其他失败turn都必须记录。accepted directive的`RootDirectiveRecord`同样包含一个nested
-`ModelTurnRecord`。nested object让Root聚合只读取一种turn事实；它不是第二个comment或第二个managed block。该record只参与retry/budget计数和用户时间轴，不拥有Root/Cycle status或下一步。写入并read-back失败时matching Root
+`model_turn`由Performer根据实际Provider调用填充，不属于模型structured output；accepted、canceled、timeout、
+schema-invalid和其他失败turn都必须记录。accepted directive与`RootReconcilerFailureRecord`各自只包含一个nested
+`ModelTurnRecord`，其中的`model`和`usage`是唯一的turn事实，不能在directive或failure record顶层重复。nested object让
+Root聚合只读取一种turn事实；它不是第二个comment或第二个managed block。该record只参与retry/budget计数和用户时间轴，不拥有Root/Cycle status或下一步。写入并read-back失败时matching Root
 立即停止；不得把失败只记在memory/log后继续调用模型。
 
 所有variants是closed、versioned、`additionalProperties: false`的discriminated union。每个turn最多返回一个

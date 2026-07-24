@@ -39,7 +39,6 @@
         "title": "Implement gateway",
         "description": "Implement the bounded gateway.",
         "labels": [],
-        "managed_marker": "root-1:work-1",
         "issue_kind": "work",
         "is_archived": false,
         "remote_version": "2026-07-21T09:01:00Z",
@@ -54,8 +53,10 @@
         "author_kind": "human",
         "author_id": "user-1",
         "author_user_id": "user-1",
+        "thread_root_comment_id": "comment-1",
+        "thread_state": "unresolved",
+        "reactions": [],
         "created_at": "2026-07-21T09:00:00Z",
-        "managed_marker": "root-1:status",
         "remote_version": "2026-07-21T09:00:01Z",
         "updated_at": "2026-07-21T09:00:01Z"
       }
@@ -68,6 +69,7 @@
         "target_issue_id": "root-1"
       }
     ],
+    "comment_thread_changes": [],
     "source_manifest": [
       {
         "source_kind": "linear_issue",
@@ -86,8 +88,7 @@
         "source_kind": "linear_comment",
         "source_id": "comment-1",
         "source_version": "2026-07-21T09:00:01Z",
-        "actor_kind": "human",
-        "stable_write_id": "root-1:status"
+        "actor_kind": "human"
       },
       {
         "source_kind": "linear_relation",

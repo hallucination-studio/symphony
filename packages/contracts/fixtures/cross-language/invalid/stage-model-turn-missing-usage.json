@@ -1,0 +1,17 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/StageModelTurnRecord",
+  "value": {
+    "turn_record_id": "turn-record-1",
+    "role": "plan",
+    "root_issue_id": "root-1",
+    "cycle_issue_id": "cycle-1",
+    "target_issue_id": "plan-1",
+    "stage_execution_id": "execution-1",
+    "role_session_id": "session-1",
+    "role_turn_id": "turn-1",
+    "invocation_state": "confirmed",
+    "model": "gpt-5-codex",
+    "outcome": "plan_completed",
+    "terminal_at": "2026-07-24T00:00:00Z"
+  }
+}

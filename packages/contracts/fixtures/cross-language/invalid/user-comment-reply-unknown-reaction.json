@@ -1,0 +1,16 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/UserCommentReply",
+  "value": {
+    "reply_id": "reply-1",
+    "source_input_id": "input-1",
+    "source_comment_id": "comment-1",
+    "source_comment_version": "comment-version-1",
+    "acknowledgement": "The request was considered.",
+    "interpreted_request": "Continue with the current plan.",
+    "decided_action": "Wait for approval.",
+    "next_step": "Move the Human Action to Approved.",
+    "disposition": "accepted",
+    "reaction": "thumbs_up",
+    "thread_action": "resolve"
+  }
+}

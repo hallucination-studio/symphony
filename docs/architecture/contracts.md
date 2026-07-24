@@ -74,7 +74,9 @@ CreateWorkflowIssueCommand
 reply write identity、target remote version及相关thread/reaction precondition，并在fresh semantic read-back后才成功。
 `none`只删除同一reply identity先前写入的Symphony receipt，绝不修改human或其他actor的reaction。它们不接受任意emoji、
 顶层reply、comment rewrite或Workflow语义字段。其他Root/Issue mutation同样携带binding、Project pool、Root
-routing/ownership、explicit target、expected remote version、expected status/archive/parent和stable write ID。没有arbitrary
+routing/ownership、explicit target、expected remote version、expected status/archive/parent和stable write ID。
+`CreateWorkflowRelationCommand`以`relation_state: present | absent`收敛指定source、target和kind之间的relation，
+因此不存在第二个remove relation command或隐式删除路径。没有arbitrary
 GraphQL、JSON mutation或SDK passthrough。
 
 ## 3. Conductor-Performer boundary
