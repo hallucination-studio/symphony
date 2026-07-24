@@ -61,6 +61,11 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - cross-process communication使用closed versioned schemas和generated types；
 - Root/Cycle timeline通过typed event和subscriber写入Linear comments，不由业务模块直接渲染；一个event恰好写一条
   同时包含用户Markdown和一个machine-readable `symphony` block的comment。
+- 每个Stage Result只在matching Plan、Work或Verify Issue的canonical managed comment中持久化一次，并嵌套唯一的
+  `ModelTurnRecord`；Cycle timeline只引用并展示该事实，不能成为第二个Result、usage或Root input来源。
+- Root、Cycle、Node和Human Action的lifecycle只由Linear custom status与native archive flag表达；directive、Result、
+  resolution、timeline、reply、reaction、thread resolve/unresolve和`RootDelta`只能提供事实、回执、幂等关联或传输，
+  不得形成并行状态机。
 - 普通human comment按actor与strict managed code block过滤；每个处理后的comment version收到native thread reply、
   closed reaction disposition和resolve/keep-open action。Symphony-authored timeline/reply body不会回流；human在这些
   thread中的新comment或reopen/resolve仍是Root输入。
