@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { WorkflowTimelineRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTimelineEvents.js";
 import type {
   WorkflowTimelineMaterializationResult,
@@ -18,10 +20,10 @@ export class LinearWorkflowTimelinePublisherImpl implements WorkflowTimelinePubl
     if (!targetIssueId) return failed(event, "timeline_target_missing");
     const target = tree.issues.find((issue) => issue.issue_id === targetIssueId);
     if (!target) return failed(event, "timeline_target_not_found");
-    const marker = `<!-- symphony timeline ${event.timelineEventId} -->`;
-    const existing = tree.comments.find((comment) => comment.issue_id === targetIssueId && comment.body.includes(marker));
+    const record = timelineRecord(event, targetIssueId);
+    const existing = findTimelineRecord(tree.comments, targetIssueId, record.timelineEventId);
     if (existing) return { kind: "materialized", timelineEventId: event.timelineEventId, commentId: existing.comment_id };
-    const body = render(event, marker);
+    const body = serializeManagedRecord(record, render(event));
     if (Buffer.byteLength(body, "utf8") > MAX_COMMENT_BYTES) return failed(event, "timeline_comment_too_large");
     const outcome = await this.linear.mutateWorkflow({
       kind: "append_workflow_comment",
@@ -34,7 +36,6 @@ export class LinearWorkflowTimelinePublisherImpl implements WorkflowTimelinePubl
         expectedRemoteVersion: target.remote_version,
         expectedStatusId: target.status_id,
         ...(target.parent_issue_id ? { expectedParentIssueId: target.parent_issue_id } : {}),
-        ...(target.managed_marker ? { expectedManagedMarker: target.managed_marker } : {}),
       },
       body,
     });
@@ -42,7 +43,7 @@ export class LinearWorkflowTimelinePublisherImpl implements WorkflowTimelinePubl
       return failed(event, `timeline_write_${outcome.kind}`);
     }
     const readBack = await this.linear.readWorkflowIssueTree(event.rootIssueId);
-    const comment = readBack.comments.find((candidate) => candidate.issue_id === targetIssueId && candidate.body.includes(marker));
+    const comment = findTimelineRecord(readBack.comments, targetIssueId, record.timelineEventId);
     return comment
       ? { kind: "materialized", timelineEventId: event.timelineEventId, commentId: comment.comment_id }
       : failed(event, "timeline_read_back_missing");
@@ -55,10 +56,40 @@ function rootVersion(tree: Awaited<ReturnType<LinearGatewayInterface["readWorkfl
   return root.remote_version;
 }
 
-function render(event: WorkflowTimelineEvent, marker: string): string {
+function timelineRecord(event: WorkflowTimelineEvent, targetIssueId: string): WorkflowTimelineRecord {
+  return {
+    kind: "workflow_timeline",
+    version: 1,
+    timelineEventId: event.timelineEventId,
+    timelineKind: event.timelineKind,
+    targetIssueId,
+    sourceRecordIds: event.sourceRecordIds,
+    sourceVersions: event.sourceVersions,
+    writeId: event.timelineEventId,
+    renderedSchemaVersion: "1",
+    materializedAt: event.occurredAt,
+  };
+}
+
+function findTimelineRecord(
+  comments: Awaited<ReturnType<LinearGatewayInterface["readWorkflowIssueTree"]>>["comments"],
+  targetIssueId: string,
+  timelineEventId: string,
+) {
+  const matches = comments.filter((comment) => {
+    if (comment.issue_id !== targetIssueId || comment.author_kind !== "symphony") return false;
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "workflow_timeline" &&
+      parsed.value.timelineEventId === timelineEventId && parsed.value.targetIssueId === targetIssueId;
+  });
+  if (matches.length > 1) throw new Error("timeline_record_ambiguous");
+  return matches[0];
+}
+
+function render(event: WorkflowTimelineEvent): string {
   const scope = event.timelineKind === "root" ? "Root Reconciliation" : "Cycle";
   const next = event.nextStep ? `\n\nNext\n${event.nextStep}` : "";
-  return `${marker}\n## Symphony · ${scope}\n\n${event.summary}\n\nDecision\n- ${event.kind}\n\nEvidence\n- ${event.outputRefs.join("\n- ") || "None"}${next}\n`;
+  return `## Symphony · ${scope}\n\n${event.summary}\n\nDecision\n- ${event.kind}\n\nEvidence\n- ${event.outputRefs.join("\n- ") || "None"}${next}`;
 }
 
 function failed(event: WorkflowTimelineEvent, code: string): WorkflowTimelineMaterializationResult {

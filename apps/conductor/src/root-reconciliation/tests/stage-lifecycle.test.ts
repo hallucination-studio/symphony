@@ -450,7 +450,7 @@ class FakeLinear {
   addManagedComment(issueId: string, body: string): void {
     this.tree.comments.push({
       comment_id: `comment-${this.tree.comments.length + 1}`, issue_id: issueId, body, author_kind: "symphony",
-      author_id: "symphony", created_at: "2026-07-24T00:00:01Z", managed_marker: "managed",
+      author_id: "symphony", created_at: "2026-07-24T00:00:01Z",
       remote_version: `comment-${this.tree.comments.length + 1}`, updated_at: "2026-07-24T00:00:01Z",
     });
     this.bump(issueId);

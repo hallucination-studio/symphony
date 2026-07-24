@@ -27,13 +27,6 @@ export interface LinearIssueValue {
   description?: string;
   labels: string[];
   isArchived: boolean;
-  managedMarker?: string;
-  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
-  nodeKind?: "work" | "human";
-  humanKind?: "plan_approval" | "planned_input" | "runtime_input";
-  origin?: "user" | "symphony";
-  completedInputHash?: string;
-  targetIssueId?: string;
   updatedAt: string;
 }
 
@@ -58,7 +51,6 @@ export interface RootManagedCommentValue {
   authorUserId?: string;
   createdAt: string;
   updatedAt: string;
-  managedMarker: string;
   body: string;
 }
 
@@ -91,8 +83,6 @@ export interface WorkflowIssueValue {
   description: string;
   labels: string[];
   isArchived: boolean;
-  managedMarker?: string;
-  issueKind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
   remoteVersion: string;
   updatedAt: string;
 }
@@ -109,7 +99,6 @@ export interface WorkflowCommentValue {
   reactions: WorkflowCommentReactionValue[];
   body: string;
   createdAt: string;
-  managedMarker?: string;
   remoteVersion: string;
   updatedAt: string;
 }
@@ -193,8 +182,6 @@ export interface WorkflowMutationTargetValue {
   title: string;
   description: string;
   isArchived: boolean;
-  managedMarker?: string;
-  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
 }
 
 interface WorkflowMutationBase {
@@ -211,11 +198,9 @@ export type WorkflowMutationCommand =
       parentExpectedRemoteVersion: string;
       parentExpectedStatusId: string;
       parentIssueId: string;
-      issueKind: "cycle" | "plan" | "work" | "verify" | "human";
       title: string;
       description: string;
       statusId: string;
-      managedMarker: string;
       labelNames: string[];
       order?: number;
     })
@@ -226,7 +211,6 @@ export type WorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
       statusId: string;
@@ -241,7 +225,6 @@ export type WorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
       body: string;
@@ -279,7 +262,6 @@ export type WorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
     })

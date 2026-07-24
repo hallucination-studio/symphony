@@ -9,6 +9,7 @@ import type {
 } from "../../root-reconciliation/api/RootModels.js";
 import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
 import { parseManagedRecord } from "../../root-reconciliation/api/index.js";
+import type { WorkflowIssueRecord } from "../../root-reconciliation/api/ManagedRecords.js";
 
 type JsonValue =
   | null
@@ -38,12 +39,6 @@ type WireIssue = {
   description: string;
   is_archived: boolean;
   updated_at: string;
-  node_kind?: "work" | "human";
-  managed_marker?: string;
-  human_kind?: "plan_approval" | "planned_input" | "runtime_input";
-  origin?: "user" | "symphony";
-  completed_input_hash?: string;
-  target_issue_id?: string;
 };
 
 export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
@@ -305,6 +300,7 @@ function rootManagedConductorId(value: JsonValue | undefined, rootIssueId: strin
     if (string(comment.issue_id, "linear_root_managed_comment_invalid") !== rootIssueId) {
       throw new Error("linear_root_managed_comment_scope_invalid");
     }
+    if (comment.author_kind !== "symphony") continue;
     const body = string(comment.body, "linear_root_managed_comment_invalid");
     const parsed = parseManagedRecord(body);
     if (!parsed.ok || parsed.value.kind !== "root_ownership") continue;
@@ -389,7 +385,7 @@ function workflowTree(
     statusIds.add(status.status_id);
     statusNames.add(status.name);
   }
-  const issues = array(value.issues, "linear_workflow_issues_invalid").map((item) => {
+  const rawIssues = array(value.issues, "linear_workflow_issues_invalid").map((item) => {
     const issue = record(item);
     return {
       issue_id: string(issue.issue_id, "linear_workflow_issue_invalid"),
@@ -407,10 +403,17 @@ function workflowTree(
       labels: array(issue.labels, "linear_workflow_issue_labels_invalid").map((label) =>
         string(label, "linear_workflow_issue_label_invalid")),
       is_archived: boolean(issue.is_archived, "linear_workflow_issue_invalid"),
-      ...(issue.managed_marker === undefined ? {} : { managed_marker: string(issue.managed_marker, "linear_workflow_issue_invalid") }),
-      ...(issue.issue_kind === undefined ? {} : { issue_kind: workflowIssueKind(issue.issue_kind) }),
       remote_version: string(issue.remote_version, "linear_workflow_issue_invalid"),
       updated_at: string(issue.updated_at, "linear_workflow_issue_invalid"),
+    };
+  });
+  const issues = rawIssues.map((issue) => {
+    if (issue.issue_id === root) return { ...issue, issue_kind: "root" as const };
+    const record = workflowIssueRecord(issue, root);
+    return record === undefined ? issue : {
+      ...issue,
+      issue_kind: record.issueKind,
+      workflow_issue_key: record.issueKey,
     };
   });
   if (issues.length === 0 || issues.length > 512) {
@@ -444,7 +447,6 @@ function workflowTree(
       author_id: string(comment.author_id, "linear_workflow_comment_invalid"),
       ...(comment.author_user_id === undefined ? {} : { author_user_id: string(comment.author_user_id, "linear_workflow_comment_invalid") }),
       created_at: string(comment.created_at, "linear_workflow_comment_invalid"),
-      ...(comment.managed_marker === undefined ? {} : { managed_marker: string(comment.managed_marker, "linear_workflow_comment_invalid") }),
       remote_version: string(comment.remote_version, "linear_workflow_comment_invalid"),
       updated_at: string(comment.updated_at, "linear_workflow_comment_invalid"),
     };
@@ -526,14 +528,30 @@ function workflowTree(
   };
 }
 
+function workflowIssueRecord(
+  issue: { issue_id: string; parent_issue_id?: string; description: string },
+  rootIssueId: string,
+): WorkflowIssueRecord | undefined {
+  const parsed = parseManagedRecord(issue.description);
+  if (!parsed.ok) {
+    if (issue.description.includes("```symphony")) {
+      throw new Error(`linear_workflow_issue_record_invalid:${parsed.error}`);
+    }
+    return undefined;
+  }
+  if (parsed.value.kind !== "workflow_issue") return undefined;
+  if (
+    parsed.value.rootIssueId !== rootIssueId ||
+    parsed.value.parentIssueId !== issue.parent_issue_id
+  ) {
+    throw new Error("linear_workflow_issue_record_scope_invalid");
+  }
+  return parsed.value;
+}
+
 function workflowStatusCategory(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["status_catalog"][number]["category"] {
   if (value === "backlog" || value === "unstarted" || value === "started" || value === "completed" || value === "canceled") return value;
   throw new Error("linear_workflow_status_category_invalid");
-}
-
-function workflowIssueKind(value: JsonValue | undefined): NonNullable<LinearWorkflowTreeSnapshot["issues"][number]["issue_kind"]> {
-  if (value === "root" || value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") return value;
-  throw new Error("linear_workflow_issue_kind_invalid");
 }
 
 function workflowCommentAuthorKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["comments"][number]["author_kind"] {
@@ -577,11 +595,9 @@ function workflowMutationBody(
         parent_expected_remote_version: input.parentExpectedRemoteVersion,
         parent_expected_status_id: input.parentExpectedStatusId,
         parent_issue_id: input.parentIssueId,
-        issue_kind: input.issueKind,
         title: input.title,
         description: input.description,
         status_id: input.statusId,
-        managed_marker: input.managedMarker,
         label_names: input.labelNames,
         ...(input.order === undefined ? {} : { order: input.order }),
       };
@@ -597,7 +613,6 @@ function workflowMutationBody(
           expected_remote_version: input.target.expectedRemoteVersion,
           ...(input.target.expectedStatusId === undefined ? {} : { expected_status_id: input.target.expectedStatusId }),
           ...(input.target.expectedParentIssueId === undefined ? {} : { expected_parent_issue_id: input.target.expectedParentIssueId }),
-          ...(input.target.expectedManagedMarker === undefined ? {} : { expected_managed_marker: input.target.expectedManagedMarker }),
           ...(input.target.expectedIsArchived === undefined ? {} : { expected_is_archived: input.target.expectedIsArchived }),
         },
         ...(input.kind === "update_workflow_issue"

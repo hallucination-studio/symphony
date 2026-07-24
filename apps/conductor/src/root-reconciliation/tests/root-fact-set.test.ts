@@ -53,6 +53,20 @@ test("a completed Plan enters the next delta as its full Result and canonical Co
   }
 });
 
+test("a Symphony-authored malformed record fails closed instead of becoming an ignored comment", () => {
+  const workflow = tree("Root", "root-v1");
+  workflow.comments = [{
+    comment_id: "comment-invalid", issue_id: "root-1", body: "## System output", author_kind: "symphony",
+    author_id: "symphony", created_at: "2026-07-23T00:00:01Z", remote_version: "comment-v1",
+    updated_at: "2026-07-23T00:00:01Z",
+  }];
+
+  assert.throws(
+    () => buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] }),
+    /root_managed_record_invalid:managed_record_block_missing/u,
+  );
+});
+
 function git(head: string) {
   return { head, branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } };
 }
@@ -132,6 +146,6 @@ function planTree(completed: boolean): LinearWorkflowTreeSnapshot {
 function managedComment(issueId: string, body: string) {
   return {
     comment_id: `comment-${body.length}-${issueId}`, issue_id: issueId, body, author_kind: "symphony" as const, author_id: "symphony",
-    created_at: "2026-07-23T00:00:00Z", managed_marker: "managed", remote_version: `version-${body.length}`, updated_at: "2026-07-23T00:00:00Z",
+    created_at: "2026-07-23T00:00:00Z", remote_version: `version-${body.length}`, updated_at: "2026-07-23T00:00:00Z",
   };
 }

@@ -23,7 +23,12 @@ import type {
   StageTurnInput,
   HumanActionResolution,
 } from "../api/index.js";
-import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
+import {
+  findWorkflowIssue,
+  parseManagedRecord,
+  serializeManagedRecord,
+  workflowIssueMarkdown,
+} from "../api/index.js";
 import type {
   EvidenceReference,
   PlanContract,
@@ -507,7 +512,7 @@ export class RootReconciliationRuntime {
     const record = toStageResultRecord(result);
     const body = serializeManagedRecord(record);
     for (const comment of view.tree.comments) {
-      if (!comment.body.startsWith("<!-- symphony managed-record\n")) continue;
+      if (comment.author_kind !== "symphony") continue;
       const parsed = parseManagedRecord(comment.body);
       if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) continue;
       if (comment.body === body) return view;
@@ -705,7 +710,7 @@ function dispositionAfterDirective(
 ): RootRuntimeDisposition {
   if (directive.action.kind === "wait") return "waiting-human";
   if (directive.action.kind !== "request_human_action") return "progress";
-  const action = tree.issues.find(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:human-action`);
+  const action = findWorkflowIssue(tree, `${directive.rootDirectiveId}:human-action`);
   return action && !action.is_archived && ["Todo", "In Progress"].includes(action.status_name)
     ? "waiting-human"
     : "progress";
@@ -716,21 +721,33 @@ function findResumableDirective(
   rootIssueId: string,
 ): RootDirectiveRecord | undefined {
   const records = tree.comments
-    .map((comment) => parseManagedRecord(comment.body))
-    .filter((parsed): parsed is { ok: true; value: RootDirectiveRecord } =>
-      parsed.ok && parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId)
-    .map(({ value }) => value)
+    .flatMap((comment) => {
+      if (comment.author_kind !== "symphony") return [];
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId
+        ? [parsed.value]
+        : [];
+    })
     .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt) || right.rootDirectiveId.localeCompare(left.rootDirectiveId));
   return records.find((record) => !directiveMaterializationComplete(record.directive, tree));
 }
 
 function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
   const repliesComplete = directive.commentReplies.every((reply) => {
-    const replyId = reconcilerReplyId(directive.rootDirectiveId, reply.sourceCommentId, reply.sourceCommentVersion);
-    return tree.comments.some(({ managed_marker }) => managed_marker === replyId || managed_marker === `<!-- symphony root-reconciler-reply ${replyId} -->`);
+    return tree.comments.some((comment) => {
+      if (comment.author_kind !== "symphony") return false;
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "root_reconciler_reply" &&
+        parsed.value.replyId === reply.replyId &&
+        parsed.value.rootDirectiveId === directive.rootDirectiveId &&
+        parsed.value.sourceInputId === reply.sourceInputId &&
+        parsed.value.sourceCommentId === reply.sourceCommentId &&
+        parsed.value.sourceCommentVersion === reply.sourceCommentVersion;
+    });
   });
   if (!repliesComplete) return false;
   const resolutionsComplete = directive.humanActionResolutions.every((resolution) => tree.comments.some((comment) => {
+    if (comment.author_kind !== "symphony") return false;
     const parsed = parseManagedRecord(comment.body);
     return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === resolution.resolutionId;
   }));
@@ -738,8 +755,8 @@ function directiveMaterializationComplete(directive: RootDirective, tree: RootRe
   const action = directive.action;
   if (action.kind === "wait" || action.kind === "acknowledge") return true;
   if (action.kind === "request_human_action") {
-    const marker = `${directive.rootDirectiveId}:human-action`;
-    const humanAction = tree.issues.find(({ managed_marker }) => managed_marker === marker);
+    const actionId = `${directive.rootDirectiveId}:human-action`;
+    const humanAction = findWorkflowIssue(tree, actionId);
     if (!humanAction) return false;
     if (!action.relatedIssueIds.every((relatedIssueId) => tree.relations.some((relation) =>
       relation.relation_kind === "relates_to" && relation.source_issue_id === humanAction.issue_id && relation.target_issue_id === relatedIssueId,
@@ -747,7 +764,8 @@ function directiveMaterializationComplete(directive: RootDirective, tree: RootRe
     return tree.comments.some((comment) => {
       const parsed = parseManagedRecord(comment.body);
       return parsed.ok && parsed.value.kind === "human_action_request" &&
-        parsed.value.actionId === marker &&
+        comment.author_kind === "symphony" &&
+        parsed.value.actionId === actionId &&
         parsed.value.actionIssueId === humanAction.issue_id &&
         parsed.value.actionKind === action.actionKind &&
         parsed.value.parentScope === action.parentScope &&
@@ -780,19 +798,19 @@ function directiveMaterializationComplete(directive: RootDirective, tree: RootRe
     return cycle?.status_name === expected;
   }
   if (action.kind === "create_cycle") {
-    return tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:cycle`) &&
-      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:plan`);
+    return Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
+      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
   }
   if (action.kind === "supersede_cycle") {
     return tree.issues.some(({ issue_id, status_name }) => issue_id === action.currentCycleIssueId && status_name === "Changes Required") &&
-      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:cycle`) &&
-      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:plan`);
+      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
+      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
   }
   if (action.kind === "replan_current_cycle") {
     const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
     const plan = tree.issues.find(({ issue_id }) => issue_id === action.planIssueId);
     return treeOperationsComplete(action.archiveOrRestoreOperations, tree) &&
-      cycle?.status_name === "Planning" && plan?.status_name === "In Progress" && plan.description === action.freshPlanGoal;
+      cycle?.status_name === "Planning" && plan?.status_name === "In Progress" && issueMarkdown(plan) === action.freshPlanGoal;
   }
   if (action.kind === "conclude_root") return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "In Review";
   if (action.kind === "cancel_root") {
@@ -809,12 +827,11 @@ function treeOperationsComplete(
 ): boolean {
   return operations.every((operation) => {
     if (operation.kind === "create_node") {
-      return tree.issues.some((issue) => issue.parent_issue_id === operation.parentIssueId && issue.title === operation.title &&
-        issue.description === operation.description && issue.status_name === operation.status);
+      return Boolean(findWorkflowIssue(tree, treeOperationIssueKey(operation)));
     }
     if (operation.kind === "update_node") {
       const issue = tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId);
-      return Boolean(issue && issue.title === operation.title && issue.description === operation.description && issue.status_name === operation.status);
+      return Boolean(issue && issue.title === operation.title && issueMarkdown(issue) === operation.description && issue.status_name === operation.status);
     }
     if (operation.kind === "archive_node" || operation.kind === "restore_node") {
       return tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId)?.is_archived === (operation.kind === "archive_node");
@@ -863,6 +880,7 @@ function stageResultRecord(
   resultId: string,
 ): StageResultRecord | undefined {
   for (const comment of tree.comments) {
+    if (comment.author_kind !== "symphony") continue;
     const parsed = parseManagedRecord(comment.body);
     if (parsed.ok && parsed.value.kind === "stage_result" && parsed.value.resultId === resultId) return parsed.value;
   }
@@ -871,12 +889,6 @@ function stageResultRecord(
 
 function rootIssueIdFromTree(tree: RootReconciliationView["tree"]): string {
   return tree.root_issue_id;
-}
-
-function reconcilerReplyId(directiveId: string, commentId: string, commentVersion: string): string {
-  return createHash("sha256")
-    .update([directiveId, commentId, commentVersion].join("\0"))
-    .digest("hex");
 }
 
 function viewWithDigest(view: RootReconciliationView, treeDigest: string): RootReconciliationView {
@@ -911,7 +923,7 @@ function validateDirectiveInputs(
     return "root_directive_consumed_inputs_incomplete";
   }
   const commentInputs = tree.comments
-    .filter((comment) => comment.author_kind === "human" && !comment.managed_marker)
+    .filter((comment) => comment.author_kind === "human")
     .map((comment) => `${comment.comment_id}:${comment.remote_version}`)
     .filter((inputId) => pending.has(inputId));
   const replies = directive.commentReplies.map((reply) => reply.sourceInputId);
@@ -919,6 +931,24 @@ function validateDirectiveInputs(
     return "root_directive_comment_replies_incomplete";
   }
   return undefined;
+}
+
+function issueMarkdown(issue: RootReconciliationView["tree"]["issues"][number] | undefined): string | undefined {
+  if (!issue) return undefined;
+  return issue.issue_kind === "root" ? issue.description : workflowIssueMarkdown(issue);
+}
+
+function treeOperationIssueKey(
+  operation: Extract<RootDirective["action"], { kind: "revise_root_tree" }> ["operations"][number] & { kind: "create_node" },
+): string {
+  const identity = JSON.stringify([
+    operation.precondition.targetIssueId,
+    operation.parentIssueId,
+    operation.issueKind,
+    operation.title,
+    operation.description,
+  ]);
+  return `tree-node:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 function timelineEvent(

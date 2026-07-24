@@ -11,6 +11,7 @@ import type {
   RootReconciliationView,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import type { ManagedRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import { renderWorkflowIssueDescription, workflowIssueLabel } from "../../root-reconciliation/api/WorkflowIssueRecords.js";
 import { LinearHumanActionMaterializerImpl } from "../internal/LinearHumanActionMaterializerImpl.js";
 
 test("materializes a Plan Review Action from the matching canonical Plan Contract", async () => {
@@ -214,11 +215,13 @@ class FakeLinear {
     if (command.kind === "create_workflow_issue") {
       const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
       if (!status) throw new Error("status missing");
-      const action = issue("action-1", "human", command.parentIssueId, status.status_id, status.name, 2);
+      const parsed = parseManagedRecord(command.description);
+      if (!parsed.ok || parsed.value.kind !== "workflow_issue") throw new Error("workflow_issue_record_missing");
+      const action = issue("action-1", parsed.value.issueKind, command.parentIssueId, status.status_id, status.name, 2);
       action.title = command.title;
       action.description = command.description;
       action.labels = command.labelNames;
-      action.managed_marker = command.managedMarker;
+      action.workflow_issue_key = parsed.value.issueKey;
       if (this.statusAfterCreate) {
         action.status_name = this.statusAfterCreate;
         action.status_id = `action-${this.statusAfterCreate.toLowerCase()}`;
@@ -270,8 +273,12 @@ function issue(
   return {
     issue_id: issueId, identifier: issueId, project_id: "project-1", ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusId, status_name: statusName, status_category: statusName === "Todo" ? "unstarted" as const : "started" as const,
-    status_position: depth, order: depth, depth, title: issueKind, description: `${issueKind} description`, labels: [] as string[],
-    is_archived: false, issue_kind: issueKind, remote_version: `${issueId}-v1`, updated_at: "2026-07-24T00:00:00Z",
+    status_position: depth, order: depth, depth, title: issueKind,
+    description: issueKind === "root" ? "root description" : workflowDescription(issueId, parentIssueId!, issueKind, `${issueKind} description`),
+    labels: issueKind === "root" ? [] : [workflowIssueLabel(issueKind)],
+    is_archived: false, issue_kind: issueKind,
+    ...(issueKind === "root" ? {} : { workflow_issue_key: issueId }),
+    remote_version: `${issueId}-v1`, updated_at: "2026-07-24T00:00:00Z",
   };
 }
 
@@ -279,8 +286,23 @@ function managedComment(issueId: string, body: string) {
   return {
     comment_id: `comment-${issueId}-${body.length}`, issue_id: issueId, body, author_kind: "symphony" as const,
     author_id: "symphony", created_at: "2026-07-24T00:00:00Z", remote_version: `comment-${body.length}`,
-    updated_at: "2026-07-24T00:00:00Z", managed_marker: "managed",
+    updated_at: "2026-07-24T00:00:00Z",
   };
+}
+
+function workflowDescription(
+  issueKey: string,
+  parentIssueId: string,
+  issueKind: "cycle" | "plan" | "work" | "verify" | "human",
+  markdown: string,
+): string {
+  return renderWorkflowIssueDescription({
+    issueKey,
+    rootIssueId: "root-1",
+    parentIssueId,
+    issueKind,
+    markdown,
+  });
 }
 
 function planContract() {

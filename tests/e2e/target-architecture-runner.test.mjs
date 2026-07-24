@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -100,6 +101,15 @@ test("target E2E waits for a durable Plan Review before a user approval", async 
   assert.equal(calls, 1);
 });
 
+test("target E2E fails with the durable Plan outcome instead of timing out", async () => {
+  await assert.rejects(waitForPlanReviewEvidence({
+    gateway: { async getWorkflowIssueTree() { return canceledPlanTree(); } },
+    projectId: "project-1",
+    rootIssueId: "root-1",
+    deadlineAt: new Date(Date.now() + 25),
+  }), /target_e2e_stage_plan_canceled/u);
+});
+
 test("target E2E execution evidence requires the complete production-created durable fact chain", async () => {
   const result = await waitForExecutionEvidence({
     gateway: { async getWorkflowIssueTree() { return completedTree(); } },
@@ -158,16 +168,28 @@ function planReviewTree() {
   const action = tree.issues.find(({ issueId }) => issueId === "action-1");
   plan.statusName = "In Review";
   action.statusName = "Todo";
-  tree.issues = tree.issues.filter(({ issueKind }) => issueKind !== "work" && issueKind !== "verify");
+  tree.issues = tree.issues.filter(({ description }) =>
+    !description.includes('"issue_kind":"work"') && !description.includes('"issue_kind":"verify"'));
   tree.comments = tree.comments.filter(({ body }) =>
     !body.includes('"kind":"human_action_resolution"') &&
-    !body.includes('"kind":"node_marker"') &&
     !body.includes('"stage":"work"') &&
     !body.includes('"stage":"verify"') &&
-    !body.includes("symphony timeline"),
+    !body.includes('"kind":"workflow_timeline"'),
   );
   tree.relations = tree.relations.filter(({ sourceIssueId, targetIssueId }) =>
     sourceIssueId === "action-1" && targetIssueId === "plan-1",
+  );
+  return tree;
+}
+
+function canceledPlanTree() {
+  const tree = completedTree();
+  const plan = tree.issues.find(({ issueId }) => issueId === "plan-1");
+  plan.statusName = "Canceled";
+  tree.comments = tree.comments.map((comment) =>
+    comment.issueId === "plan-1" && comment.body.includes('"stage":"plan"')
+      ? managed("plan-1", stageResult("plan", "canceled", "plan-1"))
+      : comment,
   );
   return tree;
 }
@@ -220,14 +242,11 @@ function completedTree() {
         terminal_remote_version: "action-v2", source_comment_ids: [], source_comment_versions: [], actor_kind: "human",
         proposal_digest: "contract-1", resolved_at: "2026-07-24T00:01:00Z",
       }),
-      managed("work-a", nodeMarker("work:head", "work")),
-      managed("work-b", nodeMarker("work:status", "work")),
-      managed("verify-1", nodeMarker("verify", "verify")),
       managed("work-a", stageResult("work", "work_completed", "work-a")),
       managed("work-b", stageResult("work", "work_completed", "work-b")),
       managed("verify-1", stageResult("verify", "verify_passed", "verify-1")),
-      { issueId: "root-1", body: "<!-- symphony timeline 0123456789abcdef -->\n## Symphony · Root Reconciliation\n", managedMarker: "root-1:timeline:root-event" },
-      { issueId: "cycle-1", body: "<!-- symphony timeline fedcba9876543210 -->\n## Symphony · Cycle\n", managedMarker: "cycle-1:timeline:cycle-event" },
+      managed("root-1", timeline("root")),
+      managed("cycle-1", timeline("cycle")),
     ],
     relations: [
       relation("action-1", "plan-1", "relates_to"),
@@ -240,9 +259,15 @@ function completedTree() {
 }
 
 function issue(issueId, issueKind, statusName, parentIssueId, labels = []) {
+  const workflowIssue = issueKind === "root" ? undefined : {
+    kind: "workflow_issue", version: 1, issue_key: issueKey(issueId, issueKind), root_issue_id: "root-1",
+    parent_issue_id: parentIssueId, issue_kind: issueKind,
+  };
   return {
-    issueId, issueKind, statusName, parentIssueId, labels, isArchived: false,
-    statusId: `${statusName}-id`, title: issueId, description: issueId,
+    issueId, statusName, parentIssueId,
+    labels: labels.length > 0 ? labels : workflowIssue ? [issueKind === "human" ? "Human Action" : `${issueKind[0].toUpperCase()}${issueKind.slice(1)}`] : [],
+    isArchived: false, statusId: `${statusName}-id`, title: issueId,
+    description: workflowIssue ? `# ${issueId}\n\n\`\`\`symphony\n${JSON.stringify(workflowIssue)}\n\`\`\`` : issueId,
     remoteVersion: issueId === "action-1" ? "action-v2" : `${issueId}-v1`,
   };
 }
@@ -252,13 +277,26 @@ function relation(sourceIssueId, targetIssueId, relationKind) {
 }
 
 function managed(issueId, record) {
-  return { issueId, body: `<!-- symphony managed-record\n${JSON.stringify(record)}\n-->`, managedMarker: `${issueId}:record:${record.kind}` };
+  return { issueId, body: `Symphony record.\n\n\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\`` };
 }
 
-function nodeMarker(nodeKey, nodeKind) {
+function issueKey(issueId, issueKind) {
+  if (issueKind === "work") {
+    const nodeKey = issueId === "work-a" ? "work:head" : "work:status";
+    return `approved-plan-dag:${createHash("sha256").update(JSON.stringify(["cycle-1", "contract-1", nodeKey])).digest("hex")}`;
+  }
+  if (issueKind === "verify") {
+    return `approved-plan-dag:${createHash("sha256").update(JSON.stringify(["cycle-1", "contract-1", "verify"])).digest("hex")}`;
+  }
+  return issueId;
+}
+
+function timeline(timelineKind) {
   return {
-    kind: "node_marker", version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1",
-    node_key: nodeKey, node_kind: nodeKind, plan_contract_digest: "contract-1",
+    kind: "workflow_timeline", version: 1, timeline_event_id: `${timelineKind}-event`, timeline_kind: timelineKind,
+    target_issue_id: timelineKind === "root" ? "root-1" : "cycle-1", source_record_ids: ["record-1"],
+    source_versions: ["version-1"], write_id: `${timelineKind}-write`, rendered_schema_version: "1",
+    materialized_at: "2026-07-24T00:03:00Z",
   };
 }
 

@@ -68,7 +68,7 @@ export function buildRootFactSet(input: {
   }> = [];
   const userComments: RootFactComment[] = [];
   for (const comment of input.tree.comments) {
-    if (comment.body.startsWith("<!-- symphony managed-record\n")) {
+    if (comment.author_kind === "symphony") {
       const parsed = parseManagedRecord(comment.body);
       if (!parsed.ok) throw new Error(`root_managed_record_invalid:${parsed.error}`);
       const record = recordReference(parsed.value, comment.remote_version);
@@ -105,7 +105,7 @@ export function buildRootFactSet(input: {
       }
       continue;
     }
-    if (comment.managed_marker || comment.author_kind === "symphony") continue;
+    if (comment.author_kind !== "human") continue;
     const source = manifest.get(`linear_comment:${comment.comment_id}`);
     const current = toFactComment(comment);
     userComments.push(current);
@@ -299,7 +299,6 @@ function toFactComment(comment: LinearWorkflowTreeSnapshot["comments"][number]):
     body: comment.body,
     createdAt: comment.created_at,
     updatedAt: comment.updated_at,
-    ...(comment.managed_marker ? { managedMarker: comment.managed_marker } : {}),
   };
 }
 
@@ -454,7 +453,8 @@ function actionKindFor(labels: string[]): HumanActionKind {
 }
 
 function recordReference(record: ManagedRecord, version: string): RootRecordReference {
-  const identity = "resultId" in record ? record.resultId
+  const identity = "replyId" in record ? record.replyId
+    : "resultId" in record ? record.resultId
     : "resolutionId" in record ? record.resolutionId
       : "rootDirectiveId" in record ? record.rootDirectiveId
       : "actionId" in record ? record.actionId

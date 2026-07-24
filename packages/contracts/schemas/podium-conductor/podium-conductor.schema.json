@@ -641,16 +641,6 @@
         "is_archived": {
           "type": "boolean"
         },
-        "issue_kind": {
-          "enum": [
-            "root",
-            "cycle",
-            "plan",
-            "work",
-            "verify",
-            "human"
-          ]
-        },
         "remote_version": {
           "$ref": "common.schema.json#/$defs/OpaqueIdentifier"
         },
@@ -1057,7 +1047,6 @@
         "parent_expected_remote_version",
         "parent_expected_status_id",
         "parent_issue_id",
-        "issue_kind",
         "title",
         "description",
         "status_id",
@@ -1093,15 +1082,6 @@
         },
         "parent_issue_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
-        },
-        "issue_kind": {
-          "enum": [
-            "cycle",
-            "plan",
-            "work",
-            "verify",
-            "human"
-          ]
         },
         "title": {
           "$ref": "common.schema.json#/$defs/BoundedText"

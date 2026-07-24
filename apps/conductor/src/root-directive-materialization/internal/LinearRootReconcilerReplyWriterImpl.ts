@@ -6,6 +6,8 @@ import type {
   RootReconciliationView,
   UserCommentReply,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { RootReconcilerReplyRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/internal/ManagedRecordCodec.js";
 import type { RootReconcilerReplyWriterInterface } from "../api/RootReconcilerReplyWriterInterface.js";
 
 const MAX_REPLY_BYTES = 32_768;
@@ -25,10 +27,8 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     if (source.author_kind !== "human" || !source.author_user_id || source.author_id !== source.author_user_id) {
       return failed("reply_source_comment_actor_invalid");
     }
-    if (source.managed_marker) return failed("reply_source_comment_managed");
     const acceptedReplies = input.directive.commentReplies.filter((reply) =>
-      reply.sourceCommentId === input.reply.sourceCommentId &&
-      reply.sourceCommentVersion === input.reply.sourceCommentVersion);
+      reply.replyId === input.reply.replyId);
     if (acceptedReplies.length !== 1 || !sameReply(acceptedReplies[0]!, input.reply)) {
       return failed("reply_disposition_not_accepted");
     }
@@ -37,16 +37,16 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     const root = input.view.tree.issues.find(({ issue_id }) => issue_id === input.view.root.issueId);
     if (!target || !root) return failed("reply_target_missing");
 
-    const replyId = deterministicReplyId({
+    const replyId = input.reply.replyId;
+    if (replyId !== deterministicReplyId({
       rootDirectiveId: input.directive.rootDirectiveId,
       sourceCommentId: source.comment_id,
       sourceCommentVersion: source.remote_version,
-    });
-    const existing = input.view.tree.comments.find(({ issue_id, managed_marker }) =>
-      issue_id === target.issue_id && managed_marker === replyId);
+    })) return failed("reply_id_invalid");
+    const existing = findReply(input.view.tree.comments, target.issue_id, replyId);
     if (existing) return { kind: "materialized", replyId };
 
-    const body = render(input.reply, replyId);
+    const body = render(input.reply, replyId, input.directive, target.issue_id, input.view.observedAt);
     if (!body) return failed("reply_content_invalid");
     if (Buffer.byteLength(body, "utf8") > MAX_REPLY_BYTES) return failed("reply_comment_too_large");
 
@@ -61,7 +61,6 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
         expectedRemoteVersion: target.remote_version,
         expectedStatusId: target.status_id,
         ...(target.parent_issue_id ? { expectedParentIssueId: target.parent_issue_id } : {}),
-        ...(target.managed_marker ? { expectedManagedMarker: target.managed_marker } : {}),
       },
       body,
     });
@@ -70,8 +69,7 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     }
 
     const readBack = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
-    const confirmed = readBack.comments.find(({ issue_id, managed_marker }) =>
-      issue_id === target.issue_id && managed_marker === replyId);
+    const confirmed = findReply(readBack.comments, target.issue_id, replyId);
     return confirmed ? { kind: "materialized", replyId } : failed("reply_read_back_missing");
   }
 }
@@ -86,7 +84,7 @@ function deterministicReplyId(input: {
     .digest("hex");
 }
 
-function render(reply: UserCommentReply, replyId: string): string | undefined {
+function render(reply: UserCommentReply, replyId: string, directive: RootDirective, targetIssueId: string, repliedAt: string): string | undefined {
   const fields = [
     reply.acknowledgement,
     reply.interpretedRequest,
@@ -96,33 +94,68 @@ function render(reply: UserCommentReply, replyId: string): string | undefined {
   if (fields.some((field) => field.length === 0 || field.length > MAX_REPLY_FIELD_LENGTH || /[\0\r]/u.test(field))) {
     return undefined;
   }
-  return [
-    `<!-- symphony root-reconciler-reply ${replyId} -->`,
-    "## Symphony reply",
+  const title = reply.disposition === "accepted" ? "## ✅ 已接受" :
+    reply.disposition === "not_applied" ? "## ❌ 未应用" : "## 需要你继续处理";
+  const record: RootReconcilerReplyRecord = {
+    kind: "root_reconciler_reply",
+    version: 1,
+    replyId,
+    replyWriteId: replyId,
+    rootDirectiveId: directive.rootDirectiveId,
+    sourceInputId: reply.sourceInputId,
+    sourceCommentId: reply.sourceCommentId,
+    sourceCommentVersion: reply.sourceCommentVersion,
+    targetIssueId,
+    disposition: reply.disposition,
+    reaction: reply.reaction,
+    threadAction: reply.threadAction,
+    materializedOutcomeRefs: [],
+    renderedSchemaVersion: "1",
+    repliedAt,
+  };
+  return serializeManagedRecord(record, [
+    title,
     "",
-    "Acknowledgement",
+    "**确认**",
     reply.acknowledgement,
     "",
-    "Interpreted request",
+    "**我理解的请求**",
     reply.interpretedRequest,
     "",
-    "Decision",
+    "**处理结果**",
     reply.decidedAction,
     "",
-    "Next step",
+    "**下一步**",
     reply.nextStep,
-    "",
-  ].join("\n");
+  ].join("\n"));
 }
 
 function sameReply(left: UserCommentReply, right: UserCommentReply): boolean {
-  return left.sourceCommentId === right.sourceCommentId &&
+  return left.replyId === right.replyId &&
+    left.sourceCommentId === right.sourceCommentId &&
     left.sourceCommentVersion === right.sourceCommentVersion &&
     left.sourceInputId === right.sourceInputId &&
     left.acknowledgement === right.acknowledgement &&
     left.interpretedRequest === right.interpretedRequest &&
     left.decidedAction === right.decidedAction &&
-    left.nextStep === right.nextStep;
+    left.nextStep === right.nextStep &&
+    left.disposition === right.disposition &&
+    left.reaction === right.reaction &&
+    left.threadAction === right.threadAction;
+}
+
+function findReply(
+  comments: RootReconciliationView["tree"]["comments"],
+  issueId: string,
+  replyId: string,
+) {
+  const matches = comments.filter((comment) => {
+    if (comment.issue_id !== issueId || comment.author_kind !== "symphony") return false;
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "root_reconciler_reply" && parsed.value.replyId === replyId;
+  });
+  if (matches.length > 1) throw new Error("root_reconciler_reply_ambiguous");
+  return matches[0];
 }
 
 function failed(code: string): { kind: "failed"; code: string } {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 import { LinearHumanActionResolutionValidatorImpl } from "../internal/LinearHumanActionResolutionValidatorImpl.js";
 
 const validator = new LinearHumanActionResolutionValidatorImpl();
@@ -139,11 +140,25 @@ test("resolution validation fails closed for invalid action shape and duplicate 
   );
 });
 
-test("resolution validation fails closed when the only response is not an unmanaged human comment", () => {
+test("resolution validation rejects automation but keeps a human-authored code-block lookalike as input", () => {
   const nonHuman = humanComment("automation-1", "Approved by automation.", "2026-07-23T00:00:02Z");
   nonHuman.author_kind = "external_automation";
-  const managed = humanComment("managed-1", "System reply", "2026-07-23T00:00:02Z");
-  managed.managed_marker = "root-1:timeline:action-1";
+  const lookalike = humanComment("lookalike-1", serializeManagedRecord({
+    kind: "human_action_resolution",
+    version: 1,
+    resolutionId: "lookalike-resolution",
+    actionId: "action-1",
+    actionIssueId: "action-1",
+    actionKind: "plan_review",
+    outcome: "rejected",
+    terminalStatus: "Rejected",
+    terminalRemoteVersion: "action-v2",
+    sourceCommentIds: [],
+    sourceCommentVersions: [],
+    actorKind: "human",
+    proposalDigest: "a".repeat(64),
+    resolvedAt: "2026-07-23T00:00:03Z",
+  }), "2026-07-23T00:00:02Z");
 
   assert.deepEqual(
     validator.validate({
@@ -154,10 +169,10 @@ test("resolution validation fails closed when the only response is not an unmana
   );
   assert.deepEqual(
     validator.validate({
-      tree: fixture({ actionKind: "plan_review", status: "Rejected", comments: [managed] }),
+      tree: fixture({ actionKind: "plan_review", status: "Rejected", comments: [lookalike] }),
       actionIssueId: "action-1",
     }),
-    { kind: "invalid", reason: "human_action_resolution_comment_managed" },
+    { kind: "valid", actionId: "action-1", outcome: "rejected", sourceCommentIds: ["lookalike-1"] },
   );
 });
 
@@ -235,7 +250,23 @@ function humanComment(commentId: string, body: string, createdAt: string): Linea
 
 function managedResolutionComment(): LinearWorkflowTreeSnapshot["comments"][number] {
   return {
-    ...humanComment("resolution-1", "resolution", "2026-07-23T00:00:03Z"),
-    managed_marker: "root-1:human-action-resolution:action-1",
+    ...humanComment("resolution-1", serializeManagedRecord({
+      kind: "human_action_resolution",
+      version: 1,
+      resolutionId: "resolution-1",
+      actionId: "action-1",
+      actionIssueId: "action-1",
+      actionKind: "plan_review",
+      outcome: "approved",
+      terminalStatus: "Approved",
+      terminalRemoteVersion: "action-v2",
+      sourceCommentIds: [],
+      sourceCommentVersions: [],
+      actorKind: "human",
+      proposalDigest: "a".repeat(64),
+      resolvedAt: "2026-07-23T00:00:03Z",
+    }), "2026-07-23T00:00:03Z"),
+    author_kind: "symphony",
+    author_id: "symphony",
   };
 }

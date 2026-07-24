@@ -1,7 +1,10 @@
 import type { LinearGatewayInterface, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import {
+  findWorkflowIssue,
   parseManagedRecord,
+  renderWorkflowIssueDescription,
   serializeManagedRecord,
+  workflowIssueLabel,
 } from "../../root-reconciliation/api/index.js";
 import type {
   HumanActionRequestRecord,
@@ -31,7 +34,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
     if (typeof prepared === "string") return failed(prepared);
 
     let tree = input.view.tree;
-    let action = tree.issues.find((issue) => issue.managed_marker === prepared.marker);
+    let action = findWorkflowIssue(tree, prepared.actionId);
     if (!action) {
       if (prepared.parent.remote_version !== input.directive.expectedParentRemoteVersion) {
         return failed("human_action_parent_version_mismatch");
@@ -40,23 +43,21 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
       if (!status) return failed("human_action_status_missing");
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_issue",
-        writeId: prepared.marker,
+        writeId: prepared.actionId,
         expectedProjectId: prepared.parent.project_id,
         rootIssueId: input.view.root.issueId,
         expectedRootRemoteVersion: rootIssue(tree, input.view.root.issueId).remote_version,
         parentExpectedRemoteVersion: prepared.parent.remote_version,
         parentExpectedStatusId: prepared.parent.status_id,
         parentIssueId: prepared.parent.issue_id,
-        issueKind: "human",
         title: input.directive.title,
         description: prepared.description,
         statusId: status.status_id,
-        managedMarker: prepared.marker,
-        labelNames: ["Human Action", actionLabelFor(input.directive.actionKind)],
+        labelNames: [workflowIssueLabel("human"), actionLabelFor(input.directive.actionKind)],
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(`human_action_write_${outcome.kind}`);
       tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
-      action = tree.issues.find((issue) => issue.managed_marker === prepared.marker);
+      action = findWorkflowIssue(tree, prepared.actionId);
       if (!action) return failed("human_action_read_back_missing");
     }
 
@@ -76,7 +77,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
       if (exists) continue;
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_relation",
-        writeId: `${prepared.marker}:related:${target.issue_id}`,
+        writeId: `${prepared.actionId}:related:${target.issue_id}`,
         expectedProjectId: action.project_id,
         rootIssueId: input.view.root.issueId,
         expectedRootRemoteVersion: rootIssue(tree, input.view.root.issueId).remote_version,
@@ -88,7 +89,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(`human_action_relation_write_${outcome.kind}`);
       tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
-      action = tree.issues.find((issue) => issue.managed_marker === prepared.marker);
+      action = findWorkflowIssue(tree, prepared.actionId);
       if (!action) return failed("human_action_read_back_missing");
       const refreshedActionError = validateAction(action, prepared, input.directive);
       if (refreshedActionError) return failed(refreshedActionError);
@@ -98,7 +99,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
     const requestBody = serializeManagedRecord(request);
     const existingRequests = tree.comments.flatMap((comment) => {
       const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "human_action_request" && parsed.value.actionId === prepared.marker
+      return comment.author_kind === "symphony" && parsed.ok && parsed.value.kind === "human_action_request" && parsed.value.actionId === prepared.actionId
         ? [{ comment, record: parsed.value }]
         : [];
     });
@@ -106,7 +107,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
     if (existingRequests.length === 0) {
       const outcome = await this.linear.mutateWorkflow({
         kind: "append_workflow_comment",
-        writeId: `${prepared.marker}:request`,
+        writeId: `${prepared.actionId}:request`,
         expectedProjectId: action.project_id,
         rootIssueId: input.view.root.issueId,
         expectedRootRemoteVersion: rootIssue(tree, input.view.root.issueId).remote_version,
@@ -115,7 +116,6 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
           expectedRemoteVersion: action.remote_version,
           expectedStatusId: action.status_id,
           expectedParentIssueId: prepared.parent.issue_id,
-          expectedManagedMarker: prepared.marker,
           expectedIsArchived: false,
         },
         body: requestBody,
@@ -127,12 +127,12 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
     const confirmed = confirmMaterialization(tree, prepared, input.directive, requestBody);
     return typeof confirmed === "string"
       ? failed(confirmed)
-      : { kind: "materialized", actionIssueId: confirmed.issue_id, actionId: prepared.marker };
+      : { kind: "materialized", actionIssueId: confirmed.issue_id, actionId: prepared.actionId };
   }
 }
 
 interface PreparedHumanAction {
-  marker: string;
+  actionId: string;
   parent: LinearWorkflowTreeSnapshot["issues"][number];
   description: string;
   createdAt: string;
@@ -165,10 +165,18 @@ function prepare(input: {
   }
   const planReview = directive.actionKind === "plan_review" ? preparePlanReview(directive, parent, view.tree, view.root.issueId) : undefined;
   if (typeof planReview === "string") return planReview;
-  const description = renderDescription(directive, parent, planReview);
+  const actionId = `${input.rootDirectiveId}:human-action`;
+  const markdown = renderDescription(directive, parent, planReview);
+  const description = renderWorkflowIssueDescription({
+    issueKey: actionId,
+    rootIssueId: view.root.issueId,
+    parentIssueId: parent.issue_id,
+    issueKind: "human",
+    markdown,
+  });
   if (description.length > maxDescriptionLength) return "human_action_description_too_long";
   return {
-    marker: `${input.rootDirectiveId}:human-action`,
+    actionId,
     parent,
     description,
     createdAt: directiveAcceptedAt(view.tree, input.rootDirectiveId) ?? view.observedAt,
@@ -243,7 +251,7 @@ function requestRecord(
   return {
     kind: "human_action_request",
     version: 1,
-    actionId: prepared.marker,
+    actionId: prepared.actionId,
     actionIssueId: action.issue_id,
     actionKind: input.directive.actionKind,
     parentScope: input.directive.parentScope,
@@ -264,14 +272,16 @@ function confirmMaterialization(
   directive: RequestHumanActionDirective,
   requestBody: string,
 ): LinearWorkflowTreeSnapshot["issues"][number] | string {
-  const action = tree.issues.find((issue) => issue.managed_marker === prepared.marker);
+  const action = findWorkflowIssue(tree, prepared.actionId);
   if (!action) return "human_action_read_back_missing";
   const actionError = validateAction(action, prepared, directive);
   if (actionError) return actionError;
   if (!directive.relatedIssueIds.every((relatedIssueId) => tree.relations.some((relation) =>
     relation.relation_kind === "relates_to" && relation.source_issue_id === action.issue_id && relation.target_issue_id === relatedIssueId,
   ))) return "human_action_relation_read_back_missing";
-  const requests = tree.comments.filter((comment) => comment.issue_id === action.issue_id && comment.body === requestBody);
+  const requests = tree.comments.filter((comment) =>
+    comment.author_kind === "symphony" && comment.issue_id === action.issue_id && comment.body === requestBody,
+  );
   return requests.length === 1 ? action : requests.length === 0 ? "human_action_request_read_back_missing" : "human_action_request_read_back_duplicate";
 }
 

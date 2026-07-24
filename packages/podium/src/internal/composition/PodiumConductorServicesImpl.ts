@@ -257,7 +257,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           author_id: comment.authorId,
           ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
           created_at: comment.createdAt,
-          managed_marker: comment.managedMarker,
           updated_at: comment.updatedAt,
         })),
       })),
@@ -311,7 +310,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           description: issue.description,
           labels: issue.labels,
           is_archived: issue.isArchived,
-          ...(issue.issueKind ? { issue_kind: issue.issueKind } : {}),
           remote_version: issue.remoteVersion,
           updated_at: issue.updatedAt,
         })),
@@ -479,14 +477,6 @@ function issueSnapshot(issue: LinearIssueValue) {
     description: issue.description,
     labels: issue.labels,
     is_archived: issue.isArchived,
-    ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
-    ...(issue.nodeKind ? { node_kind: issue.nodeKind } : {}),
-    ...(issue.humanKind ? { human_kind: issue.humanKind } : {}),
-    ...(issue.origin ? { origin: issue.origin } : {}),
-    ...(issue.completedInputHash
-      ? { completed_input_hash: issue.completedInputHash }
-      : {}),
-    ...(issue.targetIssueId ? { target_issue_id: issue.targetIssueId } : {}),
     updated_at: issue.updatedAt,
   };
 }
@@ -526,11 +516,9 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       parentExpectedRemoteVersion: requiredString(body.parent_expected_remote_version, "linear_workflow_parent_version_missing"),
       parentExpectedStatusId: requiredString(body.parent_expected_status_id, "linear_workflow_parent_status_missing"),
       parentIssueId: requiredString(body.parent_issue_id, "linear_workflow_parent_id_missing"),
-      issueKind: workflowIssueKind(body.issue_kind),
       title: requiredString(body.title, "linear_workflow_title_missing"),
       description: requiredString(body.description, "linear_workflow_description_missing"),
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
-      managedMarker: requiredString(body.managed_marker, "linear_workflow_marker_missing"),
       labelNames: requiredStringArray(body.label_names, "linear_workflow_label_names_missing"),
       ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
     };
@@ -587,7 +575,6 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     expectedRemoteVersion: requiredString(target.expected_remote_version, "linear_workflow_target_version_missing"),
     ...(target.expected_status_id === undefined ? {} : { expectedStatusId: requiredString(target.expected_status_id, "linear_workflow_target_status_invalid") }),
     ...(target.expected_parent_issue_id === undefined ? {} : { expectedParentIssueId: requiredString(target.expected_parent_issue_id, "linear_workflow_target_parent_invalid") }),
-    ...(target.expected_managed_marker === undefined ? {} : { expectedManagedMarker: requiredString(target.expected_managed_marker, "linear_workflow_target_marker_invalid") }),
     ...(target.expected_is_archived === undefined ? {} : { expectedIsArchived: requiredBoolean(target.expected_is_archived, "linear_workflow_target_archive_invalid") }),
   };
   if (body.kind === "update_workflow_issue") {

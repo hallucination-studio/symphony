@@ -64,12 +64,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
   });
   const runId = `linear-boundary-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const runDigest = createHash("sha256").update(runId).digest("hex").slice(0, 12);
-  const rootDescription = [
-    "Root created by the real Linear boundary contract test.",
-    "<!-- symphony live-boundary",
-    `run_id: ${runId}`,
-    "-->",
-  ].join("\n");
+  const rootDescription = `Root created by the real Linear boundary contract test.\n\nRun: ${runId}`;
   const root = await sdk.createRootIssue({
     projectId,
     conductorShortHash,
@@ -77,7 +72,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     description: rootDescription,
   });
   const rootIssueId = root.rootIssueId;
-  const managedMarker = `linear-boundary-${runDigest}`;
+  const writePrefix = `linear-boundary-${runDigest}`;
 
   let tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     const rootNode = tree.issues.find(({ issueId }) => issueId === rootIssueId);
@@ -88,7 +83,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(rootTarget);
     const createCycle = {
       kind: "create_workflow_issue",
-      writeId: `${managedMarker}-create`,
+      writeId: `${writePrefix}-create`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -96,12 +91,14 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
       parentExpectedRemoteVersion: rootTarget.updatedAt,
       parentExpectedStatusId: rootTarget.statusId,
       parentIssueId: rootIssueId,
-      issueKind: "cycle",
       title: `Boundary Cycle ${runDigest}`,
-      description: "Cycle created by the real Linear boundary contract test.",
+      description: [
+        "Cycle created by the real Linear boundary contract test.", "", "```symphony",
+        JSON.stringify({ kind: "workflow_issue", version: 1, issue_key: `${writePrefix}-create`, root_issue_id: rootIssueId, parent_issue_id: rootIssueId, issue_kind: "cycle" }),
+        "```",
+      ].join("\n"),
       statusId: rootTarget.statusId,
-      managedMarker,
-      labelNames: [],
+      labelNames: ["Cycle"],
     };
     const created = assertMutationApplied(
       await gateway.mutateWorkflow(createCycle),
@@ -121,7 +118,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(currentRootBeforeComment);
     const comment = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "append_workflow_comment",
-      writeId: `${managedMarker}-comment`,
+      writeId: `${writePrefix}-comment`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -129,7 +126,6 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
       target: {
         targetIssueId: cycleIssueId,
         expectedRemoteVersion: cycleTarget.updatedAt,
-        expectedManagedMarker: managedMarker,
       },
       body: "Linear boundary comment read-back.",
     }), "cycle_comment");
@@ -137,7 +133,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(currentRootBeforeUpdate);
     const update = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "update_workflow_issue",
-      writeId: `${managedMarker}-update`,
+      writeId: `${writePrefix}-update`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -145,7 +141,6 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
       target: {
         targetIssueId: cycleIssueId,
         expectedRemoteVersion: cycleTarget.updatedAt,
-        expectedManagedMarker: managedMarker,
       },
       statusId: cycleTarget.statusId,
       title: `Boundary Cycle ${runDigest} revised`,
@@ -156,7 +151,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.notEqual(currentCycleAfterUpdate.updatedAt, cycleTarget.updatedAt);
     const staleArchive = await gateway.mutateWorkflow({
       kind: "archive_workflow_issue",
-      writeId: `${managedMarker}-stale-archive`,
+      writeId: `${writePrefix}-stale-archive`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -165,7 +160,6 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         targetIssueId: cycleIssueId,
         expectedRemoteVersion: cycleTarget.updatedAt,
         expectedIsArchived: false,
-        expectedManagedMarker: managedMarker,
       },
     });
     assert.equal(staleArchive.kind, "precondition_conflict");
@@ -176,7 +170,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(currentCycle);
     const archive = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "archive_workflow_issue",
-      writeId: `${managedMarker}-archive`,
+      writeId: `${writePrefix}-archive`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -185,7 +179,6 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         targetIssueId: cycleIssueId,
         expectedRemoteVersion: currentCycle.updatedAt,
         expectedIsArchived: false,
-        expectedManagedMarker: managedMarker,
       },
     }), "cycle_archive");
 
@@ -200,7 +193,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(archivedCycleTarget);
     const restore = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "restore_workflow_issue",
-      writeId: `${managedMarker}-restore`,
+      writeId: `${writePrefix}-restore`,
       conductorShortHash,
       expectedProjectId: projectId,
       rootIssueId,
@@ -209,7 +202,6 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         targetIssueId: cycleIssueId,
         expectedRemoteVersion: archivedCycleTarget.updatedAt,
         expectedIsArchived: true,
-        expectedManagedMarker: managedMarker,
       },
     }), "cycle_restore");
 

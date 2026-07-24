@@ -119,7 +119,7 @@ function issue(tree: LinearWorkflowTreeSnapshot, issueId: string) {
 
 function deliveryReceipt(tree: LinearWorkflowTreeSnapshot, rootIssueId: string, cycleIssueId: string, verifyResultId: string): DeliveryRecord | undefined {
   const matches = tree.comments.flatMap((comment) => {
-    if (comment.issue_id !== rootIssueId || !comment.managed_marker) return [];
+    if (comment.issue_id !== rootIssueId || comment.author_kind !== "symphony") return [];
     const parsed = parseManagedRecord(comment.body);
     return parsed.ok && parsed.value.kind === "delivery" && parsed.value.cycleIssueId === cycleIssueId && parsed.value.verifyResultId === verifyResultId ? [parsed.value] : [];
   });

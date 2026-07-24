@@ -279,19 +279,17 @@ test("Root header snapshots map every Linear priority and retain Linear node ord
   );
 });
 
-test("Root scheduling batches one and 250 Root headers with one physical fact query per page", async () => {
+test("Root scheduling reads one and 250 Root headers without interpreting managed records", async () => {
   for (const rootCount of [1, 250]) {
     const roots = Array.from({ length: rootCount }, (_, index) => {
       const root = issue({ id: `root-${index}`, priority: index % 5, order: index });
-      Object.defineProperties(root, {
-        state: { get() { throw new Error("per-Root state read forbidden"); } },
-      });
-      root.comments = async () => { throw new Error("per-Root comment read forbidden"); };
-      root.inverseRelations = async () => { throw new Error("per-Root relation read forbidden"); };
+      root.comments = async () => connection([]);
+      root.inverseRelations = async () => connection([]);
       return root;
     });
     let batchReads = 0;
     const sdk = {
+      viewer: { id: "app-user" },
       project: async () => ({ issues: async () => connection(roots) }),
       client: {
         async rawRequest(_query, variables) {
@@ -331,19 +329,24 @@ test("Root scheduling batches one and 250 Root headers with one physical fact qu
     const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
 
     assert.equal(result.items.length, rootCount);
-    assert.equal(batchReads, 1);
+    assert.equal(batchReads, 0);
   }
 });
 
-test("Root scheduling batch preserves managed comments and blocker facts", async () => {
-  const primary = "Symphony\n\n<!-- symphony root\nversion: 3\n-->";
+test("Root scheduling passes Symphony-authored comments as native Linear facts", async () => {
+  const primary = "Root ownership recorded.\n\n```symphony\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
   const root = issue({ id: "root-1", priority: 2, order: 3 });
+  root.delegateId = "app-user";
+  root.comments = async () => connection([{
+    id: "primary-1", body: primary, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
+    user: { id: "app-user" }, issue: { id: "root-1" },
+  }]);
+  root.inverseRelations = async () => connection([]);
   const sdk = {
+    viewer: { id: "app-user" },
     project: async () => ({ issues: async () => connection([root]) }),
     client: {
       async rawRequest(query, variables) {
-        assert.match(query, /comments\(first: 2, filter:/u);
-        assert.equal(variables.commentMarker, "<!-- symphony root\n");
         return { data: {
           viewer: { id: "app-user" },
           issues: { nodes: [{
@@ -386,24 +389,24 @@ test("Root scheduling batch preserves managed comments and blocker facts", async
   const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
 
   assert.equal(result.items[0].isDelegatedToSymphony, true);
-  assert.equal(result.items[0].issue.state, "In Progress");
+  assert.equal(result.items[0].issue.state, "Todo");
   assert.equal(result.items[0].rootManagedComments[0].body, primary);
-  assert.deepEqual(result.items[0].blockers, [{
-    sourceIssueId: "root-1",
-    targetIssueId: "blocker-1",
-    targetState: "Todo",
-  }]);
+  assert.deepEqual(result.items[0].blockers, []);
 });
 
-test("Root scheduling batch exposes new workflow ownership records", async () => {
-  const ownership = '<!-- symphony managed-record\n{"kind":"root_ownership"}\n-->';
+test("Root scheduling leaves ownership record interpretation to Conductor", async () => {
+  const ownership = 'Root ownership recorded.\n\n```symphony\n{"kind":"root_ownership","version":1}\n```';
   const root = issue({ id: "root-1", priority: 2, order: 3 });
+  root.comments = async () => connection([{
+    id: "ownership-1", body: ownership, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
+    user: { id: "app-user" }, issue: { id: "root-1" },
+  }]);
+  root.inverseRelations = async () => connection([]);
   const sdk = {
+    viewer: { id: "app-user" },
     project: async () => ({ issues: async () => connection([root]) }),
     client: {
       async rawRequest(query, variables) {
-        assert.match(query, /workflowManagedComments: comments\(first: 25, filter:/u);
-        assert.equal(variables.workflowCommentMarker, "<!-- symphony managed-record\n");
         return { data: {
           viewer: { id: "app-user" },
           issues: { nodes: [{
@@ -584,7 +587,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
-      id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->",
+      id: "comment-work", body: "Progress\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
       createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z",
       user: { id: "symphony-bot" }, issue: { id: "work-1" }, parent: { id: "comment-root" },
       resolvedAt: "2026-07-16T00:00:04Z",
@@ -628,9 +631,9 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     { statusId: "state-todo", name: "Todo", category: "unstarted", position: 1 },
     { statusId: "state-duplicate", name: "Duplicate", category: "canceled", position: 3 },
   ]);
-  assert.deepEqual(tree.comments.map(({ commentId, issueId, managedMarker }) => ({ commentId, issueId, managedMarker })), [
-    { commentId: "comment-root", issueId: "root-1", managedMarker: undefined },
-    { commentId: "comment-work", issueId: "work-1", managedMarker: "write-1" },
+  assert.deepEqual(tree.comments.map(({ commentId, issueId }) => ({ commentId, issueId })), [
+    { commentId: "comment-root", issueId: "root-1" },
+    { commentId: "comment-work", issueId: "work-1" },
   ]);
   assert.deepEqual(tree.comments.map(({ commentId, authorKind, authorId, authorUserId, createdAt }) => ({ commentId, authorKind, authorId, authorUserId, createdAt })), [
     { commentId: "comment-root", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00.000Z" },
@@ -657,7 +660,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00.000Z", actorKind: "unknown" },
     { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:02.000Z", actorKind: "unknown" },
     { sourceKind: "linear_comment", sourceId: "comment-root", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "human" },
-    { sourceKind: "linear_comment", sourceId: "comment-work", sourceVersion: "2026-07-16T00:00:03.000Z", actorKind: "symphony", stableWriteId: "write-1" },
+    { sourceKind: "linear_comment", sourceId: "comment-work", sourceVersion: "2026-07-16T00:00:03.000Z", actorKind: "symphony" },
     { sourceKind: "linear_relation", sourceId: "relation-1", sourceVersion: "relation-1", actorKind: "unknown" },
     { sourceKind: "linear_status_catalog", sourceId: "project-1:status-catalog", sourceVersion: "f241b6b4887e72321a11ea914516224280ff68d55aa6709c0113557f6409e874", actorKind: "unknown" },
   ]);
@@ -1021,7 +1024,7 @@ test("Project label rebind creates a missing desired label and proves attachment
   assert.equal(projectLabelReads, 3);
 });
 
-test("workflow SDK mutations keep managed markers and use the explicit status and relation inputs", async () => {
+test("workflow SDK mutations preserve the supplied description and use explicit status and relation inputs", async () => {
   const parent = issue({ id: "root-1" });
   let createdInput;
   let updatedInput;
@@ -1053,14 +1056,13 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
     kind: "create_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     parentExpectedRemoteVersion: "parent-version", parentExpectedStatusId: "state-todo",
-    parentIssueId: "root-1", issueKind: "cycle", title: "Cycle", description: "Plan it",
-    statusId: "state-todo", managedMarker: "cycle-marker", labelNames: ["Human Action", "Plan Review"], order: 3,
+    parentIssueId: "root-1", title: "Cycle", description: "Plan it",
+    statusId: "state-todo", labelNames: ["Human Action", "Plan Review"], order: 3,
   });
   assert.equal(createdInput.stateId, "state-todo");
   assert.deepEqual(createdInput.labelIds, ["issue-label-1", "issue-label-2"]);
   assert.equal(createdInput.subIssueSortOrder, 3);
-  assert.match(createdInput.description, /managed_marker: cycle-marker/u);
-  assert.match(createdInput.description, /issue_kind: cycle/u);
+  assert.equal(createdInput.description, "Plan it");
 
   await adapter.executeWorkflowMutation({
     kind: "append_workflow_comment", writeId: "write-2", conductorShortHash: "abc123",
@@ -1068,9 +1070,9 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
     target: { targetIssueId: "root-1", expectedRemoteVersion: "root-version" }, body: "Progress",
   });
   assert.equal(commentInput.issueId, "root-1");
-  assert.match(commentInput.body, /symphony workflow write/u);
+  assert.equal(commentInput.body, "Progress");
 
-  const managedRecord = "<!-- symphony managed-record\n{\"kind\":\"root_ownership\"}\n-->";
+  const managedRecord = "Root ownership recorded.\n\n```symphony\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
   await adapter.executeWorkflowMutation({
     kind: "append_workflow_comment", writeId: "write-record", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
@@ -1088,7 +1090,7 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
 
   const targetIssue = issue({
     id: "work-1", parentId: "root-1", title: "Work",
-    description: "Work description\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->",
+    description: "Work description\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```",
   });
   const targetRootIssue = issue({ id: "root-1" });
   targetRootIssue.team = Promise.resolve({
@@ -1106,16 +1108,16 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
     labels: [],
     isArchived: false,
     parentIssueId: "root-1", statusId: "state-todo", title: "Work",
-    description: "Work description", managedMarker: "work-marker", workflowKind: "work",
+    description: targetIssue.description,
   });
   await targetAdapter.executeWorkflowMutation({
     kind: "update_workflow_issue", writeId: "write-4", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt, expectedManagedMarker: "work-marker" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt },
     statusId: "state-todo", title: "Updated work", description: "Updated description",
   });
   assert.equal(updatedInput.title, "Updated work");
-  assert.match(updatedInput.description, /managed_marker: work-marker/u);
+  assert.equal(updatedInput.description, "Updated description");
 });
 
 test("workflow SDK materializes native comment replies, receipts, and thread state with semantic read-back", async () => {
@@ -1294,8 +1296,8 @@ test("workflow issue creation rejects unknown and duplicate label names", async 
     kind: "create_workflow_issue", writeId: "write-label", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     parentExpectedRemoteVersion: "parent-version", parentExpectedStatusId: "state-todo",
-    parentIssueId: "root-1", issueKind: "human", title: "Human Action", description: "Decide",
-    statusId: "state-todo", managedMarker: "action-marker", labelNames: ["Unknown label"],
+    parentIssueId: "root-1", title: "Human Action", description: "Decide",
+    statusId: "state-todo", labelNames: ["Unknown label"],
   };
   await assert.rejects(adapter.executeWorkflowMutation(command), /linear_workflow_label_missing/u);
   await assert.rejects(
@@ -1521,7 +1523,7 @@ test("workflow relation mutation batches source and target scope ancestry", asyn
 
 test("workflow issue read-back batches child status facts", async () => {
   const parent = issue({ id: "root-1" });
-  const childDescription = "Implement\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->";
+  const childDescription = "Implement\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
   const rawQueries = [];
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async () => parent,
@@ -1553,8 +1555,8 @@ test("workflow issue read-back batches child status facts", async () => {
     kind: "create_workflow_issue", writeId: "write-child-read", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: parent.updatedAt,
     parentExpectedRemoteVersion: parent.updatedAt, parentExpectedStatusId: "state-todo",
-    parentIssueId: "root-1", issueKind: "work", title: "Implement", description: "Implement",
-    statusId: "state-todo", managedMarker: "work-marker", labelNames: [],
+    parentIssueId: "root-1", title: "Implement", description: childDescription,
+    statusId: "state-todo", labelNames: [],
   };
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-child-read", targetIssueId: "work-1", remoteVersion: "2026-07-22T00:00:00Z",
@@ -1562,15 +1564,15 @@ test("workflow issue read-back batches child status facts", async () => {
   });
   assert.equal(rawQueries.filter((query) => query.includes("WorkflowMutationChildren")).length, 1);
   assert.equal(rawQueries.length, 1);
-  await assert.rejects(
-    adapter.readWorkflowMutationOutcome({ ...command, writeId: "write-child-label-mismatch", labelNames: ["Human Action"] }),
-    /linear_precondition_conflict/u,
+  assert.equal(
+    await adapter.readWorkflowMutationOutcome({ ...command, writeId: "write-child-label-mismatch", labelNames: ["Human Action"] }),
+    undefined,
   );
 });
 
 test("workflow SDK compact preflight validates all update facts in one physical request", async () => {
   const rawQueries = [];
-  const description = "Existing\n\n<!-- symphony workflow issue\nmanaged_marker: work-marker\nissue_kind: work\n-->";
+  const description = "Existing\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     client: { async rawRequest(query) {
       rawQueries.push(query);
@@ -1598,7 +1600,7 @@ test("workflow SDK compact preflight validates all update facts in one physical 
   const result = await adapter.preflightWorkflowMutation({
     kind: "update_workflow_issue", writeId: "write-preflight", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1", expectedManagedMarker: "work-marker" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1" },
     statusId: "status-progress", title: "Updated", description: "Updated description",
   });
 

@@ -611,8 +611,8 @@
       "additionalProperties": false,
       "required": [
         "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source_comment_id",
-        "source_comment_version", "target_issue_id", "reply_comment_id", "reply_comment_remote_version",
-        "disposition", "reaction", "thread_action", "materialized_outcome_refs", "rendered_schema_version",
+        "source_comment_version", "target_issue_id", "disposition", "reaction", "thread_action",
+        "materialized_outcome_refs", "rendered_schema_version",
         "replied_at"
       ],
       "properties": {
@@ -623,8 +623,6 @@
         "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply_comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "disposition": { "enum": ["accepted", "not_applied", "follow_up_required"] },
         "reaction": { "enum": ["check", "cross", "none"] },
         "thread_action": { "enum": ["resolve", "keep_open", "reopen"] },

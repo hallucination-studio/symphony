@@ -9,6 +9,7 @@ import type {
   RootDirective,
   RootReconciliationView,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import { renderWorkflowIssueDescription } from "../../root-reconciliation/api/WorkflowIssueRecords.js";
 import { LinearRootDirectiveMaterializerImpl } from "../internal/LinearRootDirectiveMaterializerImpl.js";
 
 test("materializes a successful Cycle conclusion as a terminal Linear status", async () => {
@@ -47,7 +48,7 @@ test("materializes a successful Cycle conclusion as a terminal Linear status", a
     },
     statusId: "cycle-succeeded",
     title: "Cycle",
-    description: "Execute the plan.",
+    description: workflowDescription("cycle-1", "root-1", "cycle", "Execute the plan."),
   });
 });
 
@@ -102,14 +103,14 @@ test("reads a fresh tree after every Tree patch and supports reorder, dependency
   linear.tree.issues.push({
     issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-    order: 2, depth: 2, title: "Work", description: "Do work", labels: [], is_archived: false,
-    issue_kind: "work", remote_version: "work-v1", updated_at: "2026-07-23T00:00:00Z",
+    order: 2, depth: 2, title: "Work", description: workflowDescription("work-1", "cycle-1", "work", "Do work"), labels: ["Work"], is_archived: false,
+    issue_kind: "work", workflow_issue_key: "work-1", remote_version: "work-v1", updated_at: "2026-07-23T00:00:00Z",
   });
   linear.tree.issues.push({
     issue_id: "work-2", identifier: "SYM-4", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-    order: 3, depth: 2, title: "Dependency", description: "Dependency", labels: [], is_archived: false,
-    issue_kind: "work", remote_version: "work-2-v1", updated_at: "2026-07-23T00:00:00Z",
+    order: 3, depth: 2, title: "Dependency", description: workflowDescription("work-2", "cycle-1", "work", "Dependency"), labels: ["Work"], is_archived: false,
+    issue_kind: "work", workflow_issue_key: "work-2", remote_version: "work-2-v1", updated_at: "2026-07-23T00:00:00Z",
   });
   linear.tree.relations.push({
     relation_id: "dependency-1", relation_kind: "blocks", source_issue_id: "work-2", target_issue_id: "work-1",
@@ -229,8 +230,8 @@ class FakeLinear {
       {
         issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1",
         status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-        order: 1, depth: 1, title: "Cycle", description: "Execute the plan.", labels: [], is_archived: false,
-        issue_kind: "cycle", remote_version: "cycle-v1", updated_at: "2026-07-23T00:00:00Z",
+        order: 1, depth: 1, title: "Cycle", description: workflowDescription("cycle-1", "root-1", "cycle", "Execute the plan."), labels: ["Cycle"], is_archived: false,
+        issue_kind: "cycle", workflow_issue_key: "cycle-1", remote_version: "cycle-v1", updated_at: "2026-07-23T00:00:00Z",
       },
     ],
     comments: [],
@@ -293,4 +294,19 @@ class FakeLinear {
       },
     };
   }
+}
+
+function workflowDescription(
+  issueKey: string,
+  parentIssueId: string,
+  issueKind: "cycle" | "plan" | "work" | "verify" | "human",
+  markdown: string,
+): string {
+  return renderWorkflowIssueDescription({
+    issueKey,
+    rootIssueId: "root-1",
+    parentIssueId,
+    issueKind,
+    markdown,
+  });
 }

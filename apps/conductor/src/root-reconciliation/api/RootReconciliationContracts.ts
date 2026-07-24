@@ -78,7 +78,6 @@ export interface RootFactComment {
   body: string;
   createdAt: string;
   updatedAt: string;
-  managedMarker?: string;
 }
 
 export interface RootRecordReference {
@@ -269,13 +268,18 @@ export interface UserCommentInput {
 }
 
 export interface UserCommentReply {
+  replyId: string;
   sourceInputId: string;
   sourceCommentId: string;
   sourceCommentVersion: string;
+  sourceThreadChangeId?: string;
   acknowledgement: string;
   interpretedRequest: string;
   decidedAction: string;
   nextStep: string;
+  disposition: "accepted" | "not_applied" | "follow_up_required";
+  reaction: "check" | "cross" | "none";
+  threadAction: "resolve" | "keep_open" | "reopen";
 }
 
 export interface HumanActionResolution {

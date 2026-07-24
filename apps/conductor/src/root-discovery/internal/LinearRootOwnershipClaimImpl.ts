@@ -8,8 +8,6 @@ import type {
   RootOwnershipClaimResult,
 } from "../api/RootOwnershipClaimInterface.js";
 
-const managedRecordMarker = "<!-- symphony managed-record";
-
 export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface {
   constructor(private readonly dependencies: RootOwnershipClaimDependencies) {}
 
@@ -160,7 +158,7 @@ function rootIssue(tree: LinearWorkflowTreeSnapshot, rootIssueId: string) {
 function rootOwnership(tree: LinearWorkflowTreeSnapshot, rootIssueId: string): RootOwnershipRecord | undefined {
   const records: RootOwnershipRecord[] = [];
   for (const comment of tree.comments) {
-    if (comment.issue_id !== rootIssueId || !comment.body.startsWith(managedRecordMarker)) continue;
+    if (comment.issue_id !== rootIssueId || comment.author_kind !== "symphony") continue;
     const parsed = parseManagedRecord(comment.body);
     if (!parsed.ok) throw new Error("root_ownership_record_invalid");
     if (parsed.value.kind === "root_ownership") records.push(parsed.value);

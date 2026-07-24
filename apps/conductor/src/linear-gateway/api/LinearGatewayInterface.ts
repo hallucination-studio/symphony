@@ -21,8 +21,8 @@ export interface LinearWorkflowTreeSnapshot {
     description: string;
     labels: string[];
     is_archived: boolean;
-    managed_marker?: string;
     issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
+    workflow_issue_key?: string;
     remote_version: string;
     updated_at: string;
   }>;
@@ -34,7 +34,6 @@ export interface LinearWorkflowTreeSnapshot {
     author_id: string;
     author_user_id?: string;
     created_at: string;
-    managed_marker?: string;
     remote_version: string;
     updated_at: string;
   }>;
@@ -73,11 +72,9 @@ export type LinearWorkflowMutationCommand =
       parentExpectedRemoteVersion: string;
       parentExpectedStatusId: string;
       parentIssueId: string;
-      issueKind: "cycle" | "plan" | "work" | "verify" | "human";
       title: string;
       description: string;
       statusId: string;
-      managedMarker: string;
       labelNames: string[];
       order?: number;
     }
@@ -93,7 +90,6 @@ export type LinearWorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
       statusId: string;
@@ -113,7 +109,6 @@ export type LinearWorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
       body: string;
@@ -130,7 +125,6 @@ export type LinearWorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedManagedMarker?: string;
         expectedIsArchived?: boolean;
       };
     }

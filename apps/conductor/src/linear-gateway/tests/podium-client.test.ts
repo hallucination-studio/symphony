@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PodiumLinearGatewayClientImpl } from "../internal/PodiumLinearGatewayClientImpl.js";
+import { serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 
 const now = "2026-07-21T09:00:00Z";
 
@@ -39,8 +40,11 @@ test("root discovery projects the Conductor identity from a target managed recor
         issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [], root_conductor_labels: [{ conductor_short_hash: "abc123" }],
         root_managed_comments: [{
           comment_id: "ownership-comment", issue_id: "root-1",
-          body: "<!-- symphony managed-record\n{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/sym-1\",\"owner_generation\":\"generation-1\"}\n-->",
-          managed_marker: "root-1:managed-record:ownership-comment", updated_at: now,
+          body: serializeManagedRecord({
+            kind: "root_ownership", version: 1, rootIssueId: "root-1", conductorId: "conductor-1",
+            performerProfileId: "profile-1", deliveryBranch: "symphony/runs/sym-1", ownerGeneration: "generation-1",
+          }),
+          author_kind: "symphony", author_id: "symphony-1", updated_at: now,
         }],
       }],
       page_info: { has_next_page: false },
@@ -99,11 +103,33 @@ test("workflow tree decoder rejects a foreign issue", async () => {
   const gateway = createGateway(async (body) => {
     if (body.kind === "resolve_conductor_project") return resolved();
     const tree = workflowTree();
+    tree.issues.forEach((issue) => { issue.is_archived = false; });
     tree.issues[1]!.project_id = "project-foreign";
     return { kind: "workflow_issue_tree", tree };
   });
   await gateway.resolveProject();
   await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_/u);
+});
+
+test("workflow tree derives descendant kind only from a strict WorkflowIssueRecord description", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    const tree = workflowTree();
+    tree.issues.forEach((issue) => { issue.is_archived = false; });
+    const work = tree.issues[1]!;
+    work.description = [
+      "Implement it",
+      "",
+      "```symphony",
+      "{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"directive-1:work\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}",
+      "```",
+    ].join("\n");
+    return { kind: "workflow_issue_tree", tree };
+  });
+  await gateway.resolveProject();
+
+  const tree = await gateway.readWorkflowIssueTree("root-1");
+  assert.equal(tree.issues.find(({ issue_id }) => issue_id === "work-1")?.issue_kind, "work");
 });
 
 function createGateway(request: (body: Record<string, unknown>) => Promise<unknown>) {
@@ -132,8 +158,8 @@ function workflowTree() {
       { status_id: "status-todo", name: "Todo", category: "unstarted", position: 1 },
     ],
     issues: [
-      { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], issue_kind: "root", remote_version: now, updated_at: now },
-      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: [], managed_marker: "root-1:work-1", issue_kind: "work", remote_version: now, updated_at: now },
+      { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], is_archived: false, remote_version: now, updated_at: now },
+      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: [], is_archived: false, remote_version: now, updated_at: now },
     ],
     comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
   };

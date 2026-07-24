@@ -454,7 +454,6 @@ export class LinearGatewayProtocolHandlerImpl {
     ) &&
       (command.target.expectedStatusId === undefined || target?.statusId === command.target.expectedStatusId) &&
       (command.target.expectedParentIssueId === undefined || target?.parentIssueId === command.target.expectedParentIssueId) &&
-      (command.target.expectedManagedMarker === undefined || target?.managedMarker === command.target.expectedManagedMarker) &&
       (command.target.expectedIsArchived === undefined || target?.isArchived === command.target.expectedIsArchived)
       ? undefined : { kind: "precondition_conflict" };
   }
@@ -591,9 +590,6 @@ function validateIssue(issue: LinearIssueValue, projectId: string): void {
     typeof issue.isArchived !== "boolean" ||
     !timestamp(issue.updatedAt)
   ) throw new Error("linear_issue_invalid");
-  if (!managedNodeShapeValid(issue)) {
-    throw new Error("linear_managed_node_shape_invalid");
-  }
 }
 
 function validateRootScheduling(root: RootIssueValue): void {
@@ -637,7 +633,6 @@ function validateRootScheduling(root: RootIssueValue): void {
     if (
       comment.issueId !== root.issue.issueId ||
       !identifier(comment.commentId, 128) ||
-      !rootManagedCommentMarkerValid(comment.managedMarker, root.issue.issueId) ||
       typeof comment.body !== "string" ||
       codePointLength(comment.body) > 16_384 ||
       !workflowCommentAuthorKind(comment.authorKind) ||
@@ -649,11 +644,6 @@ function validateRootScheduling(root: RootIssueValue): void {
       throw new Error("linear_root_scheduling_invalid");
     }
   }
-}
-
-function rootManagedCommentMarkerValid(value: string, issueId: string): boolean {
-  return value === `${issueId}:root-comment` ||
-    (value.startsWith(`${issueId}:managed-record:`) && identifier(value.slice(`${issueId}:managed-record:`.length), 128));
 }
 
 function identifier(value: string | undefined, maximum: number): boolean {
@@ -776,39 +766,6 @@ function workflowSourceKind(value: string | undefined): boolean {
   return value === "linear_issue" || value === "linear_comment" ||
     value === "linear_comment_thread_change" || value === "linear_relation" ||
     value === "linear_status_catalog";
-}
-
-function managedNodeShapeValid(issue: LinearIssueValue): boolean {
-  if (issue.nodeKind === undefined) {
-    return (
-      issue.humanKind === undefined &&
-      issue.origin === undefined &&
-      issue.completedInputHash === undefined &&
-      issue.targetIssueId === undefined
-    );
-  }
-  if (issue.nodeKind === "work") {
-    return (
-      issue.humanKind === undefined &&
-      issue.targetIssueId === undefined &&
-      (issue.origin === "user" || issue.origin === "symphony") &&
-      (issue.completedInputHash === undefined ||
-        identifier(issue.completedInputHash, 128)) &&
-      (issue.origin === "user" || issue.managedMarker !== undefined)
-    );
-  }
-  if (
-    issue.nodeKind !== "human" ||
-    issue.managedMarker === undefined ||
-    issue.origin !== undefined ||
-    issue.completedInputHash !== undefined ||
-    issue.humanKind === undefined
-  ) {
-    return false;
-  }
-  return issue.humanKind === "plan_approval"
-    ? issue.targetIssueId === undefined
-    : identifier(issue.targetIssueId, 128);
 }
 
 function codePointLength(value: string): number {

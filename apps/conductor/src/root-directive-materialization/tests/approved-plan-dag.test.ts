@@ -4,6 +4,7 @@ import test from "node:test";
 import type { LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { serializeManagedRecord, parseManagedRecord } from "../../root-reconciliation/api/index.js";
 import type { RootDirective, RootReconciliationView } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import { renderWorkflowIssueDescription, workflowIssueLabel } from "../../root-reconciliation/api/WorkflowIssueRecords.js";
 import { LinearRootDirectiveMaterializerImpl } from "../internal/LinearRootDirectiveMaterializerImpl.js";
 
 const digest = "a".repeat(64);
@@ -27,7 +28,13 @@ test("materializes the approved immutable Plan DAG before sealing the Cycle", as
       .map((issue) => [issue.issue_kind, issue.title, issue.order]),
     [["work", "First work", 1], ["work", "Second work", 2], ["verify", "Verify the approved Plan", 3]],
   );
-  assert.deepEqual(nodeMarkers(linear.tree), ["verify", "work:first", "work:second"]);
+  const issueKeys = nodeIssueKeys(linear.tree);
+  assert.equal(issueKeys.length, 3);
+  assert.ok(issueKeys.every((issueKey) => issueKey?.startsWith("approved-plan-dag:")));
+  assert.equal(
+    linear.tree.comments.some((comment) => parseManagedRecord(comment.body).ok && comment.body.includes(`"${["node", "marker"].join("_")}"`)),
+    false,
+  );
   assert.deepEqual(
     linear.tree.relations.map((relation) => [relation.relation_kind, relation.source_issue_id, relation.target_issue_id]).sort(),
     [
@@ -186,7 +193,8 @@ class FakeLinear {
       {
         ...issue("action-1", "human", "cycle-1", "action-approved", "Approved", 2, 1),
         labels: ["Human Action", "Plan Review"],
-        managed_marker: "action-request-1",
+        workflow_issue_key: "action-request-1",
+        description: workflowDescription("action-request-1", "cycle-1", "human", "Plan review action"),
       },
     ],
     comments: [
@@ -215,11 +223,14 @@ class FakeLinear {
     this.mutations.push(command);
     if (command.kind === "create_workflow_issue") {
       const statusValue = this.status(command.statusId);
-      const issueId = command.issueKind === "work" ? `work-${this.nextWork++}` : "verify-1";
-      const created = issue(issueId, command.issueKind, command.parentIssueId, statusValue.status_id, statusValue.name, 2, command.order ?? 0);
+      const parsed = parseManagedRecord(command.description);
+      if (!parsed.ok || parsed.value.kind !== "workflow_issue") throw new Error("workflow_issue_record_missing");
+      const issueId = parsed.value.issueKind === "work" ? `work-${this.nextWork++}` : "verify-1";
+      const created = issue(issueId, parsed.value.issueKind, command.parentIssueId, statusValue.status_id, statusValue.name, 2, command.order ?? 0);
       created.title = command.title;
       created.description = command.description;
-      created.managed_marker = command.managedMarker;
+      created.labels = command.labelNames;
+      created.workflow_issue_key = parsed.value.issueKey;
       this.tree.issues.push(created);
       this.bump(command.parentIssueId);
       return applied(command.writeId, created);
@@ -286,16 +297,35 @@ function issue(
   return {
     issue_id: issueId, identifier: issueId, project_id: "project-1", ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusId, status_name: statusName, status_category: statusName === "Todo" ? "unstarted" : "started",
-    status_position: depth, order, depth, title: issueKind, description: `${issueKind} description`, labels: [],
-    is_archived: false, issue_kind: issueKind, remote_version: `${issueId}-v1`, updated_at: "2026-07-24T00:00:00Z",
+    status_position: depth, order, depth, title: issueKind,
+    description: issueKind === "root" ? "root description" : workflowDescription(issueId, parentIssueId!, issueKind, `${issueKind} description`),
+    labels: issueKind === "root" ? [] : [workflowIssueLabel(issueKind)],
+    is_archived: false, issue_kind: issueKind,
+    ...(issueKind === "root" ? {} : { workflow_issue_key: issueId }),
+    remote_version: `${issueId}-v1`, updated_at: "2026-07-24T00:00:00Z",
   };
 }
 
 function managedComment(commentId: string, issueId: string, body: string) {
   return {
     comment_id: commentId, issue_id: issueId, body, author_kind: "symphony" as const, author_id: "symphony",
-    created_at: "2026-07-24T00:00:00Z", remote_version: `${commentId}-v1`, updated_at: "2026-07-24T00:00:00Z", managed_marker: "managed",
+    created_at: "2026-07-24T00:00:00Z", remote_version: `${commentId}-v1`, updated_at: "2026-07-24T00:00:00Z",
   };
+}
+
+function workflowDescription(
+  issueKey: string,
+  parentIssueId: string,
+  issueKind: "cycle" | "plan" | "work" | "verify" | "human",
+  markdown: string,
+): string {
+  return renderWorkflowIssueDescription({
+    issueKey,
+    rootIssueId: "root-1",
+    parentIssueId,
+    issueKind,
+    markdown,
+  });
 }
 
 function applied(writeId: string, issue: LinearWorkflowTreeSnapshot["issues"][number]) {
@@ -357,9 +387,9 @@ function dag() {
   };
 }
 
-function nodeMarkers(tree: LinearWorkflowTreeSnapshot) {
-  return tree.comments.flatMap((comment) => {
-    const parsed = parseManagedRecord(comment.body);
-    return parsed.ok && parsed.value.kind === "node_marker" ? [parsed.value.nodeKey] : [];
-  }).sort();
+function nodeIssueKeys(tree: LinearWorkflowTreeSnapshot) {
+  return tree.issues
+    .filter((issue) => issue.parent_issue_id === "cycle-1" && (issue.issue_kind === "work" || issue.issue_kind === "verify"))
+    .map((issue) => issue.workflow_issue_key)
+    .sort();
 }

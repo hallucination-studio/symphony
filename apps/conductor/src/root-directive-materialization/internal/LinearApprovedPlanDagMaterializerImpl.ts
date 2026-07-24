@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
+import {
+  findWorkflowIssue,
+  parseManagedRecord,
+  renderWorkflowIssueDescription,
+  workflowIssueLabel,
+} from "../../root-reconciliation/api/index.js";
 import type {
   HumanActionRequestRecord,
   HumanActionResolutionRecord,
-  NodeMarker,
   PlanContract,
   PlanWorkNode,
   ProposedWorkDag,
@@ -29,7 +33,7 @@ interface ApprovedPlanFacts {
 interface ExpectedDagNode {
   nodeKind: "work" | "verify";
   nodeKey: string;
-  managedMarker: string;
+  issueKey: string;
   title: string;
   description: string;
   order: number;
@@ -118,8 +122,15 @@ export class LinearApprovedPlanDagMaterializerImpl {
     order: number,
   ): Promise<{ view: RootReconciliationView; issue: LinearWorkflowTreeSnapshot["issues"][number] } | string> {
     let view = initialView;
-    const managedMarker = nodeManagedMarker(facts.cycle.issue_id, facts.contract.planContractDigest, nodeKey);
-    let node = view.tree.issues.find((issue) => issue.managed_marker === managedMarker);
+    const issueKey = nodeIssueKey(facts.cycle.issue_id, facts.contract.planContractDigest, nodeKey);
+    const renderedDescription = renderWorkflowIssueDescription({
+      issueKey,
+      rootIssueId: facts.root.issue_id,
+      parentIssueId: facts.cycle.issue_id,
+      issueKind: nodeKind,
+      markdown: description,
+    });
+    let node = findWorkflowIssue(view.tree, issueKey);
     if (!node) {
       const todo = view.tree.status_catalog.find((status) => status.name === "Todo");
       const cycle = issue(view.tree, facts.cycle.issue_id);
@@ -127,69 +138,25 @@ export class LinearApprovedPlanDagMaterializerImpl {
       if (!todo) return "approved_plan_dag_todo_status_missing";
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_issue",
-        writeId: managedMarker,
+        writeId: issueKey,
         expectedProjectId: cycle.project_id,
         rootIssueId: root.issue_id,
         expectedRootRemoteVersion: root.remote_version,
         parentExpectedRemoteVersion: cycle.remote_version,
         parentExpectedStatusId: cycle.status_id,
         parentIssueId: cycle.issue_id,
-        issueKind: nodeKind,
         title,
-        description,
+        description: renderedDescription,
         statusId: todo.status_id,
-        managedMarker,
-        labelNames: [],
+        labelNames: [workflowIssueLabel(nodeKind)],
         order,
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return `approved_plan_dag_${nodeKind}_create_${outcome.kind}`;
       view = await refreshView(this.linear, view);
-      node = view.tree.issues.find((issue) => issue.managed_marker === managedMarker);
+      node = findWorkflowIssue(view.tree, issueKey);
       if (!node) return `approved_plan_dag_${nodeKind}_create_read_back_missing`;
     }
-    if (!matchesNode(node, facts.cycle.issue_id, nodeKind, title, description, order)) return `approved_plan_dag_${nodeKind}_node_invalid`;
-    const marker: NodeMarker = {
-      kind: "node_marker",
-      version: 1,
-      rootIssueId: facts.root.issue_id,
-      cycleIssueId: facts.cycle.issue_id,
-      nodeKey,
-      nodeKind,
-      planContractDigest: facts.contract.planContractDigest,
-    };
-    const markerBody = serializeManagedRecord(marker);
-    const matchingMarkers = view.tree.comments.filter((comment) => {
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "node_marker" && parsed.value.nodeKey === nodeKey && parsed.value.cycleIssueId === facts.cycle.issue_id;
-    });
-    if (matchingMarkers.length > 1) return "approved_plan_dag_node_marker_ambiguous";
-    if (matchingMarkers.length === 1 && (matchingMarkers[0]!.issue_id !== node.issue_id || matchingMarkers[0]!.body !== markerBody)) {
-      return "approved_plan_dag_node_marker_conflict";
-    }
-    if (matchingMarkers.length === 0) {
-      const root = issue(view.tree, facts.root.issue_id);
-      const outcome = await this.linear.mutateWorkflow({
-        kind: "append_workflow_comment",
-        writeId: `${managedMarker}:node-marker`,
-        expectedProjectId: node.project_id,
-        rootIssueId: root.issue_id,
-        expectedRootRemoteVersion: root.remote_version,
-        target: {
-          targetIssueId: node.issue_id,
-          expectedRemoteVersion: node.remote_version,
-          expectedStatusId: node.status_id,
-          expectedParentIssueId: facts.cycle.issue_id,
-          expectedManagedMarker: managedMarker,
-          expectedIsArchived: false,
-        },
-        body: markerBody,
-      });
-      if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return `approved_plan_dag_${nodeKind}_marker_${outcome.kind}`;
-      view = await refreshView(this.linear, view);
-      const confirmed = view.tree.comments.find((comment) => comment.issue_id === node!.issue_id && comment.body === markerBody);
-      if (!confirmed) return `approved_plan_dag_${nodeKind}_marker_read_back_missing`;
-      node = issue(view.tree, node.issue_id);
-    }
+    if (!matchesNode(node, facts.cycle.issue_id, nodeKind, issueKey, title, renderedDescription, order)) return `approved_plan_dag_${nodeKind}_node_invalid`;
     return { view, issue: node };
   }
 
@@ -350,7 +317,7 @@ function validateApprovedPlanFacts(
   if (existingNodeValidation) return existingNodeValidation;
   if (
     (plan.status_name === "Done" || cycle.status_name === "Sealed") &&
-    !isDagDurablyMaterialized(view.tree, root.issue_id, cycle.issue_id, plan.issue_id, contract.planContractDigest, expectedNodes, contract.proposedWorkDag)
+    !isDagDurablyMaterialized(view.tree, root.issue_id, cycle.issue_id, plan.issue_id, expectedNodes, contract.proposedWorkDag)
   ) return "approved_plan_dag_terminal_graph_incomplete";
   return { root, cycle, plan, action: humanAction, contract, dag: contract.proposedWorkDag };
 }
@@ -371,7 +338,7 @@ function expectedDagNodes(cycleIssueId: string, contract: PlanContract, dag: Pro
       description: renderVerifyDescription(dag),
       order: dag.workNodes.length + 1,
     },
-  ].map((node) => ({ ...node, managedMarker: nodeManagedMarker(cycleIssueId, contract.planContractDigest, node.nodeKey) }));
+  ].map((node) => ({ ...node, issueKey: nodeIssueKey(cycleIssueId, contract.planContractDigest, node.nodeKey) }));
 }
 
 function validateExistingNodes(
@@ -382,11 +349,11 @@ function validateExistingNodes(
   const existingNodes = tree.issues.filter((issue) =>
     issue.parent_issue_id === cycleIssueId && !issue.is_archived && (issue.issue_kind === "work" || issue.issue_kind === "verify"),
   );
-  const expectedMarkers = new Set(expectedNodes.map((node) => node.managedMarker));
-  if (existingNodes.some((node) => !node.managed_marker || !expectedMarkers.has(node.managed_marker))) {
+  const expectedIssueKeys = new Set(expectedNodes.map((node) => node.issueKey));
+  if (existingNodes.some((node) => !node.workflow_issue_key || !expectedIssueKeys.has(node.workflow_issue_key))) {
     return "approved_plan_dag_existing_node_unbound";
   }
-  return expectedNodes.some((expected) => existingNodes.filter((node) => node.managed_marker === expected.managedMarker).length > 1)
+  return expectedNodes.some((expected) => existingNodes.filter((node) => node.workflow_issue_key === expected.issueKey).length > 1)
     ? "approved_plan_dag_node_ambiguous"
     : undefined;
 }
@@ -396,26 +363,20 @@ function isDagDurablyMaterialized(
   rootIssueId: string,
   cycleIssueId: string,
   planIssueId: string,
-  planContractDigest: string,
   expectedNodes: ExpectedDagNode[],
   dag: ProposedWorkDag,
 ): boolean {
   const nodeIds = new Map<string, string>();
   for (const expected of expectedNodes) {
-    const nodes = tree.issues.filter((issue) => issue.managed_marker === expected.managedMarker);
-    if (nodes.length !== 1 || !matchesNode(nodes[0]!, cycleIssueId, expected.nodeKind, expected.title, expected.description, expected.order)) return false;
-    const marker: NodeMarker = {
-      kind: "node_marker",
-      version: 1,
+    const nodes = tree.issues.filter((issue) => issue.workflow_issue_key === expected.issueKey);
+    const renderedDescription = renderWorkflowIssueDescription({
+      issueKey: expected.issueKey,
       rootIssueId,
-      cycleIssueId,
-      nodeKey: expected.nodeKey,
-      nodeKind: expected.nodeKind,
-      planContractDigest,
-    };
-    if (tree.comments.filter((comment) => comment.issue_id === nodes[0]!.issue_id && comment.body === serializeManagedRecord(marker)).length !== 1) {
-      return false;
-    }
+      parentIssueId: cycleIssueId,
+      issueKind: expected.nodeKind,
+      markdown: expected.description,
+    });
+    if (nodes.length !== 1 || !matchesNode(nodes[0]!, cycleIssueId, expected.nodeKind, expected.issueKey, expected.title, renderedDescription, expected.order)) return false;
     nodeIds.set(expected.nodeKey, nodes[0]!.issue_id);
   }
   const relationCount = (relationKind: "blocks" | "relates_to", sourceIssueId: string, targetIssueId: string) =>
@@ -484,15 +445,16 @@ function matchesNode(
   node: LinearWorkflowTreeSnapshot["issues"][number],
   cycleIssueId: string,
   nodeKind: "work" | "verify",
+  issueKey: string,
   title: string,
   description: string,
   order: number,
 ): boolean {
   return node.parent_issue_id === cycleIssueId && node.issue_kind === nodeKind && !node.is_archived && node.status_name === "Todo" &&
-    node.title === title && node.description === description && node.order === order;
+    node.workflow_issue_key === issueKey && node.title === title && node.description === description && node.order === order;
 }
 
-function nodeManagedMarker(cycleIssueId: string, planContractDigest: string, nodeKey: string): string {
+function nodeIssueKey(cycleIssueId: string, planContractDigest: string, nodeKey: string): string {
   const identity = JSON.stringify([cycleIssueId, planContractDigest, nodeKey]);
   return `approved-plan-dag:${createHash("sha256").update(identity).digest("hex")}`;
 }

@@ -118,7 +118,7 @@ test("workflow issue creation rejects a missing label_names field before dispatc
       write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
       expected_root_remote_version: "root-version", parent_expected_remote_version: "parent-version",
       parent_expected_status_id: "status-todo", parent_issue_id: "root-1", issue_kind: "work",
-      title: "Work", description: "Do it", status_id: "status-todo", managed_marker: "work-marker",
+      title: "Work", description: "Do it", status_id: "status-todo",
     }),
     /linear_workflow_label_names_missing/u,
   );
@@ -224,7 +224,6 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
                 authorId: "symphony-bot",
                 createdAt: "2026-07-16T00:00:00Z",
                 updatedAt: "2026-07-16T00:00:00Z",
-                managedMarker: "root-1:root-comment",
                 body: v3PrimaryComment(),
               }],
             }],
@@ -306,7 +305,6 @@ test("Root scheduling gateway rejects malformed closed values", async () => {
         commentId: "comment-1",
         issueId: "root-other",
         updatedAt: "2026-07-16T00:00:00Z",
-        managedMarker: "root-other:root-comment",
         body: v3PrimaryComment(),
       }],
     },
@@ -688,9 +686,7 @@ function v3PrimaryComment() {
   return ["Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
     "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
     "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
-    "Current problem: none", "", "<!-- symphony root", "conductor_id: conductor-1",
-    "performer_profile_id: profile-1",
-    "delivery_branch: symphony/runs/root-1", "pull_request: none", "retry_blocked: false",
-    "retry_failure_code: none",
-    "retry_observed_at: none", "-->"].join("\n");
+    "Current problem: none", "", "```symphony",
+    "{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/root-1\",\"owner_generation\":\"owner-1\"}",
+    "```"].join("\n");
 }

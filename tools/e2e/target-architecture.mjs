@@ -16,7 +16,7 @@ import {
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
 
-const ACCEPTANCE_HEADING = "## 9. 真实边界验收";
+const ACCEPTANCE_HEADING = "## 10. 真实边界验收";
 const execFileAsync = promisify(execFile);
 
 const SCENARIO_COMMANDS = Object.freeze({
@@ -317,6 +317,8 @@ export async function waitForExecutionEvidence({
       throw new Error("target_e2e_execution_evidence_boundary_failed");
     }
     const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+    const stageFailure = stageFailureReason(tree, rootIssueId);
+    if (stageFailure) throw new Error(stageFailure);
     const evidence = executionEvidence(tree, rootIssueId);
     if (evidence) return evidence;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
@@ -337,6 +339,8 @@ export async function waitForPlanReviewEvidence({
       throw new Error("target_e2e_plan_review_boundary_failed");
     }
     const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+    const stageFailure = stageFailureReason(tree, rootIssueId, ["plan"]);
+    if (stageFailure) throw new Error(stageFailure);
     const evidence = planReviewEvidence(tree, rootIssueId);
     if (evidence) return evidence;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
@@ -373,7 +377,6 @@ async function approvePlanReviewAction({
       expectedRemoteVersion: action.updatedAt,
       expectedStatusId: action.statusId,
       ...(action.parentIssueId ? { expectedParentIssueId: action.parentIssueId } : {}),
-      ...(action.managedMarker ? { expectedManagedMarker: action.managedMarker } : {}),
       expectedIsArchived: false,
     },
     statusId: approved.statusId,
@@ -407,11 +410,11 @@ export function latestRootFailureReason(logs) {
 }
 
 function planReviewEvidence(tree, rootIssueId) {
-  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId && issue.issueKind === "root" && !issue.isArchived);
-  const cycle = one(tree.issues, (issue) => issue.parentIssueId === rootIssueId && issue.issueKind === "cycle" && !issue.isArchived);
-  const plan = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "plan" &&
+  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId && !issue.isArchived);
+  const cycle = workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === rootIssueId && issue.record.issue_kind === "cycle" && !issue.isArchived);
+  const plan = cycle && workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "plan" &&
     issue.statusName === "In Review" && !issue.isArchived);
-  const action = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "human" &&
+  const action = cycle && workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "human" &&
     ["Todo", "In Progress"].includes(issue.statusName) && !issue.isArchived &&
     issue.labels.includes("Human Action") && issue.labels.includes("Plan Review"));
   if (!root || !cycle || !plan || !action) return undefined;
@@ -438,13 +441,13 @@ function planReviewEvidence(tree, rootIssueId) {
 }
 
 function executionEvidence(tree, rootIssueId) {
-  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId && issue.issueKind === "root" &&
+  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId &&
     issue.statusName === "In Review" && !issue.isArchived);
-  const cycle = root && one(tree.issues, (issue) => issue.parentIssueId === rootIssueId && issue.issueKind === "cycle" &&
+  const cycle = root && workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === rootIssueId && issue.record.issue_kind === "cycle" &&
     issue.statusName === "Succeeded" && !issue.isArchived);
-  const plan = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "plan" &&
+  const plan = cycle && workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "plan" &&
     issue.statusName === "Done" && !issue.isArchived);
-  const action = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "human" &&
+  const action = cycle && workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "human" &&
     issue.statusName === "Approved" && !issue.isArchived && issue.labels.includes("Human Action") && issue.labels.includes("Plan Review"));
   if (!root || !cycle || !plan || !action) return undefined;
 
@@ -471,8 +474,9 @@ function executionEvidence(tree, rootIssueId) {
   const workIssueIds = [];
   for (const work of contract.record.proposed_work_dag.work_nodes) {
     if (!identifier(work?.proposal_key)) return undefined;
-    const node = one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "work" &&
-      issue.statusName === "Done" && !issue.isArchived && hasNodeMarker(records, issue.issueId, rootIssueId, cycle.issueId, `work:${work.proposal_key}`, "work", digest));
+    const nodeKey = approvedPlanDagIssueKey(cycle.issueId, digest, `work:${work.proposal_key}`);
+    const node = workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "work" &&
+      issue.record.issue_key === nodeKey && issue.statusName === "Done" && !issue.isArchived);
     if (!node || !hasRelation(tree.relations, plan.issueId, node.issueId, "relates_to") ||
       !one(records, ({ issueId, record }) => issueId === node.issueId && matchingStageResult(record, {
         rootIssueId, cycleIssueId: cycle.issueId, nodeIssueId: node.issueId, stage: "work", outcomeKind: "work_completed",
@@ -491,8 +495,9 @@ function executionEvidence(tree, rootIssueId) {
     }
   }
 
-  const verify = one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "verify" &&
-    issue.statusName === "Done" && !issue.isArchived && hasNodeMarker(records, issue.issueId, rootIssueId, cycle.issueId, "verify", "verify", digest));
+  const verifyKey = approvedPlanDagIssueKey(cycle.issueId, digest, "verify");
+  const verify = workflowIssue(tree, rootIssueId, (issue) => issue.parentIssueId === cycle.issueId && issue.record.issue_kind === "verify" &&
+    issue.record.issue_key === verifyKey && issue.statusName === "Done" && !issue.isArchived);
   if (!verify || !hasRelation(tree.relations, plan.issueId, verify.issueId, "relates_to") ||
     !one(records, ({ issueId, record }) => issueId === verify.issueId && matchingStageResult(record, {
       rootIssueId, cycleIssueId: cycle.issueId, nodeIssueId: verify.issueId, stage: "verify", outcomeKind: "verify_passed",
@@ -516,6 +521,22 @@ function executionEvidence(tree, rootIssueId) {
   };
 }
 
+function stageFailureReason(tree, rootIssueId, stages = ["plan", "work", "verify"]) {
+  const successfulOutcomes = {
+    plan: "plan_completed",
+    work: "work_completed",
+    verify: "verify_passed",
+  };
+  for (const { record } of managedRecords(tree.comments)) {
+    if (record.kind !== "stage_result" || record.root_issue_id !== rootIssueId) continue;
+    const expected = successfulOutcomes[record.stage];
+    if (!expected || !stages.includes(record.stage) || record.outcome_kind === expected) continue;
+    const outcome = identifier(record.outcome_kind) ? record.outcome_kind : "invalid";
+    return `target_e2e_stage_${record.stage}_${outcome}`;
+  }
+  return undefined;
+}
+
 function managedRecords(comments) {
   return comments.flatMap((comment) => {
     const record = managedRecord(comment.body);
@@ -524,11 +545,13 @@ function managedRecords(comments) {
 }
 
 function managedRecord(body) {
-  const marker = "<!-- symphony managed-record\n";
-  const endMarker = "\n-->";
-  if (typeof body !== "string" || !body.startsWith(marker) || !body.endsWith(endMarker)) return undefined;
-  const source = body.slice(marker.length, -endMarker.length);
-  if (!source || source.includes("\n")) return undefined;
+  if (typeof body !== "string") return undefined;
+  const blocks = [...body.matchAll(/^```symphony\r?\n([\s\S]*?)^```[ \t]*(?:\r?\n|$)/gmu)];
+  if (blocks.length !== 1) return undefined;
+  const block = blocks[0];
+  if (!block || body.slice((block.index ?? 0) + block[0].length).trim()) return undefined;
+  const source = block[1].trim();
+  if (!source) return undefined;
   try {
     const value = JSON.parse(source);
     return value && typeof value === "object" && !Array.isArray(value) && value.version === 1 && identifier(value.kind)
@@ -560,19 +583,32 @@ function samePlanContract(result, contract) {
     JSON.stringify(result.proposed_work_dag) === JSON.stringify(contract.proposed_work_dag);
 }
 
-function hasNodeMarker(records, issueId, rootIssueId, cycleIssueId, nodeKey, nodeKind, planContractDigest) {
-  return Boolean(one(records, ({ issueId: commentIssueId, record }) => commentIssueId === issueId && record.kind === "node_marker" &&
-    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycleIssueId && record.node_key === nodeKey &&
-    record.node_kind === nodeKind && record.plan_contract_digest === planContractDigest));
-}
-
 function hasRelation(relations, sourceIssueId, targetIssueId, relationKind) {
   return relations.some((relation) => relation.sourceIssueId === sourceIssueId && relation.targetIssueId === targetIssueId &&
     relation.relationKind === relationKind);
 }
 
 function isTimelineComment(body) {
-  return typeof body === "string" && /^<!-- symphony timeline [a-f0-9]{16,64} -->\n## Symphony · (Root Reconciliation|Cycle)\n/u.test(body);
+  return managedRecord(body)?.kind === "workflow_timeline";
+}
+
+function workflowIssue(tree, rootIssueId, predicate) {
+  const matches = tree.issues.flatMap((issue) => {
+    const record = managedRecord(issue.description);
+    if (!record || record.kind !== "workflow_issue" || record.root_issue_id !== rootIssueId ||
+      record.parent_issue_id !== issue.parentIssueId || !["cycle", "plan", "work", "verify", "human"].includes(record.issue_kind) ||
+      !issue.labels.includes(issueLabel(record.issue_kind))) return [];
+    return predicate({ ...issue, record }) ? [{ ...issue, record }] : [];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function approvedPlanDagIssueKey(cycleIssueId, planContractDigest, nodeKey) {
+  return `approved-plan-dag:${createHash("sha256").update(JSON.stringify([cycleIssueId, planContractDigest, nodeKey])).digest("hex")}`;
+}
+
+function issueLabel(kind) {
+  return kind === "human" ? "Human Action" : `${kind[0].toUpperCase()}${kind.slice(1)}`;
 }
 
 function one(values, predicate) {

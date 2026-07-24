@@ -42,7 +42,6 @@ const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
 const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
-const ROOT_HEADER_MARKER = "<!-- symphony root\n";
 const MAX_ROOT_TITLE_LENGTH = 256;
 const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
 const SYMPHONY_RECEIPT_EMOJI = {
@@ -174,38 +173,6 @@ function workflowScopeIssueBelongsToRoot(
   return false;
 }
 
-const ROOT_HEADER_FACTS_QUERY = `
-  query SymphonyRootHeaderFacts($rootIds: [ID!]!, $commentMarker: String!, $workflowCommentMarker: String!) {
-    viewer { id }
-    issues(first: 250, filter: { id: { in: $rootIds } }) {
-      nodes {
-        id identifier title description priority sortOrder updatedAt archivedAt
-        project { id }
-        parent { id }
-        delegate { id }
-        state { name }
-        labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
-        comments(first: 2, filter: { body: { contains: $commentMarker } }) {
-          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
-          pageInfo { hasNextPage }
-        }
-        workflowManagedComments: comments(first: 25, filter: { body: { contains: $workflowCommentMarker } }) {
-          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
-          pageInfo { hasNextPage }
-        }
-        inverseRelations(first: 25) {
-          nodes {
-            type
-            issue { id state { name } }
-            relatedIssue { id }
-          }
-          pageInfo { hasNextPage }
-        }
-      }
-      pageInfo { hasNextPage }
-    }
-  }
-`;
 const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
   query SymphonyIssueTreeRoot($rootIssueId: String!) {
     issue(id: $rootIssueId) {
@@ -290,12 +257,6 @@ const WORKFLOW_ISSUE_TREE_RELATIONS_PAGE_QUERY = `
     }
   }
 `;
-const ROOT_MARKER_START = "<!-- symphony root\n";
-const WORKFLOW_ISSUE_MARKER =
-  /\n*<!-- symphony workflow issue\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nissue_kind: (cycle|plan|work|verify|human)\n-->\s*$/;
-const WORKFLOW_WRITE_MARKER =
-  /\n*<!-- symphony workflow write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
-const MANAGED_RECORD_MARKER = "<!-- symphony managed-record\n";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
 export type LinearSdkCredential =
@@ -321,14 +282,6 @@ export interface LinearRequestObservationOptions {
   correlationId(): string;
   now(): number;
   observe?(observation: LinearPhysicalRequestObservation): void;
-}
-
-interface RootHeaderFactsData {
-  viewer: { id: string };
-  issues: {
-    nodes: RootHeaderFact[];
-    pageInfo: { hasNextPage: boolean };
-  };
 }
 
 interface IssueTreePageInfo {
@@ -364,60 +317,6 @@ interface IssueTreeRelation {
   type: string;
   issue?: { id: string; state: { name: string }; project?: { id: string } | null } | null;
   relatedIssue?: { id: string; project?: { id: string } | null } | null;
-}
-
-interface RootHeaderFact {
-  id: string;
-  identifier: string;
-  title: string;
-  description?: string | null;
-  archivedAt?: string | null;
-  priority: number;
-  sortOrder: number;
-  updatedAt: string;
-  project?: { id: string } | null;
-  parent?: { id: string } | null;
-  delegate?: { id: string } | null;
-  state: { name: string };
-  labels: {
-    nodes: Array<{ name: string }>;
-    pageInfo: { hasNextPage: boolean };
-  };
-  comments: {
-    nodes: Array<{
-      id: string;
-      body: string;
-      createdAt: string;
-      updatedAt: string;
-      user?: { id: string } | null;
-      botActor?: { id: string } | null;
-      externalUser?: { id: string } | null;
-      issue: { id: string };
-    }>;
-    pageInfo: { hasNextPage: boolean };
-  };
-  workflowManagedComments?: {
-    nodes: Array<{
-      id: string;
-      body: string;
-      createdAt: string;
-      updatedAt: string;
-      user?: { id: string } | null;
-      botActor?: { id: string } | null;
-      externalUser?: { id: string } | null;
-      issue: { id: string };
-    }>;
-    pageInfo: { hasNextPage: boolean };
-  };
-  inverseRelations: {
-    nodes: Array<{
-      id?: string | null;
-      type: string;
-      issue?: { id: string; state: { name: string }; project?: { id: string } | null } | null;
-      relatedIssue?: { id: string; project?: { id: string } | null } | null;
-    }>;
-    pageInfo: { hasNextPage: boolean };
-  };
 }
 
 interface IssueTreeFact {
@@ -1379,8 +1278,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         ? []
         : [{ issue, priority: linearPriority(issue.priority) }];
     });
-    const batched = await this.#batchedRootHeaders(input.projectId, roots);
-    if (batched) return { items: batched, pageInfo: pageInfo(page.pageInfo) };
     const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const items = await mapConcurrent(
       roots,
@@ -1405,91 +1302,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     return { items, pageInfo: pageInfo(page.pageInfo) };
   }
 
-  async #batchedRootHeaders(
-    projectId: string,
-    roots: Array<{ issue: Issue; priority: LinearPriority }>,
-  ): Promise<RootIssueValue[] | undefined> {
-    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
-    if (!rawRequest || roots.length === 0) return roots.length === 0 ? [] : undefined;
-    const response = await rawRequest<RootHeaderFactsData, {
-      rootIds: string[];
-      commentMarker: string;
-      workflowCommentMarker: string;
-    }>(ROOT_HEADER_FACTS_QUERY, {
-      rootIds: roots.map(({ issue }) => issue.id),
-      commentMarker: ROOT_HEADER_MARKER,
-      workflowCommentMarker: MANAGED_RECORD_MARKER,
-    });
-    const data = response.data;
-    if (!data || data.issues.pageInfo.hasNextPage) {
-      throw new Error("linear_root_header_batch_incomplete");
-    }
-    const factsById = new Map(data.issues.nodes.map((fact) => [fact.id, fact]));
-    if (factsById.size !== roots.length) {
-      throw new Error("linear_root_header_batch_incomplete");
-    }
-    const delegateActorId = this.#delegateActorId ?? data.viewer.id;
-    return roots.map(({ issue }) => {
-      const fact = factsById.get(issue.id);
-      if (!fact || fact.project?.id !== projectId || fact.parent !== null) {
-        throw new Error("linear_root_header_batch_invalid");
-      }
-      if (fact.comments.pageInfo.hasNextPage || fact.comments.nodes.length > 2 ||
-          fact.workflowManagedComments?.pageInfo.hasNextPage) {
-        throw new Error("linear_root_comments_too_many");
-      }
-      if (fact.inverseRelations.pageInfo.hasNextPage) {
-        throw new Error("linear_root_relations_too_many");
-      }
-      if (fact.labels.pageInfo.hasNextPage) {
-        throw new Error("linear_root_labels_too_many");
-      }
-      const rootManagedComments = [
-        ...fact.comments.nodes,
-        ...(fact.workflowManagedComments?.nodes ?? []),
-      ].flatMap((comment) => {
-        if (comment.issue.id !== fact.id) {
-          throw new Error("linear_root_comment_identity_mismatch");
-        }
-        if (!isRootManagedComment(comment.body) && !isRootOwnershipComment(comment.body)) return [];
-        return [rootManagedCommentValue(comment, fact.id, delegateActorId, isRootManagedComment(comment.body)
-          ? rootCommentMarker(fact.id)
-          : `${fact.id}:managed-record:${comment.id}`)];
-      });
-      const blockers = fact.inverseRelations.nodes.flatMap((relation) => {
-        if (relation.type !== "blocks") return [];
-        if (!relation.issue || relation.relatedIssue?.id !== fact.id || relation.issue.id === fact.id) {
-          throw new Error("linear_blocker_relation_invalid");
-        }
-        return [{
-          sourceIssueId: fact.id,
-          targetIssueId: relation.issue.id,
-          targetState: linearIssueState(relation.issue.state.name),
-        }];
-      });
-      return {
-        issue: {
-          issueId: fact.id,
-          identifier: fact.identifier,
-          projectId,
-          state: linearIssueState(fact.state.name),
-          order: fact.sortOrder,
-          depth: 0,
-          title: fact.title,
-          description: parseManagedDescription(fact.description ?? "").businessDescription,
-          labels: fact.labels.nodes.map(({ name }) => name),
-          isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
-          updatedAt: timestampValue(fact.updatedAt),
-        },
-        isDelegatedToSymphony: fact.delegate?.id === delegateActorId,
-        priority: linearPriority(fact.priority),
-        blockers,
-        rootConductorLabels: conductorPoolFromLabels(fact.labels.nodes.map(({ name }) => name)),
-        rootManagedComments,
-      };
-    });
-  }
-
   async #batchedIssueTree(
     projectId: string,
     rootIssueId: string,
@@ -1499,7 +1311,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const rootResponse = await rawRequest<IssueTreeRootData, {
       rootIssueId: string;
-      commentMarker?: string;
     }>(
       WORKFLOW_ISSUE_TREE_ROOT_QUERY,
       { rootIssueId },
@@ -1580,33 +1391,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     append(root.id);
 
     const rootConductorLabels = conductorPoolFromLabels(root.labels.nodes.map(({ name }) => name));
-    const rootManagedComments = root.comments.nodes.flatMap((comment) => {
-      if (comment.issue.id !== root.id) throw new Error("linear_root_comment_identity_mismatch");
-      if (!isRootManagedComment(comment.body)) return [];
-      return [{
-        commentId: comment.id,
-        issueId: root.id,
-        updatedAt: timestampValue(comment.updatedAt),
-        managedMarker: rootCommentMarker(root.id),
-        body: comment.body,
-      }];
-    });
-    const humanAnswers = nodes.flatMap((node) => {
-      if (node.nodeKind !== "human" || node.state !== "Done") return [];
-      const fact = facts.get(node.issueId)!.fact;
-      return fact.comments.nodes.flatMap((comment) => {
-        if (comment.issue.id !== node.issueId) {
-          throw new Error("linear_human_answer_identity_mismatch");
-        }
-        const answer = comment.body.trim();
-        return answer ? [{
-          humanIssueId: node.issueId,
-          commentId: comment.id,
-          answer,
-          updatedAt: timestampValue(comment.updatedAt),
-        }] : [];
-      });
-    });
     const comments = [...facts.values()].flatMap(({ fact }) =>
       fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id, delegateActorId)),
     );
@@ -1620,8 +1404,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     return {
       nodes,
       rootConductorLabels,
-      rootManagedComments,
-      humanAnswers,
       comments,
       relations,
       observedAt: new Date().toISOString(),
@@ -1657,16 +1439,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         description: issue.description,
         labels: issue.labels,
         isArchived: issue.isArchived,
-        ...(issue.managedMarker ? { managedMarker: issue.managedMarker } : {}),
-        ...(issue.issueId === input.rootIssueId
-          ? { issueKind: "root" as const }
-          : issue.workflowKind
-            ? { issueKind: issue.workflowKind }
-          : issue.nodeKind === "work"
-            ? { issueKind: "work" as const }
-            : issue.nodeKind === "human"
-              ? { issueKind: "human" as const }
-              : {}),
         remoteVersion: issue.updatedAt,
         updatedAt: issue.updatedAt,
       };
@@ -1819,11 +1591,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           projectId: command.expectedProjectId,
           parentId: command.parentIssueId,
           title: command.title,
-          description: serializeWorkflowIssueDescription(
-            command.description,
-            command.managedMarker,
-            command.issueKind,
-          ),
+          description: command.description,
           stateId: command.statusId,
           labelIds: await this.#workflowIssueLabelIds(command.labelNames, teamId),
           ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
@@ -1837,19 +1605,10 @@ export class LinearSdkImpl implements LinearClientInterface {
         const fact = preflight?.get(command.target.targetIssueId);
         const issue = fact ? undefined : await this.#client.issue(command.target.targetIssueId);
         if ((fact?.project?.id ?? issue?.projectId) !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
-        const current = fact ? workflowPreflightTargetValue(fact) : await workflowMutationTargetValue(issue!);
-        if (command.target.expectedManagedMarker !== undefined &&
-          current.managedMarker !== command.target.expectedManagedMarker) {
-          throw preconditionConflictError();
-        }
         if (issue) await this.#workflowStatusId(issue, command.statusId);
         await this.#client.updateIssue(command.target.targetIssueId, {
           title: command.title,
-          description: serializeWorkflowIssueDescription(
-            command.description,
-            current.managedMarker,
-            workflowIssueKindForUpdate(current),
-          ),
+          description: command.description,
           stateId: command.statusId,
           ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
         });
@@ -1858,7 +1617,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       case "append_workflow_comment": {
         await this.#client.createComment({
           issueId: command.target.targetIssueId,
-          body: serializeWorkflowComment(command.body, command.writeId),
+          body: command.body,
         });
         return;
       }
@@ -2142,8 +1901,16 @@ export class LinearSdkImpl implements LinearClientInterface {
         const children = await allNodes(parent.children({ first: 64 }), 64);
         values = await Promise.all(children.map((child) => workflowMutationTargetValue(child)));
       }
-      const matches = values.filter((issue) => issue.managedMarker === command.managedMarker);
-      if (matches.length > 1) throw new Error("linear_workflow_marker_ambiguous");
+      const matches = values.filter((issue) =>
+        issue.projectId === command.expectedProjectId &&
+        issue.parentIssueId === command.parentIssueId &&
+        issue.statusId === command.statusId &&
+        issue.title === command.title &&
+        issue.description === command.description &&
+        (command.order === undefined || issue.order === command.order) &&
+        workflowLabelsMatch(issue.labels, command.labelNames),
+      );
+      if (matches.length > 1) throw new Error("linear_workflow_issue_ambiguous");
       const issue = matches[0];
       if (!issue) return undefined;
       if (issue.projectId !== command.expectedProjectId ||
@@ -2167,9 +1934,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         issue.statusId === command.statusId && issue.title === command.title &&
         issue.description === command.description &&
         (command.order === undefined || issue.order === command.order) &&
-        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId) &&
-        (command.target.expectedManagedMarker === undefined ||
-          issue.managedMarker === command.target.expectedManagedMarker)
+        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId)
         ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
           issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
         : undefined;
@@ -2181,11 +1946,11 @@ export class LinearSdkImpl implements LinearClientInterface {
       const comments = await allNodes(issue.comments({ first: PAGE_LIMIT }), MAX_ROOT_COMMENTS);
       const matches = comments.filter((comment) =>
         comment.issueId === command.target.targetIssueId &&
-        comment.body === serializeWorkflowComment(command.body, command.writeId),
+        comment.body === command.body,
       );
       if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
       const comment = matches[0];
-      return comment && comment.body === serializeWorkflowComment(command.body, command.writeId)
+      return comment && comment.body === command.body
         ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: comment.updatedAt.toISOString(),
           issueVersions: [{ issueId: command.target.targetIssueId, remoteVersion: issue.updatedAt.toISOString() }] }
         : undefined;
@@ -2199,9 +1964,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       const desiredArchived = command.kind === "archive_workflow_issue";
       return issue && issue.projectId === command.expectedProjectId &&
         issue.isArchived === desiredArchived &&
-        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId) &&
-        (command.target.expectedManagedMarker === undefined ||
-          issue.managedMarker === command.target.expectedManagedMarker)
+        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId)
         ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
           issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
         : undefined;
@@ -2306,7 +2069,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!comments || comments.pageInfo?.hasNextPage !== false || !Array.isArray(comments.nodes)) {
       throw new Error("linear_workflow_comment_read_back_incomplete");
     }
-    const body = serializeWorkflowComment(command.body, command.writeId);
+    const body = command.body;
     const matches = comments.nodes.filter((comment) => comment.issue?.id === issueId && comment.body === body);
     if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
     return { available: true, value: matches[0]?.updatedAt && typeof issue.updatedAt === "string"
@@ -2468,27 +2231,13 @@ export class LinearSdkImpl implements LinearClientInterface {
     );
   }
 
-  async #rootManagedComments(issueId: string): Promise<Comment[]> {
-    const issue = await this.#client.issue(issueId);
-    const comments = await this.#rootComments(issue);
-    return comments.filter(({ body }) => isRootManagedComment(body));
-  }
-
   async #rootManagedCommentValues(issue: Issue) {
-    const comments = (await this.#rootComments(issue))
-      .filter(({ body }) => isRootManagedComment(body) || isRootOwnershipComment(body));
-    if (comments.length > 2) {
-      throw new Error("linear_root_comments_too_many");
-    }
+    const comments = await this.#rootComments(issue);
     const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
-    return comments.map((comment) => rootManagedCommentValue(
-      comment,
-      issue.id,
-      delegateActorId,
-      isRootManagedComment(comment.body)
-        ? rootCommentMarker(issue.id)
-        : `${issue.id}:managed-record:${comment.id}`,
-    ));
+    return comments.flatMap((comment) => {
+      const value = rootManagedCommentValue(comment, issue.id, delegateActorId);
+      return value.authorKind === "symphony" ? [value] : [];
+    });
   }
 
   async #createProjectLabelWithReadBack(labelName: string): Promise<ProjectLabel> {
@@ -2801,7 +2550,6 @@ function workflowCommentValue(
     throw new Error("linear_workflow_comment_identity_mismatch");
   }
   const actor = workflowCommentActor(comment, delegateActorId);
-  const managedMarker = commentManagedMarker(comment.body, issueId, comment.id);
   const parentCommentId = commentParentId(comment);
   return {
     commentId: comment.id,
@@ -2817,7 +2565,6 @@ function workflowCommentValue(
     reactions: workflowCommentReactions(comment.reactions, delegateActorId),
     body: comment.body,
     createdAt: timestampValue(comment.createdAt),
-    ...(managedMarker ? { managedMarker } : {}),
     remoteVersion: timestampValue(comment.updatedAt),
     updatedAt: timestampValue(comment.updatedAt),
   };
@@ -2891,7 +2638,6 @@ function rootManagedCommentValue(
   comment: WorkflowCommentSource,
   issueId: string,
   delegateActorId: string,
-  managedMarker: string,
 ) {
   const actor = workflowCommentActor(comment, delegateActorId);
   return {
@@ -2902,7 +2648,6 @@ function rootManagedCommentValue(
     ...(actor.userId ? { authorUserId: actor.userId } : {}),
     createdAt: timestampValue(comment.createdAt),
     updatedAt: timestampValue(comment.updatedAt),
-    managedMarker,
     body: comment.body,
   };
 }
@@ -2991,14 +2736,12 @@ function workflowSourceManifest(input: {
       sourceId: issue.issueId,
       sourceVersion: issue.updatedAt,
       actorKind: "unknown" as const,
-      ...(issue.managedMarker ? { stableWriteId: issue.managedMarker } : {}),
     })),
     ...input.comments.map((comment) => ({
       sourceKind: "linear_comment" as const,
       sourceId: comment.commentId,
       sourceVersion: comment.updatedAt,
       actorKind: comment.authorKind,
-      ...(comment.managedMarker ? { stableWriteId: comment.managedMarker } : {}),
     })),
     ...input.commentThreadChanges.map((change) => ({
       sourceKind: "linear_comment_thread_change" as const,
@@ -3032,16 +2775,9 @@ function workflowRelationKindValue(
   return undefined;
 }
 
-function commentManagedMarker(body: string, issueId: string, commentId: string): string | undefined {
-  if (isRootManagedComment(body)) return rootCommentMarker(issueId);
-  if (body.startsWith(MANAGED_RECORD_MARKER)) return `${issueId}:managed-record:${commentId}`;
-  return body.match(WORKFLOW_WRITE_MARKER)?.[1];
-}
-
 async function workflowMutationTargetValue(issue: Issue) {
   const state = await issue.state;
   if (!state || !issue.projectId) throw new Error("linear_workflow_target_invalid");
-  const managed = parseManagedDescription(issue.description ?? "");
   const labels = workflowIssueLabelNames(await allNodes(issue.labels({ first: 64 }), 64));
   return {
     issueId: issue.id,
@@ -3053,9 +2789,7 @@ async function workflowMutationTargetValue(issue: Issue) {
     ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
     statusId: state.id,
     title: issue.title,
-    description: managed.businessDescription,
-    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
-    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
+    description: issue.description ?? "",
   };
 }
 
@@ -3065,7 +2799,6 @@ function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
       (issue.subIssueSortOrder !== null && issue.subIssueSortOrder !== undefined && typeof issue.subIssueSortOrder !== "number") ||
       typeof issue.state?.id !== "string" || typeof issue.title !== "string" ||
       typeof issue.description !== "string") throw new Error("linear_workflow_target_invalid");
-  const managed = parseManagedDescription(issue.description);
   return {
     issueId: issue.id,
     projectId: issue.project.id,
@@ -3076,9 +2809,7 @@ function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
     ...(issue.parent?.id ? { parentIssueId: issue.parent.id } : {}),
     statusId: issue.state.id,
     title: issue.title,
-    description: managed.businessDescription,
-    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
-    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
+    description: issue.description,
   };
 }
 
@@ -3093,8 +2824,15 @@ function workflowPreflightOutcome(
       throw new Error("linear_workflow_children_read_back_incomplete");
     }
     const matches = children.nodes.map((value) => workflowMutationRawTargetValue(value, command.parentIssueId))
-      .filter((value) => value.managedMarker === command.managedMarker);
-    if (matches.length > 1) throw new Error("linear_workflow_marker_ambiguous");
+      .filter((value) =>
+        value.projectId === command.expectedProjectId &&
+        value.statusId === command.statusId &&
+        value.title === command.title &&
+        value.description === command.description &&
+        (command.order === undefined || value.order === command.order) &&
+        workflowLabelsMatch(value.labels, command.labelNames),
+      );
+    if (matches.length > 1) throw new Error("linear_workflow_issue_ambiguous");
     const issue = matches[0];
     if (!issue) return undefined;
     if (issue.projectId !== command.expectedProjectId || issue.statusId !== command.statusId ||
@@ -3107,8 +2845,7 @@ function workflowPreflightOutcome(
     return target.statusId === command.statusId && target.title === command.title &&
       target.description === command.description &&
       (command.order === undefined || target.order === command.order) &&
-      (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId) &&
-      (command.target.expectedManagedMarker === undefined || target.managedMarker === command.target.expectedManagedMarker)
+      (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId)
       ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt } : undefined;
   }
   if (command.kind === "archive_workflow_issue" || command.kind === "restore_workflow_issue") {
@@ -3123,7 +2860,7 @@ function workflowPreflightOutcome(
     if (!comments || comments.pageInfo?.hasNextPage !== false || !Array.isArray(comments.nodes)) {
       throw new Error("linear_workflow_comment_read_back_incomplete");
     }
-    const body = serializeWorkflowComment(command.body, command.writeId);
+    const body = command.body;
     const matches = comments.nodes.filter((comment) => comment.issue?.id === command.target.targetIssueId && comment.body === body);
     if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
     return matches[0]?.updatedAt
@@ -3212,7 +2949,6 @@ function workflowPreconditionMismatch(
   if (target.updatedAt !== command.target.expectedRemoteVersion) return "target_remote_version";
   if (command.target.expectedStatusId !== undefined && target.statusId !== command.target.expectedStatusId) return "target_status";
   if (command.target.expectedParentIssueId !== undefined && target.parentIssueId !== command.target.expectedParentIssueId) return "target_parent";
-  if (command.target.expectedManagedMarker !== undefined && target.managedMarker !== command.target.expectedManagedMarker) return "target_managed_marker";
   if (command.target.expectedIsArchived !== undefined && target.isArchived !== command.target.expectedIsArchived) return "target_archive";
   return command.kind !== "update_workflow_issue" || workflowPreflightHasStatus(facts.get(command.target.targetIssueId)!, command.statusId)
     ? undefined : "target_status_catalog";
@@ -3278,7 +3014,6 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
       (raw.archivedAt !== null && raw.archivedAt !== undefined && typeof raw.archivedAt !== "string")) {
     throw new Error("linear_workflow_target_invalid");
   }
-  const managed = parseManagedDescription(raw.description);
   return {
     issueId: raw.id,
     projectId: raw.project.id,
@@ -3289,9 +3024,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     parentIssueId: expectedParentIssueId,
     statusId: raw.state.id,
     title: raw.title,
-    description: managed.businessDescription,
-    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
-    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
+    description: raw.description,
   };
 }
 
@@ -3338,31 +3071,6 @@ function workflowLabelsMatch(observed: string[], expected: readonly string[]): b
   const observedNames = workflowIssueLabelNames(observed.map((name) => ({ name }))).sort();
   return expectedNames.length === observedNames.length &&
     expectedNames.every((name, index) => observedNames[index] === name);
-}
-
-function serializeWorkflowIssueDescription(
-  description: string,
-  managedMarker: string | undefined,
-  issueKind: "cycle" | "plan" | "work" | "verify" | "human" | undefined,
-) {
-  return managedMarker && issueKind
-    ? `${description.trim()}\n\n<!-- symphony workflow issue\nmanaged_marker: ${managedMarker}\nissue_kind: ${issueKind}\n-->`
-    : description.trim();
-}
-
-function serializeWorkflowComment(body: string, writeId: string) {
-  if (isManagedRecordBody(body)) return body;
-  return `${body.trim()}\n\n<!-- symphony workflow write\nwrite_id: ${writeId}\n-->`;
-}
-
-function isManagedRecordBody(body: string): boolean {
-  return body.startsWith(MANAGED_RECORD_MARKER) && body.endsWith("\n-->");
-}
-
-function workflowIssueKindForUpdate(
-  target: Awaited<ReturnType<typeof workflowMutationTargetValue>>,
-) {
-  return target.workflowKind ?? "work";
 }
 
 function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
@@ -3423,7 +3131,6 @@ async function completeNestedIssueTreeFact(
 }
 
 function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
-  const managed = parseManagedDescription(fact.description ?? "");
   return {
     issueId: fact.id,
     identifier: fact.identifier,
@@ -3433,16 +3140,9 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     order: fact.subIssueSortOrder ?? fact.sortOrder,
     depth,
     title: fact.title,
-    description: managed.businessDescription,
+    description: fact.description ?? "",
     labels: issueLabels(fact.labels),
     isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
-    ...(managed.managedMarker ? { managedMarker: managed.managedMarker } : {}),
-    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
-    ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
-    ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
-    ...(managed.origin ? { origin: managed.origin } : {}),
-    ...(managed.completedInputHash ? { completedInputHash: managed.completedInputHash } : {}),
-    ...(managed.targetIssueId ? { targetIssueId: managed.targetIssueId } : {}),
     updatedAt: timestampValue(fact.updatedAt),
   };
 }
@@ -3483,7 +3183,6 @@ function validateTreeRelations(fact: IssueTreeFact): void {
 async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
   const statePromise = issue.state;
   const state = statePromise ? await statePromise : undefined;
-  const managed = parseManagedDescription(issue.description ?? "");
   return {
     issueId: issue.id,
     identifier: issue.identifier,
@@ -3493,66 +3192,11 @@ async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
     order: issue.subIssueSortOrder ?? issue.sortOrder,
     depth,
     title: issue.title,
-    description: managed.businessDescription,
+    description: issue.description ?? "",
     labels: [],
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
-    ...(managed.managedMarker
-      ? { managedMarker: managed.managedMarker }
-      : {}),
-    ...(managed.workflowKind ? { workflowKind: managed.workflowKind } : {}),
-    ...(managed.nodeKind ? { nodeKind: managed.nodeKind } : {}),
-    ...(managed.humanKind ? { humanKind: managed.humanKind } : {}),
-    ...(managed.origin ? { origin: managed.origin } : {}),
-    ...(managed.completedInputHash
-      ? { completedInputHash: managed.completedInputHash }
-      : {}),
-    ...(managed.targetIssueId
-      ? { targetIssueId: managed.targetIssueId }
-      : {}),
     updatedAt: issue.updatedAt.toISOString(),
   };
-}
-
-function parseManagedDescription(description: string): {
-  businessDescription: string;
-  managedMarker?: string;
-  nodeKind?: "work" | "human";
-  humanKind?: "plan_approval" | "planned_input" | "runtime_input";
-  origin?: "user" | "symphony";
-  completedInputHash?: string;
-  targetIssueId?: string;
-  workflowKind?: "cycle" | "plan" | "work" | "verify" | "human";
-} {
-  const workflow = description.match(WORKFLOW_ISSUE_MARKER);
-  if (workflow?.index !== undefined) {
-    return {
-      businessDescription: description.slice(0, workflow.index).trim(),
-      managedMarker: workflow[1]!,
-      workflowKind: workflow[2] as "cycle" | "plan" | "work" | "verify" | "human",
-      ...(workflow[2] === "work" ? { nodeKind: "work" as const } : {}),
-      ...(workflow[2] === "human" ? { nodeKind: "human" as const } : {}),
-    };
-  }
-  return { businessDescription: description };
-}
-
-function rootCommentMarker(issueId: string) {
-  return `${issueId}:root-comment`;
-}
-
-function isRootManagedComment(body: string): boolean {
-  const marker = body.lastIndexOf(ROOT_MARKER_START);
-  return body.startsWith("Symphony\n") && marker > 0 && body.endsWith("\n-->");
-}
-
-function isRootOwnershipComment(body: string): boolean {
-  if (!body.startsWith(MANAGED_RECORD_MARKER) || !body.endsWith("\n-->")) return false;
-  try {
-    const value = JSON.parse(body.slice(MANAGED_RECORD_MARKER.length, -"\n-->".length));
-    return value && typeof value === "object" && value.kind === "root_ownership";
-  } catch {
-    return false;
-  }
 }
 
 function linearIssueState(value: string): LinearIssueState {
@@ -3619,23 +3263,9 @@ function boundedRootText(value: string, maximum: number): boolean {
 }
 
 function rootOwnershipConductorId(
-  comments: readonly { body: string }[],
+  _comments: readonly { body: string }[],
 ): string | undefined {
-  const owners: string[] = [];
-  for (const comment of comments) {
-    if (!isRootOwnershipComment(comment.body)) continue;
-    try {
-      const value = JSON.parse(comment.body.slice(MANAGED_RECORD_MARKER.length, -"\n-->".length)) as {
-        conductor_id?: unknown;
-      };
-      if (typeof value.conductor_id !== "string") throw new Error("invalid");
-      owners.push(value.conductor_id);
-    } catch {
-      throw new Error("project_conductor_root_ownership_invalid");
-    }
-  }
-  if (owners.length > 1) throw new Error("project_conductor_root_ownership_duplicate");
-  return owners[0];
+  return undefined;
 }
 
 function projectPoolFingerprint(input: {

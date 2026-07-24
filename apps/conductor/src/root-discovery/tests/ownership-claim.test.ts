@@ -217,7 +217,7 @@ class FakeLinear {
       comments: record ? [{
         comment_id: "ownership-comment", issue_id: rootId, body: serializeManagedRecord(record),
         author_kind: "symphony", author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: now,
-        managed_marker: `${rootId}:ownership`, remote_version: "comment-v1", updated_at: now,
+        remote_version: "comment-v1", updated_at: now,
       }] : [],
       relations: [],
       source_manifest: [],
@@ -255,7 +255,6 @@ class FakeLinear {
         author_id: "symphony-bot",
         author_user_id: "symphony-bot",
         created_at: now,
-        managed_marker: command.writeId,
         remote_version: "comment-v2",
         updated_at: now,
       });

@@ -48,6 +48,15 @@ export interface RootOwnershipRecord {
   ownerGeneration: string;
 }
 
+export interface WorkflowIssueRecord {
+  kind: "workflow_issue";
+  version: ManagedRecordVersion;
+  issueKey: string;
+  rootIssueId: string;
+  parentIssueId: string;
+  issueKind: "cycle" | "plan" | "work" | "verify" | "human";
+}
+
 export interface RootDirectiveRecord {
   kind: "root_directive";
   version: ManagedRecordVersion;
@@ -59,6 +68,24 @@ export interface RootDirectiveRecord {
   consumedInputIds: string[];
   directive: RootDirective;
   acceptedAt: string;
+}
+
+export interface RootReconcilerReplyRecord {
+  kind: "root_reconciler_reply";
+  version: ManagedRecordVersion;
+  replyId: string;
+  replyWriteId: string;
+  rootDirectiveId: string;
+  sourceInputId: string;
+  sourceCommentId: string;
+  sourceCommentVersion: string;
+  targetIssueId: string;
+  disposition: "accepted" | "not_applied" | "follow_up_required";
+  reaction: "check" | "cross" | "none";
+  threadAction: "resolve" | "keep_open" | "reopen";
+  materializedOutcomeRefs: EvidenceReference[];
+  renderedSchemaVersion: "1";
+  repliedAt: string;
 }
 
 export interface DeliveryRecord {
@@ -74,29 +101,17 @@ export interface DeliveryRecord {
   deliveredAt: string;
 }
 
-export interface CycleMarker {
-  kind: "cycle_marker";
+export interface WorkflowTimelineRecord {
+  kind: "workflow_timeline";
   version: ManagedRecordVersion;
-  rootIssueId: string;
-  cycleKey: string;
-  trigger: "initial" | "verify_changes" | "review_changes";
-  baselineRevision: string;
-  predecessorCycleIssueId?: string;
-  repairGroupId?: string;
-  findingIds?: string[];
-  predecessorPlanContractDigest?: string;
-  predecessorVerifyResultId?: string;
-  predecessorVerifiedRevision?: string;
-}
-
-export interface NodeMarker {
-  kind: "node_marker";
-  version: ManagedRecordVersion;
-  rootIssueId: string;
-  cycleIssueId: string;
-  nodeKey: string;
-  nodeKind: "plan" | "work" | "verify";
-  planContractDigest: string;
+  timelineEventId: string;
+  timelineKind: "root" | "cycle";
+  targetIssueId: string;
+  sourceRecordIds: string[];
+  sourceVersions: string[];
+  writeId: string;
+  renderedSchemaVersion: "1";
+  materializedAt: string;
 }
 
 export interface PlanContractProposal {
@@ -169,30 +184,6 @@ export interface StageExecutionRecord {
   repositoryRevision: string;
   startedAt: string;
   deadlineAt: string;
-}
-
-export interface StageUsage {
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-}
-
-export interface StageTerminalRecord {
-  kind: "stage_terminal";
-  version: ManagedRecordVersion;
-  stageExecutionId: string;
-  rootIssueId: string;
-  cycleIssueId: string;
-  nodeIssueId: string;
-  stage: "plan" | "work" | "verify";
-  contextDigest: string;
-  outcome: "completed" | "failed" | "canceled" | "suspended";
-  completedAt: string;
-  summary: string;
-  usage: StageUsage;
-  failureCode?: string;
 }
 
 export type StageResultOutcomeKind =
@@ -388,13 +379,13 @@ export interface ConvergenceRecord {
 
 export type ManagedRecord =
   | RootOwnershipRecord
+  | WorkflowIssueRecord
   | RootDirectiveRecord
+  | RootReconcilerReplyRecord
   | DeliveryRecord
-  | CycleMarker
-  | NodeMarker
+  | WorkflowTimelineRecord
   | PlanContract
   | StageExecutionRecord
-  | StageTerminalRecord
   | StageResultRecord
   | HumanActionRequestRecord
   | HumanActionResolutionRecord

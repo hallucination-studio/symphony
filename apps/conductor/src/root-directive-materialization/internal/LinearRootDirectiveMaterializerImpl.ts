@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { HumanActionMaterializerInterface } from "../../human-actions/api/HumanActionMaterializerInterface.js";
 import type {
@@ -5,8 +7,12 @@ import type {
   RootReconciliationView,
   TreeOperation,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
-import type { CycleMarker } from "../../root-reconciliation/api/ManagedRecords.js";
-import { serializeManagedRecord } from "../../root-reconciliation/api/index.js";
+import {
+  findWorkflowIssue,
+  renderWorkflowIssueDescription,
+  rewriteWorkflowIssueDescription,
+  workflowIssueLabel,
+} from "../../root-reconciliation/api/index.js";
 import type {
   RootDirectiveMaterializationResult,
   RootDirectiveMaterializerInterface,
@@ -145,58 +151,37 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
     if (action.reason !== "initial" && (!predecessor || predecessor.parent_issue_id !== view.root.issueId || predecessor.issue_kind !== "cycle" || !isTerminalCycle(predecessor))) {
       return failed(directive, "successor_cycle_predecessor_invalid");
     }
-    const cycleMarker = `${directive.rootDirectiveId}:cycle`;
+    const cycleKey = `${directive.rootDirectiveId}:cycle`;
     let currentView = view;
-    let cycle = currentView.tree.issues.find((issue) => issue.managed_marker === cycleMarker);
+    let cycle = findWorkflowIssue(currentView.tree, cycleKey);
     if (!cycle) {
       const status = currentView.tree.status_catalog.find(({ name }) => name === "Planning");
       const root = rootIssue(currentView, view.root.issueId);
       if (!status) return failed(directive, "successor_cycle_status_missing");
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_issue",
-        writeId: cycleMarker,
+        writeId: cycleKey,
         expectedProjectId: root.project_id,
         rootIssueId: root.issue_id,
         expectedRootRemoteVersion: root.remote_version,
         parentExpectedRemoteVersion: root.remote_version,
         parentExpectedStatusId: root.status_id,
         parentIssueId: root.issue_id,
-        issueKind: "cycle",
         title: `Cycle ${currentView.tree.issues.filter((issue) => issue.issue_kind === "cycle").length + 1}`,
-        description: action.planTrigger,
+        description: renderWorkflowIssueDescription({
+          issueKey: cycleKey,
+          rootIssueId: root.issue_id,
+          parentIssueId: root.issue_id,
+          issueKind: "cycle",
+          markdown: action.planTrigger,
+        }),
         statusId: status.status_id,
-        managedMarker: cycleMarker,
-        labelNames: [],
+        labelNames: [workflowIssueLabel("cycle")],
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(directive, `cycle_create_${outcome.kind}`);
       currentView = await refreshView(this.linear, currentView);
-      cycle = currentView.tree.issues.find((issue) => issue.managed_marker === cycleMarker);
+      cycle = findWorkflowIssue(currentView.tree, cycleKey);
       if (!cycle) return failed(directive, "successor_cycle_read_back_missing");
-    }
-    const marker: CycleMarker = {
-      kind: "cycle_marker",
-      version: 1,
-      rootIssueId: view.root.issueId,
-      cycleKey: cycleMarker,
-      trigger: action.reason === "initial" ? "initial" : action.reason === "user_requested_retry" ? "review_changes" : "verify_changes",
-      baselineRevision: view.git.head,
-      ...(action.predecessorCycleIssueId ? { predecessorCycleIssueId: action.predecessorCycleIssueId } : {}),
-    };
-    const markerBody = serializeManagedRecord(marker);
-    if (!currentView.tree.comments.some((comment) => comment.issue_id === cycle!.issue_id && comment.body === markerBody)) {
-      const root = rootIssue(currentView, view.root.issueId);
-      const target = rootIssue(currentView, cycle!.issue_id);
-      const outcome = await this.linear.mutateWorkflow({
-        kind: "append_workflow_comment",
-        writeId: `${cycleMarker}:marker`,
-        expectedProjectId: target.project_id,
-        rootIssueId: root.issue_id,
-        expectedRootRemoteVersion: root.remote_version,
-        target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id },
-        body: markerBody,
-      });
-      if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(directive, `cycle_marker_${outcome.kind}`);
-      currentView = await refreshView(this.linear, currentView);
     }
     if (predecessor && !currentView.tree.relations.some((relation) =>
       relation.relation_kind === "relates_to" && relation.source_issue_id === predecessor.issue_id && relation.target_issue_id === cycle!.issue_id)) {
@@ -205,7 +190,7 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
       const target = rootIssue(currentView, cycle!.issue_id);
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_relation",
-        writeId: `${cycleMarker}:predecessor`,
+        writeId: `${cycleKey}:predecessor`,
         expectedProjectId: root.project_id,
         rootIssueId: root.issue_id,
         expectedRootRemoteVersion: root.remote_version,
@@ -218,31 +203,35 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(directive, `cycle_predecessor_${outcome.kind}`);
       currentView = await refreshView(this.linear, currentView);
     }
-    const planMarker = `${directive.rootDirectiveId}:plan`;
-    let plan = currentView.tree.issues.find((issue) => issue.managed_marker === planMarker);
+    const planKey = `${directive.rootDirectiveId}:plan`;
+    let plan = findWorkflowIssue(currentView.tree, planKey);
     if (!plan) {
       const cycleNow = rootIssue(currentView, cycle!.issue_id);
       const status = currentView.tree.status_catalog.find(({ name }) => name === "Todo");
       if (!status) return failed(directive, "successor_plan_status_missing");
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_issue",
-        writeId: planMarker,
+        writeId: planKey,
         expectedProjectId: cycleNow.project_id,
         rootIssueId: view.root.issueId,
         expectedRootRemoteVersion: rootIssue(currentView, view.root.issueId).remote_version,
         parentExpectedRemoteVersion: cycleNow.remote_version,
         parentExpectedStatusId: cycleNow.status_id,
         parentIssueId: cycleNow.issue_id,
-        issueKind: "plan",
         title: "Plan",
-        description: action.planTrigger,
+        description: renderWorkflowIssueDescription({
+          issueKey: planKey,
+          rootIssueId: view.root.issueId,
+          parentIssueId: cycleNow.issue_id,
+          issueKind: "plan",
+          markdown: action.planTrigger,
+        }),
         statusId: status.status_id,
-        managedMarker: planMarker,
-        labelNames: [],
+        labelNames: [workflowIssueLabel("plan")],
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(directive, `successor_plan_${outcome.kind}`);
       currentView = await refreshView(this.linear, currentView);
-      plan = currentView.tree.issues.find((issue) => issue.managed_marker === planMarker);
+      plan = findWorkflowIssue(currentView.tree, planKey);
     }
     return plan
       ? { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [cycle.issue_id, plan.issue_id] }
@@ -326,7 +315,7 @@ function updateIssueCommand(
   directive: RootDirective,
   target: RootReconciliationView["tree"]["issues"][number],
   statusId: string,
-  description = target.description,
+  description?: string,
 ): LinearWorkflowMutationCommand {
   return {
     kind: "update_workflow_issue",
@@ -337,7 +326,7 @@ function updateIssueCommand(
     target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id },
     statusId,
     title: target.title,
-    description,
+    description: description === undefined ? target.description : preservedDescription(target, description),
   };
 }
 
@@ -361,22 +350,28 @@ function operationPlan(
       operation.precondition.targetIssueId !== parent.issue_id ||
       parent.remote_version !== operation.precondition.expectedRemoteVersion
     ) return undefined;
+    const issueKind = operation.issueKind === "human_action" ? "human" : operation.issueKind;
+    const issueKey = treeOperationIssueKey(directive, operation);
     return {
       commands: [{
         kind: "create_workflow_issue",
-        writeId: `${directive.rootDirectiveId}:${operation.parentIssueId}:${operation.title}`,
+        writeId: issueKey,
         expectedProjectId: parent.project_id,
         rootIssueId: view.root.issueId,
         expectedRootRemoteVersion: root.remote_version,
         parentExpectedRemoteVersion: parent.remote_version,
         parentExpectedStatusId: parent.status_id,
         parentIssueId: operation.parentIssueId,
-        issueKind: operation.issueKind === "human_action" ? "human" : operation.issueKind,
         title: operation.title,
-        description: operation.description,
+        description: renderWorkflowIssueDescription({
+          issueKey,
+          rootIssueId: view.root.issueId,
+          parentIssueId: operation.parentIssueId,
+          issueKind,
+          markdown: operation.description,
+        }),
         statusId: status.status_id,
-        managedMarker: `${directive.rootDirectiveId}:${operation.parentIssueId}:${operation.title}`,
-        labelNames: [],
+        labelNames: [workflowIssueLabel(issueKind)],
       }],
       sourceIssueIds: [operation.parentIssueId],
     };
@@ -397,7 +392,7 @@ function operationPlan(
         expectedProjectId: target.project_id, rootIssueId: view.root.issueId, expectedRootRemoteVersion: root.remote_version,
         target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, ...(operation.precondition.expectedStatus !== undefined ? { expectedStatusId: target.status_id } : {}) },
         statusId: status.status_id,
-        title: operation.title, description: operation.description,
+        title: operation.title, description: preservedDescription(target, operation.description),
         order: target.order,
       }],
       sourceIssueIds: [target.issue_id],
@@ -666,8 +661,14 @@ function mutationReadBackMatches(
   tree: RootReconciliationView["tree"],
 ): boolean {
   if (command.kind === "create_workflow_issue") {
-    return tree.issues.some((issue) => issue.managed_marker === command.managedMarker &&
-      issue.parent_issue_id === command.parentIssueId && issue.status_id === command.statusId);
+    return tree.issues.some((issue) =>
+      issue.workflow_issue_key === command.writeId &&
+      issue.parent_issue_id === command.parentIssueId &&
+      issue.status_id === command.statusId &&
+      issue.title === command.title &&
+      issue.description === command.description &&
+      JSON.stringify([...issue.labels].sort()) === JSON.stringify([...command.labelNames].sort()),
+    );
   }
   if (command.kind === "update_workflow_issue") {
     const issue = tree.issues.find(({ issue_id }) => issue_id === command.target.targetIssueId);
@@ -686,6 +687,27 @@ function mutationReadBackMatches(
     return !tree.relations.some(({ relation_id }) => relation_id === command.relationId);
   }
   return true;
+}
+
+function preservedDescription(
+  target: RootReconciliationView["tree"]["issues"][number],
+  markdown: string,
+): string {
+  return target.issue_kind === "root" ? markdown : rewriteWorkflowIssueDescription(target, markdown);
+}
+
+function treeOperationIssueKey(
+  directive: RootDirective,
+  operation: Extract<TreeOperation, { kind: "create_node" }>,
+): string {
+  const identity = JSON.stringify([
+    directive.rootDirectiveId,
+    operation.parentIssueId,
+    operation.issueKind,
+    operation.title,
+    operation.description,
+  ]);
+  return `tree-node:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 function rootIssue(view: RootReconciliationView, issueId: string) {

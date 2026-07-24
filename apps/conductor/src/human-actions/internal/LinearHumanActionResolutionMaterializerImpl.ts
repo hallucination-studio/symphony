@@ -51,7 +51,7 @@ export class LinearHumanActionResolutionMaterializerImpl implements HumanActionR
     const body = serializeManagedRecord(record);
     const existing = input.tree.comments.find((comment) => {
       const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === record.resolutionId;
+      return comment.author_kind === "symphony" && parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === record.resolutionId;
     });
     if (existing) {
       if (existing.body !== body) return failed("human_action_resolution_conflict");
@@ -70,7 +70,6 @@ export class LinearHumanActionResolutionMaterializerImpl implements HumanActionR
         expectedRemoteVersion: action.remote_version,
         expectedStatusId: action.status_id,
         ...(action.parent_issue_id ? { expectedParentIssueId: action.parent_issue_id } : {}),
-        ...(action.managed_marker ? { expectedManagedMarker: action.managed_marker } : {}),
       },
       body,
     });
@@ -81,7 +80,7 @@ export class LinearHumanActionResolutionMaterializerImpl implements HumanActionR
     const readBack = await this.linear.readWorkflowIssueTree(input.rootIssueId);
     const confirmed = readBack.comments.find((comment) => {
       const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === record.resolutionId && comment.body === body;
+      return comment.author_kind === "symphony" && parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === record.resolutionId && comment.body === body;
     });
     return confirmed ? { kind: "materialized", record } : failed("human_action_resolution_read_back_missing");
   }

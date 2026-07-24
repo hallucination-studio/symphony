@@ -1,4 +1,5 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { parseManagedRecord } from "../../root-reconciliation/api/index.js";
 import type { HumanActionKind } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import type {
   HumanActionResolutionValidationResult,
@@ -27,8 +28,11 @@ export class LinearHumanActionResolutionValidatorImpl implements HumanActionReso
     const actionKind = actionKindFromLabels(action.labels);
     if (!actionKind) return invalid("human_action_kind_invalid");
 
-    const duplicate = input.tree.comments.some((comment) =>
-      comment.issue_id === action.issue_id && isResolutionMarker(comment.managed_marker, action.issue_id));
+    const duplicate = input.tree.comments.some((comment) => {
+      if (comment.issue_id !== action.issue_id || comment.author_kind !== "symphony") return false;
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.actionIssueId === action.issue_id;
+    });
     if (duplicate) return invalid("human_action_resolution_duplicate");
 
     const terminalOutcome = outcomeFor(actionKind, action.status_name);
@@ -41,8 +45,8 @@ export class LinearHumanActionResolutionValidatorImpl implements HumanActionReso
     const responseComments = input.tree.comments
       .filter((comment) => comment.issue_id === action.issue_id)
       .filter((comment) => comment.updated_at <= action.updated_at);
-    const managedComments = responseComments.filter(({ managed_marker }) => managed_marker !== undefined);
-    const humanComments = responseComments.filter((comment) => comment.managed_marker === undefined && comment.author_kind === "human");
+    const managedComments = responseComments.filter(isManagedComment);
+    const humanComments = responseComments.filter((comment) => comment.author_kind === "human");
 
     for (const comment of humanComments) {
       if (!comment.author_user_id || comment.author_id !== comment.author_user_id) {
@@ -90,9 +94,8 @@ function outcomeFor(
   return status.toLowerCase() as "approved" | "rejected" | "canceled";
 }
 
-function isResolutionMarker(marker: string | undefined, actionIssueId: string): boolean {
-  if (!marker) return false;
-  return marker.includes("human-action-resolution") && marker.endsWith(`:${actionIssueId}`);
+function isManagedComment(comment: LinearWorkflowTreeSnapshot["comments"][number]): boolean {
+  return comment.author_kind === "symphony" && parseManagedRecord(comment.body).ok;
 }
 
 function valid(

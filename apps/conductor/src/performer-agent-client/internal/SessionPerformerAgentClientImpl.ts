@@ -478,7 +478,6 @@ function toWireComment(comment: import("../../root-reconciliation/api/RootReconc
     body: comment.body,
     created_at: comment.createdAt,
     updated_at: comment.updatedAt,
-    ...(comment.managedMarker ? { managed_marker: comment.managedMarker } : {}),
   };
 }
 

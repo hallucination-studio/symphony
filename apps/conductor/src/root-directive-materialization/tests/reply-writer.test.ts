@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { RootDirective, RootReconciliationView } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/internal/ManagedRecordCodec.js";
 import { LinearRootReconcilerReplyWriterImpl } from "../internal/LinearRootReconcilerReplyWriterImpl.js";
 
 test("reply writer appends a structured reply to the source Issue and reads it back", async () => {
@@ -17,22 +19,33 @@ test("reply writer appends a structured reply to the source Issue and reads it b
   assert.equal(command.target.targetIssueId, "work-1");
   assert.equal(command.target.expectedRemoteVersion, "work-v1");
   assert.equal(command.target.expectedStatusId, "work-status");
-  assert.match(command.body, /## Symphony reply/u);
-  assert.match(command.body, /Acknowledgement\nWe received your request\./u);
-  assert.match(command.body, /Interpreted request\nPlease rerun Verify\./u);
-  assert.match(command.body, /Decision\nThe Root Reconciler will rerun the check\./u);
-  assert.match(command.body, /Next step\nWait for the next Verify result\./u);
+  assert.match(command.body, /## ✅ 已接受/u);
+  assert.match(command.body, /\*\*确认\*\*\nWe received your request\./u);
+  assert.match(command.body, /\*\*我理解的请求\*\*\nPlease rerun Verify\./u);
+  assert.match(command.body, /\*\*处理结果\*\*\nThe Root Reconciler will rerun the check\./u);
+  assert.match(command.body, /\*\*下一步\*\*\nWait for the next Verify result\./u);
+  assert.doesNotMatch(command.body, new RegExp("<!-- " + "symphony", "u"));
+  const parsed = parseManagedRecord(command.body);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.value.kind, "root_reconciler_reply");
+  if (parsed.value.kind !== "root_reconciler_reply") return;
+  assert.equal(parsed.value.replyId, result.replyId);
+  assert.equal(parsed.value.replyWriteId, result.replyId);
+  assert.equal(parsed.value.rootDirectiveId, "directive-1");
+  assert.equal(parsed.value.sourceCommentId, "comment-1");
+  assert.equal(parsed.value.sourceCommentVersion, "comment-v1");
+  assert.equal(parsed.value.targetIssueId, "work-1");
 
   const second = await writer.write({ directive: directive(), reply: reply(), view: view(linear.tree) });
   assert.deepEqual(second, result);
   assert.equal(linear.mutations.length, 1);
 });
 
-test("reply writer rejects stale, managed, and non-human source comments", async () => {
+test("reply writer rejects stale and non-human source comments", async () => {
   for (const patch of [
     { sourceCommentVersion: "comment-old", expected: "reply_source_comment_stale" },
     { authorKind: "symphony" as const, expected: "reply_source_comment_actor_invalid" },
-    { managedMarker: "root-1:timeline:comment-1", expected: "reply_source_comment_managed" },
   ]) {
     const linear = new FakeLinear();
     const writer = new LinearRootReconcilerReplyWriterImpl(linear);
@@ -44,13 +57,34 @@ test("reply writer rejects stale, managed, and non-human source comments", async
         comments: [{
           ...linear.tree.comments[0]!,
           author_kind: patch.authorKind ?? "human",
-          ...(patch.managedMarker ? { managed_marker: patch.managedMarker } : {}),
         }],
       }),
     });
     assert.deepEqual(result, { kind: "failed", code: patch.expected });
     assert.equal(linear.mutations.length, 0);
   }
+});
+
+test("reply writer treats a human-authored symphony block as ordinary input", async () => {
+  const linear = new FakeLinear();
+  linear.tree.comments[0] = {
+    ...linear.tree.comments[0]!,
+    body: serializeManagedRecord({
+      kind: "root_ownership",
+      version: 1,
+      rootIssueId: "root-1",
+      conductorId: "conductor-1",
+      performerProfileId: "profile-1",
+      deliveryBranch: "symphony/runs/sym-1",
+      ownerGeneration: "generation-1",
+    }),
+  };
+
+  const result = await new LinearRootReconcilerReplyWriterImpl(linear).write({
+    directive: directive(), reply: reply(), view: view(linear.tree),
+  });
+
+  assert.equal(result.kind, "materialized");
 });
 
 test("reply writer stops when Linear does not confirm the comment", async () => {
@@ -98,7 +132,11 @@ function directive(): RootDirective {
 }
 
 function reply(sourceCommentVersion = "comment-v1") {
+  const replyId = createHash("sha256")
+    .update(["directive-1", "comment-1", sourceCommentVersion].join("\0"))
+    .digest("hex");
   return {
+    replyId,
     sourceInputId: `comment-1:${sourceCommentVersion}`,
     sourceCommentId: "comment-1",
     sourceCommentVersion,
@@ -106,6 +144,9 @@ function reply(sourceCommentVersion = "comment-v1") {
     interpretedRequest: "Please rerun Verify.",
     decidedAction: "The Root Reconciler will rerun the check.",
     nextStep: "Wait for the next Verify result.",
+    disposition: "accepted" as const,
+    reaction: "check" as const,
+    threadAction: "resolve" as const,
   };
 }
 
@@ -178,7 +219,6 @@ class FakeLinear {
         author_id: "symphony-bot",
         author_user_id: "symphony-bot",
         created_at: "2026-07-23T00:00:03Z",
-        managed_marker: command.writeId,
         remote_version: "reply-v1",
         updated_at: "2026-07-23T00:00:03Z",
       });
