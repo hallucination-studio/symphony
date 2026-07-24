@@ -2062,7 +2062,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
     const response = await rawRequest(
-      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }`,
+      `query WorkflowMutationChildren { issue(id: ${quoteGraphql(parentIssueId)}) { ${workflowScopeSelection(32)} updatedAt children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt sortOrder subIssueSortOrder project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }`,
     );
     const data = (response as {
       data?: { issue?: { updatedAt?: unknown; children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: unknown } } | null } | null };

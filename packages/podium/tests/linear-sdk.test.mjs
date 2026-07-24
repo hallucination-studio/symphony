@@ -1337,6 +1337,7 @@ test("workflow issue read-back batches child status facts", async () => {
           } } };
         }
         assert.match(query, /WorkflowMutationChildren/u);
+        assert.match(query, /sortOrder\s+subIssueSortOrder/u);
         return { data: { issue: {
           id: "root-1", updatedAt: "2026-07-22T00:00:01Z", project: { id: "project-1" }, parent: null,
           children: {
