@@ -56,6 +56,7 @@ test("setup and fallback screens keep their card structure", () => {
   expect(setup.querySelector(".button.primary.full-width")).not.toBeNull();
   expect(setup.querySelector(".brand-mark-animated .brand-mark-path")).not.toBeNull();
   expect(setup.querySelector(".setup-progress-fill")).toHaveAttribute("data-step", "1");
+  expect(setup.querySelector(".setup-card > .setup-card-body")).not.toBeNull();
 
   const { container: unavailable } = render(
     <App
