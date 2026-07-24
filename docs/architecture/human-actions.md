@@ -37,7 +37,7 @@ Root Issue
 - Root全局Action是Root直接子Issue；
 - Action拥有自己的assignee、description、comments、status、archive flag和审计历史；
 - Action不参与Work DAG ready/dependency计算，不被Plan/Work/Verify executor dispatch；
-- archived Action仍属于完整Root Tree并进入Root Reconciler observation。
+- archived Action仍属于完整Root Tree；已有session通过delta获知，fresh session通过bootstrap获知。
 
 ## 3. Labels与Project初始化
 
@@ -53,8 +53,8 @@ Convergence Override
 ```
 
 每个Action必须有`Human Action`和恰好一个kind label。Label只表达Issue/action kind，不表达生命周期或
-resolution；生命周期只由Action status和原生archive flag表达。缺失、重复或错误kind label使matching Root fail
-closed并写Linear timeline，Conductor不能根据title猜测类型。
+resolution；生命周期只由Action status和原生archive flag表达。用户造成的缺失、重复或错误kind label作为
+mechanical violation进入Root Reconciler；Conductor不能根据title猜测类型或主动修正。
 
 ## 4. 状态模型
 
@@ -188,9 +188,10 @@ proposal_digest
 resolved_at
 ```
 
-Conductor从fresh Linear facts验证status transition、Human actor、comment requirement、proposal digest和无既有
-resolution后写record并read-back。同一Action最多一个resolution；status本身是用户选择事实，resolution是
-Conductor验证后的workflow输入。
+Conductor从fresh Linear facts验证actor、source version、Action scope和schema，再把status/comment及proposal事实
+作为delta交给Root Reconciler。Root Reconciler通过`RootDirective.human_action_resolutions[]`决定是否形成record；
+Conductor只验证matching status、comment requirement、proposal digest和无既有resolution后写入并read-back。
+同一Action最多一个resolution；status本身是用户选择事实，resolution是Root Reconciler接受该输入的不可变证据。
 
 Action下的普通human comment也会按Root Reconciliation规则得到reply，但在matching terminal status和
 `HumanActionResolutionRecord`成立前，Root Reconciler不能仅凭评论文本产生Approved、Rejected或Answered后果。
@@ -219,15 +220,14 @@ Cycle Action只能来自matching Root Reconciler directive。Plan、Work和Verif
 user changes Action status/comments
 -> webhook wakes Root Reconciliation
 -> fresh read complete Action and Root Tree, including archived Issues
--> validate and persist HumanActionResolutionRecord
--> read back resolution
--> rebuild complete Root Tree containing request, comments and resolution
--> advance the same Root Reconciler thread, or a fresh one after recovery
+-> derive delta from the current session baseline
+-> advance the same Root Reconciler thread with delta, or bootstrap a fresh one after recovery
 -> Root Reconciler chooses the next directive
+-> if valid, materialize and read back HumanActionResolutionRecord with the directive
 ```
 
-Conductor不硬编码“Approved后执行Work”或“Rejected后replan”。具体下一步必须由Root Reconciler基于完整Tree决定，
-但Conductor仍机械执行Plan Contract、permission、budget和status合法性约束。
+Conductor不硬编码“Approved后执行Work”或“Rejected后replan”。具体下一步必须由Root Reconciler基于thread baseline
+和本轮delta决定，但Conductor仍机械执行Plan Contract、permission、budget和status schema约束。
 
 ## 9. Plan review durable facts
 
@@ -240,30 +240,30 @@ Plan Result durable
 -> Conductor creates Cycle child Action linked to Plan
 
 Approved resolution durable
--> complete Root Tree to Root Reconciler
+-> resolution enters the next Root delta
 -> Root Reconciler may materialize proposed DAG and continue Work
 
 Rejected resolution with reason durable
--> complete Root Tree to Root Reconciler
+-> resolution enters the next Root delta
 -> Root Reconciler may supersede old Contract and request a fresh Plan turn
 -> fresh Plan Result has new execution ID and Contract digest
 -> any new review uses a new Action
 ```
 
 旧Contract、旧Action、reason、supersession和所有Result永久保留。原生archive可以把不再active的Plan/Action
-移出active Tree，但每次Root Reconciler observation仍必须包含它们。
+移出active Tree，但archive/current value必须进入下一份delta；fresh session bootstrap仍包含它们。
 
 ## 10. Permission与capability
 
 Permission Action description必须定义resource、operation、scope、有效边界、风险和拒绝影响。批准只产生
 closed grant；不能扩大产品本身不支持的capability、读取secret或变成任意shell/tool许可。
 
-Permission resolution进入完整Tree后由Root Reconciler选择下一步。Conductor只在matching turn request中授予精确
+Permission resolution进入下一份delta后由Root Reconciler选择下一步。Conductor只在matching turn request中授予精确
 capability，并再次验证当前Root/Cycle/target和grant digest。
 
 ## 11. Archive、stale与冲突
 
-- archived Action和linked archived targets始终进入完整Tree；
+- archived Action和linked archived targets始终进入Conductor完整读取、Root delta或fresh bootstrap；
 - archive不是resolution，不能把Todo/In Progress视为Canceled；
 - restore不是reopen，不能重放旧resolution；
 - stale status/comment、非Human actor、旧proposal digest、重复terminal transition不推进workflow；

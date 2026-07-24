@@ -105,8 +105,9 @@ runtime-logs
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
 `RootReconciliationView`和`WorkflowRootTreeSnapshot`只存在于内存。
 
-`root-reconciliation`拥有只验证ownership、lifecycle、budget和convergence不变量的`RootInvariantPolicyInterface`；
-`root-reconciler-client`构造完整Root observation并调用Performer；
+`root-reconciliation`拥有只验证ownership、coverage、schema、capability、budget和convergence边界的
+`RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
+`root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
 `root-directive-materialization`验证和执行closed directive；`performer-agent-client`拥有Root Reconciler和三个
 Stage role session/turn
 transport。`workflow-events`只发布typed timeline event，`timeline-projections`只渲染和写Root/Cycle timeline；
@@ -147,7 +148,7 @@ backends/<provider>/<Provider>BackendImpl.py
 `ProviderBackendInterface`和registry属于Performer内部，不进入跨角色contracts。
 `CodexTurnSettings`是批准的产品DTO；Codex SDK类型、login handle、auth/account payload
 和SDK参数映射仍只能存在于`CodexBackendImpl`。
-Root Reconciler observation和Stage turn request可以携带approved `CodexTurnSettings`；不能携带任意Provider
+Root Reconciler bootstrap/delta和Stage turn request可以携带approved `CodexTurnSettings`；不能携带任意Provider
 config map。Root Reconciler和三个Stage role session及Provider thread mapping只存在于Performer
 `session_runtime`。
 
@@ -190,7 +191,7 @@ TypeScript：
 
 ```text
 LinearGatewayInterface.ts
-RootInvariantPolicyInterface.ts
+RootSafetyPolicyInterface.ts
 RootReconcilerClientInterface.ts
 RootDirectiveMaterializerInterface.ts
 RootReconcilerReplyWriterInterface.ts

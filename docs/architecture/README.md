@@ -29,8 +29,8 @@ Performer Python runtime
 ```text
 Root Reconciler
   model-driven ReAct in Performer
-  observes the complete active + archived Root Tree
-  handles human comments and replies
+  receives one complete bootstrap, then strict Root deltas
+  handles every user Linear change and comment reply
   spans all Cycles
   proposes the next closed directive
 ```
@@ -43,9 +43,10 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - Linear Issue Tree、custom status、原生archive flag和managed records是Workflow authority，Git是code/delivery
   authority；
 - Conductor不保存Workflow DB、Root Queue、DAG mirror、durable event queue、gate table或checkpoint；
-- Conductor host不运行模型，只执行ownership、status、budget、convergence、materialization和delivery；
+- Conductor host不运行模型，只执行ownership、coverage、schema、capability、budget、convergence、materialization和delivery；
 - Root/Cycle下一步语义只来自matching Root Reconciler的closed `RootDirective`；
-- Root Reconciler读取完整active和archived Root Tree，但不直接调用Linear、Git或Conductor；
+- fresh Root Reconciler session接收一次完整active和archived Root bootstrap；后续turn只接收严格连续的Root delta；
+- 所有用户status、content、archive、parent、relation和comment修改都由Root Reconciler解释，Conductor不主动纠正；
 - Plan、Work、Verify通过强类型request/result contract报告事实，不决定下一步或创建Human Action；
 - Conductor始终是Performer caller；Performer只响应closed command，不反向调用Conductor；
 - Cycle Human Action是Cycle直接子Issue并link目标；Root Action是Root直接子Issue；
@@ -69,11 +70,11 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 | Conductor Binding和Repository Context | `podium.db` | Podium Desktop |
 | Root routing和Project Conductor Pool | Linear labels | Podium / Conductor |
 | Root ownership、Profile和convergence policy | Root managed records | Conductor |
-| Root/Cycle/Node status与archive membership | Linear | Conductor reconciles |
+| Root/Cycle/Node status与archive membership | Linear | Root Reconciler interprets; Conductor materializes directives |
 | Cycle DAG、relations、Plan Contract和Human Action | Linear Issue Tree | Root Reconciler proposes; Conductor writes |
 | Root directives和Plan/Work/Verify Results | Linear managed records | Conductor validates |
 | Human status/comments/resolutions | Linear | Human / Conductor / Root Reconciler |
-| 用户comment disposition与reply | Linear managed comments | Root Reconciler proposes; directive materializer writes |
+| 用户comment input与reply | Linear managed comments | Root Reconciler interprets; directive materializer writes |
 | branch、commits、diff、checks和delivery | Git | Conductor / Performer Work |
 | Provider auth/session runtime | Profile `CODEX_HOME` and live Performer | Codex SDK / Performer |
 | Root/Cycle user timeline | Linear comments | Timeline subscribers |
@@ -90,15 +91,17 @@ online/offline，并提供Conductor/Profile配置与脱敏运行日志。
 ## 4. 调用与恢复
 
 ```text
-Conductor -> advanceRootReconciler(complete Root observation) -> Performer
-Conductor <- RootDirective                                   <- Performer
+Conductor -> openRootReconciler(complete bootstrap once)     -> Performer
+Conductor <- RootReconcilerOpenedResult + initial directive <- Performer
+Conductor -> advanceRootReconciler(strict RootDelta)     -> Performer
+Conductor <- RootDirective                               <- Performer
 
 Conductor -> executePlan|Work|Verify(strong request)     -> Performer
 Conductor <- Plan|Work|VerifyResult                      <- Performer
 ```
 
-Result先持久化，再进入Root Reconciler下一轮observation。Performer/session丢失不回滚durable facts；Conductor从完整
-Tree打开fresh matching role thread。旧session output因digest或remote version不匹配而失效。
+Result先持久化，再进入Root Reconciler下一份delta。Performer/session丢失不回滚durable facts；Conductor从完整Tree
+bootstrap fresh matching role thread。旧session output因digest或remote version不匹配而失效。
 
 ## 5. 时间轴
 
@@ -131,8 +134,8 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 
 ## 7. 文档导航
 
-- [Root Reconciliation](root-reconciliation.md)：唯一语义Reconciler、完整Root Tree、用户comment回复、
-  `RootDirective`、Root/Cycle revision和确定性materialization。
+- [Root Reconciliation](root-reconciliation.md)：唯一语义Reconciler、bootstrap/delta、全部用户Linear输入与回复、
+  `RootDirective`、Root/Cycle用户修改和确定性materialization。
 - [Performer Plan、Work与Verify Contracts](stage-orchestration.md)：三个role thread的强类型request/result。
 - [Root与Cycle Workflow Timeline](workflow-timeline.md)：事件发布、订阅和Linear comment投影。
 - [Human Action交互与恢复](human-actions.md)：Issue层级、labels、专用状态和resolution。

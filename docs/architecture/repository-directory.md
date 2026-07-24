@@ -59,9 +59,9 @@ apps/conductor/
     │       └── LinearPriorityRootSchedulingPolicyImpl.ts
     ├── root-reconciliation/
     │   ├── api/
-    │   │   └── RootInvariantPolicyInterface.ts
+    │   │   └── RootSafetyPolicyInterface.ts
     │   └── internal/
-    │       └── LinearRootInvariantPolicyImpl.ts
+    │       └── LinearRootSafetyPolicyImpl.ts
     ├── root-reconciler-client/
     │   ├── api/
     │   │   └── RootReconcilerClientInterface.ts

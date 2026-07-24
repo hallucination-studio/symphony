@@ -205,14 +205,14 @@ run-marker digest和确认词，将Root置为Canceled并做Project、marker、pa
 
 | 故障 | Runtime动作 | Workflow恢复 |
 |---|---|---|
-| role session/turn启动失败 | 释放permit，记录Problem | 写attempt terminal record并交给Root Reconciler/gate |
+| role session/turn启动失败 | 释放permit，记录Problem | 写attempt terminal record并进入Root delta或fresh bootstrap |
 | Linear mutation上限到达 | 拒绝mutation，结束turn后释放permit、read-back | 从fresh Linear/Git重建并继续 |
 | heartbeat停止/硬wall-time耗尽 | cancel active turn、terminate、read-back | 保留reservation并把事实交给Root Reconciler |
 | transport在terminal Result前中断 | 终止turn、释放permit、read-back | 使用已持久化事实或fresh role session |
 | terminal Result重复/迟到 | 以execution identity与precondition拒绝旧Result | Workflow facts不变 |
 | Linear 429 | bounded backoff，释放超时permit | 下次full-read继续 |
 | mutation unconfirmed | semantic read-back | 以read-back事实继续 |
-| Git HEAD变化 | 拒绝旧Result/mutation | fresh observation/turn重新审计Git |
+| Git HEAD变化 | 拒绝旧Result/mutation | fresh Root delta或bootstrap重新审计Git |
 | Host/Conductor crash | replacement前证明旧tree退出 | full-read所有Roots/Git |
 | upgrade失败 | 保留旧完整bundle | Workflow不变 |
 | cleanup证明不足 | 不删除 | Root/branch保持可恢复 |

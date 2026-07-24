@@ -46,11 +46,11 @@ worktree，保留未提交修改；identity冲突使matching Root fail closed并
 
 Root In Review表示代码已经以PR或branch交付。只有用户或外部SCM/Linear automation把Root置为Done。
 
-Root/Work内容没有变化时不继续修改branch。外部review changes、新工作或verified HEAD失效时，Root回到
-In Progress并创建successor Cycle；继续复用同一branch/worktree，在新Cycle中重新Plan、审批、执行delta
-Work DAG和Verify，随后重新delivery。
+Root/Work内容没有变化时不继续修改branch。外部review changes、新工作或verified HEAD失效作为下一份Root delta；
+Root Reconciler决定保持状态、回到In Progress、创建Cycle、重新Plan或请求Human Action。若directive继续执行，仍
+复用同一branch/worktree，并在matching Cycle中完成Plan、审批、Work和Verify后重新delivery。
 
-Done/Canceled Root不自动重开。
+Done/Canceled Root不能由Conductor自动重开；保持terminal、重开或修复必须来自Root Reconciler directive。
 
 ## 6. Cleanup
 
