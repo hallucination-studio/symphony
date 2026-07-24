@@ -119,7 +119,8 @@ test("retired Conductor turn observation surfaces are rejected", () => {
 
 test("approved managed evidence vocabulary is inside the active boundary", () => {
   for (const [file, source] of [
-    ["apps/conductor/src/root-reconciliation/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {}"],
+    ["apps/conductor/src/root-reconciliation/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {} interface EvidenceReference {}"],
+    ["apps/conductor/src/root-reconciliation/internal/ManagedRecordCodec.ts", "function decodeEvidenceReference() {} function encodeEvidenceReference() {}"],
     ["apps/conductor/src/root-reconciliation/internal/RootInvariantPolicy.ts", "interface RootSelectionEvidence {}"],
   ]) {
     assert.deepEqual(inspectAuthoredFile(file, source), []);

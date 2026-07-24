@@ -240,18 +240,19 @@
     "CycleObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_issue", "predecessor_cycle_issue_id", "cycle_status", "is_archived", "issues", "relations", "plan_results", "work_results", "verify_results", "findings", "human_action_records", "human_action_resolutions"],
+      "required": ["cycle_issue", "predecessor_cycle_issue_id", "cycle_status", "is_archived", "issues", "relations", "plan_results", "plan_completed_results", "work_results", "verify_results", "findings", "human_action_records", "human_action_resolutions"],
       "properties": {
         "cycle_issue": { "$ref": "#/$defs/IssueSnapshot" },
         "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "cycle_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
         "is_archived": { "type": "boolean" },
-        "active_plan_contract": { "$ref": "#/$defs/PlanContract" },
+        "active_plan_contract": { "$ref": "#/$defs/CanonicalPlanContract" },
         "budget": { "$ref": "#/$defs/BudgetSnapshot" },
         "outcome": { "$ref": "#/$defs/RecordReference" },
         "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
         "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
         "plan_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
+        "plan_completed_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/PlanCompletedResultRecord" } },
         "work_results": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RecordReference" } },
         "verify_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
         "findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } },
@@ -335,7 +336,7 @@
     "IssueDetached": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "plan_issue_id", "plan_contract_digest"],
       "properties": {
         "kind": { "const": "issue_detached" },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -419,6 +420,62 @@
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
+    "PlanContractCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "plan_issue_id", "plan_contract"],
+      "properties": {
+        "kind": { "const": "plan_contract_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "const": "symphony" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_contract": { "$ref": "#/$defs/CanonicalPlanContract" }
+      }
+    },
+    "PlanCompletedResultCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "plan_completed_result"],
+      "properties": {
+        "kind": { "const": "plan_completed_result_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "const": "symphony" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "plan_completed_result": { "$ref": "#/$defs/PlanCompletedResultRecord" }
+      }
+    },
+    "PlanContractRemoved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "plan_issue_id", "plan_contract_digest"],
+      "properties": {
+        "kind": { "const": "plan_contract_removed" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "const": "symphony" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "PlanCompletedResultRemoved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "result_id"],
+      "properties": {
+        "kind": { "const": "plan_completed_result_removed" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "const": "symphony" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "result_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
     "GitFactsCurrentValue": {
       "type": "object",
       "additionalProperties": false,
@@ -451,6 +508,8 @@
         { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
         { "$ref": "#/$defs/RelationCurrentValue" }, { "$ref": "#/$defs/RelationRemoved" },
         { "$ref": "#/$defs/ManagedRecordCurrentValue" }, { "$ref": "#/$defs/ManagedRecordRemoved" },
+        { "$ref": "#/$defs/PlanContractCurrentValue" }, { "$ref": "#/$defs/PlanCompletedResultCurrentValue" },
+        { "$ref": "#/$defs/PlanContractRemoved" }, { "$ref": "#/$defs/PlanCompletedResultRemoved" },
         { "$ref": "#/$defs/GitFactsCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" }
       ]
     },
@@ -620,7 +679,7 @@
     "SupersedeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "current_cycle_issue_id", "reason", "invalidated_execution_ids", "unresolved_finding_ids", "preserved_evidence_refs", "successor"], "properties": { "kind": { "const": "supersede_cycle" }, "current_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_contract_changed", "cycle_change_not_absorbable", "no_safe_replan"] }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor": { "$ref": "#/$defs/SuccessorPlan" } } },
     "SuccessorPlan": { "type": "object", "additionalProperties": false, "required": ["create", "plan_trigger", "inherited_fact_refs"], "properties": { "create": { "const": true }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "CreateCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "plan_trigger", "inherited_fact_refs", "invalidated_delivery_refs"], "properties": { "kind": { "const": "create_cycle" }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["initial", "root_contract_changed", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"] }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "invalidated_delivery_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "RequestHumanActionDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "parent_scope", "root_issue_id", "action_kind", "title", "description", "related_issue_ids", "requested_decision", "options", "comment_required", "evidence_refs"], "properties": { "kind": { "const": "request_human_action" }, "parent_scope": { "enum": ["root", "cycle"] }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "requested_decision": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "comment_required": { "type": "boolean" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "RequestHumanActionDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "parent_scope", "root_issue_id", "action_kind", "title", "description", "related_issue_ids", "proposal_digest", "expected_parent_remote_version", "requested_decision", "options", "comment_required", "evidence_refs"], "properties": { "kind": { "const": "request_human_action" }, "parent_scope": { "enum": ["root", "cycle"] }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "proposal_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "expected_parent_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "requested_decision": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "comment_required": { "type": "boolean" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "ConcludeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "conclusion", "completed_work_ids", "unresolved_finding_ids", "attempted_approach_refs", "verification_evidence_refs"], "properties": { "kind": { "const": "conclude_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "conclusion": { "enum": ["succeeded", "repair_required", "exhausted", "canceled"] }, "completed_work_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "attempted_approach_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "verification_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor_recommendation": { "$ref": "#/$defs/SuccessorPlan" } } },
     "ConcludeRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "conclusion", "evidence_refs"], "properties": { "kind": { "const": "conclude_root" }, "conclusion": { "const": "ready_for_delivery" }, "evidence_refs": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "CancelRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "invalidated_execution_ids", "preserved_fact_refs"], "properties": { "kind": { "const": "cancel_root" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "active_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "invalidated_execution_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
@@ -641,7 +700,9 @@
     "PlanVerifyNode": { "type": "object", "additionalProperties": false, "required": ["title", "acceptance_criteria", "required_checks"], "properties": { "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
     "PlanContract": { "type": "object", "additionalProperties": false, "required": ["objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements"], "properties": { "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "included_scope": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "excluded_scope": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
     "PlanDag": { "type": "object", "additionalProperties": false, "required": ["work_nodes", "dependency_edges", "verify_node"], "properties": { "work_nodes": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/PlanWorkNode" } }, "dependency_edges": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RelationSnapshot" } }, "verify_node": { "$ref": "#/$defs/PlanVerifyNode" } } },
+    "CanonicalPlanContract": { "type": "object", "additionalProperties": false, "required": ["kind", "version", "root_issue_id", "cycle_issue_id", "plan_contract_digest", "objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements", "proposed_work_dag"], "properties": { "kind": { "const": "plan_contract" }, "version": { "const": 1 }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "included_scope": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "excluded_scope": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" } } },
     "PlanCompletedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"], "properties": { "kind": { "const": "plan_completed" }, "plan_contract": { "$ref": "#/$defs/PlanContract" }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" }, "risks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "required_permissions": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "PlanCompletedResultRecord": { "type": "object", "additionalProperties": false, "required": ["result_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "summary", "completed_at", "plan_contract_digest", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"], "properties": { "result_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "node_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "plan_contract": { "$ref": "#/$defs/PlanContract" }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" }, "risks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "required_permissions": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "PlanNeedsInformationResult": { "type": "object", "additionalProperties": false, "required": ["kind", "missing_questions", "impact", "evidence_refs"], "properties": { "kind": { "const": "plan_needs_information" }, "missing_questions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "impact": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "PlanBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "attempts", "evidence_refs"], "properties": { "kind": { "const": "plan_blocked" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "WorkTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "current_active_work_dag", "selected_work", "completed_work_evidence", "prior_turn_results", "human_resolutions", "git_baseline", "workspace_capability"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "current_active_work_dag": { "$ref": "#/$defs/PlanDag" }, "selected_work": { "$ref": "#/$defs/IssueSnapshot" }, "completed_work_evidence": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/EvidenceRef" } }, "prior_turn_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "git_baseline": { "$ref": "#/$defs/GitFacts" }, "workspace_capability": { "enum": ["workspace_write"] } } },

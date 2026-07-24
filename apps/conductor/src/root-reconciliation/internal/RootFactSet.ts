@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { parseManagedRecord } from "../api/index.js";
-import type { ManagedRecord } from "../api/ManagedRecords.js";
+import type {
+  ManagedRecord,
+  PlanContract,
+  StageResultRecord,
+} from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type {
   HumanActionKind,
@@ -17,6 +21,7 @@ import type {
   RootFactRelation,
   RootGitFacts,
   RootHumanActionRecord,
+  RootPlanCompletedResult,
   RootRecordReference,
   RootReconciliationView,
   RootSourceManifestEntry,
@@ -57,6 +62,10 @@ export function buildRootFactSet(input: {
   }
 
   const managedRecords: RootRecordReference[] = [];
+  const managedRecordComments: Array<{
+    comment: LinearWorkflowTreeSnapshot["comments"][number];
+    record: ManagedRecord;
+  }> = [];
   const userComments: RootFactComment[] = [];
   for (const comment of input.tree.comments) {
     if (comment.body.startsWith("<!-- symphony managed-record\n")) {
@@ -64,6 +73,7 @@ export function buildRootFactSet(input: {
       if (!parsed.ok) throw new Error(`root_managed_record_invalid:${parsed.error}`);
       const record = recordReference(parsed.value, comment.remote_version);
       managedRecords.push(record);
+      managedRecordComments.push({ comment, record: parsed.value });
       add(entries, `linear_record:${record.recordId}`, {
         kind: "managed_record_current_value",
         sourceId: record.recordId,
@@ -72,6 +82,27 @@ export function buildRootFactSet(input: {
         observedAt: comment.updated_at,
         record,
       });
+      if (parsed.value.kind === "plan_contract") {
+        add(entries, `linear_plan_contract:${comment.comment_id}`, {
+          kind: "plan_contract_current_value",
+          sourceId: comment.comment_id,
+          sourceVersion: comment.remote_version,
+          actorKind: "symphony",
+          observedAt: comment.updated_at,
+          planIssueId: comment.issue_id,
+          planContract: parsed.value,
+        });
+      }
+      if (isCompletedPlanResult(parsed.value)) {
+        add(entries, `linear_plan_completed_result:${comment.comment_id}`, {
+          kind: "plan_completed_result_current_value",
+          sourceId: comment.comment_id,
+          sourceVersion: comment.remote_version,
+          actorKind: "symphony",
+          observedAt: comment.updated_at,
+          planCompletedResult: planCompletedResult(parsed.value),
+        });
+      }
       continue;
     }
     if (comment.managed_marker || comment.author_kind === "symphony") continue;
@@ -121,7 +152,7 @@ export function buildRootFactSet(input: {
 
   const cycles = input.tree.issues
     .filter((issue) => issue.issue_kind === "cycle")
-    .map((cycle) => cycleObservation(cycle, input.tree, issues, managedRecords));
+    .map((cycle) => cycleObservation(cycle, input.tree, issues, managedRecordComments));
   const delivery = managedRecords.find(({ recordKind }) => recordKind === "delivery") ?? noneRecord("delivery");
   const snapshot: RootBootstrapSnapshot = {
     root: {
@@ -206,7 +237,7 @@ function sourceManifestEntry(change: RootDeltaChange): RootSourceManifestEntry {
   const sourceKind = change.kind.startsWith("issue_") ? "linear_issue"
     : change.kind.startsWith("comment_") ? "linear_comment"
       : change.kind.startsWith("relation_") ? "linear_relation"
-        : change.kind.startsWith("managed_record_") ? "linear_comment"
+        : change.kind.startsWith("managed_record_") || change.kind.startsWith("plan_") ? "linear_comment"
         : change.kind === "git_facts_current_value" ? "git" : "linear_issue";
   return { sourceKind, sourceId: change.sourceId, versionOrDigest: change.sourceVersion, actorKind: change.actorKind };
 }
@@ -222,6 +253,23 @@ function tombstone(change: RootDeltaChange): RootDeltaChange {
   if (change.kind.startsWith("comment_")) return { ...base, kind: "comment_removed" };
   if (change.kind.startsWith("relation_")) return { ...base, kind: "relation_removed" };
   if (change.kind.startsWith("managed_record_")) return { ...base, kind: "managed_record_removed" };
+  if (change.kind === "plan_contract_current_value") {
+    return {
+      ...base,
+      kind: "plan_contract_removed",
+      cycleIssueId: change.planContract.cycleIssueId,
+      planIssueId: change.planIssueId,
+      planContractDigest: change.planContract.planContractDigest,
+    };
+  }
+  if (change.kind === "plan_completed_result_current_value") {
+    return {
+      ...base,
+      kind: "plan_completed_result_removed",
+      cycleIssueId: change.planCompletedResult.cycleIssueId,
+      resultId: change.planCompletedResult.resultId,
+    };
+  }
   return { ...base, kind: "mechanical_violations_current_value", mechanicalViolations: [] };
 }
 
@@ -267,7 +315,10 @@ function cycleObservation(
   cycle: LinearWorkflowTreeSnapshot["issues"][number],
   tree: LinearWorkflowTreeSnapshot,
   issues: RootFactIssue[],
-  records: RootRecordReference[],
+  managedRecordComments: Array<{
+    comment: LinearWorkflowTreeSnapshot["comments"][number];
+    record: ManagedRecord;
+  }>,
 ) {
   const descendants = new Set<string>();
   for (const issue of tree.issues) {
@@ -305,19 +356,79 @@ function cycleObservation(
       actorKind: value.actorKind,
       resolvedAt: value.resolvedAt,
     }));
+  const planResults = managedRecordComments.flatMap((entry) =>
+    isCompletedPlanResult(entry.record) &&
+    entry.record.rootIssueId === tree.root_issue_id &&
+    entry.record.cycleIssueId === cycle.issue_id &&
+    descendants.has(entry.record.nodeIssueId)
+      ? [{ comment: entry.comment, record: entry.record }]
+      : [],
+  );
+  const activePlanIssueIds = new Set(tree.issues
+    .filter((issue) => issue.parent_issue_id === cycle.issue_id && issue.issue_kind === "plan" && !issue.is_archived && issue.status_name === "In Review")
+    .map(({ issue_id }) => issue_id));
+  const activePlanContracts = managedRecordComments
+    .filter((entry): entry is { comment: LinearWorkflowTreeSnapshot["comments"][number]; record: PlanContract } =>
+      entry.record.kind === "plan_contract" &&
+      entry.record.rootIssueId === tree.root_issue_id &&
+      entry.record.cycleIssueId === cycle.issue_id &&
+      activePlanIssueIds.has(entry.comment.issue_id),
+    )
+    .sort((left, right) => right.comment.updated_at.localeCompare(left.comment.updated_at) || right.comment.comment_id.localeCompare(left.comment.comment_id));
   return {
     cycleIssue: toFactIssue(cycle),
     predecessorCycleIssueId: cycle.parent_issue_id ?? "none",
     cycleStatus: cycle.status_name as RootFactIssue["status"],
     isArchived: cycle.is_archived,
+    ...(activePlanContracts[0] ? { activePlanContract: activePlanContracts[0].record } : {}),
     issues: cycleIssues,
     relations: cycleRelations,
-    planResults: records.filter((record) => record.recordKind === "stage_result" && cycleIssues.some(({ issueId }) => record.recordId.includes(issueId))),
+    planResults: planResults.map(({ comment, record }) => recordReference(record, comment.remote_version)),
+    planCompletedResults: planResults.map(({ record }) => planCompletedResult(record)),
     workResults: [],
     verifyResults: [],
     findings: [],
     humanActionRecords,
     humanActionResolutions,
+  };
+}
+
+type CompletedPlanManagedRecord = StageResultRecord & {
+  outcomeKind: "plan_completed";
+  planContractDigest: string;
+  planContract: NonNullable<StageResultRecord["planContract"]>;
+  proposedWorkDag: NonNullable<StageResultRecord["proposedWorkDag"]>;
+  risks: string[];
+  requiredPermissions: string[];
+  evidenceRefs: NonNullable<StageResultRecord["evidenceRefs"]>;
+};
+
+function isCompletedPlanResult(record: ManagedRecord): record is CompletedPlanManagedRecord {
+  return record.kind === "stage_result" &&
+    record.stage === "plan" &&
+    record.outcomeKind === "plan_completed" &&
+    record.planContractDigest !== undefined &&
+    record.planContract !== undefined &&
+    record.proposedWorkDag !== undefined &&
+    record.risks !== undefined &&
+    record.requiredPermissions !== undefined &&
+    record.evidenceRefs !== undefined;
+}
+
+function planCompletedResult(record: CompletedPlanManagedRecord): RootPlanCompletedResult {
+  return {
+    resultId: record.resultId,
+    rootIssueId: record.rootIssueId,
+    cycleIssueId: record.cycleIssueId,
+    nodeIssueId: record.nodeIssueId,
+    summary: record.summary,
+    completedAt: record.completedAt,
+    planContractDigest: record.planContractDigest,
+    planContract: record.planContract,
+    proposedWorkDag: record.proposedWorkDag,
+    risks: record.risks,
+    requiredPermissions: record.requiredPermissions,
+    evidenceRefs: record.evidenceRefs,
   };
 }
 

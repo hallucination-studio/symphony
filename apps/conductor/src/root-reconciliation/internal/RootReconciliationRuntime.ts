@@ -183,9 +183,7 @@ export class RootReconciliationRuntime {
       if (materialization.kind === "failed") return "needs-attention";
       const resumedSession = this.sessions.get(root.issueId);
       if (resumedSession) await this.closeSessionsAfterDirective(resumable.directive, root, resumedSession.sessionId);
-      return resumable.directive.action.kind === "wait" || resumable.directive.action.kind === "request_human_action"
-        ? "waiting-human"
-        : "progress";
+      return dispositionAfterDirective(resumable.directive, await this.dependencies.linear.readWorkflowIssueTree(root.issueId));
     }
     const limits = reconcilerLimits();
     const currentSession = this.sessions.get(root.issueId);
@@ -263,9 +261,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     await this.closeSessionsAfterDirective(result.directive, root, sessionId);
-    return result.directive.action.kind === "wait" || result.directive.action.kind === "request_human_action"
-      ? "waiting-human"
-      : "progress";
+    return dispositionAfterDirective(result.directive, await this.dependencies.linear.readWorkflowIssueTree(root.issueId));
   }
 
   private async finishDirective(
@@ -698,6 +694,18 @@ function statusCode(statusName: string): "in_progress" | "in_review" | "done" | 
   return "canceled";
 }
 
+function dispositionAfterDirective(
+  directive: RootDirective,
+  tree: RootReconciliationView["tree"],
+): RootRuntimeDisposition {
+  if (directive.action.kind === "wait") return "waiting-human";
+  if (directive.action.kind !== "request_human_action") return "progress";
+  const action = tree.issues.find(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:human-action`);
+  return action && !action.is_archived && ["Todo", "In Progress"].includes(action.status_name)
+    ? "waiting-human"
+    : "progress";
+}
+
 function findResumableDirective(
   tree: RootReconciliationView["tree"],
   rootIssueId: string,
@@ -725,7 +733,27 @@ function directiveMaterializationComplete(directive: RootDirective, tree: RootRe
   const action = directive.action;
   if (action.kind === "wait" || action.kind === "acknowledge") return true;
   if (action.kind === "request_human_action") {
-    return tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:human-action`);
+    const marker = `${directive.rootDirectiveId}:human-action`;
+    const humanAction = tree.issues.find(({ managed_marker }) => managed_marker === marker);
+    if (!humanAction) return false;
+    if (!action.relatedIssueIds.every((relatedIssueId) => tree.relations.some((relation) =>
+      relation.relation_kind === "relates_to" && relation.source_issue_id === humanAction.issue_id && relation.target_issue_id === relatedIssueId,
+    ))) return false;
+    return tree.comments.some((comment) => {
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "human_action_request" &&
+        parsed.value.actionId === marker &&
+        parsed.value.actionIssueId === humanAction.issue_id &&
+        parsed.value.actionKind === action.actionKind &&
+        parsed.value.parentScope === action.parentScope &&
+        parsed.value.rootIssueId === action.rootIssueId &&
+        parsed.value.cycleIssueId === action.cycleIssueId &&
+        sameIds(parsed.value.relatedIssueIds, action.relatedIssueIds) &&
+        parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
+        parsed.value.basedOnTreeDigest === directive.basedOnTargetRootDigest &&
+        parsed.value.proposalDigest === action.proposalDigest &&
+        parsed.value.expectedParentRemoteVersion === action.expectedParentRemoteVersion;
+    });
   }
   if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify") {
     const role = action.kind === "execute_plan" ? "plan" : action.kind === "execute_work" ? "work" : "verify";

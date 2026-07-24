@@ -155,6 +155,10 @@ RootDeltaChange =
   RelationRemoved |
   ManagedRecordCurrentValue |
   ManagedRecordRemoved |
+  PlanContractCurrentValue |
+  PlanCompletedResultCurrentValue |
+  PlanContractRemoved |
+  PlanCompletedResultRemoved |
   GitFactsCurrentValue |
   MechanicalViolationsCurrentValue
 ```
@@ -165,6 +169,12 @@ description变化发送新的完整description；comment新增或编辑发送新
 明确tombstone。`base_root_digest`必须精确等于该session已确认baseline，`target_root_digest`必须等于Conductor本轮
 fresh完整读取计算出的digest。delta本身必须足以把session内的base facts严格推进到target facts，不发送完整target
 source manifest。
+
+`PlanContractCurrentValue`携带canonical immutable Contract和它所属Plan Issue；`PlanCompletedResultCurrentValue`
+携带完整Plan Result、proposed DAG、risk、permission和evidence。它们让Root Reconciler能够在不读取Linear、也不依赖
+仅有record reference的情况下判断Plan review和后续directive。对应comment仍同时以`ManagedRecordCurrentValue`
+作为通用record identity进入snapshot；这不是两份durable fact，而是同一Linear comment的reference和closed semantic value，
+必须具有相同source identity/version。comment消失时，两个Plan tombstone按各自identity删除对应baseline facts。
 
 Conductor每轮仍完整读取Linear/Git，但完整Tree只在Conductor内存中用于coverage、按source version/hash计算diff和
 precondition校验；正常

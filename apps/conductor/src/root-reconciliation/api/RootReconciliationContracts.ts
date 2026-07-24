@@ -1,6 +1,11 @@
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { EvidenceReference, PlanContractProposal, ProposedWorkDag } from "./ManagedRecords.js";
+import type {
+  EvidenceReference,
+  PlanContract,
+  PlanContractProposal,
+  ProposedWorkDag,
+} from "./ManagedRecords.js";
 import type { DiscoveredRoot } from "./RootModels.js";
 
 export type RootTree = LinearWorkflowTreeSnapshot;
@@ -107,17 +112,33 @@ export interface RootBudgetSnapshot {
   tokensRemaining: number;
 }
 
+export interface RootPlanCompletedResult {
+  resultId: string;
+  rootIssueId: string;
+  cycleIssueId: string;
+  nodeIssueId: string;
+  summary: string;
+  completedAt: string;
+  planContractDigest: string;
+  planContract: PlanContractProposal;
+  proposedWorkDag: ProposedWorkDag;
+  risks: string[];
+  requiredPermissions: string[];
+  evidenceRefs: EvidenceReference[];
+}
+
 export interface RootCycleObservation {
   cycleIssue: RootFactIssue;
   predecessorCycleIssueId: string;
   cycleStatus: LinearFactState;
   isArchived: boolean;
-  activePlanContract?: RootRecordReference;
+  activePlanContract?: PlanContract;
   budget?: RootBudgetSnapshot;
   outcome?: RootRecordReference;
   issues: RootFactIssue[];
   relations: RootFactRelation[];
   planResults: RootRecordReference[];
+  planCompletedResults: RootPlanCompletedResult[];
   workResults: RootRecordReference[];
   verifyResults: RootRecordReference[];
   findings: RootFinding[];
@@ -185,6 +206,10 @@ export type RootDeltaChange =
   | (RootDeltaChangeBase & { kind: "relation_removed" })
   | (RootDeltaChangeBase & { kind: "managed_record_current_value"; record: RootRecordReference })
   | (RootDeltaChangeBase & { kind: "managed_record_removed" })
+  | (RootDeltaChangeBase & { kind: "plan_contract_current_value"; planIssueId: string; planContract: PlanContract })
+  | (RootDeltaChangeBase & { kind: "plan_completed_result_current_value"; planCompletedResult: RootPlanCompletedResult })
+  | (RootDeltaChangeBase & { kind: "plan_contract_removed"; cycleIssueId: string; planIssueId: string; planContractDigest: string })
+  | (RootDeltaChangeBase & { kind: "plan_completed_result_removed"; cycleIssueId: string; resultId: string })
   | (RootDeltaChangeBase & { kind: "git_facts_current_value"; gitFacts: RootGitFacts })
   | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] });
 
@@ -355,6 +380,8 @@ export interface RequestHumanActionDirective {
   title: string;
   description: string;
   relatedIssueIds: string[];
+  proposalDigest: string;
+  expectedParentRemoteVersion: string;
   requestedDecision: string;
   options: string[];
   commentRequired: boolean;

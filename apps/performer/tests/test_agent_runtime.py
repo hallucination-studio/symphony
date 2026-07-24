@@ -180,6 +180,53 @@ def plan_dag() -> dict[str, object]:
     }
 
 
+def canonical_plan_contract() -> dict[str, object]:
+    return {
+        "kind": "plan_contract",
+        "version": 1,
+        "root_issue_id": "root-1",
+        "cycle_issue_id": "cycle-1",
+        "plan_contract_digest": "plan-contract-1",
+        **plan_contract(),
+        "proposed_work_dag": plan_dag(),
+    }
+
+
+def completed_plan_result() -> dict[str, object]:
+    return {
+        "result_id": "plan-result-1",
+        "root_issue_id": "root-1",
+        "cycle_issue_id": "cycle-1",
+        "node_issue_id": "plan-1",
+        "summary": "The complete Plan is ready for review.",
+        "completed_at": "2026-07-23T00:00:01Z",
+        "plan_contract_digest": "plan-contract-1",
+        "plan_contract": plan_contract(),
+        "proposed_work_dag": plan_dag(),
+        "risks": [],
+        "required_permissions": [],
+        "evidence_refs": [],
+    }
+
+
+def cycle_snapshot() -> dict[str, object]:
+    return {
+        "cycle_issue": issue_snapshot("cycle"),
+        "predecessor_cycle_issue_id": "none",
+        "cycle_status": "Todo",
+        "is_archived": False,
+        "issues": [issue_snapshot("plan")],
+        "relations": [],
+        "plan_results": [],
+        "plan_completed_results": [],
+        "work_results": [],
+        "verify_results": [],
+        "findings": [],
+        "human_action_records": [],
+        "human_action_resolutions": [],
+    }
+
+
 def stage_context(role: str) -> dict[str, object]:
     if role == "plan":
         return {
@@ -277,6 +324,71 @@ def test_delta_advances_runtime_canonical_facts_and_lost_session_requires_bootst
     host._sessions.close("root-session")
     lost = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
     assert lost["code"] == "root_reconciler_bootstrap_required"
+
+
+def test_delta_retains_and_removes_canonical_plan_facts_in_the_root_baseline():
+    backend = FakeBackend()
+    host = AgentProtocolHost(backend)
+    open_request = open_root_request()
+    bootstrap = root_bootstrap()
+    bootstrap["root_snapshot"]["cycles"] = [cycle_snapshot()]
+    open_request["bootstrap"] = bootstrap
+    host.handle(open_request)
+
+    contract = canonical_plan_contract()
+    completed = completed_plan_result()
+    added = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    added["delta"]["changes"] = [
+        {
+            "kind": "plan_contract_current_value",
+            "source_id": "plan-contract-comment-1",
+            "source_version": "comment-v1",
+            "actor_kind": "symphony",
+            "observed_at": "2026-07-23T00:00:01Z",
+            "plan_issue_id": "plan-1",
+            "plan_contract": contract,
+        },
+        {
+            "kind": "plan_completed_result_current_value",
+            "source_id": "plan-result-comment-1",
+            "source_version": "comment-v1",
+            "actor_kind": "symphony",
+            "observed_at": "2026-07-23T00:00:01Z",
+            "plan_completed_result": completed,
+        },
+    ]
+    assert host.handle(added)["based_on_target_root_digest"] == "tree-2"
+    baseline = host._root._baselines["root-session"].canonical_facts
+    cycle = baseline["root_snapshot"]["cycles"][0]
+    assert cycle["active_plan_contract"]["objective"] == "Complete the cycle objective"
+    assert cycle["plan_completed_results"][0]["result_id"] == "plan-result-1"
+
+    removed = root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3")
+    removed["delta"]["changes"] = [
+        {
+            "kind": "plan_contract_removed",
+            "source_id": "plan-contract-comment-1",
+            "source_version": "comment-v1",
+            "actor_kind": "symphony",
+            "observed_at": "2026-07-23T00:00:02Z",
+            "cycle_issue_id": "cycle-1",
+            "plan_issue_id": "plan-1",
+            "plan_contract_digest": "plan-contract-1",
+        },
+        {
+            "kind": "plan_completed_result_removed",
+            "source_id": "plan-result-comment-1",
+            "source_version": "comment-v1",
+            "actor_kind": "symphony",
+            "observed_at": "2026-07-23T00:00:02Z",
+            "cycle_issue_id": "cycle-1",
+            "result_id": "plan-result-1",
+        },
+    ]
+    assert host.handle(removed)["based_on_target_root_digest"] == "tree-3"
+    cycle = host._root._baselines["root-session"].canonical_facts["root_snapshot"]["cycles"][0]
+    assert "active_plan_contract" not in cycle
+    assert cycle["plan_completed_results"] == []
 
 
 def test_host_preserves_root_provider_failure_code():

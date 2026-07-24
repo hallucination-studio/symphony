@@ -298,6 +298,23 @@ function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
   if (change.kind === "comment_current_value") return { ...base, comment: toWireComment(change.comment) };
   if (change.kind === "relation_current_value") return { ...base, relation: toWireRelation(change.relation) };
   if (change.kind === "managed_record_current_value") return { ...base, record: toWireRecordReference(change.record) };
+  if (change.kind === "plan_contract_current_value") {
+    return { ...base, plan_issue_id: change.planIssueId, plan_contract: toWireCanonicalPlanContract(change.planContract) };
+  }
+  if (change.kind === "plan_completed_result_current_value") {
+    return { ...base, plan_completed_result: toWirePlanCompletedResult(change.planCompletedResult) };
+  }
+  if (change.kind === "plan_contract_removed") {
+    return {
+      ...base,
+      cycle_issue_id: change.cycleIssueId,
+      plan_issue_id: change.planIssueId,
+      plan_contract_digest: change.planContractDigest,
+    };
+  }
+  if (change.kind === "plan_completed_result_removed") {
+    return { ...base, cycle_issue_id: change.cycleIssueId, result_id: change.resultId };
+  }
   if (change.kind === "git_facts_current_value") return { ...base, git_facts: toWireGitFacts(change.gitFacts) };
   if (change.kind === "mechanical_violations_current_value") {
     return { ...base, mechanical_violations: change.mechanicalViolations.map(toWireMechanicalViolation) };
@@ -328,17 +345,91 @@ function toWireCycleObservation(input: import("../../root-reconciliation/api/Roo
     predecessor_cycle_issue_id: input.predecessorCycleIssueId,
     cycle_status: input.cycleStatus,
     is_archived: input.isArchived,
-    ...(input.activePlanContract ? { active_plan_contract: toWireRecordReference(input.activePlanContract) } : {}),
+    ...(input.activePlanContract ? { active_plan_contract: toWireCanonicalPlanContract(input.activePlanContract) } : {}),
     ...(input.budget ? { budget: toWireBudget(input.budget) } : {}),
     ...(input.outcome ? { outcome: toWireRecordReference(input.outcome) } : {}),
     issues: input.issues.map(toWireFactIssue),
     relations: input.relations.map(toWireRelation),
     plan_results: input.planResults.map(toWireRecordReference),
+    plan_completed_results: input.planCompletedResults.map(toWirePlanCompletedResult),
     work_results: input.workResults.map(toWireRecordReference),
     verify_results: input.verifyResults.map(toWireRecordReference),
     findings: input.findings.map(toWireFinding),
     human_action_records: input.humanActionRecords.map(toWireHumanActionRecord),
     human_action_resolutions: input.humanActionResolutions.map(toWireHumanActionResolution),
+  };
+}
+
+function toWireCanonicalPlanContract(input: import("../../root-reconciliation/api/ManagedRecords.js").PlanContract): JsonRecord {
+  return {
+    kind: input.kind,
+    version: input.version,
+    root_issue_id: input.rootIssueId,
+    cycle_issue_id: input.cycleIssueId,
+    plan_contract_digest: input.planContractDigest,
+    ...toWirePlanContractProposal(input),
+    proposed_work_dag: toWirePlanDag(input.proposedWorkDag),
+  };
+}
+
+function toWirePlanCompletedResult(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootPlanCompletedResult): JsonRecord {
+  return {
+    result_id: input.resultId,
+    root_issue_id: input.rootIssueId,
+    cycle_issue_id: input.cycleIssueId,
+    node_issue_id: input.nodeIssueId,
+    summary: input.summary,
+    completed_at: input.completedAt,
+    plan_contract_digest: input.planContractDigest,
+    plan_contract: toWirePlanContractProposal(input.planContract),
+    proposed_work_dag: toWirePlanDag(input.proposedWorkDag),
+    risks: input.risks,
+    required_permissions: input.requiredPermissions,
+    evidence_refs: input.evidenceRefs.map((reference) => ({ reference_id: reference.referenceId, source_kind: reference.sourceKind })),
+  };
+}
+
+function toWirePlanContractProposal(input: import("../../root-reconciliation/api/ManagedRecords.js").PlanContractProposal): JsonRecord {
+  return {
+    objective: input.objective,
+    included_scope: input.includedScope,
+    excluded_scope: input.excludedScope,
+    assumptions: input.assumptions,
+    constraints: input.constraints,
+    acceptance_criteria: input.acceptanceCriteria.map((criterion) => ({
+      criterion_key: criterion.criterionKey,
+      statement: criterion.statement,
+      verification_method: criterion.verificationMethod,
+    })),
+    verification_requirements: input.verificationRequirements,
+  };
+}
+
+function toWirePlanDag(input: import("../../root-reconciliation/api/ManagedRecords.js").ProposedWorkDag): JsonRecord {
+  return {
+    work_nodes: input.workNodes.map((work) => ({
+      proposal_key: work.proposalKey,
+      title: work.title,
+      description: work.description,
+      expected_outcome: work.expectedOutcome,
+      required_checks: work.requiredChecks,
+      dependency_proposal_keys: work.dependencyProposalKeys,
+    })),
+    dependency_edges: input.dependencyEdges.map((relation) => ({
+      relation_id: relation.relationId,
+      relation_kind: relation.relationKind,
+      source_issue_id: relation.sourceIssueId,
+      target_issue_id: relation.targetIssueId,
+    })),
+    verify_node: {
+      title: input.verifyNode.title,
+      acceptance_criteria: input.verifyNode.acceptanceCriteria.map((criterion) => ({
+        criterion_key: criterion.criterionKey,
+        statement: criterion.statement,
+        verification_method: criterion.verificationMethod,
+      })),
+      required_checks: input.verifyNode.requiredChecks,
+    },
   };
 }
 

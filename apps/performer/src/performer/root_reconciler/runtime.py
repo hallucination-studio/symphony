@@ -179,6 +179,18 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
         if kind == "mechanical_violations_current_value":
             snapshot["mechanical_violations"] = deepcopy(change["mechanical_violations"])
             continue
+        if kind == "plan_contract_current_value":
+            _apply_plan_contract(snapshot, change)
+            continue
+        if kind == "plan_completed_result_current_value":
+            _apply_plan_completed_result(snapshot, change)
+            continue
+        if kind == "plan_contract_removed":
+            _remove_plan_contract(snapshot, change)
+            continue
+        if kind == "plan_completed_result_removed":
+            _remove_plan_completed_result(snapshot, change)
+            continue
         collection, nested_key, nested_value = _change_target(kind)
         items = snapshot.get(collection)
         if not isinstance(items, list):
@@ -191,6 +203,53 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
             snapshot["root"]["issue"] = deepcopy(change[nested_value])
     next_facts["pending_input_ids"] = deepcopy(delta["pending_input_ids"])
     return next_facts
+
+
+def _cycle(snapshot: dict[str, Any], cycle_issue_id: str) -> dict[str, Any]:
+    cycles = snapshot.get("cycles")
+    if not isinstance(cycles, list):
+        raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+    for cycle in cycles:
+        if isinstance(cycle, dict) and cycle.get("cycle_issue", {}).get("issue_id") == cycle_issue_id:
+            return cycle
+    raise RootReconcilerTurnError("root_delta_cycle_missing", "The Root delta refers to an unknown Cycle.")
+
+
+def _apply_plan_contract(snapshot: dict[str, Any], change: dict[str, Any]) -> None:
+    contract = change["plan_contract"]
+    if not isinstance(contract, dict):
+        raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+    cycle = _cycle(snapshot, _text(contract, "cycle_issue_id"))
+    cycle["active_plan_contract"] = deepcopy(contract)
+
+
+def _apply_plan_completed_result(snapshot: dict[str, Any], change: dict[str, Any]) -> None:
+    result = change["plan_completed_result"]
+    if not isinstance(result, dict):
+        raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+    cycle = _cycle(snapshot, _text(result, "cycle_issue_id"))
+    results = cycle.get("plan_completed_results")
+    if not isinstance(results, list):
+        raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+    result_id = _text(result, "result_id")
+    results[:] = [item for item in results if item.get("result_id") != result_id]
+    results.append(deepcopy(result))
+
+
+def _remove_plan_contract(snapshot: dict[str, Any], change: dict[str, Any]) -> None:
+    cycle = _cycle(snapshot, _text(change, "cycle_issue_id"))
+    active = cycle.get("active_plan_contract")
+    if isinstance(active, dict) and active.get("plan_contract_digest") == _text(change, "plan_contract_digest"):
+        cycle.pop("active_plan_contract", None)
+
+
+def _remove_plan_completed_result(snapshot: dict[str, Any], change: dict[str, Any]) -> None:
+    cycle = _cycle(snapshot, _text(change, "cycle_issue_id"))
+    results = cycle.get("plan_completed_results")
+    if not isinstance(results, list):
+        raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+    result_id = _text(change, "result_id")
+    results[:] = [item for item in results if item.get("result_id") != result_id]
 
 
 def _change_target(kind: str) -> tuple[str, str, str | None]:

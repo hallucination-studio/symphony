@@ -11,7 +11,13 @@ import {
   PersistentPerformerAgentChannelFactory,
   type PerformerAgentChannelFactory,
 } from "../internal/PerformerAgentChannel.js";
-import type { RootReconcilerOpenInput, StageTurnInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { PlanContract } from "../../root-reconciliation/api/ManagedRecords.js";
+import type {
+  RootCycleObservation,
+  RootPlanCompletedResult,
+  RootReconcilerOpenInput,
+  StageTurnInput,
+} from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import { SessionPerformerAgentClientImpl } from "../internal/SessionPerformerAgentClientImpl.js";
 
 function channelFactoryFor(
@@ -251,6 +257,119 @@ function initialDirective() {
   };
 }
 
+function waitDirective(requestId: string, digest: string, turnId: string) {
+  return {
+    protocol_version: "1",
+    request_id: requestId,
+    root_directive_id: `directive-${turnId}`,
+    reconciler_session_id: "session-1",
+    reconciler_turn_id: turnId,
+    based_on_target_root_digest: digest,
+    rationale: "Wait for the next durable fact.",
+    evidence_refs: [],
+    consumed_input_ids: [],
+    comment_replies: [],
+    human_action_resolutions: [],
+    action: { kind: "wait", reason_code: "human", blocking_fact_refs: [{ reference_id: "fact-1", source_kind: "result" }] },
+  };
+}
+
+function planFacts(): {
+  contract: PlanContract;
+  result: RootPlanCompletedResult;
+  cycle: RootCycleObservation;
+} {
+  const proposal = {
+    objective: "Persist the complete Plan Contract.",
+    includedScope: ["apps/conductor"],
+    excludedScope: [],
+    assumptions: [],
+    constraints: ["Use durable Linear facts."],
+    acceptanceCriteria: [{
+      criterionKey: "contract-persisted",
+      statement: "The complete Plan Contract is stored before review.",
+      verificationMethod: "Read the Plan Contract record.",
+    }],
+    verificationRequirements: ["npm test -w @symphony/conductor"],
+  };
+  const proposedWorkDag = {
+    workNodes: [{
+      proposalKey: "persist-contract",
+      title: "Persist the Plan Contract",
+      description: "Write the canonical Plan Contract record.",
+      expectedOutcome: "The contract can be reconstructed after restart.",
+      requiredChecks: ["managed-record-read-back"],
+      dependencyProposalKeys: [],
+    }],
+    dependencyEdges: [],
+    verifyNode: {
+      title: "Verify Plan Contract persistence",
+      acceptanceCriteria: [{
+        criterionKey: "contract-read-back",
+        statement: "The stored contract matches the Plan result.",
+        verificationMethod: "Read the Plan Contract record.",
+      }],
+      requiredChecks: ["managed-record-read-back"],
+    },
+  };
+  const contract: PlanContract = {
+    kind: "plan_contract",
+    version: 1,
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    planContractDigest: "a".repeat(64),
+    ...proposal,
+    proposedWorkDag,
+  };
+  const result: RootPlanCompletedResult = {
+    resultId: "plan-result-1",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "plan-1",
+    summary: "The complete Plan is ready for review.",
+    completedAt: "2026-07-23T00:00:01Z",
+    planContractDigest: contract.planContractDigest,
+    planContract: proposal,
+    proposedWorkDag,
+    risks: [],
+    requiredPermissions: [],
+    evidenceRefs: [],
+  };
+  const planIssue = {
+    issueId: "plan-1",
+    issueKind: "plan" as const,
+    title: "Plan",
+    description: "Review the proposed execution.",
+    status: "In Review" as const,
+    isArchived: false,
+    labels: [],
+    remoteVersion: "plan-v1",
+  };
+  return {
+    contract,
+    result,
+    cycle: {
+      cycleIssue: {
+        issueId: "cycle-1", issueKind: "cycle", title: "Cycle", description: "Current Cycle",
+        status: "In Progress", isArchived: false, labels: [], remoteVersion: "cycle-v1",
+      },
+      predecessorCycleIssueId: "none",
+      cycleStatus: "In Progress",
+      isArchived: false,
+      activePlanContract: contract,
+      issues: [planIssue],
+      relations: [],
+      planResults: [],
+      planCompletedResults: [result],
+      workResults: [],
+      verifyResults: [],
+      findings: [],
+      humanActionRecords: [],
+      humanActionResolutions: [],
+    },
+  };
+}
+
 test("agent client sends the closed direct OpenRootReconcilerRequest", async () => {
   const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
@@ -276,6 +395,68 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal("payload" in sent, false);
   assert.equal(sent.root_issue_id, "root-1");
   assert.equal(sent.performer_profile_id, "profile-1");
+});
+
+test("agent client carries canonical Plan facts in Root bootstrap and delta wires", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
+      ? {
+        protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_directive: waitDirective(requestId, "tree-1", "turn-1"),
+      }
+      : waitDirective(requestId, "tree-2", "advance-turn"), calls),
+    deadlineMs: 30_000,
+  });
+  const input = openInput();
+  const facts = planFacts();
+  input.bootstrap.rootSnapshot.cycles = [facts.cycle];
+  input.bootstrap.rootSnapshot.issues.push(facts.cycle.cycleIssue, ...facts.cycle.issues);
+
+  await client.openRootReconciler(input);
+  const bootstrap = calls[0]!.bootstrap as {
+    root_snapshot: { cycles: Array<Record<string, unknown>> };
+  };
+  const cycle = bootstrap.root_snapshot.cycles[0]!;
+  const contract = cycle.active_plan_contract as Record<string, unknown>;
+  const result = (cycle.plan_completed_results as Array<Record<string, unknown>>)[0]!;
+  assert.equal(contract.plan_contract_digest, "a".repeat(64));
+  assert.equal(contract.objective, "Persist the complete Plan Contract.");
+  assert.equal(result.result_id, "plan-result-1");
+  assert.equal((result.plan_contract as Record<string, unknown>).objective, "Persist the complete Plan Contract.");
+  assert.equal(((result.proposed_work_dag as Record<string, unknown>).work_nodes as unknown[]).length, 1);
+
+  await client.advanceRootReconciler({
+    requestId: "advance-request",
+    sessionId: "session-1",
+    reconcilerTurnId: "advance-turn",
+    observedAt: "2026-07-23T00:00:01Z",
+    delta: {
+      baseRootDigest: "tree-1",
+      targetRootDigest: "tree-2",
+      changes: [
+        {
+          kind: "plan_contract_current_value", sourceId: "plan-contract-comment-1", sourceVersion: "comment-v1",
+          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z", planIssueId: "plan-1", planContract: facts.contract,
+        },
+        {
+          kind: "plan_completed_result_current_value", sourceId: "plan-result-comment-1", sourceVersion: "comment-v1",
+          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z", planCompletedResult: facts.result,
+        },
+      ],
+      pendingInputIds: [],
+    },
+  });
+  const delta = calls[1]!.delta as { changes: Array<Record<string, unknown>> };
+  assert.equal("root_snapshot" in delta, false);
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), [
+    "plan_contract_current_value",
+    "plan_completed_result_current_value",
+  ]);
+  assert.equal(((delta.changes[0]!.plan_contract as Record<string, unknown>).proposed_work_dag as Record<string, unknown>).verify_node !== undefined, true);
+  assert.equal((delta.changes[1]!.plan_completed_result as Record<string, unknown>).summary, "The complete Plan is ready for review.");
 });
 
 test("agent client reuses one Profile channel for a Root session lifecycle", async () => {

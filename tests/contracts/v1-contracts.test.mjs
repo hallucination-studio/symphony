@@ -266,6 +266,8 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/CommentCurrentValue", "#/$defs/CommentRemoved",
     "#/$defs/RelationCurrentValue", "#/$defs/RelationRemoved",
     "#/$defs/ManagedRecordCurrentValue", "#/$defs/ManagedRecordRemoved",
+    "#/$defs/PlanContractCurrentValue", "#/$defs/PlanCompletedResultCurrentValue",
+    "#/$defs/PlanContractRemoved", "#/$defs/PlanCompletedResultRemoved",
     "#/$defs/GitFactsCurrentValue",
     "#/$defs/MechanicalViolationsCurrentValue",
   ]);
