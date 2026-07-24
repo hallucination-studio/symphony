@@ -108,6 +108,8 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert '"execute_plan"' in sdk.thread.calls[0][0]
     assert "ROOT TARGET IDS:" in sdk.thread.calls[0][0]
     assert '"required_outputs":"array"' in sdk.thread.calls[0][0]
+    assert "ROOT ACTION CLOSED VALUES:" in sdk.thread.calls[0][0]
+    assert '"reason":["initial","root_contract_changed","repair_required","exhausted","user_requested_retry","unresolved_findings"]' in sdk.thread.calls[0][0]
     assert "required_outputs, prior_plan_result_ids and human_resolution_ids must each be JSON arrays" in sdk.started[0]["base_instructions"]
     assert "dependency_evidence_refs must be an array of EvidenceRef objects" in sdk.started[0]["base_instructions"]
     assert "EvidenceRef.source_kind must be exactly one of linear_issue" in sdk.started[0]["base_instructions"]

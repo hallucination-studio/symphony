@@ -303,6 +303,8 @@ def _role_prompt(role: str, request: dict[str, Any]) -> str:
             f"{json.dumps(_root_action_requirements(), separators=(',', ':'))}"
             "\nROOT ACTION FIELD SHAPES:\n"
             f"{json.dumps(_root_action_field_shapes(), separators=(',', ':'))}"
+            "\nROOT ACTION CLOSED VALUES:\n"
+            f"{json.dumps(_root_action_closed_values(), separators=(',', ':'))}"
         )
         if request.get("kind") == "open_root_reconciler":
             prompt += (
@@ -384,6 +386,20 @@ def _root_action_field_shapes() -> dict[str, dict[str, str]]:
             str(field): _schema_shape(variant["properties"][field])
             for field in variant["required"]
             if field != "kind"
+        }
+        for variant in schema["oneOf"]
+    }
+
+
+def _root_action_closed_values() -> dict[str, dict[str, list[Any]]]:
+    schema = _root_action_schema()
+    return {
+        str(variant["properties"]["kind"]["const"]): {
+            str(field): list(field_schema["enum"])
+            if isinstance(field_schema.get("enum"), list)
+            else [field_schema["const"]]
+            for field, field_schema in variant["properties"].items()
+            if isinstance(field_schema, dict) and ("enum" in field_schema or "const" in field_schema)
         }
         for variant in schema["oneOf"]
     }
