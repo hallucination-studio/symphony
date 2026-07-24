@@ -93,6 +93,9 @@ types、production code、tests、fixtures和E2E证据；task文件、日志、r
 
 - 每个架构invariant必须有一个可定位的实现、验证和证据；没有对应实现的目标项必须保持明确未完成，不能由相邻功能
   推断已满足；
+- `docs/architecture/`自身也必须只有一个named concern owner：审计拒绝同一Issue identity、durable Result、usage aggregate、
+  timeline/reply或lifecycle在两个文档中出现不同record、字段表、transition或恢复语义；修复时删除冲突描述，不以备注
+  声称两种定义都有效；
 - 对每个持久化或跨进程对象确认唯一职责：Issue custom status + archive拥有lifecycle；Stage Result拥有execution
   事实；`ModelTurnRecord`拥有usage事实；directive/resolution拥有接受的意图或用户选择证据；timeline/reply/reaction/
   thread state只拥有叙事或回执；`RootDelta`只拥有单次传输；

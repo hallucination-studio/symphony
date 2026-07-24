@@ -189,6 +189,7 @@ Linear durable records使用同一schema生成机制：
 
 ```text
 RootOwnershipRecord
+WorkflowIssueRecord
 RootConvergencePolicy
 RootDirectiveRecord
 RootReconcilerFailureRecord
@@ -205,14 +206,24 @@ CycleOutcome
 WorkflowTimelineRecord
 ```
 
-每个durable managed comment使用同一外壳；Symphony创建的Root descendant Issue description使用相同的Markdown +
-唯一`symphony` block格式承载其Issue kind record：
+每个durable managed comment和Symphony创建的Root descendant Issue description都使用Markdown + 唯一
+`symphony` block；两者的record shape不同，不能把comment的`record_id`模板复制到Issue description：
 
 ````text
+Managed comment
+
 <closed renderer生成的bounded用户Markdown；允许普通Markdown和非symphony fenced code block>
 
 ```symphony
 {"kind":"<closed record kind>","version":1,"record_id":"<stable id>",...}
+```
+
+Managed Root descendant Issue description
+
+<closed renderer生成的bounded用户Markdown；允许普通Markdown和非symphony fenced code block>
+
+```symphony
+{"kind":"workflow_issue","version":1,"issueKey":"<stable key>","rootIssueId":"<Root>","parentIssueId":"<parent>","issueKind":"cycle | plan | work | verify | human"}
 ```
 ````
 
@@ -225,9 +236,17 @@ comment身份只在以下条件全部成立时成立：
 - record scope、target Issue、stable write ID和ownership correlation一致；
 - comment与code block已经fresh read-back。
 
-managed Issue description还必须关联Symphony stable create/write ID、matching Issue kind label、parent scope和fresh remote
-version。用户后续删除、复制或修改code block只产生新的Linear事实和mechanical violation，不能伪造另一Issue身份，也
-不能由Conductor静默恢复。
+`WorkflowIssueRecord`是Symphony创建的每个Root descendant Issue description中的唯一Issue kind record。它只包含
+`issueKey`、`rootIssueId`、`parentIssueId`和`issueKind`，用于stable create/write correlation、scope validation和
+crash recovery；它不表达status、archive、approval、execution result、budget或next step。Cycle、Plan、Work、Verify和
+Human Action的业务事实仍分别由对应managed comment record和Linear Issue事实承担。Conductor从strict decode后的
+`WorkflowIssueRecord`派生内部Issue kind；Podium只传递原生description，不能输出marker、预解码Issue kind或第二个
+identity field。
+
+managed Issue description必须在stable create/write ID下创建并read-back，且`WorkflowIssueRecord`必须与matching primary
+kind label、parent scope和fresh remote version一致。它不得加入source directive、proposal、resolution或任意lifecycle字段。
+用户后续删除、复制或修改code block只产生新的Linear事实和mechanical violation，不能伪造另一Issue身份，也不能由
+Conductor静默恢复。
 
 human actor写入相同code block、普通文本声称自己是Symphony、作者显示名相同或comment位于第一条，都不能伪造managed
 record。Symphony actor写出的缺失、重复或无效`symphony` block是mechanical violation，也不能降级成另一种旧marker。
