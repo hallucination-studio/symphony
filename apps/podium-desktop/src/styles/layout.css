@@ -606,19 +606,21 @@ input[type="radio"] {
   background: var(--color-content-bg);
 }
 
-/* Setup progress bar — lives outside the keyed card so the fill width
-   transitions across steps instead of remounting. */
+/* Setup progress bar — a fill strip bleeding into the card's top edge,
+   so progress reads as part of the card rather than a floating widget.
+   It sits outside the keyed body to persist and animate across steps. */
 .setup-progress {
-  width: min(440px, 100%);
-  height: 3px;
-  margin-bottom: var(--space-4);
-  border-radius: var(--radius-pill);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
   background: var(--color-separator);
 }
 
 .setup-progress-fill {
   height: 100%;
-  border-radius: inherit;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
   background: var(--color-accent);
   transition: width var(--duration-standard) var(--easing-standard);
 }
@@ -635,14 +637,32 @@ input[type="radio"] {
   width: 100%;
 }
 
+/* Step 3 renders a page instead of a card; the bar joins the content
+   column there. */
+.setup-detail .setup-progress {
+  position: static;
+  max-width: var(--size-content-column);
+  margin: 0 0 var(--space-3);
+  border-radius: var(--radius-pill);
+}
+
 .setup-card {
+  position: relative;
+  overflow: hidden;
   width: min(440px, 100%);
   padding: var(--space-6);
   border: 1px solid var(--color-separator);
   border-radius: var(--radius-dialog);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
-  /* The card is keyed per setup step, so step changes replay this. */
+  /* Runs once when the shell first mounts; step changes only swap the
+     keyed body. */
+  animation: page-enter var(--duration-slow) var(--easing-standard);
+}
+
+/* The card shell persists across setup steps; only the keyed body
+   cross-fades, which also keeps the progress strip from remounting. */
+.setup-card-body {
   animation: page-enter var(--duration-slow) var(--easing-standard);
 }
 
