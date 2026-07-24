@@ -11,6 +11,85 @@ summary:focus-visible {
   box-shadow: 0 0 0 3.5px var(--color-focus-halo);
 }
 
+a:focus-visible {
+  border-radius: var(--radius-control);
+  outline: none;
+  box-shadow: 0 0 0 3.5px var(--color-focus-halo);
+}
+
+/* Focus halo blooms in instead of snapping on. */
+input,
+select,
+summary,
+a {
+  transition: box-shadow var(--duration-fast) var(--easing-standard);
+}
+
+/* Motion keyframes */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes status-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes skeleton-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes brand-mark-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes brand-mark-dot {
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes refresh-value {
+  from {
+    opacity: 0.3;
+  }
+}
+
 /* Page headings receive programmatic focus for screen readers; the halo is
    for interactive controls only. */
 h1:focus {
@@ -21,7 +100,7 @@ h1:focus {
    is draggable while interactive controls opt out. */
 .drag-region {
   position: fixed;
-  z-index: 1;
+  z-index: var(--z-drag-region);
   top: 0;
   left: 0;
   right: 0;
@@ -35,7 +114,7 @@ h1:focus {
 }
 
 .sidebar {
-  width: 232px;
+  width: var(--size-sidebar);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -51,7 +130,7 @@ h1:focus {
   padding: 0 var(--space-2);
   color: var(--color-label);
   font-size: var(--font-size-title);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .brand-mark {
@@ -80,6 +159,8 @@ h1:focus {
   text-align: left;
   cursor: pointer;
   -webkit-app-region: no-drag;
+  transition: background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .nav-link svg {
@@ -96,7 +177,7 @@ h1:focus {
 .nav-link[data-active="true"] {
   background: var(--color-accent);
   color: var(--color-accent-contrast);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .nav-link[data-active="true"] svg {
@@ -112,13 +193,13 @@ h1:focus {
 }
 
 .page-header {
-  max-width: 840px;
+  max-width: var(--size-content-column);
   margin-bottom: var(--space-5);
 }
 
 .page-header h1 {
   font-size: var(--font-size-h1);
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
   line-height: var(--line-height-h1);
 }
 
@@ -136,13 +217,26 @@ h1:focus {
 .page-stack {
   display: grid;
   gap: var(--space-4);
-  max-width: 840px;
+  max-width: var(--size-content-column);
+}
+
+/* Page content cascades in on navigation; React remounts the page
+   component on switch, which replays the animation. */
+.page-stack > * {
+  animation: page-enter var(--duration-standard) var(--easing-standard)
+    backwards;
+}
+
+.page-stack > *:nth-child(2) {
+  animation-delay: 30ms;
+}
+
+.page-stack > *:nth-child(3) {
+  animation-delay: 60ms;
 }
 
 /* Inset grouped cards (System Settings style) */
 .panel,
-.next-action,
-.metrics article,
 .empty-state,
 .selection-list {
   border: 1px solid var(--color-separator);
@@ -156,8 +250,7 @@ h1:focus {
 }
 
 .panel h2,
-.empty-state h2,
-.next-action h2 {
+.empty-state h2 {
   font-size: var(--font-size-title);
   line-height: var(--line-height-title);
 }
@@ -167,27 +260,13 @@ h1:focus {
   margin-bottom: 0;
 }
 
-.next-action {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  border-color: var(--color-separator-strong);
-}
-
-.next-action p {
-  margin: var(--space-2) 0 0;
-  color: var(--color-label-secondary);
-}
-
 .eyebrow {
   margin: 0 0 var(--space-2);
   color: var(--color-label-tertiary);
   font-size: var(--font-size-caption);
   font-weight: var(--font-weight-label);
   line-height: var(--line-height-caption);
-  letter-spacing: 0.04em;
+  letter-spacing: var(--letter-spacing-caps);
   text-transform: uppercase;
 }
 
@@ -196,7 +275,7 @@ h1:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 28px;
+  min-height: var(--size-control-height);
   padding: 3px var(--space-3);
   border: 1px solid var(--color-separator-strong);
   border-radius: var(--radius-control);
@@ -204,11 +283,16 @@ h1:focus {
   box-shadow: var(--shadow-button);
   color: var(--color-label);
   font-size: var(--font-size-body);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   cursor: pointer;
+  transition: transform var(--duration-instant) var(--easing-standard),
+    filter var(--duration-instant) var(--easing-standard),
+    background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .button:active:not(:disabled) {
+  transform: scale(0.97);
   filter: brightness(0.96);
 }
 
@@ -234,7 +318,7 @@ h1:focus {
   background: transparent;
   box-shadow: none;
   color: var(--color-accent);
-  font-weight: 400;
+  font-weight: var(--font-weight-regular);
 }
 
 .button.quiet-button:hover:not(:disabled) {
@@ -245,37 +329,38 @@ h1:focus {
   min-height: 22px;
   padding: 2px var(--space-2);
   font-size: var(--font-size-caption);
-  font-weight: 400;
+  font-weight: var(--font-weight-regular);
 }
 
 .full-width {
   width: 100%;
 }
 
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
+/* macOS text inputs and selects are styled globally so a form outside a
+   dialog or the setup flow does not silently render unstyled controls. */
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: var(--size-control-height);
+  padding: 3px var(--space-2);
+  border: 1px solid var(--color-separator-strong);
+  border-radius: var(--radius-control);
+  background: var(--color-card-bg);
+  color: var(--color-label);
+  font-size: var(--font-size-body);
 }
 
-.metrics article {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-4);
+input[type="checkbox"],
+input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-accent);
 }
 
-.metrics span,
-.metrics small,
 .stale-note {
   color: var(--color-label-secondary);
   font-size: var(--font-size-caption);
   line-height: var(--line-height-caption);
-}
-
-.metrics strong {
-  font-size: var(--font-size-display);
-  font-weight: 700;
-  line-height: var(--line-height-display);
 }
 
 .section-heading,
@@ -336,6 +421,15 @@ h1:focus {
   height: var(--size-status-dot);
   border-radius: var(--radius-pill);
   background: var(--status-neutral);
+  transition: background-color var(--duration-standard) var(--easing-standard);
+}
+
+/* Attention pulse for non-healthy tones; always paired with the text
+   label, and collapsed by the reduced-motion guard. */
+.status-badge[data-tone="negative"] .status-dot,
+.status-badge[data-tone="warning"] .status-dot {
+  animation: status-dot-pulse var(--duration-pulse) var(--easing-standard)
+    infinite;
 }
 
 .status-badge[data-tone="positive"] .status-dot {
@@ -350,57 +444,44 @@ h1:focus {
   background: var(--status-warning);
 }
 
-.root-list,
 .plain-list,
-.selection-list,
-.workflow-tree {
+.selection-list {
   margin: var(--space-3) 0 0;
   padding: 0;
   list-style: none;
 }
 
-.root-list li,
 .plain-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
+  min-width: 0;
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--color-separator);
 }
 
-.root-list li:last-child,
 .plain-list li:last-child {
   border-bottom: 0;
 }
 
-.root-list div,
-.plain-list li {
-  min-width: 0;
-}
-
-.root-list strong,
-.root-list span,
-.root-list small,
 .plain-list strong,
 .plain-list span {
   display: block;
 }
 
-.root-list strong,
+/* Rows mounted by a poll refresh (new keys) fade in at the top. */
+.plain-list li {
+  animation: row-enter var(--duration-standard) var(--easing-standard)
+    backwards;
+}
+
 .plain-list strong {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
-.root-list span,
-.plain-list span,
-.root-list small {
+.plain-list span {
   color: var(--color-label-secondary);
-}
-
-.root-list small {
-  margin-top: 2px;
-  font-size: var(--font-size-caption);
 }
 
 .selection-list {
@@ -421,6 +502,8 @@ h1:focus {
   font-size: var(--font-size-body);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .selection-list button:hover {
@@ -433,32 +516,10 @@ h1:focus {
 
 .selection-list span strong {
   display: block;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .selection-list span {
-  color: var(--color-label-secondary);
-}
-
-.workflow-tree {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.workflow-tree li {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-3);
-  margin-left: calc(var(--tree-depth) * var(--space-5));
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-separator);
-  border-radius: var(--radius-control);
-  background: var(--color-content-bg);
-}
-
-.workflow-tree small {
-  display: block;
   color: var(--color-label-secondary);
 }
 
@@ -478,6 +539,8 @@ h1:focus {
   border-radius: var(--radius-dialog);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
+  /* The card is keyed per setup step, so step changes replay this. */
+  animation: page-enter var(--duration-slow) var(--easing-standard);
 }
 
 .setup-card h1 {
@@ -517,10 +580,26 @@ h1:focus {
 }
 
 .skeleton div {
+  position: relative;
+  overflow: hidden;
   height: 14px;
   margin-top: var(--space-3);
   border-radius: var(--radius-control);
   background: var(--color-selection);
+}
+
+.skeleton div::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-card-bg),
+    transparent
+  );
+  animation: skeleton-sweep var(--duration-sweep) var(--easing-standard)
+    infinite;
 }
 
 .error-panel {
@@ -531,12 +610,13 @@ h1:focus {
 /* Dialogs */
 .dialog-backdrop {
   position: fixed;
-  z-index: 10;
+  z-index: var(--z-dialog);
   inset: 0;
   display: grid;
   place-items: center;
   padding: var(--space-4);
   background: var(--color-overlay);
+  animation: backdrop-enter var(--duration-fast) var(--easing-standard);
 }
 
 .dialog {
@@ -548,6 +628,7 @@ h1:focus {
   border-radius: var(--radius-dialog);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
+  animation: dialog-enter var(--duration-standard) var(--easing-emphasized);
 }
 
 .dialog h2 {
@@ -565,29 +646,6 @@ h1:focus {
   gap: var(--space-1);
   color: var(--color-label-secondary);
   font-size: var(--font-size-body);
-}
-
-.dialog input:not([type="checkbox"]):not([type="radio"]),
-.dialog select,
-.setup-card input,
-.setup-card select {
-  min-height: 28px;
-  padding: 3px var(--space-2);
-  border: 1px solid var(--color-separator-strong);
-  border-radius: var(--radius-control);
-  background: var(--color-card-bg);
-  color: var(--color-label);
-  font-size: var(--font-size-body);
-}
-
-.dialog input[type="checkbox"],
-.dialog input[type="radio"] {
-  min-height: 0;
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--color-accent);
 }
 
 .dialog label:has(> input[type="checkbox"]),
@@ -632,6 +690,34 @@ h1:focus {
   gap: var(--space-2);
 }
 
+/* Brand mark draw-in (setup screens, once per mount) */
+.brand-mark-animated {
+  display: block;
+  width: var(--space-8);
+  height: var(--space-8);
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-card);
+}
+
+.brand-mark-path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: brand-mark-draw var(--duration-brand) var(--easing-standard)
+    forwards;
+}
+
+.brand-mark-dot {
+  opacity: 0;
+  animation: brand-mark-dot var(--duration-standard) var(--easing-standard)
+    450ms forwards;
+}
+
+/* Values swapped by a poll refresh cross-fade via a keyed remount. */
+.refresh-value {
+  display: inline-block;
+  animation: refresh-value var(--duration-fast) var(--easing-standard);
+}
+
 .command-rule-actions {
   justify-content: flex-start;
 }
@@ -664,25 +750,42 @@ h1:focus {
     padding: var(--space-5) var(--space-4);
   }
 
-  .metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .next-action,
   .action-row,
   .section-heading {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .workflow-tree li {
-    grid-template-columns: 1fr;
-    margin-left: calc(var(--tree-depth) * var(--space-3));
   }
 }
 
 @media (max-width: 380px) {
   .nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Forced-colors mode strips box shadows, which would erase the focus
+   halo; fall back to a real outline so focus stays visible. */
+@media (forced-colors: active) {
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  a:focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 1px;
+    box-shadow: none;
+  }
+}
+
+/* Reduced motion collapses every animation and transition. The
+   !important guard is intentional: it must win over component rules. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
