@@ -78,10 +78,8 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
   });
   const rootIssueId = root.rootIssueId;
   const managedMarker = `linear-boundary-${runDigest}`;
-  let cycleIssueId;
 
-  try {
-    let tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+  let tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     const rootNode = tree.issues.find(({ issueId }) => issueId === rootIssueId);
     assert.ok(rootNode);
     assert.equal(rootNode.isArchived, false);
@@ -105,9 +103,11 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
       managedMarker,
       labelNames: [],
     };
-    const created = await gateway.mutateWorkflow(createCycle);
-    assert.ok(created.kind === "applied" || created.kind === "already_applied");
-    cycleIssueId = created.readBack.targetIssueId;
+    const created = assertMutationApplied(
+      await gateway.mutateWorkflow(createCycle),
+      "cycle_create",
+    );
+  const cycleIssueId = created.readBack.targetIssueId;
 
     tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     const cycleNode = tree.issues.find(({ issueId }) => issueId === cycleIssueId);
@@ -119,7 +119,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     assert.ok(cycleTarget);
     const currentRootBeforeComment = await sdk.readWorkflowMutationTarget(rootIssueId);
     assert.ok(currentRootBeforeComment);
-    const comment = await gateway.mutateWorkflow({
+    const comment = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "append_workflow_comment",
       writeId: `${managedMarker}-comment`,
       conductorShortHash,
@@ -132,11 +132,10 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         expectedManagedMarker: managedMarker,
       },
       body: "Linear boundary comment read-back.",
-    });
-    assert.ok(comment.kind === "applied" || comment.kind === "already_applied");
+    }), "cycle_comment");
     const currentRootBeforeUpdate = await sdk.readWorkflowMutationTarget(rootIssueId);
     assert.ok(currentRootBeforeUpdate);
-    const update = await gateway.mutateWorkflow({
+    const update = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "update_workflow_issue",
       writeId: `${managedMarker}-update`,
       conductorShortHash,
@@ -151,8 +150,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
       statusId: cycleTarget.statusId,
       title: `Boundary Cycle ${runDigest} revised`,
       description: "Cycle updated by the real Linear boundary contract test.",
-    });
-    assert.ok(update.kind === "applied" || update.kind === "already_applied");
+    }), "cycle_update");
     const currentCycleAfterUpdate = await sdk.readWorkflowMutationTarget(cycleIssueId);
     assert.ok(currentCycleAfterUpdate);
     assert.notEqual(currentCycleAfterUpdate.updatedAt, cycleTarget.updatedAt);
@@ -176,7 +174,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     const currentCycle = currentCycleAfterUpdate;
     assert.ok(currentRoot);
     assert.ok(currentCycle);
-    const archive = await gateway.mutateWorkflow({
+    const archive = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "archive_workflow_issue",
       writeId: `${managedMarker}-archive`,
       conductorShortHash,
@@ -189,8 +187,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         expectedIsArchived: false,
         expectedManagedMarker: managedMarker,
       },
-    });
-    assert.ok(archive.kind === "applied" || archive.kind === "already_applied");
+    }), "cycle_archive");
 
     tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
     const archivedCycle = tree.issues.find(({ issueId }) => issueId === cycleIssueId);
@@ -201,7 +198,7 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
     const archivedCycleTarget = await sdk.readWorkflowMutationTarget(cycleIssueId);
     assert.ok(archivedRoot);
     assert.ok(archivedCycleTarget);
-    const restore = await gateway.mutateWorkflow({
+    const restore = assertMutationApplied(await gateway.mutateWorkflow({
       kind: "restore_workflow_issue",
       writeId: `${managedMarker}-restore`,
       conductorShortHash,
@@ -214,53 +211,19 @@ test("real Linear boundary preserves complete Tree and mutation preconditions", 
         expectedIsArchived: true,
         expectedManagedMarker: managedMarker,
       },
-    });
-    assert.ok(
-      restore.kind === "applied" || restore.kind === "already_applied",
-      `restore mutation failed: ${JSON.stringify(restore)}`,
-    );
+    }), "cycle_restore");
 
-    tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
-    const restoredCycle = tree.issues.find(({ issueId }) => issueId === cycleIssueId);
-    assert.ok(restoredCycle);
-    assert.equal(restoredCycle.isArchived, false);
-  } finally {
-    if (cycleIssueId) {
-      const cycle = await sdk.readWorkflowMutationTarget(cycleIssueId);
-      const currentRoot = await sdk.readWorkflowMutationTarget(rootIssueId);
-      if (cycle?.isArchived === false && currentRoot) {
-        await gateway.mutateWorkflow({
-          kind: "archive_workflow_issue",
-          writeId: `${managedMarker}-cleanup-cycle`,
-          conductorShortHash,
-          expectedProjectId: projectId,
-          rootIssueId,
-          expectedRootRemoteVersion: currentRoot.updatedAt,
-          target: {
-            targetIssueId: cycleIssueId,
-            expectedRemoteVersion: cycle.updatedAt,
-            expectedIsArchived: false,
-            expectedManagedMarker: managedMarker,
-          },
-        });
-      }
-    }
-    const currentRoot = await sdk.readWorkflowMutationTarget(rootIssueId);
-    if (currentRoot?.isArchived === false) {
-      const cleanup = await gateway.mutateWorkflow({
-        kind: "archive_workflow_issue",
-        writeId: `${runDigest}-cleanup-root`,
-        conductorShortHash,
-        expectedProjectId: projectId,
-        rootIssueId,
-        expectedRootRemoteVersion: currentRoot.updatedAt,
-        target: {
-          targetIssueId: rootIssueId,
-          expectedRemoteVersion: currentRoot.updatedAt,
-          expectedIsArchived: false,
-        },
-      });
-      assert.ok(cleanup.kind === "applied" || cleanup.kind === "already_applied");
-    }
-  }
+  tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+  const restoredCycle = tree.issues.find(({ issueId }) => issueId === cycleIssueId);
+  assert.ok(restoredCycle);
+  assert.equal(restoredCycle.isArchived, false);
 });
+
+function assertMutationApplied(outcome, operation) {
+  const summary = outcome.kind === "failed" ? `${outcome.kind}:${outcome.error.code}` : outcome.kind;
+  assert.ok(
+    outcome.kind === "applied" || outcome.kind === "already_applied",
+    `${operation}_failed:${summary}`,
+  );
+  return outcome;
+}

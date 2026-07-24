@@ -295,13 +295,9 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
   } catch (error) {
     throw new Error(`${safeErrorCode(error)}:${lastLogReason(logs)}`);
   } finally {
-    try {
-      if (gateway && sdk && rootIssueId) await archiveRoot({ sdk, gateway, rootIssueId });
-    } finally {
-      if (harness) await harness.close().catch(() => undefined);
-      await podium?.close?.();
-      await rm(rootDirectory, { recursive: true, force: true });
-    }
+    if (harness) await harness.close().catch(() => undefined);
+    await podium?.close?.();
+    await rm(rootDirectory, { recursive: true, force: true });
   }
 }
 
@@ -399,26 +395,6 @@ function countStageResults(comments, stage) {
   return comments.filter((comment) =>
     comment.body.includes("stage_result") && new RegExp(`"stage"\\s*:\\s*"${stage}"`, "u").test(comment.body),
   ).length;
-}
-
-async function archiveRoot({ sdk, gateway, rootIssueId }) {
-  const target = await sdk.readWorkflowMutationTarget(rootIssueId);
-  if (!target || target.isArchived) return;
-  const outcome = await gateway.mutateWorkflow({
-    kind: "archive_workflow_issue",
-    writeId: `target-architecture-cleanup:${rootIssueId}`,
-    expectedProjectId: target.projectId,
-    rootIssueId,
-    expectedRootRemoteVersion: target.updatedAt,
-    target: {
-      targetIssueId: rootIssueId,
-      expectedRemoteVersion: target.updatedAt,
-      expectedIsArchived: false,
-    },
-  });
-  if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-    throw new Error(`target_e2e_cleanup_${outcome.kind}`);
-  }
 }
 
 function remaining(deadlineAt) {
