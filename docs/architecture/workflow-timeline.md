@@ -136,8 +136,8 @@ RootTimelineEvent =
   | RootClaimedEvent
   | RootDecisionAcceptedEvent
   | RootStatusChangedEvent
-  | RootLifecycleCorrectedEvent
-  | RootContractRevisedEvent
+  | RootTreePatchedEvent
+  | RootContractChangedEvent
   | CycleCreatedEvent
   | CycleConcludedEvent
   | RootWaitingHumanEvent
@@ -152,7 +152,7 @@ RootTimelineEvent =
 
 Root时间轴只记录跨Cycle或Root级业务边界，不复制每个Work turn。`RootConvergenceEvaluatedEvent`展示本次
 Cycle count、Finding persistence、no-progress、token/deadline和触发阈值；不得只写“budget exceeded”。
-`RootContractRevisedEvent`说明最新Root contract变化和旧delivery/Cycle是否仍匹配。
+`RootContractChangedEvent`说明最新Root contract变化和旧delivery/Cycle是否仍匹配。
 
 ### 5.2 Root comment模板
 
@@ -188,12 +188,11 @@ Next
 ```text
 CycleTimelineEvent =
   | CycleDecisionAcceptedEvent
-  | CycleLifecycleCorrectedEvent
   | PlanTurnCompletedEvent
   | WorkTurnStartedEvent
   | WorkTurnCompletedEvent
   | WorkTurnBlockedEvent
-  | CycleTreeRevisedEvent
+  | CycleTreePatchedEvent
   | CycleReplannedEvent
   | CycleSupersededEvent
   | NodeArchivedEvent
@@ -210,8 +209,9 @@ CycleTimelineEvent =
 `CycleDecisionAcceptedEvent`。普通模型retry、schema-invalid output和内部reasoning不展示给用户；只有最终
 accepted directive进入时间轴。
 
-`CycleTreeRevisedEvent`必须列出create/update/archive/restore/reorder/dependency operations及其业务原因。
-archived Issue使用Linear链接继续可访问。Human Action事件展示请求、用户选择和下一步，不复制用户comment全文。
+`RootTreePatchedEvent`和`CycleTreePatchedEvent`只在matching Root Reconciler directive已接受并完成read-back后产生，
+必须列出create/update/archive/restore/reorder/dependency operations及其业务原因。它们不表示Conductor自动修正了
+用户状态；Conductor只能执行directive要求的受限操作。archived Issue使用Linear链接继续可访问。Human Action事件展示请求、用户选择和下一步，不复制用户comment全文。
 `CycleReplannedEvent`与`CycleSupersededEvent`必须区分同Cycle fresh Plan和successor Cycle，不能都显示成
 “重新开始”。
 

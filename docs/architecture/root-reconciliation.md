@@ -162,6 +162,10 @@ advance只把`RootDelta`发送给Performer。session baseline snapshot和source 
 workflow DB、checkpoint或Linear镜像。合法directive返回后baseline推进到target digest；directive invalid、session
 丢失、delta不连续或baseline无法证明时，关闭旧session并从fresh完整事实重新bootstrap，不尝试兼容或猜测缺失delta。
 
+因此，完整读取和完整传输是两个不同的边界：Conductor可以每轮从Linear重建完整事实来保证diff正确，但Performer
+已有session永远只看到从已确认baseline到新target的当前值/tombstone增量。任何把完整Tree塞入advance request的实现都
+违反本架构，即使它同时附带了delta或声称只是为了安全校验。
+
 `root_digest`只覆盖canonical Root Reconciler Fact Set：业务Issue当前值、relations、业务managed records、普通human
 comments、Git/delivery事实和mechanical violations。Raw SDK对象、Timeline comments、Reconciler reply comments、
 transport heartbeat和其他明确排除的automation comments不属于该fact set，其写入不会改变digest或触发模型。

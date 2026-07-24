@@ -64,6 +64,10 @@ RootTreeQuery
 remote versions时，Root不能进入Root Reconciler或mutation。source changes提供稳定identity、actor kind、source
 version和Symphony stable write correlation；普通advance仍只发送变化source的当前值或tombstone，不发送activity history。
 
+这里的完整Tree是Podium到Conductor的fresh source read和Conductor单轮内存计算输入，不是已有Root Reconciler session
+的跨进程输入。Conductor只把相对session baseline的`RootDelta`发送给Performer；只有open fresh session时才把完整
+`RootBootstrapSnapshot`发送一次。
+
 没有pending input、未完成directive或到期事实的waiting/terminal Root释放execution lane。ownership不可证明或读取
 不完整时fail closed；可读取的invalid lifecycle/Tree进入delta中的mechanical violations，不能在调用Root Reconciler前
 由Conductor修正或跳过。memory cache只能减少读取，不能决定readiness或mutation。

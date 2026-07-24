@@ -46,6 +46,7 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - Conductor host不运行模型，只执行ownership、coverage、schema、capability、budget、convergence、materialization和delivery；
 - Root/Cycle下一步语义只来自matching Root Reconciler的closed `RootDirective`；
 - fresh Root Reconciler session接收一次完整active和archived Root bootstrap；后续turn只接收严格连续的Root delta；
+- Conductor可以在内存中完整读取Linear以计算source diff和校验digest，但已有session的advance request绝不携带完整Tree；session新建、丢失或baseline无法证明时才重新发送一次`RootBootstrapSnapshot`；
 - 所有用户status、content、archive、parent、relation和comment修改都由Root Reconciler解释，Conductor不主动纠正；
 - Plan、Work、Verify通过强类型request/result contract报告事实，不决定下一步或创建Human Action；
 - Conductor始终是Performer caller；Performer只响应closed command，不反向调用Conductor；

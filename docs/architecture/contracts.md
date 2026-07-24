@@ -115,6 +115,8 @@ human_action_resolutions[]
 `RootReconcilerOpenedResult`包含该bootstrap turn产生的initial `RootDirective`。
 `AdvanceRootReconcilerRequest`只允许携带`base_root_digest`、`target_root_digest`和`RootDeltaChange[]`；schema不提供
 full snapshot、before/after diff或兼容union。baseline不匹配返回closed failure并要求fresh session bootstrap。
+Conductor可以为了计算delta在自己的单轮内存视图中读取完整active和archived Tree，但不得把该视图、完整source manifest
+或历史activity复制到advance message。只有新建session、session丢失或baseline无法证明时，才允许再次发送完整bootstrap。
 
 Stage Result至少关联role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。
 Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment
