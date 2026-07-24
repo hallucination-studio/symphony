@@ -408,6 +408,10 @@ UserCommentReply
 `follow_up_required + none`表示仍需用户补充或执行状态操作。reaction只是输入处理回执，不是Human Action lifecycle、
 Plan approval或Workflow command。
 
+reply renderer只能从这些bounded字段生成结构化用户Markdown。它可以使用heading、强调、列表、链接、引用和非
+`symphony` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
+唯一末尾`symphony` block之外放置restart-required事实。
+
 closed renderer使用固定用户结构，不把模型原文直接当comment：
 
 ````markdown

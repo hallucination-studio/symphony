@@ -223,23 +223,27 @@ Managed Root descendant Issue description
 <closed renderer生成的bounded用户Markdown；允许普通Markdown和非symphony fenced code block>
 
 ```symphony
-{"kind":"workflow_issue","version":1,"issueKey":"<stable key>","rootIssueId":"<Root>","parentIssueId":"<parent>","issueKind":"cycle | plan | work | verify | human"}
+{"kind":"workflow_issue","version":1,"issue_key":"<stable key>","root_issue_id":"<Root>","parent_issue_id":"<parent>","issue_kind":"cycle | plan | work | verify | human"}
 ```
 ````
 
-一条managed comment或managed Issue description必须恰有一个`info string = symphony`的fenced code block。该block必须
-是strict JSON、使用closed versioned schema、拒绝unknown字段，并携带stable identity与source references。managed
-comment身份只在以下条件全部成立时成立：
+一条managed comment或managed Issue description必须恰有一个`info string = symphony`的fenced code block，且该block
+必须位于正文末尾，闭合后只允许trailing whitespace。该block必须是strict JSON、使用closed versioned schema、拒绝
+unknown字段，并携带stable identity与source references。managed comment身份只在以下条件全部成立时成立：
 
 - Linear actor是当前Binding验证过的Symphony actor；
 - code block完整通过matching closed schema decode；
 - record scope、target Issue、stable write ID和ownership correlation一致；
 - comment与code block已经fresh read-back。
 
+持久化到Linear的code block是language-neutral wire JSON，字段一律使用`snake_case`；`kind`和`version`保持
+上述固定拼写。TypeScript内存对象可以使用camelCase，但renderer输出、strict decoder输入、文档JSON示例和跨进程
+schema都必须是相同的snake_case wire shape。这个映射不能成为第二种record format、兼容reader或best-effort解析。
+
 `WorkflowIssueRecord`是Symphony创建的每个Root descendant Issue description中的唯一Issue kind record。它只包含
-`issueKey`、`rootIssueId`、`parentIssueId`和`issueKind`，用于stable create/write correlation、scope validation和
-crash recovery；它不表达status、archive、approval、execution result、budget或next step。Cycle、Plan、Work、Verify和
-Human Action的业务事实仍分别由对应managed comment record和Linear Issue事实承担。Conductor从strict decode后的
+`issue_key`、`root_issue_id`、`parent_issue_id`和`issue_kind`，用于stable create/write correlation、scope validation
+和crash recovery；它不表达status、archive、approval、execution result、budget或next step。Cycle、Plan、Work、Verify
+和Human Action的业务事实仍分别由对应managed comment record和Linear Issue事实承担。Conductor从strict decode后的
 `WorkflowIssueRecord`派生内部Issue kind；Podium只传递原生description，不能输出marker、预解码Issue kind或第二个
 identity field。
 
