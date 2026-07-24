@@ -111,7 +111,11 @@ Root Reconciler、Plan、Work和Verify全部运行在Performer，且由Conductor
 
 ## 7. Mutation语义
 
-所有Linear mutation必须：
+Linear mutation在本架构中只是accepted `RootDirective`或其他已定义managed action的机械写入，不是独立的业务输入、
+revision、change event或workflow状态。Root Reconciler不能发Linear mutation；它只能返回closed directive，由Conductor
+的materializer生成受限写入。
+
+所有这类Linear写入必须：
 
 - 验证binding、Project pool、Root routing和full ownership；
 - target属于owned Root Tree；
@@ -123,6 +127,10 @@ Root Reconciler、Plan、Work和Verify全部运行在Performer，且由Conductor
 - 不允许arbitrary GraphQL、全labels覆盖或跨Root/Project parent移动。
 
 archive/restore使用Linear原生archive API和explicit precondition。归档后完整Tree查询仍必须返回Issue及历史事实。
+
+用户对Linear的status、description、archive、parent、relation和comment修改不经过该写入路径的“修正”步骤。Conductor
+在fresh read中观察当前source version/hash，计算相对Root Reconciler session baseline的`RootDelta`，再由Root Reconciler
+决定是否需要directive。不存在用户修改的Linear revision record、mutation queue或独立pending状态。
 
 ## 8. Timeline comment投影
 

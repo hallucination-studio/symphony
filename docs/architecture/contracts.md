@@ -134,6 +134,10 @@ Conductor可以为了计算delta在自己的单轮内存视图中读取完整act
 delta而把完整Tree、source manifest或历史activity放入advance请求。Linear mutation仍可作为accepted directive的机械
 materialization手段，但它不产生用户修改的revision/change-event生命周期，也不改变Root Reconciler的语义所有权。
 
+source version/hash、`RootDelta`、accepted `RootDirectiveRecord`和单次Linear write的职责分层由[Root Reconciliation](root-reconciliation.md)
+的“Revision、Delta与Linear写入的唯一分层”定义。本文不增加revision、change-event、pending mutation或projection
+contract；Linear Gateway只执行directive materializer交给它的closed write command并返回read-back Result。
+
 Stage Result至少关联role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。
 Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment
 version、Root directive和deterministic reply ID。
