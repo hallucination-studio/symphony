@@ -90,6 +90,26 @@ a {
   }
 }
 
+@keyframes backdrop-exit {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-exit {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+/* Monospace identifiers and log event kinds (DESIGN.md mono spec) */
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono);
+  line-height: var(--line-height-mono);
+}
+
 /* Page headings receive programmatic focus for screen readers; the halo is
    for interactive controls only. */
 h1:focus {
@@ -228,11 +248,11 @@ h1:focus {
 }
 
 .page-stack > *:nth-child(2) {
-  animation-delay: 30ms;
+  animation-delay: var(--duration-stagger);
 }
 
 .page-stack > *:nth-child(3) {
-  animation-delay: 60ms;
+  animation-delay: calc(var(--duration-stagger) * 2);
 }
 
 /* Inset grouped cards (System Settings style) */
@@ -364,12 +384,21 @@ input[type="radio"] {
 }
 
 .section-heading,
-.action-row,
-.button-row {
+.action-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+/* Button clusters hug the trailing edge (macOS convention) and wrap
+   instead of overflowing on narrow layouts. */
+.button-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .section-heading {
@@ -455,6 +484,7 @@ input[type="radio"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-4);
   min-width: 0;
   padding: var(--space-3) 0;
@@ -571,6 +601,7 @@ input[type="radio"] {
   min-height: 100vh;
   padding: var(--size-titlebar) var(--space-6) var(--space-6);
   background: var(--color-content-bg);
+  animation: page-enter var(--duration-slow) var(--easing-standard);
 }
 
 .selection-summary {
@@ -588,6 +619,18 @@ input[type="radio"] {
   background: var(--color-selection);
 }
 
+.skeleton div:nth-of-type(1) {
+  width: 92%;
+}
+
+.skeleton div:nth-of-type(2) {
+  width: 74%;
+}
+
+.skeleton div:nth-of-type(3) {
+  width: 84%;
+}
+
 .skeleton div::after {
   content: "";
   position: absolute;
@@ -600,6 +643,15 @@ input[type="radio"] {
   );
   animation: skeleton-sweep var(--duration-sweep) var(--easing-standard)
     infinite;
+}
+
+/* Stagger the sweep phase so the bars do not shimmer in lockstep. */
+.skeleton div:nth-of-type(2)::after {
+  animation-delay: calc(var(--duration-stagger) * 4);
+}
+
+.skeleton div:nth-of-type(3)::after {
+  animation-delay: calc(var(--duration-stagger) * 8);
 }
 
 .error-panel {
@@ -629,6 +681,18 @@ input[type="radio"] {
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
   animation: dialog-enter var(--duration-standard) var(--easing-emphasized);
+}
+
+/* Exit runs after requestClose flips data-closing; DialogFrame calls the
+   real onClose on animationend so the exit always completes first. */
+.dialog-backdrop[data-closing="true"] {
+  animation: backdrop-exit var(--duration-fast) var(--easing-standard)
+    forwards;
+}
+
+.dialog[data-closing="true"] {
+  animation: dialog-exit var(--duration-fast) var(--easing-standard)
+    forwards;
 }
 
 .dialog h2 {
@@ -683,6 +747,10 @@ input[type="radio"] {
   border-radius: var(--radius-control);
 }
 
+.command-rule input {
+  font-family: var(--font-mono);
+}
+
 .command-argument {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -709,7 +777,7 @@ input[type="radio"] {
 .brand-mark-dot {
   opacity: 0;
   animation: brand-mark-dot var(--duration-standard) var(--easing-standard)
-    450ms forwards;
+    calc(var(--duration-brand) * 0.75) forwards;
 }
 
 /* Values swapped by a poll refresh cross-fade via a keyed remount. */

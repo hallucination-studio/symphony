@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { BRAND_MARK_PATH } from "./brandMark";
 import { formatObservedAt, labelFromIdentifier } from "./format";
 import type { Page } from "./types";
 
@@ -147,7 +148,7 @@ export function BrandMark() {
       <rect width="512" height="512" rx="112" fill="url(#brand-mark-bg)" />
       <path
         className="brand-mark-path"
-        d="M168 128 L232 320 C244 356 300 356 320 316 L372 208"
+        d={BRAND_MARK_PATH}
         fill="none"
         stroke="#ffffff"
         strokeLinecap="round"

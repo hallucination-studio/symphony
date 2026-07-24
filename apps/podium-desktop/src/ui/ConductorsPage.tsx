@@ -57,7 +57,7 @@ export function ConductorsPage({
         <section className="panel action-row">
           <div>
             <h2>Runtime</h2>
-            <StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} />
+            <StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} {...(conductor.status === "online" ? { tone: "positive" } : {})} />
           </div>
           <div className="button-row">
             <button className="button" onClick={() => onCommand({ kind: "stop_conductor", conductorId: conductor.conductorId })}>Stop</button>

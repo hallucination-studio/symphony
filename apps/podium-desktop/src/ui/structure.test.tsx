@@ -43,6 +43,8 @@ test("overview keeps panel, readiness, and list classes", () => {
     container.querySelector('.status-badge[data-tone="positive"] .status-dot'),
   ).not.toBeNull();
   expect(container.querySelector(".plain-list > li > strong")).not.toBeNull();
+  expect(container.querySelector(".plain-list .mono")).not.toBeNull();
+  expect(container.querySelector(".refresh-value")).not.toBeNull();
 });
 
 test("setup and fallback screens keep their card structure", () => {

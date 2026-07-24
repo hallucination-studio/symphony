@@ -52,7 +52,7 @@ export function OverviewPage({
             <ul className="plain-list">
               {view.recentLogs.map((log) => (
                 <li key={`${log.eventKind}-${log.occurredAt}`}>
-                  <strong>{log.eventKind}</strong>
+                  <strong className="mono">{log.eventKind}</strong>
                   <span>{log.summary}</span>
                 </li>
               ))}

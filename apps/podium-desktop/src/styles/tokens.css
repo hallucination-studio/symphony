@@ -40,6 +40,8 @@
   --line-height-body: 16px;
   --font-size-caption: 11px;
   --line-height-caption: 13px;
+  --font-size-mono: 11px;
+  --line-height-mono: 16px;
 
   /* Font weights / letter spacing */
   --font-weight-regular: 400;
@@ -81,6 +83,7 @@
   --duration-brand: 600ms;
   --duration-sweep: 1400ms;
   --duration-pulse: 2s;
+  --duration-stagger: 30ms;
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
   --easing-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1);
   --shadow-button: 0 0.5px 1.5px rgba(0, 0, 0, 0.12);
