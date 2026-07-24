@@ -52,13 +52,18 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     result = backend.execute_role_turn(
         session,
         {
+            "kind": "open_root_reconciler",
             "root_issue_id": "root-1",
-            "observed_root_tree_digest": "tree-1",
-            "root": {"issue": {"issue_id": "root-1"}},
-            "cycles": [{
-                "cycle_issue": {"issue_id": "cycle-1"},
-                "issues": [{"issue_id": "plan-1", "issue_kind": "plan"}],
-            }],
+            "bootstrap": {
+                "root_digest": "tree-1",
+                "root_snapshot": {
+                    "root": {"issue": {"issue_id": "root-1"}},
+                    "cycles": [{
+                        "cycle_issue": {"issue_id": "cycle-1"},
+                        "issues": [{"issue_id": "plan-1", "issue_kind": "plan"}],
+                    }],
+                },
+            },
         },
         workspace_root=None,
         cancel_event=__import__("threading").Event(),
@@ -77,7 +82,12 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "EvidenceRef.source_kind must be exactly one of linear_issue" in sdk.started[0]["base_instructions"]
     assert "dependency_evidence_refs to []" in sdk.started[0]["base_instructions"]
     assert "plan-1" in sdk.thread.calls[0][0]
-    assert sdk.thread.calls[0][1]["output_schema"]["required"] == ["action"]
+    assert sdk.thread.calls[0][1]["output_schema"]["required"] == [
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action",
+    ]
+    assert set(sdk.thread.calls[0][1]["output_schema"]["properties"]) == {
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action",
+    }
     action_variants = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]["oneOf"]
     execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")
     assert execute_plan_schema["required"] == [

@@ -22,7 +22,14 @@ class FakeBackend:
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         self.turns.append((session.provider_handle, request, workspace_root))
         if session.role == "root_reconciler":
-            return {"output": {"action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]}}}
+            return {"output": {
+                "rationale": "Waiting for the next durable fact.",
+                "evidence_refs": [{"reference_id": "fact-1", "source_kind": "result"}],
+                "consumed_input_ids": [],
+                "comment_replies": [],
+                "human_action_resolutions": [],
+                "action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]},
+            }}
         return {"output": {"kind": "canceled", "sanitized_reason": "test cancellation"}, "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
 
     def interrupt_turn(self, session) -> None:
@@ -47,7 +54,14 @@ class RootFailureBackend(FakeBackend):
 class InvalidRootDirectiveBackend(FakeBackend):
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         if session.role == "root_reconciler":
-            return {"output": {"action": {"kind": "wait", "reason_code": "human"}}}
+            return {"output": {
+                "rationale": "Missing evidence.",
+                "evidence_refs": [],
+                "consumed_input_ids": [],
+                "comment_replies": [],
+                "human_action_resolutions": [],
+                "action": {"kind": "wait", "reason_code": "human"},
+            }}
         return super().execute_role_turn(
             session,
             request,
@@ -60,39 +74,51 @@ def envelope(request_id: str, kind: str, payload: dict[str, object]) -> dict[str
     return {"protocol_version": "1", "request_id": request_id, "kind": kind, **payload}
 
 
-def root_observation(request_id: str, session_id: str, turn_id: str) -> dict[str, object]:
+def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
+    return {
+        "root_snapshot": {
+            "root": {
+                "issue": {
+                    "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": "Root description",
+                    "status": "Todo", "is_archived": False, "labels": [], "remote_version": "root-v1",
+                },
+                "objective": "Complete the root objective",
+                "scope": "The requested root scope",
+                "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}],
+                "constraints": [],
+                "root_status": "Todo",
+                "ownership": {"record_id": "owner-1", "record_kind": "root_ownership", "version": "1"},
+                "convergence_summary": "No convergence limit has been reached.",
+            },
+            "cycles": [],
+            "issues": [],
+            "relations": [],
+            "managed_records": [],
+            "user_comments": [],
+            "git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
+            "delivery": {"record_id": "delivery-1", "record_kind": "delivery", "version": "1"},
+            "mechanical_violations": [],
+        },
+        "source_manifest": [],
+        "coverage": {"is_complete": True, "omissions": []},
+        "root_digest": root_digest,
+        "pending_input_ids": [],
+    }
+
+
+def open_root_request(request_id: str = "open", session_id: str = "root-session", turn_id: str = "turn-1") -> dict[str, object]:
     return {
         "protocol_version": "1",
         "request_id": request_id,
+        "kind": "open_root_reconciler",
         "reconciler_session_id": session_id,
         "reconciler_turn_id": turn_id,
         "observed_at": "2026-07-23T00:00:00Z",
-        "root": {
-            "issue": {
-                "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": "Root description",
-                "status": "Todo", "is_archived": False, "remote_version": "root-v1",
-            },
-            "objective": "Complete the root objective",
-            "scope": "The requested root scope",
-            "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}],
-            "constraints": [],
-            "root_status": "Todo",
-            "ownership": {"record_id": "owner-1", "record_kind": "root_ownership", "version": "1"},
-            "convergence_summary": "No convergence limit has been reached.",
-        },
-        "cycles": [],
-        "root_human_actions": [],
-        "accepted_root_directives": [],
-        "root_reconciler_failures": [],
-        "pending_user_comments": [],
-        "reconciler_reply_records": [],
-        "external_linear_changes": [],
-        "workflow_change_resolutions": [],
-        "git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
-        "delivery": {"record_id": "delivery-1", "record_kind": "delivery", "version": "1"},
-        "source_manifest": [],
-        "coverage": {"is_complete": True, "omissions": []},
-        "observed_root_tree_digest": "tree-1",
+        "root_issue_id": "root-1",
+        "performer_profile_id": "profile-1",
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
+        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "bootstrap": root_bootstrap(),
         "limits": {
             "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
             "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
@@ -100,10 +126,40 @@ def root_observation(request_id: str, session_id: str, turn_id: str) -> dict[str
     }
 
 
+def root_delta(request_id: str, session_id: str, turn_id: str, base: str, target: str) -> dict[str, object]:
+    return {
+        "protocol_version": "1",
+        "request_id": request_id,
+        "kind": "advance_root_reconciler",
+        "reconciler_session_id": session_id,
+        "reconciler_turn_id": turn_id,
+        "observed_at": "2026-07-23T00:00:00Z",
+        "delta": {"base_root_digest": base, "target_root_digest": target, "changes": [], "pending_input_ids": []},
+        "limits": {
+            "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
+            "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
+        },
+    }
+
+
+def issue_change(description: str = "Updated root description") -> dict[str, object]:
+    return {
+        "kind": "issue_current_value",
+        "source_id": "root-1",
+        "source_version": "root-v2",
+        "actor_kind": "human",
+        "observed_at": "2026-07-23T00:00:01Z",
+        "issue": {
+            "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": description,
+            "status": "Todo", "is_archived": False, "labels": [], "remote_version": "root-v2",
+        },
+    }
+
+
 def issue_snapshot(kind: str) -> dict[str, object]:
     return {
         "issue_id": f"{kind}-1", "issue_kind": kind, "title": kind.title(), "description": f"{kind} description",
-        "status": "Todo", "is_archived": False, "remote_version": f"{kind}-v1",
+        "status": "Todo", "is_archived": False, "labels": [], "remote_version": f"{kind}-v1",
     }
 
 
@@ -152,47 +208,88 @@ def test_host_keeps_root_session_and_returns_root_directive():
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
 
-    opened = host.handle(envelope("open", "open_root_reconciler", {
-        "root_issue_id": "root-1",
-        "performer_profile_id": "profile-1",
-        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
-        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
-        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2026-07-23T00:00:00Z"},
-    }))
-    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
+    opened = host.handle(open_root_request())
 
     assert opened["kind"] == "root_reconciler_opened"
-    assert result["action"]["kind"] == "wait"
+    assert opened["initial_directive"]["action"]["kind"] == "wait"
+    assert opened["bootstrap_root_digest"] == "tree-1"
     assert backend.turns[0][0] == "provider-1"
+    assert backend.turns[0][1]["kind"] == "open_root_reconciler"
+
+
+def test_host_accepts_multiple_continuous_deltas_in_one_root_session():
+    backend = FakeBackend()
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+
+    first = host.handle(root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2"))
+    second = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
+
+    assert first["based_on_target_root_digest"] == "tree-2"
+    assert second["based_on_target_root_digest"] == "tree-3"
+    assert [turn[1]["kind"] for turn in backend.turns] == ["open_root_reconciler", "advance_root_reconciler", "advance_root_reconciler"]
+
+
+def test_host_rejects_stale_and_discontinuous_deltas():
+    stale_host = AgentProtocolHost(FakeBackend())
+    stale_host.handle(open_root_request())
+    stale_host.handle(root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2"))
+
+    stale = stale_host.handle(root_delta("stale", "root-session", "turn-3", "tree-1", "tree-3"))
+
+    discontinuous_host = AgentProtocolHost(FakeBackend())
+    discontinuous_host.handle(open_root_request())
+    discontinuous = discontinuous_host.handle(root_delta("gap", "root-session", "turn-2", "unknown", "tree-4"))
+
+    assert stale["code"] == "root_delta_stale"
+    assert discontinuous["code"] == "root_delta_discontinuous"
+    assert stale_host.handle(root_delta("after-stale", "root-session", "turn-4", "tree-1", "tree-4"))["code"] == "root_reconciler_bootstrap_required"
+
+
+def test_host_rejects_full_snapshot_and_implicit_root_turn_on_advance():
+    host = AgentProtocolHost(FakeBackend())
+    host.handle(open_root_request())
+    full_snapshot = root_delta("full", "root-session", "turn-2", "tree-1", "tree-2")
+    full_snapshot["bootstrap"] = root_bootstrap("tree-2")
+    legacy = {
+        "protocol_version": "1", "request_id": "legacy", "reconciler_session_id": "root-session",
+        "reconciler_turn_id": "turn-2", "observed_at": "2026-07-23T00:00:00Z", "root": {},
+    }
+
+    assert host.handle(full_snapshot)["code"] == "request_shape_invalid"
+    assert host.handle(legacy)["code"] == "request_shape_invalid"
+
+
+def test_delta_advances_runtime_canonical_facts_and_lost_session_requires_bootstrap():
+    backend = FakeBackend()
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+    changed = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    changed["delta"]["changes"] = [issue_change()]
+    changed["delta"]["pending_input_ids"] = ["root-v2"]
+
+    host.handle(changed)
+    baseline = host._root._baselines["root-session"]
+    assert baseline.root_digest == "tree-2"
+    assert baseline.canonical_facts["pending_input_ids"] == ["root-v2"]
+    assert baseline.canonical_facts["root_snapshot"]["root"]["issue"]["description"] == "Updated root description"
+
+    host._sessions.close("root-session")
+    lost = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
+    assert lost["code"] == "root_reconciler_bootstrap_required"
 
 
 def test_host_preserves_root_provider_failure_code():
     backend = RootFailureBackend()
     host = AgentProtocolHost(backend)
-    opened = host.handle(envelope("open", "open_root_reconciler", {
-        "root_issue_id": "root-1",
-        "performer_profile_id": "profile-1",
-        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
-        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
-        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z"},
-    }))
-
-    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
+    result = host.handle(open_root_request())
 
     assert result["code"] == "provider_turn_failed"
 
 
 def test_host_reports_root_directive_contract_failure():
     host = AgentProtocolHost(InvalidRootDirectiveBackend())
-    opened = host.handle(envelope("open", "open_root_reconciler", {
-        "root_issue_id": "root-1",
-        "performer_profile_id": "profile-1",
-        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
-        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
-        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z"},
-    }))
-
-    result = host.handle(root_observation("turn", opened["reconciler_session_id"], "turn-1"))
+    result = host.handle(open_root_request())
 
     assert result["code"] == "root_directive_wait_missing_blocking_fact_refs"
 
@@ -281,12 +378,7 @@ def test_host_rejects_unknown_or_malformed_protocol_requests():
 def test_close_cycle_does_not_close_root_session():
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
-    host.handle(envelope("root", "open_root_reconciler", {
-        "root_issue_id": "root-1", "performer_profile_id": "profile-1",
-        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
-        "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
-        "limits": {"max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1, "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2026-07-23T00:00:00Z"},
-    }))
+    host.handle(open_root_request(request_id="root"))
     host._sessions.open(
         session_id="plan-session", role="plan", root_issue_id="root-1", cycle_issue_id="cycle-1", settings={}
     )

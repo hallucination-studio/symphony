@@ -8,7 +8,7 @@ const SHUTDOWN_ASSERTION_MS = 2_000;
 const RESPONSE_ASSERTION_MS = 5_000;
 const PERFORMER = path.resolve(".venv/bin/performer");
 
-test("production Performer rejects the retired envelope and exits on SIGTERM", {
+test("production Performer rejects implicit Root turn input and exits on SIGTERM", {
   timeout: EVIDENCE_DEADLINE_MS,
 }, async () => {
   const deadlineAt = Date.now() + EVIDENCE_DEADLINE_MS;
@@ -40,10 +40,16 @@ test("production Performer rejects the retired envelope and exits on SIGTERM", {
     assert.equal(response.kind, "error");
     assert.equal(response.code, "request_shape_invalid");
 
-    child.stdin.write(`${JSON.stringify(rootObservation())}\n`);
+    child.stdin.write(`${JSON.stringify({
+      protocol_version: "1",
+      request_id: "root-observation",
+      reconciler_session_id: "missing-session",
+      reconciler_turn_id: "root-turn",
+      observed_at: "2026-07-23T00:00:00Z",
+    })}\n`);
     const directResponse = await waitForJsonLine(child, () => output, outputState, Math.min(deadlineAt, Date.now() + RESPONSE_ASSERTION_MS), () => errors);
     assert.equal(directResponse.kind, "error");
-    assert.equal(directResponse.code, "session_not_found");
+    assert.equal(directResponse.code, "request_shape_invalid");
 
     child.kill("SIGTERM");
     const exit = await waitForExit(child, Math.min(deadlineAt, Date.now() + SHUTDOWN_ASSERTION_MS));
@@ -94,59 +100,6 @@ function waitForJsonLine(child, readOutput, outputState, deadlineAt, readErrors)
     child.stdout.on("data", listener);
     check();
   });
-}
-
-function rootObservation() {
-  return {
-    protocol_version: "1",
-    request_id: "root-observation",
-    reconciler_session_id: "missing-session",
-    reconciler_turn_id: "root-turn",
-    observed_at: "2026-07-23T00:00:00Z",
-    root: {
-      issue: {
-        issue_id: "root-1",
-        issue_kind: "root",
-        title: "Root",
-        description: "Complete the root objective",
-        status: "Todo",
-        is_archived: false,
-        remote_version: "root-v1",
-      },
-      objective: "Complete the root objective",
-      scope: "The requested scope",
-      acceptance_criteria: [{
-        criterion_key: "criterion-1",
-        statement: "The objective is complete",
-        verification_method: "automated test",
-      }],
-      constraints: [],
-      root_status: "Todo",
-      ownership: { record_id: "owner-1", record_kind: "root_ownership", version: "1" },
-      convergence_summary: "No convergence limit has been reached.",
-    },
-    cycles: [],
-    root_human_actions: [],
-    accepted_root_directives: [],
-    root_reconciler_failures: [],
-    pending_user_comments: [],
-    reconciler_reply_records: [],
-    external_linear_changes: [],
-    workflow_change_resolutions: [],
-    git_facts: { head_revision: "head-1", baseline_revision: "head-1", status_summary: "clean", changed_paths: [] },
-    delivery: { record_id: "delivery-1", record_kind: "delivery", version: "1" },
-    source_manifest: [],
-    coverage: { is_complete: true, omissions: [] },
-    observed_root_tree_digest: "tree-1",
-    limits: {
-      max_context_bytes: 1,
-      max_result_bytes: 1,
-      max_output_tokens: 1,
-      max_tool_calls: 0,
-      max_wall_time_ms: 1_000,
-      deadline_at: "2027-07-23T00:00:00Z",
-    },
-  };
 }
 
 function waitForExit(child, deadlineAt) {

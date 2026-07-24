@@ -14,7 +14,6 @@ def validate(name: str, value: Any) -> Any:
         labels = {
             "PerformerProfileControlMetadata": "Performer Profile control metadata",
             "PerformerProfileControlResult": "Performer Profile control result",
-            "RootReconcilerObservation": "Root Reconciler observation",
             "RootDirective": "Root directive",
             "PlanResult": "Plan result",
             "WorkResult": "Work result",

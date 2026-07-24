@@ -44,11 +44,7 @@ class RoleExecutionRuntime:
 
     def _execute(self, role: str, request: dict[str, Any], *, cancel_event: Event | None) -> dict[str, Any]:
         cancel_event = cancel_event or Event()
-        root_issue_id = (
-            _required_text(request, "root_issue_id")
-            if role != "root_reconciler"
-            else _root_issue_id(request)
-        )
+        root_issue_id = _required_text(request, "root_issue_id")
         cycle_issue_id = _optional_text(request, "cycle_issue_id")
         session_key = "reconciler_session_id" if role == "root_reconciler" else "role_session_id"
         turn_key = "reconciler_turn_id" if role == "root_reconciler" else "role_turn_id"
@@ -107,7 +103,20 @@ class RoleExecutionRuntime:
 
 def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
     if role == "root_reconciler":
-        _required_text(request, "observed_root_tree_digest")
+        _required_text(request, "root_issue_id")
+        if request.get("kind") == "open_root_reconciler":
+            bootstrap = request.get("bootstrap")
+            if not isinstance(bootstrap, dict):
+                raise ValueError("root_bootstrap_invalid")
+            _required_text(bootstrap, "root_digest")
+        elif request.get("kind") == "advance_root_reconciler":
+            delta = request.get("delta")
+            if not isinstance(delta, dict):
+                raise ValueError("root_delta_invalid")
+            _required_text(delta, "base_root_digest")
+            _required_text(delta, "target_root_digest")
+        else:
+            raise ValueError("root_reconciler_command_invalid")
         if "cycle_issue_id" in request and request["cycle_issue_id"] is not None:
             raise ValueError("root_reconciler_cycle_scope_invalid")
         return
@@ -137,13 +146,30 @@ def _terminal(
 ) -> dict[str, Any]:
     if role == "root_reconciler":
         payload = {
+            "protocol_version": "1",
+            "request_id": request["request_id"],
             "reconciler_session_id": request["reconciler_session_id"],
             "reconciler_turn_id": request["reconciler_turn_id"],
-            "root_issue_id": _root_issue_id(request),
-            "observed_root_tree_digest": request["observed_root_tree_digest"],
-            "directive": result,
-            "completed_at": _timestamp(completed_at),
+            "root_issue_id": request["root_issue_id"],
         }
+        if result.get("kind") in {"execution_failed", "canceled"}:
+            payload["directive"] = result
+        else:
+            payload["directive"] = {
+                "protocol_version": "1",
+                "request_id": request["request_id"],
+                "root_directive_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}",
+                "reconciler_session_id": request["reconciler_session_id"],
+                "reconciler_turn_id": request["reconciler_turn_id"],
+                "based_on_target_root_digest": _root_target_digest(request),
+                "rationale": result["rationale"],
+                "evidence_refs": result["evidence_refs"],
+                "consumed_input_ids": result["consumed_input_ids"],
+                "comment_replies": result["comment_replies"],
+                "human_action_resolutions": result["human_action_resolutions"],
+                "action": result["action"],
+            }
+        payload["completed_at"] = _timestamp(completed_at)
         if provider_output and provider_output.get("usage") is not None:
             payload["usage"] = provider_output["usage"]
         return payload
@@ -176,6 +202,9 @@ def _provider_output(value: Any, role: str) -> dict[str, Any]:
     if role == "root_reconciler":
         if not isinstance(output.get("action"), dict):
             raise ValueError("provider_output_action_invalid")
+        for field in ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions"):
+            if field not in output:
+                raise ValueError(f"provider_output_{field}_missing")
         return output
     if not isinstance(output.get("kind"), str):
         raise ValueError("provider_output_kind_invalid")
@@ -189,11 +218,16 @@ def _required_text(value: dict[str, Any], key: str) -> str:
     return result
 
 
-def _root_issue_id(request: dict[str, Any]) -> str:
-    root = request.get("root")
-    if not isinstance(root, dict) or not isinstance(root.get("issue"), dict):
-        raise ValueError("root_issue_id_invalid")
-    return _required_text(root["issue"], "issue_id")
+def _root_target_digest(request: dict[str, Any]) -> str:
+    if request.get("kind") == "open_root_reconciler":
+        bootstrap = request.get("bootstrap")
+        if not isinstance(bootstrap, dict):
+            raise ValueError("root_bootstrap_invalid")
+        return _required_text(bootstrap, "root_digest")
+    delta = request.get("delta")
+    if not isinstance(delta, dict):
+        raise ValueError("root_delta_invalid")
+    return _required_text(delta, "target_root_digest")
 
 
 def _optional_text(value: dict[str, Any], key: str) -> str | None:

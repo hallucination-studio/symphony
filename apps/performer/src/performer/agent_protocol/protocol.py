@@ -9,9 +9,7 @@ PROTOCOL_VERSION = "1"
 REQUEST_KINDS = frozenset(
     {
         "open_root_reconciler",
-        "execute_plan_turn",
-        "execute_work_turn",
-        "execute_verify_turn",
+        "advance_root_reconciler",
         "close_cycle_stage_sessions",
         "close_root_reconciler",
     }
@@ -39,8 +37,7 @@ def validate_request(value: Any) -> dict[str, Any]:
     kind = request.get("kind")
     if kind is None:
         if "reconciler_session_id" in request:
-            _validate_contract("RootReconcilerObservation", request, request_id)
-            return request
+            raise ProtocolError("request_shape_invalid", "Root Reconciler turns require an explicit command kind.")
         role = request.get("role")
         stage_contract = {"plan": "PlanTurnRequest", "work": "WorkTurnRequest", "verify": "VerifyTurnRequest"}.get(role)
         if stage_contract is None:
@@ -50,17 +47,26 @@ def validate_request(value: Any) -> dict[str, Any]:
     if not isinstance(kind, str) or kind not in REQUEST_KINDS:
         raise ProtocolError("request_kind_unsupported", "The Performer request kind is unsupported.")
     required_fields = {
-        "open_root_reconciler": {"root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "limits"},
+        "open_root_reconciler": {
+            "reconciler_session_id", "reconciler_turn_id", "observed_at", "root_issue_id",
+            "performer_profile_id", "model_settings", "execution_policy", "bootstrap", "limits",
+        },
+        "advance_root_reconciler": {"reconciler_session_id", "reconciler_turn_id", "observed_at", "delta", "limits"},
         "close_cycle_stage_sessions": {"root_issue_id", "cycle_issue_id", "reason"},
         "close_root_reconciler": {"root_issue_id", "reason"},
-    }[kind]
+    }.get(kind)
+    if required_fields is None:
+        raise ProtocolError("request_kind_unsupported", "The Performer request kind is unsupported.")
     if not required_fields.issubset(request):
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
     contract_name = {
         "open_root_reconciler": "OpenRootReconcilerRequest",
+        "advance_root_reconciler": "AdvanceRootReconcilerRequest",
         "close_cycle_stage_sessions": "CloseCycleStageSessionsCommand",
         "close_root_reconciler": "CloseRootReconcilerCommand",
-    }[kind]
+    }.get(kind)
+    if contract_name is None:
+        raise ProtocolError("request_kind_unsupported", "The Performer request kind is unsupported.")
     _validate_contract(contract_name, request, request_id)
     return request
 

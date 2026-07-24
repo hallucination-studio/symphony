@@ -38,8 +38,9 @@ class AgentProtocolHost:
             payload = request
             kind = request.get("kind")
             if kind == "open_root_reconciler":
-                return response(request["request_id"], "root_reconciler_opened", self._root.open(payload))
-            if kind is None and "reconciler_session_id" in request:
+                opened = response(request["request_id"], "root_reconciler_opened", self._root.open(payload))
+                return validate("RootReconcilerOpenedResult", opened)
+            if kind == "advance_root_reconciler":
                 return validate("RootDirective", self._root.advance(payload))
             if kind is None and request.get("role") == "plan":
                 self._ensure_stage_session(payload, "plan")
