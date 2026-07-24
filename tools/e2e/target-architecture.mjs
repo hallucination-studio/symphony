@@ -179,22 +179,22 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       title: `Cycle ${runDigest}`, description: "Run the disposable no-op target architecture acceptance cycle.",
       marker: `${runDigest}:cycle`, statusName: "Draft",
     });
-    await createChild({
+    const planIssueId = await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
       issueKind: "plan", title: `Plan ${runDigest}`, description: "Define the already-scoped two-check no-op execution using supplied facts; do not use tools.",
       marker: `${runDigest}:plan`, statusName: "Todo",
     });
-    await createChild({
+    const workAIssueId = await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
       issueKind: "work", title: `Work A ${runDigest}`, description: "Report the supplied current HEAD without inspecting files or using tools.",
       marker: `${runDigest}:work-a`, order: 1, statusName: "Todo",
     });
-    await createChild({
+    const workBIssueId = await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
       issueKind: "work", title: `Work B ${runDigest}`, description: "Report the supplied clean status without inspecting files or using tools.",
       marker: `${runDigest}:work-b`, order: 2, statusName: "Todo",
     });
-    await createChild({
+    const verifyIssueId = await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
       issueKind: "verify", title: `Verify ${runDigest}`, description: "Verify the supplied no-op facts without inspecting files or using tools.",
       marker: `${runDigest}:verify`, order: 3, statusName: "Todo",
@@ -283,6 +283,7 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       gateway,
       projectId,
       rootIssueId,
+      expectedStageIssueIds: { planIssueId, workIssueIds: [workAIssueId, workBIssueId], verifyIssueId },
       deadlineAt,
       failureReason: () => latestRootFailureReason(logs),
     });
@@ -354,7 +355,14 @@ async function createChild({
   return outcome.readBack.targetIssueId;
 }
 
-export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt, failureReason }) {
+export async function waitForExecutionEvidence({
+  gateway,
+  projectId,
+  rootIssueId,
+  expectedStageIssueIds,
+  deadlineAt,
+  failureReason,
+}) {
   const stopAt = deadlineAt.getTime();
   let latest = { planResults: 0, workResults: 0, verifyResults: 0 };
   while (Date.now() < stopAt) {
@@ -367,7 +375,12 @@ export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId
       workResults: countStageResults(tree.comments, "work"),
       verifyResults: countStageResults(tree.comments, "verify"),
     };
-    if (latest.planResults >= 1 && latest.workResults >= 2 && latest.verifyResults >= 1) return latest;
+    if (
+      latest.planResults >= 1 &&
+      latest.workResults >= 2 &&
+      latest.verifyResults >= 1 &&
+      hasCompletedStageStatuses(tree.issues, expectedStageIssueIds)
+    ) return latest;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
   }
   throw new Error("target_e2e_execution_evidence_timeout");
@@ -398,6 +411,21 @@ function countStageResults(comments, stage) {
   return comments.filter((comment) =>
     comment.body.includes("stage_result") && new RegExp(`"stage"\\s*:\\s*"${stage}"`, "u").test(comment.body),
   ).length;
+}
+
+function hasCompletedStageStatuses(issues, expectedStageIssueIds) {
+  if (!Array.isArray(issues) || !expectedStageIssueIds) return false;
+  const byId = new Map(issues.filter((issue) => issue && typeof issue.issueId === "string")
+    .map((issue) => [issue.issueId, issue]));
+  return hasStatus(byId.get(expectedStageIssueIds.planIssueId), "plan", "In Review") &&
+    Array.isArray(expectedStageIssueIds.workIssueIds) &&
+    expectedStageIssueIds.workIssueIds.length === 2 &&
+    expectedStageIssueIds.workIssueIds.every((issueId) => hasStatus(byId.get(issueId), "work", "Done")) &&
+    hasStatus(byId.get(expectedStageIssueIds.verifyIssueId), "verify", "Done");
+}
+
+function hasStatus(issue, issueKind, statusName) {
+  return Boolean(issue) && issue.issueKind === issueKind && issue.statusName === statusName && issue.isArchived === false;
 }
 
 function remaining(deadlineAt) {

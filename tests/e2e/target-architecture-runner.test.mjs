@@ -89,15 +89,48 @@ test("target E2E execution evidence reads through the Linear gateway contract", 
             { body: 'stage_result {"stage":"work"}' },
             { body: 'stage_result {"stage":"verify"}' },
           ],
+          issues: [
+            { issueId: "plan-1", issueKind: "plan", statusName: "In Review", isArchived: false },
+            { issueId: "work-a", issueKind: "work", statusName: "Done", isArchived: false },
+            { issueId: "work-b", issueKind: "work", statusName: "Done", isArchived: false },
+            { issueId: "verify-1", issueKind: "verify", statusName: "Done", isArchived: false },
+          ],
         };
       },
     },
     projectId: "project-1",
     rootIssueId: "root-1",
+    expectedStageIssueIds: { planIssueId: "plan-1", workIssueIds: ["work-a", "work-b"], verifyIssueId: "verify-1" },
     deadlineAt: new Date(Date.now() + 1_000),
   });
   assert.deepEqual(result, { planResults: 1, workResults: 2, verifyResults: 1 });
   assert.equal(calls, 1);
+});
+
+test("target E2E rejects Stage Results without their matching terminal statuses", async () => {
+  await assert.rejects(waitForExecutionEvidence({
+    gateway: {
+      async getWorkflowIssueTree() {
+        return {
+          comments: [
+            { body: 'stage_result {"stage":"plan"}' },
+            { body: 'stage_result {"stage":"work"}' },
+            { body: 'stage_result {"stage":"work"}' },
+            { body: 'stage_result {"stage":"verify"}' },
+          ],
+          issues: [
+            { issueId: "plan-1", issueKind: "plan", statusName: "In Progress", isArchived: false },
+            { issueId: "work-a", issueKind: "work", statusName: "Todo", isArchived: false },
+            { issueId: "work-b", issueKind: "work", statusName: "Todo", isArchived: false },
+          ],
+        };
+      },
+    },
+    projectId: "project-1",
+    rootIssueId: "root-1",
+    expectedStageIssueIds: { planIssueId: "plan-1", workIssueIds: ["work-a", "work-b"], verifyIssueId: "verify-1" },
+    deadlineAt: new Date(Date.now() + 10),
+  }), /target_e2e_execution_evidence_timeout/u);
 });
 
 test("target E2E execution evidence stops when the production boundary reports failure", async () => {
