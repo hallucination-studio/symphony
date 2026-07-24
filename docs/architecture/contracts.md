@@ -47,9 +47,10 @@ actor kinds + stable write correlations
 它只属于matching comment snapshot的thread-state field，不创建第二个manifest entry或historical activity source；缺失时
 该state actor为`unknown`。
 
-Comment source必须包含native thread resolved/unresolved当前值以及reaction当前集合。comment body input使用canonical body
-digest；当前thread-state revision使用comment remote version。后者的identity由comment identity、remote version和当前state
-组成，而不是一个不可重建的thread-change event。二者不能共用remote version，避免close/reopen把未编辑的body重复变成输入。
+Comment source必须包含native thread resolved/unresolved当前值以及reaction当前集合。body input的唯一wire field是
+`comment_body_digest`，它携带canonical body digest，不能替换为Linear remote version、递增revision或本地计数器；当前
+thread-state revision使用comment remote version。后者的identity由comment identity、remote version和当前state组成，而不是一个
+不可重建的thread-change event。二者不能共用remote version，避免close/reopen把未编辑的body重复变成输入。
 Linear仅在实际返回state actor时携带actor kind；缺失时为`unknown`，Podium和Conductor不得从comment author或webhook内存
 推断。reaction集合用于Symphony回执write/read-back与审计；human reaction不是Workflow command或Root pending input。
 Podium不得把reaction翻译成approval、rejection或其他Workflow语义。
@@ -178,7 +179,7 @@ Root Reconciler和Stage turn Result都必须关联实际调用model与closed Tur
 role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。usage无法从Provider
 取得时使用显式`unavailable` variant，不能省略或写零。字段与聚合语义由
 [Performer Profile](performer-profiles.md)定义。
-Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment body version或
+Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment body digest或
 native comment thread-state revision、Root directive和deterministic reply ID。
 
 ## 7. Error语义

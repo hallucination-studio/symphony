@@ -345,7 +345,7 @@ Symphony actor产生但code block缺失、重复或schema无效的comment形成m
 UserCommentInput =
   HumanCommentBodyInput
     comment_id
-    comment_body_version
+    comment_body_digest
     issue_id
     issue_kind: root | cycle | plan | work | verify | human_action
     cycle_issue_id?
@@ -364,7 +364,8 @@ UserCommentInput =
     observed_at
 ```
 
-body input identity是`comment_body + comment_id + canonical_body_digest`；thread-state input identity是
+body input identity是`comment_body + comment_id + canonical_body_digest`；其中wire field固定为
+`comment_body_digest`，它是canonical body digest而不是Linear remote version、递增revision或本地计数器。thread-state input identity是
 `thread_state + comment_id + comment_remote_version + thread_state`。每个identity最多处理一次。human body及所有non-Symphony thread-state
 revision（包括无法由Linear归属的`unknown`）进入pending input；matching Symphony reply/reaction/resolve writes按stable
 write correlation排除。reaction不机械映射为approval、rejection或任何status，也不作为模型控制通道。
@@ -406,7 +407,7 @@ UserCommentReply
   source:
     CommentBodyVersionReplySource
       comment_id
-      comment_body_version
+      comment_body_digest
     | CommentThreadStateReplySource
       comment_id
       comment_remote_version
@@ -466,7 +467,7 @@ RootReconcilerReplyRecord
   source:
     CommentBodyVersionRecordSource
       comment_id
-      comment_body_version
+      comment_body_digest
     | CommentThreadStateRecordSource
       comment_id
       comment_remote_version
