@@ -341,7 +341,7 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
   const targetIssue = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
   if (!rootIssue || !cycleIssue || !targetIssue) throw new Error("stage_context_issue_missing");
   const rootContract = planRootContract(rootIssue);
-  const planContract = planContractFor(input, rootIssue);
+  const planContract = planContractFor(input, rootIssue, targetIssue);
   const planDag = planDagFor(input);
   const gitFacts = gitFactsFor(input);
   const context = input.role === "plan"
@@ -454,13 +454,13 @@ function planRootContract(rootIssue: JsonRecord): JsonRecord {
   };
 }
 
-function planContractFor(input: StageTurnInput, rootIssue: JsonRecord): JsonRecord {
+function planContractFor(input: StageTurnInput, rootIssue: JsonRecord, targetIssue: JsonRecord): JsonRecord {
   const objective = typeof rootIssue.description === "string" && rootIssue.description
     ? rootIssue.description
     : input.goal;
   return {
     objective,
-    included_scope: [input.goal],
+    included_scope: [scopeSummary(input.goal, targetIssue.title)],
     excluded_scope: [],
     assumptions: [],
     constraints: [],
@@ -471,6 +471,12 @@ function planContractFor(input: StageTurnInput, rootIssue: JsonRecord): JsonReco
     }],
     verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
   };
+}
+
+function scopeSummary(goal: string, title: unknown): string {
+  if (goal.trim().length > 0 && goal.length <= 256) return goal;
+  if (typeof title === "string" && title.trim().length > 0 && title.length <= 256) return title;
+  return "selected work issue";
 }
 
 function planDagFor(input: StageTurnInput): JsonRecord {

@@ -169,34 +169,34 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       description: [
         "Disposable target architecture acceptance root.",
         "Execute the existing Cycle Plan, then each Work issue in order, then Verify.",
-        "The two Work issues are deliberately ordinary read-only checks; do not request human action.",
+        "This is a no-op acceptance fixture: use the supplied Git facts, do not inspect files or run tools, and do not request human action.",
         `Run marker: ${runDigest}`,
       ].join("\n"),
     });
     rootIssueId = root.rootIssueId;
     const cycleIssueId = await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, issueKind: "cycle",
-      title: `Cycle ${runDigest}`, description: "Run the disposable target architecture acceptance cycle.",
+      title: `Cycle ${runDigest}`, description: "Run the disposable no-op target architecture acceptance cycle.",
       marker: `${runDigest}:cycle`, statusName: "Draft",
     });
     await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "plan", title: `Plan ${runDigest}`, description: "Define the already-scoped two-check execution.",
+      issueKind: "plan", title: `Plan ${runDigest}`, description: "Define the already-scoped two-check no-op execution using supplied facts; do not use tools.",
       marker: `${runDigest}:plan`, statusName: "Todo",
     });
     await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "work", title: `Work A ${runDigest}`, description: "Inspect the repository and report the current HEAD.",
+      issueKind: "work", title: `Work A ${runDigest}`, description: "Report the supplied current HEAD without inspecting files or using tools.",
       marker: `${runDigest}:work-a`, order: 1, statusName: "Todo",
     });
     await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "work", title: `Work B ${runDigest}`, description: "Inspect the repository and report the current status.",
+      issueKind: "work", title: `Work B ${runDigest}`, description: "Report the supplied clean status without inspecting files or using tools.",
       marker: `${runDigest}:work-b`, order: 2, statusName: "Todo",
     });
     await createChild({
       sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "verify", title: `Verify ${runDigest}`, description: "Verify the scoped repository checks.",
+      issueKind: "verify", title: `Verify ${runDigest}`, description: "Verify the supplied no-op facts without inspecting files or using tools.",
       marker: `${runDigest}:verify`, order: 3, statusName: "Todo",
     });
 
@@ -277,7 +277,7 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       model: config.codex.model,
       apiKey,
       displayName: "Target architecture E2E",
-      reasoningEffort: "low",
+      reasoningEffort: "minimal",
     });
     const evidence = await waitForExecutionEvidence({
       gateway,
@@ -359,7 +359,7 @@ async function createChild({
 }
 
 export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId, deadlineAt, failureReason }) {
-  const stopAt = Math.min(deadlineAt.getTime(), Date.now() + 180_000);
+  const stopAt = deadlineAt.getTime();
   let latest = { planResults: 0, workResults: 0, verifyResults: 0 };
   while (Date.now() < stopAt) {
     if (typeof failureReason === "function" && failureReason()) {

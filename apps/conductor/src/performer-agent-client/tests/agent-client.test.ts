@@ -32,7 +32,7 @@ function channelFactoryFor(
   };
 }
 
-function stageInput(role: "plan" | "work" | "verify"): StageTurnInput {
+function stageInput(role: "plan" | "work" | "verify", goal = "execute the selected role"): StageTurnInput {
   return {
     protocolVersion: 1,
     requestId: `${role}-request`,
@@ -43,7 +43,7 @@ function stageInput(role: "plan" | "work" | "verify"): StageTurnInput {
     cycleIssueId: "cycle-1",
     targetIssueId: `${role}-1`,
     role,
-    goal: "execute the selected role",
+    goal,
     requiredEvidenceRefs: [],
     tree: {
       root_issue_id: "root-1",
@@ -270,6 +270,20 @@ test("agent client sends role-specific closed stage contexts", async () => {
     "human_resolutions", "immutable_target_revision", "repository_snapshot", "unresolved_findings",
     "verification_requirements",
   ]);
+});
+
+test("agent client keeps a long Work execution goal within the Plan Contract scope bound", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => {
+      decodeConductorPerformerWorkTurnRequest(body as JsonValue);
+      return directStageResult("work", requestId) as JsonValue;
+    }),
+    deadlineMs: 30_000,
+  });
+
+  await client.executeWorkTurn(stageInput("work", `execute work ${"x".repeat(512)}`));
 });
 
 test("agent client rejects the retired stage_result envelope", async () => {
