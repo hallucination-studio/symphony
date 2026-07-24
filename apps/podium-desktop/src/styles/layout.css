@@ -11,6 +11,12 @@ summary:focus-visible {
   box-shadow: 0 0 0 3.5px var(--color-focus-halo);
 }
 
+a:focus-visible {
+  border-radius: var(--radius-control);
+  outline: none;
+  box-shadow: 0 0 0 3.5px var(--color-focus-halo);
+}
+
 /* Page headings receive programmatic focus for screen readers; the halo is
    for interactive controls only. */
 h1:focus {
@@ -233,6 +239,27 @@ h1:focus {
 
 .full-width {
   width: 100%;
+}
+
+/* macOS text inputs and selects are styled globally so a form outside a
+   dialog or the setup flow does not silently render unstyled controls. */
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: var(--size-control-height);
+  padding: 3px var(--space-2);
+  border: 1px solid var(--color-separator-strong);
+  border-radius: var(--radius-control);
+  background: var(--color-card-bg);
+  color: var(--color-label);
+  font-size: var(--font-size-body);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-accent);
 }
 
 .stale-note {
@@ -489,29 +516,6 @@ h1:focus {
   font-size: var(--font-size-body);
 }
 
-.dialog input:not([type="checkbox"]):not([type="radio"]),
-.dialog select,
-.setup-card input,
-.setup-card select {
-  min-height: var(--size-control-height);
-  padding: 3px var(--space-2);
-  border: 1px solid var(--color-separator-strong);
-  border-radius: var(--radius-control);
-  background: var(--color-card-bg);
-  color: var(--color-label);
-  font-size: var(--font-size-body);
-}
-
-.dialog input[type="checkbox"],
-.dialog input[type="radio"] {
-  min-height: 0;
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--color-accent);
-}
-
 .dialog label:has(> input[type="checkbox"]),
 .dialog fieldset label {
   display: flex;
@@ -596,5 +600,32 @@ h1:focus {
 @media (max-width: 380px) {
   .nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Forced-colors mode strips box shadows, which would erase the focus
+   halo; fall back to a real outline so focus stays visible. */
+@media (forced-colors: active) {
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  a:focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 1px;
+    box-shadow: none;
+  }
+}
+
+/* Reduced motion collapses every animation and transition. The
+   !important guard is intentional: it must win over component rules. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
