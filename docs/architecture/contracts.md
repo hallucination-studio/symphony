@@ -257,6 +257,13 @@ identity加上validated Symphony actor和strict decode定位该宿主comment，�
 `WorkflowIssueRecord`派生内部Issue kind；Podium只传递原生description，不能输出marker、预解码Issue kind或第二个
 identity field。
 
+代码块与Linear原生当前事实有严格边界。所有Symphony-owned、restart-required workflow record必须只在上述strict
+`symphony` block中持久化；普通Markdown、HTML、local file、queue、checkpoint或数据库不能保存其替代状态。反过来，
+Issue status/archive/parent/relation，以及comment body、native resolved/unresolved thread state和reaction set是Linear
+原生当前事实，必须由fresh Linear read-back取得，不能再镜像为`StatusRecord`、`ThreadStateRecord`、reaction record
+或Markdown状态约定。唯一例外是严格managed record对这些原生事实的immutable evidence reference；它不拥有、覆盖或
+恢复原生当前值。这一边界保证“一个代码块记录格式”和“一个Linear workflow状态模型”，而不是两套持久状态。
+
 managed Issue description必须在stable create/write ID下创建并read-back，且`WorkflowIssueRecord`必须与matching primary
 kind label、parent scope和fresh remote version一致。它不得加入source directive、proposal、resolution或任意lifecycle字段。
 用户后续删除、复制或修改code block只产生新的Linear事实和mechanical violation，不能伪造另一Issue身份，也不能由

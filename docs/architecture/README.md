@@ -66,6 +66,9 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - Root、Cycle、Node和Human Action的lifecycle只由Linear custom status与native archive flag表达；directive、Result、
   resolution、timeline、reply、reaction、thread resolve/unresolve和`RootDelta`只能提供事实、回执、幂等关联或传输，
   不得形成并行状态机。
+- 除Linear原生的Issue current facts（status、archive、parent和relation）及comment current facts（body、thread
+  state和reaction set）外，任何需要跨重启恢复的Symphony workflow record只能位于strict `symphony` code block；
+  Symphony不得把前述原生事实镜像成第二份managed record、Markdown约定、HTML marker、local checkpoint或状态表。
 - 普通human comment按actor与strict managed code block过滤；每个处理后的comment body version或non-Symphony native
   thread-state revision收到native thread reply、closed reaction disposition和resolve/keep-open action。Symphony-authored
   timeline/reply body不会回流；human在这些thread中的新comment，或当前线程状态的close/reopen revision，仍是Root输入。

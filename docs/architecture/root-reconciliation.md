@@ -326,7 +326,10 @@ directive中的`consumed_input_ids[]`后派生。comment body version和thread-s
 thread-state revision以source comment的当前remote version和state构成identity，而不是由Conductor、webhook或进程内存
 保存历史action。Linear能暴露state actor时才使用该actor；否则actor kind为`unknown`，绝不从comment author推断。
 因此用户可以reopen Symphony timeline/reply thread而不被错误过滤。reaction不是pending input。
-必须排除：
+
+下列排除只适用于Symphony-authored managed **body version**，不排除用户或unknown actor改变其原生thread state所产生的
+`NativeCommentThreadStateInput`。后者仍是同一comment snapshot的当前Linear事实，必须经Root Reconciler处理；不能以
+`ThreadStateRecord`、comment Markdown或本地历史复制为第二套状态。必须排除：
 
 - Root Control Record Comment；
 - Root/Cycle Timeline comments；
