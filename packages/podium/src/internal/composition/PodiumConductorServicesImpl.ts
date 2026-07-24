@@ -92,6 +92,9 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       case "create_workflow_issue":
       case "update_workflow_issue":
       case "append_workflow_comment":
+      case "create_comment_reply":
+      case "set_comment_receipt_reaction":
+      case "set_comment_thread_state":
       case "create_workflow_relation":
         return workflowMutationResult(
           await gateway.mutateWorkflow(workflowMutationCommand(body)),
@@ -308,7 +311,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           description: issue.description,
           labels: issue.labels,
           is_archived: issue.isArchived,
-          ...(issue.managedMarker ? { managed_marker: issue.managedMarker } : {}),
           ...(issue.issueKind ? { issue_kind: issue.issueKind } : {}),
           remote_version: issue.remoteVersion,
           updated_at: issue.updatedAt,
@@ -320,10 +322,28 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           author_kind: comment.authorKind,
           author_id: comment.authorId,
           ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
+          ...(comment.parentCommentId ? { parent_comment_id: comment.parentCommentId } : {}),
+          thread_root_comment_id: comment.threadRootCommentId,
+          thread_state: comment.threadState,
+          reactions: comment.reactions.map((reaction) => ({
+            reaction_id: reaction.reactionId,
+            emoji: reaction.emoji,
+            actor_kind: reaction.actorKind,
+            actor_id: reaction.actorId,
+          })),
           created_at: comment.createdAt,
-          ...(comment.managedMarker ? { managed_marker: comment.managedMarker } : {}),
           remote_version: comment.remoteVersion,
           updated_at: comment.updatedAt,
+        })),
+        comment_thread_changes: tree.commentThreadChanges.map((change) => ({
+          thread_change_id: change.threadChangeId,
+          source_comment_id: change.sourceCommentId,
+          thread_root_comment_id: change.threadRootCommentId,
+          action: change.action,
+          actor_kind: change.actorKind,
+          actor_id: change.actorId,
+          ...(change.actorUserId ? { actor_user_id: change.actorUserId } : {}),
+          occurred_at: change.occurredAt,
         })),
         relations: tree.relations.map((relation) => ({
           relation_id: relation.relationId,
@@ -526,6 +546,41 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       relationKind: workflowRelationKind(body.relation_kind),
     };
   }
+  if (body.kind === "create_comment_reply") {
+    return {
+      ...common,
+      kind: body.kind,
+      sourceCommentId: requiredString(body.source_comment_id, "linear_workflow_source_comment_id_missing"),
+      expectedSourceCommentRemoteVersion: requiredString(body.expected_source_comment_remote_version, "linear_workflow_source_comment_version_missing"),
+      expectedThreadRootCommentId: requiredString(body.expected_thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
+      expectedThreadState: workflowCommentThreadState(body.expected_thread_state, "linear_workflow_expected_thread_state_invalid"),
+      body: requiredString(body.body, "linear_workflow_comment_body_missing"),
+    };
+  }
+  if (body.kind === "set_comment_receipt_reaction") {
+    return {
+      ...common,
+      kind: body.kind,
+      replyWriteId: requiredString(body.reply_write_id, "linear_workflow_reply_write_id_missing"),
+      replyCommentId: requiredString(body.reply_comment_id, "linear_workflow_reply_comment_id_missing"),
+      expectedReplyCommentRemoteVersion: requiredString(body.expected_reply_comment_remote_version, "linear_workflow_reply_comment_version_missing"),
+      threadRootCommentId: requiredString(body.thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
+      expectedReceipt: workflowCommentReceipt(body.expected_receipt, "linear_workflow_expected_receipt_invalid"),
+      receipt: workflowCommentReceipt(body.receipt, "linear_workflow_receipt_invalid"),
+    };
+  }
+  if (body.kind === "set_comment_thread_state") {
+    return {
+      ...common,
+      kind: body.kind,
+      replyWriteId: requiredString(body.reply_write_id, "linear_workflow_reply_write_id_missing"),
+      sourceCommentId: requiredString(body.source_comment_id, "linear_workflow_source_comment_id_missing"),
+      expectedSourceCommentRemoteVersion: requiredString(body.expected_source_comment_remote_version, "linear_workflow_source_comment_version_missing"),
+      threadRootCommentId: requiredString(body.thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
+      expectedThreadState: workflowCommentThreadState(body.expected_thread_state, "linear_workflow_expected_thread_state_invalid"),
+      threadState: workflowCommentThreadState(body.thread_state, "linear_workflow_thread_state_invalid"),
+    };
+  }
   if (!target) throw new Error("linear_workflow_target_missing");
   const targetValue = {
     targetIssueId: requiredString(target.target_issue_id, "linear_workflow_target_id_missing"),
@@ -575,6 +630,22 @@ function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked
   throw new Error("linear_workflow_relation_kind_invalid");
 }
 
+function workflowCommentThreadState(
+  value: JsonValue | undefined,
+  code: string,
+): "resolved" | "unresolved" {
+  if (value === "resolved" || value === "unresolved") return value;
+  throw new Error(code);
+}
+
+function workflowCommentReceipt(
+  value: JsonValue | undefined,
+  code: string,
+): "check" | "cross" | "none" {
+  if (value === "check" || value === "cross" || value === "none") return value;
+  throw new Error(code);
+}
+
 function workflowMutationResult(
   result: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["mutateWorkflow"]>>,
 ) {
@@ -605,7 +676,37 @@ function workflowMutationResult(
     target_issue_id: result.readBack.targetIssueId,
     remote_version: result.readBack.remoteVersion,
     ...(result.readBack.issueVersions ? { issue_versions: result.readBack.issueVersions.map((value) => ({ issue_id: value.issueId, remote_version: value.remoteVersion })) } : {}),
+    ...(result.readBack.comment ? { comment: workflowCommentSnapshot(result.readBack.comment) } : {}),
+    ...(result.readBack.symphonyReceipt ? { symphony_receipt: {
+      reply_write_id: result.readBack.symphonyReceipt.replyWriteId,
+      reply_comment_id: result.readBack.symphonyReceipt.replyCommentId,
+      thread_root_comment_id: result.readBack.symphonyReceipt.threadRootCommentId,
+      receipt: result.readBack.symphonyReceipt.receipt,
+    } } : {}),
   } };
+}
+
+function workflowCommentSnapshot(comment: import("../linear-gateway/types.js").WorkflowCommentValue) {
+  return {
+    comment_id: comment.commentId,
+    issue_id: comment.issueId,
+    body: comment.body,
+    author_kind: comment.authorKind,
+    author_id: comment.authorId,
+    ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
+    ...(comment.parentCommentId ? { parent_comment_id: comment.parentCommentId } : {}),
+    thread_root_comment_id: comment.threadRootCommentId,
+    thread_state: comment.threadState,
+    reactions: comment.reactions.map((reaction) => ({
+      reaction_id: reaction.reactionId,
+      emoji: reaction.emoji,
+      actor_kind: reaction.actorKind,
+      actor_id: reaction.actorId,
+    })),
+    created_at: comment.createdAt,
+    remote_version: comment.remoteVersion,
+    updated_at: comment.updatedAt,
+  };
 }
 
 function recordValue(value: JsonValue | undefined, code: string) {

@@ -23,6 +23,8 @@ import type {
   RootIssueValue,
   WorkflowCommentValue,
   WorkflowCommentAuthorKind,
+  WorkflowMutationCommand,
+  WorkflowMutationReadBack,
   WorkflowRelationValue,
   WorkflowSourceManifestEntryValue,
 } from "../types.js";
@@ -43,6 +45,40 @@ const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_HEADER_MARKER = "<!-- symphony root\n";
 const MAX_ROOT_TITLE_LENGTH = 256;
 const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
+const SYMPHONY_RECEIPT_EMOJI = {
+  check: "✅",
+  cross: "❌",
+} as const;
+
+type NativeCommentMutation = Extract<WorkflowMutationCommand, {
+  kind: "create_comment_reply" | "set_comment_receipt_reaction" | "set_comment_thread_state";
+}>;
+
+function isNativeCommentMutation(command: WorkflowMutationCommand): command is NativeCommentMutation {
+  return command.kind === "create_comment_reply" ||
+    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "set_comment_thread_state";
+}
+
+function receiptEmoji(receipt: "check" | "cross"): string {
+  return SYMPHONY_RECEIPT_EMOJI[receipt];
+}
+
+function symphonyReceipt(
+  comment: WorkflowCommentValue,
+): { receipt: "check" | "cross" | "none"; reactionId?: string } {
+  const receipts = comment.reactions.filter((reaction) =>
+    reaction.actorKind === "symphony" &&
+    (reaction.emoji === SYMPHONY_RECEIPT_EMOJI.check || reaction.emoji === SYMPHONY_RECEIPT_EMOJI.cross),
+  );
+  if (receipts.length === 0) return { receipt: "none" };
+  if (receipts.length !== 1) throw new Error("linear_workflow_receipt_ambiguous");
+  const reaction = receipts[0]!;
+  return {
+    receipt: reaction.emoji === SYMPHONY_RECEIPT_EMOJI.check ? "check" : "cross",
+    reactionId: reaction.reactionId,
+  };
+}
 
 type WorkflowScopeIssue = {
   id: string;
@@ -179,7 +215,14 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
       state { name }
       labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
       comments(first: 8) {
-        nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
+        nodes {
+          id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
+          parent { id } resolvedAt
+          reactions(first: 256) {
+            nodes { id emoji user { id } botActor { id } externalUser { id } }
+            pageInfo { hasNextPage }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
       inverseRelations(first: 8) {
@@ -199,7 +242,14 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
         state { name }
         labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         comments(first: 8) {
-          nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
+          nodes {
+            id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
+            parent { id } resolvedAt
+            reactions(first: 256) {
+              nodes { id emoji user { id } botActor { id } externalUser { id } }
+              pageInfo { hasNextPage }
+            }
+          }
           pageInfo { hasNextPage endCursor }
         }
         inverseRelations(first: 8) {
@@ -216,7 +266,14 @@ const WORKFLOW_ISSUE_TREE_COMMENTS_PAGE_QUERY = `
     issue(id: $issueId) {
       id
       comments(first: 25, after: $cursor) {
-        nodes { id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id } }
+        nodes {
+          id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
+          parent { id } resolvedAt
+          reactions(first: 256) {
+            nodes { id emoji user { id } botActor { id } externalUser { id } }
+            pageInfo { hasNextPage }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -288,6 +345,18 @@ interface IssueTreeComment {
   botActor?: { id: string } | null;
   externalUser?: { id: string } | null;
   issue: { id: string };
+  parent: { id: string } | null;
+  resolvedAt: string | null;
+  reactions: {
+    nodes: Array<{
+      id: string;
+      emoji: string;
+      user?: { id: string } | null;
+      botActor?: { id: string } | null;
+      externalUser?: { id: string } | null;
+    }>;
+    pageInfo: { hasNextPage: boolean };
+  };
 }
 
 interface IssueTreeRelation {
@@ -1602,23 +1671,13 @@ export class LinearSdkImpl implements LinearClientInterface {
         updatedAt: issue.updatedAt,
       };
     });
-    const comments = tree.comments.map((comment) => ({
-      commentId: comment.commentId,
-      issueId: comment.issueId,
-      body: comment.body,
-      authorKind: comment.authorKind,
-      authorId: comment.authorId,
-      ...(comment.authorUserId ? { authorUserId: comment.authorUserId } : {}),
-      createdAt: comment.createdAt,
-      ...(comment.managedMarker ? { managedMarker: comment.managedMarker } : {}),
-      remoteVersion: comment.updatedAt,
-      updatedAt: comment.updatedAt,
-    }));
+    const comments = tree.comments;
     const sourceManifest = workflowSourceManifest({
       projectId: input.projectId,
       statusCatalog,
       issues,
       comments,
+      commentThreadChanges: [],
       relations: tree.relations,
     });
     return {
@@ -1626,6 +1685,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       statusCatalog,
       issues,
       comments,
+      commentThreadChanges: [],
       relations: tree.relations,
       sourceManifest,
       coverage: { isComplete: true, omissions: [] },
@@ -1639,12 +1699,19 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async preflightWorkflowMutation(
-    command: import("../types.js").WorkflowMutationCommand,
+    command: WorkflowMutationCommand,
   ): Promise<
     | { kind: "ready" }
-    | { kind: "already_applied"; readBack: import("../types.js").WorkflowMutationReadBack }
+    | { kind: "already_applied"; readBack: WorkflowMutationReadBack }
     | { kind: "precondition_conflict" }
   > {
+    if (isNativeCommentMutation(command)) {
+      const outcome = await this.readWorkflowMutationOutcome(command);
+      if (outcome) return { kind: "already_applied", readBack: outcome };
+      return await this.#nativeCommentPreconditionsMatch(command)
+        ? { kind: "ready" }
+        : { kind: "precondition_conflict" };
+    }
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) {
       const outcome = await this.readWorkflowMutationOutcome(command);
@@ -1699,8 +1766,44 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async executeWorkflowMutation(
-    command: import("../types.js").WorkflowMutationCommand,
+    command: WorkflowMutationCommand,
   ): Promise<void> {
+    if (isNativeCommentMutation(command)) {
+      const comments = await this.#nativeCommentPreconditions(command);
+      switch (command.kind) {
+        case "create_comment_reply": {
+          const source = comments.get(command.sourceCommentId)!;
+          await this.#client.createComment({
+            issueId: source.issueId,
+            parentId: command.sourceCommentId,
+            body: command.body,
+          });
+          return;
+        }
+        case "set_comment_receipt_reaction": {
+          const reply = comments.get(command.replyCommentId)!;
+          const current = symphonyReceipt(reply);
+          if (command.receipt === "none") {
+            if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
+            return;
+          }
+          if (current.receipt === command.receipt) return;
+          if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
+          await this.#client.createReaction({
+            commentId: command.replyCommentId,
+            emoji: receiptEmoji(command.receipt),
+          });
+          return;
+        }
+        case "set_comment_thread_state":
+          if (command.threadState === "resolved") {
+            await this.#client.commentResolve(command.threadRootCommentId);
+          } else {
+            await this.#client.commentUnresolve(command.threadRootCommentId);
+          }
+          return;
+      }
+    }
     const preflight = this.#workflowPreflights.get(command.writeId);
     this.#workflowPreflights.delete(command.writeId);
     if (!preflight) await this.#assertWorkflowMutationScope(command);
@@ -1821,9 +1924,101 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
   }
 
+  async #nativeCommentTree(command: NativeCommentMutation): Promise<{
+    rootRemoteVersion: string;
+    comments: Map<string, WorkflowCommentValue>;
+  }> {
+    const tree = await this.getWorkflowIssueTree({
+      projectId: command.expectedProjectId,
+      rootIssueId: command.rootIssueId,
+    });
+    const root = tree.issues.find((issue) => issue.issueId === command.rootIssueId);
+    if (!root || root.projectId !== command.expectedProjectId) {
+      throw new Error("linear_workflow_comment_root_missing");
+    }
+    const comments = new Map<string, WorkflowCommentValue>();
+    for (const comment of tree.comments) {
+      if (comments.has(comment.commentId)) throw new Error("linear_workflow_comment_ambiguous");
+      comments.set(comment.commentId, comment);
+    }
+    return { rootRemoteVersion: root.remoteVersion, comments };
+  }
+
+  async #nativeCommentPreconditionsMatch(command: NativeCommentMutation): Promise<boolean> {
+    return nativeCommentPreconditionsMatch(command, await this.#nativeCommentTree(command));
+  }
+
+  async #nativeCommentPreconditions(
+    command: NativeCommentMutation,
+  ): Promise<Map<string, WorkflowCommentValue>> {
+    const tree = await this.#nativeCommentTree(command);
+    if (!nativeCommentPreconditionsMatch(command, tree)) throw preconditionConflictError();
+    return tree.comments;
+  }
+
+  async #readNativeCommentMutationOutcome(
+    command: NativeCommentMutation,
+  ): Promise<WorkflowMutationReadBack | undefined> {
+    const { comments } = await this.#nativeCommentTree(command);
+    switch (command.kind) {
+      case "create_comment_reply": {
+        const matches = [...comments.values()].filter((comment) =>
+          comment.parentCommentId === command.sourceCommentId &&
+          comment.threadRootCommentId === command.expectedThreadRootCommentId &&
+          comment.authorKind === "symphony" &&
+          comment.body === command.body,
+        );
+        if (matches.length > 1) throw new Error("linear_workflow_comment_ambiguous");
+        const comment = matches[0];
+        return comment
+          ? {
+              writeId: command.writeId,
+              targetIssueId: comment.issueId,
+              remoteVersion: comment.remoteVersion,
+              comment,
+            }
+          : undefined;
+      }
+      case "set_comment_receipt_reaction": {
+        const reply = comments.get(command.replyCommentId);
+        if (!reply || reply.threadRootCommentId !== command.threadRootCommentId) return undefined;
+        const current = symphonyReceipt(reply);
+        return current.receipt === command.receipt
+          ? {
+              writeId: command.writeId,
+              targetIssueId: reply.issueId,
+              remoteVersion: reply.remoteVersion,
+              symphonyReceipt: {
+                replyWriteId: command.replyWriteId,
+                replyCommentId: command.replyCommentId,
+                threadRootCommentId: command.threadRootCommentId,
+                receipt: command.receipt,
+              },
+            }
+          : undefined;
+      }
+      case "set_comment_thread_state": {
+        const source = comments.get(command.sourceCommentId);
+        return source &&
+          source.threadRootCommentId === command.threadRootCommentId &&
+          source.threadState === command.threadState
+          ? {
+              writeId: command.writeId,
+              targetIssueId: source.issueId,
+              remoteVersion: source.remoteVersion,
+              comment: source,
+            }
+          : undefined;
+      }
+    }
+  }
+
   async #assertWorkflowMutationScope(
     command: import("../types.js").WorkflowMutationCommand,
   ): Promise<void> {
+    if (isNativeCommentMutation(command)) {
+      throw new Error("linear_workflow_comment_scope_unavailable");
+    }
     const targetIds = command.kind === "create_workflow_issue"
       ? [command.parentIssueId]
       : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
@@ -1920,8 +2115,11 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async readWorkflowMutationOutcome(
-    command: import("../types.js").WorkflowMutationCommand,
-  ): Promise<import("../types.js").WorkflowMutationReadBack | undefined> {
+    command: WorkflowMutationCommand,
+  ): Promise<WorkflowMutationReadBack | undefined> {
+    if (isNativeCommentMutation(command)) {
+      return this.#readNativeCommentMutationOutcome(command);
+    }
     const outcomeTargetId = command.kind === "create_workflow_issue"
       ? command.parentIssueId
       : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
@@ -2592,25 +2790,31 @@ function errorRecord(error: unknown): Record<string, unknown> {
 }
 
 function workflowCommentValue(
-  comment: WorkflowCommentSource,
+  comment: IssueTreeComment,
   issueId: string,
   delegateActorId: string,
 ): WorkflowCommentValue {
   const commentIssue = comment.issue as { id?: unknown } | undefined;
   if (
-    (comment.issueId !== undefined && comment.issueId !== issueId) ||
-    (commentIssue !== undefined && commentIssue.id !== issueId)
+    commentIssue === undefined || commentIssue.id !== issueId
   ) {
     throw new Error("linear_workflow_comment_identity_mismatch");
   }
   const actor = workflowCommentActor(comment, delegateActorId);
   const managedMarker = commentManagedMarker(comment.body, issueId, comment.id);
+  const parentCommentId = commentParentId(comment);
   return {
     commentId: comment.id,
     issueId,
     authorKind: actor.kind,
     authorId: actor.id,
     ...(actor.userId ? { authorUserId: actor.userId } : {}),
+    ...(parentCommentId ? { parentCommentId } : {}),
+    threadRootCommentId: parentCommentId ?? comment.id,
+    threadState: comment.resolvedAt === null
+      ? "unresolved"
+      : (timestampValue(comment.resolvedAt), "resolved"),
+    reactions: workflowCommentReactions(comment.reactions, delegateActorId),
     body: comment.body,
     createdAt: timestampValue(comment.createdAt),
     ...(managedMarker ? { managedMarker } : {}),
@@ -2633,23 +2837,73 @@ type WorkflowCommentSource = {
   externalUserId?: string | null | undefined;
 };
 
+function commentParentId(comment: IssueTreeComment): string | undefined {
+  if (comment.parent === null) return undefined;
+  if (typeof comment.parent.id !== "string" || !SAFE_ID.test(comment.parent.id)) {
+    throw new Error("linear_workflow_comment_parent_invalid");
+  }
+  if (comment.parent.id === comment.id) throw new Error("linear_workflow_comment_parent_invalid");
+  return comment.parent.id;
+}
+
+function workflowCommentReactions(
+  reactions: IssueTreeComment["reactions"],
+  delegateActorId: string,
+): import("../types.js").WorkflowCommentReactionValue[] {
+  if (reactions.pageInfo.hasNextPage || reactions.nodes.length > 256) {
+    throw new Error("linear_workflow_comment_reactions_incomplete");
+  }
+  const reactionIds = new Set<string>();
+  return reactions.nodes.map((reaction) => {
+    if (!reaction || typeof reaction !== "object") throw new Error("linear_workflow_comment_reaction_invalid");
+    const value = reaction as {
+      id?: unknown;
+      emoji?: unknown;
+      user?: unknown;
+      botActor?: unknown;
+      externalUser?: unknown;
+    };
+    if (typeof value.id !== "string" || !SAFE_ID.test(value.id) ||
+        typeof value.emoji !== "string" || value.emoji.length === 0 || value.emoji.length > 256 ||
+        reactionIds.has(value.id)) {
+      throw new Error("linear_workflow_comment_reaction_invalid");
+    }
+    reactionIds.add(value.id);
+    const actor = workflowCommentActor({
+      id: value.id,
+      body: "",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:00.000Z",
+      user: value.user,
+      botActor: value.botActor,
+      externalUser: value.externalUser,
+    }, delegateActorId);
+    return {
+      reactionId: value.id,
+      emoji: value.emoji,
+      actorKind: actor.kind,
+      actorId: actor.id,
+    };
+  });
+}
+
 function rootManagedCommentValue(
   comment: WorkflowCommentSource,
   issueId: string,
   delegateActorId: string,
   managedMarker: string,
 ) {
-  const value = workflowCommentValue(comment, issueId, delegateActorId);
+  const actor = workflowCommentActor(comment, delegateActorId);
   return {
-    commentId: value.commentId,
-    issueId: value.issueId,
-    authorKind: value.authorKind,
-    authorId: value.authorId,
-    ...(value.authorUserId ? { authorUserId: value.authorUserId } : {}),
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
+    commentId: comment.id,
+    issueId,
+    authorKind: actor.kind,
+    authorId: actor.id,
+    ...(actor.userId ? { authorUserId: actor.userId } : {}),
+    createdAt: timestampValue(comment.createdAt),
+    updatedAt: timestampValue(comment.updatedAt),
     managedMarker,
-    body: value.body,
+    body: comment.body,
   };
 }
 
@@ -2720,6 +2974,7 @@ function workflowSourceManifest(input: {
   statusCatalog: readonly WorkflowStatusCatalogEntry[];
   issues: readonly LinearIssueValue[];
   comments: readonly WorkflowCommentValue[];
+  commentThreadChanges: readonly import("../types.js").WorkflowCommentThreadChangeValue[];
   relations: readonly WorkflowRelationValue[];
 }): WorkflowSourceManifestEntryValue[] {
   const statusVersion = createHash("sha256")
@@ -2744,6 +2999,12 @@ function workflowSourceManifest(input: {
       sourceVersion: comment.updatedAt,
       actorKind: comment.authorKind,
       ...(comment.managedMarker ? { stableWriteId: comment.managedMarker } : {}),
+    })),
+    ...input.commentThreadChanges.map((change) => ({
+      sourceKind: "linear_comment_thread_change" as const,
+      sourceId: change.threadChangeId,
+      sourceVersion: change.threadChangeId,
+      actorKind: change.actorKind,
     })),
     ...input.relations.map((relation) => ({
       sourceKind: "linear_relation" as const,
@@ -2825,6 +3086,7 @@ function workflowPreflightOutcome(
   command: import("../types.js").WorkflowMutationCommand,
   facts: ReadonlyMap<string, WorkflowPreflightIssue>,
 ): import("../types.js").WorkflowMutationReadBack | undefined {
+  if (isNativeCommentMutation(command)) return undefined;
   if (command.kind === "create_workflow_issue") {
     const children = facts.get(command.parentIssueId)?.children;
     if (!children || children.pageInfo?.hasNextPage !== false || !Array.isArray(children.nodes)) {
@@ -2919,6 +3181,7 @@ function workflowPreconditionMismatch(
   command: import("../types.js").WorkflowMutationCommand,
   facts: ReadonlyMap<string, WorkflowPreflightIssue>,
 ): string | undefined {
+  if (isNativeCommentMutation(command)) return "native_comment_command";
   const targets = command.kind === "create_workflow_issue" ? [command.parentIssueId]
     : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
       : [command.target.targetIssueId];
@@ -2953,6 +3216,36 @@ function workflowPreconditionMismatch(
   if (command.target.expectedIsArchived !== undefined && target.isArchived !== command.target.expectedIsArchived) return "target_archive";
   return command.kind !== "update_workflow_issue" || workflowPreflightHasStatus(facts.get(command.target.targetIssueId)!, command.statusId)
     ? undefined : "target_status_catalog";
+}
+
+function nativeCommentPreconditionsMatch(
+  command: NativeCommentMutation,
+  tree: {
+    rootRemoteVersion: string;
+    comments: ReadonlyMap<string, WorkflowCommentValue>;
+  },
+): boolean {
+  if (tree.rootRemoteVersion !== command.expectedRootRemoteVersion) return false;
+  switch (command.kind) {
+    case "create_comment_reply": {
+      const source = tree.comments.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.expectedThreadRootCommentId &&
+        source.threadState === command.expectedThreadState;
+    }
+    case "set_comment_receipt_reaction": {
+      const reply = tree.comments.get(command.replyCommentId);
+      return reply?.remoteVersion === command.expectedReplyCommentRemoteVersion &&
+        reply.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(reply).receipt === command.expectedReceipt;
+    }
+    case "set_comment_thread_state": {
+      const source = tree.comments.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        source.threadState === command.expectedThreadState;
+    }
+  }
 }
 
 function workflowPreflightHasStatus(issue: WorkflowPreflightIssue, statusId: string): boolean {

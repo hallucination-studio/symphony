@@ -103,11 +103,33 @@ export interface WorkflowCommentValue {
   authorKind: WorkflowCommentAuthorKind;
   authorId: string;
   authorUserId?: string;
+  parentCommentId?: string;
+  threadRootCommentId: string;
+  threadState: "resolved" | "unresolved";
+  reactions: WorkflowCommentReactionValue[];
   body: string;
   createdAt: string;
   managedMarker?: string;
   remoteVersion: string;
   updatedAt: string;
+}
+
+export interface WorkflowCommentReactionValue {
+  reactionId: string;
+  emoji: string;
+  actorKind: WorkflowCommentAuthorKind;
+  actorId: string;
+}
+
+export interface WorkflowCommentThreadChangeValue {
+  threadChangeId: string;
+  sourceCommentId: string;
+  threadRootCommentId: string;
+  action: "resolved" | "reopened";
+  actorKind: WorkflowCommentAuthorKind;
+  actorId: string;
+  actorUserId?: string;
+  occurredAt: string;
 }
 
 export type WorkflowCommentAuthorKind =
@@ -127,6 +149,7 @@ export interface WorkflowRelationValue {
 export type WorkflowSourceKind =
   | "linear_issue"
   | "linear_comment"
+  | "linear_comment_thread_change"
   | "linear_relation"
   | "linear_status_catalog";
 
@@ -153,6 +176,7 @@ export interface WorkflowRootTreeValue {
   statusCatalog: WorkflowStatusValue[];
   issues: WorkflowIssueValue[];
   comments: WorkflowCommentValue[];
+  commentThreadChanges: WorkflowCommentThreadChangeValue[];
   relations: WorkflowRelationValue[];
   sourceManifest: WorkflowSourceManifestEntryValue[];
   coverage: WorkflowSourceCoverageValue;
@@ -223,6 +247,32 @@ export type WorkflowMutationCommand =
       body: string;
     })
   | (WorkflowMutationBase & {
+      kind: "create_comment_reply";
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      expectedThreadRootCommentId: string;
+      expectedThreadState: "resolved" | "unresolved";
+      body: string;
+    })
+  | (WorkflowMutationBase & {
+      kind: "set_comment_receipt_reaction";
+      replyWriteId: string;
+      replyCommentId: string;
+      expectedReplyCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      expectedReceipt: "check" | "cross" | "none";
+      receipt: "check" | "cross" | "none";
+    })
+  | (WorkflowMutationBase & {
+      kind: "set_comment_thread_state";
+      replyWriteId: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      expectedThreadState: "resolved" | "unresolved";
+      threadState: "resolved" | "unresolved";
+    })
+  | (WorkflowMutationBase & {
       kind: "archive_workflow_issue" | "restore_workflow_issue";
       target: {
         targetIssueId: string;
@@ -256,6 +306,13 @@ export interface WorkflowMutationReadBack {
   targetIssueId: string;
   remoteVersion: string;
   issueVersions?: Array<{ issueId: string; remoteVersion: string }>;
+  comment?: WorkflowCommentValue;
+  symphonyReceipt?: {
+    replyWriteId: string;
+    replyCommentId: string;
+    threadRootCommentId: string;
+    receipt: "check" | "cross" | "none";
+  };
 }
 
 export type WorkflowMutationResult =

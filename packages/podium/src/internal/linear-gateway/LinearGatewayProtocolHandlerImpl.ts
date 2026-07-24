@@ -4,6 +4,7 @@ import { isTargetWorkflowStatusName } from "../../public/TargetWorkflowCatalog.j
 import type {
   WorkflowMutationCommand,
   WorkflowMutationResult,
+  WorkflowCommentValue,
   RootIssueValue,
   LinearIssueValue,
 } from "./types.js";
@@ -166,6 +167,7 @@ export class LinearGatewayProtocolHandlerImpl {
       tree.issues.length === 0 ||
       tree.issues.length > MAX_TREE_NODES ||
       tree.comments.length > 4_096 ||
+      tree.commentThreadChanges.length > 4_096 ||
       tree.relations.length > 1_024
     ) {
       throw new Error("linear_workflow_tree_invalid");
@@ -246,6 +248,12 @@ export class LinearGatewayProtocolHandlerImpl {
         !workflowCommentAuthorKind(comment.authorKind) ||
         !identifier(comment.authorId, 128) ||
         (comment.authorUserId !== undefined && !identifier(comment.authorUserId, 128)) ||
+        (comment.parentCommentId !== undefined &&
+          (!identifier(comment.parentCommentId, 128) || comment.parentCommentId === comment.commentId)) ||
+        !identifier(comment.threadRootCommentId, 128) ||
+        !workflowCommentThreadState(comment.threadState) ||
+        !Array.isArray(comment.reactions) ||
+        comment.reactions.length > 256 ||
         !timestamp(comment.createdAt) ||
         !identifier(comment.remoteVersion, 512) ||
         !timestamp(comment.updatedAt) ||
@@ -254,6 +262,46 @@ export class LinearGatewayProtocolHandlerImpl {
         throw new Error("linear_workflow_comment_invalid");
       }
       commentIds.add(comment.commentId);
+      const reactionIds = new Set<string>();
+      for (const reaction of comment.reactions) {
+        if (
+          !identifier(reaction.reactionId, 128) ||
+          !shortText(reaction.emoji) ||
+          !workflowCommentAuthorKind(reaction.actorKind) ||
+          !identifier(reaction.actorId, 128) ||
+          reactionIds.has(reaction.reactionId)
+        ) {
+          throw new Error("linear_workflow_comment_reaction_invalid");
+        }
+        reactionIds.add(reaction.reactionId);
+      }
+    }
+    const threadChangeIds = new Set<string>();
+    for (const change of tree.commentThreadChanges) {
+      const source = tree.comments.find((comment) => comment.commentId === change.sourceCommentId);
+      if (
+        !identifier(change.threadChangeId, 128) ||
+        !source ||
+        change.threadRootCommentId !== source.threadRootCommentId ||
+        (change.action !== "resolved" && change.action !== "reopened") ||
+        !workflowCommentAuthorKind(change.actorKind) ||
+        !identifier(change.actorId, 128) ||
+        (change.actorUserId !== undefined && !identifier(change.actorUserId, 128)) ||
+        !timestamp(change.occurredAt) ||
+        threadChangeIds.has(change.threadChangeId)
+      ) {
+        throw new Error("linear_workflow_comment_thread_change_invalid");
+      }
+      threadChangeIds.add(change.threadChangeId);
+    }
+    for (const comment of tree.comments) {
+      if (
+        (comment.parentCommentId === undefined && comment.threadRootCommentId !== comment.commentId) ||
+        (comment.parentCommentId !== undefined &&
+          (!commentIds.has(comment.parentCommentId) || !commentIds.has(comment.threadRootCommentId)))
+      ) {
+        throw new Error("linear_workflow_comment_thread_invalid");
+      }
     }
     const relationIds = new Set<string>();
     for (const relation of tree.relations) {
@@ -374,6 +422,12 @@ export class LinearGatewayProtocolHandlerImpl {
     if (!workflowTargetMatches(root, command.expectedProjectId, command.rootIssueId, command.expectedRootRemoteVersion)) {
       return { kind: "precondition_conflict" };
     }
+    if (isNativeCommentMutation(command)) {
+      const tree = await this.getWorkflowIssueTree(command.expectedProjectId, command.rootIssueId);
+      return nativeCommentPreconditionsMatch(command, tree.comments)
+        ? undefined
+        : { kind: "precondition_conflict" };
+    }
     if (command.kind === "create_workflow_issue") {
       const parent = await this.client.readWorkflowMutationTarget(command.parentIssueId);
       return workflowTargetMatches(
@@ -457,9 +511,56 @@ function workflowTargetMatches(
 }
 
 function workflowReadBackIssueId(command: WorkflowMutationCommand): string {
+  if (isNativeCommentMutation(command)) return command.rootIssueId;
   if (command.kind === "create_workflow_issue") return command.parentIssueId;
   if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") return command.sourceIssueId;
   return command.target.targetIssueId;
+}
+
+type NativeCommentMutation = Extract<WorkflowMutationCommand, {
+  kind: "create_comment_reply" | "set_comment_receipt_reaction" | "set_comment_thread_state";
+}>;
+
+function isNativeCommentMutation(command: WorkflowMutationCommand): command is NativeCommentMutation {
+  return command.kind === "create_comment_reply" ||
+    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "set_comment_thread_state";
+}
+
+function nativeCommentPreconditionsMatch(
+  command: NativeCommentMutation,
+  comments: readonly WorkflowCommentValue[],
+): boolean {
+  const byId = new Map(comments.map((comment) => [comment.commentId, comment]));
+  switch (command.kind) {
+    case "create_comment_reply": {
+      const source = byId.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.expectedThreadRootCommentId &&
+        source.threadState === command.expectedThreadState;
+    }
+    case "set_comment_receipt_reaction": {
+      const reply = byId.get(command.replyCommentId);
+      return reply?.remoteVersion === command.expectedReplyCommentRemoteVersion &&
+        reply.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(reply) === command.expectedReceipt;
+    }
+    case "set_comment_thread_state": {
+      const source = byId.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        source.threadState === command.expectedThreadState;
+    }
+  }
+}
+
+function symphonyReceipt(comment: WorkflowCommentValue): "check" | "cross" | "none" {
+  const receipts = comment.reactions.filter((reaction) =>
+    reaction.actorKind === "symphony" &&
+    (reaction.emoji === "✅" || reaction.emoji === "❌"),
+  );
+  if (receipts.length > 1) throw new Error("linear_workflow_receipt_ambiguous");
+  return receipts[0]?.emoji === "✅" ? "check" : receipts[0]?.emoji === "❌" ? "cross" : "none";
 }
 
 function nextCursor(pageInfo: { hasNextPage: boolean; endCursor?: string }): string | undefined {
@@ -605,6 +706,10 @@ function workflowCommentAuthorKind(value: string | undefined): boolean {
     value === "external_automation" || value === "unknown";
 }
 
+function workflowCommentThreadState(value: string | undefined): boolean {
+  return value === "resolved" || value === "unresolved";
+}
+
 function workflowRelationKind(value: string | undefined): boolean {
   return value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by";
 }
@@ -629,6 +734,9 @@ function validateWorkflowSourceFacts(
   }
   for (const comment of tree.comments) {
     expected.set(`linear_comment:${comment.commentId}`, comment.remoteVersion);
+  }
+  for (const change of tree.commentThreadChanges) {
+    expected.set(`linear_comment_thread_change:${change.threadChangeId}`, change.threadChangeId);
   }
   for (const relation of tree.relations) {
     expected.set(`linear_relation:${relation.relationId}`, relation.relationId);
@@ -666,7 +774,8 @@ function validateWorkflowSourceFacts(
 
 function workflowSourceKind(value: string | undefined): boolean {
   return value === "linear_issue" || value === "linear_comment" ||
-    value === "linear_relation" || value === "linear_status_catalog";
+    value === "linear_comment_thread_change" || value === "linear_relation" ||
+    value === "linear_status_catalog";
 }
 
 function managedNodeShapeValid(issue: LinearIssueValue): boolean {

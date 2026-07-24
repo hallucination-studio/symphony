@@ -563,14 +563,19 @@ test("Root scheduling fails closed for a cross-project Root", async () => {
   );
 });
 
-test("workflow Issue Tree maps every bounded comment, relation, and Team status", async () => {
+test("workflow Issue Tree maps every bounded comment, native thread, reaction, relation, and Team status", async () => {
   const queries = [];
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "Root description",
     sortOrder: 1, updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "In Progress" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
-    comments: { nodes: [{ id: "comment-root", body: "Root status", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" } }], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [{
+      id: "comment-root", body: "Root status", createdAt: "2026-07-16T00:00:00Z",
+      updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
+      parent: null, resolvedAt: null,
+      reactions: { nodes: [{ id: "reaction-human", emoji: "eyes", user: { id: "human-2" } }], pageInfo: { hasNextPage: false } },
+    }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }], pageInfo: { hasNextPage: false } },
   };
   const child = {
@@ -578,7 +583,13 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
     sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:02Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
-    comments: { nodes: [{ id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->", createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z", user: { id: "symphony-bot" }, issue: { id: "work-1" } }], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [{
+      id: "comment-work", body: "Progress\n\n<!-- symphony workflow write\nwrite_id: write-1\n-->",
+      createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z",
+      user: { id: "symphony-bot" }, issue: { id: "work-1" }, parent: { id: "comment-root" },
+      resolvedAt: "2026-07-16T00:00:04Z",
+      reactions: { nodes: [{ id: "reaction-symphony", emoji: "white_check_mark", user: { id: "symphony-bot" } }], pageInfo: { hasNextPage: false } },
+    }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
@@ -606,6 +617,9 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   const tree = await adapter.getWorkflowIssueTree({ projectId: "project-1", rootIssueId: "root-1" });
 
   assert.ok(queries.some((query) => query.includes("comments(first: 8)")));
+  assert.ok(queries.some((query) => query.includes("parent { id }")));
+  assert.ok(queries.some((query) => query.includes("resolvedAt")));
+  assert.ok(queries.some((query) => query.includes("reactions(first: 256)")));
   assert.ok(queries.some((query) => query.includes("inverseRelations(first: 8)")));
   assert.ok(queries.some((query) => query.includes("includeArchived: true")));
 
@@ -621,6 +635,20 @@ test("workflow Issue Tree maps every bounded comment, relation, and Team status"
   assert.deepEqual(tree.comments.map(({ commentId, authorKind, authorId, authorUserId, createdAt }) => ({ commentId, authorKind, authorId, authorUserId, createdAt })), [
     { commentId: "comment-root", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00.000Z" },
     { commentId: "comment-work", authorKind: "symphony", authorId: "symphony-bot", authorUserId: "symphony-bot", createdAt: "2026-07-16T00:00:02.000Z" },
+  ]);
+  assert.deepEqual(tree.comments.map(({
+    commentId, parentCommentId, threadRootCommentId, threadState, reactions,
+  }) => ({ commentId, parentCommentId, threadRootCommentId, threadState, reactions })), [
+    {
+      commentId: "comment-root", parentCommentId: undefined, threadRootCommentId: "comment-root",
+      threadState: "unresolved",
+      reactions: [{ reactionId: "reaction-human", emoji: "eyes", actorKind: "human", actorId: "human-2" }],
+    },
+    {
+      commentId: "comment-work", parentCommentId: "comment-root", threadRootCommentId: "comment-root",
+      threadState: "resolved",
+      reactions: [{ reactionId: "reaction-symphony", emoji: "white_check_mark", actorKind: "symphony", actorId: "symphony-bot" }],
+    },
   ]);
   assert.deepEqual(tree.relations, [{
     relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
@@ -643,7 +671,11 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: {
-      nodes: [{ id: "comment-1", body: "first", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" } }],
+      nodes: [{
+        id: "comment-1", body: "first", createdAt: "2026-07-16T00:00:00Z",
+        updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
+        parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+      }],
       pageInfo: { hasNextPage: true, endCursor: "comments-2" },
     },
     inverseRelations: {
@@ -675,7 +707,11 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
     if (query.includes("IssueTreeComments")) return { data: { issue: {
       id: "root-1",
       comments: {
-        nodes: [{ id: "comment-2", body: "second", createdAt: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:02Z", user: { id: "human-2" }, issue: { id: "root-1" } }],
+        nodes: [{
+          id: "comment-2", body: "second", createdAt: "2026-07-16T00:00:01Z",
+          updatedAt: "2026-07-16T00:00:02Z", user: { id: "human-2" }, issue: { id: "root-1" },
+          parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+        }],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
     } } };
@@ -1080,6 +1116,164 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.match(updatedInput.description, /managed_marker: work-marker/u);
+});
+
+test("workflow SDK materializes native comment replies, receipts, and thread state with semantic read-back", async () => {
+  const source = {
+    id: "source-comment", body: "Please review the plan", createdAt: "2026-07-16T00:00:00Z",
+    updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
+    parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const root = {
+    id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
+    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [source], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const calls = [];
+  const sdk = {
+    viewer: Promise.resolve({ id: "symphony-bot" }),
+    async issue() {
+      return {
+        projectId: "project-1",
+        team: Promise.resolve({ states: async () => connection([
+          { id: "state-todo", name: "Todo", type: "unstarted", position: 1 },
+        ]) }),
+      };
+    },
+    async createComment(input) {
+      calls.push({ kind: "create_comment", input });
+      root.comments.nodes.push({
+        id: "reply-comment", body: input.body, createdAt: "2026-07-16T00:00:02Z",
+        updatedAt: "2026-07-16T00:00:02Z", user: { id: "symphony-bot" }, issue: { id: input.issueId },
+        parent: { id: input.parentId }, resolvedAt: null,
+        reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+      });
+    },
+    async createReaction(input) {
+      calls.push({ kind: "create_reaction", input });
+      const reply = root.comments.nodes.find(({ id }) => id === input.commentId);
+      reply.reactions.nodes.push({ id: "receipt-check", emoji: input.emoji, user: { id: "symphony-bot" } });
+    },
+    async deleteReaction(reactionId) {
+      calls.push({ kind: "delete_reaction", reactionId });
+      const reply = root.comments.nodes.find(({ id }) => id === "reply-comment");
+      reply.reactions.nodes = reply.reactions.nodes.filter(({ id }) => id !== reactionId);
+    },
+    async commentResolve(commentId) {
+      calls.push({ kind: "resolve", commentId });
+      source.resolvedAt = "2026-07-16T00:00:03Z";
+    },
+    async commentUnresolve(commentId) {
+      calls.push({ kind: "unresolve", commentId });
+      source.resolvedAt = null;
+    },
+    client: { async rawRequest(_query, variables) {
+      if (variables.rootIssueId) return { data: { issue: root } };
+      return { data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+    } },
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "development_token", token: "token", delegateActorId: "symphony-bot" },
+    "organization-1",
+    sdk,
+  );
+  const common = {
+    conductorShortHash: "abc123", expectedProjectId: "project-1", rootIssueId: "root-1",
+    expectedRootRemoteVersion: "2026-07-16T00:00:00.000Z",
+  };
+  const reply = {
+    ...common,
+    kind: "create_comment_reply",
+    writeId: "reply-write-1",
+    sourceCommentId: "source-comment",
+    expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
+    expectedThreadRootCommentId: "source-comment",
+    expectedThreadState: "unresolved",
+    body: "Plan review is waiting for your decision.",
+  };
+
+  await adapter.executeWorkflowMutation(reply);
+  assert.deepEqual(calls.shift(), {
+    kind: "create_comment",
+    input: {
+      issueId: "root-1",
+      parentId: "source-comment",
+      body: "Plan review is waiting for your decision.",
+    },
+  });
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(reply), {
+    writeId: "reply-write-1",
+    targetIssueId: "root-1",
+    remoteVersion: "2026-07-16T00:00:02.000Z",
+    comment: {
+      commentId: "reply-comment", issueId: "root-1", body: "Plan review is waiting for your decision.",
+      authorKind: "symphony", authorId: "symphony-bot", authorUserId: "symphony-bot",
+      parentCommentId: "source-comment", threadRootCommentId: "source-comment", threadState: "unresolved",
+      reactions: [], createdAt: "2026-07-16T00:00:02.000Z",
+      remoteVersion: "2026-07-16T00:00:02.000Z", updatedAt: "2026-07-16T00:00:02.000Z",
+    },
+  });
+
+  const receipt = {
+    ...common,
+    kind: "set_comment_receipt_reaction",
+    writeId: "receipt-write-1",
+    replyWriteId: "reply-write-1",
+    replyCommentId: "reply-comment",
+    expectedReplyCommentRemoteVersion: "2026-07-16T00:00:02.000Z",
+    threadRootCommentId: "source-comment",
+    expectedReceipt: "none",
+    receipt: "check",
+  };
+  await adapter.executeWorkflowMutation(receipt);
+  assert.deepEqual(calls.shift(), {
+    kind: "create_reaction",
+    input: { commentId: "reply-comment", emoji: "✅" },
+  });
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(receipt), {
+    writeId: "receipt-write-1",
+    targetIssueId: "root-1",
+    remoteVersion: "2026-07-16T00:00:02.000Z",
+    symphonyReceipt: {
+      replyWriteId: "reply-write-1", replyCommentId: "reply-comment",
+      threadRootCommentId: "source-comment", receipt: "check",
+    },
+  });
+
+  const resolve = {
+    ...common,
+    kind: "set_comment_thread_state",
+    writeId: "thread-write-1",
+    replyWriteId: "reply-write-1",
+    sourceCommentId: "source-comment",
+    expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
+    threadRootCommentId: "source-comment",
+    expectedThreadState: "unresolved",
+    threadState: "resolved",
+  };
+  await adapter.executeWorkflowMutation(resolve);
+  assert.deepEqual(calls.shift(), { kind: "resolve", commentId: "source-comment" });
+  assert.deepEqual((await adapter.readWorkflowMutationOutcome(resolve)).comment.threadState, "resolved");
+
+  const removeReceipt = {
+    ...receipt,
+    writeId: "receipt-write-2",
+    expectedReceipt: "check",
+    receipt: "none",
+  };
+  await adapter.executeWorkflowMutation(removeReceipt);
+  assert.deepEqual(calls.shift(), { kind: "delete_reaction", reactionId: "receipt-check" });
+
+  const unresolve = {
+    ...resolve,
+    writeId: "thread-write-2",
+    expectedThreadState: "resolved",
+    threadState: "unresolved",
+  };
+  await adapter.executeWorkflowMutation(unresolve);
+  assert.deepEqual(calls.shift(), { kind: "unresolve", commentId: "source-comment" });
 });
 
 test("workflow issue creation rejects unknown and duplicate label names", async () => {

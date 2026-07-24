@@ -4,6 +4,7 @@ import test from "node:test";
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 import { ConductorPresenceImpl } from "../dist/internal/conductor-presence/ConductorPresenceImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
+import { PodiumConductorProtocolHandler } from "../dist/public/PodiumConductorProtocolHandler.js";
 
 function project() {
   return {
@@ -403,10 +404,27 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   assert.equal(result.tree.issues.length, 2);
   assert.equal(result.tree.issues[0].is_archived, false);
   assert.equal(result.tree.relations[0].relation_id, "relation-1");
+  assert.deepEqual(result.tree.comments[0].reactions, []);
+  assert.equal(result.tree.comments[0].thread_root_comment_id, "comment-1");
+  assert.equal(result.tree.comments[0].thread_state, "unresolved");
+  assert.deepEqual(result.tree.comment_thread_changes, []);
   assert.equal(result.tree.coverage.is_complete, true);
   assert.ok(result.tree.source_manifest.some(({ source_kind, source_id }) =>
     source_kind === "linear_comment" && source_id === "comment-1"));
   assert.equal(reads, 1);
+  const protocol = new PodiumConductorProtocolHandler(services);
+  const closed = await protocol.handle({
+    protocol_version: "1",
+    request_id: "tree-request-1",
+    body: {
+      kind: "get_workflow_issue_tree",
+      binding_id: "binding-1",
+      conductor_short_hash: "abc123",
+      expected_project_id: "project-1",
+      root_issue_id: "root-1",
+    },
+  });
+  assert.equal(closed.body.kind, "workflow_issue_tree");
   await assert.rejects(
     services.handle({
       kind: "get_workflow_issue_tree",
@@ -417,7 +435,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
     }),
     /linear_conductor_short_hash_mismatch/u,
   );
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
 });
 
 test("workflow mutation rejects stale Root and target versions before Linear write", async () => {
@@ -447,6 +465,88 @@ test("workflow mutation rejects stale Root and target versions before Linear wri
 
   assert.deepEqual(result, { kind: "precondition_conflict" });
   assert.equal(writes, 0);
+});
+
+test("Podium-Conductor serializes native comment mutation commands and semantic read-back", async () => {
+  const received = [];
+  const services = await createConductorServices({
+    async preflightWorkflowMutation(command) {
+      received.push(command);
+      return {
+        kind: "already_applied",
+        readBack: {
+          writeId: command.writeId,
+          targetIssueId: "root-1",
+          remoteVersion: "2026-07-16T00:00:02Z",
+          comment: {
+            commentId: "reply-comment",
+            issueId: "root-1",
+            body: "Acknowledged.",
+            authorKind: "symphony",
+            authorId: "app-user-1",
+            parentCommentId: "comment-1",
+            threadRootCommentId: "comment-1",
+            threadState: "unresolved",
+            reactions: [],
+            createdAt: "2026-07-16T00:00:02Z",
+            remoteVersion: "2026-07-16T00:00:02Z",
+            updatedAt: "2026-07-16T00:00:02Z",
+          },
+        },
+      };
+    },
+  });
+
+  const result = await services.handle({
+    kind: "create_comment_reply",
+    binding_id: "binding-1",
+    write_id: "reply-write-1",
+    conductor_short_hash: "abc123",
+    expected_project_id: "project-1",
+    root_issue_id: "root-1",
+    expected_root_remote_version: "root-version",
+    source_comment_id: "comment-1",
+    expected_source_comment_remote_version: "comment-version",
+    expected_thread_root_comment_id: "comment-1",
+    expected_thread_state: "unresolved",
+    body: "Acknowledged.",
+  });
+
+  assert.deepEqual(received, [{
+    kind: "create_comment_reply",
+    writeId: "reply-write-1",
+    conductorShortHash: "abc123",
+    expectedProjectId: "project-1",
+    rootIssueId: "root-1",
+    expectedRootRemoteVersion: "root-version",
+    sourceCommentId: "comment-1",
+    expectedSourceCommentRemoteVersion: "comment-version",
+    expectedThreadRootCommentId: "comment-1",
+    expectedThreadState: "unresolved",
+    body: "Acknowledged.",
+  }]);
+  assert.deepEqual(result, {
+    kind: "already_applied",
+    read_back: {
+      write_id: "reply-write-1",
+      target_issue_id: "root-1",
+      remote_version: "2026-07-16T00:00:02Z",
+      comment: {
+        comment_id: "reply-comment",
+        issue_id: "root-1",
+        body: "Acknowledged.",
+        author_kind: "symphony",
+        author_id: "app-user-1",
+        parent_comment_id: "comment-1",
+        thread_root_comment_id: "comment-1",
+        thread_state: "unresolved",
+        reactions: [],
+        created_at: "2026-07-16T00:00:02Z",
+        remote_version: "2026-07-16T00:00:02Z",
+        updated_at: "2026-07-16T00:00:02Z",
+      },
+    },
+  });
 });
 
 test("workflow mutation proves stable write idempotency with semantic read-back", async () => {
@@ -569,7 +669,8 @@ function workflowTree(projectId) {
       { ...issue("root-1", projectId), statusId: "status-progress", statusName: "In Progress", statusCategory: "started", statusPosition: 2, depth: 0, remoteVersion: "2026-07-16T00:00:00Z" },
       { ...issue("work-1", projectId), parentIssueId: "root-1", statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted", statusPosition: 1, depth: 1, remoteVersion: "2026-07-16T00:00:00Z" },
     ],
-    comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
+    comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", threadRootCommentId: "comment-1", threadState: "unresolved", reactions: [], createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
+    commentThreadChanges: [],
     relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
     sourceManifest: [
       { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown" },
