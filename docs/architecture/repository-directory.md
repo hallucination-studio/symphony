@@ -83,10 +83,10 @@ apps/conductor/
     ├── workflow-events/
     │   └── api/
     │       └── WorkflowTimelinePublisherInterface.ts
-    ├── timeline-projections/
+    ├── timeline-comments/
     │   └── internal/
-    │       ├── LinearRootTimelineProjectionImpl.ts
-    │       └── LinearCycleTimelineProjectionImpl.ts
+    │       ├── LinearRootTimelineCommentSubscriberImpl.ts
+    │       └── LinearCycleTimelineCommentSubscriberImpl.ts
     ├── performer-profiles/
     │   ├── api/
     │   │   ├── PerformerProfile.ts

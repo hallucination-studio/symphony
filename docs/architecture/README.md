@@ -16,7 +16,7 @@ Conductor TypeScript daemon
   -> Root Reconciliation host and deterministic materializer
   -> read and materialize Linear/Git durable facts
   -> call Performer; never host Agent SDK
-  -> publish typed timeline events and materialize user-comment replies
+  -> publish typed timeline events and materialize native user-comment thread replies/reactions
 
 Performer Python runtime
   -> one Root Reconciler ReAct thread per Root
@@ -54,14 +54,18 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - Root Reconciler可以提出create/update/archive/restore/reorder/dependency patch、replan和successor Cycle；
   Conductor验证并materialize；
 - 原生archive flag决定active DAG membership，archived Issues仍完整进入Tree、审计和恢复；
-- Finding、attempt、budget、Stage Result、Root directive、Human resolution、用户comment处理和progress持久化
-  到Linear；
+- Finding、attempt、budget、Stage Result、Root directive、Human resolution、用户comment处理、model/usage和progress
+  以strict `symphony` fenced code block持久化到Linear comments；不存在HTML managed marker；
 - Provider thread只提供runtime continuity，丢失后从Linear/Git facts打开fresh thread；
 - Podium独占Linear OAuth、Token和SDK，Performer独占Provider SDK；
 - cross-process communication使用closed versioned schemas和generated types；
-- Root/Cycle timeline通过typed event和subscriber投影到Linear comments，不由业务模块直接渲染。
-- 普通human comment按actor和managed marker过滤；每个处理后的comment version收到read-back后的Reconciler
-  reply，系统、timeline、status和reply comments不会回流为用户输入。
+- Root/Cycle timeline通过typed event和subscriber写入Linear comments，不由业务模块直接渲染；一个event恰好写一条
+  同时包含用户Markdown和一个machine-readable `symphony` block的comment。
+- 普通human comment按actor与strict managed code block过滤；每个处理后的comment version收到native thread reply、
+  closed reaction disposition和resolve/keep-open action。Symphony-authored timeline/reply body不会回流；human在这些
+  thread中的新comment或reopen/resolve仍是Root输入。
+- 每个Root Reconciler/Plan/Work/Verify调用都记录实际model和required Turn Usage；Stage、Cycle和Root累计只从Linear
+  immutable turn records派生，Root累计等于全部Cycle Stage usage加全部Root Reconciler usage。
 
 ## 3. 权威事实
 
@@ -73,12 +77,12 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 | Root ownership、Profile和convergence policy | Root managed records | Conductor |
 | Root/Cycle/Node status与archive membership | Linear | Root Reconciler interprets; Conductor materializes directives |
 | Cycle DAG、relations、Plan Contract和Human Action | Linear Issue Tree | Root Reconciler proposes; Conductor writes |
-| Root directives和Plan/Work/Verify Results | Linear managed records | Conductor validates |
+| Root directives、Plan/Work/Verify Results、model和turn usage | Linear managed comment code blocks | Conductor validates |
 | Human status/comments/resolutions | Linear | Human / Conductor / Root Reconciler |
 | 用户comment input与reply | Linear managed comments | Root Reconciler interprets; directive materializer writes |
 | branch、commits、diff、checks和delivery | Git | Conductor / Performer Work |
 | Provider auth/session runtime | Profile `CODEX_HOME` and live Performer | Codex SDK / Performer |
-| Root/Cycle user timeline | Linear comments | Timeline subscribers |
+| Root/Cycle user timeline | Linear Markdown + `symphony` block comments | Timeline subscribers |
 | Conductor online/offline | 当前private channel | Podium Desktop只观察，不持久化 |
 | heartbeat和tool progress | process memory/log | 不进入Desktop Workflow View，不参与Workflow |
 
@@ -109,12 +113,12 @@ bootstrap fresh matching role thread。旧session output因digest或remote versi
 ```text
 read-back durable fact
 -> publish typed WorkflowTimelineEvent
--> Root or Cycle projection subscriber
--> append idempotent, structured Linear comment
+-> Root or Cycle comment subscriber
+-> append one idempotent Linear comment with user Markdown + one symphony block
 ```
 
-Root Timeline只写Root Issue；Cycle Timeline只写matching Cycle Issue。Reconciler comment reply作为matching
-`RootDirective`的必需Linear mutation写回原Issue。event机制不是
+Root Timeline只写Root Issue；Cycle Timeline只写matching Cycle Issue。Reconciler comment reply、reaction和native
+thread resolve/unresolve作为matching `RootDirective`的必需Linear mutation写回原thread。event机制不是
 durable queue或workflow authority；任一required comment write/read-back失败时Root停在当前materialization，
 打印correlated error，并在恢复后使用同一deterministic ID继续，成功前不推进。
 
@@ -132,13 +136,14 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 - Conductor通过session-capable Performer client调用Root Reconciler和三个Stage role thread；
 - Performer backend独占model、thread、turn、sandbox和structured output映射；
 - SDK objects、credentials、raw transcript、process handles和arbitrary metadata不跨public boundary。
+- restart-required Linear managed facts只有strict `symphony` code block这一种格式；旧HTML marker不读取、不迁移、不兼容。
 
 ## 7. 文档导航
 
 - [Root Reconciliation](root-reconciliation.md)：唯一语义Reconciler、bootstrap/delta、全部用户Linear输入与回复、
   `RootDirective`、Root/Cycle用户修改和确定性materialization。
 - [Performer Plan、Work与Verify Contracts](stage-orchestration.md)：三个role thread的强类型request/result。
-- [Root与Cycle Workflow Timeline](workflow-timeline.md)：事件发布、订阅和Linear comment投影。
+- [Root与Cycle Workflow Timeline](workflow-timeline.md)：事件发布、订阅和Linear comment materialization。
 - [Human Action交互与恢复](human-actions.md)：Issue层级、labels、专用状态和resolution。
 - [Root Issue工作流](root-issue.md)：Linear status、Cycle Tree、Finding和delivery事实。
 - [Linear端到端流转](linear-flow.md)：Project解析、Root发现、blocker、排序和SDK ownership。

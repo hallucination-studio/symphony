@@ -67,14 +67,17 @@ StageTurnResultEnvelope
   observed_tree_digest
   context_digest
   completed_at
+  model
+  usage: TurnUsage
   outcome:
     PlanResult | WorkResult | VerifyResult
-  usage?
 ```
 
 `role`是discriminator；context和result variant必须matching。未知字段、未知variant、role/session不匹配、
 source coverage不完整、digest错误或超出bound均fail closed。所有schema使用`additionalProperties: false`，由
 JSON Schema生成各语言的generated codecs；生成语言集合由[契约与接口边界](contracts.md)统一定义。
+`model`和`usage`由Performer根据实际Provider调用填充，不属于模型structured output；它们对每个terminal outcome都
+required。`TurnUsage`及聚合语义只由[Performer Profile](performer-profiles.md)定义。
 
 ## 3. Session与turn
 
@@ -342,7 +345,6 @@ repair conclusion。
 StageBudgetExhaustedResult
   kind: budget_exhausted
   budget_kind
-  usage
   attempted_approaches[]
   resumable_facts[]
 
@@ -357,8 +359,9 @@ StageExecutionFailedResult
   retryable
 ```
 
-Provider transport/crash/schema failure与业务blocked必须区分。只有validated Result能进入Linear；无Result的
-process failure写execution failure record并由下一份Root delta处理，不能伪造业务结论。
+Provider transport/crash/schema failure与业务blocked必须区分。只有validated Result能进入Linear；无业务Result的
+process failure仍必须写包含model、`TurnUsage`和closed failure outcome的`ModelTurnRecord`及execution failure record，
+再由下一份Root delta处理，不能伪造业务结论。usage无法取得时使用显式`unavailable` variant。
 
 ## 9. Human input边界
 
@@ -386,9 +389,10 @@ Result接受顺序固定：
 fresh-read Root/Cycle/target/Git preconditions
 -> validate wire schema, role/session/turn correlation and context digest
 -> validate target revision and capability-specific evidence
--> persist immutable Result record with stable execution ID
+-> persist immutable Result with nested ModelTurnRecord in one managed Stage comment and one symphony block
 -> semantic read-back
 -> settle token reservation
+-> derive and materialize Stage/Cycle/Root usage snapshots from fresh Linear turn records
 -> rebuild complete Root Tree
 -> derive and advance Root delta, or bootstrap a fresh Reconciler session
 ```
@@ -420,3 +424,4 @@ matching turn/session失效并拒绝late output。
 6. Result必须durable并read-back后才能交给Root Reconciler。
 7. Provider thread不是durable authority；丢失后从Linear/Git facts恢复。
 8. Plan/Verify read-only，Work只能修改授予的Root worktree。
+9. 每个Stage Result都携带实际model和required `TurnUsage`；retry、rerun、cancel和failure不能绕过usage事实。

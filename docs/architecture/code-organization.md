@@ -95,7 +95,7 @@ root-directive-materialization
 performer-agent-client
 human-actions
 workflow-events
-timeline-projections
+timeline-comments
 performer-profiles
 git-workspaces
 root-delivery
@@ -110,7 +110,7 @@ Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository
 `root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
 `root-directive-materialization`验证和执行closed directive；`performer-agent-client`拥有Root Reconciler和三个
 Stage role session/turn
-transport。`workflow-events`只发布typed timeline event，`timeline-projections`只渲染和写Root/Cycle timeline；
+transport。`workflow-events`只发布typed timeline event，`timeline-comments`只渲染和写Root/Cycle timeline；
 用户comment reply由`root-directive-materialization`通过closed writer完成。
 完整边界分别由[Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和
 [Workflow Timeline](workflow-timeline.md)定义。
@@ -219,7 +219,7 @@ root_reconciler_runtime.py
 
 - TypeScript业务对象和View使用`camelCase`；
 - Python内部对象使用`snake_case`；
-- generated JSON Schema、跨进程wire和Linear Managed Marker字段统一使用
+- generated JSON Schema、跨进程wire和Linear managed code block字段统一使用
   `lower_snake_case`；
 - 不为了TypeScript方便修改wire字段，也不把wire字段风格扩散到TypeScript业务对象。
 

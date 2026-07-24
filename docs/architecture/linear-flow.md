@@ -57,6 +57,7 @@ RootTreeQuery
   root_issue_id
   include_archived: true
   include_comments: true
+  include_comment_threads_and_reactions: true
   include_relations: true
   include_labels: true
   include_status_catalog: true
@@ -139,10 +140,11 @@ archive/restore使用Linear原生archive API和explicit precondition。归档后
 在fresh read中观察当前source version/hash，计算相对Root Reconciler session baseline的`RootDelta`，再由Root Reconciler
 决定是否需要directive。不存在用户修改的Linear revision record、mutation queue或独立pending状态。
 
-## 8. Timeline comment投影
+## 8. Timeline comment materialization
 
-业务mutation和accepted Result read-back后发布typed timeline event。Root/Cycle projection subscriber通过Linear
-Gateway创建对应Issue comment。Root Reconciler对普通human comment的reply由matching `RootDirective`
+业务mutation和accepted Result read-back后发布typed timeline event。Root/Cycle comment subscriber通过Linear
+Gateway创建对应Issue comment。每个event生成一条同时包含用户Markdown和唯一`symphony` code block的comment。
+Root Reconciler对普通human comment的reply由matching `RootDirective`
 materializer写回原Issue。业务模块不直接拼接comment；任何required comment create/read-back失败都停止当前Root，
 记录correlated error，并在恢复后按同一stable ID重试，成功前不推进下一动作。规则见
 [Workflow Timeline](workflow-timeline.md)。
@@ -180,6 +182,6 @@ Podium configures Linear and Project Conductor Pool
 5. 完整Tree包括active和archived descendants。
 6. Conductor无poll checkpoint、Queue、DAG mirror、dispatch table或Workflow DB。
 7. Conductor不运行模型；Root和Cycle语义来自Root Reconciler。
-8. mutation、Reconciler reply和timeline comment都以Linear durable read-back和stable identity收敛。
+8. mutation、Reconciler reply、native reaction/thread action和timeline comment都以Linear durable read-back和stable identity收敛。
 9. Root convergence跨所有active/archived Cycle历史计算。
 10. 完整Tree只用于Conductor fresh derivation和fresh Reconciler bootstrap；已有session的advance严格只发送delta。

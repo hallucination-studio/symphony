@@ -47,7 +47,7 @@ apps/conductor/src/
   git-workspaces/
   root-delivery/
   workflow-events/
-  timeline-projections/
+  timeline-comments/
   performer-profiles/
   runtime-logs/
   private-ipc/
@@ -63,11 +63,11 @@ apps/conductor/src/
 | `performer-agent-client` | Root Reconciler和三个Stage role session/turn transport |
 | `human-actions` | Action Issue、labels、status/comment validation和resolution |
 | `workflow-events` | 发布closed timeline events |
-| `timeline-projections` | Root/Cycle timeline subscriber和closed renderer |
+| `timeline-comments` | Root/Cycle timeline comment subscriber和closed renderer |
 | `git-workspaces` | Root branch/worktree、commit和Git facts |
 | `root-delivery` | PR/branch delivery |
 
-`root-reconciliation`不能import Provider或Agent SDK。`timeline-projections`不能决定workflow mutation。
+`root-reconciliation`不能import Provider或Agent SDK。`timeline-comments`不能决定workflow mutation。
 `root-reconciler-client`不能materialize directive；`root-directive-materialization`不能调用模型。
 
 ## 3. 可重建View
