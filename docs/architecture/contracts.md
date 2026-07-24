@@ -129,6 +129,11 @@ Conductor可以为了计算delta在自己的单轮内存视图中读取完整act
 本轮从已确认baseline到fresh target的当前值/tombstone传输。传输失败或不连续时必须丢弃session并重新bootstrap，不能
 重放、补猜或兼容旧delta。
 
+这也是唯一的传输矩阵：新建、丢失或无法证明baseline的session使用一次`OpenRootReconcilerRequest`完整bootstrap；可证明
+连续的session使用`AdvanceRootReconcilerRequest`增量。普通用户修改不会单独触发bootstrap，Conductor也不能因为计算
+delta而把完整Tree、source manifest或历史activity放入advance请求。Linear mutation仍可作为accepted directive的机械
+materialization手段，但它不产生用户修改的revision/change-event生命周期，也不改变Root Reconciler的语义所有权。
+
 Stage Result至少关联role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。
 Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment
 version、Root directive和deterministic reply ID。

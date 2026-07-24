@@ -197,6 +197,20 @@ comments、Git/delivery事实和mechanical violations。Raw SDK对象、Timeline
 transport heartbeat和其他明确排除的automation comments不属于该fact set，其写入不会改变digest或触发模型。
 fresh bootstrap和每份delta必须使用同一canonicalization/schema version。
 
+### 4.4 唯一发送边界
+
+Root Reconciler跨进程输入只有以下两种，二者不能在同一个请求中混用：
+
+| session条件 | Conductor到Performer的输入 | 允许携带完整Root Tree |
+|---|---|---:|
+| 新建、丢失或baseline无法证明 | `OpenRootReconcilerRequest.bootstrap.root_snapshot` | 是，仅一次 |
+| session存在且baseline严格连续 | `AdvanceRootReconcilerRequest.delta` | 否 |
+
+Conductor可以为了安全校验和diff计算读取完整的active/archived Tree，但这只是本轮内存输入，不是对Performer的
+advance传输。普通用户修改、Stage Result或Human Action resolution只会导致下一份delta；只有session连续性无法证明时，
+才关闭旧session并用同一份fresh source read建立一次新的bootstrap。任何实现都不得把完整Tree、完整manifest或
+before/after diff作为advance的隐藏字段、可选字段或兼容字段。
+
 `MechanicalViolationsCurrentValue`只陈述从fresh facts计算出的可验证矛盾，例如多个nonterminal Cycles、Canceled Root仍有
 active Cycle、active dependency指向archived Node或无matching Result的Done Stage。它们必须交给Root Reconciler
 选择接受、修复、取消、replan、supersede或请求Human Action。只有无法证明ownership、读取不完整、schema无法
