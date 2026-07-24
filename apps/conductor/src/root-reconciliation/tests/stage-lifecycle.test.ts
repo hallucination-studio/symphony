@@ -10,6 +10,7 @@ import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import {
   RootReconciliationRuntime,
+  stageExecutionIdFor,
   stageTerminalStatusForOutcome,
   type RootReconciliationRuntimeDependencies,
 } from "../internal/RootReconciliationRuntime.js";
@@ -229,6 +230,18 @@ test("a Plan Contract write failure resumes from the durable Plan Result without
   assert.equal(performerCalls, 1);
   assert.equal(linear.planContractCount(), 1);
   assert.equal(stage(linear.tree).status_name, "In Review");
+});
+
+test("Stage execution IDs stay within the closed contract bound for long durable identities", () => {
+  const stageExecutionId = stageExecutionIdFor(
+    "r".repeat(36),
+    "d".repeat(73),
+    "plan",
+    "t".repeat(36),
+  );
+
+  assert.match(stageExecutionId, /^stage-execution:[a-f0-9]{64}$/u);
+  assert.ok(stageExecutionId.length <= 128);
 });
 
 function dependencies(input: {

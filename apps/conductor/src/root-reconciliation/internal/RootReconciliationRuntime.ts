@@ -344,7 +344,12 @@ export class RootReconciliationRuntime {
       const targetIssueId = action.kind === "rerun_stage"
         ? action.targetIssueId
         : action.kind === "execute_plan" ? action.planIssueId : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
-      const stageExecutionId = `${root.issueId}:${directive.rootDirectiveId}:${role}:${targetIssueId}`;
+      const stageExecutionId = stageExecutionIdFor(
+        root.issueId,
+        directive.rootDirectiveId,
+        role,
+        targetIssueId,
+      );
       const existingResult = stageResultRecord(view.tree, stageExecutionId);
       if (existingResult) {
         const contractView = await this.persistPlanContract(view, directive.rootDirectiveId, existingResult, setPhase);
@@ -1137,7 +1142,7 @@ function stageInput(
     role,
     roleSessionId,
     roleTurnId: randomUUID(),
-    stageExecutionId: `${root.issueId}:${directiveId}:${role}:${targetIssueId}`,
+    stageExecutionId: stageExecutionIdFor(root.issueId, directiveId, role, targetIssueId),
     observedTreeDigest: view.treeDigest,
     contextDigest: view.treeDigest,
     goal: JSON.stringify(action),
@@ -1151,6 +1156,18 @@ function stageInput(
       workspace_access: role === "work" ? "read_write" : "read_only",
     },
   } as StageTurnInput;
+}
+
+export function stageExecutionIdFor(
+  rootIssueId: string,
+  rootDirectiveId: string,
+  role: "plan" | "work" | "verify",
+  targetIssueId: string,
+): string {
+  const digest = createHash("sha256")
+    .update([rootIssueId, rootDirectiveId, role, targetIssueId].join("\0"), "utf8")
+    .digest("hex");
+  return `stage-execution:${digest}`;
 }
 
 function cycleIssueIdForTarget(
