@@ -8,7 +8,7 @@ import { LinearRootReconcilerReplyWriterImpl } from "../internal/LinearRootRecon
 test("reply writer appends a structured reply to the source Issue and reads it back", async () => {
   const linear = new FakeLinear();
   const writer = new LinearRootReconcilerReplyWriterImpl(linear);
-  const result = await writer.write({ directive: directive(), disposition: disposition(), view: view(linear.tree) });
+  const result = await writer.write({ directive: directive(), reply: reply(), view: view(linear.tree) });
 
   assert.equal(result.kind, "materialized");
   assert.equal(linear.mutations.length, 1);
@@ -23,7 +23,7 @@ test("reply writer appends a structured reply to the source Issue and reads it b
   assert.match(command.body, /Decision\nThe Root Reconciler will rerun the check\./u);
   assert.match(command.body, /Next step\nWait for the next Verify result\./u);
 
-  const second = await writer.write({ directive: directive(), disposition: disposition(), view: view(linear.tree) });
+  const second = await writer.write({ directive: directive(), reply: reply(), view: view(linear.tree) });
   assert.deepEqual(second, result);
   assert.equal(linear.mutations.length, 1);
 });
@@ -38,7 +38,7 @@ test("reply writer rejects stale, managed, and non-human source comments", async
     const writer = new LinearRootReconcilerReplyWriterImpl(linear);
     const result = await writer.write({
       directive: directive(),
-      disposition: disposition(patch.sourceCommentVersion),
+      reply: reply(patch.sourceCommentVersion),
       view: view({
         ...linear.tree,
         comments: [{
@@ -58,7 +58,7 @@ test("reply writer stops when Linear does not confirm the comment", async () => 
   linear.dropReadBack = true;
   const result = await new LinearRootReconcilerReplyWriterImpl(linear).write({
     directive: directive(),
-    disposition: disposition(),
+    reply: reply(),
     view: view(linear.tree),
   });
 
@@ -67,12 +67,12 @@ test("reply writer stops when Linear does not confirm the comment", async () => 
 
 test("reply writer rejects reply content that differs from the accepted directive", async () => {
   const linear = new FakeLinear();
-  const changed = disposition();
-  changed.reply.nextStep = "Do something else.";
+  const changed = reply();
+  changed.nextStep = "Do something else.";
 
   const result = await new LinearRootReconcilerReplyWriterImpl(linear).write({
     directive: directive(),
-    disposition: changed,
+    reply: changed,
     view: view(linear.tree),
   });
 
@@ -87,28 +87,25 @@ function directive(): RootDirective {
     rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1",
-    basedOnRootTreeDigest: "tree-v1",
+    basedOnTargetRootDigest: "tree-v1",
     rationale: "The user requested a fresh check.",
-    evidenceRefs: ["comment-1"],
-    commentDispositions: [disposition()],
-    externalChangeDispositions: [],
-    action: { kind: "wait", reasonCode: "runtime_condition", blockingFactRefs: ["comment-1"] },
+    evidenceRefs: [{ referenceId: "comment-1", sourceKind: "linear_comment" }],
+    consumedInputIds: ["comment-1:comment-v1"],
+    commentReplies: [reply()],
+    humanActionResolutions: [],
+    action: { kind: "wait", reasonCode: "runtime_condition", blockingFactRefs: [{ referenceId: "comment-1", sourceKind: "linear_comment" }] },
   };
 }
 
-function disposition(sourceCommentVersion = "comment-v1") {
+function reply(sourceCommentVersion = "comment-v1") {
   return {
+    sourceInputId: `comment-1:${sourceCommentVersion}`,
     sourceCommentId: "comment-1",
     sourceCommentVersion,
-    interpretation: "execution_instruction" as const,
-    impact: "current_stage" as const,
-    decisionRef: "decision-1",
-    reply: {
-      acknowledgement: "We received your request.",
-      interpretedRequest: "Please rerun Verify.",
-      decidedAction: "The Root Reconciler will rerun the check.",
-      nextStep: "Wait for the next Verify result.",
-    },
+    acknowledgement: "We received your request.",
+    interpretedRequest: "Please rerun Verify.",
+    decidedAction: "The Root Reconciler will rerun the check.",
+    nextStep: "Wait for the next Verify result.",
   };
 }
 

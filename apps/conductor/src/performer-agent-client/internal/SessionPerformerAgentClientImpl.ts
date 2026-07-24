@@ -13,11 +13,14 @@ import type {
   PerformerAgentClientInterface,
 } from "../api/PerformerAgentClientInterface.js";
 import type {
+  RootBootstrap,
+  RootDelta,
+  RootDeltaChange,
   RootDirective,
   RootReconcilerAdvanceResult,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
-  RootReconciliationObservation,
+  RootTree,
   StageResult,
   StageTurnInput,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
@@ -45,6 +48,9 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
       kind: "open_root_reconciler",
       root_issue_id: input.rootIssueId,
       performer_profile_id: input.profileId,
+      reconciler_session_id: input.reconcilerSessionId,
+      reconciler_turn_id: input.reconcilerTurnId,
+      observed_at: input.observedAt,
       model_settings: {
         model: input.modelSettings.model,
         reasoning_effort: input.modelSettings.reasoningEffort,
@@ -56,30 +62,50 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         denied_tools: [],
         network_policy: "disabled",
       },
-      limits: defaultLimits(this.options.deadlineMs),
+      bootstrap: toWireBootstrap(input.bootstrap),
+      limits: toWireLimits(input.limits),
     }, decodeConductorPerformerRootReconcilerOpenedResult, "root_reconciler_open_response_contract_invalid")
       .then((response) => {
-        if (response.kind !== "root_reconciler_opened" || typeof response.reconciler_session_id !== "string") {
+        if (
+          response.kind !== "root_reconciler_opened" ||
+          typeof response.reconciler_session_id !== "string" ||
+          typeof response.bootstrap_root_digest !== "string"
+        ) {
           throw new Error("root_reconciler_open_result_invalid");
         }
         this.profileByRoot.set(input.rootIssueId, input.profileId);
         this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
-        return { kind: "opened", sessionId: response.reconciler_session_id };
+        return {
+          kind: "opened",
+          sessionId: response.reconciler_session_id,
+          bootstrapRootDigest: response.bootstrap_root_digest,
+          initialDirective: decodeDirective(response.initial_directive),
+        };
       });
   }
 
   advanceRootReconciler(input: {
     requestId: string;
     sessionId: string;
-    observation: RootReconciliationObservation;
+    reconcilerTurnId: string;
+    observedAt: string;
+    delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
-    const observation = input.observation;
     const profileId = this.profileByRootSession.get(input.sessionId);
     if (!profileId) return Promise.reject(new Error("root_reconciler_session_profile_unknown"));
     return this.invoke(
       input.requestId,
       profileId,
-      toWireObservation(observation),
+      {
+        protocol_version: "1",
+        request_id: input.requestId,
+        kind: "advance_root_reconciler",
+        reconciler_session_id: input.sessionId,
+        reconciler_turn_id: input.reconcilerTurnId,
+        observed_at: input.observedAt,
+        delta: toWireDelta(input.delta),
+        limits: defaultLimits(this.options.deadlineMs),
+      },
       decodeConductorPerformerRootDirective,
       "root_directive_response_contract_invalid",
     )
@@ -213,108 +239,110 @@ function defaultLimits(deadlineMs: number | (() => number)) {
   };
 }
 
-function toWireObservation(input: RootReconciliationObservation): JsonRecord {
-  const rootIssue = input.tree.issues.find((issue) => issue.issue_id === input.root.issueId);
-  if (!rootIssue) throw new Error("root_observation_root_issue_missing");
-  const objective = input.root.description || input.root.title;
+function toWireLimits(limits: import("../../root-reconciliation/api/RootReconciliationContracts.js").ReconcilerLimits): JsonRecord {
   return {
-    protocol_version: "1",
-    request_id: input.requestId,
-    reconciler_session_id: input.reconcilerSessionId,
-    reconciler_turn_id: input.reconcilerTurnId,
-    observed_at: input.observedAt,
-    root: {
-      issue: toWireIssue(rootIssue, "root"),
-      objective,
-      scope: input.root.title,
-      acceptance_criteria: [{
-        criterion_key: `${input.root.issueId}:objective`,
-        statement: objective,
-        verification_method: "provider-defined verification",
-      }],
-      constraints: [],
-      root_status: rootIssue.status_name,
-      ownership: { record_id: input.root.issueId, record_kind: "root_ownership", version: rootIssue.remote_version },
-      convergence_summary: "Root convergence is governed by durable Linear and Git facts.",
-    },
-    cycles: input.cycles.map((cycle) => ({
-      cycle_issue: toWireIssue(cycle.cycleIssue, "cycle"),
-      predecessor_cycle_issue_id: cycle.cycleIssue.parent_issue_id ?? "none",
-      cycle_status: cycle.cycleIssue.status_name,
-      is_archived: cycle.isArchived,
-      issues: cycle.issues.map((issue) => toWireIssue(issue)),
-      relations: cycle.relations,
-      plan_results: cycle.planResults.map(toWireRecordReference),
-      work_results: cycle.workResults.map(toWireRecordReference),
-      verify_results: cycle.verifyResults.map(toWireRecordReference),
-      findings: [],
-      human_action_records: cycle.humanActionRecords.map(toWireHumanActionRecord),
-      human_action_resolutions: [],
-    })),
-    root_human_actions: input.rootHumanActions.map(toWireHumanActionRecord),
-    accepted_root_directives: input.acceptedDirectives.map((directive) => ({
-      record_id: directive.rootDirectiveId,
-      record_kind: "accepted_root_directive",
-      version: directive.basedOnRootTreeDigest,
-    })),
-    root_reconciler_failures: input.rootReconcilerFailures.map((failure) => ({
-      failure_id: failure.failureId,
-      reconciler_session_id: failure.reconcilerSessionId,
-      reconciler_turn_id: failure.reconcilerTurnId,
-      observed_root_tree_digest: failure.observedRootTreeDigest,
-      category: failure.category,
-      sanitized_reason: failure.sanitizedReason,
-      failed_at: failure.failedAt,
-    })),
-    pending_user_comments: input.pendingUserComments.map((comment) => ({
-      comment_id: comment.commentId,
-      comment_version: comment.commentVersion,
-      issue_id: comment.issueId,
-      issue_kind: comment.issueKind === "human" ? "human_action" : comment.issueKind,
-      ...(comment.cycleIssueId ? { cycle_issue_id: comment.cycleIssueId } : {}),
-      author_user_id: comment.authorUserId,
-      body: comment.body,
-      created_at: comment.createdAt,
-      updated_at: comment.updatedAt,
-    })),
-    reconciler_reply_records: input.reconcilerReplies.map((reply) => ({
-      reply_id: reply.replyId,
-      root_directive_id: reply.rootDirectiveId,
-      source_comment_id: reply.sourceCommentId,
-      source_comment_version: reply.sourceCommentVersion,
-      target_issue_id: reply.targetIssueId,
-      materialized_outcome_refs: reply.materializedOutcomeRefs.map((referenceId) => ({ reference_id: referenceId, source_kind: "result" })),
-      rendered_schema_version: "1",
-      replied_at: reply.repliedAt,
-    })),
-    external_linear_changes: input.externalLinearChanges.map((change) => ({
-      change_id: change.changeId,
-      actor_kind: change.actorKind,
-      target_issue_id: change.targetIssueId,
-      issue_kind: change.issueKind === "human" ? "human_action" : change.issueKind,
-      change_kind: change.changeKind,
-      before_version_or_digest: change.beforeVersionOrDigest,
-      after_version_or_digest: change.afterVersionOrDigest,
-      changed_field_names: change.changedFieldNames,
-      relation_ids: change.relationIds,
-      observed_at: change.observedAt,
-    })),
-    workflow_change_resolutions: [],
-    git_facts: {
-      head_revision: input.git.head,
-      baseline_revision: input.git.head,
-      status_summary: input.git.status.items.join("\n") || "clean",
-      changed_paths: input.git.status.items,
-    },
-    delivery: { record_id: "none", record_kind: "none", version: "none" },
-    source_manifest: [],
-    coverage: { is_complete: input.complete, omissions: [] },
-    observed_root_tree_digest: input.treeDigest,
-    limits: defaultLimits(input.limits.maxTurnWallTimeMs),
+    max_context_bytes: limits.maxContextBytes,
+    max_result_bytes: limits.maxResultBytes,
+    max_output_tokens: limits.maxOutputTokens,
+    max_tool_calls: limits.maxToolCalls,
+    max_wall_time_ms: limits.maxWallTimeMs,
+    deadline_at: limits.deadlineAt,
   };
 }
 
-function toWireHumanActionRecord(record: RootReconciliationObservation["rootHumanActions"][number]): JsonRecord {
+function toWireBootstrap(input: RootBootstrap): JsonRecord {
+  return {
+    root_snapshot: {
+      root: toWireRootObservation(input.rootSnapshot.root),
+      cycles: input.rootSnapshot.cycles.map(toWireCycleObservation),
+      issues: input.rootSnapshot.issues.map(toWireFactIssue),
+      relations: input.rootSnapshot.relations.map(toWireRelation),
+      managed_records: input.rootSnapshot.managedRecords.map(toWireRecordReference),
+      user_comments: input.rootSnapshot.userComments.map(toWireComment),
+      git_facts: toWireGitFacts(input.rootSnapshot.gitFacts),
+      delivery: toWireRecordReference(input.rootSnapshot.delivery),
+      mechanical_violations: input.rootSnapshot.mechanicalViolations.map(toWireMechanicalViolation),
+    },
+    source_manifest: input.sourceManifest.map((entry) => ({
+      source_kind: entry.sourceKind,
+      source_id: entry.sourceId,
+      version_or_digest: entry.versionOrDigest,
+    })),
+    coverage: {
+      is_complete: input.coverage.isComplete,
+      omissions: input.coverage.omissions.map((omission) => ({ source_id: omission.sourceId, reason: omission.reason })),
+    },
+    root_digest: input.rootDigest,
+    pending_input_ids: input.pendingInputIds,
+  };
+}
+
+function toWireDelta(input: RootDelta): JsonRecord {
+  return {
+    base_root_digest: input.baseRootDigest,
+    target_root_digest: input.targetRootDigest,
+    changes: input.changes.map(toWireDeltaChange),
+    pending_input_ids: input.pendingInputIds,
+  };
+}
+
+function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
+  const base = {
+    kind: change.kind,
+    source_id: change.sourceId,
+    source_version: change.sourceVersion,
+    actor_kind: change.actorKind,
+    observed_at: change.observedAt,
+  };
+  if (change.kind === "issue_current_value") return { ...base, issue: toWireFactIssue(change.issue) };
+  if (change.kind === "comment_current_value") return { ...base, comment: toWireComment(change.comment) };
+  if (change.kind === "relation_current_value") return { ...base, relation: toWireRelation(change.relation) };
+  if (change.kind === "managed_record_current_value") return { ...base, record: toWireRecordReference(change.record) };
+  if (change.kind === "git_facts_current_value") return { ...base, git_facts: toWireGitFacts(change.gitFacts) };
+  if (change.kind === "mechanical_violations_current_value") {
+    return { ...base, mechanical_violations: change.mechanicalViolations.map(toWireMechanicalViolation) };
+  }
+  return base;
+}
+
+function toWireRootObservation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootObservation): JsonRecord {
+  return {
+    issue: toWireFactIssue(input.issue),
+    objective: input.objective,
+    scope: input.scope,
+    acceptance_criteria: input.acceptanceCriteria.map((criterion) => ({
+      criterion_key: criterion.criterionKey,
+      statement: criterion.statement,
+      verification_method: criterion.verificationMethod,
+    })),
+    constraints: input.constraints,
+    root_status: input.rootStatus,
+    ownership: toWireRecordReference(input.ownership),
+    convergence_summary: input.convergenceSummary,
+  };
+}
+
+function toWireCycleObservation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootCycleObservation): JsonRecord {
+  return {
+    cycle_issue: toWireFactIssue(input.cycleIssue),
+    predecessor_cycle_issue_id: input.predecessorCycleIssueId,
+    cycle_status: input.cycleStatus,
+    is_archived: input.isArchived,
+    ...(input.activePlanContract ? { active_plan_contract: toWireRecordReference(input.activePlanContract) } : {}),
+    ...(input.budget ? { budget: toWireBudget(input.budget) } : {}),
+    ...(input.outcome ? { outcome: toWireRecordReference(input.outcome) } : {}),
+    issues: input.issues.map(toWireFactIssue),
+    relations: input.relations.map(toWireRelation),
+    plan_results: input.planResults.map(toWireRecordReference),
+    work_results: input.workResults.map(toWireRecordReference),
+    verify_results: input.verifyResults.map(toWireRecordReference),
+    findings: input.findings.map(toWireFinding),
+    human_action_records: input.humanActionRecords.map(toWireHumanActionRecord),
+    human_action_resolutions: input.humanActionResolutions.map(toWireHumanActionResolution),
+  };
+}
+
+function toWireHumanActionRecord(record: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootHumanActionRecord): JsonRecord {
   return {
     action_id: record.actionId,
     action_issue_id: record.actionIssueId,
@@ -327,12 +355,70 @@ function toWireHumanActionRecord(record: RootReconciliationObservation["rootHuma
   };
 }
 
-function toWireRecordReference(reference: RootReconciliationObservation["cycles"][number]["planResults"][number]): JsonRecord {
+function toWireHumanActionResolution(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").HumanActionResolution): JsonRecord {
   return {
-    record_id: reference.recordId,
-    record_kind: reference.recordKind,
-    version: reference.version,
+    resolution_id: input.resolutionId,
+    action_id: input.actionId,
+    action_issue_id: input.actionIssueId,
+    ...(input.actionKind ? { action_kind: input.actionKind } : {}),
+    outcome: input.outcome,
+    terminal_status: input.terminalStatus,
+    terminal_remote_version: input.terminalRemoteVersion,
+    proposal_digest: input.proposalDigest,
+    ...(input.sourceCommentIds ? { source_comment_ids: input.sourceCommentIds } : {}),
+    actor_kind: input.actorKind,
+    resolved_at: input.resolvedAt,
   };
+}
+
+function toWireRecordReference(reference: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootRecordReference): JsonRecord {
+  return {
+    record_id: reference.recordId, record_kind: reference.recordKind, version: reference.version,
+  };
+}
+
+function toWireComment(comment: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFactComment): JsonRecord {
+  return {
+    comment_id: comment.commentId,
+    comment_version: comment.commentVersion,
+    issue_id: comment.issueId,
+    ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
+    author_kind: comment.authorKind,
+    body: comment.body,
+    created_at: comment.createdAt,
+    updated_at: comment.updatedAt,
+    ...(comment.managedMarker ? { managed_marker: comment.managedMarker } : {}),
+  };
+}
+
+function toWireRelation(relation: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFactRelation): JsonRecord {
+  return {
+    relation_id: relation.relationId,
+    relation_kind: relation.relationKind,
+    source_issue_id: relation.sourceIssueId,
+    target_issue_id: relation.targetIssueId,
+  };
+}
+
+function toWireGitFacts(facts: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootGitFacts): JsonRecord {
+  return {
+    head_revision: facts.headRevision,
+    baseline_revision: facts.baselineRevision,
+    status_summary: facts.statusSummary,
+    changed_paths: facts.changedPaths,
+  };
+}
+
+function toWireMechanicalViolation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").MechanicalViolation): JsonRecord {
+  return { violation_kind: input.violationKind, source_issue_ids: input.sourceIssueIds, summary: input.summary };
+}
+
+function toWireFinding(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFinding): JsonRecord {
+  return { finding_id: input.findingId, category: input.category, severity: input.severity, summary: input.summary };
+}
+
+function toWireBudget(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootBudgetSnapshot): JsonRecord {
+  return { turns_used: input.turnsUsed, turns_remaining: input.turnsRemaining, tokens_used: input.tokensUsed, tokens_remaining: input.tokensRemaining };
 }
 
 function toWireStageInput(input: StageTurnInput): JsonRecord {
@@ -416,16 +502,32 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
   };
 }
 
-function toWireIssue(issue: RootReconciliationObservation["tree"]["issues"][number], fallbackKind?: "root" | "cycle"): JsonRecord {
+function toWireIssue(issue: RootTree["issues"][number]): JsonRecord {
+  const issueKind = issue.issue_kind ?? "work";
   return {
     issue_id: issue.issue_id,
-    issue_kind: issue.issue_kind ?? fallbackKind ?? "work",
+    issue_kind: issueKind === "human" ? "human_action" : issueKind,
     ...(issue.parent_issue_id ? { parent_issue_id: issue.parent_issue_id } : {}),
     title: issue.title,
     description: issue.description,
     status: issue.status_name,
     is_archived: issue.is_archived,
+    labels: issue.labels,
     remote_version: issue.remote_version,
+  };
+}
+
+function toWireFactIssue(issue: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFactIssue): JsonRecord {
+  return {
+    issue_id: issue.issueId,
+    issue_kind: issue.issueKind,
+    ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
+    title: issue.title,
+    description: issue.description,
+    status: issue.status,
+    is_archived: issue.isArchived,
+    labels: issue.labels,
+    remote_version: issue.remoteVersion,
   };
 }
 
@@ -512,13 +614,13 @@ function planDagFor(input: StageTurnInput): JsonRecord {
 function decodeDirective(value: unknown): RootDirective {
   const directive = record(value);
   const action = record(directive.action);
-  if (directive.protocol_version !== "1" || typeof directive.root_directive_id !== "string" || typeof directive.based_on_root_tree_digest !== "string") {
+  if (directive.protocol_version !== "1" || typeof directive.root_directive_id !== "string" || typeof directive.based_on_target_root_digest !== "string") {
     throw new Error("root_directive_shape_invalid");
   }
   if (typeof action.kind !== "string" || !new Set([
-    "execute_plan", "execute_work", "execute_verify", "rerun_stage", "resolve_invalid_lifecycle",
-    "revise_cycle_tree", "replan_current_cycle", "supersede_cycle", "create_successor_cycle",
-    "request_human_action", "conclude_cycle", "conclude_root", "wait", "acknowledge",
+    "execute_plan", "execute_work", "execute_verify", "rerun_stage", "revise_root_tree",
+    "replan_current_cycle", "supersede_cycle", "create_cycle", "request_human_action",
+    "conclude_cycle", "conclude_root", "cancel_root", "wait", "acknowledge",
   ]).has(action.kind)) throw new Error("root_directive_action_invalid");
   return camelizeKeys(directive) as RootDirective;
 }

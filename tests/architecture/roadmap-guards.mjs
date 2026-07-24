@@ -64,6 +64,12 @@ const approvedEvidenceNames = new Set([
   "FindingEvidence",
   "decodeFindingEvidence",
   "encodeFindingEvidence",
+  "EvidenceRef",
+  "RootSourceManifestEntry",
+  "WorkflowSourceManifestEntryValue",
+  "sourceManifest",
+  "sourceManifestEntry",
+  "workflowSourceManifest",
 ]);
 
 function importSpecifiers(source) {

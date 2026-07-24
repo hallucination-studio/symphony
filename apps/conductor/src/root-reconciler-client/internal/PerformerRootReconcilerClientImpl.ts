@@ -1,7 +1,7 @@
 import type { RootReconcilerClientInterface } from "../api/RootReconcilerClientInterface.js";
 import type {
+  RootDelta,
   RootReconcilerAdvanceResult,
-  RootReconcilerObservation,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
@@ -11,7 +11,9 @@ interface RootReconcilerTransport {
   advanceRootReconciler(input: {
     requestId: string;
     sessionId: string;
-    observation: RootReconcilerObservation;
+    reconcilerTurnId: string;
+    observedAt: string;
+    delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
   closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void>;
 }
@@ -30,7 +32,9 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
   advance(input: {
     requestId: string;
     sessionId: string;
-    observation: RootReconcilerObservation;
+    reconcilerTurnId: string;
+    observedAt: string;
+    delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
     return this.transport.advanceRootReconciler(input);
   }

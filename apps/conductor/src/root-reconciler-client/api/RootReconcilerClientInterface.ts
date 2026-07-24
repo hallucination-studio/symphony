@@ -1,6 +1,6 @@
 import type {
   RootReconcilerAdvanceResult,
-  RootReconcilerObservation,
+  RootDelta,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
@@ -10,7 +10,9 @@ export interface RootReconcilerClientInterface {
   advance(input: {
     requestId: string;
     sessionId: string;
-    observation: RootReconcilerObservation;
+    reconcilerTurnId: string;
+    observedAt: string;
+    delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
   close(input: { requestId: string; sessionId: string }): Promise<void>;
 }

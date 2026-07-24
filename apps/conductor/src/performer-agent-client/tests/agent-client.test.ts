@@ -11,8 +11,7 @@ import {
   PersistentPerformerAgentChannelFactory,
   type PerformerAgentChannelFactory,
 } from "../internal/PerformerAgentChannel.js";
-import type { RootReconcilerOpenInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
-import type { StageTurnInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { RootReconcilerOpenInput, StageTurnInput } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import { SessionPerformerAgentClientImpl } from "../internal/SessionPerformerAgentClientImpl.js";
 
 function channelFactoryFor(
@@ -137,6 +136,65 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string) 
   };
 }
 
+function openInput(requestId = "request-1"): RootReconcilerOpenInput {
+  return {
+    protocolVersion: 1,
+    requestId,
+    reconcilerSessionId: "session-request-1",
+    reconcilerTurnId: "turn-1",
+    observedAt: "2026-07-23T00:00:00Z",
+    rootIssueId: "root-1",
+    profileId: "profile-1",
+    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
+    bootstrap: bootstrap(),
+    limits: {
+      maxContextBytes: 8_388_608,
+      maxResultBytes: 1_048_576,
+      maxOutputTokens: 32_768,
+      maxToolCalls: 0,
+      maxWallTimeMs: 30_000,
+      deadlineAt: "2026-07-23T00:05:00Z",
+    },
+  };
+}
+
+function bootstrap() {
+  const issue = {
+    issueId: "root-1", issueKind: "root" as const, title: "Root", description: "Root description",
+    status: "Todo" as const, isArchived: false, labels: [], remoteVersion: "root-v1",
+  };
+  return {
+    rootSnapshot: {
+      root: {
+        issue, objective: "Root description", scope: "Root", acceptanceCriteria: [], constraints: [],
+        rootStatus: "Todo" as const, ownership: { recordId: "none:root_ownership", recordKind: "root_ownership", version: "none" },
+        convergenceSummary: "none",
+      },
+      cycles: [], issues: [issue], relations: [], managedRecords: [], userComments: [],
+      gitFacts: { headRevision: "head-1", baselineRevision: "head-1", statusSummary: "clean", changedPaths: [] },
+      delivery: { recordId: "none:delivery", recordKind: "delivery", version: "none" }, mechanicalViolations: [],
+    },
+    sourceManifest: [], coverage: { isComplete: true, omissions: [] }, rootDigest: "tree-1", pendingInputIds: [],
+  };
+}
+
+function initialDirective() {
+  return {
+    protocol_version: "1",
+    request_id: "request-1",
+    root_directive_id: "directive-1",
+    reconciler_session_id: "session-1",
+    reconciler_turn_id: "turn-1",
+    based_on_target_root_digest: "tree-1",
+    rationale: "Open the root.",
+    evidence_refs: [],
+    consumed_input_ids: [],
+    comment_replies: [],
+    human_action_resolutions: [],
+    action: { kind: "wait", reason_code: "initial_bootstrap", blocking_fact_refs: [{ reference_id: "bootstrap", source_kind: "linear_issue" }] },
+  };
+}
+
 test("agent client sends the closed direct OpenRootReconcilerRequest", async () => {
   const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
@@ -146,20 +204,15 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
       protocol_version: "1",
       request_id: requestId,
       kind: "root_reconciler_opened",
-      root_issue_id: "root-1",
       reconciler_session_id: "session-1",
+      bootstrap_root_digest: "tree-1",
+      initial_directive: initialDirective(),
     }), calls),
     deadlineMs: 30_000,
   });
-  const input: RootReconcilerOpenInput = {
-    protocolVersion: 1,
-    requestId: "request-1",
-    rootIssueId: "root-1",
-    profileId: "profile-1",
-    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
-  };
+  const input = openInput();
 
-  assert.deepEqual(await client.openRootReconciler(input), { kind: "opened", sessionId: "session-1" });
+  assert.equal((await client.openRootReconciler(input)).initialDirective.action.kind, "wait");
   assert.equal(calls.length, 1);
   const sent = calls[0]!;
   assert.equal(sent.protocol_version, "1");
@@ -181,7 +234,8 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
           return (body.kind === "open_root_reconciler"
             ? {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-              root_issue_id: "root-1", reconciler_session_id: "session-1",
+              reconciler_session_id: "session-1",
+              bootstrap_root_digest: "tree-1", initial_directive: initialDirective(),
             }
             : {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_closed", root_issue_id: "root-1",
@@ -197,13 +251,7 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
     channelFactory,
     deadlineMs: 30_000,
   });
-  await client.openRootReconciler({
-    protocolVersion: 1,
-    requestId: "open-request",
-    rootIssueId: "root-1",
-    profileId: "profile-1",
-    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
-  });
+  await client.openRootReconciler(openInput("open-request"));
   await client.closeRootReconciler({ requestId: "close-request", rootIssueId: "root-1", sessionId: "session-1" });
   assert.equal(openedChannels, 1);
   assert.deepEqual(requestKinds, ["open_root_reconciler", "close_root_reconciler"]);
@@ -311,12 +359,12 @@ test("agent client normalizes the Root directive wire fields", async () => {
     channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
       ? {
         protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-        root_issue_id: "root-1", reconciler_session_id: "session-1",
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_directive: initialDirective(),
       }
       : {
         protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
-        reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_root_tree_digest: "tree-1",
-        rationale: "execute the plan", evidence_refs: [], comment_dispositions: [], external_change_dispositions: [],
+        reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_target_root_digest: "tree-1",
+        rationale: "execute the plan", evidence_refs: [], consumed_input_ids: [], comment_replies: [], human_action_resolutions: [],
         action: {
           kind: "execute_plan", cycle_issue_id: "cycle-1", plan_issue_id: "plan-1", plan_goal: "plan",
           required_outputs: [], prior_plan_result_ids: [], human_resolution_ids: [],
@@ -324,30 +372,14 @@ test("agent client normalizes the Root directive wire fields", async () => {
       } as JsonValue),
     deadlineMs: 30_000,
   });
-  await client.openRootReconciler({
-    protocolVersion: 1,
-    requestId: "open-request",
-    rootIssueId: "root-1",
-    profileId: "profile-1",
-    modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
-  });
+  await client.openRootReconciler(openInput("open-request"));
 
   const result = await client.advanceRootReconciler({
     requestId: "advance-request",
     sessionId: "session-1",
-    observation: {
-      root: { issueId: "root-1", title: "Root", description: "Root" } as never,
-      tree: {
-        root_issue_id: "root-1", status_catalog: [], issues: [{ issue_id: "root-1", issue_kind: "root", title: "Root", description: "Root", status: "In Progress" }], comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-23T00:00:00Z",
-      },
-      git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } },
-      observedAt: "2026-07-23T00:00:00Z", treeDigest: "tree-1", complete: true,
-      protocolVersion: 1, requestId: "observation-request", reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1",
-      cycles: [], rootHumanActions: [], pendingUserComments: [], externalLinearChanges: [], acceptedDirectives: [],
-      rootReconcilerFailures: [], reconcilerReplies: [], limits: {
-        maxObservationBytes: 1, maxDirectiveBytes: 1, maxTurnWallTimeMs: 1, reservedTotalTokens: 1,
-      },
-    } as never,
+    reconcilerTurnId: "advance-turn",
+    observedAt: "2026-07-23T00:00:01Z",
+    delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
   });
 
   assert.equal(result.directive.action.kind, "execute_plan");

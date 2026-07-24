@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
-  CommentDisposition,
   RootDirective,
   RootReconciliationView,
+  UserCommentReply,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import type { RootReconcilerReplyWriterInterface } from "../api/RootReconcilerReplyWriterInterface.js";
 
@@ -16,20 +16,20 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
 
   async write(input: {
     directive: RootDirective;
-    disposition: CommentDisposition;
+    reply: UserCommentReply;
     view: RootReconciliationView;
   }): Promise<{ kind: "materialized"; replyId: string } | { kind: "failed"; code: string }> {
-    const source = input.view.tree.comments.find(({ comment_id }) => comment_id === input.disposition.sourceCommentId);
+    const source = input.view.tree.comments.find(({ comment_id }) => comment_id === input.reply.sourceCommentId);
     if (!source) return failed("reply_source_comment_missing");
-    if (source.remote_version !== input.disposition.sourceCommentVersion) return failed("reply_source_comment_stale");
+    if (source.remote_version !== input.reply.sourceCommentVersion) return failed("reply_source_comment_stale");
     if (source.author_kind !== "human" || !source.author_user_id || source.author_id !== source.author_user_id) {
       return failed("reply_source_comment_actor_invalid");
     }
     if (source.managed_marker) return failed("reply_source_comment_managed");
-    const acceptedDispositions = input.directive.commentDispositions.filter((disposition) =>
-      disposition.sourceCommentId === input.disposition.sourceCommentId &&
-      disposition.sourceCommentVersion === input.disposition.sourceCommentVersion);
-    if (acceptedDispositions.length !== 1 || !sameDisposition(acceptedDispositions[0]!, input.disposition)) {
+    const acceptedReplies = input.directive.commentReplies.filter((reply) =>
+      reply.sourceCommentId === input.reply.sourceCommentId &&
+      reply.sourceCommentVersion === input.reply.sourceCommentVersion);
+    if (acceptedReplies.length !== 1 || !sameReply(acceptedReplies[0]!, input.reply)) {
       return failed("reply_disposition_not_accepted");
     }
 
@@ -46,7 +46,7 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
       issue_id === target.issue_id && managed_marker === replyId);
     if (existing) return { kind: "materialized", replyId };
 
-    const body = render(input.disposition, replyId);
+    const body = render(input.reply, replyId);
     if (!body) return failed("reply_content_invalid");
     if (Buffer.byteLength(body, "utf8") > MAX_REPLY_BYTES) return failed("reply_comment_too_large");
 
@@ -86,12 +86,12 @@ function deterministicReplyId(input: {
     .digest("hex");
 }
 
-function render(disposition: CommentDisposition, replyId: string): string | undefined {
+function render(reply: UserCommentReply, replyId: string): string | undefined {
   const fields = [
-    disposition.reply.acknowledgement,
-    disposition.reply.interpretedRequest,
-    disposition.reply.decidedAction,
-    disposition.reply.nextStep,
+    reply.acknowledgement,
+    reply.interpretedRequest,
+    reply.decidedAction,
+    reply.nextStep,
   ];
   if (fields.some((field) => field.length === 0 || field.length > MAX_REPLY_FIELD_LENGTH || /[\0\r]/u.test(field))) {
     return undefined;
@@ -101,30 +101,28 @@ function render(disposition: CommentDisposition, replyId: string): string | unde
     "## Symphony reply",
     "",
     "Acknowledgement",
-    disposition.reply.acknowledgement,
+    reply.acknowledgement,
     "",
     "Interpreted request",
-    disposition.reply.interpretedRequest,
+    reply.interpretedRequest,
     "",
     "Decision",
-    disposition.reply.decidedAction,
+    reply.decidedAction,
     "",
     "Next step",
-    disposition.reply.nextStep,
+    reply.nextStep,
     "",
   ].join("\n");
 }
 
-function sameDisposition(left: CommentDisposition, right: CommentDisposition): boolean {
+function sameReply(left: UserCommentReply, right: UserCommentReply): boolean {
   return left.sourceCommentId === right.sourceCommentId &&
     left.sourceCommentVersion === right.sourceCommentVersion &&
-    left.interpretation === right.interpretation &&
-    left.impact === right.impact &&
-    left.decisionRef === right.decisionRef &&
-    left.reply.acknowledgement === right.reply.acknowledgement &&
-    left.reply.interpretedRequest === right.reply.interpretedRequest &&
-    left.reply.decidedAction === right.reply.decidedAction &&
-    left.reply.nextStep === right.reply.nextStep;
+    left.sourceInputId === right.sourceInputId &&
+    left.acknowledgement === right.acknowledgement &&
+    left.interpretedRequest === right.interpretedRequest &&
+    left.decidedAction === right.decidedAction &&
+    left.nextStep === right.nextStep;
 }
 
 function failed(code: string): { kind: "failed"; code: string } {

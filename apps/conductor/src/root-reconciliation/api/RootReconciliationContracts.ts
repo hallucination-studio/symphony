@@ -7,6 +7,12 @@ export type RootIssueSnapshot = RootTree["issues"][number];
 export type RootCommentSnapshot = RootTree["comments"][number];
 export type RootRelationSnapshot = RootTree["relations"][number];
 export type RootIssueKind = NonNullable<RootIssueSnapshot["issue_kind"]>;
+export type RootFactIssueKind = "root" | "cycle" | "plan" | "work" | "verify" | "human_action";
+export type RootActorKind = "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
+export type LinearFactState =
+  | "Draft" | "Todo" | "Planning" | "Sealed" | "Executing" | "Verifying" | "In Progress"
+  | "In Review" | "Needs Approval" | "Needs Info" | "Inconclusive" | "Escalated" | "Succeeded"
+  | "Changes Required" | "Done" | "Canceled" | "Failed";
 
 export interface RootReconciliationView {
   root: DiscoveredRoot;
@@ -17,155 +23,175 @@ export interface RootReconciliationView {
   complete: true;
 }
 
-export interface RootReconciliationObservation extends RootReconciliationView {
-  protocolVersion: 1;
-  requestId: string;
-  reconcilerSessionId: string;
-  reconcilerTurnId: string;
-  cycles: RootCycleObservation[];
-  rootHumanActions: HumanActionObservationRecord[];
-  pendingUserComments: UserCommentInput[];
-  externalLinearChanges: ExternalLinearChangeInput[];
-  acceptedDirectives: AcceptedRootDirective[];
-  rootReconcilerFailures: RootReconcilerFailureRecord[];
-  reconcilerReplies: RootReconcilerReplyRecord[];
-  limits: ReconcilerLimits;
+export interface ReconcilerLimits {
+  maxContextBytes: number;
+  maxResultBytes: number;
+  maxOutputTokens: number;
+  maxToolCalls: number;
+  maxWallTimeMs: number;
+  deadlineAt: string;
 }
 
-export type RootReconcilerObservation = RootReconciliationObservation;
+export interface RootSourceManifestEntry {
+  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction";
+  sourceId: string;
+  versionOrDigest: string;
+  actorKind?: RootActorKind;
+}
 
-export interface RootCycleObservation {
-  cycleIssue: RootIssueSnapshot;
+export interface RootCoverage {
+  isComplete: boolean;
+  omissions: Array<{ sourceId: string; reason: string }>;
+}
+
+export interface RootFactIssue {
+  issueId: string;
+  issueKind: RootFactIssueKind;
+  parentIssueId?: string;
+  title: string;
+  description: string;
+  status: LinearFactState;
   isArchived: boolean;
-  issues: RootIssueSnapshot[];
-  relations: RootRelationSnapshot[];
-  comments: RootCommentSnapshot[];
-  planResults: ManagedRecordReference[];
-  workResults: ManagedRecordReference[];
-  verifyResults: ManagedRecordReference[];
-  humanActionRecords: HumanActionObservationRecord[];
+  labels: string[];
+  remoteVersion: string;
 }
 
-export interface ManagedRecordReference {
+export interface RootFactRelation {
+  relationId: string;
+  relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+  sourceIssueId: string;
+  targetIssueId: string;
+}
+
+export interface RootFactComment {
+  commentId: string;
+  commentVersion: string;
+  issueId: string;
+  authorUserId?: string;
+  authorKind: RootActorKind;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  managedMarker?: string;
+}
+
+export interface RootRecordReference {
   recordId: string;
   recordKind: string;
   version: string;
 }
 
-export interface HumanActionObservationRecord {
+export interface RootHumanActionRecord {
   actionId: string;
   actionIssueId: string;
   actionKind: HumanActionKind;
   parentScope: "root" | "cycle";
   cycleIssueId?: string;
-  status: string;
+  status: LinearFactState;
   isArchived: boolean;
   relatedIssueIds: string[];
 }
 
-export interface ReconcilerLimits {
-  maxObservationBytes: number;
-  maxDirectiveBytes: number;
-  maxTurnWallTimeMs: number;
-  reservedTotalTokens: number;
+export interface RootFinding {
+  findingId: string;
+  category: "product" | "code" | "test" | "infra" | "requirement" | "policy";
+  severity: "critical" | "high" | "medium" | "low";
+  summary: string;
 }
 
-export interface UserCommentInput {
-  commentId: string;
-  commentVersion: string;
-  issueId: string;
-  issueKind: RootIssueKind;
-  cycleIssueId?: string;
-  authorUserId: string;
-  body: string;
-  createdAt: string;
-  updatedAt: string;
+export interface RootBudgetSnapshot {
+  turnsUsed: number;
+  turnsRemaining: number;
+  tokensUsed: number;
+  tokensRemaining: number;
 }
 
-export interface ExternalLinearChangeInput {
-  changeId: string;
-  actorKind: "human" | "external_automation" | "unknown";
-  targetIssueId: string;
-  issueKind: RootIssueKind;
-  changeKind: "status" | "content" | "archive" | "parent" | "relation";
-  beforeVersionOrDigest: string;
-  afterVersionOrDigest: string;
-  changedFieldNames: string[];
-  relationIds: string[];
+export interface RootCycleObservation {
+  cycleIssue: RootFactIssue;
+  predecessorCycleIssueId: string;
+  cycleStatus: LinearFactState;
+  isArchived: boolean;
+  activePlanContract?: RootRecordReference;
+  budget?: RootBudgetSnapshot;
+  outcome?: RootRecordReference;
+  issues: RootFactIssue[];
+  relations: RootFactRelation[];
+  planResults: RootRecordReference[];
+  workResults: RootRecordReference[];
+  verifyResults: RootRecordReference[];
+  findings: RootFinding[];
+  humanActionRecords: RootHumanActionRecord[];
+  humanActionResolutions: HumanActionResolution[];
+}
+
+export interface RootObservation {
+  issue: RootFactIssue;
+  objective: string;
+  scope: string;
+  acceptanceCriteria: RootAcceptanceCriterion[];
+  constraints: string[];
+  rootStatus: LinearFactState;
+  ownership: RootRecordReference;
+  convergenceSummary: string;
+}
+
+export interface RootGitFacts {
+  headRevision: string;
+  baselineRevision: string;
+  statusSummary: string;
+  changedPaths: string[];
+}
+
+export interface MechanicalViolation {
+  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "missing_stage_result" | "invalid_tree";
+  sourceIssueIds: string[];
+  summary: string;
+}
+
+export interface RootBootstrapSnapshot {
+  root: RootObservation;
+  cycles: RootCycleObservation[];
+  issues: RootFactIssue[];
+  relations: RootFactRelation[];
+  managedRecords: RootRecordReference[];
+  userComments: RootFactComment[];
+  gitFacts: RootGitFacts;
+  delivery: RootRecordReference;
+  mechanicalViolations: MechanicalViolation[];
+}
+
+export interface RootBootstrap {
+  rootSnapshot: RootBootstrapSnapshot;
+  sourceManifest: RootSourceManifestEntry[];
+  coverage: RootCoverage;
+  rootDigest: string;
+  pendingInputIds: string[];
+}
+
+interface RootDeltaChangeBase {
+  sourceId: string;
+  sourceVersion: string;
+  actorKind: RootActorKind;
   observedAt: string;
 }
 
-export interface RootReconcilerReplyRecord {
-  kind: "root_reconciler_reply";
-  version: 1;
-  replyId: string;
-  rootDirectiveId: string;
-  sourceCommentId: string;
-  sourceCommentVersion: string;
-  targetIssueId: string;
-  materializedOutcomeRefs: string[];
-  renderedSchemaVersion: 1;
-  repliedAt: string;
-}
+export type RootDeltaChange =
+  | (RootDeltaChangeBase & { kind: "issue_current_value"; issue: RootFactIssue })
+  | (RootDeltaChangeBase & { kind: "issue_detached" })
+  | (RootDeltaChangeBase & { kind: "comment_current_value"; comment: RootFactComment })
+  | (RootDeltaChangeBase & { kind: "comment_removed" })
+  | (RootDeltaChangeBase & { kind: "relation_current_value"; relation: RootFactRelation })
+  | (RootDeltaChangeBase & { kind: "relation_removed" })
+  | (RootDeltaChangeBase & { kind: "managed_record_current_value"; record: RootRecordReference })
+  | (RootDeltaChangeBase & { kind: "managed_record_removed" })
+  | (RootDeltaChangeBase & { kind: "git_facts_current_value"; gitFacts: RootGitFacts })
+  | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] });
 
-export interface RootReconcilerFailureRecord {
-  kind: "root_reconciler_failure";
-  version: 1;
-  failureId: string;
-  reconcilerSessionId: string;
-  reconcilerTurnId: string;
-  observedRootTreeDigest: string;
-  category: "transport_failed" | "timed_out" | "schema_invalid" | "stale_output";
-  sanitizedReason: string;
-  failedAt: string;
-}
-
-export interface AcceptedRootDirective {
-  kind: "accepted_root_directive";
-  version: 1;
-  rootDirectiveId: string;
-  basedOnRootTreeDigest: string;
-  acceptedAt: string;
-}
-
-export interface CommentDisposition {
-  sourceCommentId: string;
-  sourceCommentVersion: string;
-  interpretation:
-    | "question"
-    | "feedback"
-    | "execution_instruction"
-    | "requirement_revision"
-    | "approval_context"
-    | "cancellation_request"
-    | "no_action";
-  impact:
-    | "none"
-    | "current_stage"
-    | "current_cycle_dag"
-    | "current_cycle_plan"
-    | "root_contract"
-    | "human_action";
-  decisionRef: string;
-  reply: {
-    acknowledgement: string;
-    interpretedRequest: string;
-    decidedAction: string;
-    nextStep: string;
-  };
-}
-
-export interface ExternalChangeDisposition {
-  changeId: string;
-  impact:
-    | "none"
-    | "lifecycle"
-    | "current_stage"
-    | "current_cycle_dag"
-    | "current_cycle_plan"
-    | "root_contract"
-    | "invalid_structure";
-  decisionRef: string;
+export interface RootDelta {
+  baseRootDigest: string;
+  targetRootDigest: string;
+  changes: RootDeltaChange[];
+  pendingInputIds: string[];
 }
 
 export interface RootDirectiveBase {
@@ -174,11 +200,12 @@ export interface RootDirectiveBase {
   rootDirectiveId: string;
   reconcilerSessionId: string;
   reconcilerTurnId: string;
-  basedOnRootTreeDigest: string;
+  basedOnTargetRootDigest: string;
   rationale: string;
-  evidenceRefs: string[];
-  commentDispositions: CommentDisposition[];
-  externalChangeDispositions: ExternalChangeDisposition[];
+  evidenceRefs: EvidenceRef[];
+  consumedInputIds: string[];
+  commentReplies: UserCommentReply[];
+  humanActionResolutions: HumanActionResolution[];
 }
 
 export type RootDirective = RootDirectiveBase & {
@@ -187,17 +214,56 @@ export type RootDirective = RootDirectiveBase & {
     | ExecuteWorkDirective
     | ExecuteVerifyDirective
     | RerunStageDirective
-    | ResolveInvalidLifecycleDirective
-    | ReviseCycleTreeDirective
+    | ReviseRootTreeDirective
     | ReplanCurrentCycleDirective
     | SupersedeCycleDirective
-    | CreateSuccessorCycleDirective
+    | CreateCycleDirective
     | RequestHumanActionDirective
     | ConcludeCycleDirective
     | ConcludeRootDirective
+    | CancelRootDirective
     | WaitDirective
     | AcknowledgeDirective;
 };
+
+export interface EvidenceRef { referenceId: string; sourceKind: "linear_issue" | "linear_comment" | "linear_record" | "git" | "check" | "result"; }
+export interface RootAcceptanceCriterion { criterionKey: string; statement: string; verificationMethod: string; }
+
+export interface UserCommentInput {
+  commentId: string;
+  commentVersion: string;
+  issueId: string;
+  issueKind: RootFactIssueKind;
+  cycleIssueId?: string;
+  authorUserId: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserCommentReply {
+  sourceInputId: string;
+  sourceCommentId: string;
+  sourceCommentVersion: string;
+  acknowledgement: string;
+  interpretedRequest: string;
+  decidedAction: string;
+  nextStep: string;
+}
+
+export interface HumanActionResolution {
+  resolutionId: string;
+  actionId: string;
+  actionIssueId: string;
+  actionKind?: HumanActionKind;
+  outcome: "approved" | "rejected" | "answered" | "canceled" | "granted" | "denied" | "waived" | "override_applied" | "override_rejected";
+  terminalStatus: LinearFactState;
+  terminalRemoteVersion: string;
+  proposalDigest: string;
+  sourceCommentIds?: string[];
+  actorKind: "human";
+  resolvedAt: string;
+}
 
 export interface ExecutePlanDirective {
   kind: "execute_plan";
@@ -208,24 +274,21 @@ export interface ExecutePlanDirective {
   priorPlanResultIds: string[];
   humanResolutionIds: string[];
 }
-
 export interface ExecuteWorkDirective {
   kind: "execute_work";
   cycleIssueId: string;
   workIssueId: string;
   executionGoal: string;
   requiredChecks: string[];
-  dependencyEvidenceRefs: string[];
+  dependencyEvidenceRefs: EvidenceRef[];
 }
-
 export interface ExecuteVerifyDirective {
   kind: "execute_verify";
   cycleIssueId: string;
   verifyIssueId: string;
   targetGitRevision: string;
-  requiredEvidenceRefs: string[];
+  requiredEvidenceRefs: EvidenceRef[];
 }
-
 export interface RerunStageDirective {
   kind: "rerun_stage";
   cycleIssueId: string;
@@ -233,140 +296,102 @@ export interface RerunStageDirective {
   targetIssueId: string;
   invalidatedExecutionIds: string[];
   reason: string;
-  preservedEvidenceRefs: string[];
+  preservedEvidenceRefs: EvidenceRef[];
 }
 
-export interface ResolveInvalidLifecycleDirective {
-  kind: "resolve_invalid_lifecycle";
-  reason: string;
-  changes: Array<{
-    targetIssueId: string;
-    issueKind: RootIssueKind;
-    observedStatus: string;
-    requestedStatus: string;
-    expectedRemoteVersion: string;
-    durableEvidenceRefs: string[];
-  }>;
-}
+export type TreePrecondition = {
+  targetIssueId: string;
+  expectedRemoteVersion: string;
+  expectedParentIssueId?: string;
+  expectedStatus?: LinearFactState;
+};
+export type TreeOperation =
+  | { kind: "create_node"; issueKind: "plan" | "work" | "verify" | "human_action"; title: string; description: string; parentIssueId: string; status: LinearFactState; precondition: TreePrecondition }
+  | { kind: "update_node"; precondition: TreePrecondition; title: string; description: string; status: LinearFactState }
+  | { kind: "archive_node"; precondition: TreePrecondition }
+  | { kind: "restore_node"; precondition: TreePrecondition }
+  | { kind: "reorder_nodes"; cycleIssueId: string; orderedIssueIds: string[]; precondition: TreePrecondition }
+  | { kind: "replace_dependencies"; workIssueId: string; dependencyIssueIds: string[]; precondition: TreePrecondition }
+  | { kind: "create_relation"; relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by"; sourceIssueId: string; targetIssueId: string }
+  | { kind: "remove_relation"; relationId: string; precondition: TreePrecondition };
 
-export interface ReviseCycleTreeDirective {
-  kind: "revise_cycle_tree";
-  cycleIssueId: string;
-  reason: string;
-  operations: CycleTreeOperation[];
-}
-
-export type CycleTreeOperation =
-  | { kind: "create_node"; issueId: string; issueKind: "work" | "verify"; title: string; description: string; order: number }
-  | { kind: "update_node"; issueId: string; expectedRemoteVersion: string; title: string; description: string }
-  | { kind: "archive_node"; issueId: string; expectedRemoteVersion: string }
-  | { kind: "restore_node"; issueId: string; expectedRemoteVersion: string }
-  | { kind: "reorder_node"; issueId: string; expectedRemoteVersion: string; order: number }
-  | { kind: "replace_dependencies"; issueId: string; expectedRemoteVersion: string; dependencyIssueIds: string[] }
-  | { kind: "create_relation"; sourceIssueId: string; targetIssueId: string; relationKind: "blocks" | "blocked_by" | "triggered_by" }
-  | { kind: "remove_relation"; relationId: string; expectedSourceRemoteVersion: string; expectedTargetRemoteVersion: string };
-
+export interface ReviseRootTreeDirective { kind: "revise_root_tree"; reason: string; operations: TreeOperation[]; }
 export interface ReplanCurrentCycleDirective {
   kind: "replan_current_cycle";
   cycleIssueId: string;
   reason: string;
   supersededPlanContractIds: string[];
   invalidateExecutionIds: string[];
-  preserveEvidenceRefs: string[];
-  archiveOrRestoreOperations: CycleTreeOperation[];
+  preserveEvidenceRefs: EvidenceRef[];
+  archiveOrRestoreOperations: TreeOperation[];
   planIssueId: string;
   freshPlanGoal: string;
 }
-
 export interface SupersedeCycleDirective {
   kind: "supersede_cycle";
   currentCycleIssueId: string;
-  reason: "root_requirement_revision" | "destructive_cycle_revision" | "no_safe_replan";
+  reason: "root_contract_changed" | "cycle_change_not_absorbable" | "no_safe_replan";
   invalidatedExecutionIds: string[];
   unresolvedFindingIds: string[];
-  preservedEvidenceRefs: string[];
-  successor: { create: true; planTrigger: string; inheritedFactRefs: string[] };
+  preservedEvidenceRefs: EvidenceRef[];
+  successor: { create: true; planTrigger: string; inheritedFactRefs: EvidenceRef[] };
 }
-
-export interface CreateSuccessorCycleDirective {
-  kind: "create_successor_cycle";
+export interface CreateCycleDirective {
+  kind: "create_cycle";
   predecessorCycleIssueId?: string;
-  reason: "root_requirement_revision" | "repair_required" | "exhausted" | "user_requested_retry" | "unresolved_findings";
+  reason: "initial" | "root_contract_changed" | "repair_required" | "exhausted" | "user_requested_retry" | "unresolved_findings";
   planTrigger: string;
-  inheritedFactRefs: string[];
-  invalidatedDeliveryRefs: string[];
+  inheritedFactRefs: EvidenceRef[];
+  invalidatedDeliveryRefs: EvidenceRef[];
 }
-
 export type HumanActionKind = "plan_review" | "clarification" | "permission" | "finding_waiver" | "convergence_override";
-
 export interface RequestHumanActionDirective {
   kind: "request_human_action";
   parentScope: "root" | "cycle";
+  rootIssueId: string;
   cycleIssueId?: string;
   actionKind: HumanActionKind;
+  title: string;
+  description: string;
   relatedIssueIds: string[];
   requestedDecision: string;
-  context: string;
   options: string[];
   commentRequired: boolean;
-  evidenceRefs: string[];
+  evidenceRefs: EvidenceRef[];
 }
-
 export interface ConcludeCycleDirective {
   kind: "conclude_cycle";
   cycleIssueId: string;
   conclusion: "succeeded" | "repair_required" | "exhausted" | "canceled";
   completedWorkIds: string[];
   unresolvedFindingIds: string[];
-  attemptedApproachRefs: string[];
-  verificationEvidenceRefs: string[];
-  successorRecommendation?: string;
+  attemptedApproachRefs: EvidenceRef[];
+  verificationEvidenceRefs: EvidenceRef[];
+  successorRecommendation?: { create: true; planTrigger: string; inheritedFactRefs: EvidenceRef[] };
 }
-
-export interface ConcludeRootDirective {
-  kind: "conclude_root";
-  conclusion: "ready_for_delivery";
-  evidenceRefs: string[];
-}
-
-export interface WaitDirective {
-  kind: "wait";
-  reasonCode: "human_action" | "external_fact" | "runtime_condition";
-  blockingFactRefs: string[];
-}
-
-export interface AcknowledgeDirective {
-  kind: "acknowledge";
-  reason: string;
-  continueExecutionId?: string;
-}
+export interface ConcludeRootDirective { kind: "conclude_root"; conclusion: "ready_for_delivery"; evidenceRefs: EvidenceRef[]; }
+export interface CancelRootDirective { kind: "cancel_root"; reason: string; activeCycleIssueId?: string; invalidatedExecutionIds: string[]; preservedFactRefs: EvidenceRef[]; }
+export interface WaitDirective { kind: "wait"; reasonCode: string; blockingFactRefs: EvidenceRef[]; }
+export interface AcknowledgeDirective { kind: "acknowledge"; reason: string; continueExecutionId?: string; }
 
 export interface RootReconcilerOpenInput {
   protocolVersion: 1;
   requestId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  observedAt: string;
   rootIssueId: string;
   profileId: string;
   modelSettings: AgentModelSettings;
+  bootstrap: RootBootstrap;
+  limits: ReconcilerLimits;
 }
+export interface RootReconcilerOpenResult { kind: "opened"; sessionId: string; bootstrapRootDigest: string; initialDirective: RootDirective; }
+export interface RootReconcilerAdvanceResult { kind: "directive"; directive: RootDirective; }
 
-export interface RootReconcilerOpenResult {
-  kind: "opened";
-  sessionId: string;
-}
-
-export interface RootReconcilerAdvanceResult {
-  kind: "directive";
-  directive: RootDirective;
-}
-
-export interface AgentModelSettings {
-  model: string;
-  reasoningEffort: "low" | "medium" | "high";
-  isFastModeEnabled: boolean;
-}
+export interface AgentModelSettings { model: string; reasoningEffort: "low" | "medium" | "high"; isFastModeEnabled: boolean; }
 
 export type StageRole = "plan" | "work" | "verify";
-
 export interface StageTurnInput {
   protocolVersion: 1;
   requestId: string;
@@ -385,10 +410,7 @@ export interface StageTurnInput {
   modelSettings: AgentModelSettings;
   observedTreeDigest: string;
   contextDigest: string;
-  executionPolicy: {
-    sandbox_mode: "read_only" | "workspace_write";
-    workspace_access: "read_only" | "read_write";
-  };
+  executionPolicy: { sandbox_mode: "read_only" | "workspace_write"; workspace_access: "read_only" | "read_write" };
 }
 
 export interface StageResultBase {
@@ -409,6 +431,5 @@ export interface StageResultBase {
 }
 
 export type StageResult = StageResultBase & {
-  outcome:
-    | { kind: string; planContractDigest?: string; changedPaths?: string[]; commitRevision?: string; checks?: string[]; conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human"; findings?: string[]; verifiedRevision?: string; errorCode?: string };
+  outcome: { kind: string; planContractDigest?: string; changedPaths?: string[]; commitRevision?: string; checks?: string[]; conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human"; findings?: string[]; verifiedRevision?: string; errorCode?: string };
 };

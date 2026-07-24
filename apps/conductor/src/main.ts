@@ -20,7 +20,7 @@ import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/Line
 import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
-import { LinearRootInvariantPolicyImpl } from "./root-reconciliation/internal/LinearRootInvariantPolicyImpl.js";
+import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
 import { PodiumRuntimeLogPublisherImpl } from "./runtime-logs/internal/PodiumRuntimeLogPublisherImpl.js";
 import type { DiscoveredRoot } from "./root-reconciliation/api/RootModels.js";
 
@@ -159,7 +159,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     git,
     ownership: ownershipClaim,
     scheduling: new LinearPriorityRootSchedulingPolicyImpl(),
-    invariants: new LinearRootInvariantPolicyImpl(),
+    safety: new LinearRootSafetyPolicyImpl(),
     reconciler,
     performer,
     materializer: new LinearRootDirectiveMaterializerImpl(

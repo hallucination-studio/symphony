@@ -1,6 +1,6 @@
 import type {
+  RootDelta,
   RootReconcilerAdvanceResult,
-  RootReconcilerObservation,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
   StageResult,
@@ -12,7 +12,9 @@ export interface PerformerAgentClientInterface {
   advanceRootReconciler(input: {
     requestId: string;
     sessionId: string;
-    observation: RootReconcilerObservation;
+    reconcilerTurnId: string;
+    observedAt: string;
+    delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
   executePlanTurn(input: StageTurnInput): Promise<StageResult>;
   executeWorkTurn(input: StageTurnInput): Promise<StageResult>;

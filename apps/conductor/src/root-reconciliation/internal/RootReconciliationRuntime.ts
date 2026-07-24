@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";
 import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../../root-scheduling/api/RootSchedulingPolicyInterface.js";
-import type { RootInvariantPolicyInterface } from "../api/RootInvariantPolicyInterface.js";
+import type { RootSafetyPolicyInterface } from "../api/RootSafetyPolicyInterface.js";
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
@@ -11,15 +11,15 @@ import type { RootReconcilerClientInterface } from "../../root-reconciler-client
 import type { RootDirectiveMaterializerInterface } from "../../root-directive-materialization/api/RootDirectiveMaterializerInterface.js";
 import type {
   RootDirective,
-  RootReconciliationObservation,
   RootReconciliationView,
+  ReconcilerLimits,
   StageResult,
   StageTurnInput,
 } from "../api/index.js";
 import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
 import type { StageResultRecord, StageResultOutcomeKind } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
-import { buildRootObservationInputs } from "./RootObservationInputs.js";
+import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
@@ -37,7 +37,7 @@ export interface RootReconciliationRuntimeDependencies {
   git: GitWorkspaceProvisionerInterface;
   ownership: { claim(input: { root: DiscoveredRoot }): Promise<RootOwnershipClaimResult> };
   scheduling: RootSchedulingPolicyInterface;
-  invariants: RootInvariantPolicyInterface;
+  safety: RootSafetyPolicyInterface;
   reconciler: RootReconcilerClientInterface;
   performer: PerformerAgentClientInterface;
   materializer: RootDirectiveMaterializerInterface;
@@ -52,8 +52,14 @@ export interface RootReconciliationRuntimeDependencies {
 
 export type RootRuntimeDisposition = "progress" | "waiting-human" | "needs-attention" | "empty";
 
+interface RootSessionState {
+  sessionId: string;
+  profileId: string;
+  factSet: RootFactSet;
+}
+
 export class RootReconciliationRuntime {
-  private readonly sessions = new Map<string, string>();
+  private readonly sessions = new Map<string, RootSessionState>();
 
   constructor(private readonly dependencies: RootReconciliationRuntimeDependencies) {}
 
@@ -91,7 +97,7 @@ export class RootReconciliationRuntime {
         });
         result = "needs-attention";
       }
-      if (result === "progress") return result;
+      if (result === "progress" || result === "waiting-human") return result;
     }
     return "needs-attention";
   }
@@ -121,27 +127,14 @@ export class RootReconciliationRuntime {
       this.dependencies.log("root_profile_missing", { root_issue_id: root.issueId });
       return "needs-attention";
     }
-    let sessionId = this.sessions.get(root.issueId);
-    if (!sessionId) {
-      setPhase("open_reconciler");
-      const opened = await this.dependencies.reconciler.open({
-        protocolVersion: 1,
-        requestId: randomUUID(),
-        rootIssueId: root.issueId,
-        profileId,
-        modelSettings: await this.dependencies.modelSettingsFor(profileId),
-      });
-      sessionId = opened.sessionId;
-      this.sessions.set(root.issueId, sessionId);
-    }
     setPhase("read_tree");
     const tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
     setPhase("validate_tree");
-    const invariants = this.dependencies.invariants.validate({ root, tree });
-    if (invariants.kind === "invalid") {
-      this.dependencies.log("root_invariant_blocked", {
+    const safety = this.dependencies.safety.validate({ root, tree });
+    if (safety.kind === "blocked") {
+      this.dependencies.log("root_safety_blocked", {
         root_issue_id: root.issueId,
-        reason: invariants.reason,
+        reason: safety.reason,
       });
       return "needs-attention";
     }
@@ -151,42 +144,71 @@ export class RootReconciliationRuntime {
       rootIdentifier: root.identifier,
       baseBranch: this.dependencies.baseBranch,
     });
-    setPhase("build_observation");
-    const view: RootReconciliationView = {
-      root,
-      tree,
-      git: await this.dependencies.git.inspect(workspace),
-      observedAt: tree.observed_at,
-      treeDigest: digest(tree),
-      complete: true,
-    };
-    const observationInputs = buildRootObservationInputs({ tree });
-    const observation: RootReconciliationObservation = {
-      ...view,
-      protocolVersion: 1,
-      requestId: randomUUID(),
-      reconcilerSessionId: sessionId,
-      reconcilerTurnId: randomUUID(),
-      cycles: observationInputs.cycles,
-      rootHumanActions: observationInputs.rootHumanActions,
-      pendingUserComments: observationInputs.pendingUserComments,
-      externalLinearChanges: [],
-      acceptedDirectives: [],
-      rootReconcilerFailures: [],
-      reconcilerReplies: [],
-      limits: {
-        maxObservationBytes: 8_388_608,
-        maxDirectiveBytes: 1_048_576,
-        maxTurnWallTimeMs: 300_000,
-        reservedTotalTokens: 50_000,
-      },
-    };
-    setPhase("root_reconciler_advance");
-    const result = await this.dependencies.reconciler.advance({
-      requestId: observation.requestId,
-      sessionId,
-      observation,
-    });
+    setPhase("build_root_facts");
+    const git = await this.dependencies.git.inspect(workspace);
+    const factSet = buildRootFactSet({ root, tree, git, mechanicalViolations: safety.mechanicalViolations });
+    const view: RootReconciliationView = viewFromFactSet({ root, tree, git, factSet });
+    const limits = reconcilerLimits();
+    const currentSession = this.sessions.get(root.issueId);
+    const trustedSession = currentSession?.profileId === profileId ? currentSession : undefined;
+    let sessionId: string;
+    let result: { kind: "directive"; directive: RootDirective };
+    if (!trustedSession) {
+      setPhase("open_reconciler");
+      const opened = await this.dependencies.reconciler.open({
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        reconcilerSessionId: randomUUID(),
+        reconcilerTurnId: randomUUID(),
+        observedAt: tree.observed_at,
+        rootIssueId: root.issueId,
+        profileId,
+        modelSettings: await this.dependencies.modelSettingsFor(profileId),
+        bootstrap: factSet.bootstrap,
+        limits,
+      });
+      if (opened.bootstrapRootDigest !== factSet.bootstrap.rootDigest) throw new Error("root_bootstrap_digest_mismatch");
+      sessionId = opened.sessionId;
+      this.sessions.set(root.issueId, { sessionId, profileId, factSet });
+      result = { kind: "directive", directive: opened.initialDirective };
+    } else {
+      sessionId = trustedSession.sessionId;
+      const delta = diffRootFactSets(trustedSession.factSet, factSet);
+      if (delta.changes.length === 0 && delta.pendingInputIds.length === 0) return "empty";
+      setPhase("root_reconciler_advance");
+      try {
+        result = await this.dependencies.reconciler.advance({
+          requestId: randomUUID(),
+          sessionId,
+          reconcilerTurnId: randomUUID(),
+          observedAt: tree.observed_at,
+          delta,
+        });
+      } catch (error) {
+        if (!isRootSessionLoss(error)) throw error;
+        this.sessions.delete(root.issueId);
+        setPhase("reopen_root_reconciler");
+        const opened = await this.dependencies.reconciler.open({
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          reconcilerSessionId: randomUUID(),
+          reconcilerTurnId: randomUUID(),
+          observedAt: tree.observed_at,
+          rootIssueId: root.issueId,
+          profileId,
+          modelSettings: await this.dependencies.modelSettingsFor(profileId),
+          bootstrap: factSet.bootstrap,
+          limits,
+        });
+        if (opened.bootstrapRootDigest !== factSet.bootstrap.rootDigest) throw new Error("root_bootstrap_digest_mismatch");
+        sessionId = opened.sessionId;
+        result = { kind: "directive", directive: opened.initialDirective };
+      }
+      this.sessions.set(root.issueId, { sessionId, profileId, factSet });
+    }
+    if (result.directive.basedOnTargetRootDigest !== view.treeDigest) {
+      throw new Error("root_directive_stale_tree");
+    }
     setPhase(`materialize_${result.directive.action.kind}`);
     const materialization = await this.materializeDirective(
       result.directive,
@@ -208,7 +230,9 @@ export class RootReconciliationRuntime {
       });
       return "needs-attention";
     }
-    return result.directive.action.kind === "wait" ? "waiting-human" : "progress";
+    return result.directive.action.kind === "wait" || result.directive.action.kind === "request_human_action"
+      ? "waiting-human"
+      : "progress";
   }
 
   private async materializeDirective(
@@ -443,8 +467,29 @@ function stageInput(
   } as StageTurnInput;
 }
 
-function digest(value: unknown): string {
-  return Buffer.from(JSON.stringify(value)).toString("base64url").slice(0, 128);
+function reconcilerLimits(): ReconcilerLimits {
+  return {
+    maxContextBytes: 8_388_608,
+    maxResultBytes: 1_048_576,
+    maxOutputTokens: 32_768,
+    maxToolCalls: 0,
+    maxWallTimeMs: 300_000,
+    deadlineAt: new Date(Date.now() + 300_000).toISOString(),
+  };
+}
+
+function isRootSessionLoss(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!(current instanceof Error)) return false;
+    const code = (current as Error & { code?: unknown }).code;
+    const reason = current.message;
+    if (code === "root_reconciler_bootstrap_required" || code === "root_reconciler_session_profile_unknown" ||
+      code === "performer_agent_process_exited" || reason === "root_reconciler_bootstrap_required" ||
+      reason === "root_reconciler_session_profile_unknown" || reason === "performer_agent_process_exited") return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 function sanitizedFailureReason(error: unknown): string {
