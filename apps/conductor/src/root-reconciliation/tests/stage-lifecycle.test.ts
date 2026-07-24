@@ -5,8 +5,8 @@ import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { RootDirective, StageResult, StageTurnInput } from "../api/index.js";
-import { serializeManagedRecord } from "../api/index.js";
+import type { ManagedRecord, RootDirective, StageResult, StageTurnInput } from "../api/index.js";
+import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import {
   RootReconciliationRuntime,
@@ -41,12 +41,12 @@ test("Stage Result outcomes have one closed target status", () => {
 });
 
 test("Stage execution persists In Progress, a Stage Result, and the terminal status in order", async () => {
-  const linear = new FakeLinear("plan");
+  const linear = new FakeLinear("work");
   let performerCalls = 0;
   const runtime = new RootReconciliationRuntime(dependencies({
     linear,
-    role: "plan",
-    outcomeKind: "plan_completed",
+    role: "work",
+    outcomeKind: "work_completed",
     onExecute(input) {
       performerCalls += 1;
       assert.equal(stage(input.tree).status_name, "In Progress");
@@ -55,7 +55,7 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
         reasoningEffort: "medium",
         isFastModeEnabled: false,
       });
-      return stageResult(input, "plan_completed");
+      return stageResult(input, "work_completed");
     },
   }));
 
@@ -66,9 +66,96 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
     "append_workflow_comment",
     "update_workflow_issue",
   ]);
-  assert.deepEqual(statusMutations(linear), ["In Progress", "In Review"]);
-  assert.equal(stage(linear.tree).status_name, "In Review");
+  assert.deepEqual(statusMutations(linear), ["In Progress", "Done"]);
+  assert.equal(stage(linear.tree).status_name, "Done");
   assert.equal(linear.stageResultCount(), 1);
+});
+
+test("a completed Plan persists its canonical contract before In Review", async () => {
+  const linear = new FakeLinear("plan");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "plan",
+    outcomeKind: "plan_completed",
+    onExecute(input) {
+      return completedPlanResult(input);
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  assert.deepEqual(linear.mutations.map((command) => command.kind), [
+    "update_workflow_issue",
+    "append_workflow_comment",
+    "append_workflow_comment",
+    "update_workflow_issue",
+  ]);
+  assert.deepEqual(statusMutations(linear), ["In Progress", "In Review"]);
+
+  const records = linear.managedRecords();
+  const stageResult = records.find((record): record is Extract<ManagedRecord, { kind: "stage_result" }> => record.kind === "stage_result");
+  const planContract = records.find((record): record is Extract<ManagedRecord, { kind: "plan_contract" }> => record.kind === "plan_contract");
+  assert.ok(stageResult);
+  assert.ok(planContract);
+  assert.equal(stageResult.planContractDigest, planContract.planContractDigest);
+  assert.match(planContract.planContractDigest, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(planContract, {
+    kind: "plan_contract",
+    version: 1,
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    planContractDigest: planContract.planContractDigest,
+    objective: "Validate the durable Plan Contract.",
+    includedScope: ["apps/conductor"],
+    excludedScope: ["Podium Desktop"],
+    assumptions: ["The project status catalog is valid."],
+    constraints: ["Do not add compatibility paths."],
+    acceptanceCriteria: [{
+      criterionKey: "plan-acceptance",
+      statement: "The Plan Contract is durable before review.",
+      verificationMethod: "Read the managed record from Linear.",
+    }],
+    verificationRequirements: ["npm test -w @symphony/conductor"],
+    proposedWorkDag: {
+      workNodes: [{
+        proposalKey: "persist-contract",
+        title: "Persist the Plan Contract",
+        description: "Write and read back the immutable contract.",
+        expectedOutcome: "The contract is a durable Linear fact.",
+        requiredChecks: ["managed-record-read-back"],
+        dependencyProposalKeys: [],
+      }],
+      dependencyEdges: [],
+      verifyNode: {
+        title: "Verify the Plan Contract",
+        acceptanceCriteria: [{
+          criterionKey: "verify-contract",
+          statement: "The recorded Plan Contract matches the Plan Result.",
+          verificationMethod: "Read the managed record from Linear.",
+        }],
+        requiredChecks: ["managed-record-read-back"],
+      },
+    },
+  });
+});
+
+test("an incomplete completed Plan fails closed before its Stage Result is durable", async () => {
+  const linear = new FakeLinear("plan");
+  let performerCalls = 0;
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "plan",
+    outcomeKind: "plan_completed",
+    onExecute(input) {
+      performerCalls += 1;
+      return stageResult(input, "plan_completed");
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(performerCalls, 1);
+  assert.equal(linear.stageResultCount(), 0);
+  assert.equal(linear.planContractCount(), 0);
+  assert.equal(stage(linear.tree).status_name, "In Progress");
 });
 
 test("a failed In Progress mutation prevents Performer dispatch and leaves no Stage Result", async () => {
@@ -115,6 +202,33 @@ test("a terminal status failure resumes from the durable Stage Result without ca
   assert.equal(await runtime.cycle(), "progress");
   assert.equal(performerCalls, 1);
   assert.equal(stage(linear.tree).status_name, "Done");
+});
+
+test("a Plan Contract write failure resumes from the durable Plan Result without calling Performer again", async () => {
+  const linear = new FakeLinear("plan");
+  linear.failAppendManagedRecordKind = "plan_contract";
+  let performerCalls = 0;
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "plan",
+    outcomeKind: "plan_completed",
+    onExecute(input) {
+      performerCalls += 1;
+      return completedPlanResult(input);
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(performerCalls, 1);
+  assert.equal(linear.stageResultCount(), 1);
+  assert.equal(linear.planContractCount(), 0);
+  assert.equal(stage(linear.tree).status_name, "In Progress");
+
+  delete linear.failAppendManagedRecordKind;
+  assert.equal(await runtime.cycle(), "progress");
+  assert.equal(performerCalls, 1);
+  assert.equal(linear.planContractCount(), 1);
+  assert.equal(stage(linear.tree).status_name, "In Review");
 });
 
 function dependencies(input: {
@@ -227,6 +341,51 @@ function stageResult(input: StageTurnInput, outcomeKind: StageResult["outcome"][
   };
 }
 
+function completedPlanResult(input: StageTurnInput): StageResult {
+  return {
+    ...stageResult(input, "plan_completed"),
+    outcome: {
+      kind: "plan_completed",
+      planContract: {
+        objective: "Validate the durable Plan Contract.",
+        includedScope: ["apps/conductor"],
+        excludedScope: ["Podium Desktop"],
+        assumptions: ["The project status catalog is valid."],
+        constraints: ["Do not add compatibility paths."],
+        acceptanceCriteria: [{
+          criterionKey: "plan-acceptance",
+          statement: "The Plan Contract is durable before review.",
+          verificationMethod: "Read the managed record from Linear.",
+        }],
+        verificationRequirements: ["npm test -w @symphony/conductor"],
+      },
+      proposedWorkDag: {
+        workNodes: [{
+          proposalKey: "persist-contract",
+          title: "Persist the Plan Contract",
+          description: "Write and read back the immutable contract.",
+          expectedOutcome: "The contract is a durable Linear fact.",
+          requiredChecks: ["managed-record-read-back"],
+          dependencyProposalKeys: [],
+        }],
+        dependencyEdges: [],
+        verifyNode: {
+          title: "Verify the Plan Contract",
+          acceptanceCriteria: [{
+            criterionKey: "verify-contract",
+            statement: "The recorded Plan Contract matches the Plan Result.",
+            verificationMethod: "Read the managed record from Linear.",
+          }],
+          requiredChecks: ["managed-record-read-back"],
+        },
+      },
+      risks: [],
+      requiredPermissions: [],
+      evidenceRefs: [],
+    },
+  } as unknown as StageResult;
+}
+
 function statusMutations(linear: FakeLinear): string[] {
   return linear.mutations.flatMap((command) => command.kind === "update_workflow_issue"
     ? [linear.statusName(command.statusId)]
@@ -243,6 +402,7 @@ class FakeLinear {
   readonly tree: LinearWorkflowTreeSnapshot;
   readonly mutations: LinearWorkflowMutationCommand[] = [];
   failStatusName?: string;
+  failAppendManagedRecordKind?: "plan_contract";
 
   constructor(role: "plan" | "work" | "verify") {
     this.tree = {
@@ -287,6 +447,17 @@ class FakeLinear {
     return this.tree.comments.filter(({ body }) => body.includes('"kind":"stage_result"')).length;
   }
 
+  planContractCount(): number {
+    return this.tree.comments.filter(({ body }) => body.includes('"kind":"plan_contract"')).length;
+  }
+
+  managedRecords(): ManagedRecord[] {
+    return this.tree.comments.flatMap(({ body }) => {
+      const parsed = parseManagedRecord(body);
+      return parsed.ok ? [parsed.value] : [];
+    });
+  }
+
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
     this.mutations.push(command);
     if (command.kind === "update_workflow_issue") {
@@ -303,6 +474,10 @@ class FakeLinear {
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: target.issue_id, remoteVersion: target.remote_version } };
     }
     if (command.kind === "append_workflow_comment") {
+      const record = parseManagedRecord(command.body);
+      if (record.ok && record.value.kind === this.failAppendManagedRecordKind) {
+        return { kind: "failed" as const, code: "linear_write_failed", summary: "failed" };
+      }
       this.addManagedComment(command.target.targetIssueId, command.body);
       const target = stageOrRoot(this.tree, command.target.targetIssueId);
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: target.issue_id, remoteVersion: target.remote_version } };

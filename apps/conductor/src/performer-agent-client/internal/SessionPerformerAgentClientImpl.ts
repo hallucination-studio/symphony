@@ -666,6 +666,21 @@ function decodeStageResult(value: unknown): StageResult {
 function normalizeStageResultOutcome(outcome: JsonRecord): StageResult["outcome"] {
   const kind = outcome.kind;
   if (typeof kind !== "string") throw new Error("role_result_outcome_invalid");
+  if (kind === "plan_completed") {
+    const planContract = record(outcome.plan_contract);
+    const proposedWorkDag = record(outcome.proposed_work_dag);
+    const risks = stringArray(outcome.risks, "role_result_plan_risks_invalid");
+    const requiredPermissions = stringArray(outcome.required_permissions, "role_result_plan_permissions_invalid");
+    const evidenceRefs = evidenceReferences(outcome.evidence_refs);
+    return {
+      kind,
+      planContract: camelizeKeys(planContract) as NonNullable<StageResult["outcome"]["planContract"]>,
+      proposedWorkDag: camelizeKeys(proposedWorkDag) as NonNullable<StageResult["outcome"]["proposedWorkDag"]>,
+      risks,
+      requiredPermissions,
+      evidenceRefs,
+    };
+  }
   if (kind === "work_completed") {
     const changes = record(outcome.actual_changes);
     return {
@@ -709,6 +724,21 @@ function string(value: unknown, code: string): string {
 function stringArray(value: unknown, code: string): string[] {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) throw new Error(code);
   return value as string[];
+}
+
+function evidenceReferences(value: unknown): NonNullable<StageResult["outcome"]["evidenceRefs"]> {
+  if (!Array.isArray(value)) throw new Error("role_result_plan_evidence_invalid");
+  return value.map((entry) => {
+    const reference = record(entry);
+    const referenceId = string(reference.reference_id, "role_result_plan_evidence_invalid");
+    const sourceKind = reference.source_kind;
+    if (typeof sourceKind !== "string" || ![
+      "linear_issue", "linear_comment", "linear_record", "git", "check", "result",
+    ].includes(sourceKind)) {
+      throw new Error("role_result_plan_evidence_invalid");
+    }
+    return { referenceId, sourceKind: sourceKind as NonNullable<StageResult["outcome"]["evidenceRefs"]>[number]["sourceKind"] };
+  });
 }
 
 function record(value: unknown): JsonRecord {

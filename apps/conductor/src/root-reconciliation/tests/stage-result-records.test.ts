@@ -47,3 +47,23 @@ test("stage result records reject role-specific fields on the wrong outcome", ()
     changedPaths: ["src/example.ts"],
   }), /managed_record_stage_result_field_invalid/u);
 });
+
+test("a completed Plan Stage Result requires its complete canonical input", () => {
+  assert.throws(() => serializeManagedRecord({
+    kind: "stage_result",
+    version: 1,
+    resultId: "plan-execution-1",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "plan-1",
+    stage: "plan",
+    roleSessionId: "plan-session-1",
+    roleTurnId: "plan-turn-1",
+    observedTreeDigest: "tree-v1",
+    contextDigest: "context-v1",
+    outcomeKind: "plan_completed",
+    summary: "Plan completed",
+    sourceManifest: [],
+    completedAt: "2026-07-23T00:00:06Z",
+  }), /managed_record_required_field:plan_completed/u);
+});

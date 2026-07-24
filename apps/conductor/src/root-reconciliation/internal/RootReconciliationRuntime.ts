@@ -24,7 +24,15 @@ import type {
   HumanActionResolution,
 } from "../api/index.js";
 import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
-import type { RootDirectiveRecord, StageResultRecord, StageResultOutcomeKind } from "../api/ManagedRecords.js";
+import type {
+  EvidenceReference,
+  PlanContract,
+  PlanContractProposal,
+  ProposedWorkDag,
+  RootDirectiveRecord,
+  StageResultRecord,
+  StageResultOutcomeKind,
+} from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 
@@ -343,7 +351,8 @@ export class RootReconciliationRuntime {
       const stageExecutionId = `${root.issueId}:${directive.rootDirectiveId}:${role}:${targetIssueId}`;
       const existingResult = stageResultRecord(view.tree, stageExecutionId);
       if (existingResult) {
-        await this.persistStageTerminalStatus(view, directive.rootDirectiveId, existingResult, setPhase);
+        const contractView = await this.persistPlanContract(view, directive.rootDirectiveId, existingResult, setPhase);
+        await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, existingResult, setPhase);
         return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
       }
       const modelSettings = await this.dependencies.modelSettingsFor(profileId);
@@ -368,7 +377,9 @@ export class RootReconciliationRuntime {
       validateStageResult(input, stageResult);
       setPhase(`persist_${role}_result`);
       const resultView = await this.persistStageResult(executionView, directive.rootDirectiveId, stageResult, setPhase);
-      await this.persistStageTerminalStatus(resultView, directive.rootDirectiveId, toStageResultRecord(stageResult), setPhase);
+      const resultRecord = toStageResultRecord(stageResult);
+      const contractView = await this.persistPlanContract(resultView, directive.rootDirectiveId, resultRecord, setPhase);
+      await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, resultRecord, setPhase);
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
     return this.dependencies.materializer.materialize({ directive, view });
@@ -553,6 +564,52 @@ export class RootReconciliationRuntime {
     const parsed = parseManagedRecord(readBackComment.body);
     if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) {
       throw new Error("role_result_read_back_invalid");
+    }
+    return { ...view, tree: readBack, observedAt: readBack.observed_at };
+  }
+
+  private async persistPlanContract(
+    view: RootReconciliationView,
+    directiveId: string,
+    stageResult: StageResultRecord,
+    setPhase: (phase: string) => void,
+  ): Promise<RootReconciliationView> {
+    if (stageResult.stage !== "plan" || stageResult.outcomeKind !== "plan_completed") return view;
+    const contract = planContractFromStageResult(stageResult);
+    const target = stageTarget(view, "plan", stageResult.nodeIssueId);
+    const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
+    if (!rootIssue) throw new Error("plan_contract_root_missing");
+    const body = serializeManagedRecord(contract);
+    for (const comment of view.tree.comments) {
+      const parsed = parseManagedRecord(comment.body);
+      if (!parsed.ok || parsed.value.kind !== "plan_contract" || parsed.value.planContractDigest !== contract.planContractDigest) continue;
+      if (comment.issue_id === target.issue_id && samePlanContract(parsed.value, contract)) return view;
+      throw new Error("plan_contract_conflict");
+    }
+    setPhase("persist_plan_contract_linear_write");
+    const outcome = await this.dependencies.linear.mutateWorkflow({
+      kind: "append_workflow_comment",
+      writeId: planContractWriteId(directiveId, stageResult.resultId, contract.planContractDigest),
+      expectedProjectId: target.project_id,
+      rootIssueId: view.root.issueId,
+      expectedRootRemoteVersion: rootIssue.remote_version,
+      target: {
+        targetIssueId: target.issue_id,
+        expectedRemoteVersion: target.remote_version,
+        expectedStatusId: target.status_id,
+      },
+      body,
+    });
+    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+      throw new Error(`plan_contract_write_${outcome.kind}`);
+    }
+    setPhase("persist_plan_contract_linear_read_back");
+    const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    const comment = readBack.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
+    if (!comment) throw new Error("plan_contract_read_back_missing");
+    const parsed = parseManagedRecord(comment.body);
+    if (!parsed.ok || parsed.value.kind !== "plan_contract" || !samePlanContract(parsed.value, contract)) {
+      throw new Error("plan_contract_read_back_invalid");
     }
     return { ...view, tree: readBack, observedAt: readBack.observed_at };
   }
@@ -752,6 +809,15 @@ function stageLifecycleComplete(
 ): boolean {
   const record = stageResultRecord(tree, resultId);
   if (!record || record.stage !== role || record.nodeIssueId !== targetIssueId) return false;
+  if (record.outcomeKind === "plan_completed") {
+    const contract = planContractFromStageResult(record);
+    const hasMatchingContract = tree.comments.some((comment) => {
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "plan_contract" &&
+        comment.issue_id === targetIssueId && samePlanContract(parsed.value, contract);
+    });
+    if (!hasMatchingContract) return false;
+  }
   return tree.issues.some((issue) =>
     issue.issue_id === targetIssueId &&
     !issue.is_archived &&
@@ -878,7 +944,11 @@ function validateStageResult(input: StageTurnInput, result: StageResult): void {
 function toStageResultRecord(result: StageResult): StageResultRecord {
   const outcome = result.outcome as unknown as {
     kind: StageResultOutcomeKind;
-    planContractDigest?: string;
+    planContract?: PlanContractProposal;
+    proposedWorkDag?: ProposedWorkDag;
+    risks?: string[];
+    requiredPermissions?: string[];
+    evidenceRefs?: EvidenceReference[];
     changedPaths?: string[];
     commitRevision?: string;
     conclusion?: StageResultRecord["verifyConclusion"];
@@ -886,6 +956,7 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     errorCode?: string;
   };
   if (!isStageResultOutcomeKind(outcome.kind)) throw new Error("role_result_outcome_invalid");
+  const completedPlan = outcome.kind === "plan_completed" ? completedPlanResult(outcome) : undefined;
   const record: StageResultRecord = {
     kind: "stage_result",
     version: 1,
@@ -902,7 +973,14 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     summary: result.summary,
     sourceManifest: result.sourceManifest,
     completedAt: result.completedAt,
-    ...(outcome.planContractDigest === undefined ? {} : { planContractDigest: outcome.planContractDigest }),
+    ...(completedPlan === undefined ? {} : {
+      planContractDigest: canonicalPlanContractDigest(completedPlan),
+      planContract: completedPlan.planContract,
+      proposedWorkDag: completedPlan.proposedWorkDag,
+      risks: completedPlan.risks,
+      requiredPermissions: completedPlan.requiredPermissions,
+      evidenceRefs: completedPlan.evidenceRefs,
+    }),
     ...(outcome.changedPaths === undefined ? {} : { changedPaths: outcome.changedPaths }),
     ...(outcome.commitRevision === undefined ? {} : { commitRevision: outcome.commitRevision }),
     ...(outcome.conclusion === undefined ? {} : { verifyConclusion: outcome.conclusion }),
@@ -910,6 +988,96 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     ...(outcome.errorCode === undefined ? {} : { failureCode: outcome.errorCode }),
   };
   return record;
+}
+
+function planContractFromStageResult(result: StageResultRecord): PlanContract {
+  if (result.stage !== "plan" || result.outcomeKind !== "plan_completed") {
+    throw new Error("plan_contract_stage_result_invalid");
+  }
+  const completedPlan = completedPlanResult(result);
+  const planContractDigest = canonicalPlanContractDigest(completedPlan);
+  if (result.planContractDigest !== planContractDigest) throw new Error("plan_contract_digest_invalid");
+  return {
+    kind: "plan_contract",
+    version: 1,
+    rootIssueId: result.rootIssueId,
+    cycleIssueId: result.cycleIssueId,
+    planContractDigest,
+    ...completedPlan.planContract,
+    proposedWorkDag: completedPlan.proposedWorkDag,
+  };
+}
+
+function completedPlanResult(input: {
+  planContract?: PlanContractProposal;
+  proposedWorkDag?: ProposedWorkDag;
+  risks?: string[];
+  requiredPermissions?: string[];
+  evidenceRefs?: EvidenceReference[];
+}): {
+  planContract: PlanContractProposal;
+  proposedWorkDag: ProposedWorkDag;
+  risks: string[];
+  requiredPermissions: string[];
+  evidenceRefs: EvidenceReference[];
+} {
+  if (
+    input.planContract === undefined ||
+    input.proposedWorkDag === undefined ||
+    input.risks === undefined ||
+    input.requiredPermissions === undefined ||
+    input.evidenceRefs === undefined
+  ) {
+    throw new Error("plan_completed_result_incomplete");
+  }
+  return {
+    planContract: input.planContract,
+    proposedWorkDag: input.proposedWorkDag,
+    risks: input.risks,
+    requiredPermissions: input.requiredPermissions,
+    evidenceRefs: input.evidenceRefs,
+  };
+}
+
+function canonicalPlanContractDigest(input: ReturnType<typeof completedPlanResult>): string {
+  return createHash("sha256")
+    .update(canonicalJson({
+      planContract: input.planContract,
+      proposedWorkDag: input.proposedWorkDag,
+      risks: input.risks,
+      requiredPermissions: input.requiredPermissions,
+      evidenceRefs: input.evidenceRefs,
+    }), "utf8")
+    .digest("hex");
+}
+
+function samePlanContract(left: PlanContract, right: PlanContract): boolean {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("plan_contract_canonical_value_invalid");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalJsonValue(child)]));
+  }
+  throw new Error("plan_contract_canonical_value_invalid");
+}
+
+function planContractWriteId(directiveId: string, resultId: string, planContractDigest: string): string {
+  const digest = createHash("sha256")
+    .update(`${directiveId}:plan-contract:${resultId}:${planContractDigest}`, "utf8")
+    .digest("hex");
+  return `plan-contract:${digest}`;
 }
 
 function isStageResultOutcomeKind(value: unknown): value is StageResultOutcomeKind {

@@ -12,7 +12,12 @@ import type {
   HumanActionResolutionRecord,
   ManagedRecord,
   NodeMarker,
+  EvidenceReference,
   PlanContract,
+  PlanContractProposal,
+  PlanDependencyEdge,
+  PlanVerifyNode,
+  PlanWorkNode,
   ProgressAssessment,
   RootOwnershipRecord,
   RootDirectiveRecord,
@@ -24,9 +29,7 @@ import type {
   StageLimits,
   StageTerminalRecord,
   StageUsage,
-  VerifyNodeContract,
   VerifyResultRecord,
-  WorkNodeContract,
 } from "../api/ManagedRecords.js";
 import { decodeConductorPerformerRootDirective, type JsonValue } from "@symphony/contracts";
 import type { RootDirective } from "../api/RootReconciliationContracts.js";
@@ -172,11 +175,22 @@ function decodeNodeMarker(o: Record<string, unknown>): NodeMarker {
 }
 
 function decodePlanContract(o: Record<string, unknown>): PlanContract {
-  fields(o, ["kind", "version", "root_issue_id", "cycle_issue_id", "plan_contract_digest", "objective_summary", "included_scope", "excluded_scope", "acceptance_criteria", "work_nodes", "verify_node"]);
+  fields(o, [
+    "kind", "version", "root_issue_id", "cycle_issue_id", "plan_contract_digest", "objective", "included_scope",
+    "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements", "proposed_work_dag",
+  ]);
   return {
     kind: "plan_contract", version: 1, rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"), planContractDigest: id(o, "plan_contract_digest"),
-    objectiveSummary: text(o, "objective_summary"), includedScope: strings(o, "included_scope"), excludedScope: strings(o, "excluded_scope"),
-    acceptanceCriteria: criteria(o, "acceptance_criteria"), workNodes: array(o, "work_nodes", decodeWorkNode), verifyNode: decodeVerifyNode(requiredObject(o, "verify_node")),
+    ...decodePlanContractProposal({
+      objective: o.objective,
+      included_scope: o.included_scope,
+      excluded_scope: o.excluded_scope,
+      assumptions: o.assumptions,
+      constraints: o.constraints,
+      acceptance_criteria: o.acceptance_criteria,
+      verification_requirements: o.verification_requirements,
+    }),
+    proposedWorkDag: decodePlanDag(requiredObject(o, "proposed_work_dag")),
   };
 }
 
@@ -207,8 +221,12 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
     "kind", "version", "result_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "stage",
     "role_session_id", "role_turn_id", "observed_tree_digest", "context_digest", "outcome_kind", "summary",
     "source_manifest", "completed_at", "plan_contract_digest", "changed_paths", "commit_revision",
-    "verify_conclusion", "verified_revision", "failure_code",
-  ], ["plan_contract_digest", "changed_paths", "commit_revision", "verify_conclusion", "verified_revision", "failure_code"]);
+    "verify_conclusion", "verified_revision", "failure_code", "plan_contract", "proposed_work_dag", "risks",
+    "required_permissions", "evidence_refs",
+  ], [
+    "plan_contract_digest", "changed_paths", "commit_revision", "verify_conclusion", "verified_revision", "failure_code",
+    "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs",
+  ]);
   const stage = stageValue(o, "stage");
   const outcomeKind: StageResultOutcomeKind = enumValue(o, "outcome_kind", [
     "plan_completed", "plan_needs_information", "plan_blocked",
@@ -224,9 +242,12 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
       ? outcomeKind.startsWith("work_")
       : outcomeKind.startsWith("verify_");
   if (!roleMatches && !commonOutcomes.has(outcomeKind)) fail("managed_record_stage_result_role_invalid");
-  if (o.plan_contract_digest !== undefined && (stage !== "plan" || outcomeKind !== "plan_completed")) {
+  const isCompletedPlan = stage === "plan" && outcomeKind === "plan_completed";
+  const planFields = ["plan_contract_digest", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"];
+  if (planFields.some((field) => o[field] !== undefined) && !isCompletedPlan) {
     fail("managed_record_stage_result_field_invalid");
   }
+  if (isCompletedPlan && planFields.some((field) => o[field] === undefined)) fail("managed_record_required_field:plan_completed");
   if (o.changed_paths !== undefined || o.commit_revision !== undefined) {
     if (stage !== "work" || outcomeKind !== "work_completed" || o.changed_paths === undefined || o.commit_revision === undefined) {
       fail("managed_record_stage_result_field_invalid");
@@ -247,6 +268,11 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
     observedTreeDigest: id(o, "observed_tree_digest"), contextDigest: id(o, "context_digest"), outcomeKind,
     summary: text(o, "summary"), sourceManifest: strings(o, "source_manifest"), completedAt: timestamp(o, "completed_at"),
     ...(o.plan_contract_digest === undefined ? {} : { planContractDigest: id(o, "plan_contract_digest") }),
+    ...(o.plan_contract === undefined ? {} : { planContract: decodePlanContractProposal(requiredObject(o, "plan_contract")) }),
+    ...(o.proposed_work_dag === undefined ? {} : { proposedWorkDag: decodePlanDag(requiredObject(o, "proposed_work_dag")) }),
+    ...(o.risks === undefined ? {} : { risks: strings(o, "risks") }),
+    ...(o.required_permissions === undefined ? {} : { requiredPermissions: strings(o, "required_permissions") }),
+    ...(o.evidence_refs === undefined ? {} : { evidenceRefs: array(o, "evidence_refs", decodeEvidenceReference) }),
     ...(o.changed_paths === undefined ? {} : { changedPaths: paths(o, "changed_paths") }),
     ...(o.commit_revision === undefined ? {} : { commitRevision: id(o, "commit_revision") }),
     ...(o.verify_conclusion === undefined ? {} : { verifyConclusion: enumValue(o, "verify_conclusion", ["passed", "changes_required", "inconclusive", "escalate_human"]) }),
@@ -328,8 +354,49 @@ function decodeLimits(o: Record<string, unknown>): StageLimits { fields(o, ["max
 function decodeUsage(o: Record<string, unknown>): StageUsage { fields(o, ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]); return { inputTokens: integer(o, "input_tokens"), cachedInputTokens: integer(o, "cached_input_tokens"), outputTokens: integer(o, "output_tokens"), reasoningOutputTokens: integer(o, "reasoning_output_tokens"), totalTokens: integer(o, "total_tokens") }; }
 function decodeFindingEvidence(o: Record<string, unknown>): FindingEvidence { fields(o, ["evidence_id", "source_kind", "source_id", "summary", "artifact_revision"]); return { evidenceId: id(o, "evidence_id"), sourceKind: enumValue(o, "source_kind", ["criterion", "check", "diff", "file", "log", "human_input"]), sourceId: id(o, "source_id"), summary: text(o, "summary"), artifactRevision: id(o, "artifact_revision") }; }
 function decodeAffectedScope(o: Record<string, unknown>): AffectedScope { fields(o, ["scope_kind", "identity"]); return { scopeKind: enumValue(o, "scope_kind", ["repository_path", "criterion", "component", "workflow_boundary"]), identity: text(o, "identity") }; }
-function decodeWorkNode(o: Record<string, unknown>): WorkNodeContract { fields(o, ["work_key", "title", "description", "acceptance_criteria", "dependency_work_keys"]); return { workKey: id(o, "work_key"), title: text(o, "title"), description: text(o, "description"), acceptanceCriteria: criteria(o, "acceptance_criteria"), dependencyWorkKeys: ids(o, "dependency_work_keys") }; }
-function decodeVerifyNode(o: Record<string, unknown>): VerifyNodeContract { fields(o, ["title", "acceptance_criteria", "required_checks"]); return { title: text(o, "title"), acceptanceCriteria: criteria(o, "acceptance_criteria"), requiredChecks: array(o, "required_checks", decodeCheck) }; }
+function decodePlanContractProposal(o: Record<string, unknown>): PlanContractProposal {
+  fields(o, ["objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements"]);
+  return {
+    objective: text(o, "objective"), includedScope: strings(o, "included_scope"), excludedScope: strings(o, "excluded_scope"),
+    assumptions: strings(o, "assumptions"), constraints: strings(o, "constraints"), acceptanceCriteria: criteria(o, "acceptance_criteria"),
+    verificationRequirements: strings(o, "verification_requirements"),
+  };
+}
+
+function decodePlanDag(o: Record<string, unknown>) {
+  fields(o, ["work_nodes", "dependency_edges", "verify_node"]);
+  return {
+    workNodes: array(o, "work_nodes", decodePlanWorkNode),
+    dependencyEdges: array(o, "dependency_edges", decodePlanDependencyEdge),
+    verifyNode: decodePlanVerifyNode(requiredObject(o, "verify_node")),
+  };
+}
+
+function decodePlanWorkNode(o: Record<string, unknown>): PlanWorkNode {
+  fields(o, ["proposal_key", "title", "description", "expected_outcome", "required_checks", "dependency_proposal_keys"]);
+  return {
+    proposalKey: id(o, "proposal_key"), title: text(o, "title"), description: text(o, "description"),
+    expectedOutcome: text(o, "expected_outcome"), requiredChecks: strings(o, "required_checks"), dependencyProposalKeys: ids(o, "dependency_proposal_keys"),
+  };
+}
+
+function decodePlanDependencyEdge(o: Record<string, unknown>): PlanDependencyEdge {
+  fields(o, ["relation_id", "relation_kind", "source_issue_id", "target_issue_id"]);
+  return {
+    relationId: id(o, "relation_id"), relationKind: enumValue(o, "relation_kind", ["blocks", "blocked_by", "relates_to", "triggered_by"]),
+    sourceIssueId: id(o, "source_issue_id"), targetIssueId: id(o, "target_issue_id"),
+  };
+}
+
+function decodePlanVerifyNode(o: Record<string, unknown>): PlanVerifyNode {
+  fields(o, ["title", "acceptance_criteria", "required_checks"]);
+  return { title: text(o, "title"), acceptanceCriteria: criteria(o, "acceptance_criteria"), requiredChecks: strings(o, "required_checks") };
+}
+
+function decodeEvidenceReference(o: Record<string, unknown>): EvidenceReference {
+  fields(o, ["reference_id", "source_kind"]);
+  return { referenceId: id(o, "reference_id"), sourceKind: enumValue(o, "source_kind", ["linear_issue", "linear_comment", "linear_record", "git", "check", "result"]) };
+}
 
 function encodeRecord(value: unknown): Record<string, unknown> {
   if (!isObject(value) || typeof value.kind !== "string") fail("managed_record_kind_invalid");
@@ -340,10 +407,10 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     cycle_marker: { allowed: ["kind", "version", "rootIssueId", "cycleKey", "trigger", "baselineRevision", "predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"], optional: ["predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"] },
     node_marker: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "nodeKey", "nodeKind", "planContractDigest"] },
-    plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objectiveSummary", "includedScope", "excludedScope", "acceptanceCriteria", "workNodes", "verifyNode"] },
+    plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements", "proposedWorkDag"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_terminal: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "contextDigest", "outcome", "completedAt", "summary", "usage", "failureCode"], optional: ["failureCode"] },
-    stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "planContractDigest", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
+    stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
     human_action_request: { allowed: ["kind", "version", "actionId", "actionIssueId", "actionKind", "parentScope", "rootIssueId", "cycleIssueId", "relatedIssueIds", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest", "proposalDigest", "expectedParentRemoteVersion", "createdAt"], optional: ["cycleIssueId", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest"] },
     human_action_resolution: { allowed: ["kind", "version", "resolutionId", "actionId", "actionIssueId", "actionKind", "outcome", "terminalStatus", "terminalRemoteVersion", "sourceCommentIds", "sourceCommentVersions", "actorKind", "proposalDigest", "resolvedAt"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
@@ -374,7 +441,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "delivery": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, verify_result_id: record.verifyResultId, verified_revision: record.verifiedRevision, delivery_kind: record.deliveryKind, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), delivered_at: record.deliveredAt });
     case "cycle_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_key: record.cycleKey, trigger: record.trigger, baseline_revision: record.baselineRevision, ...(record.predecessorCycleIssueId === undefined ? {} : { predecessor_cycle_issue_id: record.predecessorCycleIssueId }), ...(record.repairGroupId === undefined ? {} : { repair_group_id: record.repairGroupId }), ...(record.findingIds === undefined ? {} : { finding_ids: record.findingIds }), ...(record.predecessorPlanContractDigest === undefined ? {} : { predecessor_plan_contract_digest: record.predecessorPlanContractDigest }), ...(record.predecessorVerifyResultId === undefined ? {} : { predecessor_verify_result_id: record.predecessorVerifyResultId }), ...(record.predecessorVerifiedRevision === undefined ? {} : { predecessor_verified_revision: record.predecessorVerifiedRevision }) });
     case "node_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_key: record.nodeKey, node_kind: record.nodeKind, plan_contract_digest: record.planContractDigest });
-    case "plan_contract": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest, objective_summary: record.objectiveSummary, included_scope: record.includedScope, excluded_scope: record.excludedScope, acceptance_criteria: record.acceptanceCriteria.map(encodeCriterion), work_nodes: record.workNodes.map(encodeWorkNode), verify_node: encodeVerifyNode(record.verifyNode) });
+    case "plan_contract": return encodePlanContract(record);
     case "stage_execution": return encodeStageExecution(record);
     case "stage_terminal": return encodeStageTerminal(record);
     case "stage_result": return encodeStageResult(record);
@@ -406,20 +473,42 @@ function encodeStageResult(record: StageResultRecord): Record<string, unknown> {
   stage: record.stage, role_session_id: record.roleSessionId, role_turn_id: record.roleTurnId, observed_tree_digest: record.observedTreeDigest,
   context_digest: record.contextDigest, outcome_kind: record.outcomeKind, summary: record.summary, source_manifest: record.sourceManifest,
   completed_at: record.completedAt, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }),
+  ...(record.planContract === undefined ? {} : { plan_contract: encodePlanContractProposal(record.planContract) }),
+  ...(record.proposedWorkDag === undefined ? {} : { proposed_work_dag: encodePlanDag(record.proposedWorkDag) }),
+  ...(record.risks === undefined ? {} : { risks: record.risks }),
+  ...(record.requiredPermissions === undefined ? {} : { required_permissions: record.requiredPermissions }),
+  ...(record.evidenceRefs === undefined ? {} : { evidence_refs: record.evidenceRefs.map(encodeEvidenceReference) }),
   ...(record.changedPaths === undefined ? {} : { changed_paths: record.changedPaths }), ...(record.commitRevision === undefined ? {} : { commit_revision: record.commitRevision }),
   ...(record.verifyConclusion === undefined ? {} : { verify_conclusion: record.verifyConclusion }), ...(record.verifiedRevision === undefined ? {} : { verified_revision: record.verifiedRevision }),
   ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }),
 }); }
+function encodePlanContract(record: PlanContract): Record<string, unknown> { return encodeSimple(record, {
+  root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest,
+  ...encodePlanContractProposal({
+    objective: record.objective,
+    includedScope: record.includedScope,
+    excludedScope: record.excludedScope,
+    assumptions: record.assumptions,
+    constraints: record.constraints,
+    acceptanceCriteria: record.acceptanceCriteria,
+    verificationRequirements: record.verificationRequirements,
+  }),
+  proposed_work_dag: encodePlanDag(record.proposedWorkDag),
+}); }
 function encodeCriterion(value: AcceptanceCriterion): Record<string, unknown> { recordFields(value, ["criterionKey", "statement", "verificationMethod"]); return { criterion_key: value.criterionKey, statement: value.statement, verification_method: value.verificationMethod }; }
 function encodeCheck(value: CheckEvidence): Record<string, unknown> { recordFields(value, ["checkKey", "commandOrMethod", "outcome", "summary", "artifactRevision"]); return { check_key: value.checkKey, command_or_method: value.commandOrMethod, outcome: value.outcome, summary: value.summary, artifact_revision: value.artifactRevision }; }
+function encodePlanContractProposal(value: PlanContractProposal): Record<string, unknown> { recordFields(value, ["objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements"]); return { objective: value.objective, included_scope: value.includedScope, excluded_scope: value.excludedScope, assumptions: value.assumptions, constraints: value.constraints, acceptance_criteria: value.acceptanceCriteria.map(encodeCriterion), verification_requirements: value.verificationRequirements }; }
+function encodePlanDag(value: import("../api/ManagedRecords.js").ProposedWorkDag): Record<string, unknown> { recordFields(value, ["workNodes", "dependencyEdges", "verifyNode"]); return { work_nodes: value.workNodes.map(encodePlanWorkNode), dependency_edges: value.dependencyEdges.map(encodePlanDependencyEdge), verify_node: encodePlanVerifyNode(value.verifyNode) }; }
+function encodePlanWorkNode(value: PlanWorkNode): Record<string, unknown> { recordFields(value, ["proposalKey", "title", "description", "expectedOutcome", "requiredChecks", "dependencyProposalKeys"]); return { proposal_key: value.proposalKey, title: value.title, description: value.description, expected_outcome: value.expectedOutcome, required_checks: value.requiredChecks, dependency_proposal_keys: value.dependencyProposalKeys }; }
+function encodePlanDependencyEdge(value: PlanDependencyEdge): Record<string, unknown> { recordFields(value, ["relationId", "relationKind", "sourceIssueId", "targetIssueId"]); return { relation_id: value.relationId, relation_kind: value.relationKind, source_issue_id: value.sourceIssueId, target_issue_id: value.targetIssueId }; }
+function encodePlanVerifyNode(value: PlanVerifyNode): Record<string, unknown> { recordFields(value, ["title", "acceptanceCriteria", "requiredChecks"]); return { title: value.title, acceptance_criteria: value.acceptanceCriteria.map(encodeCriterion), required_checks: value.requiredChecks }; }
+function encodeEvidenceReference(value: EvidenceReference): Record<string, unknown> { recordFields(value, ["referenceId", "sourceKind"]); return { reference_id: value.referenceId, source_kind: value.sourceKind }; }
 function encodeSource(value: StageContextSource): Record<string, unknown> { recordFields(value, ["sourceKind", "sourceId", "versionOrDigest"]); return { source_kind: value.sourceKind, source_id: value.sourceId, version_or_digest: value.versionOrDigest }; }
 function encodeCoverage(value: StageContextCoverage): Record<string, unknown> { recordFields(value, ["isComplete", "omissions"]); return { is_complete: value.isComplete, omissions: value.omissions.map((entry) => { recordFields(entry, ["sourceId", "reason"]); return { source_id: entry.sourceId, reason: entry.reason }; }) }; }
 function encodeLimits(value: StageLimits): Record<string, unknown> { recordFields(value, ["maxContextBytes", "maxResultBytes", "maxWallTimeMs", "maxToolCalls", "maxCommandDurationMs", "reservedTotalTokens", "maxOutputTokens"]); return { max_context_bytes: value.maxContextBytes, max_result_bytes: value.maxResultBytes, max_wall_time_ms: value.maxWallTimeMs, max_tool_calls: value.maxToolCalls, max_command_duration_ms: value.maxCommandDurationMs, reserved_total_tokens: value.reservedTotalTokens, max_output_tokens: value.maxOutputTokens }; }
 function encodeUsage(value: StageUsage): Record<string, unknown> { recordFields(value, ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"]); return { input_tokens: value.inputTokens, cached_input_tokens: value.cachedInputTokens, output_tokens: value.outputTokens, reasoning_output_tokens: value.reasoningOutputTokens, total_tokens: value.totalTokens }; }
 function encodeFindingEvidence(value: FindingEvidence): Record<string, unknown> { recordFields(value, ["evidenceId", "sourceKind", "sourceId", "summary", "artifactRevision"]); return { evidence_id: value.evidenceId, source_kind: value.sourceKind, source_id: value.sourceId, summary: value.summary, artifact_revision: value.artifactRevision }; }
 function encodeAffectedScope(value: AffectedScope): Record<string, unknown> { recordFields(value, ["scopeKind", "identity"]); return { scope_kind: value.scopeKind, identity: value.identity }; }
-function encodeWorkNode(value: WorkNodeContract): Record<string, unknown> { recordFields(value, ["workKey", "title", "description", "acceptanceCriteria", "dependencyWorkKeys"]); return { work_key: value.workKey, title: value.title, description: value.description, acceptance_criteria: value.acceptanceCriteria.map(encodeCriterion), dependency_work_keys: value.dependencyWorkKeys }; }
-function encodeVerifyNode(value: VerifyNodeContract): Record<string, unknown> { recordFields(value, ["title", "acceptanceCriteria", "requiredChecks"]); return { title: value.title, acceptance_criteria: value.acceptanceCriteria.map(encodeCriterion), required_checks: value.requiredChecks.map(encodeCheck) }; }
 function encodeSimple(record: { kind: string; version: 1 }, fieldsToEncode: Record<string, unknown>): Record<string, unknown> { return { kind: record.kind, version: 1, ...fieldsToEncode }; }
 
 function recordObject(value: unknown): Record<string, unknown> { if (!isObject(value)) fail("managed_record_payload_invalid"); return value; }

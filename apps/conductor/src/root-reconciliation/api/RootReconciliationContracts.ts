@@ -1,5 +1,6 @@
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { EvidenceReference, PlanContractProposal, ProposedWorkDag } from "./ManagedRecords.js";
 import type { DiscoveredRoot } from "./RootModels.js";
 
 export type RootTree = LinearWorkflowTreeSnapshot;
@@ -431,5 +432,19 @@ export interface StageResultBase {
 }
 
 export type StageResult = StageResultBase & {
-  outcome: { kind: string; planContractDigest?: string; changedPaths?: string[]; commitRevision?: string; checks?: string[]; conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human"; findings?: string[]; verifiedRevision?: string; errorCode?: string };
+  outcome: {
+    kind: string;
+    planContract?: PlanContractProposal;
+    proposedWorkDag?: ProposedWorkDag;
+    risks?: string[];
+    requiredPermissions?: string[];
+    evidenceRefs?: EvidenceReference[];
+    changedPaths?: string[];
+    commitRevision?: string;
+    checks?: string[];
+    conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
+    findings?: string[];
+    verifiedRevision?: string;
+    errorCode?: string;
+  };
 };

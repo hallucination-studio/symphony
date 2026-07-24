@@ -136,6 +136,62 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string) 
   };
 }
 
+function completedPlanResult(requestId: string) {
+  return {
+    protocol_version: "1",
+    request_id: requestId,
+    stage_execution_id: "plan-execution",
+    role: "plan",
+    role_session_id: "plan-session",
+    role_turn_id: "plan-turn",
+    root_issue_id: "root-1",
+    cycle_issue_id: "cycle-1",
+    target_issue_id: "plan-1",
+    observed_tree_digest: "tree-1",
+    context_digest: "context-1",
+    completed_at: "2026-07-23T00:00:01Z",
+    outcome: {
+      kind: "plan_completed",
+      plan_contract: {
+        objective: "Persist the complete Plan Contract.",
+        included_scope: ["apps/conductor"],
+        excluded_scope: [],
+        assumptions: [],
+        constraints: ["Use durable Linear facts."],
+        acceptance_criteria: [{
+          criterion_key: "contract-persisted",
+          statement: "The complete Plan Contract is stored before review.",
+          verification_method: "Read the Plan Contract record.",
+        }],
+        verification_requirements: ["npm test -w @symphony/conductor"],
+      },
+      proposed_work_dag: {
+        work_nodes: [{
+          proposal_key: "persist-contract",
+          title: "Persist the Plan Contract",
+          description: "Write the canonical Plan Contract record.",
+          expected_outcome: "The contract can be reconstructed after restart.",
+          required_checks: ["managed-record-read-back"],
+          dependency_proposal_keys: [],
+        }],
+        dependency_edges: [],
+        verify_node: {
+          title: "Verify Plan Contract persistence",
+          acceptance_criteria: [{
+            criterion_key: "contract-read-back",
+            statement: "The stored contract matches the Plan result.",
+            verification_method: "Read the Plan Contract record.",
+          }],
+          required_checks: ["managed-record-read-back"],
+        },
+      },
+      risks: [],
+      required_permissions: [],
+      evidence_refs: [],
+    },
+  };
+}
+
 function openInput(requestId = "request-1"): RootReconcilerOpenInput {
   return {
     protocolVersion: 1,
@@ -282,6 +338,60 @@ test("agent client decodes direct role-specific results", async () => {
     assert.equal(result.resultId, `${role}-execution`);
     assert.equal(result.outcome.kind, "canceled");
   }
+});
+
+test("agent client preserves every validated completed Plan field", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => {
+      decodeConductorPerformerPlanTurnRequest(body as JsonValue);
+      return completedPlanResult(requestId) as JsonValue;
+    }),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executePlanTurn(stageInput("plan"));
+
+  assert.deepEqual(result.outcome, {
+    kind: "plan_completed",
+    planContract: {
+      objective: "Persist the complete Plan Contract.",
+      includedScope: ["apps/conductor"],
+      excludedScope: [],
+      assumptions: [],
+      constraints: ["Use durable Linear facts."],
+      acceptanceCriteria: [{
+        criterionKey: "contract-persisted",
+        statement: "The complete Plan Contract is stored before review.",
+        verificationMethod: "Read the Plan Contract record.",
+      }],
+      verificationRequirements: ["npm test -w @symphony/conductor"],
+    },
+    proposedWorkDag: {
+      workNodes: [{
+        proposalKey: "persist-contract",
+        title: "Persist the Plan Contract",
+        description: "Write the canonical Plan Contract record.",
+        expectedOutcome: "The contract can be reconstructed after restart.",
+        requiredChecks: ["managed-record-read-back"],
+        dependencyProposalKeys: [],
+      }],
+      dependencyEdges: [],
+      verifyNode: {
+        title: "Verify Plan Contract persistence",
+        acceptanceCriteria: [{
+          criterionKey: "contract-read-back",
+          statement: "The stored contract matches the Plan result.",
+          verificationMethod: "Read the Plan Contract record.",
+        }],
+        requiredChecks: ["managed-record-read-back"],
+      },
+    },
+    risks: [],
+    requiredPermissions: [],
+    evidenceRefs: [],
+  });
 });
 
 test("agent client sends role-specific closed stage contexts", async () => {

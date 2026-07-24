@@ -99,32 +99,56 @@ export interface NodeMarker {
   planContractDigest: string;
 }
 
-export interface WorkNodeContract {
-  workKey: string;
+export interface PlanContractProposal {
+  objective: string;
+  includedScope: string[];
+  excludedScope: string[];
+  assumptions: string[];
+  constraints: string[];
+  acceptanceCriteria: AcceptanceCriterion[];
+  verificationRequirements: string[];
+}
+
+export interface PlanWorkNode {
+  proposalKey: string;
   title: string;
   description: string;
-  acceptanceCriteria: AcceptanceCriterion[];
-  dependencyWorkKeys: string[];
+  expectedOutcome: string;
+  requiredChecks: string[];
+  dependencyProposalKeys: string[];
 }
 
-export interface VerifyNodeContract {
+export interface PlanDependencyEdge {
+  relationId: string;
+  relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+  sourceIssueId: string;
+  targetIssueId: string;
+}
+
+export interface PlanVerifyNode {
   title: string;
   acceptanceCriteria: AcceptanceCriterion[];
-  requiredChecks: CheckEvidence[];
+  requiredChecks: string[];
 }
 
-export interface PlanContract {
+export interface ProposedWorkDag {
+  workNodes: PlanWorkNode[];
+  dependencyEdges: PlanDependencyEdge[];
+  verifyNode: PlanVerifyNode;
+}
+
+export interface EvidenceReference {
+  referenceId: string;
+  sourceKind: "linear_issue" | "linear_comment" | "linear_record" | "git" | "check" | "result";
+}
+
+export interface PlanContract extends PlanContractProposal {
   kind: "plan_contract";
   version: ManagedRecordVersion;
   rootIssueId: string;
   cycleIssueId: string;
   planContractDigest: string;
-  objectiveSummary: string;
-  includedScope: string[];
-  excludedScope: string[];
-  acceptanceCriteria: AcceptanceCriterion[];
-  workNodes: WorkNodeContract[];
-  verifyNode: VerifyNodeContract;
+  proposedWorkDag: ProposedWorkDag;
 }
 
 export interface StageExecutionRecord {
@@ -207,6 +231,11 @@ export interface StageResultRecord {
   sourceManifest: string[];
   completedAt: string;
   planContractDigest?: string;
+  planContract?: PlanContractProposal;
+  proposedWorkDag?: ProposedWorkDag;
+  risks?: string[];
+  requiredPermissions?: string[];
+  evidenceRefs?: EvidenceReference[];
   changedPaths?: string[];
   commitRevision?: string;
   verifyConclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
