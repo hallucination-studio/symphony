@@ -126,6 +126,8 @@ TimelineEventBase
 
 事件是closed、versioned discriminated union，使用generated types。不得包含raw Provider reasoning、完整
 transcript、secret、credential、任意metadata map或未bounded stdout/stderr。
+`next_step`若存在，只是时间轴中面向用户的bounded说明文字；它不驱动Conductor调度、Linear状态迁移、Stage执行或
+任何其他语义决策。所有Workflow决策只能来自Root Reconciler返回的closed `RootDirective.action`。
 
 ## 5. Root Reconciliation Timeline
 

@@ -360,6 +360,8 @@ UserCommentReply
 ```
 
 这些字段是bounded自然语言，不包含raw reasoning、transcript、secret、内部ID要求或未经read-back的成功声明。
+其中`next_step`只是写给用户的说明文字，不是Conductor命令、Stage选择、Linear状态迁移或另一套决策协议；唯一的
+语义控制面是本节定义的closed `RootDirective.action` union。
 回复是accepted `RootDirective`的必需Linear materialization，不是event projection。Conductor在matching
 directive及其必要mutation read-back后，把回复作为带managed marker的`RootReconcilerReplyRecord`写到原
 comment所在Issue并read-back：
