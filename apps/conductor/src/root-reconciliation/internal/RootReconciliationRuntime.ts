@@ -346,8 +346,18 @@ export class RootReconciliationRuntime {
         await this.persistStageTerminalStatus(view, directive.rootDirectiveId, existingResult, setPhase);
         return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
       }
+      const modelSettings = await this.dependencies.modelSettingsFor(profileId);
       const executionView = await this.persistStageInProgress(view, directive.rootDirectiveId, role, targetIssueId, setPhase);
-      const input = stageInput(executionView, root, profileId, role, targetIssueId, action, directive.rootDirectiveId);
+      const input = stageInput(
+        executionView,
+        root,
+        profileId,
+        modelSettings,
+        role,
+        targetIssueId,
+        action,
+        directive.rootDirectiveId,
+      );
       setPhase(`execute_${role}_turn`);
       const stageResult = role === "plan"
         ? await this.dependencies.performer.executePlanTurn(input)
@@ -915,6 +925,7 @@ function stageInput(
   view: RootReconciliationView,
   root: DiscoveredRoot,
   profileId: string,
+  modelSettings: StageTurnInput["modelSettings"],
   role: "plan" | "work" | "verify",
   targetIssueId: string,
   action: object,
@@ -938,7 +949,7 @@ function stageInput(
     tree: view.tree,
     git: view.git,
     profileId,
-    modelSettings: { model: "default", reasoningEffort: "medium", isFastModeEnabled: false },
+    modelSettings,
     executionPolicy: {
       sandbox_mode: role === "work" ? "workspace_write" : "read_only",
       workspace_access: role === "work" ? "read_write" : "read_only",

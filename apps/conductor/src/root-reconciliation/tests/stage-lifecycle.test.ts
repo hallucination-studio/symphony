@@ -50,6 +50,11 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
     onExecute(input) {
       performerCalls += 1;
       assert.equal(stage(input.tree).status_name, "In Progress");
+      assert.deepEqual(input.modelSettings, {
+        model: "gpt",
+        reasoningEffort: "medium",
+        isFastModeEnabled: false,
+      });
       return stageResult(input, "plan_completed");
     },
   }));
