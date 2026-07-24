@@ -52,6 +52,7 @@ test("setup and fallback screens keep their card structure", () => {
   expect(setup.querySelector(".setup-layout > .setup-card")).not.toBeNull();
   expect(setup.querySelector(".eyebrow")).not.toBeNull();
   expect(setup.querySelector(".button.primary.full-width")).not.toBeNull();
+  expect(setup.querySelector(".brand-mark-animated .brand-mark-path")).not.toBeNull();
 
   const { container: unavailable } = render(
     <App

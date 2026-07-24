@@ -132,3 +132,31 @@ export function StaleNote({ observedAt }: { observedAt: string }) {
     </p>
   );
 }
+
+// Inline variant of /app-icon.svg whose baton path can draw itself in
+// once on mount (stroke animation is impossible inside an <img>).
+export function BrandMark() {
+  return (
+    <svg className="brand-mark-animated" viewBox="0 0 512 512" role="img" aria-label="Symphony">
+      <defs>
+        <linearGradient id="brand-mark-bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#818cf8" />
+          <stop offset="1" stopColor="#4338ca" />
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="112" fill="url(#brand-mark-bg)" />
+      <path
+        className="brand-mark-path"
+        d="M168 128 L232 320 C244 356 300 356 320 316 L372 208"
+        fill="none"
+        stroke="#ffffff"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="40"
+        pathLength={1}
+      />
+      <circle className="brand-mark-dot" cx="168" cy="128" r="30" fill="#ffffff" />
+      <circle className="brand-mark-dot" cx="372" cy="208" r="18" fill="#ffffff" fillOpacity="0.55" />
+    </svg>
+  );
+}

@@ -17,6 +17,79 @@ a:focus-visible {
   box-shadow: 0 0 0 3.5px var(--color-focus-halo);
 }
 
+/* Focus halo blooms in instead of snapping on. */
+input,
+select,
+summary,
+a {
+  transition: box-shadow var(--duration-fast) var(--easing-standard);
+}
+
+/* Motion keyframes */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes status-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes skeleton-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes brand-mark-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes brand-mark-dot {
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes refresh-value {
+  from {
+    opacity: 0.3;
+  }
+}
+
 /* Page headings receive programmatic focus for screen readers; the halo is
    for interactive controls only. */
 h1:focus {
@@ -86,6 +159,8 @@ h1:focus {
   text-align: left;
   cursor: pointer;
   -webkit-app-region: no-drag;
+  transition: background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .nav-link svg {
@@ -145,6 +220,21 @@ h1:focus {
   max-width: var(--size-content-column);
 }
 
+/* Page content cascades in on navigation; React remounts the page
+   component on switch, which replays the animation. */
+.page-stack > * {
+  animation: page-enter var(--duration-standard) var(--easing-standard)
+    backwards;
+}
+
+.page-stack > *:nth-child(2) {
+  animation-delay: 30ms;
+}
+
+.page-stack > *:nth-child(3) {
+  animation-delay: 60ms;
+}
+
 /* Inset grouped cards (System Settings style) */
 .panel,
 .empty-state,
@@ -195,9 +285,14 @@ h1:focus {
   font-size: var(--font-size-body);
   font-weight: var(--font-weight-medium);
   cursor: pointer;
+  transition: transform var(--duration-instant) var(--easing-standard),
+    filter var(--duration-instant) var(--easing-standard),
+    background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .button:active:not(:disabled) {
+  transform: scale(0.97);
   filter: brightness(0.96);
 }
 
@@ -326,6 +421,15 @@ input[type="radio"] {
   height: var(--size-status-dot);
   border-radius: var(--radius-pill);
   background: var(--status-neutral);
+  transition: background-color var(--duration-standard) var(--easing-standard);
+}
+
+/* Attention pulse for non-healthy tones; always paired with the text
+   label, and collapsed by the reduced-motion guard. */
+.status-badge[data-tone="negative"] .status-dot,
+.status-badge[data-tone="warning"] .status-dot {
+  animation: status-dot-pulse var(--duration-pulse) var(--easing-standard)
+    infinite;
 }
 
 .status-badge[data-tone="positive"] .status-dot {
@@ -366,6 +470,12 @@ input[type="radio"] {
   display: block;
 }
 
+/* Rows mounted by a poll refresh (new keys) fade in at the top. */
+.plain-list li {
+  animation: row-enter var(--duration-standard) var(--easing-standard)
+    backwards;
+}
+
 .plain-list strong {
   font-weight: var(--font-weight-medium);
 }
@@ -392,6 +502,8 @@ input[type="radio"] {
   font-size: var(--font-size-body);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--duration-fast) var(--easing-standard),
+    box-shadow var(--duration-fast) var(--easing-standard);
 }
 
 .selection-list button:hover {
@@ -427,6 +539,8 @@ input[type="radio"] {
   border-radius: var(--radius-dialog);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
+  /* The card is keyed per setup step, so step changes replay this. */
+  animation: page-enter var(--duration-slow) var(--easing-standard);
 }
 
 .setup-card h1 {
@@ -466,10 +580,26 @@ input[type="radio"] {
 }
 
 .skeleton div {
+  position: relative;
+  overflow: hidden;
   height: 14px;
   margin-top: var(--space-3);
   border-radius: var(--radius-control);
   background: var(--color-selection);
+}
+
+.skeleton div::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-card-bg),
+    transparent
+  );
+  animation: skeleton-sweep var(--duration-sweep) var(--easing-standard)
+    infinite;
 }
 
 .error-panel {
@@ -486,6 +616,7 @@ input[type="radio"] {
   place-items: center;
   padding: var(--space-4);
   background: var(--color-overlay);
+  animation: backdrop-enter var(--duration-fast) var(--easing-standard);
 }
 
 .dialog {
@@ -497,6 +628,7 @@ input[type="radio"] {
   border-radius: var(--radius-dialog);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-dialog);
+  animation: dialog-enter var(--duration-standard) var(--easing-emphasized);
 }
 
 .dialog h2 {
@@ -556,6 +688,34 @@ input[type="radio"] {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: var(--space-2);
+}
+
+/* Brand mark draw-in (setup screens, once per mount) */
+.brand-mark-animated {
+  display: block;
+  width: var(--space-8);
+  height: var(--space-8);
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-card);
+}
+
+.brand-mark-path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: brand-mark-draw var(--duration-brand) var(--easing-standard)
+    forwards;
+}
+
+.brand-mark-dot {
+  opacity: 0;
+  animation: brand-mark-dot var(--duration-standard) var(--easing-standard)
+    450ms forwards;
+}
+
+/* Values swapped by a poll refresh cross-fade via a keyed remount. */
+.refresh-value {
+  display: inline-block;
+  animation: refresh-value var(--duration-fast) var(--easing-standard);
 }
 
 .command-rule-actions {

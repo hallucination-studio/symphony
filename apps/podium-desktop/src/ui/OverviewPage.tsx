@@ -21,7 +21,7 @@ export function OverviewPage({
         <section className="panel">
           <div className="section-heading">
             <h2>System readiness</h2>
-            <span>Observed {formatObservedAt(view.observedAt)}</span>
+            <span className="refresh-value" key={view.observedAt}>Observed {formatObservedAt(view.observedAt)}</span>
           </div>
           <dl className="readiness-list">
             <div>

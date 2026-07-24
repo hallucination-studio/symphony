@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 
 import { ConductorsPage } from "./ConductorsPage";
+import { BrandMark } from "./components";
 import type {
   CommandHandler,
   DesktopState,
@@ -54,7 +55,8 @@ export function SetupView({
   if (state.kind === "loading") {
     return (
       <main className="setup-layout" aria-busy="true">
-        <section className="setup-card skeleton">
+        <section className="setup-card skeleton" key={state.kind}>
+          <BrandMark />
           <p className="eyebrow">Symphony</p>
           <h1>Reading {state.objectLabel ?? "Desktop state"}…</h1>
           <div /><div /><div />
@@ -65,7 +67,7 @@ export function SetupView({
   if (state.kind === "unavailable") {
     return (
       <main className="setup-layout">
-        <section className="setup-card error-panel" role="alert">
+        <section className="setup-card error-panel" key={state.kind} role="alert">
           <p className="eyebrow">Unavailable</p><h1>{state.summary}</h1><p>{state.nextAction}</p>
         </section>
       </main>
@@ -74,7 +76,8 @@ export function SetupView({
   if (state.kind === "linear-setup") {
     return (
       <main className="setup-layout">
-        <section className="setup-card">
+        <section className="setup-card" key={state.kind}>
+          <BrandMark />
           <p className="eyebrow">Setup · 1 of 3</p>
           <h1 ref={headingRef}>Connect Symphony to Linear</h1>
           <p>Linear is the workflow authority. Authorization opens in your browser; credentials never enter this view.</p>
@@ -85,7 +88,7 @@ export function SetupView({
   }
   if (state.kind === "conductor-setup") {
     return (
-      <main className="setup-layout"><section className="setup-card"><p className="eyebrow">Setup · 2 of 3</p><h1>Create Conductor</h1><p>Select one Project, a Git repository, and its base branch. Repository selection uses the native picker.</p>
+      <main className="setup-layout"><section className="setup-card" key={state.kind}><BrandMark /><p className="eyebrow">Setup · 2 of 3</p><h1>Create Conductor</h1><p>Select one Project, a Git repository, and its base branch. Repository selection uses the native picker.</p>
         <label>Linear Project<select data-testid="project-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{state.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         <button data-testid="choose-repository" className="button full-width" onClick={() => void chooseRepository()}>Choose Git repository</button>
         {repository && <label>Base branch<select data-testid="base-branch-select" value={repository.baseBranch} onChange={(event) => setRepository({ ...repository, baseBranch: event.target.value })}>{repository.baseBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}</select></label>}

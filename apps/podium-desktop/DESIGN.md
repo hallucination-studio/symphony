@@ -101,6 +101,16 @@ shadows:
 z-index:
   drag-region: 1
   dialog: 100
+motion:
+  duration-instant: 80ms
+  duration-fast: 140ms
+  duration-standard: 220ms
+  duration-slow: 320ms
+  duration-brand: 600ms
+  duration-sweep: 1400ms
+  duration-pulse: 2s
+  easing-standard: cubic-bezier(0.2, 0, 0, 1)
+  easing-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1)
 spacing:
   1: 4px
   2: 8px
@@ -139,6 +149,10 @@ The visual language follows the Apple Human Interface Guidelines for macOS:
   10px-radius cards on the content background, hairline separators between
   rows. Keep the 232px sidebar and a main reading column of at most 840px.
 - Keep one visually primary action per view.
+- Motion is fast and purposeful: 80-320ms ease-out transitions on
+  transform/opacity only (no layout shift), tokenized durations and
+  easings, and everything must collapse under `prefers-reduced-motion`.
+  Status color animation never carries meaning alone.
 - Narrow layouts may hide secondary metadata, but never the next action or
   an actionable error.
 - Never display secrets, absolute local paths, Provider handles, raw logs,
@@ -147,5 +161,8 @@ The visual language follows the Apple Human Interface Guidelines for macOS:
   a second token system. `src/styles/layout.css` must not contain raw color
   values, numeric font weights, or raw spacing-scale values (4/8/12/16/24/32/
   48px) in margin, padding, or gap declarations; use the font-weight, size,
-  spacing, and z-index tokens instead. Every color value in `tokens.css` must
+  spacing, and z-index tokens instead. Animations and transitions must use
+  the motion tokens; raw durations or easings are not allowed in
+  `layout.css` outside keyframe definitions. Every color value in
+  `tokens.css` must
   be declared in the YAML manifest above (checked both directions).
