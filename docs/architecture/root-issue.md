@@ -118,6 +118,22 @@ Clarification Human Action:
 Plan/Work/Verify的status只记录durable执行生命周期；重试次数和turn identity来自matching execution records。
 Human Action状态、comments和resolution由[Human Action](human-actions.md)定义。
 
+每次`execute_plan`、`execute_work`、`execute_verify`或`rerun_stage`在调用Performer前，Conductor必须先把matching
+active Node写为`In Progress`并read-back。它只在matching Stage Result已经durable写入和read-back后，才按closed
+Result kind写入下一status；写入任一Result或status失败都停止该Root，不能用memory、timeline或下一次模型调用伪造完成。
+
+| Stage Result | Node status | 原因 |
+|---|---|---|
+| `plan_completed` | `In Review` | Plan执行完成，等待matching Plan Approval；批准后的Root Reconciler directive materialize DAG并把Plan置为`Done`。 |
+| `work_completed` | `Done` | matching Work目标已完成。 |
+| `verify_passed`、`verify_changes_required`、`verify_inconclusive`、`verify_plan_contract_violation` | `Done` | Verify执行已产生closed conclusion；Cycle/Root语义由该Result和后续Root Directive决定，不由Node status猜测。 |
+| `plan_needs_information`、`plan_blocked`、`work_blocked`、`work_plan_assumption_invalid`、`work_scope_conflict`、`work_permission_required`、`work_information_required`、`verify_blocked`、`budget_exhausted`、`execution_failed` | `Failed` | matching目标本轮未完成；Human Action、replan、Tree patch或fresh rerun由Root Reconciler根据durable Result决定。 |
+| `canceled` | `Canceled` | matching turn被取消；恢复只能由fresh directive创建新execution。 |
+
+这个映射只持久化已经验证的execution lifecycle，不解释Result的业务影响，不选择下一Stage，不创建Human Action，也不改变
+Cycle或Root status。`Failed`或`Canceled`的Node只有matching fresh directive才可重新进入`In Progress`；不能通过重用旧
+Provider turn、改写Result或自动cleanup恢复。
+
 archive规则：
 
 - active或running Node归档前必须终止matching turn并持久化原因；
