@@ -8,14 +8,26 @@ import {
   inspectSchemaCoverage,
 } from "../../tools/architecture/audit-alignment.mjs";
 
-test("static alignment passes the committed target model", async () => {
+const timelineProjections = "timeline-" + "projections";
+
+test("static alignment records the pending timeline module hard cut", async () => {
   const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
-  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), []);
+  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), [{
+    code: "architecture_rule_unowned",
+    expected: timelineProjections,
+    source: "docs/architecture/conductor.md#模块",
+  }]);
 });
 
-test("full alignment audit composes architecture, retired, and static checks", async () => {
+test("full alignment audit remains RED until H09 removes retired records", async () => {
   const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
-  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "full" }), []);
+  const findings = await auditArchitectureAlignment(process.cwd(), { mode: "full" });
+  assert.ok(findings.some((finding) =>
+    finding.code === "architecture_rule_unowned" && finding.expected === timelineProjections));
+  assert.ok(findings.some((finding) =>
+    finding.code === "retired_symbol_remaining" &&
+    finding.scope === "managed-html-records" &&
+    finding.source === "docs/architecture/contracts.md#契约与接口边界"));
 });
 
 test("alignment reports missing target paths with their owning architecture source", () => {

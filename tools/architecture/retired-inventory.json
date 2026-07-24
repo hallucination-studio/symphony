@@ -55,6 +55,124 @@
         "StageContextEnvelope": [],
         "StageOutcome": []
       }
+    },
+    "managed-html-records": {
+      "source": "docs/architecture/contracts.md#契约与接口边界",
+      "path_patterns": [],
+      "paths": [],
+      "symbols": {
+        "<!-- symphony": [
+          "apps/conductor/src/linear-gateway/tests/podium-client.test.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts",
+          "apps/conductor/src/root-discovery/internal/LinearRootOwnershipClaimImpl.ts",
+          "apps/conductor/src/root-reconciliation/internal/ManagedRecordCodec.ts",
+          "apps/conductor/src/root-reconciliation/internal/RootFactSet.ts",
+          "apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts",
+          "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
+          "packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts",
+          "packages/podium/tests/linear-gateway.test.mjs",
+          "packages/podium/tests/linear-sdk.test.mjs",
+          "tests/e2e/target-architecture-runner.test.mjs",
+          "tests/integration/linear-boundary-live.test.mjs",
+          "tools/e2e/target-architecture.mjs"
+        ],
+        "managed_marker": [
+          "apps/conductor/src/composition/RootDeliveryComposition.test.ts",
+          "apps/conductor/src/composition/RootDeliveryComposition.ts",
+          "apps/conductor/src/human-actions/internal/LinearHumanActionMaterializerImpl.ts",
+          "apps/conductor/src/human-actions/internal/LinearHumanActionResolutionMaterializerImpl.ts",
+          "apps/conductor/src/human-actions/internal/LinearHumanActionResolutionValidatorImpl.ts",
+          "apps/conductor/src/human-actions/tests/materializer.test.ts",
+          "apps/conductor/src/human-actions/tests/resolution-validator.test.ts",
+          "apps/conductor/src/linear-gateway/api/LinearGatewayInterface.ts",
+          "apps/conductor/src/linear-gateway/internal/PodiumLinearGatewayClientImpl.ts",
+          "apps/conductor/src/linear-gateway/tests/podium-client.test.ts",
+          "apps/conductor/src/performer-agent-client/internal/SessionPerformerAgentClientImpl.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearApprovedPlanDagMaterializerImpl.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts",
+          "apps/conductor/src/root-directive-materialization/tests/approved-plan-dag.test.ts",
+          "apps/conductor/src/root-directive-materialization/tests/reply-writer.test.ts",
+          "apps/conductor/src/root-discovery/tests/ownership-claim.test.ts",
+          "apps/conductor/src/root-reconciliation/internal/RootFactSet.ts",
+          "apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts",
+          "apps/conductor/src/root-reconciliation/tests/root-fact-set.test.ts",
+          "apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts",
+          "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
+          "packages/contracts/fixtures/cross-language/valid/workflow-issue-tree.json",
+          "packages/contracts/generated/python/contracts.py",
+          "packages/contracts/generated/rust/src/lib.rs",
+          "packages/contracts/generated/typescript/contracts.ts",
+          "packages/contracts/schemas/conductor-performer/conductor-performer.schema.json",
+          "packages/contracts/schemas/podium-conductor/podium-conductor.schema.json",
+          "packages/podium/src/internal/composition/PodiumConductorServicesImpl.ts",
+          "packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts",
+          "packages/podium/tests/linear-gateway.test.mjs",
+          "packages/podium/tests/linear-sdk.test.mjs"
+        ],
+        "managedMarker": [
+          "apps/conductor/src/human-actions/internal/LinearHumanActionMaterializerImpl.ts",
+          "apps/conductor/src/human-actions/tests/materializer.test.ts",
+          "apps/conductor/src/linear-gateway/api/LinearGatewayInterface.ts",
+          "apps/conductor/src/linear-gateway/internal/PodiumLinearGatewayClientImpl.ts",
+          "apps/conductor/src/performer-agent-client/internal/SessionPerformerAgentClientImpl.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearApprovedPlanDagMaterializerImpl.ts",
+          "apps/conductor/src/root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.ts",
+          "apps/conductor/src/root-directive-materialization/tests/approved-plan-dag.test.ts",
+          "apps/conductor/src/root-directive-materialization/tests/reply-writer.test.ts",
+          "apps/conductor/src/root-reconciliation/api/RootReconciliationContracts.ts",
+          "apps/conductor/src/root-reconciliation/internal/RootFactSet.ts",
+          "packages/podium/src/internal/composition/PodiumConductorServicesImpl.ts",
+          "packages/podium/src/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.ts",
+          "packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts",
+          "packages/podium/src/internal/linear-gateway/types.ts",
+          "packages/podium/tests/linear-gateway.test.mjs",
+          "packages/podium/tests/linear-sdk.test.mjs",
+          "tests/e2e/target-architecture-runner.test.mjs",
+          "tests/integration/linear-boundary-live.test.mjs",
+          "tools/e2e/target-architecture.mjs"
+        ]
+      }
+    },
+    "timeline-projections": {
+      "source": "docs/architecture/workflow-timeline.md#解耦机制",
+      "path_patterns": [
+        "^apps/conductor/src/timeline-projections/"
+      ],
+      "paths": [
+        "apps/conductor/src/timeline-projections/api/TimelineProjectionSubscriberInterface.ts",
+        "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts"
+      ],
+      "symbols": {
+        "TimelineProjection": [
+          "apps/conductor/src/timeline-projections/api/TimelineProjectionSubscriberInterface.ts"
+        ],
+        "timeline-projections": [
+          "apps/conductor/src/main.ts",
+          "tools/architecture/audit-alignment.mjs"
+        ]
+      }
+    },
+    "legacy-turn-usage": {
+      "source": "docs/architecture/performer-profiles.md#token-usage",
+      "path_patterns": [],
+      "paths": [],
+      "symbols": {
+        "StageUsage": [
+          "apps/conductor/src/root-reconciliation/api/ManagedRecords.ts",
+          "apps/conductor/src/root-reconciliation/internal/ManagedRecordCodec.ts"
+        ],
+        "StageUsageSnapshot": []
+      }
+    },
+    "synthetic-e2e-completion": {
+      "source": "docs/architecture/roadmap.md#真实边界验收",
+      "path_patterns": [],
+      "paths": [],
+      "symbols": {
+        "synthetic final": [],
+        "target_e2e_synthetic_final": []
+      }
     }
   }
 }

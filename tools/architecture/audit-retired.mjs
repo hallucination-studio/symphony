@@ -81,7 +81,10 @@ export function inspectRetiredInventory(inventory, tracked, options) {
     }
   }
 
-  return violations.sort((left, right) =>
+  return violations.map((violation) => {
+    const source = inventory.scopes[violation.scope]?.source;
+    return source === undefined ? violation : { ...violation, source };
+  }).sort((left, right) =>
     left.file.localeCompare(right.file) || left.code.localeCompare(right.code) ||
     (left.symbol ?? "").localeCompare(right.symbol ?? ""));
 }
