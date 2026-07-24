@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { ConductorsPage } from "./ui/ConductorsPage";
 import { OverviewPage } from "./ui/OverviewPage";
@@ -49,8 +50,20 @@ export function App({
 
   const { overview, conductorDetail } = initialState;
   function navigate(nextPage: Page) {
-    setPage(nextPage);
-    setConductorId(undefined);
+    const apply = () => {
+      setPage(nextPage);
+      setConductorId(undefined);
+    };
+    // Cross-fade page switches where the host supports View Transitions
+    // (WKWebView 18+); older hosts fall back to the CSS cascade alone.
+    const host = document as Document & {
+      startViewTransition?: (update: () => void) => { finished: Promise<void> };
+    };
+    if (typeof host.startViewTransition !== "function") {
+      apply();
+      return;
+    }
+    host.startViewTransition(() => flushSync(apply));
   }
 
   return (

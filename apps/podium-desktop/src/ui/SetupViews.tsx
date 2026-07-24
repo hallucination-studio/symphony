@@ -27,6 +27,23 @@ export function SetupView({
   const [repository, setRepository] = useState<RepositorySelection>();
   const [error, setError] = useState<string>();
   const [isCreating, setIsCreating] = useState(false);
+  const setupStep =
+    state.kind === "linear-setup" ? 1
+    : state.kind === "conductor-setup" ? 2
+    : state.kind === "profile-setup" ? 3
+    : 0;
+  const progress = setupStep > 0 && (
+    <div
+      className="setup-progress"
+      role="progressbar"
+      aria-label="Setup progress"
+      aria-valuemin={1}
+      aria-valuemax={3}
+      aria-valuenow={setupStep}
+    >
+      <div className="setup-progress-fill" data-step={setupStep} />
+    </div>
+  );
   const chooseRepository = async () => {
     setError(undefined);
     try {
@@ -76,6 +93,7 @@ export function SetupView({
   if (state.kind === "linear-setup") {
     return (
       <main className="setup-layout">
+        {progress}
         <section className="setup-card" key={state.kind}>
           <BrandMark />
           <p className="eyebrow">Setup · 1 of 3</p>
@@ -88,13 +106,13 @@ export function SetupView({
   }
   if (state.kind === "conductor-setup") {
     return (
-      <main className="setup-layout"><section className="setup-card" key={state.kind}><BrandMark /><p className="eyebrow">Setup · 2 of 3</p><h1>Create Conductor</h1><p>Select one Project, a Git repository, and its base branch. Repository selection uses the native picker.</p>
+      <main className="setup-layout">{progress}<section className="setup-card" key={state.kind}><BrandMark /><p className="eyebrow">Setup · 2 of 3</p><h1>Create Conductor</h1><p>Select one Project, a Git repository, and its base branch. Repository selection uses the native picker.</p>
         <label>Linear Project<select data-testid="project-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{state.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         <button data-testid="choose-repository" className="button full-width" onClick={() => void chooseRepository()}>Choose Git repository</button>
         {repository && <label>Base branch<select data-testid="base-branch-select" value={repository.baseBranch} onChange={(event) => setRepository({ ...repository, baseBranch: event.target.value })}>{repository.baseBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}</select></label>}
         {repository && <p className="selection-summary">{repository.displayName} · {repository.baseBranch}</p>}
         {error && <p role="alert">{error}</p>}
-        <button data-testid="create-conductor" className="button primary full-width" disabled={!projectId || !repository || isCreating} onClick={() => void createConductor()}>{isCreating ? "Creating…" : "Create Conductor"}</button>
+        <button data-testid="create-conductor" className="button primary full-width" disabled={!projectId || !repository || isCreating} aria-busy={isCreating} onClick={() => void createConductor()}>{isCreating && <span className="button-spinner" aria-hidden="true" />}{isCreating ? "Creating…" : "Create Conductor"}</button>
       </section></main>
     );
   }
@@ -104,6 +122,7 @@ export function SetupView({
   return (
     <main className="setup-detail">
       <p className="eyebrow">Setup · 3 of 3</p>
+      {progress}
       <ConductorsPage
         conductors={[state.conductorDetail.summary]}
         detail={state.conductorDetail}

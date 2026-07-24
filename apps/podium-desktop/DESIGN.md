@@ -110,8 +110,10 @@ motion:
   duration-sweep: 1400ms
   duration-pulse: 2s
   duration-stagger: 30ms
+  duration-spin: 700ms
   easing-standard: cubic-bezier(0.2, 0, 0, 1)
   easing-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1)
+  easing-continuous: linear
 spacing:
   1: 4px
   2: 8px

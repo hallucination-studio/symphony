@@ -70,7 +70,7 @@ export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { co
         <>
       <h2 id="profile-title">{profile ? "Edit Codex profile" : "Configure Codex profile"}</h2>
       {status === "pending" && <StatusMessage title="Waiting for Conductor confirmation" body="Settings remain unchanged until Conductor accepts them." />}
-      {status === "confirmed" && <StatusMessage title="Profile confirmed" body="Complete login, then activate it for new Roots." action={<button data-testid="profile-done" className="button primary" onClick={requestClose}>Done</button>} />}
+      {status === "confirmed" && <StatusMessage showCheck title="Profile confirmed" body="Complete login, then activate it for new Roots." action={<button data-testid="profile-done" className="button primary" onClick={requestClose}>Done</button>} />}
       {status === "error" && <StatusMessage isError title="Profile was not created" body="Conductor rejected the change. Review the settings and try again." action={<button className="button" onClick={() => setStatus("editing")}>Try again</button>} />}
       {status === "editing" && (
         <form onSubmit={(event) => { event.preventDefault(); void submit(event.currentTarget); }}>
@@ -127,7 +127,7 @@ export function ApiKeyDialog({ conductorId, profileId, onClose, onSecret }: { co
         <>
       <h2 id="api-key-title">Set Codex API Key</h2>
       {status === "pending" && <StatusMessage title="Waiting for Conductor confirmation" body="The key will not be displayed again." />}
-      {status === "confirmed" && <StatusMessage title="API Key configured" body="The key will not be displayed again." action={<button data-testid="api-key-done" className="button primary" onClick={requestClose}>Done</button>} />}
+      {status === "confirmed" && <StatusMessage showCheck title="API Key configured" body="The key will not be displayed again." action={<button data-testid="api-key-done" className="button primary" onClick={requestClose}>Done</button>} />}
       {status === "error" && <StatusMessage isError title="API Key was not accepted" body="Nothing was saved. Enter the key again to retry." action={<button className="button" onClick={() => setStatus("editing")}>Try again</button>} />}
       {status === "editing" && (
         <form onSubmit={(event) => { event.preventDefault(); void submit(event.currentTarget); }}>
@@ -168,8 +168,18 @@ function DialogFrame({ labelId, testId, onClose, children }: { labelId: string; 
   );
 }
 
-function StatusMessage({ title, body, action, isError = false }: { title: string; body: string; action?: React.ReactNode; isError?: boolean }) {
-  return <div role={isError ? "alert" : "status"}><strong>{title}</strong><p>{body}</p>{action}</div>;
+function StatusMessage({ title, body, action, isError = false, showCheck = false }: { title: string; body: string; action?: React.ReactNode; isError?: boolean; showCheck?: boolean }) {
+  return (
+    <div role={isError ? "alert" : "status"}>
+      {showCheck && (
+        <svg className="status-message-check" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="9" fill="none" strokeWidth="1.5" />
+          <path d="M6 10.5l2.5 2.5L14 7.5" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+      <strong>{title}</strong><p>{body}</p>{action}
+    </div>
+  );
 }
 
 function statusFromResult(result: DesktopCommandResult): SubmissionStatus {

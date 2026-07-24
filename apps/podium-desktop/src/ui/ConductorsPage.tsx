@@ -3,7 +3,7 @@ import { useState } from "react";
 import { EmptyState, PageHeading, StatusBadge } from "./components";
 import { labelFromIdentifier } from "./format";
 import { ApiKeyDialog, ProfileDialog } from "./ProfileDialogs";
-import type { CommandHandler, ConductorDetailView, ConductorSummaryView, PerformerProfileSummaryView, SecretHandler } from "./types";
+import type { CommandHandler, ConductorDetailView, ConductorSummaryView, DesktopCommand, PerformerProfileSummaryView, SecretHandler } from "./types";
 
 export function ConductorsPage({
   conductors,
@@ -25,6 +25,20 @@ export function ConductorsPage({
   const [showProfile, setShowProfile] = useState(false);
   const [editProfile, setEditProfile] = useState<PerformerProfileSummaryView>();
   const [secretProfileId, setSecretProfileId] = useState<string>();
+  // Buttons that issue runtime commands show a spinner and lock while the
+  // Conductor processes the request; the poll refresh confirms the result.
+  const [pendingAction, setPendingAction] = useState<string>();
+  const runCommand = async (action: string, command: DesktopCommand) => {
+    if (pendingAction) return;
+    setPendingAction(action);
+    try {
+      await onCommand(command);
+    } finally {
+      setPendingAction(undefined);
+    }
+  };
+  const pendingSpinner = (action: string) =>
+    pendingAction === action ? <span className="button-spinner" aria-hidden="true" /> : null;
   if (!detail) {
     return (
       <>
@@ -60,8 +74,8 @@ export function ConductorsPage({
             <StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} {...(conductor.status === "online" ? { tone: "positive" } : {})} />
           </div>
           <div className="button-row">
-            <button className="button" onClick={() => onCommand({ kind: "stop_conductor", conductorId: conductor.conductorId })}>Stop</button>
-            <button className="button primary" onClick={() => onCommand({ kind: "restart_conductor", conductorId: conductor.conductorId })}>Restart</button>
+            <button className="button" disabled={pendingAction !== undefined} aria-busy={pendingAction === "stop"} onClick={() => void runCommand("stop", { kind: "stop_conductor", conductorId: conductor.conductorId })}>{pendingSpinner("stop")}Stop</button>
+            <button className="button primary" disabled={pendingAction !== undefined} aria-busy={pendingAction === "restart"} onClick={() => void runCommand("restart", { kind: "restart_conductor", conductorId: conductor.conductorId })}>{pendingSpinner("restart")}Restart</button>
           </div>
         </section>
         <section className="panel">
@@ -79,13 +93,13 @@ export function ConductorsPage({
                 <div className="button-row">
                   <button data-testid="profile-edit" className="button" onClick={() => setEditProfile(profile)}>Edit settings</button>
                   {profile.readiness === "login-required" && profile.authenticationMethod === "chatgpt" && (
-                    <button className="button" onClick={() => onCommand({ kind: "start_codex_chatgpt_login", conductorId: conductor.conductorId, profileId: profile.profileId })}>Sign in with ChatGPT</button>
+                    <button className="button" disabled={pendingAction !== undefined} aria-busy={pendingAction === `login-${profile.profileId}`} onClick={() => void runCommand(`login-${profile.profileId}`, { kind: "start_codex_chatgpt_login", conductorId: conductor.conductorId, profileId: profile.profileId })}>{pendingSpinner(`login-${profile.profileId}`)}Sign in with ChatGPT</button>
                   )}
                   {profile.readiness === "login-required" && profile.authenticationMethod === "api_key" && (
                     <button data-testid="profile-set-api-key" className="button" onClick={() => setSecretProfileId(profile.profileId)}>Set API Key</button>
                   )}
                   {!profile.isActive && profile.readiness === "ready" && (
-                    <button data-testid="profile-activate" className="button" onClick={() => onCommand({ kind: "activate_performer_profile", conductorId: conductor.conductorId, profileId: profile.profileId })}>Activate</button>
+                    <button data-testid="profile-activate" className="button" disabled={pendingAction !== undefined} aria-busy={pendingAction === `activate-${profile.profileId}`} onClick={() => void runCommand(`activate-${profile.profileId}`, { kind: "activate_performer_profile", conductorId: conductor.conductorId, profileId: profile.profileId })}>{pendingSpinner(`activate-${profile.profileId}`)}Activate</button>
                   )}
                 </div>
               </li>

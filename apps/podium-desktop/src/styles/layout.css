@@ -90,6 +90,38 @@ a {
   }
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes check-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@keyframes alert-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+}
+
 @keyframes backdrop-exit {
   to {
     opacity: 0;
@@ -295,6 +327,7 @@ h1:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-1);
   min-height: var(--size-control-height);
   padding: 3px var(--space-3);
   border: 1px solid var(--color-separator-strong);
@@ -354,6 +387,17 @@ h1:focus {
 
 .full-width {
   width: 100%;
+}
+
+/* Busy indicator for buttons awaiting Conductor confirmation. Inherits
+   the button text color via currentColor. */
+.button-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--radius-pill);
+  animation: spin var(--duration-spin) var(--easing-continuous) infinite;
 }
 
 /* macOS text inputs and selects are styled globally so a form outside a
@@ -562,6 +606,35 @@ input[type="radio"] {
   background: var(--color-content-bg);
 }
 
+/* Setup progress bar — lives outside the keyed card so the fill width
+   transitions across steps instead of remounting. */
+.setup-progress {
+  width: min(440px, 100%);
+  height: 3px;
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-pill);
+  background: var(--color-separator);
+}
+
+.setup-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  transition: width var(--duration-standard) var(--easing-standard);
+}
+
+.setup-progress-fill[data-step="1"] {
+  width: 33.33%;
+}
+
+.setup-progress-fill[data-step="2"] {
+  width: 66.67%;
+}
+
+.setup-progress-fill[data-step="3"] {
+  width: 100%;
+}
+
 .setup-card {
   width: min(440px, 100%);
   padding: var(--space-6);
@@ -652,6 +725,12 @@ input[type="radio"] {
 
 .skeleton div:nth-of-type(3)::after {
   animation-delay: calc(var(--duration-stagger) * 8);
+}
+
+/* Inline alerts shake once on mount; the full-card unavailable state is
+   excluded because it already enters with page-enter. */
+[role="alert"]:not(.setup-card) {
+  animation: alert-shake var(--duration-slow) var(--easing-standard);
 }
 
 .error-panel {
@@ -784,6 +863,21 @@ input[type="radio"] {
 .refresh-value {
   display: inline-block;
   animation: refresh-value var(--duration-fast) var(--easing-standard);
+}
+
+/* Confirmation checkmark pop */
+.status-message-check {
+  display: block;
+  width: 20px;
+  height: 20px;
+  margin-bottom: var(--space-2);
+  animation: check-pop var(--duration-standard) var(--easing-emphasized)
+    backwards;
+}
+
+.status-message-check circle,
+.status-message-check path {
+  stroke: var(--status-positive);
 }
 
 .command-rule-actions {
