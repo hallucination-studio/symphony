@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   lastLogReason,
+  latestRootFailureReason,
   readArchitectureAcceptanceManifest,
   runTargetArchitectureEvidence,
   safeErrorCode,
@@ -59,6 +60,18 @@ test("target E2E diagnostics prefer the concrete boundary failure over the harne
     },
   ]), "role_result_write_linear_internal_failed");
   assert.equal(safeErrorCode(new TypeError("untrusted runtime detail")), "target_e2e_type_error");
+});
+
+test("target E2E stops when Root directive materialization fails", () => {
+  assert.equal(latestRootFailureReason([
+    {
+      event: "e2e_child_log",
+      message: JSON.stringify({
+        event: "root_directive_materialization_failed",
+        fields: { reason: "root_directive_create_cycle_conflict" },
+      }),
+    },
+  ]), "root_directive_create_cycle_conflict");
 });
 
 test("target E2E execution evidence reads through the Linear gateway contract", async () => {

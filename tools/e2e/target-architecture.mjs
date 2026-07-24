@@ -373,12 +373,15 @@ export async function waitForExecutionEvidence({ gateway, projectId, rootIssueId
   throw new Error("target_e2e_execution_evidence_timeout");
 }
 
-function latestRootFailureReason(logs) {
+export function latestRootFailureReason(logs) {
   for (const event of [...logs].reverse()) {
     if (event?.event !== "e2e_child_log" || typeof event.message !== "string") continue;
     try {
       const message = JSON.parse(event.message);
-      if (message?.event !== "root_reconciliation_failed") continue;
+      if (![
+        "root_reconciliation_failed",
+        "root_directive_materialization_failed",
+      ].includes(message?.event)) continue;
       const fields = message.fields && typeof message.fields === "object" && !Array.isArray(message.fields)
         ? message.fields
         : message;
