@@ -80,7 +80,7 @@ baseBranch
 | Root Managed Comment | 领域概念 | Symphony在Root下管理的用户可见comment，包括Control Record、Timeline和Reconciler Reply |
 | Root Control Record Comment | `RootControlRecordCommentSnapshot` | claim时创建的Symphony-managed Root comment；只承载ownership、fixed Profile等明确Root records，不保存status、current Cycle、ready node、activity或runtime observation |
 | Root Timeline Comment | `LinearCommentSnapshot` | Root timeline event subscriber写到Root Issue的Markdown + `symphony` block comment |
-| User Comment Input | `UserCommentInput` | human actor创建/修改的comment body version或native thread change；reaction不是pending input |
+| User Comment Input | `UserCommentInput` | human actor创建/修改的comment body version，或non-Symphony native thread-state revision；后者是当前state快照而非历史event，reaction不是pending input |
 | Root Reconciler Reply | `RootReconcilerReplyRecord` | matching RootDirective处理用户comment后写入原生thread并read-back的reply、reaction和thread action |
 
 不使用`Managed Run`作为新架构代码名。历史语义在本架构中统一为`Root Run`；

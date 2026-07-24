@@ -33,25 +33,31 @@ Root headers以及完整Root Tree，并执行受限mutation。
 ```text
 include_archived: true
 issues + comments + relations + labels + statuses + remote versions
-comment thread resolution + reactions
-source change identities + actor kinds + stable write correlations
+comment current thread state + reactions
+actor kinds + stable write correlations
 ```
 
 `WorkflowRootTreeSnapshot`必须同时包含`source_manifest`和`coverage`。每个
 `WorkflowSourceManifestEntry`至少携带`source_kind`、`source_id`、`source_version`和`actor_kind`，其中source kind只允许
-`linear_issue`、`linear_comment`、`linear_comment_thread_change`、`linear_relation`和`linear_status_catalog`；actor kind只允许`human`、
+`linear_issue`、`linear_comment`、`linear_relation`和`linear_status_catalog`；actor kind只允许`human`、
 `symphony`、`linear_integration`、`external_automation`和`unknown`。由Symphony写入且可从Linear稳定关联的来源可以带
 `stable_write_id`，但Podium不得猜测或伪造该关联。
 
-Comment source必须包含native thread resolved/unresolved当前值以及reaction当前集合。comment正文编辑使用comment
-source version；thread resolve/unresolve还必须携带稳定source change identity、change actor和occurred time，使
-“comment作者”和“执行本次thread action的人”不会混淆。reaction集合用于Symphony回执write/read-back与审计；human
-reaction不是Workflow command或Root pending input。Podium不得把reaction翻译成approval、rejection或其他Workflow语义。
+`linear_comment` manifest entry的`actor_kind`描述comment body author。若Linear公开当前thread state的actor，
+它只属于matching comment snapshot的thread-state field，不创建第二个manifest entry或historical activity source；缺失时
+该state actor为`unknown`。
+
+Comment source必须包含native thread resolved/unresolved当前值以及reaction当前集合。comment body input使用canonical body
+digest；当前thread-state revision使用comment remote version。后者的identity由comment identity、remote version和当前state
+组成，而不是一个不可重建的thread-change event。二者不能共用remote version，避免close/reopen把未编辑的body重复变成输入。
+Linear仅在实际返回state actor时携带actor kind；缺失时为`unknown`，Podium和Conductor不得从comment author或webhook内存
+推断。reaction集合用于Symphony回执write/read-back与审计；human reaction不是Workflow command或Root pending input。
+Podium不得把reaction翻译成approval、rejection或其他Workflow语义。
 Reaction-only current-value changes不进入Root canonical fact digest或`RootDelta`；它们只供matching reply materializer
 校验native receipt是否存在。
 
 `WorkflowSourceCoverage`必须明确`is_complete`和`omissions`。active与archived Issue、comment、relation和status
-catalog以及human comment thread change的required source都必须进入manifest；任何无法分页读取、无法证明identity/version或无法判断覆盖范围的情况都必须
+catalog以及comment当前thread state的required source都必须进入manifest；任何无法分页读取、无法证明identity/version或无法判断覆盖范围的情况都必须
 返回不完整coverage，使matching Root fail closed。Gateway无法证明actor时返回closed `unknown`，不能把它猜成human或
 Symphony。除matching stable write correlation和明确排除的reaction-only变化外，所有human、external automation和
 unknown source changes都作为pending Root inputs；普通advance payload仍只包含变化source的当前值或tombstone，不透传完整activity history。
@@ -172,8 +178,8 @@ Root Reconciler和Stage turn Result都必须关联实际调用model与closed Tur
 role/session/turn/execution、Root/Cycle/target、Tree/context digest和Git revision（如适用）。usage无法从Provider
 取得时使用显式`unavailable` variant，不能省略或写零。字段与聚合语义由
 [Performer Profile](performer-profiles.md)定义。
-Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment version或
-native comment thread-change identity、Root directive和deterministic reply ID。
+Timeline event至少关联source durable record identity和deterministic event ID；reply至少关联source comment body version或
+native comment thread-state revision、Root directive和deterministic reply ID。
 
 ## 7. Error语义
 
