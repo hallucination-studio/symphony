@@ -70,6 +70,99 @@ test("accepts wait and acknowledge directives without inventing a Linear status 
   }
 });
 
+test("cancel_root cancels a terminal active Cycle before canceling the Root", async () => {
+  const linear = new FakeLinear();
+  linear.tree.issues.find(({ issue_id }) => issue_id === "cycle-1")!.status_id = "cycle-succeeded";
+  linear.tree.issues.find(({ issue_id }) => issue_id === "cycle-1")!.status_name = "Succeeded";
+  linear.tree.issues.find(({ issue_id }) => issue_id === "cycle-1")!.status_category = "completed";
+  const materializer = new LinearRootDirectiveMaterializerImpl(linear, {} as never);
+
+  const result = await materializer.materialize({
+    directive: directive({
+      kind: "cancel_root",
+      reason: "User canceled the Root.",
+      activeCycleIssueId: "cycle-1",
+      invalidatedExecutionIds: [],
+      preservedFactRefs: [],
+    }),
+    view: view(linear.tree),
+  });
+
+  assert.equal(result.kind, "materialized");
+  assert.deepEqual(linear.mutations.map((mutation) => mutation.kind === "update_workflow_issue" ? mutation.statusId : mutation.kind), [
+    "canceled",
+    "canceled",
+  ]);
+  assert.equal(linear.issue("cycle-1").status_name, "Canceled");
+  assert.equal(linear.issue("root-1").status_name, "Canceled");
+});
+
+test("reads a fresh tree after every Tree patch and supports reorder, dependency, and relates_to operations", async () => {
+  const linear = new FakeLinear();
+  linear.tree.issues.push({
+    issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
+    status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
+    order: 2, depth: 2, title: "Work", description: "Do work", labels: [], is_archived: false,
+    issue_kind: "work", remote_version: "work-v1", updated_at: "2026-07-23T00:00:00Z",
+  });
+  linear.tree.issues.push({
+    issue_id: "work-2", identifier: "SYM-4", project_id: "project-1", parent_issue_id: "cycle-1",
+    status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
+    order: 3, depth: 2, title: "Dependency", description: "Dependency", labels: [], is_archived: false,
+    issue_kind: "work", remote_version: "work-2-v1", updated_at: "2026-07-23T00:00:00Z",
+  });
+  linear.tree.relations.push({
+    relation_id: "dependency-1", relation_kind: "blocks", source_issue_id: "work-2", target_issue_id: "work-1",
+  });
+  const materializer = new LinearRootDirectiveMaterializerImpl(linear, {} as never);
+  const result = await materializer.materialize({
+    directive: directive({
+      kind: "revise_root_tree",
+      reason: "The execution order and dependency graph need correction.",
+      operations: [
+        {
+          kind: "update_node",
+          precondition: { targetIssueId: "cycle-1", expectedRemoteVersion: "cycle-v1" },
+          title: "Cycle updated",
+          description: "Execute the plan.",
+          status: "Executing",
+        },
+        {
+          kind: "reorder_nodes",
+          cycleIssueId: "cycle-1",
+          orderedIssueIds: ["work-1", "work-2"],
+          precondition: { targetIssueId: "cycle-1", expectedRemoteVersion: "cycle-v1:updated" },
+        },
+        {
+          kind: "replace_dependencies",
+          workIssueId: "work-1",
+          dependencyIssueIds: [],
+          precondition: { targetIssueId: "work-1", expectedRemoteVersion: "work-v1" },
+        },
+        {
+          kind: "create_relation",
+          relationKind: "relates_to",
+          sourceIssueId: "cycle-1",
+          targetIssueId: "work-1",
+        },
+      ],
+    }),
+    view: view(linear.tree),
+  });
+
+  assert.equal(result.kind, "materialized");
+  assert.equal(linear.readCount, 5);
+  assert.deepEqual(linear.mutations.map((mutation) => mutation.kind), [
+    "update_workflow_issue",
+    "update_workflow_issue",
+    "update_workflow_issue",
+    "remove_workflow_relation",
+    "create_workflow_relation",
+  ]);
+  assert.equal(linear.tree.relations.length, 1);
+  assert.equal(linear.tree.relations[0]?.relation_kind, "relates_to");
+});
+
 function directive(action: RootDirective["action"]): RootDirective {
   return {
     protocolVersion: 1,
@@ -147,6 +240,7 @@ class FakeLinear {
     observed_at: "2026-07-23T00:00:02Z",
   };
   mutations: LinearWorkflowMutationCommand[] = [];
+  readCount = 0;
 
   issue(issueId: string) {
     const issue = this.tree.issues.find((candidate) => candidate.issue_id === issueId);
@@ -155,23 +249,48 @@ class FakeLinear {
   }
 
   async readWorkflowIssueTree() {
+    this.readCount += 1;
     return structuredClone(this.tree);
   }
 
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
     this.mutations.push(command);
-    if (command.kind !== "update_workflow_issue") throw new Error("unexpected_mutation");
-    const target = this.issue(command.target.targetIssueId);
-    const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
-    if (!status) throw new Error("missing_status");
-    target.status_id = status.status_id;
-    target.status_name = status.name;
-    target.status_category = status.category;
-    target.status_position = status.position;
-    target.remote_version = `${target.remote_version}:updated`;
+    if (command.kind === "update_workflow_issue") {
+      const target = this.issue(command.target.targetIssueId);
+      const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
+      if (!status) throw new Error("missing_status");
+      target.status_id = status.status_id;
+      target.status_name = status.name;
+      target.status_category = status.category;
+      target.status_position = status.position;
+      target.title = command.title;
+      target.description = command.description;
+      if (command.order !== undefined) target.order = command.order;
+      target.remote_version = `${target.remote_version}:updated`;
+    } else if (command.kind === "create_workflow_relation") {
+      this.tree.relations.push({
+        relation_id: command.writeId,
+        relation_kind: command.relationKind,
+        source_issue_id: command.sourceIssueId,
+        target_issue_id: command.targetIssueId,
+      });
+      this.issue(command.sourceIssueId).remote_version += ":updated";
+      this.issue(command.targetIssueId).remote_version += ":updated";
+    } else if (command.kind === "remove_workflow_relation") {
+      this.tree.relations = this.tree.relations.filter(({ relation_id }) => relation_id !== command.relationId);
+      this.issue(command.sourceIssueId).remote_version += ":updated";
+      this.issue(command.targetIssueId).remote_version += ":updated";
+    } else {
+      throw new Error("unexpected_mutation");
+    }
+    this.tree.issues[0]!.remote_version = `${this.tree.issues[0]!.remote_version}:updated`;
     return {
       kind: "applied" as const,
-      readBack: { writeId: command.writeId, targetIssueId: target.issue_id, remoteVersion: target.remote_version },
+      readBack: {
+        writeId: command.writeId,
+        targetIssueId: command.kind === "update_workflow_issue" ? command.target.targetIssueId : command.sourceIssueId,
+        remoteVersion: this.issue(command.kind === "update_workflow_issue" ? command.target.targetIssueId : command.sourceIssueId).remote_version,
+      },
     };
   }
 }

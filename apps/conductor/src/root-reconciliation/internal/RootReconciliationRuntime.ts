@@ -9,15 +9,22 @@ import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
 import type { RootDirectiveMaterializerInterface } from "../../root-directive-materialization/api/RootDirectiveMaterializerInterface.js";
+import type { RootDirectiveRecordWriterInterface } from "../../root-directive-materialization/api/RootDirectiveRecordWriterInterface.js";
+import type { RootReconcilerReplyWriterInterface } from "../../root-directive-materialization/api/RootReconcilerReplyWriterInterface.js";
+import type { HumanActionResolutionValidatorInterface } from "../../human-actions/api/HumanActionResolutionValidatorInterface.js";
+import type { HumanActionResolutionMaterializerInterface } from "../../human-actions/api/HumanActionResolutionMaterializerInterface.js";
+import type { WorkflowTimelinePublisherInterface } from "../../workflow-events/api/WorkflowTimelinePublisherInterface.js";
+import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTimelineEvents.js";
 import type {
   RootDirective,
   RootReconciliationView,
   ReconcilerLimits,
   StageResult,
   StageTurnInput,
+  HumanActionResolution,
 } from "../api/index.js";
 import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
-import type { StageResultRecord, StageResultOutcomeKind } from "../api/ManagedRecords.js";
+import type { RootDirectiveRecord, StageResultRecord, StageResultOutcomeKind } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 
@@ -41,6 +48,11 @@ export interface RootReconciliationRuntimeDependencies {
   reconciler: RootReconcilerClientInterface;
   performer: PerformerAgentClientInterface;
   materializer: RootDirectiveMaterializerInterface;
+  directiveRecordWriter: RootDirectiveRecordWriterInterface;
+  replyWriter: RootReconcilerReplyWriterInterface;
+  humanActionResolutionValidator: HumanActionResolutionValidatorInterface;
+  humanActionResolutionMaterializer: HumanActionResolutionMaterializerInterface;
+  timeline: WorkflowTimelinePublisherInterface;
   profileIdFor(root: DiscoveredRoot): Promise<string | undefined>;
   modelSettingsFor(profileId: string): Promise<{
     model: string;
@@ -148,6 +160,25 @@ export class RootReconciliationRuntime {
     const git = await this.dependencies.git.inspect(workspace);
     const factSet = buildRootFactSet({ root, tree, git, mechanicalViolations: safety.mechanicalViolations });
     const view: RootReconciliationView = viewFromFactSet({ root, tree, git, factSet });
+    const resumable = findResumableDirective(tree, root.issueId);
+    if (resumable && !directiveMaterializationComplete(resumable.directive, tree)) {
+      setPhase("resume_accepted_directive");
+      const materialization = await this.finishDirective(
+        resumable.directive,
+        viewWithDigest(view, resumable.directive.basedOnTargetRootDigest),
+        root,
+        profileId,
+        setPhase,
+        factSet.bootstrap.pendingInputIds,
+        true,
+      );
+      if (materialization.kind === "failed") return "needs-attention";
+      const resumedSession = this.sessions.get(root.issueId);
+      if (resumedSession) await this.closeSessionsAfterDirective(resumable.directive, root, resumedSession.sessionId);
+      return resumable.directive.action.kind === "wait" || resumable.directive.action.kind === "request_human_action"
+        ? "waiting-human"
+        : "progress";
+    }
     const limits = reconcilerLimits();
     const currentSession = this.sessions.get(root.issueId);
     const trustedSession = currentSession?.profileId === profileId ? currentSession : undefined;
@@ -209,14 +240,7 @@ export class RootReconciliationRuntime {
     if (result.directive.basedOnTargetRootDigest !== view.treeDigest) {
       throw new Error("root_directive_stale_tree");
     }
-    setPhase(`materialize_${result.directive.action.kind}`);
-    const materialization = await this.materializeDirective(
-      result.directive,
-      view,
-      root,
-      profileId,
-      setPhase,
-    );
+    const materialization = await this.finishDirective(result.directive, view, root, profileId, setPhase, factSet.bootstrap.pendingInputIds, false);
     this.dependencies.log("root_directive_received", {
       root_issue_id: root.issueId,
       directive_kind: result.directive.action.kind,
@@ -230,9 +254,77 @@ export class RootReconciliationRuntime {
       });
       return "needs-attention";
     }
+    await this.closeSessionsAfterDirective(result.directive, root, sessionId);
     return result.directive.action.kind === "wait" || result.directive.action.kind === "request_human_action"
       ? "waiting-human"
       : "progress";
+  }
+
+  private async finishDirective(
+    directive: RootDirective,
+    view: RootReconciliationView,
+    root: DiscoveredRoot,
+    profileId: string,
+    setPhase: (phase: string) => void,
+    pendingInputIds: string[],
+    alreadyAccepted: boolean,
+  ) {
+    if (!alreadyAccepted) {
+      const inputValidation = validateDirectiveInputs(directive, view.tree, pendingInputIds);
+      if (inputValidation) return failedMaterialization(directive, inputValidation);
+      setPhase("persist_root_directive_record");
+      const accepted = await this.dependencies.directiveRecordWriter.write({
+        directive,
+        view,
+        acceptedAt: view.observedAt,
+      });
+      if (accepted.kind === "failed") return accepted;
+      view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
+    }
+    setPhase("validate_human_action_resolutions");
+    for (const resolution of directive.humanActionResolutions) {
+      const validated = this.dependencies.humanActionResolutionValidator.validate({
+        tree: view.tree,
+        actionIssueId: resolution.actionIssueId,
+      });
+      if (validated.kind !== "valid") return failedMaterialization(directive, `human_action_resolution_${validated.kind}`);
+      if (
+        validated.actionId !== resolution.actionId ||
+        validated.outcome !== resolution.outcome ||
+        !sameIds(validated.sourceCommentIds, resolution.sourceCommentIds ?? [])
+      ) return failedMaterialization(directive, "human_action_resolution_directive_mismatch");
+      if (!resolution.actionKind || resolution.terminalStatus !== statusForOutcome(resolution.outcome)) {
+        return failedMaterialization(directive, "human_action_resolution_shape_invalid");
+      }
+      setPhase("persist_human_action_resolution");
+      const materialized = await this.dependencies.humanActionResolutionMaterializer.materialize({
+        resolution,
+        actionKind: resolution.actionKind,
+        tree: view.tree,
+        rootIssueId: root.issueId,
+      });
+      if (materialized.kind === "failed") return failedMaterialization(directive, materialized.code);
+      view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
+    }
+    setPhase(`materialize_${directive.action.kind}`);
+    const materialization = await this.materializeDirective(directive, view, root, profileId, setPhase);
+    if (materialization.kind === "failed") return materialization;
+    view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
+    setPhase("materialize_root_reconciler_replies");
+    for (const reply of directive.commentReplies) {
+      const written = await this.dependencies.replyWriter.write({ directive, reply, view });
+      if (written.kind === "failed") return failedMaterialization(directive, written.code);
+      view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
+    }
+    setPhase("publish_root_timeline");
+    const timeline = await this.dependencies.timeline.publish(timelineEvent(directive, root.issueId, view));
+    if (timeline.kind === "failed") return failedMaterialization(directive, timeline.code);
+    return materialization;
+  }
+
+  private async refreshViewPreservingDigest(view: RootReconciliationView, treeDigest: string): Promise<RootReconciliationView> {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    return { ...view, tree, observedAt: tree.observed_at, treeDigest };
   }
 
   private async materializeDirective(
@@ -243,12 +335,12 @@ export class RootReconciliationRuntime {
     setPhase: (phase: string) => void,
   ) {
     const action = directive.action;
-    if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify") {
-      const role = action.kind === "execute_plan" ? "plan" : action.kind === "execute_work" ? "work" : "verify";
-      const targetIssueId = action.kind === "execute_plan"
-        ? action.planIssueId
-        : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
-      const input = stageInput(view, root, profileId, role, targetIssueId, action);
+    if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify" || action.kind === "rerun_stage") {
+      const role = action.kind === "rerun_stage" ? action.role : action.kind === "execute_plan" ? "plan" : action.kind === "execute_work" ? "work" : "verify";
+      const targetIssueId = action.kind === "rerun_stage"
+        ? action.targetIssueId
+        : action.kind === "execute_plan" ? action.planIssueId : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
+      const input = stageInput(view, root, profileId, role, targetIssueId, action, directive.rootDirectiveId);
       setPhase(`execute_${role}_turn`);
       const stageResult = role === "plan"
         ? await this.dependencies.performer.executePlanTurn(input)
@@ -262,6 +354,26 @@ export class RootReconciliationRuntime {
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
     return this.dependencies.materializer.materialize({ directive, view });
+  }
+
+  private async closeSessionsAfterDirective(
+    directive: RootDirective,
+    root: DiscoveredRoot,
+    sessionId: string,
+  ): Promise<void> {
+    const action = directive.action;
+    const cycleIssueId = cycleIdForAction(action);
+    if (cycleIssueId && ["conclude_cycle", "supersede_cycle", "replan_current_cycle", "cancel_root"].includes(action.kind)) {
+      await this.dependencies.performer.closeCycleStageSessions({
+        requestId: randomUUID(),
+        rootIssueId: root.issueId,
+        cycleIssueId,
+      });
+    }
+    if (action.kind === "conclude_root" || action.kind === "cancel_root") {
+      await this.dependencies.reconciler.close({ requestId: randomUUID(), sessionId });
+      this.sessions.delete(root.issueId);
+    }
   }
 
   private async persistStageResult(
@@ -369,6 +481,198 @@ function stageResultWriteId(directiveId: string, resultId: string): string {
   return `stage-result:${digest}`;
 }
 
+function findResumableDirective(
+  tree: RootReconciliationView["tree"],
+  rootIssueId: string,
+): RootDirectiveRecord | undefined {
+  const records = tree.comments
+    .map((comment) => parseManagedRecord(comment.body))
+    .filter((parsed): parsed is { ok: true; value: RootDirectiveRecord } =>
+      parsed.ok && parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId)
+    .map(({ value }) => value)
+    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt) || right.rootDirectiveId.localeCompare(left.rootDirectiveId));
+  return records.find((record) => !directiveMaterializationComplete(record.directive, tree));
+}
+
+function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
+  const repliesComplete = directive.commentReplies.every((reply) => {
+    const replyId = reconcilerReplyId(directive.rootDirectiveId, reply.sourceCommentId, reply.sourceCommentVersion);
+    return tree.comments.some(({ managed_marker }) => managed_marker === replyId || managed_marker === `<!-- symphony root-reconciler-reply ${replyId} -->`);
+  });
+  if (!repliesComplete) return false;
+  const resolutionsComplete = directive.humanActionResolutions.every((resolution) => tree.comments.some((comment) => {
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === resolution.resolutionId;
+  }));
+  if (!resolutionsComplete) return false;
+  const action = directive.action;
+  if (action.kind === "wait" || action.kind === "acknowledge") return true;
+  if (action.kind === "request_human_action") {
+    return tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:human-action`);
+  }
+  if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify") {
+    const role = action.kind === "execute_plan" ? "plan" : action.kind === "execute_work" ? "work" : "verify";
+    const targetIssueId = action.kind === "execute_plan" ? action.planIssueId : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
+    const executionId = `${rootIssueIdFromTree(tree)}:${directive.rootDirectiveId}:${role}:${targetIssueId}`;
+    return hasStageResult(tree, executionId);
+  }
+  if (action.kind === "rerun_stage") {
+    return hasStageResult(tree, `${rootIssueIdFromTree(tree)}:${directive.rootDirectiveId}:${action.role}:${action.targetIssueId}`);
+  }
+  if (action.kind === "conclude_cycle") {
+    const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
+    const expected = action.conclusion === "succeeded" ? "Succeeded" : action.conclusion === "canceled" ? "Canceled" : "Changes Required";
+    return cycle?.status_name === expected;
+  }
+  if (action.kind === "create_cycle") {
+    return tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:cycle`) &&
+      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:plan`);
+  }
+  if (action.kind === "supersede_cycle") {
+    return tree.issues.some(({ issue_id, status_name }) => issue_id === action.currentCycleIssueId && status_name === "Changes Required") &&
+      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:cycle`) &&
+      tree.issues.some(({ managed_marker }) => managed_marker === `${directive.rootDirectiveId}:plan`);
+  }
+  if (action.kind === "replan_current_cycle") {
+    const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
+    const plan = tree.issues.find(({ issue_id }) => issue_id === action.planIssueId);
+    return treeOperationsComplete(action.archiveOrRestoreOperations, tree) &&
+      cycle?.status_name === "Planning" && plan?.status_name === "In Progress" && plan.description === action.freshPlanGoal;
+  }
+  if (action.kind === "conclude_root") return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "In Review";
+  if (action.kind === "cancel_root") {
+    return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "Canceled" &&
+      (!action.activeCycleIssueId || tree.issues.find(({ issue_id }) => issue_id === action.activeCycleIssueId)?.status_name === "Canceled");
+  }
+  if (action.kind === "revise_root_tree") return treeOperationsComplete(action.operations, tree);
+  return false;
+}
+
+function treeOperationsComplete(
+  operations: Extract<RootDirective["action"], { kind: "revise_root_tree" }>["operations"],
+  tree: RootReconciliationView["tree"],
+): boolean {
+  return operations.every((operation) => {
+    if (operation.kind === "create_node") {
+      return tree.issues.some((issue) => issue.parent_issue_id === operation.parentIssueId && issue.title === operation.title &&
+        issue.description === operation.description && issue.status_name === operation.status);
+    }
+    if (operation.kind === "update_node") {
+      const issue = tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId);
+      return Boolean(issue && issue.title === operation.title && issue.description === operation.description && issue.status_name === operation.status);
+    }
+    if (operation.kind === "archive_node" || operation.kind === "restore_node") {
+      return tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId)?.is_archived === (operation.kind === "archive_node");
+    }
+    if (operation.kind === "reorder_nodes") {
+      return operation.orderedIssueIds.every((issueId, order) => tree.issues.find(({ issue_id }) => issue_id === issueId)?.order === order);
+    }
+    if (operation.kind === "replace_dependencies") {
+      const expected = new Set(operation.dependencyIssueIds);
+      const actual = new Set(tree.relations.filter((relation) => relation.relation_kind === "blocks" && relation.target_issue_id === operation.workIssueId).map((relation) => relation.source_issue_id));
+      return expected.size === actual.size && [...expected].every((issueId) => actual.has(issueId));
+    }
+    if (operation.kind === "create_relation") {
+      return tree.relations.some((relation) => relation.relation_kind === operation.relationKind && relation.source_issue_id === operation.sourceIssueId && relation.target_issue_id === operation.targetIssueId);
+    }
+    return !tree.relations.some(({ relation_id }) => relation_id === operation.relationId);
+  });
+}
+
+function hasStageResult(tree: RootReconciliationView["tree"], resultId: string): boolean {
+  return tree.comments.some((comment) => {
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "stage_result" && parsed.value.resultId === resultId;
+  });
+}
+
+function rootIssueIdFromTree(tree: RootReconciliationView["tree"]): string {
+  return tree.root_issue_id;
+}
+
+function reconcilerReplyId(directiveId: string, commentId: string, commentVersion: string): string {
+  return createHash("sha256")
+    .update([directiveId, commentId, commentVersion].join("\0"))
+    .digest("hex");
+}
+
+function viewWithDigest(view: RootReconciliationView, treeDigest: string): RootReconciliationView {
+  return { ...view, treeDigest };
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.slice().sort().every((value, index) => value === right.slice().sort()[index]);
+}
+
+function statusForOutcome(outcome: HumanActionResolution["outcome"]): "Approved" | "Rejected" | "Answered" | "Canceled" {
+  if (outcome === "approved" || outcome === "granted" || outcome === "waived" || outcome === "override_applied") return "Approved";
+  if (outcome === "rejected" || outcome === "denied" || outcome === "override_rejected") return "Rejected";
+  if (outcome === "answered") return "Answered";
+  return "Canceled";
+}
+
+function failedMaterialization(directive: RootDirective, code: string) {
+  return { kind: "failed" as const, rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [], sanitizedReason: code };
+}
+
+function validateDirectiveInputs(
+  directive: RootDirective,
+  tree: RootReconciliationView["tree"],
+  pendingInputIds: string[],
+): string | undefined {
+  const pending = new Set(pendingInputIds);
+  const consumed = new Set(directive.consumedInputIds);
+  if (consumed.size !== directive.consumedInputIds.length) return "root_directive_consumed_inputs_duplicate";
+  if ([...consumed].some((inputId) => !pending.has(inputId))) return "root_directive_consumed_input_unknown";
+  if (consumed.size !== pending.size || [...pending].some((inputId) => !consumed.has(inputId))) {
+    return "root_directive_consumed_inputs_incomplete";
+  }
+  const commentInputs = tree.comments
+    .filter((comment) => comment.author_kind === "human" && !comment.managed_marker)
+    .map((comment) => `${comment.comment_id}:${comment.remote_version}`)
+    .filter((inputId) => pending.has(inputId));
+  const replies = directive.commentReplies.map((reply) => reply.sourceInputId);
+  if (new Set(replies).size !== replies.length || replies.length !== commentInputs.length || commentInputs.some((inputId) => !replies.includes(inputId))) {
+    return "root_directive_comment_replies_incomplete";
+  }
+  return undefined;
+}
+
+function timelineEvent(
+  directive: RootDirective,
+  rootIssueId: string,
+  view: RootReconciliationView,
+): WorkflowTimelineEvent {
+  const cycleIssueId = cycleIdForAction(directive.action);
+  const timelineKind = cycleIssueId ? "cycle" : "root";
+  const timelineEventId = createHash("sha256")
+    .update(["decision_accepted", rootIssueId, cycleIssueId ?? "", directive.rootDirectiveId].join("\0"), "utf8")
+    .digest("hex");
+  const base = {
+    protocolVersion: 1 as const,
+    timelineEventId,
+    rootIssueId,
+    occurredAt: view.observedAt,
+    sourceRecordIds: [directive.rootDirectiveId],
+    sourceVersions: [directive.basedOnTargetRootDigest],
+    actor: "root_reconciler" as const,
+    summary: directive.rationale,
+    inputRefs: directive.consumedInputIds,
+    outputRefs: [directive.rootDirectiveId],
+    nextStep: directive.action.kind,
+  };
+  return cycleIssueId
+    ? { ...base, timelineKind: "cycle", cycleIssueId, kind: "cycle_decision_accepted" }
+    : { ...base, timelineKind: timelineKind as "root", kind: "root_decision_accepted" };
+}
+
+function cycleIdForAction(action: RootDirective["action"]): string | undefined {
+  if ("cycleIssueId" in action && typeof action.cycleIssueId === "string") return action.cycleIssueId;
+  if (action.kind === "supersede_cycle") return action.currentCycleIssueId;
+  if (action.kind === "cancel_root") return action.activeCycleIssueId;
+  return undefined;
+}
+
 function validateStageResult(input: StageTurnInput, result: StageResult): void {
   if (
     result.protocolVersion !== 1 ||
@@ -440,18 +744,19 @@ function stageInput(
   role: "plan" | "work" | "verify",
   targetIssueId: string,
   action: object,
+  directiveId: string,
 ) {
-  const roleSessionId = `${root.issueId}:${view.tree.root_issue_id}:${role}`;
+  const roleSessionId = `${root.issueId}:${cycleIssueIdForTarget(view, targetIssueId)}:${role}`;
   return {
     protocolVersion: 1 as const,
     requestId: randomUUID(),
     rootIssueId: root.issueId,
-    cycleIssueId: view.tree.issues.find((issue) => issue.issue_id === targetIssueId)?.parent_issue_id ?? root.issueId,
+    cycleIssueId: cycleIssueIdForTarget(view, targetIssueId),
     targetIssueId,
     role,
     roleSessionId,
     roleTurnId: randomUUID(),
-    stageExecutionId: `${root.issueId}:${role}:${randomUUID()}`,
+    stageExecutionId: `${root.issueId}:${directiveId}:${role}:${targetIssueId}`,
     observedTreeDigest: view.treeDigest,
     contextDigest: view.treeDigest,
     goal: JSON.stringify(action),
@@ -465,6 +770,17 @@ function stageInput(
       workspace_access: role === "work" ? "read_write" : "read_only",
     },
   } as StageTurnInput;
+}
+
+function cycleIssueIdForTarget(
+  view: RootReconciliationView,
+  targetIssueId: string,
+): string {
+  const target = view.tree.issues.find((issue) => issue.issue_id === targetIssueId);
+  if (!target?.parent_issue_id) throw new Error("stage_target_cycle_missing");
+  const cycle = view.tree.issues.find((issue) => issue.issue_id === target.parent_issue_id && issue.issue_kind === "cycle");
+  if (!cycle) throw new Error("stage_target_cycle_invalid");
+  return cycle.issue_id;
 }
 
 function reconcilerLimits(): ReconcilerLimits {

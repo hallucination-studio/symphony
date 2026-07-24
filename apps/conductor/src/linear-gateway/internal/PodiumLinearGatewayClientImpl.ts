@@ -542,7 +542,7 @@ function workflowCommentAuthorKind(value: JsonValue | undefined): LinearWorkflow
 }
 
 function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {
-  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") return value;
+  if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
 }
 
@@ -601,13 +601,29 @@ function workflowMutationBody(
           ...(input.target.expectedIsArchived === undefined ? {} : { expected_is_archived: input.target.expectedIsArchived }),
         },
         ...(input.kind === "update_workflow_issue"
-          ? { status_id: input.statusId, title: input.title, description: input.description }
+          ? {
+            status_id: input.statusId,
+            title: input.title,
+            description: input.description,
+            ...(input.order === undefined ? {} : { order: input.order }),
+          }
           : input.kind === "append_workflow_comment" ? { body: input.body } : {}),
       };
     case "create_workflow_relation":
       return {
         ...common,
         kind: input.kind,
+        source_issue_id: input.sourceIssueId,
+        source_expected_remote_version: input.sourceExpectedRemoteVersion,
+        target_issue_id: input.targetIssueId,
+        target_expected_remote_version: input.targetExpectedRemoteVersion,
+        relation_kind: input.relationKind,
+      };
+    case "remove_workflow_relation":
+      return {
+        ...common,
+        kind: input.kind,
+        relation_id: input.relationId,
         source_issue_id: input.sourceIssueId,
         source_expected_remote_version: input.sourceExpectedRemoteVersion,
         target_issue_id: input.targetIssueId,

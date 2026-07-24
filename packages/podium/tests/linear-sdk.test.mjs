@@ -1063,6 +1063,7 @@ test("workflow SDK mutations keep managed markers and use the explicit status an
   const target = await targetAdapter.readWorkflowMutationTarget("work-1");
   assert.deepEqual(target, {
     issueId: "work-1", projectId: "project-1", updatedAt: "2026-07-16T00:00:00.000Z",
+    order: 1,
     labels: [],
     isArchived: false,
     parentIssueId: "root-1", statusId: "state-todo", title: "Work",
@@ -1211,6 +1212,40 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
   assert.equal(rawOperations.length, 1);
 });
 
+test("workflow relation removal read-back confirms the relation is absent", async () => {
+  const command = {
+    kind: "remove_workflow_relation", writeId: "remove-relation", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "2026-07-16T00:00:06Z",
+    relationId: "relation-1", sourceIssueId: "source-1", sourceExpectedRemoteVersion: "2026-07-16T00:00:04Z",
+    targetIssueId: "target-1", targetExpectedRemoteVersion: "2026-07-16T00:00:05Z", relationKind: "blocks",
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    client: {
+      async rawRequest() {
+        return { data: { root: {
+          id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null,
+        }, source: {
+          id: "source-1", updatedAt: "2026-07-16T00:00:04Z", project: { id: "project-1" },
+          parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null },
+        }, issue: {
+          id: "target-1", updatedAt: "2026-07-16T00:00:05Z", project: { id: "project-1" },
+          parent: { id: "root-1", updatedAt: "2026-07-16T00:00:06Z", project: { id: "project-1" }, parent: null },
+          inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+        } } };
+      },
+    },
+  });
+
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "remove-relation", targetIssueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z",
+    issueVersions: [
+      { issueId: "source-1", remoteVersion: "2026-07-16T00:00:04Z" },
+      { issueId: "target-1", remoteVersion: "2026-07-16T00:00:05Z" },
+      { issueId: "root-1", remoteVersion: "2026-07-16T00:00:06Z" },
+    ],
+  });
+});
+
 test("workflow blocked_by read-back maps Linear relation versions to command endpoints", async () => {
   const root = issue({ id: "root-1" });
   const blocked = issue({ id: "blocked-1", parentId: "root-1" });
@@ -1306,7 +1341,7 @@ test("workflow issue read-back batches child status facts", async () => {
           id: "root-1", updatedAt: "2026-07-22T00:00:01Z", project: { id: "project-1" }, parent: null,
           children: {
           nodes: [{
-            id: "work-1", updatedAt: "2026-07-22T00:00:00Z", project: { id: "project-1" },
+            id: "work-1", updatedAt: "2026-07-22T00:00:00Z", sortOrder: 1, subIssueSortOrder: 1, project: { id: "project-1" },
             parent: { id: "root-1" }, state: { id: "state-todo" }, title: "Implement",
             description: childDescription,
             labels: { nodes: [], pageInfo: { hasNextPage: false } },
@@ -1343,7 +1378,7 @@ test("workflow SDK compact preflight validates all update facts in one physical 
       rawQueries.push(query);
       return { data: { issues: { nodes: [
         {
-          id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null,
+          id: "root-1", updatedAt: "root-version", sortOrder: 1, subIssueSortOrder: null, project: { id: "project-1" }, parent: null,
           state: { id: "status-progress" }, title: "Root", description: "Root",
           team: { id: "team-1", states: { nodes: [{ id: "status-progress" }], pageInfo: { hasNextPage: false } } },
           comments: { nodes: [], pageInfo: { hasNextPage: false } },
@@ -1351,7 +1386,7 @@ test("workflow SDK compact preflight validates all update facts in one physical 
           inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
         },
         {
-          id: "work-1", updatedAt: "work-version", project: { id: "project-1" },
+          id: "work-1", updatedAt: "work-version", sortOrder: 1, subIssueSortOrder: 1, project: { id: "project-1" },
           parent: { id: "root-1", project: { id: "project-1" }, parent: null },
           state: { id: "status-todo" }, title: "Existing", description,
           team: { id: "team-1", states: { nodes: [{ id: "status-progress" }], pageInfo: { hasNextPage: false } } },

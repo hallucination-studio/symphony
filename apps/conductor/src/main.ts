@@ -17,7 +17,12 @@ import { PersistentPerformerAgentChannelFactory } from "./performer-agent-client
 import { PerformerRootReconcilerClientImpl } from "./root-reconciler-client/internal/PerformerRootReconcilerClientImpl.js";
 import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
+import { LinearHumanActionResolutionMaterializerImpl } from "./human-actions/internal/LinearHumanActionResolutionMaterializerImpl.js";
+import { LinearHumanActionResolutionValidatorImpl } from "./human-actions/internal/LinearHumanActionResolutionValidatorImpl.js";
 import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
+import { LinearRootDirectiveRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootDirectiveRecordWriterImpl.js";
+import { LinearRootReconcilerReplyWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
+import { LinearWorkflowTimelinePublisherImpl } from "./timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
@@ -166,6 +171,11 @@ export async function runConductor(environment = process.env): Promise<void> {
       gateway,
       new LinearHumanActionMaterializerImpl(gateway),
     ),
+    directiveRecordWriter: new LinearRootDirectiveRecordWriterImpl(gateway),
+    replyWriter: new LinearRootReconcilerReplyWriterImpl(gateway),
+    humanActionResolutionValidator: new LinearHumanActionResolutionValidatorImpl(),
+    humanActionResolutionMaterializer: new LinearHumanActionResolutionMaterializerImpl(gateway),
+    timeline: new LinearWorkflowTimelinePublisherImpl(gateway),
     profileIdFor: async () => {
       const file = await profiles.list();
       const profileId = file.activeProfileId;

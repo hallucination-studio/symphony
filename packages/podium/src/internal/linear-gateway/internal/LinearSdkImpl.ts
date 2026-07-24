@@ -53,12 +53,16 @@ type WorkflowScopeIssue = {
 type WorkflowVersionScopeIssue = {
   id: string;
   updatedAt?: string;
+  sortOrder?: number;
+  subIssueSortOrder?: number | null;
   project?: { id?: string } | null;
   parent?: WorkflowVersionScopeIssue | null;
 };
 
 type WorkflowPreflightIssue = WorkflowScopeIssue & {
   updatedAt?: string;
+  sortOrder?: number;
+  subIssueSortOrder?: number | null;
   archivedAt?: string | null;
   title?: string;
   description?: string | null;
@@ -71,7 +75,7 @@ type WorkflowPreflightIssue = WorkflowScopeIssue & {
   comments?: { nodes?: Array<{ id?: string; body?: string; updatedAt?: string; issue?: { id?: string } }>; pageInfo?: { hasNextPage?: boolean } };
   children?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean } };
   inverseRelations?: {
-    nodes?: Array<{ type?: string; issue?: { id?: string; updatedAt?: string; project?: { id?: string } }; relatedIssue?: { id?: string; project?: { id?: string } } }>;
+    nodes?: Array<{ id?: string; type?: string; issue?: { id?: string; updatedAt?: string; project?: { id?: string } }; relatedIssue?: { id?: string; project?: { id?: string } } }>;
     pageInfo?: { hasNextPage?: boolean };
   };
 };
@@ -1647,19 +1651,19 @@ export class LinearSdkImpl implements LinearClientInterface {
     const issueIds = [...new Set([
       command.rootIssueId,
       ...(command.kind === "create_workflow_issue" ? [command.parentIssueId]
-        : command.kind === "create_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
+          : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
           : [command.target.targetIssueId]),
     ])];
     const response = await rawRequest(`query WorkflowMutationPreflight {
       issues(includeArchived: true, filter: { id: { in: [${issueIds.map(quoteGraphql).join(", ")}] } }) {
         nodes {
           ${workflowScopeSelection(32)}
-          updatedAt archivedAt title description state { id }
+          updatedAt archivedAt sortOrder subIssueSortOrder title description state { id }
           labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
           team { id states(first: 64) { nodes { id } pageInfo { hasNextPage } } }
           comments(first: 64) { nodes { id body updatedAt issue { id } } pageInfo { hasNextPage } }
-          children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } }
-          inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } }
+          children(first: 64, includeArchived: true) { nodes { id updatedAt archivedAt sortOrder subIssueSortOrder project { id } parent { id } state { id } title description labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } pageInfo { hasNextPage } }
+          inverseRelations(first: 64) { nodes { id type issue { id updatedAt project { id } } relatedIssue { id project { id } } } pageInfo { hasNextPage } }
         }
       }
     }`);
@@ -1741,6 +1745,7 @@ export class LinearSdkImpl implements LinearClientInterface {
             workflowIssueKindForUpdate(current),
           ),
           stateId: command.statusId,
+          ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
         });
         return;
       }
@@ -1786,14 +1791,28 @@ export class LinearSdkImpl implements LinearClientInterface {
         if (command.relationKind === "triggered_by") {
           throw new Error("linear_workflow_relation_kind_unsupported");
         }
-        const issueId = command.relationKind === "blocks" ? command.sourceIssueId : command.targetIssueId;
-        const relatedIssueId = command.relationKind === "blocks" ? command.targetIssueId : command.sourceIssueId;
+        const issueId = command.relationKind === "blocks" || command.relationKind === "relates_to"
+          ? command.sourceIssueId : command.targetIssueId;
+        const relatedIssueId = command.relationKind === "blocks" || command.relationKind === "relates_to"
+          ? command.targetIssueId : command.sourceIssueId;
         const payload = await this.#client.createIssueRelation({
           issueId,
           relatedIssueId,
-          type: "blocks" as Parameters<LinearClient["createIssueRelation"]>[0]["type"],
+          type: (command.relationKind === "relates_to" ? "related" : "blocks") as Parameters<LinearClient["createIssueRelation"]>[0]["type"],
         });
         if (!payload.success) throw new Error("linear_workflow_relation_create_failed");
+        return;
+      }
+      case "remove_workflow_relation": {
+        const relation = await this.#client.issueRelation(command.relationId);
+        const expectedIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
+        const expectedRelatedIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
+        const expectedType = command.relationKind === "relates_to" ? "related" : "blocks";
+        if (relation.issueId !== expectedIssueId || relation.relatedIssueId !== expectedRelatedIssueId || relation.type !== expectedType) {
+          throw new Error("linear_workflow_relation_invalid");
+        }
+        const payload = await relation.delete();
+        if (!payload.success) throw new Error("linear_workflow_relation_remove_failed");
         return;
       }
     }
@@ -1804,7 +1823,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   ): Promise<void> {
     const targetIds = command.kind === "create_workflow_issue"
       ? [command.parentIssueId]
-      : command.kind === "create_workflow_relation"
+      : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
         ? [command.sourceIssueId, command.targetIssueId]
         : [command.target.targetIssueId];
     if (targetIds.length > 1) {
@@ -1902,7 +1921,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   ): Promise<import("../types.js").WorkflowMutationReadBack | undefined> {
     const outcomeTargetId = command.kind === "create_workflow_issue"
       ? command.parentIssueId
-      : command.kind === "create_workflow_relation"
+      : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
         ? command.sourceIssueId
         : command.target.targetIssueId;
     const hasRawRequest = Boolean(this.#client.client?.rawRequest);
@@ -1946,6 +1965,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       return issue && issue.projectId === command.expectedProjectId &&
         issue.statusId === command.statusId && issue.title === command.title &&
         issue.description === command.description &&
+        (command.order === undefined || issue.order === command.order) &&
         (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId) &&
         (command.target.expectedManagedMarker === undefined ||
           issue.managedMarker === command.target.expectedManagedMarker)
@@ -1985,7 +2005,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
         : undefined;
     }
-    if (command.kind !== "create_workflow_relation") return undefined;
+    if (command.kind !== "create_workflow_relation" && command.kind !== "remove_workflow_relation") return undefined;
     const compactRelation = await this.#readCompactWorkflowRelationOutcome(command);
     if (compactRelation.available) return compactRelation.value;
     const tree = await this.getWorkflowIssueTree({
@@ -2002,6 +2022,24 @@ export class LinearSdkImpl implements LinearClientInterface {
         ? value.sourceIssueId === sourceIssueId && value.targetIssueId === targetIssueId
         : false,
     );
+    if (command.kind === "remove_workflow_relation") {
+      if (relation) return undefined;
+      const source = tree.issues.find((value) => value.issueId === command.sourceIssueId);
+      const target = tree.issues.find((value) => value.issueId === command.targetIssueId);
+      const root = tree.issues.find((value) => value.issueId === command.rootIssueId);
+      return source && target && root
+        ? {
+            writeId: command.writeId,
+            targetIssueId: command.sourceIssueId,
+            remoteVersion: source.updatedAt,
+            issueVersions: [
+              { issueId: command.sourceIssueId, remoteVersion: source.updatedAt },
+              { issueId: command.targetIssueId, remoteVersion: target.updatedAt },
+              { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
+            ],
+          }
+        : undefined;
+    }
     if (!relation) return undefined;
     const source = tree.issues.find((value) => value.issueId === command.sourceIssueId);
     const target = tree.issues.find((value) => value.issueId === command.targetIssueId);
@@ -2046,7 +2084,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   async #readCompactWorkflowTarget(issueId: string, projectId: string, rootIssueId: string) {
     const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
     if (!rawRequest) return undefined;
-    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt archivedAt title description state { id } labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } }`);
+    const response = await rawRequest(`query WorkflowMutationTarget { issue(id: ${quoteGraphql(issueId)}) { ${workflowScopeSelection(32)} updatedAt archivedAt sortOrder subIssueSortOrder title description state { id } labels(first: 64) { nodes { name } pageInfo { hasNextPage } } } }`);
     const issue = (response as { data?: { issue?: WorkflowPreflightIssue | null } }).data?.issue;
     if (!issue || !workflowScopeIssueBelongsToRoot(issue, projectId, rootIssueId)) return undefined;
     return workflowPreflightTargetValue(issue);
@@ -2077,7 +2115,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async #readCompactWorkflowRelationOutcome(
-    command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" }>,
+    command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" | "remove_workflow_relation" }>,
   ): Promise<{
     available: boolean;
     value: import("../types.js").WorkflowMutationReadBack | undefined;
@@ -2088,7 +2126,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       ? command.targetIssueId : command.sourceIssueId;
     const targetIssueId = command.relationKind === "blocked_by"
       ? command.sourceIssueId : command.targetIssueId;
-    const response = await rawRequest(`query WorkflowMutationRelation { root: issue(id: ${quoteGraphql(command.rootIssueId)}) { id updatedAt project { id } parent { id } } source: issue(id: ${quoteGraphql(sourceIssueId)}) { ${workflowVersionScopeSelection(32)} } issue(id: ${quoteGraphql(targetIssueId)}) { ${workflowVersionScopeSelection(32)} inverseRelations(first: 64) { nodes { type issue { id updatedAt project { id } } relatedIssue { id updatedAt project { id } } } pageInfo { hasNextPage } } } }`);
+    const response = await rawRequest(`query WorkflowMutationRelation { root: issue(id: ${quoteGraphql(command.rootIssueId)}) { id updatedAt project { id } parent { id } } source: issue(id: ${quoteGraphql(sourceIssueId)}) { ${workflowVersionScopeSelection(32)} } issue(id: ${quoteGraphql(targetIssueId)}) { ${workflowVersionScopeSelection(32)} inverseRelations(first: 64) { nodes { id type issue { id updatedAt project { id } } relatedIssue { id updatedAt project { id } } } pageInfo { hasNextPage } } } }`);
     const data = (response as {
       data?: {
         root?: { id?: string; updatedAt?: string; project?: { id?: string }; parent?: { id?: string } | null };
@@ -2096,6 +2134,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         issue?: WorkflowVersionScopeIssue & {
           inverseRelations?: {
             nodes?: Array<{
+              id?: string;
               type?: string;
               issue?: { id?: string; updatedAt?: string; project?: { id?: string } };
               relatedIssue?: { id?: string; updatedAt?: string; project?: { id?: string } };
@@ -2116,7 +2155,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       throw new Error("linear_workflow_relation_read_back_incomplete");
     }
     const matchedRelation = issue.inverseRelations.nodes?.find((relation) =>
-      relation.type === "blocks" && relation.issue?.id === sourceIssueId &&
+      relation.type === (command.relationKind === "relates_to" ? "related" : "blocks") && relation.issue?.id === sourceIssueId &&
       relation.issue.project?.id === command.expectedProjectId &&
       relation.relatedIssue?.id === targetIssueId &&
       relation.relatedIssue.project?.id === command.expectedProjectId,
@@ -2125,20 +2164,38 @@ export class LinearSdkImpl implements LinearClientInterface {
     const targetVersion = latestRemoteVersion(issue.updatedAt, matchedRelation?.relatedIssue?.updatedAt);
     const commandSourceVersion = command.relationKind === "blocked_by" ? targetVersion : sourceVersion;
     const commandTargetVersion = command.relationKind === "blocked_by" ? sourceVersion : targetVersion;
-    return {
-      available: true,
-      value: matchedRelation
-        ? commandSourceVersion && commandTargetVersion && root.updatedAt
-          ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: commandSourceVersion,
+    const readBack = matchedRelation
+      ? commandSourceVersion && commandTargetVersion && root.updatedAt
+        ? {
+            writeId: command.writeId,
+            targetIssueId: command.sourceIssueId,
+            remoteVersion: commandSourceVersion,
             issueVersions: [...new Map([
               { issueId: command.sourceIssueId, remoteVersion: commandSourceVersion },
               { issueId: command.targetIssueId, remoteVersion: commandTargetVersion },
               ...workflowAncestryVersions(source, command.expectedProjectId, command.rootIssueId).slice(1),
               ...workflowAncestryVersions(issue, command.expectedProjectId, command.rootIssueId).slice(1),
               { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
-            ].map((version) => [version.issueId, version])).values()] }
-          : (() => { throw new Error("linear_workflow_relation_version_missing"); })()
-        : undefined,
+            ].map((version) => [version.issueId, version])).values()]
+          }
+        : (() => { throw new Error("linear_workflow_relation_version_missing"); })()
+      : command.kind === "remove_workflow_relation" && commandSourceVersion && commandTargetVersion && root.updatedAt
+        ? {
+            writeId: command.writeId,
+            targetIssueId: command.sourceIssueId,
+            remoteVersion: commandSourceVersion,
+            issueVersions: [...new Map([
+              { issueId: command.sourceIssueId, remoteVersion: commandSourceVersion },
+              { issueId: command.targetIssueId, remoteVersion: commandTargetVersion },
+              ...workflowAncestryVersions(source, command.expectedProjectId, command.rootIssueId).slice(1),
+              ...workflowAncestryVersions(issue, command.expectedProjectId, command.rootIssueId).slice(1),
+              { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
+            ].map((version) => [version.issueId, version])).values()]
+          }
+        : undefined;
+    return {
+      available: true,
+      value: readBack,
     };
   }
 
@@ -2703,9 +2760,11 @@ function workflowSourceManifest(input: {
 function workflowRelationKindValue(
   value: string,
 ): WorkflowRelationValue["relationKind"] | undefined {
-  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") {
+  if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") {
+    if (value === "relates_to") return value;
     return value;
   }
+  if (value === "related") return "relates_to";
   return undefined;
 }
 
@@ -2724,6 +2783,7 @@ async function workflowMutationTargetValue(issue: Issue) {
     issueId: issue.id,
     projectId: issue.projectId,
     updatedAt: timestampValue(issue.updatedAt),
+    order: issue.subIssueSortOrder ?? issue.sortOrder,
     labels,
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
@@ -2737,6 +2797,8 @@ async function workflowMutationTargetValue(issue: Issue) {
 
 function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
   if (typeof issue.updatedAt !== "string" || typeof issue.project?.id !== "string" ||
+      typeof issue.sortOrder !== "number" ||
+      (issue.subIssueSortOrder !== null && issue.subIssueSortOrder !== undefined && typeof issue.subIssueSortOrder !== "number") ||
       typeof issue.state?.id !== "string" || typeof issue.title !== "string" ||
       typeof issue.description !== "string") throw new Error("linear_workflow_target_invalid");
   const managed = parseManagedDescription(issue.description);
@@ -2744,6 +2806,7 @@ function workflowPreflightTargetValue(issue: WorkflowPreflightIssue) {
     issueId: issue.id,
     projectId: issue.project.id,
     updatedAt: issue.updatedAt,
+    order: issue.subIssueSortOrder ?? issue.sortOrder,
     labels: workflowRawLabelNames(issue.labels),
     isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
     ...(issue.parent?.id ? { parentIssueId: issue.parent.id } : {}),
@@ -2778,6 +2841,7 @@ function workflowPreflightOutcome(
     const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
     return target.statusId === command.statusId && target.title === command.title &&
       target.description === command.description &&
+      (command.order === undefined || target.order === command.order) &&
       (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId) &&
       (command.target.expectedManagedMarker === undefined || target.managedMarker === command.target.expectedManagedMarker)
       ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt } : undefined;
@@ -2801,18 +2865,51 @@ function workflowPreflightOutcome(
       ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: matches[0].updatedAt }
       : undefined;
   }
-  if (command.kind !== "create_workflow_relation") return undefined;
+  if (command.kind !== "create_workflow_relation" && command.kind !== "remove_workflow_relation") return undefined;
   const sourceIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
   const targetIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
   const relations = facts.get(targetIssueId)?.inverseRelations;
   if (!relations || relations.pageInfo?.hasNextPage !== false || !Array.isArray(relations.nodes)) {
     throw new Error("linear_workflow_relation_read_back_incomplete");
   }
-  const relation = relations.nodes.find((value) => value.type === "blocks" &&
-    value.issue?.id === sourceIssueId && value.relatedIssue?.id === targetIssueId);
+  const relation = relations.nodes.find((value) =>
+    value.type === (command.relationKind === "relates_to" ? "related" : "blocks") &&
+    value.issue?.id === sourceIssueId && value.relatedIssue?.id === targetIssueId &&
+    (command.kind !== "remove_workflow_relation" || value.id === command.relationId));
+  if (command.kind === "remove_workflow_relation") {
+    if (relation) return undefined;
+    const source = facts.get(command.sourceIssueId);
+    const target = facts.get(command.targetIssueId);
+    const root = facts.get(command.rootIssueId);
+    return source && target && root && typeof source.updatedAt === "string" && typeof target.updatedAt === "string" && typeof root.updatedAt === "string"
+      ? {
+          writeId: command.writeId,
+          targetIssueId: command.sourceIssueId,
+          remoteVersion: source.updatedAt,
+          issueVersions: [
+            { issueId: command.sourceIssueId, remoteVersion: source.updatedAt },
+            { issueId: command.targetIssueId, remoteVersion: target.updatedAt },
+            { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
+          ],
+        }
+      : undefined;
+  }
   return relation?.issue?.updatedAt
     ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: relation.issue.updatedAt }
     : undefined;
+}
+
+function workflowPreflightRelation(
+  facts: ReadonlyMap<string, WorkflowPreflightIssue>,
+  command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" | "remove_workflow_relation" }>,
+) {
+  const sourceIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
+  const targetIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
+  const expectedType = command.relationKind === "relates_to" ? "related" : "blocks";
+  return [...facts.values()].flatMap((fact) => fact.inverseRelations?.nodes ?? []).find((relation) =>
+    relation.type === expectedType && relation.issue?.id === sourceIssueId &&
+    relation.relatedIssue?.id === targetIssueId &&
+    (command.kind !== "remove_workflow_relation" || relation.id === command.relationId));
 }
 
 function workflowPreconditionMismatch(
@@ -2820,7 +2917,7 @@ function workflowPreconditionMismatch(
   facts: ReadonlyMap<string, WorkflowPreflightIssue>,
 ): string | undefined {
   const targets = command.kind === "create_workflow_issue" ? [command.parentIssueId]
-    : command.kind === "create_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
+    : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
       : [command.target.targetIssueId];
   if ([command.rootIssueId, ...targets].some((id) => {
     const issue = facts.get(id);
@@ -2839,6 +2936,11 @@ function workflowPreconditionMismatch(
     if (facts.get(command.sourceIssueId)?.updatedAt !== command.sourceExpectedRemoteVersion) return "relation_source_remote_version";
     return facts.get(command.targetIssueId)?.updatedAt === command.targetExpectedRemoteVersion
       ? undefined : "relation_target_remote_version";
+  }
+  if (command.kind === "remove_workflow_relation") {
+    if (facts.get(command.sourceIssueId)?.updatedAt !== command.sourceExpectedRemoteVersion) return "relation_source_remote_version";
+    if (facts.get(command.targetIssueId)?.updatedAt !== command.targetExpectedRemoteVersion) return "relation_target_remote_version";
+    return workflowPreflightRelation(facts, command) ? undefined : "relation_missing";
   }
   const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
   if (target.updatedAt !== command.target.expectedRemoteVersion) return "target_remote_version";
@@ -2861,6 +2963,8 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
   const raw = value as {
     id?: unknown;
     updatedAt?: unknown;
+    sortOrder?: unknown;
+    subIssueSortOrder?: unknown;
     archivedAt?: unknown;
     project?: { id?: unknown } | null;
     parent?: { id?: unknown } | null;
@@ -2873,6 +2977,8 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
       typeof raw.project?.id !== "string" || raw.parent?.id !== expectedParentIssueId ||
       typeof raw.state?.id !== "string" || typeof raw.title !== "string" ||
       typeof raw.description !== "string" ||
+      typeof raw.sortOrder !== "number" ||
+      (raw.subIssueSortOrder !== null && raw.subIssueSortOrder !== undefined && typeof raw.subIssueSortOrder !== "number") ||
       (raw.archivedAt !== null && raw.archivedAt !== undefined && typeof raw.archivedAt !== "string")) {
     throw new Error("linear_workflow_target_invalid");
   }
@@ -2881,6 +2987,7 @@ function workflowMutationRawTargetValue(value: unknown, expectedParentIssueId: s
     issueId: raw.id,
     projectId: raw.project.id,
     updatedAt: raw.updatedAt,
+    order: raw.subIssueSortOrder ?? raw.sortOrder,
     labels: workflowRawLabelNames(raw.labels, true),
     isArchived: raw.archivedAt !== null && raw.archivedAt !== undefined,
     parentIssueId: expectedParentIssueId,

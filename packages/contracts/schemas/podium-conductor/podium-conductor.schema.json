@@ -714,6 +714,7 @@
           "enum": [
             "blocks",
             "blocked_by",
+            "relates_to",
             "triggered_by"
           ]
         },
@@ -1070,6 +1071,11 @@
         },
         "description": {
           "$ref": "common.schema.json#/$defs/BoundedText"
+        },
+        "order": {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
         }
       }
     },
@@ -1220,9 +1226,44 @@
           "enum": [
             "blocks",
             "blocked_by",
+            "relates_to",
             "triggered_by"
           ]
         }
+      }
+    },
+    "RemoveWorkflowRelationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "binding_id",
+        "write_id",
+        "conductor_short_hash",
+        "expected_project_id",
+        "root_issue_id",
+        "expected_root_remote_version",
+        "relation_id",
+        "source_issue_id",
+        "source_expected_remote_version",
+        "target_issue_id",
+        "target_expected_remote_version",
+        "relation_kind"
+      ],
+      "properties": {
+        "kind": { "const": "remove_workflow_relation" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] }
       }
     },
     "WorkflowMutationCommand": {
@@ -1244,6 +1285,9 @@
         },
         {
           "$ref": "#/$defs/CreateWorkflowRelationCommand"
+        },
+        {
+          "$ref": "#/$defs/RemoveWorkflowRelationCommand"
         }
       ]
     },

@@ -15,6 +15,7 @@ import type {
   PlanContract,
   ProgressAssessment,
   RootOwnershipRecord,
+  RootDirectiveRecord,
   StageContextCoverage,
   StageContextSource,
   StageExecutionRecord,
@@ -27,6 +28,8 @@ import type {
   VerifyResultRecord,
   WorkNodeContract,
 } from "../api/ManagedRecords.js";
+import { decodeConductorPerformerRootDirective, type JsonValue } from "@symphony/contracts";
+import type { RootDirective } from "../api/RootReconciliationContracts.js";
 
 const marker = "<!-- symphony managed-record\n";
 const endMarker = "\n-->";
@@ -71,6 +74,7 @@ function decodeRecord(value: unknown): ManagedRecord {
   if (object.version !== 1) fail(object.version === undefined ? "managed_record_required_field:version" : "managed_record_version_invalid");
   switch (kind) {
     case "root_ownership": return decodeRootOwnership(object);
+    case "root_directive": return decodeRootDirectiveRecord(object);
     case "delivery": return decodeDelivery(object);
     case "cycle_marker": return decodeCycleMarker(object);
     case "node_marker": return decodeNodeMarker(object);
@@ -96,6 +100,45 @@ function decodeRootOwnership(o: Record<string, unknown>): RootOwnershipRecord {
     performerProfileId: id(o, "performer_profile_id"), deliveryBranch: text(o, "delivery_branch"),
     ...(o.pull_request === undefined ? {} : { pullRequest: text(o, "pull_request") }), ownerGeneration: id(o, "owner_generation"),
   };
+}
+
+function decodeRootDirectiveRecord(o: Record<string, unknown>): RootDirectiveRecord {
+  fields(o, [
+    "kind", "version", "root_directive_id", "root_issue_id", "reconciler_session_id", "reconciler_turn_id",
+    "based_on_target_root_digest", "consumed_input_ids", "directive", "accepted_at",
+  ]);
+  const directive = decodeRootDirective(requiredObject(o, "directive"));
+  if (
+    directive.rootDirectiveId !== id(o, "root_directive_id") ||
+    directive.basedOnTargetRootDigest !== id(o, "based_on_target_root_digest") ||
+    directive.reconcilerSessionId !== id(o, "reconciler_session_id") ||
+    directive.reconcilerTurnId !== id(o, "reconciler_turn_id")
+  ) fail("managed_record_root_directive_correlation_invalid");
+  return {
+    kind: "root_directive",
+    version: 1,
+    rootDirectiveId: id(o, "root_directive_id"),
+    rootIssueId: id(o, "root_issue_id"),
+    reconcilerSessionId: id(o, "reconciler_session_id"),
+    reconcilerTurnId: id(o, "reconciler_turn_id"),
+    basedOnTargetRootDigest: id(o, "based_on_target_root_digest"),
+    consumedInputIds: ids(o, "consumed_input_ids"),
+    directive,
+    acceptedAt: timestamp(o, "accepted_at"),
+  };
+}
+
+function decodeRootDirective(value: Record<string, unknown>): RootDirective {
+  const wire = snakeCaseKeys({ ...value, protocol_version: "1" });
+  try {
+    decodeConductorPerformerRootDirective(wire as JsonValue);
+  } catch {
+    fail("managed_record_root_directive_invalid");
+  }
+  const camel = camelCaseKeys(wire);
+  if (!isObject(camel)) fail("managed_record_root_directive_invalid");
+  if (camel.protocolVersion === "1") camel.protocolVersion = 1;
+  return camel as unknown as RootDirective;
 }
 
 function decodeDelivery(o: Record<string, unknown>): DeliveryRecord {
@@ -293,6 +336,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   const record = value as unknown as ManagedRecord;
   const topFields: Record<ManagedRecord["kind"], { allowed: string[]; optional?: string[] }> = {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
+    root_directive: { allowed: ["kind", "version", "rootDirectiveId", "rootIssueId", "reconcilerSessionId", "reconcilerTurnId", "basedOnTargetRootDigest", "consumedInputIds", "directive", "acceptedAt"] },
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     cycle_marker: { allowed: ["kind", "version", "rootIssueId", "cycleKey", "trigger", "baselineRevision", "predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"], optional: ["predecessorCycleIssueId", "repairGroupId", "findingIds", "predecessorPlanContractDigest", "predecessorVerifyResultId", "predecessorVerifiedRevision"] },
     node_marker: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "nodeKey", "nodeKind", "planContractDigest"] },
@@ -317,6 +361,16 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   }
   switch (record.kind) {
     case "root_ownership": return encodeRootOwnership(record);
+    case "root_directive": return encodeSimple(record, {
+      root_directive_id: record.rootDirectiveId,
+      root_issue_id: record.rootIssueId,
+      reconciler_session_id: record.reconcilerSessionId,
+      reconciler_turn_id: record.reconcilerTurnId,
+      based_on_target_root_digest: record.basedOnTargetRootDigest,
+      consumed_input_ids: record.consumedInputIds,
+      directive: encodeRootDirective(record.directive),
+      accepted_at: record.acceptedAt,
+    });
     case "delivery": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, verify_result_id: record.verifyResultId, verified_revision: record.verifiedRevision, delivery_kind: record.deliveryKind, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), delivered_at: record.deliveredAt });
     case "cycle_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_key: record.cycleKey, trigger: record.trigger, baseline_revision: record.baselineRevision, ...(record.predecessorCycleIssueId === undefined ? {} : { predecessor_cycle_issue_id: record.predecessorCycleIssueId }), ...(record.repairGroupId === undefined ? {} : { repair_group_id: record.repairGroupId }), ...(record.findingIds === undefined ? {} : { finding_ids: record.findingIds }), ...(record.predecessorPlanContractDigest === undefined ? {} : { predecessor_plan_contract_digest: record.predecessorPlanContractDigest }), ...(record.predecessorVerifyResultId === undefined ? {} : { predecessor_verify_result_id: record.predecessorVerifyResultId }), ...(record.predecessorVerifiedRevision === undefined ? {} : { predecessor_verified_revision: record.predecessorVerifiedRevision }) });
     case "node_marker": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_key: record.nodeKey, node_kind: record.nodeKind, plan_contract_digest: record.planContractDigest });
@@ -335,6 +389,16 @@ function encodeRecord(value: unknown): Record<string, unknown> {
 }
 
 function encodeRootOwnership(record: RootOwnershipRecord): Record<string, unknown> { return encodeSimple(record, { root_issue_id: record.rootIssueId, conductor_id: record.conductorId, performer_profile_id: record.performerProfileId, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), owner_generation: record.ownerGeneration }); }
+function encodeRootDirective(record: RootDirective): Record<string, unknown> {
+  const wire = snakeCaseKeys({ ...record, protocolVersion: "1" });
+  try {
+    decodeConductorPerformerRootDirective(wire as JsonValue);
+  } catch {
+    fail("managed_record_root_directive_invalid");
+  }
+  if (!isObject(wire)) fail("managed_record_root_directive_invalid");
+  return wire;
+}
 function encodeStageExecution(record: StageExecutionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }), context_digest: record.contextDigest, source_manifest: record.sourceManifest.map(encodeSource), coverage: encodeCoverage(record.coverage), instruction_set_id: record.instructionSetId, execution_policy_id: record.executionPolicyId, limits: encodeLimits(record.limits), repository_revision: record.repositoryRevision, started_at: record.startedAt, deadline_at: record.deadlineAt }); }
 function encodeStageTerminal(record: StageTerminalRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, context_digest: record.contextDigest, outcome: record.outcome, completed_at: record.completedAt, summary: record.summary, usage: encodeUsage(record.usage), ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }) }); }
 function encodeStageResult(record: StageResultRecord): Record<string, unknown> { return encodeSimple(record, {
@@ -359,6 +423,22 @@ function encodeVerifyNode(value: VerifyNodeContract): Record<string, unknown> { 
 function encodeSimple(record: { kind: string; version: 1 }, fieldsToEncode: Record<string, unknown>): Record<string, unknown> { return { kind: record.kind, version: 1, ...fieldsToEncode }; }
 
 function recordObject(value: unknown): Record<string, unknown> { if (!isObject(value)) fail("managed_record_payload_invalid"); return value; }
+function snakeCaseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(snakeCaseKeys);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`),
+    snakeCaseKeys(child),
+  ]));
+}
+function camelCaseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(camelCaseKeys);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key.replace(/_([a-z])/gu, (_, letter: string) => letter.toUpperCase()),
+    camelCaseKeys(child),
+  ]));
+}
 function recordFields(value: unknown, allowed: string[], optional: string[] = []): void { const object = recordObject(value); const allowedSet = new Set(allowed); const optionalSet = new Set(optional); for (const key of Object.keys(object)) if (!allowedSet.has(key)) fail(`managed_record_unknown_field:${key}`); for (const key of allowed) if (!optionalSet.has(key) && !(key in object)) fail(`managed_record_required_field:${key}`); }
 function requiredObject(o: Record<string, unknown>, key: string): Record<string, unknown> { const value = o[key]; if (value === undefined) fail(`managed_record_required_field:${key}`); return recordObject(value); }
 function fields(o: Record<string, unknown>, allowed: string[], optional: string[] = []): void { const allowedSet = new Set(allowed); for (const key of Object.keys(o)) if (!allowedSet.has(key)) fail(`managed_record_unknown_field:${key}`); const optionalSet = new Set(optional); for (const key of allowed) if (!optionalSet.has(key) && !(key in o)) fail(`managed_record_required_field:${key}`); }

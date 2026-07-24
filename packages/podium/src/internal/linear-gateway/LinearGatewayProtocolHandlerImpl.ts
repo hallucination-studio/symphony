@@ -384,7 +384,7 @@ export class LinearGatewayProtocolHandlerImpl {
       ) && parent?.statusId === command.parentExpectedStatusId
         ? undefined : { kind: "precondition_conflict" };
     }
-    if (command.kind === "create_workflow_relation") {
+    if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") {
       const source = await this.client.readWorkflowMutationTarget(command.sourceIssueId);
       const target = await this.client.readWorkflowMutationTarget(command.targetIssueId);
       return workflowTargetMatches(source, command.expectedProjectId, command.sourceIssueId, command.sourceExpectedRemoteVersion) &&
@@ -458,7 +458,7 @@ function workflowTargetMatches(
 
 function workflowReadBackIssueId(command: WorkflowMutationCommand): string {
   if (command.kind === "create_workflow_issue") return command.parentIssueId;
-  if (command.kind === "create_workflow_relation") return command.sourceIssueId;
+  if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") return command.sourceIssueId;
   return command.target.targetIssueId;
 }
 
@@ -606,7 +606,7 @@ function workflowCommentAuthorKind(value: string | undefined): boolean {
 }
 
 function workflowRelationKind(value: string | undefined): boolean {
-  return value === "blocks" || value === "blocked_by" || value === "triggered_by";
+  return value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by";
 }
 
 function validateWorkflowSourceFacts(

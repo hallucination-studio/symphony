@@ -119,7 +119,7 @@ export type WorkflowCommentAuthorKind =
 
 export interface WorkflowRelationValue {
   relationId: string;
-  relationKind: "blocks" | "blocked_by" | "triggered_by";
+  relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
   sourceIssueId: string;
   targetIssueId: string;
 }
@@ -208,6 +208,7 @@ export type WorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      order?: number;
     })
   | (WorkflowMutationBase & {
       kind: "append_workflow_comment";
@@ -238,7 +239,16 @@ export type WorkflowMutationCommand =
       sourceExpectedRemoteVersion: string;
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "triggered_by";
+      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+    })
+  | (WorkflowMutationBase & {
+      kind: "remove_workflow_relation";
+      relationId: string;
+      sourceIssueId: string;
+      sourceExpectedRemoteVersion: string;
+      targetIssueId: string;
+      targetExpectedRemoteVersion: string;
+      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
     });
 
 export interface WorkflowMutationReadBack {

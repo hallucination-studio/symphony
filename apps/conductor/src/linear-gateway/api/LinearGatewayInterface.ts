@@ -40,7 +40,7 @@ export interface LinearWorkflowTreeSnapshot {
   }>;
   relations: Array<{
     relation_id: string;
-    relation_kind: "blocks" | "blocked_by" | "triggered_by";
+    relation_kind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
     source_issue_id: string;
     target_issue_id: string;
   }>;
@@ -99,6 +99,7 @@ export type LinearWorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      order?: number;
     }
   | {
       kind: "append_workflow_comment";
@@ -144,7 +145,21 @@ export type LinearWorkflowMutationCommand =
       sourceExpectedRemoteVersion: string;
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "triggered_by";
+      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+    }
+  | {
+      kind: "remove_workflow_relation";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      relationId: string;
+      sourceIssueId: string;
+      sourceExpectedRemoteVersion: string;
+      targetIssueId: string;
+      targetExpectedRemoteVersion: string;
+      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
     };
 
 export type LinearWorkflowMutationOutcome =

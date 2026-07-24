@@ -287,6 +287,24 @@ function cycleObservation(
     .filter((relation) => descendants.has(relation.source_issue_id) && descendants.has(relation.target_issue_id))
     .map(toFactRelation);
   const humanActionRecords = cycleIssues.filter(({ issueKind }) => issueKind === "human_action").map((issue) => humanActionRecord(issue, cycle.issue_id, tree));
+  const humanActionIssueIds = new Set(humanActionRecords.map(({ actionIssueId }) => actionIssueId));
+  const humanActionResolutions = tree.comments
+    .map((comment) => parseManagedRecord(comment.body))
+    .filter((parsed): parsed is { ok: true; value: Extract<ManagedRecord, { kind: "human_action_resolution" }> } =>
+      parsed.ok && parsed.value.kind === "human_action_resolution" && humanActionIssueIds.has(parsed.value.actionIssueId))
+    .map(({ value }) => ({
+      resolutionId: value.resolutionId,
+      actionId: value.actionId,
+      actionIssueId: value.actionIssueId,
+      actionKind: value.actionKind,
+      outcome: value.outcome,
+      terminalStatus: value.terminalStatus,
+      terminalRemoteVersion: value.terminalRemoteVersion,
+      proposalDigest: value.proposalDigest,
+      sourceCommentIds: value.sourceCommentIds,
+      actorKind: value.actorKind,
+      resolvedAt: value.resolvedAt,
+    }));
   return {
     cycleIssue: toFactIssue(cycle),
     predecessorCycleIssueId: cycle.parent_issue_id ?? "none",
@@ -299,7 +317,7 @@ function cycleObservation(
     verifyResults: [],
     findings: [],
     humanActionRecords,
-    humanActionResolutions: [],
+    humanActionResolutions,
   };
 }
 
@@ -327,6 +345,7 @@ function actionKindFor(labels: string[]): HumanActionKind {
 function recordReference(record: ManagedRecord, version: string): RootRecordReference {
   const identity = "resultId" in record ? record.resultId
     : "resolutionId" in record ? record.resolutionId
+      : "rootDirectiveId" in record ? record.rootDirectiveId
       : "actionId" in record ? record.actionId
         : `${record.kind}:${digest(record).slice(0, 24)}`;
   return { recordId: identity, recordKind: record.kind, version };

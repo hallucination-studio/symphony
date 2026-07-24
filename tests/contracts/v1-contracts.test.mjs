@@ -337,6 +337,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "#/$defs/ArchiveWorkflowIssueCommand",
     "#/$defs/RestoreWorkflowIssueCommand",
     "#/$defs/CreateWorkflowRelationCommand",
+    "#/$defs/RemoveWorkflowRelationCommand",
   ]);
   for (const name of [
     "CreateWorkflowIssueCommand",

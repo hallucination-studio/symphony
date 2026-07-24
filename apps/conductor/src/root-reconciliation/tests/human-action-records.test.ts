@@ -42,6 +42,41 @@ test("Human Action request and resolution records round-trip as closed managed r
   assert.deepEqual(parseManagedRecord(serializeManagedRecord(resolution)), { ok: true, value: resolution });
 });
 
+test("Root directive records round-trip the accepted directive and correlation", () => {
+  const directive = {
+    protocolVersion: 1 as const,
+    requestId: "request-1",
+    rootDirectiveId: "directive-1",
+    reconcilerSessionId: "session-1",
+    reconcilerTurnId: "turn-1",
+    basedOnTargetRootDigest: "digest-1",
+    rationale: "Wait for the next user fact.",
+    evidenceRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" as const }],
+    consumedInputIds: ["root-1:root-v1"],
+    commentReplies: [],
+    humanActionResolutions: [],
+    action: {
+      kind: "wait" as const,
+      reasonCode: "human_input",
+      blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" as const }],
+    },
+  };
+  const record = {
+    kind: "root_directive" as const,
+    version: 1 as const,
+    rootDirectiveId: "directive-1",
+    rootIssueId: "root-1",
+    reconcilerSessionId: "session-1",
+    reconcilerTurnId: "turn-1",
+    basedOnTargetRootDigest: "digest-1",
+    consumedInputIds: ["root-1:root-v1"],
+    directive,
+    acceptedAt: "2026-07-23T00:00:01Z",
+  };
+
+  assert.deepEqual(parseManagedRecord(serializeManagedRecord(record)), { ok: true, value: record });
+});
+
 test("Human Action request records enforce root/cycle scope and resolution actor/outcome enums", () => {
   assert.throws(() => serializeManagedRecord({
     ...requestRecord(),

@@ -11,7 +11,7 @@ export type RootFactIssueKind = "root" | "cycle" | "plan" | "work" | "verify" | 
 export type RootActorKind = "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
 export type LinearFactState =
   | "Draft" | "Todo" | "Planning" | "Sealed" | "Executing" | "Verifying" | "In Progress"
-  | "In Review" | "Needs Approval" | "Needs Info" | "Inconclusive" | "Escalated" | "Succeeded"
+  | "In Review" | "Needs Approval" | "Needs Info" | "Inconclusive" | "Escalated" | "Approved" | "Rejected" | "Answered" | "Succeeded"
   | "Changes Required" | "Done" | "Canceled" | "Failed";
 
 export interface RootReconciliationView {
@@ -257,7 +257,7 @@ export interface HumanActionResolution {
   actionIssueId: string;
   actionKind?: HumanActionKind;
   outcome: "approved" | "rejected" | "answered" | "canceled" | "granted" | "denied" | "waived" | "override_applied" | "override_rejected";
-  terminalStatus: LinearFactState;
+  terminalStatus: "Approved" | "Rejected" | "Answered" | "Canceled";
   terminalRemoteVersion: string;
   proposalDigest: string;
   sourceCommentIds?: string[];

@@ -1,4 +1,4 @@
-import type { HumanActionKind } from "./RootReconciliationContracts.js";
+import type { HumanActionKind, RootDirective } from "./RootReconciliationContracts.js";
 
 export type ManagedRecordVersion = 1;
 
@@ -46,6 +46,19 @@ export interface RootOwnershipRecord {
   deliveryBranch: string;
   pullRequest?: string;
   ownerGeneration: string;
+}
+
+export interface RootDirectiveRecord {
+  kind: "root_directive";
+  version: ManagedRecordVersion;
+  rootDirectiveId: string;
+  rootIssueId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  basedOnTargetRootDigest: string;
+  consumedInputIds: string[];
+  directive: RootDirective;
+  acceptedAt: string;
 }
 
 export interface DeliveryRecord {
@@ -346,6 +359,7 @@ export interface ConvergenceRecord {
 
 export type ManagedRecord =
   | RootOwnershipRecord
+  | RootDirectiveRecord
   | DeliveryRecord
   | CycleMarker
   | NodeMarker

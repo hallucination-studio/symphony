@@ -36,18 +36,41 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
       async open(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]) {
         opens += 1;
         assert.ok(input.bootstrap.rootSnapshot);
-        return { kind: "opened" as const, sessionId: `session-${opens}`, bootstrapRootDigest: input.bootstrap.rootDigest, initialDirective: directive(input.bootstrap.rootDigest) };
+        return { kind: "opened" as const, sessionId: `session-${opens}`, bootstrapRootDigest: input.bootstrap.rootDigest, initialDirective: directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds) };
       },
       async advance(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["advance"]>[0]) {
         advances += 1;
         assert.equal("rootSnapshot" in input.delta, false);
         assert.equal(input.delta.changes[0]?.kind, "issue_current_value");
-        return { kind: "directive" as const, directive: directive(input.delta.targetRootDigest) };
+        return { kind: "directive" as const, directive: directive(input.delta.targetRootDigest, input.delta.pendingInputIds) };
       },
       async close() {},
     },
     performer: {} as never,
     materializer: { async materialize() { return { kind: "materialized" as const, rootDirectiveId: "directive-1", sourceIssueIds: [] }; } },
+    directiveRecordWriter: {
+      async write({ directive }: { directive: RootDirective }) {
+        return {
+          kind: "materialized" as const,
+          record: {
+            kind: "root_directive" as const,
+            version: 1 as const,
+            rootDirectiveId: directive.rootDirectiveId,
+            rootIssueId: "root-1",
+            reconcilerSessionId: directive.reconcilerSessionId,
+            reconcilerTurnId: directive.reconcilerTurnId,
+            basedOnTargetRootDigest: directive.basedOnTargetRootDigest,
+            consumedInputIds: directive.consumedInputIds,
+            directive,
+            acceptedAt: "2026-07-23T00:00:02Z",
+          },
+        };
+      },
+    },
+    replyWriter: { async write() { return { kind: "materialized" as const, replyId: "reply-1" }; } },
+    humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
+    humanActionResolutionMaterializer: { async materialize() { return { kind: "failed" as const, code: "unused", sanitizedReason: "unused" }; } },
+    timeline: { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
     profileIdFor: async () => "profile-1",
     modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
     log() {},
@@ -62,11 +85,11 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   assert.equal(advances, 1);
 });
 
-function directive(digest: string): RootDirective {
+function directive(digest: string, consumedInputIds: string[] = []): RootDirective {
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", basedOnTargetRootDigest: digest,
-    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds: [], commentReplies: [], humanActionResolutions: [],
+    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies: [], humanActionResolutions: [],
     action: { kind: "wait", reasonCode: "test", blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }] },
   };
 }

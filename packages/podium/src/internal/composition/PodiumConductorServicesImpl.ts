@@ -533,6 +533,7 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     ...(target.expected_status_id === undefined ? {} : { expectedStatusId: requiredString(target.expected_status_id, "linear_workflow_target_status_invalid") }),
     ...(target.expected_parent_issue_id === undefined ? {} : { expectedParentIssueId: requiredString(target.expected_parent_issue_id, "linear_workflow_target_parent_invalid") }),
     ...(target.expected_managed_marker === undefined ? {} : { expectedManagedMarker: requiredString(target.expected_managed_marker, "linear_workflow_target_marker_invalid") }),
+    ...(target.expected_is_archived === undefined ? {} : { expectedIsArchived: requiredBoolean(target.expected_is_archived, "linear_workflow_target_archive_invalid") }),
   };
   if (body.kind === "update_workflow_issue") {
     return {
@@ -540,11 +541,24 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
       title: requiredString(body.title, "linear_workflow_title_missing"),
       description: requiredString(body.description, "linear_workflow_description_missing"),
+      ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
     };
   }
   if (body.kind === "append_workflow_comment") {
     return { ...common, kind: body.kind, target: targetValue,
       body: requiredString(body.body, "linear_workflow_comment_body_missing") };
+  }
+  if (body.kind === "remove_workflow_relation") {
+    return {
+      ...common,
+      kind: body.kind,
+      relationId: requiredString(body.relation_id, "linear_workflow_relation_id_missing"),
+      sourceIssueId: requiredString(body.source_issue_id, "linear_workflow_source_id_missing"),
+      sourceExpectedRemoteVersion: requiredString(body.source_expected_remote_version, "linear_workflow_source_version_missing"),
+      targetIssueId: requiredString(body.target_issue_id, "linear_workflow_target_id_missing"),
+      targetExpectedRemoteVersion: requiredString(body.target_expected_remote_version, "linear_workflow_target_version_missing"),
+      relationKind: workflowRelationKind(body.relation_kind),
+    };
   }
   throw new Error("linear_workflow_kind_unsupported");
 }
@@ -556,8 +570,8 @@ function workflowIssueKind(value: JsonValue | undefined): "cycle" | "plan" | "wo
   throw new Error("linear_workflow_issue_kind_invalid");
 }
 
-function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "triggered_by" {
-  if (value === "blocks" || value === "blocked_by" || value === "triggered_by") return value;
+function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" | "triggered_by" {
+  if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
 }
 
@@ -604,6 +618,11 @@ function recordValue(value: JsonValue | undefined, code: string) {
 
 function requiredNumber(value: JsonValue | undefined, code: string) {
   if (typeof value !== "number") throw new Error(code);
+  return value;
+}
+
+function requiredBoolean(value: JsonValue | undefined, code: string) {
+  if (typeof value !== "boolean") throw new Error(code);
   return value;
 }
 
