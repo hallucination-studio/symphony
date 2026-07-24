@@ -168,37 +168,13 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       title: `Target architecture ${runDigest}`,
       description: [
         "Disposable target architecture acceptance root.",
-        "Execute the existing Cycle Plan, then each Work issue in order, then Verify.",
-        "This is a no-op acceptance fixture: use the supplied Git facts, do not inspect files or run tools, and do not request human action.",
+        "Create one Cycle, produce a Plan, and request a Plan Review Human Action before Work begins.",
+        "The Plan must propose exactly two sequential no-op Work nodes followed by Verify.",
+        "Use the supplied Git facts. Do not modify files, create commits, or request any Human Action other than Plan Review.",
         `Run marker: ${runDigest}`,
       ].join("\n"),
     });
     rootIssueId = root.rootIssueId;
-    const cycleIssueId = await createChild({
-      sdk, gateway, rootIssueId, projectId, conductorShortHash, issueKind: "cycle",
-      title: `Cycle ${runDigest}`, description: "Run the disposable no-op target architecture acceptance cycle.",
-      marker: `${runDigest}:cycle`, statusName: "Draft",
-    });
-    const planIssueId = await createChild({
-      sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "plan", title: `Plan ${runDigest}`, description: "Define the already-scoped two-check no-op execution using supplied facts; do not use tools.",
-      marker: `${runDigest}:plan`, statusName: "Todo",
-    });
-    const workAIssueId = await createChild({
-      sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "work", title: `Work A ${runDigest}`, description: "Report the supplied current HEAD without inspecting files or using tools.",
-      marker: `${runDigest}:work-a`, order: 1, statusName: "Todo",
-    });
-    const workBIssueId = await createChild({
-      sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "work", title: `Work B ${runDigest}`, description: "Report the supplied clean status without inspecting files or using tools.",
-      marker: `${runDigest}:work-b`, order: 2, statusName: "Todo",
-    });
-    const verifyIssueId = await createChild({
-      sdk, gateway, rootIssueId, projectId, conductorShortHash, parentIssueId: cycleIssueId,
-      issueKind: "verify", title: `Verify ${runDigest}`, description: "Verify the supplied no-op facts without inspecting files or using tools.",
-      marker: `${runDigest}:verify`, order: 3, statusName: "Todo",
-    });
 
     const bindingId = `${runDigest}-binding`;
     const conductorId = `${runDigest}-conductor`;
@@ -279,15 +255,30 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
       displayName: "Target architecture E2E",
       reasoningEffort: "minimal",
     });
+    const review = await waitForPlanReviewEvidence({
+      gateway,
+      projectId,
+      rootIssueId,
+      deadlineAt,
+      failureReason: () => latestRootFailureReason(logs),
+    });
+    await approvePlanReviewAction({
+      sdk,
+      gateway,
+      projectId,
+      rootIssueId,
+      conductorShortHash,
+      approvalActionIssueId: review.approvalActionIssueId,
+      approvalActionId: review.approvalActionId,
+    });
     const evidence = await waitForExecutionEvidence({
       gateway,
       projectId,
       rootIssueId,
-      expectedStageIssueIds: { planIssueId, workIssueIds: [workAIssueId, workBIssueId], verifyIssueId },
       deadlineAt,
       failureReason: () => latestRootFailureReason(logs),
     });
-    if (evidence.planResults < 1 || evidence.workResults < 2 || evidence.verifyResults < 1) {
+    if (evidence.planResults !== 1 || evidence.workResults !== 2 || evidence.verifyResults !== 1) {
       throw new Error("target_e2e_stage_evidence_incomplete");
     }
     if (logs.some(({ event }) => event === "e2e_child_failed")) {
@@ -312,78 +303,85 @@ async function initializeRepository(repositoryRoot) {
   await execFileAsync("git", ["-C", repositoryRoot, "commit", "-m", "Initialize target architecture E2E repository"]);
 }
 
-async function createChild({
-  sdk,
-  gateway,
-  rootIssueId,
-  projectId,
-  conductorShortHash,
-  parentIssueId = rootIssueId,
-  issueKind,
-  title,
-  description,
-  marker,
-  order,
-  statusName = "Todo",
-}) {
-  const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
-  const root = await sdk.readWorkflowMutationTarget(rootIssueId);
-  const parent = await sdk.readWorkflowMutationTarget(parentIssueId);
-  const desiredStatus = tree.statusCatalog.find(({ name }) => name === statusName);
-  if (!root || !parent || !desiredStatus) throw new Error("target_e2e_workflow_setup_incomplete");
-  const outcome = await gateway.mutateWorkflow({
-    kind: "create_workflow_issue",
-    writeId: `${marker}:create`,
-    conductorShortHash,
-    expectedProjectId: projectId,
-    rootIssueId,
-    expectedRootRemoteVersion: root.updatedAt,
-    parentExpectedRemoteVersion: parent.updatedAt,
-    parentExpectedStatusId: parent.statusId,
-    parentIssueId,
-    issueKind,
-    title,
-    description,
-    statusId: desiredStatus.statusId,
-    managedMarker: marker,
-    labelNames: [],
-    ...(order === undefined ? {} : { order }),
-  });
-  if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-    throw new Error(`target_e2e_workflow_child_${outcome.kind}`);
-  }
-  return outcome.readBack.targetIssueId;
-}
-
 export async function waitForExecutionEvidence({
   gateway,
   projectId,
   rootIssueId,
-  expectedStageIssueIds,
   deadlineAt,
   failureReason,
 }) {
   const stopAt = deadlineAt.getTime();
-  let latest = { planResults: 0, workResults: 0, verifyResults: 0 };
   while (Date.now() < stopAt) {
     if (typeof failureReason === "function" && failureReason()) {
       throw new Error("target_e2e_execution_evidence_boundary_failed");
     }
     const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
-    latest = {
-      planResults: countStageResults(tree.comments, "plan"),
-      workResults: countStageResults(tree.comments, "work"),
-      verifyResults: countStageResults(tree.comments, "verify"),
-    };
-    if (
-      latest.planResults >= 1 &&
-      latest.workResults >= 2 &&
-      latest.verifyResults >= 1 &&
-      hasCompletedStageStatuses(tree.issues, expectedStageIssueIds)
-    ) return latest;
+    const evidence = executionEvidence(tree, rootIssueId);
+    if (evidence) return evidence;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
   }
   throw new Error("target_e2e_execution_evidence_timeout");
+}
+
+export async function waitForPlanReviewEvidence({
+  gateway,
+  projectId,
+  rootIssueId,
+  deadlineAt,
+  failureReason,
+}) {
+  const stopAt = deadlineAt.getTime();
+  while (Date.now() < stopAt) {
+    if (typeof failureReason === "function" && failureReason()) {
+      throw new Error("target_e2e_plan_review_boundary_failed");
+    }
+    const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+    const evidence = planReviewEvidence(tree, rootIssueId);
+    if (evidence) return evidence;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, stopAt - Date.now()))));
+  }
+  throw new Error("target_e2e_plan_review_timeout");
+}
+
+async function approvePlanReviewAction({
+  sdk,
+  gateway,
+  projectId,
+  rootIssueId,
+  conductorShortHash,
+  approvalActionIssueId,
+  approvalActionId,
+}) {
+  const tree = await gateway.getWorkflowIssueTree(projectId, rootIssueId);
+  const root = await sdk.readWorkflowMutationTarget(rootIssueId);
+  const action = await sdk.readWorkflowMutationTarget(approvalActionIssueId);
+  const actionFact = tree.issues.find(({ issueId }) => issueId === approvalActionIssueId);
+  const approved = tree.statusCatalog.find(({ name }) => name === "Approved");
+  if (!root || !action || !actionFact || !approved || !["Todo", "In Progress"].includes(actionFact.statusName)) {
+    throw new Error("target_e2e_plan_review_approval_precondition_invalid");
+  }
+  const outcome = await gateway.mutateWorkflow({
+    kind: "update_workflow_issue",
+    writeId: `target-e2e-human-approved:${approvalActionId}`,
+    conductorShortHash,
+    expectedProjectId: projectId,
+    rootIssueId,
+    expectedRootRemoteVersion: root.updatedAt,
+    target: {
+      targetIssueId: action.issueId,
+      expectedRemoteVersion: action.updatedAt,
+      expectedStatusId: action.statusId,
+      ...(action.parentIssueId ? { expectedParentIssueId: action.parentIssueId } : {}),
+      ...(action.managedMarker ? { expectedManagedMarker: action.managedMarker } : {}),
+      expectedIsArchived: false,
+    },
+    statusId: approved.statusId,
+    title: action.title,
+    description: action.description,
+  });
+  if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+    throw new Error(`target_e2e_plan_review_approval_${outcome.kind}`);
+  }
 }
 
 export function latestRootFailureReason(logs) {
@@ -407,25 +405,182 @@ export function latestRootFailureReason(logs) {
   return undefined;
 }
 
-function countStageResults(comments, stage) {
-  return comments.filter((comment) =>
-    comment.body.includes("stage_result") && new RegExp(`"stage"\\s*:\\s*"${stage}"`, "u").test(comment.body),
-  ).length;
+function planReviewEvidence(tree, rootIssueId) {
+  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId && issue.issueKind === "root" && !issue.isArchived);
+  const cycle = one(tree.issues, (issue) => issue.parentIssueId === rootIssueId && issue.issueKind === "cycle" && !issue.isArchived);
+  const plan = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "plan" &&
+    issue.statusName === "In Review" && !issue.isArchived);
+  const action = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "human" &&
+    ["Todo", "In Progress"].includes(issue.statusName) && !issue.isArchived &&
+    issue.labels.includes("Human Action") && issue.labels.includes("Plan Review"));
+  if (!root || !cycle || !plan || !action) return undefined;
+
+  const records = managedRecords(tree.comments);
+  const contract = one(records, ({ issueId, record }) => issueId === plan.issueId && record.kind === "plan_contract" &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycle.issueId && identifier(record.plan_contract_digest));
+  const planResult = contract && one(records, ({ issueId, record }) => issueId === plan.issueId && record.kind === "stage_result" &&
+    record.stage === "plan" && record.outcome_kind === "plan_completed" && record.node_issue_id === plan.issueId &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycle.issueId &&
+    record.plan_contract_digest === contract.record.plan_contract_digest && samePlanContract(record, contract.record));
+  const request = contract && one(records, ({ issueId, record }) => issueId === action.issueId && record.kind === "human_action_request" &&
+    record.action_issue_id === action.issueId && record.action_kind === "plan_review" && record.parent_scope === "cycle" &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycle.issueId && record.related_issue_ids?.length === 1 &&
+    record.related_issue_ids[0] === plan.issueId && record.proposal_digest === contract.record.plan_contract_digest && identifier(record.action_id));
+  if (!contract || !planResult || !request || !hasRelation(tree.relations, action.issueId, plan.issueId, "relates_to")) return undefined;
+  return {
+    cycleIssueId: cycle.issueId,
+    planIssueId: plan.issueId,
+    approvalActionIssueId: action.issueId,
+    approvalActionId: request.record.action_id,
+    planContractDigest: contract.record.plan_contract_digest,
+  };
 }
 
-function hasCompletedStageStatuses(issues, expectedStageIssueIds) {
-  if (!Array.isArray(issues) || !expectedStageIssueIds) return false;
-  const byId = new Map(issues.filter((issue) => issue && typeof issue.issueId === "string")
-    .map((issue) => [issue.issueId, issue]));
-  return hasStatus(byId.get(expectedStageIssueIds.planIssueId), "plan", "In Review") &&
-    Array.isArray(expectedStageIssueIds.workIssueIds) &&
-    expectedStageIssueIds.workIssueIds.length === 2 &&
-    expectedStageIssueIds.workIssueIds.every((issueId) => hasStatus(byId.get(issueId), "work", "Done")) &&
-    hasStatus(byId.get(expectedStageIssueIds.verifyIssueId), "verify", "Done");
+function executionEvidence(tree, rootIssueId) {
+  const root = one(tree.issues, (issue) => issue.issueId === rootIssueId && issue.issueKind === "root" &&
+    issue.statusName === "In Review" && !issue.isArchived);
+  const cycle = root && one(tree.issues, (issue) => issue.parentIssueId === rootIssueId && issue.issueKind === "cycle" &&
+    issue.statusName === "Succeeded" && !issue.isArchived);
+  const plan = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "plan" &&
+    issue.statusName === "Done" && !issue.isArchived);
+  const action = cycle && one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "human" &&
+    issue.statusName === "Approved" && !issue.isArchived && issue.labels.includes("Human Action") && issue.labels.includes("Plan Review"));
+  if (!root || !cycle || !plan || !action) return undefined;
+
+  const records = managedRecords(tree.comments);
+  const contract = one(records, ({ issueId, record }) => issueId === plan.issueId && record.kind === "plan_contract" &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycle.issueId && identifier(record.plan_contract_digest) &&
+    Array.isArray(record.proposed_work_dag?.work_nodes) && record.proposed_work_dag.work_nodes.length === 2 && record.proposed_work_dag.verify_node);
+  if (!contract) return undefined;
+  const digest = contract.record.plan_contract_digest;
+  const planResult = one(records, ({ issueId, record }) => issueId === plan.issueId && matchingStageResult(record, {
+    rootIssueId, cycleIssueId: cycle.issueId, nodeIssueId: plan.issueId, stage: "plan", outcomeKind: "plan_completed", planContractDigest: digest,
+  }) && samePlanContract(record, contract.record));
+  const request = one(records, ({ issueId, record }) => issueId === action.issueId && record.kind === "human_action_request" &&
+    record.action_issue_id === action.issueId && record.action_kind === "plan_review" && record.parent_scope === "cycle" &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycle.issueId && record.related_issue_ids?.length === 1 &&
+    record.related_issue_ids[0] === plan.issueId && record.proposal_digest === digest && identifier(record.action_id));
+  const resolution = request && one(records, ({ issueId, record }) => issueId === action.issueId && record.kind === "human_action_resolution" &&
+    record.action_issue_id === action.issueId && record.action_id === request.record.action_id && record.action_kind === "plan_review" &&
+    record.outcome === "approved" && record.terminal_status === "Approved" && record.actor_kind === "human" &&
+    record.proposal_digest === digest && record.terminal_remote_version === action.remoteVersion &&
+    Array.isArray(record.source_comment_ids) && record.source_comment_ids.length === 0);
+  if (!planResult || !request || !resolution || !hasRelation(tree.relations, action.issueId, plan.issueId, "relates_to")) return undefined;
+
+  const workIssueIds = [];
+  for (const work of contract.record.proposed_work_dag.work_nodes) {
+    if (!identifier(work?.proposal_key)) return undefined;
+    const node = one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "work" &&
+      issue.statusName === "Done" && !issue.isArchived && hasNodeMarker(records, issue.issueId, rootIssueId, cycle.issueId, `work:${work.proposal_key}`, "work", digest));
+    if (!node || !hasRelation(tree.relations, plan.issueId, node.issueId, "relates_to") ||
+      !one(records, ({ issueId, record }) => issueId === node.issueId && matchingStageResult(record, {
+        rootIssueId, cycleIssueId: cycle.issueId, nodeIssueId: node.issueId, stage: "work", outcomeKind: "work_completed",
+      }))) return undefined;
+    workIssueIds.push(node.issueId);
+  }
+  if (new Set(workIssueIds).size !== workIssueIds.length) return undefined;
+
+  for (const work of contract.record.proposed_work_dag.work_nodes) {
+    const target = workIssueIds[contract.record.proposed_work_dag.work_nodes.indexOf(work)];
+    if (!target || !Array.isArray(work.dependency_proposal_keys)) return undefined;
+    for (const dependencyProposalKey of work.dependency_proposal_keys) {
+      const sourceIndex = contract.record.proposed_work_dag.work_nodes.findIndex(({ proposal_key }) => proposal_key === dependencyProposalKey);
+      const source = workIssueIds[sourceIndex];
+      if (sourceIndex < 0 || !source || !hasRelation(tree.relations, source, target, "blocks")) return undefined;
+    }
+  }
+
+  const verify = one(tree.issues, (issue) => issue.parentIssueId === cycle.issueId && issue.issueKind === "verify" &&
+    issue.statusName === "Done" && !issue.isArchived && hasNodeMarker(records, issue.issueId, rootIssueId, cycle.issueId, "verify", "verify", digest));
+  if (!verify || !hasRelation(tree.relations, plan.issueId, verify.issueId, "relates_to") ||
+    !one(records, ({ issueId, record }) => issueId === verify.issueId && matchingStageResult(record, {
+      rootIssueId, cycleIssueId: cycle.issueId, nodeIssueId: verify.issueId, stage: "verify", outcomeKind: "verify_passed",
+    }))) return undefined;
+
+  const rootTimelineEvents = tree.comments.filter(({ issueId, body }) => issueId === rootIssueId && isTimelineComment(body)).length;
+  const cycleTimelineEvents = tree.comments.filter(({ issueId, body }) => issueId === cycle.issueId && isTimelineComment(body)).length;
+  if (rootTimelineEvents === 0 || cycleTimelineEvents === 0) return undefined;
+  return {
+    cycleIssueId: cycle.issueId,
+    planIssueId: plan.issueId,
+    approvalActionIssueId: action.issueId,
+    planContractDigest: digest,
+    workIssueIds,
+    verifyIssueId: verify.issueId,
+    planResults: 1,
+    workResults: workIssueIds.length,
+    verifyResults: 1,
+    rootTimelineEvents,
+    cycleTimelineEvents,
+  };
 }
 
-function hasStatus(issue, issueKind, statusName) {
-  return Boolean(issue) && issue.issueKind === issueKind && issue.statusName === statusName && issue.isArchived === false;
+function managedRecords(comments) {
+  return comments.flatMap((comment) => {
+    const record = managedRecord(comment.body);
+    return record ? [{ issueId: comment.issueId, record }] : [];
+  });
+}
+
+function managedRecord(body) {
+  const marker = "<!-- symphony managed-record\n";
+  const endMarker = "\n-->";
+  if (typeof body !== "string" || !body.startsWith(marker) || !body.endsWith(endMarker)) return undefined;
+  const source = body.slice(marker.length, -endMarker.length);
+  if (!source || source.includes("\n")) return undefined;
+  try {
+    const value = JSON.parse(source);
+    return value && typeof value === "object" && !Array.isArray(value) && value.version === 1 && identifier(value.kind)
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function matchingStageResult(record, expected) {
+  return record.kind === "stage_result" && record.root_issue_id === expected.rootIssueId &&
+    record.cycle_issue_id === expected.cycleIssueId && record.node_issue_id === expected.nodeIssueId &&
+    record.stage === expected.stage && record.outcome_kind === expected.outcomeKind &&
+    (expected.planContractDigest === undefined || record.plan_contract_digest === expected.planContractDigest);
+}
+
+function samePlanContract(result, contract) {
+  const proposal = {
+    objective: contract.objective,
+    included_scope: contract.included_scope,
+    excluded_scope: contract.excluded_scope,
+    assumptions: contract.assumptions,
+    constraints: contract.constraints,
+    acceptance_criteria: contract.acceptance_criteria,
+    verification_requirements: contract.verification_requirements,
+  };
+  return JSON.stringify(result.plan_contract) === JSON.stringify(proposal) &&
+    JSON.stringify(result.proposed_work_dag) === JSON.stringify(contract.proposed_work_dag);
+}
+
+function hasNodeMarker(records, issueId, rootIssueId, cycleIssueId, nodeKey, nodeKind, planContractDigest) {
+  return Boolean(one(records, ({ issueId: commentIssueId, record }) => commentIssueId === issueId && record.kind === "node_marker" &&
+    record.root_issue_id === rootIssueId && record.cycle_issue_id === cycleIssueId && record.node_key === nodeKey &&
+    record.node_kind === nodeKind && record.plan_contract_digest === planContractDigest));
+}
+
+function hasRelation(relations, sourceIssueId, targetIssueId, relationKind) {
+  return relations.some((relation) => relation.sourceIssueId === sourceIssueId && relation.targetIssueId === targetIssueId &&
+    relation.relationKind === relationKind);
+}
+
+function isTimelineComment(body) {
+  return typeof body === "string" && /^<!-- symphony timeline [a-f0-9]{16,64} -->\n## Symphony · (Root Reconciliation|Cycle)\n/u.test(body);
+}
+
+function one(values, predicate) {
+  const matches = values.filter(predicate);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function identifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
 }
 
 function remaining(deadlineAt) {
