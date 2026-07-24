@@ -64,8 +64,12 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "ResolveConductorProjectQuery",
     "WorkflowMutationCommand",
     "ConductorPerformerMessage",
-    "RootReconcilerObservation",
+    "RootBootstrapSnapshot",
+    "RootDelta",
+    "AdvanceRootReconcilerRequest",
     "RootDirective",
+    "UserCommentReply",
+    "CancelRootDirective",
     "PlanTurnRequest",
     "WorkTurnRequest",
     "VerifyTurnRequest",
@@ -101,6 +105,16 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "LinearIssueTreeSnapshot",
     "LinearMutationCommand",
     "LinearMutationResult",
+    ["RootReconciler", "Observation"].join(""),
+    ["ExternalLinearChange", "Input"].join(""),
+    ["ExternalLinearChange", "Disposition"].join(""),
+    ["UserComment", "Disposition"].join(""),
+    "comment_" + "dispositions",
+    "external_" + "change_dispositions",
+    "based_on_" + "root_tree_digest",
+    "resolve_" + "invalid_lifecycle",
+    "revise_" + "cycle_tree",
+    "create_" + "successor_cycle",
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }
@@ -219,7 +233,7 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   assert.deepEqual(message.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/OpenRootReconcilerRequest",
     "#/$defs/RootReconcilerOpenedResult",
-    "#/$defs/RootReconcilerObservation",
+    "#/$defs/AdvanceRootReconcilerRequest",
     "#/$defs/RootDirective",
     "#/$defs/PlanTurnRequest",
     "#/$defs/PlanResult",
@@ -233,6 +247,27 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/CloseRootReconcilerResult",
     "#/$defs/PerformerProfileControlMetadata",
     "#/$defs/PerformerProfileControlResult",
+  ]);
+  const open = schema.$defs.OpenRootReconcilerRequest;
+  assert.ok(open.required.includes("bootstrap"));
+  assert.equal(open.properties.bootstrap.$ref, "#/$defs/RootBootstrap");
+  const advance = schema.$defs.AdvanceRootReconcilerRequest;
+  assert.deepEqual(advance.required, [
+    "protocol_version", "request_id", "kind", "reconciler_session_id",
+    "reconciler_turn_id", "observed_at", "delta", "limits",
+  ]);
+  assert.equal(advance.properties.delta.$ref, "#/$defs/RootDelta");
+  assert.equal(
+    Object.hasOwn(advance.properties, "root_snapshot"),
+    false,
+  );
+  assert.deepEqual(schema.$defs.RootDeltaChange.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/IssueCurrentValue", "#/$defs/IssueDetached",
+    "#/$defs/CommentCurrentValue", "#/$defs/CommentRemoved",
+    "#/$defs/RelationCurrentValue", "#/$defs/RelationRemoved",
+    "#/$defs/ManagedRecordCurrentValue", "#/$defs/ManagedRecordRemoved",
+    "#/$defs/GitFactsCurrentValue",
+    "#/$defs/MechanicalViolationsCurrentValue",
   ]);
   for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
     const definition = schema.$defs[name];

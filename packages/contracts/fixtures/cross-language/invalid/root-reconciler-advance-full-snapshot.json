@@ -1,0 +1,26 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/AdvanceRootReconcilerRequest",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-advance",
+    "kind": "advance_root_reconciler",
+    "reconciler_session_id": "session-1",
+    "reconciler_turn_id": "turn-2",
+    "observed_at": "2026-07-24T00:00:00Z",
+    "delta": {
+      "base_root_digest": "root-digest-before",
+      "target_root_digest": "root-digest-after",
+      "changes": [],
+      "pending_input_ids": []
+    },
+    "root_snapshot": {},
+    "limits": {
+      "max_context_bytes": 1024,
+      "max_result_bytes": 1024,
+      "max_output_tokens": 256,
+      "max_tool_calls": 4,
+      "max_wall_time_ms": 1000,
+      "deadline_at": "2026-07-24T00:01:00Z"
+    }
+  }
+}

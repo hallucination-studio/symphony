@@ -123,7 +123,7 @@
     "IssueSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue_id", "issue_kind", "title", "description", "status", "is_archived", "remote_version"],
+      "required": ["issue_id", "issue_kind", "title", "description", "status", "is_archived", "labels", "remote_version"],
       "properties": {
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
@@ -132,6 +132,7 @@
         "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
         "is_archived": { "type": "boolean" },
+        "labels": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/ShortText" }, "uniqueItems": true },
         "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
       }
     },
@@ -154,8 +155,10 @@
         "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "author_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "author_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
         "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
         "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
@@ -174,23 +177,6 @@
         "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "ExternalLinearChangeInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["change_id", "actor_kind", "target_issue_id", "issue_kind", "change_kind", "before_version_or_digest", "after_version_or_digest", "changed_field_names", "observed_at"],
-      "properties": {
-        "change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
-        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
-        "change_kind": { "enum": ["status", "content", "archive", "parent", "relation"] },
-        "before_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "after_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "changed_field_names": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/ShortText" } },
-        "relation_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
     "RecordReference": {
@@ -221,7 +207,7 @@
     "HumanActionResolution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["resolution_id", "action_id", "action_issue_id", "outcome", "terminal_status", "terminal_remote_version", "actor_kind", "resolved_at"],
+      "required": ["resolution_id", "action_id", "action_issue_id", "outcome", "terminal_status", "terminal_remote_version", "proposal_digest", "actor_kind", "resolved_at"],
       "properties": {
         "resolution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -230,6 +216,7 @@
         "outcome": { "enum": ["approved", "rejected", "answered", "canceled", "granted", "denied", "waived", "override_applied", "override_rejected"] },
         "terminal_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
         "terminal_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "proposal_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_comment_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
         "actor_kind": { "const": "human" },
         "resolved_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
@@ -294,31 +281,188 @@
         "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
-    "RootReconcilerObservation": {
+    "MechanicalViolation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "reconciler_session_id", "reconciler_turn_id", "observed_at", "root", "cycles", "root_human_actions", "accepted_root_directives", "root_reconciler_failures", "pending_user_comments", "reconciler_reply_records", "external_linear_changes", "workflow_change_resolutions", "git_facts", "delivery", "source_manifest", "coverage", "observed_root_tree_digest", "limits"],
+      "required": ["violation_kind", "source_issue_ids", "summary"],
       "properties": {
-        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "violation_kind": { "enum": ["multiple_nonterminal_cycles", "canceled_root_has_active_cycle", "archived_dependency", "missing_stage_result", "invalid_tree"] },
+        "source_issue_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
+        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "RootBootstrapSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "cycles", "issues", "relations", "managed_records", "user_comments", "git_facts", "delivery", "mechanical_violations"],
+      "properties": {
         "root": { "$ref": "#/$defs/RootObservation" },
         "cycles": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CycleObservation" } },
-        "root_human_actions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionRecord" } },
-        "accepted_root_directives": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } },
-        "root_reconciler_failures": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RootReconcilerFailureRecord" } },
-        "pending_user_comments": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentInput" } },
-        "reconciler_reply_records": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RootReconcilerReplyRecord" } },
-        "external_linear_changes": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ExternalLinearChangeInput" } },
-        "workflow_change_resolutions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } },
+        "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
+        "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
+        "managed_records": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RecordReference" } },
+        "user_comments": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentSnapshot" } },
         "git_facts": { "$ref": "#/$defs/GitFacts" },
         "delivery": { "$ref": "#/$defs/RecordReference" },
+        "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
+      }
+    },
+    "RootBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_snapshot", "source_manifest", "coverage", "root_digest", "pending_input_ids"],
+      "properties": {
+        "root_snapshot": { "$ref": "#/$defs/RootBootstrapSnapshot" },
         "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } },
         "coverage": { "$ref": "#/$defs/Coverage" },
-        "observed_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "limits": { "$ref": "#/$defs/TurnLimits" }
+        "root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "pending_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true }
+      }
+    },
+    "IssueCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "issue"],
+      "properties": {
+        "kind": { "const": "issue_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "issue": { "$ref": "#/$defs/IssueSnapshot" }
+      }
+    },
+    "IssueDetached": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
+      "properties": {
+        "kind": { "const": "issue_detached" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "CommentCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "comment"],
+      "properties": {
+        "kind": { "const": "comment_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "comment": { "$ref": "#/$defs/CommentSnapshot" }
+      }
+    },
+    "CommentRemoved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
+      "properties": {
+        "kind": { "const": "comment_removed" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RelationCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "relation"],
+      "properties": {
+        "kind": { "const": "relation_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "relation": { "$ref": "#/$defs/RelationSnapshot" }
+      }
+    },
+    "RelationRemoved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
+      "properties": {
+        "kind": { "const": "relation_removed" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ManagedRecordCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "record"],
+      "properties": {
+        "kind": { "const": "managed_record_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "record": { "$ref": "#/$defs/RecordReference" }
+      }
+    },
+    "ManagedRecordRemoved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
+      "properties": {
+        "kind": { "const": "managed_record_removed" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "GitFactsCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "git_facts"],
+      "properties": {
+        "kind": { "const": "git_facts_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "git_facts": { "$ref": "#/$defs/GitFacts" }
+      }
+    },
+    "MechanicalViolationsCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "mechanical_violations"],
+      "properties": {
+        "kind": { "const": "mechanical_violations_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
+      }
+    },
+    "RootDeltaChange": {
+      "oneOf": [
+        { "$ref": "#/$defs/IssueCurrentValue" }, { "$ref": "#/$defs/IssueDetached" },
+        { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
+        { "$ref": "#/$defs/RelationCurrentValue" }, { "$ref": "#/$defs/RelationRemoved" },
+        { "$ref": "#/$defs/ManagedRecordCurrentValue" }, { "$ref": "#/$defs/ManagedRecordRemoved" },
+        { "$ref": "#/$defs/GitFactsCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" }
+      ]
+    },
+    "RootDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_root_digest", "target_root_digest", "changes", "pending_input_ids"],
+      "properties": {
+        "base_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "changes": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RootDeltaChange" } },
+        "pending_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true }
       }
     },
     "RootReconcilerReplyRecord": {
@@ -336,24 +480,14 @@
         "replied_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "UserCommentDisposition": {
+    "UserCommentReply": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source_comment_id", "source_comment_version", "interpretation", "impact", "decision_ref", "reply"],
+      "required": ["source_input_id", "source_comment_id", "source_comment_version", "acknowledgement", "interpreted_request", "decided_action", "next_step"],
       "properties": {
+        "source_input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "interpretation": { "enum": ["question", "feedback", "execution_instruction", "requirement_revision", "approval_context", "cancellation_request", "no_action"] },
-        "impact": { "enum": ["none", "current_stage", "current_cycle_dag", "current_cycle_plan", "root_contract", "human_action"] },
-        "decision_ref": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply": { "$ref": "#/$defs/CommentReply" }
-      }
-    },
-    "CommentReply": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["acknowledgement", "interpreted_request", "decided_action", "next_step"],
-      "properties": {
         "acknowledgement": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "interpreted_request": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "decided_action": { "$ref": "common.schema.json#/$defs/BoundedText" },
@@ -363,12 +497,12 @@
     "RootReconcilerFailureRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "observed_root_tree_digest", "category", "sanitized_reason", "failed_at"],
+      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "category", "sanitized_reason", "failed_at"],
       "properties": {
         "failure_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "observed_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output"] },
         "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "usage": { "$ref": "#/$defs/UsageSnapshot" },
@@ -387,41 +521,32 @@
         "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
       }
     },
-    "ExternalLinearChangeDisposition": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["change_id", "impact", "decision_ref"],
-      "properties": {
-        "change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "impact": { "enum": ["none", "lifecycle", "current_stage", "current_cycle_dag", "current_cycle_plan", "root_contract", "invalid_structure"] },
-        "decision_ref": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
     "RootDirective": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "root_directive_id", "reconciler_session_id", "reconciler_turn_id", "based_on_root_tree_digest", "rationale", "evidence_refs", "comment_dispositions", "external_change_dispositions", "action"],
+      "required": ["protocol_version", "request_id", "root_directive_id", "reconciler_session_id", "reconciler_turn_id", "based_on_target_root_digest", "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action"],
       "properties": {
         "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
         "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "root_directive_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "based_on_root_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "based_on_target_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "rationale": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } },
-        "comment_dispositions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentDisposition" } },
-        "external_change_dispositions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ExternalLinearChangeDisposition" } },
+        "consumed_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
+        "comment_replies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentReply" } },
+        "human_action_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } },
         "action": { "$ref": "#/$defs/RootDirectiveAction" }
       }
     },
     "RootDirectiveAction": {
       "oneOf": [
         { "$ref": "#/$defs/ExecutePlanDirective" }, { "$ref": "#/$defs/ExecuteWorkDirective" }, { "$ref": "#/$defs/ExecuteVerifyDirective" },
-        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/ResolveInvalidLifecycleDirective" }, { "$ref": "#/$defs/ReviseCycleTreeDirective" },
-        { "$ref": "#/$defs/ReplanCurrentCycleDirective" }, { "$ref": "#/$defs/SupersedeCycleDirective" }, { "$ref": "#/$defs/CreateSuccessorCycleDirective" },
+        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/ReviseRootTreeDirective" },
+        { "$ref": "#/$defs/ReplanCurrentCycleDirective" }, { "$ref": "#/$defs/SupersedeCycleDirective" }, { "$ref": "#/$defs/CreateCycleDirective" },
         { "$ref": "#/$defs/RequestHumanActionDirective" }, { "$ref": "#/$defs/ConcludeCycleDirective" }, { "$ref": "#/$defs/ConcludeRootDirective" },
-        { "$ref": "#/$defs/WaitDirective" }, { "$ref": "#/$defs/AcknowledgeDirective" }
+        { "$ref": "#/$defs/CancelRootDirective" }, { "$ref": "#/$defs/WaitDirective" }, { "$ref": "#/$defs/AcknowledgeDirective" }
       ]
     },
     "DirectiveBase": {
@@ -465,20 +590,6 @@
         "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
       }
     },
-    "LifecycleChange": {
-      "type": "object", "additionalProperties": false,
-      "required": ["target_issue_id", "issue_kind", "observed_status", "requested_status", "expected_remote_version", "durable_evidence_refs"],
-      "properties": {
-        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
-        "observed_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" }, "requested_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "durable_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
-      }
-    },
-    "ResolveInvalidLifecycleDirective": {
-      "type": "object", "additionalProperties": false,
-      "required": ["kind", "reason", "changes"],
-      "properties": { "kind": { "const": "resolve_invalid_lifecycle" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "changes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/LifecycleChange" } } }
-    },
     "TreeOperation": {
       "oneOf": [
         { "$ref": "#/$defs/CreateNodeOperation" }, { "$ref": "#/$defs/UpdateNodeOperation" }, { "$ref": "#/$defs/ArchiveNodeOperation" },
@@ -504,18 +615,20 @@
     "ReplaceDependenciesOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "work_issue_id", "dependency_issue_ids", "precondition"], "properties": { "kind": { "const": "replace_dependencies" }, "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "dependency_issue_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
     "CreateRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_kind", "source_issue_id", "target_issue_id"], "properties": { "kind": { "const": "create_relation" }, "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] }, "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "RemoveRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_id", "precondition"], "properties": { "kind": { "const": "remove_relation" }, "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
-    "ReviseCycleTreeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "operations"], "properties": { "kind": { "const": "revise_cycle_tree" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "operations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/TreeOperation" } } } },
+    "ReviseRootTreeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "operations"], "properties": { "kind": { "const": "revise_root_tree" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "operations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/TreeOperation" } } } },
     "ReplanCurrentCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "superseded_plan_contract_ids", "invalidate_execution_ids", "preserve_evidence_refs", "archive_or_restore_operations", "plan_issue_id", "fresh_plan_goal"], "properties": { "kind": { "const": "replan_current_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "superseded_plan_contract_ids": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "invalidate_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserve_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "archive_or_restore_operations": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/TreeOperation" } }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "fresh_plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
-    "SupersedeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "current_cycle_issue_id", "reason", "invalidated_execution_ids", "unresolved_finding_ids", "preserved_evidence_refs", "successor"], "properties": { "kind": { "const": "supersede_cycle" }, "current_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_requirement_revision", "destructive_cycle_revision", "no_safe_replan"] }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor": { "$ref": "#/$defs/SuccessorPlan" } } },
+    "SupersedeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "current_cycle_issue_id", "reason", "invalidated_execution_ids", "unresolved_finding_ids", "preserved_evidence_refs", "successor"], "properties": { "kind": { "const": "supersede_cycle" }, "current_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_contract_changed", "cycle_change_not_absorbable", "no_safe_replan"] }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor": { "$ref": "#/$defs/SuccessorPlan" } } },
     "SuccessorPlan": { "type": "object", "additionalProperties": false, "required": ["create", "plan_trigger", "inherited_fact_refs"], "properties": { "create": { "const": true }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "CreateSuccessorCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "plan_trigger", "inherited_fact_refs", "invalidated_delivery_refs"], "properties": { "kind": { "const": "create_successor_cycle" }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_requirement_revision", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"] }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "invalidated_delivery_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "CreateCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "plan_trigger", "inherited_fact_refs", "invalidated_delivery_refs"], "properties": { "kind": { "const": "create_cycle" }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["initial", "root_contract_changed", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"] }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "invalidated_delivery_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "RequestHumanActionDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "parent_scope", "root_issue_id", "action_kind", "title", "description", "related_issue_ids", "requested_decision", "options", "comment_required", "evidence_refs"], "properties": { "kind": { "const": "request_human_action" }, "parent_scope": { "enum": ["root", "cycle"] }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "requested_decision": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "comment_required": { "type": "boolean" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "ConcludeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "conclusion", "completed_work_ids", "unresolved_finding_ids", "attempted_approach_refs", "verification_evidence_refs"], "properties": { "kind": { "const": "conclude_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "conclusion": { "enum": ["succeeded", "repair_required", "exhausted", "canceled"] }, "completed_work_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "attempted_approach_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "verification_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor_recommendation": { "$ref": "#/$defs/SuccessorPlan" } } },
     "ConcludeRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "conclusion", "evidence_refs"], "properties": { "kind": { "const": "conclude_root" }, "conclusion": { "const": "ready_for_delivery" }, "evidence_refs": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "CancelRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "invalidated_execution_ids", "preserved_fact_refs"], "properties": { "kind": { "const": "cancel_root" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "active_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "invalidated_execution_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "WaitDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason_code", "blocking_fact_refs"], "properties": { "kind": { "const": "wait" }, "reason_code": { "$ref": "common.schema.json#/$defs/ShortText" }, "blocking_fact_refs": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "AcknowledgeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "acknowledge" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "continue_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
-    "OpenRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "open_root_reconciler" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
-    "RootReconcilerOpenedResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "reconciler_session_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_opened" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "OpenRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "reconciler_turn_id", "observed_at", "root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "bootstrap", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "open_root_reconciler" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "bootstrap": { "$ref": "#/$defs/RootBootstrap" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
+    "RootReconcilerOpenedResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "bootstrap_root_digest", "initial_directive"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_opened" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "bootstrap_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "initial_directive": { "$ref": "#/$defs/RootDirective" } } },
+    "AdvanceRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "reconciler_turn_id", "observed_at", "delta", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "advance_root_reconciler" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "delta": { "$ref": "#/$defs/RootDelta" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
     "CloseCycleStageSessionsCommand": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id", "reason"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "close_cycle_stage_sessions" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/ShortText" } } },
     "CloseCycleStageSessionsResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "cycle_stage_sessions_closed" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "CloseRootReconcilerCommand": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "reason"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "close_root_reconciler" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/ShortText" } } },
@@ -572,7 +685,7 @@
     },
     "ConductorPerformerMessage": {
       "oneOf": [
-        { "$ref": "#/$defs/OpenRootReconcilerRequest" }, { "$ref": "#/$defs/RootReconcilerOpenedResult" }, { "$ref": "#/$defs/RootReconcilerObservation" }, { "$ref": "#/$defs/RootDirective" },
+        { "$ref": "#/$defs/OpenRootReconcilerRequest" }, { "$ref": "#/$defs/RootReconcilerOpenedResult" }, { "$ref": "#/$defs/AdvanceRootReconcilerRequest" }, { "$ref": "#/$defs/RootDirective" },
         { "$ref": "#/$defs/PlanTurnRequest" }, { "$ref": "#/$defs/PlanResult" }, { "$ref": "#/$defs/WorkTurnRequest" }, { "$ref": "#/$defs/WorkResult" },
         { "$ref": "#/$defs/VerifyTurnRequest" }, { "$ref": "#/$defs/VerifyResult" }, { "$ref": "#/$defs/CloseCycleStageSessionsCommand" }, { "$ref": "#/$defs/CloseCycleStageSessionsResult" },
         { "$ref": "#/$defs/CloseRootReconcilerCommand" }, { "$ref": "#/$defs/CloseRootReconcilerResult" }, { "$ref": "#/$defs/PerformerProfileControlMetadata" }, { "$ref": "#/$defs/PerformerProfileControlResult" }
