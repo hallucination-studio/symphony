@@ -195,7 +195,9 @@ canonical Result计算并持久化，不信任模型自报digest。
 
 `proposed_work_dag.work_nodes[].dependency_proposal_keys[]`是Plan阶段唯一可解析的Work dependency identity；
 Plan尚未materialize时不存在Work Issue ID。Conductor只在matching approved Contract DAG materialization时把这些keys解析为
-`blocks` relations，并对每个created Work/Verify写Contract digest的`NodeMarker`。
+`blocks` relations，并为每个created Work/Verify写唯一的`WorkflowIssueRecord`。已批准Contract的digest binding由matching
+`MaterializeApprovedPlanDagDirective`、immutable `PlanContractRecord`和Plan relation证明；不得创建或读取`NodeMarker`、
+description digest marker或第二种Node identity record。
 
 ## 6. Work contract
 
@@ -396,6 +398,41 @@ fresh-read Root/Cycle/target/Git preconditions
 -> rebuild complete Root Tree
 -> derive and advance Root delta, or bootstrap a fresh Reconciler session
 ```
+
+### 10.1 Stage Result comment
+
+每次已验证的Plan、Work或Verify Result必须在matching Stage Issue追加一条canonical managed comment。该comment是
+执行事实唯一的用户可见载体：上半部分由closed renderer输出结构化Markdown，末尾唯一`symphony` block承载Result与
+nested `ModelTurnRecord`。它不是Cycle timeline、Root Reconciler reply或第二份usage comment。
+
+````markdown
+## Symphony · <Plan | Work | Verify>
+
+<concise verified outcome>
+
+**Result**
+<completed, blocked, failed, canceled or verification conclusion; do not present a proposal as complete>
+
+**Evidence**
+- <bounded check, finding, artifact, Linear or Git reference>
+
+**Usage**
+- Model: <actual invoked model>
+- This turn: <measured usage or explicit unavailable reason>
+- This Issue: <derived cumulative usage by model and completeness>
+
+**Next**
+<the Root Reconciler will evaluate the durable result; do not promise a directive not yet accepted>
+
+```symphony
+{"kind":"<plan_result | work_result | verify_result>","version":1,"record_id":"...",...}
+```
+````
+
+没有对应事实的section省略；renderer允许heading、列表、表格、链接、引用和非`symphony` code block，但不输出raw
+reasoning、secret或未经验证的Provider text。实际wire fields和Result variants只由generated schema定义；该模板不增加
+第二份Result、status、usage或恢复语义。comment与block必须在同一次required Linear materialization中read-back；失败时
+matching Root停止，不能以runtime Result、timeline或日志代替。
 
 ## 11. Provider boundary与安全
 
