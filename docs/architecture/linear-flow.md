@@ -61,8 +61,10 @@ RootTreeQuery
 ```
 
 查询必须分页到完整并返回每个Issue的native archive flag。无法读取archived children、comments、relations或
-remote versions时，Root不能进入Root Reconciler或mutation。source changes提供稳定identity、actor kind、source
-version和Symphony stable write correlation；普通advance仍只发送变化source的当前值或tombstone，不发送activity history。
+remote versions时，Root不能进入Root Reconciler或mutation。返回的`WorkflowRootTreeSnapshot`必须带完整的
+`source_manifest`和`coverage`：manifest为Issue、comment、relation、status catalog提供稳定source identity、version、
+actor kind，并在可证明时提供Symphony stable write correlation；coverage必须列出任何遗漏及原因。普通advance仍只发送
+变化source的当前值或tombstone，不发送activity history。无法证明required source或coverage完整时，Root必须fail closed。
 
 这里的完整Tree是Podium到Conductor的fresh source read和Conductor单轮内存计算输入，不是已有Root Reconciler session
 的跨进程输入。Conductor只把相对session baseline的`RootDelta`发送给Performer；只有open fresh session时才把完整

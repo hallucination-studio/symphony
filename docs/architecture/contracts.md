@@ -36,9 +36,17 @@ issues + comments + relations + labels + statuses + remote versions
 source change identities + actor kinds + stable write correlations
 ```
 
-Gateway无法证明actor时返回closed `unknown`，不能把它猜成human或Symphony。除matching stable write correlation外，
-所有human、external automation和unknown source changes都作为pending Root inputs；缺少required source identity或version
-使matching Root fail closed。普通advance payload仍只包含变化source的当前值或tombstone，不透传完整activity history。
+`WorkflowRootTreeSnapshot`必须同时包含`source_manifest`和`coverage`。每个
+`WorkflowSourceManifestEntry`至少携带`source_kind`、`source_id`、`source_version`和`actor_kind`，其中source kind只允许
+`linear_issue`、`linear_comment`、`linear_relation`和`linear_status_catalog`；actor kind只允许`human`、
+`symphony`、`linear_integration`、`external_automation`和`unknown`。由Symphony写入且可从Linear稳定关联的来源可以带
+`stable_write_id`，但Podium不得猜测或伪造该关联。
+
+`WorkflowSourceCoverage`必须明确`is_complete`和`omissions`。active与archived Issue、comment、relation和status
+catalog的required source都必须进入manifest；任何无法分页读取、无法证明identity/version或无法判断覆盖范围的情况都必须
+返回不完整coverage，使matching Root fail closed。Gateway无法证明actor时返回closed `unknown`，不能把它猜成human或
+Symphony。除matching stable write correlation外，所有human、external automation和unknown source changes都作为
+pending Root inputs；普通advance payload仍只包含变化source的当前值或tombstone，不透传完整activity history。
 
 Root/Issue mutation携带binding、Project pool、Root routing/ownership、explicit target、expected remote version、
 expected status/archive/parent和stable write ID。没有arbitrary GraphQL、JSON mutation或SDK passthrough。

@@ -114,7 +114,9 @@ RootReconcilerOpenedResult
 ```
 
 bootstrap必须包含Root下全部active和archived Cycles、Issues、relations、managed records、用户comments和Git事实。
-Linear读取必须分页到完整并使用include-archived能力。它只允许用于新建Root Reconciler session，或原session丢失、
+其中Linear source manifest必须覆盖active与archived Issue、comment、relation和status catalog，并为每个source提供稳定
+identity、version和actor kind；`coverage.is_complete`为false或存在未解释的required omission时，Conductor不得调用
+Reconciler。Linear读取必须分页到完整并使用include-archived能力。它只允许用于新建Root Reconciler session，或原session丢失、
 baseline mismatch、context无法继续可信使用后的fresh session；普通advance不得携带完整snapshot。
 open本身执行首个ReAct turn并返回`initial_directive`，不能再发送空delta来取得第一步。
 
