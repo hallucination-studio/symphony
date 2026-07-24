@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl
-from performer.backends.provider_backend_interface import ProviderBackendError
+from performer.backends.provider_backend_interface import ProviderBackendError, ProviderTurnDeadlineExpired
 
 
 class FakeThread:
@@ -42,6 +44,35 @@ class FakeCodex:
 
     def account(self, refresh_token: bool = False):
         return SimpleNamespace(account=SimpleNamespace(root=SimpleNamespace(type="chatgpt")))
+
+
+class BlockingTurn:
+    def __init__(self) -> None:
+        self.interrupted = threading.Event()
+        self.interrupt_calls = 0
+
+    def run(self):
+        self.interrupted.wait(timeout=1)
+        return SimpleNamespace(
+            status="completed",
+            error=None,
+            final_response='{"kind":"wait"}',
+            usage=SimpleNamespace(total=SimpleNamespace(total_tokens=3)),
+        )
+
+    def interrupt(self) -> None:
+        self.interrupt_calls += 1
+        self.interrupted.set()
+
+
+class BlockingThread(FakeThread):
+    def __init__(self) -> None:
+        super().__init__()
+        self.turn_handle = BlockingTurn()
+
+    def turn(self, prompt: str, **kwargs: object):
+        self.calls.append((prompt, kwargs))
+        return self.turn_handle
 
 
 def test_role_session_uses_role_specific_instructions_and_returns_json():
@@ -161,3 +192,20 @@ def test_invalid_provider_json_is_sanitized():
 
     assert raised.value.code == "provider_output_invalid_json"
     assert "not-json" not in raised.value.sanitized_reason
+
+
+def test_role_turn_interrupts_a_blocked_provider_at_its_deadline():
+    thread = BlockingThread()
+    backend = CodexBackendImpl(FakeCodex(thread))
+    session = backend.open_role_session("plan", {"model": "gpt"})
+
+    with pytest.raises(ProviderTurnDeadlineExpired):
+        backend.execute_role_turn(
+            session,
+            {"limits": {"deadline_at": (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()}},
+            workspace_root=None,
+            cancel_event=threading.Event(),
+        )
+
+    assert thread.turn_handle.interrupted.is_set()
+    assert thread.turn_handle.interrupt_calls == 1

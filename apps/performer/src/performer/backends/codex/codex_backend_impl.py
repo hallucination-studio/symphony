@@ -5,6 +5,7 @@ import os
 import re
 import threading
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -18,6 +19,7 @@ from performer.backends.provider_backend_interface import (
     ProviderBackendInterface,
     ProviderSession,
     ProviderTurnCanceled,
+    ProviderTurnDeadlineExpired,
 )
 
 CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
@@ -152,9 +154,11 @@ class CodexBackendImpl(ProviderBackendInterface):
             ) from error
 
         interrupted = threading.Event()
+        deadline_expired = threading.Event()
         interrupt_requested = threading.Event()
         stop_watcher = threading.Event()
         completed = False
+        deadline = _deadline_at(request)
 
         def request_interrupt() -> None:
             if interrupt_requested.is_set():
@@ -172,13 +176,25 @@ class CodexBackendImpl(ProviderBackendInterface):
                     request_interrupt()
                     return
 
+        def deadline_watcher() -> None:
+            if deadline is None:
+                return
+            seconds_remaining = (deadline - datetime.now(UTC)).total_seconds()
+            if not stop_watcher.wait(max(0, seconds_remaining)):
+                deadline_expired.set()
+                request_interrupt()
+
         watcher = threading.Thread(target=cancel_watcher, daemon=True)
+        deadline_watcher_thread = threading.Thread(target=deadline_watcher, daemon=True)
         watcher.start()
+        deadline_watcher_thread.start()
         try:
             try:
                 result = handle.run()
                 completed = True
             except Exception as error:
+                if deadline_expired.is_set():
+                    raise ProviderTurnDeadlineExpired() from error
                 if cancel_event.is_set() or interrupted.is_set():
                     raise ProviderTurnCanceled() from error
                 raise ProviderBackendError(
@@ -189,11 +205,14 @@ class CodexBackendImpl(ProviderBackendInterface):
         finally:
             stop_watcher.set()
             watcher.join(timeout=1)
+            deadline_watcher_thread.join(timeout=1)
             if not completed:
                 request_interrupt()
 
         if cancel_event.is_set() or interrupted.is_set():
             raise ProviderTurnCanceled()
+        if deadline_expired.is_set():
+            raise ProviderTurnDeadlineExpired()
         if str(result.status) not in {"completed", "TurnStatus.completed"} or result.error:
             raise ProviderBackendError(
                 "The Provider did not complete the role turn.",
@@ -246,6 +265,22 @@ def _settings(settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProviderBackendError("The role settings are invalid.", code="role_settings_invalid", retryable=False)
     return dict(value)
+
+
+def _deadline_at(request: dict[str, Any]) -> datetime | None:
+    limits = request.get("limits")
+    if not isinstance(limits, dict):
+        return None
+    value = limits.get("deadline_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if deadline.tzinfo is None:
+        return None
+    return deadline.astimezone(UTC)
 
 
 def _sandbox_for_role(role: str) -> Sandbox:
