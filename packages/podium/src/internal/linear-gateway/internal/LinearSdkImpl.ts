@@ -569,6 +569,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     conductorShortHash: string;
     title: string;
     description: string;
+    priority?: LinearPriority;
   }) {
     const plan = await this.#preflightRootCreation(input);
     const fresh = await this.#preflightRootCreation(input);
@@ -580,6 +581,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       projectId: plan.projectId,
       labelIds: [plan.issueLabelId],
       ...(this.#delegateActorId === undefined ? {} : { delegateId: this.#delegateActorId }),
+      ...(input.priority === undefined ? {} : { priority: linearPriorityValue(input.priority) }),
       title: input.title,
       description: input.description,
     });
@@ -595,6 +597,7 @@ export class LinearSdkImpl implements LinearClientInterface {
       issue.parentId !== undefined && issue.parentId !== null ||
       issue.title !== input.title ||
       issue.description !== input.description ||
+      input.priority !== undefined && issue.priority !== linearPriorityValue(input.priority) ||
       this.#delegateActorId !== undefined && issue.delegateId !== this.#delegateActorId ||
       routeLabels.length !== 1 ||
       routeLabels[0]?.id !== plan.issueLabelId ||
@@ -3278,6 +3281,16 @@ function linearPriority(value: number): LinearPriority {
       return "low";
     default:
       throw new Error("linear_issue_priority_invalid");
+  }
+}
+
+function linearPriorityValue(value: LinearPriority): number {
+  switch (value) {
+    case "no_priority": return 0;
+    case "urgent": return 1;
+    case "high": return 2;
+    case "normal": return 3;
+    case "low": return 4;
   }
 }
 

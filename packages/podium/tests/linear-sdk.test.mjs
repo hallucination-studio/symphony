@@ -242,7 +242,7 @@ test("development-token SDK uses the persisted app user for Root delegation", as
 });
 
 
-test("Root scheduling maps every Linear priority and preserves Root sort order", async () => {
+test("Root header snapshots map every Linear priority and retain Linear node order", async () => {
   const roots = [0, 1, 2, 3, 4].map((priority) => issue({
     id: `root-${priority}`,
     priority,
@@ -786,6 +786,7 @@ test("official SDK adapter creates a delegated routed top-level Root and proves 
         title: input.title,
         description: input.description,
         delegateId: input.delegateId,
+        priority: input.priority,
       });
       created.labels = async () => connection([issueLabel]);
       return { success: true, issueId: "root-1" };
@@ -803,6 +804,7 @@ test("official SDK adapter creates a delegated routed top-level Root and proves 
     conductorShortHash: "abc123def456",
     title: "Routed Root",
     description: "A user-owned Root.",
+    priority: "urgent",
   });
 
   assert.deepEqual(result, { rootIssueId: "root-1", identifier: "SYM-1", projectId: "project-1" });
@@ -810,6 +812,7 @@ test("official SDK adapter creates a delegated routed top-level Root and proves 
   assert.equal(createdInput.delegateId, "app-user-1");
   assert.equal(createdInput.parentId, undefined);
   assert.equal(createdInput.stateId, undefined);
+  assert.equal(createdInput.priority, 1);
 });
 
 test("Root creation rejects an out-of-pool member before issueCreate", async () => {

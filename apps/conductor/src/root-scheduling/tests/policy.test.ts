@@ -3,38 +3,41 @@ import test from "node:test";
 
 import { LinearPriorityRootSchedulingPolicyImpl } from "../internal/LinearPriorityRootSchedulingPolicyImpl.js";
 
-test("Root scheduling orders every Priority, Linear order, and identifier tie", () => {
+test("Root scheduling preempts older Roots within each priority tier", () => {
   const policy = new LinearPriorityRootSchedulingPolicyImpl();
   const roots = [
-    root("low", "low", 0),
-    root("normal-z", "normal", 2, "SYM-20"),
-    root("urgent", "urgent", 10),
-    root("none", "no_priority", -10),
-    root("high", "high", 5),
-    root("normal-a", "normal", 2, "SYM-10"),
-    root("normal-first", "normal", 1),
+    root("low", "low", 0, "SYM-60", [], "2026-07-22T00:00:00Z"),
+    root("normal-old", "normal", 1, "SYM-10", [], "2026-07-19T00:00:00Z"),
+    root("urgent-old", "urgent", 99, "SYM-20", [], "2026-07-19T00:00:00Z"),
+    root("none", "no_priority", -10, "SYM-70", [], "2026-07-23T00:00:00Z"),
+    root("high-new", "high", 1, "SYM-40", [], "2026-07-21T00:00:00Z"),
+    root("urgent-new", "urgent", 1, "SYM-30", [], "2026-07-20T00:00:00Z"),
+    root("normal-new-z", "normal", 99, "SYM-50", [], "2026-07-22T00:00:00Z"),
+    root("normal-new-a", "normal", 2, "SYM-05", [], "2026-07-22T00:00:00Z"),
   ];
 
   assert.deepEqual(
     policy.evaluate(roots).orderedEligible.map(({ issueId }) => issueId),
     [
-      "urgent",
-      "high",
-      "normal-first",
-      "normal-a",
-      "normal-z",
+      "urgent-new",
+      "urgent-old",
+      "high-new",
+      "normal-new-a",
+      "normal-new-z",
+      "normal-old",
       "low",
       "none",
     ],
   );
   assert.deepEqual(roots.map(({ issueId }) => issueId), [
     "low",
-    "normal-z",
-    "urgent",
+    "normal-old",
+    "urgent-old",
     "none",
-    "high",
-    "normal-a",
-    "normal-first",
+    "high-new",
+    "urgent-new",
+    "normal-new-z",
+    "normal-new-a",
   ]);
 });
 
@@ -86,10 +89,19 @@ test("Root scheduling excludes self-cycles and every member of a multi-Root cycl
   );
 });
 
-test("Root paging boundary comparison includes identifier ties", () => {
+test("Root scheduling compares latest updates before the stable identifier tie-breaker", () => {
   const policy = new LinearPriorityRootSchedulingPolicyImpl();
-  assert.equal(policy.strictlyOutranksBoundary(root("a", "high", 1, "SYM-10"), root("z", "high", 1, "SYM-20")), true);
-  assert.equal(policy.strictlyOutranksBoundary(root("z", "high", 1, "SYM-20"), root("a", "high", 1, "SYM-10")), false);
+  const ordered = policy.evaluate([
+    root("old", "high", 1, "SYM-10", [], "2026-07-19T00:00:00Z"),
+    root("new", "high", 99, "SYM-20", [], "2026-07-20T00:00:00Z"),
+    root("lexical-second", "high", 99, "SYM-2", [], "2026-07-20T00:00:00Z"),
+    root("lexical-first", "high", 1, "SYM-10", [], "2026-07-20T00:00:00Z"),
+  ]).orderedEligible;
+
+  assert.deepEqual(
+    ordered.map(({ issueId }) => issueId),
+    ["lexical-first", "lexical-second", "new", "old"],
+  );
 });
 
 function root(
@@ -102,6 +114,7 @@ function root(
     targetIssueId: string;
     targetState: "Todo" | "In Progress" | "In Review" | "Done" | "Canceled";
   }> = [],
+  updatedAt = "2026-07-19T00:00:00Z",
 ) {
   return {
     issueId,
@@ -109,7 +122,7 @@ function root(
     state: "Todo" as const,
     title: issueId,
     description: "",
-    updatedAt: "2026-07-19T00:00:00Z",
+    updatedAt,
     projectId: "project-1",
     parentIssueId: null,
     isDelegatedToSymphony: true,

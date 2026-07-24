@@ -258,7 +258,7 @@ function dependencies(input: {
     ownership: {
       async claim() { return { kind: "already_owned" as const, ownership: {} as never, workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" } }; },
     },
-    scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; }, strictlyOutranksBoundary() { return false; } },
+    scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
     reconciler: {
       async open(openInput) {

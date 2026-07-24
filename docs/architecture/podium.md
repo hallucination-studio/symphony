@@ -74,7 +74,7 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - list Roots；
 - fetch complete Workflow Issue Tree；
 - fetch resolved Team workflow status catalog；
-- read Priority/blocker/order/comments；
+- read Priority、normalized `updatedAt`、blocker和comments；Root `sortOrder`不定义跨Root调度；
 - execute closed Issue mutation；
 - execute `WorkflowMutationCommand`；
 - read-back ambiguous mutation。

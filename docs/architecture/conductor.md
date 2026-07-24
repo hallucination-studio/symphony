@@ -56,7 +56,7 @@ apps/conductor/src/
 | 模块 | 职责 |
 |---|---|
 | `root-discovery` | Project、Root routing、ownership和header discovery |
-| `root-scheduling` | blocker、Priority、Root order和capacity |
+| `root-scheduling` | blocker eligibility、Priority和`updatedAt`抢占排序；不拥有capacity或Root语义 |
 | `root-reconciliation` | deterministic host、diff、safety validation和convergence gate；不产生业务下一步 |
 | `root-reconciler-client` | open时发送一次bootstrap，advance时只发送delta，并调用Root Reconciler |
 | `root-directive-materialization` | 校验、幂等执行和read-back Root directive及required user replies |

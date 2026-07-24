@@ -1,3 +1,5 @@
+import type { LinearPriority } from "../types.js";
+
 export interface PageInfo {
   hasNextPage: boolean;
   endCursor?: string;
@@ -166,6 +168,7 @@ export interface LinearClientInterface {
     conductorShortHash: string;
     title: string;
     description: string;
+    priority?: LinearPriority;
   }): Promise<{
     rootIssueId: string;
     identifier: string;

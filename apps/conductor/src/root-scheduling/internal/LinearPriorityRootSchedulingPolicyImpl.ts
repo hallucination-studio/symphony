@@ -17,22 +17,22 @@ export class LinearPriorityRootSchedulingPolicyImpl
 implements RootSchedulingPolicyInterface {
   evaluate(roots: readonly DiscoveredRoot[]) {
     const result = blockerEligibleRoots(roots);
-    const orderedEligible = result.eligible.sort((left, right) => {
-      const priority = PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority];
-      if (priority !== 0) return priority;
-      const order = left.order - right.order;
-      if (order !== 0) return order;
-      if (left.identifier < right.identifier) return -1;
-      if (left.identifier > right.identifier) return 1;
-      return 0;
-    });
+    const orderedEligible = result.eligible.sort(compareRoots);
     return { orderedEligible, blocked: result.blocked };
   }
 
-  strictlyOutranksBoundary(candidate: DiscoveredRoot, boundary: DiscoveredRoot) {
-    const priority = PRIORITY_ORDER[candidate.priority] - PRIORITY_ORDER[boundary.priority];
-    if (priority !== 0) return priority < 0;
-    if (candidate.order !== boundary.order) return candidate.order < boundary.order;
-    return candidate.identifier < boundary.identifier;
-  }
+}
+
+function compareRoots(left: DiscoveredRoot, right: DiscoveredRoot): number {
+  const priority = PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority];
+  if (priority !== 0) return priority;
+  const updatedAt = compareLexically(right.updatedAt, left.updatedAt);
+  if (updatedAt !== 0) return updatedAt;
+  return compareLexically(left.identifier, right.identifier);
+}
+
+function compareLexically(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }

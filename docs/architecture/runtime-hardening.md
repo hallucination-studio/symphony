@@ -18,7 +18,8 @@ authorized
 
 required_consequences
   - runtime state全部可丢弃，不能成为Workflow authority
-  - capacity只决定何时运行一个已选Root的Reconciler/Stage turn，不改变Linear Priority/order/blocker
+  - capacity只决定何时运行一个已选Root的Reconciler/Stage turn，不改变由Priority、`updatedAt`和blocker eligibility
+    得出的Root admission顺序
   - Host/Conductor crash后从Binding、Linear和Git重新建立runtime
   - failure必须有界、脱敏、可观察并释放资源
   - execution policy只做closed DTO映射，不形成Symphony通用授权系统

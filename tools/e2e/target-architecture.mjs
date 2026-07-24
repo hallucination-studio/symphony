@@ -173,6 +173,7 @@ async function runProductionRootEvidence({ environment, deadlineAt }) {
         "Use the supplied Git facts. Do not modify files, create commits, or request any Human Action other than Plan Review.",
         `Run marker: ${runDigest}`,
       ].join("\n"),
+      priority: "urgent",
     });
     rootIssueId = root.rootIssueId;
 
