@@ -12,7 +12,6 @@ export async function createFinalCaseVerdict({
   observedAt = () => new Date().toISOString(),
 } = {}) {
   const caseId = requiredIdentifier(e2eCase?.case_id, "parallel_black_box_campaign_verdict_invalid");
-  const rootIssueId = requiredIdentifier(root?.root_issue_id, "parallel_black_box_campaign_verdict_invalid");
   const observedAtValue = timestamp(observedAt(), "parallel_black_box_campaign_verdict_invalid");
   const predicate = resolveEvidencePredicate(e2eCase?.evidence_predicate_id);
 
@@ -23,6 +22,7 @@ export async function createFinalCaseVerdict({
   if (snapshot.kind === "incomplete") {
     return verdict(caseId, "incomplete", "fresh_evidence_incomplete", [], observedAtValue);
   }
+  const rootIssueId = requiredIdentifier(root?.root_issue_id, "parallel_black_box_campaign_verdict_invalid");
   if (!completeSnapshotHasRoot(snapshot, rootIssueId)) {
     return verdict(caseId, "incomplete", "fresh_evidence_root_missing", [], observedAtValue);
   }

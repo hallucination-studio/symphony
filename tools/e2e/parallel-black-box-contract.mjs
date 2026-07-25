@@ -64,8 +64,10 @@ export function assertParallelBlackBoxE2ECampaignCommand(value) {
     throw stableError("parallel_black_box_campaign_cases_invalid");
   }
   const caseIds = new Set();
+  const startedAt = Date.parse(command.started_at);
+  const campaignDeadlineAt = Date.parse(command.deadline_at);
   for (const e2eCase of command.cases) {
-    assertCase(e2eCase, conductorIds);
+    assertCase(e2eCase, conductorIds, { startedAt, campaignDeadlineAt });
     if (caseIds.has(e2eCase.case_id)) throw stableError("parallel_black_box_campaign_case_invalid");
     caseIds.add(e2eCase.case_id);
   }
@@ -153,7 +155,7 @@ function assertConductor(value) {
   }
 }
 
-function assertCase(value, conductorIds) {
+function assertCase(value, conductorIds, { startedAt, campaignDeadlineAt }) {
   const e2eCase = record(value, "parallel_black_box_campaign_case_invalid");
   assertExactKeys(e2eCase, [
     "case_id",
@@ -170,6 +172,10 @@ function assertCase(value, conductorIds) {
     throw stableError("parallel_black_box_campaign_case_invalid");
   }
   assertTimestamp(e2eCase.deadline_at, "parallel_black_box_campaign_case_invalid");
+  const deadlineAt = Date.parse(e2eCase.deadline_at);
+  if (deadlineAt <= startedAt || deadlineAt > campaignDeadlineAt) {
+    throw stableError("parallel_black_box_campaign_case_invalid");
+  }
   const routes = new Set();
   for (const conductorId of e2eCase.routed_conductor_ids) {
     if (!identifier(conductorId) || !conductorIds.has(conductorId) || routes.has(conductorId)) {
