@@ -39,6 +39,11 @@ export function createProductionE2EProcessStarter(input, dependencies = {}) {
             SYMPHONY_PERFORMER_EXECUTABLE: input.performerExecutable,
             SYMPHONY_CODEX_BASE_URL: input.codexBaseUrl,
             SYMPHONY_ROOT_DEADLINE_AT: input.rootDeadlineAt,
+            SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: String(input.convergencePolicy.maxCyclesPerRoot),
+            SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: String(input.convergencePolicy.maxSameOpenFindingCycles),
+            SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: String(input.convergencePolicy.maxConsecutiveNoProgress),
+            SYMPHONY_ROOT_MAX_TOTAL_TOKENS: String(input.convergencePolicy.maxTotalTokens),
+            SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: String(input.convergencePolicy.maxCycleRepairAttempts),
             SYMPHONY_CYCLE_DELAY_MS: "250",
           },
         }),
@@ -56,10 +61,25 @@ function assertRuntime(value) {
       typeof value.databasePath !== "string" || value.databasePath.length === 0 ||
       typeof value.conductorDataRoot !== "string" || value.conductorDataRoot.length === 0 ||
       typeof value.performerExecutable !== "string" || value.performerExecutable.length === 0 ||
-      !validUrl(value.codexBaseUrl) || !timestamp(value.rootDeadlineAt) ||
+      !validUrl(value.codexBaseUrl) || !timestamp(value.rootDeadlineAt) || !convergencePolicy(value.convergencePolicy) ||
       !value.environment || typeof value.environment !== "object") {
     throw stableError("e2e_production_starter_input_invalid");
   }
+}
+
+function convergencePolicy(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    positiveInteger(value.maxCyclesPerRoot) && positiveInteger(value.maxSameOpenFindingCycles) &&
+    positiveInteger(value.maxConsecutiveNoProgress) && positiveInteger(value.maxTotalTokens) &&
+    nonNegativeInteger(value.maxCycleRepairAttempts);
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
+}
+
+function nonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
 }
 
 function validUrl(value) {

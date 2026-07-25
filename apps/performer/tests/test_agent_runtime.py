@@ -103,7 +103,7 @@ def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
                     "record_version": "1",
                     "write_id": "owner-write-1",
                 },
-                "convergence_summary": "No convergence limit has been reached.",
+                "convergence": convergence_snapshot(),
             },
             "cycles": [],
             "issues": [],
@@ -159,6 +159,33 @@ def root_delta(request_id: str, session_id: str, turn_id: str, base: str, target
         "limits": {
             "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
             "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
+        },
+    }
+
+
+def convergence_snapshot() -> dict[str, object]:
+    return {
+        "policy": {
+            "kind": "root_convergence_policy",
+            "version": 1,
+            "policy_id": "root-convergence-policy-1",
+            "root_issue_id": "root-1",
+            "max_cycles_per_root": 3,
+            "max_same_open_finding_cycles": 2,
+            "max_consecutive_no_progress": 2,
+            "max_total_tokens": 10000,
+            "max_cycle_repair_attempts": 0,
+            "deadline_at": "2027-07-24T00:00:00Z",
+        },
+        "view": {
+            "cycle_count": 0,
+            "open_finding_persistence": [],
+            "consecutive_no_progress": 0,
+            "settled_tokens": 0,
+            "open_token_reservations": [],
+            "active_cycle_repair_attempts": 0,
+            "is_deadline_exceeded": False,
+            "root_is_canceled": False,
         },
     }
 
@@ -351,6 +378,31 @@ def test_delta_advances_runtime_canonical_facts_and_lost_session_requires_bootst
     host._sessions.close("root-session")
     lost = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
     assert lost["code"] == "root_reconciler_bootstrap_required"
+
+
+def test_delta_replaces_the_structured_convergence_snapshot_in_the_root_baseline():
+    backend = FakeBackend()
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+    changed = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    convergence = convergence_snapshot()
+    convergence["view"] = {
+        **convergence["view"],
+        "active_cycle_issue_id": "cycle-1",
+        "active_cycle_repair_attempts": 1,
+    }
+    changed["delta"]["changes"] = [{
+        "kind": "convergence_current_value",
+        "source_id": "root-1",
+        "source_version": "convergence-v2",
+        "actor_kind": "symphony",
+        "observed_at": "2026-07-23T00:00:01Z",
+        "convergence": convergence,
+    }]
+
+    assert host.handle(changed)["based_on_target_root_digest"] == "tree-2"
+    baseline = host._root._baselines["root-session"].canonical_facts
+    assert baseline["root_snapshot"]["root"]["convergence"]["view"]["active_cycle_repair_attempts"] == 1
 
 
 def test_delta_retains_and_removes_canonical_plan_facts_in_the_root_baseline():

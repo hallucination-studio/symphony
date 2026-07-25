@@ -21,6 +21,7 @@ test("parallel black-box control plane bootstraps the target Project before rele
     createProcessStarter(input) {
       events.push("process-starter");
       assert.equal(input.codexBaseUrl, "https://codex.example.test");
+      assert.deepEqual(input.convergencePolicy, convergencePolicy());
       return async () => ({ request() {}, close() {} });
     },
     async createPodiumClient(input) {
@@ -171,7 +172,18 @@ function runtime() {
     conductorDataRoot: "/tmp/conductors",
     performerExecutable: "/tmp/performer",
     rootDeadlineAt: "2026-07-25T00:05:00.000Z",
+    convergencePolicy: convergencePolicy(),
     environment: { HOME: "/tmp/home", PATH: "/usr/bin" },
+  };
+}
+
+function convergencePolicy() {
+  return {
+    maxCyclesPerRoot: 3,
+    maxSameOpenFindingCycles: 2,
+    maxConsecutiveNoProgress: 2,
+    maxTotalTokens: 10_000,
+    maxCycleRepairAttempts: 0,
   };
 }
 

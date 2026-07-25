@@ -11,6 +11,7 @@ import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.m
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
+import { cycleSuccessorRow } from "./cycle-successor-fixture.mjs";
 import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
 import { rootRevisionCommentRow } from "./root-revision-comment-fixture.mjs";
 import { restartIsolationRow } from "./restart-isolation-fixture.mjs";
@@ -66,6 +67,20 @@ test("parallel black-box Campaign accepts only the closed version-one command", 
     () => assertParallelBlackBoxE2ECampaignCommand({
       ...command,
       cases: [{ ...restartCase(), routed_conductor_ids: ["conductor-c", "conductor-a"] }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...command.cases[0], human_script_id: "exhaust_cycle_budget" }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...command.cases[0], evidence_predicate_id: "cycle_successor" }],
     }),
     /parallel_black_box_campaign_case_invalid/u,
   );
@@ -385,6 +400,32 @@ test("parallel black-box Campaign derives Plan rejection supersession only from 
     reason_code: "plan_rejection_supersession_confirmed",
   }]);
   assert.deepEqual(events.filter((event) => event.startsWith("human-reject:")), ["human-reject:action-plan-rejection"]);
+});
+
+test("parallel black-box Campaign approves the initial Plan and derives Cycle exhaustion only from final fresh evidence", async () => {
+  const command = campaignCommand();
+  command.cases = [{
+    case_id: "cycle-exhaustion",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "exhaust_cycle_budget",
+    evidence_predicate_id: "cycle_successor",
+  }];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "passed",
+    reason_code: "cycle_successor_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("human:")), ["human:cycle-exhaustion"]);
+  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:cycle-exhaustion"]);
 });
 
 test("parallel black-box Campaign final-reads after a Human deadline and lets an inconclusive predicate decide", async () => {
@@ -776,6 +817,11 @@ function ports(events, {
       }
       if (e2eCase.evidence_predicate_id === "restart_isolation") {
         const fixture = restartIsolationRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "cycle_successor") {
+        const fixture = cycleSuccessorRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
       }

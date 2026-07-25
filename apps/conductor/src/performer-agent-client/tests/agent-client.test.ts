@@ -267,7 +267,30 @@ function bootstrap() {
           recordVersion: "1" as const,
           writeId: "root-1:ownership",
         },
-        convergenceSummary: "none",
+        convergence: {
+          policy: {
+            kind: "root_convergence_policy" as const,
+            version: 1 as const,
+            policyId: "root-convergence-policy-1",
+            rootIssueId: "root-1",
+            maxCyclesPerRoot: 3,
+            maxSameOpenFindingCycles: 2,
+            maxConsecutiveNoProgress: 2,
+            maxTotalTokens: 10_000,
+            maxCycleRepairAttempts: 0,
+            deadlineAt: "2026-07-24T00:00:00Z",
+          },
+          view: {
+            cycleCount: 0,
+            openFindingPersistence: [],
+            consecutiveNoProgress: 0,
+            settledTokens: 0,
+            openTokenReservations: [],
+            activeCycleRepairAttempts: 0,
+            isDeadlineExceeded: false,
+            rootIsCanceled: false,
+          },
+        },
       },
       cycles: [], issues: [issue], relations: [], managedRecords: [], userComments: [], userCommentThreadStates: [],
       gitFacts: { headRevision: "head-1", baselineRevision: "head-1", statusSummary: "clean", changedPaths: [] },
@@ -477,6 +500,10 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal("payload" in sent, false);
   assert.equal(sent.root_issue_id, "root-1");
   assert.equal(sent.performer_profile_id, "profile-1");
+  const root = ((sent.bootstrap as Record<string, unknown>).root_snapshot as Record<string, unknown>).root as Record<string, unknown>;
+  const convergence = root.convergence as Record<string, unknown>;
+  assert.equal((convergence.policy as Record<string, unknown>).policy_id, "root-convergence-policy-1");
+  assert.equal((convergence.view as Record<string, unknown>).active_cycle_repair_attempts, 0);
 });
 
 test("agent client decodes a closed Root Reconciler failure without retaining a session", async () => {
@@ -554,7 +581,7 @@ test("agent client discards a session after an advance returns a closed Root fai
   assert.equal(calls.length, 2);
 });
 
-test("agent client carries canonical Plan facts in Root bootstrap and delta wires", async () => {
+test("agent client carries canonical Plan and convergence facts in Root bootstrap and delta wires", async () => {
   const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
@@ -602,6 +629,18 @@ test("agent client carries canonical Plan facts in Root bootstrap and delta wire
           kind: "plan_completed_result_current_value", sourceId: "plan-result-comment-1", sourceVersion: "comment-v1",
           actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z", planCompletedResult: facts.result,
         },
+        {
+          kind: "convergence_current_value", sourceId: "root-1", sourceVersion: "convergence-v2",
+          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z",
+          convergence: {
+            ...input.bootstrap.rootSnapshot.root.convergence,
+            view: {
+              ...input.bootstrap.rootSnapshot.root.convergence.view,
+              activeCycleIssueId: "cycle-1",
+              activeCycleRepairAttempts: 1,
+            },
+          },
+        },
       ],
       pendingInputIds: [],
     },
@@ -611,9 +650,14 @@ test("agent client carries canonical Plan facts in Root bootstrap and delta wire
   assert.deepEqual(delta.changes.map(({ kind }) => kind), [
     "plan_contract_current_value",
     "plan_completed_result_current_value",
+    "convergence_current_value",
   ]);
   assert.equal(((delta.changes[0]!.plan_contract as Record<string, unknown>).proposed_work_dag as Record<string, unknown>).verify_node !== undefined, true);
   assert.equal((delta.changes[1]!.plan_completed_result as Record<string, unknown>).summary, "The complete Plan is ready for review.");
+  assert.equal(
+    (((delta.changes[2]!.convergence as Record<string, unknown>).view as Record<string, unknown>).active_cycle_repair_attempts),
+    1,
+  );
 });
 
 test("agent client reuses one Profile channel for a Root session lifecycle", async () => {

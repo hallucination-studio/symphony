@@ -112,6 +112,7 @@ async function provisionWithRepositories({
       performerExecutable: runtime.performerExecutable,
       codexBaseUrl: config.codex.baseUrl,
       rootDeadlineAt: runtime.rootDeadlineAt,
+      convergencePolicy: runtime.convergencePolicy,
       environment: runtime.environment,
     }),
   });
@@ -205,9 +206,25 @@ function assertInput({
       !validUrl(config.codex?.baseUrl) || !secret(config.codex?.model) ||
       !pathValue(runtime.databasePath) || !pathValue(runtime.conductorDataRoot) ||
       !pathValue(runtime.performerExecutable) || !validTimestamp(runtime.rootDeadlineAt) ||
+      !convergencePolicy(runtime.convergencePolicy) ||
       !runtime.environment || typeof runtime.environment !== "object") {
     throw stableError("parallel_black_box_control_plane_input_invalid");
   }
+}
+
+function convergencePolicy(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    positiveInteger(value.maxCyclesPerRoot) && positiveInteger(value.maxSameOpenFindingCycles) &&
+    positiveInteger(value.maxConsecutiveNoProgress) && positiveInteger(value.maxTotalTokens) &&
+    nonNegativeInteger(value.maxCycleRepairAttempts);
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
+}
+
+function nonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
 }
 
 function validRepositories(repositories) {

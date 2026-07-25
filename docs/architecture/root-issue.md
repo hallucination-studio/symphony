@@ -224,6 +224,12 @@ Cycle/Plan status、archive flag或fresh Plan execution；这些仍是Linear原�
 `replan_current_cycle.superseded_plan_contract_ids`必须是非空且无重复的列表；每个元素都必须在matching Plan Issue上
 对应唯一、同Root同Cycle的旧`PlanContractRecord`，否则Conductor不得改变Cycle或Plan的Linear status。
 
+`RootConvergencePolicy` and non-allowing `ConvergenceRecord` are Root Issue
+managed comments. The former is immutable claim-time configuration; the latter
+is immutable evidence for one mechanically derived limit. Neither owns a
+lifecycle transition. Their fields, calculation, delta transport, and
+directive gate are owned solely by [Root Reconciliation](root-reconciliation.md).
+
 managed records位于Symphony actor所写Linear comment的唯一`symphony` fenced code block中；`WorkflowIssueRecord`
 位于matching descendant Issue description的唯一`symphony` block中。二者都使用closed、versioned schema，不包含SDK object、
 raw reasoning、secret或arbitrary metadata。不存在HTML marker、`managed_marker`字段或兼容reader。
@@ -304,8 +310,8 @@ supersede，此时`plan_contract_digest`缺席；Conductor不得伪造digest，�
 改写旧Result。terminal Cycle保持immutable，successor通过provenance引用其可复用事实。
 
 Cycle预算耗尽结束当前Cycle，不机械打扰用户。Root Reconciler根据完整历史选择successor或Root级convergence Human
-Action；Conductor只从全部active/archived历史重新计算cycle count、same Finding persistence、no-progress、token和
-deadline gate，并允许或拒绝matching directive，不能把gate结果转换成另一种动作。
+Action；Conductor只从全部active/archived历史重新计算cycle count、same Finding persistence、no-progress、token、Cycle
+repair attempts和deadline gate，并允许或拒绝matching directive，不能把gate结果转换成另一种动作。
 创建non-initial successor前，Conductor必须确认predecessor保持terminal且恰有一个scope正确、status映射正确的
 `CycleOutcome`；`reason=exhausted`还必须matching predecessor `conclusion=exhausted`。缺失、冲突、foreign或read-back
 失败都使当前Root停在Linear事实处，不能创建Cycle或Plan。

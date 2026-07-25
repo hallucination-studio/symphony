@@ -110,6 +110,13 @@ Conductor每轮都可以在内存中完整读取Root Tree，但不能把完整Tr
 baseline snapshot、source manifest和digest只存在于runtime memory；丢失或不连续时直接关闭旧session并fresh
 bootstrap，不保存checkpoint或提供兼容路径。
 
+Convergence settings are validated public Conductor launch configuration for
+new Root claims. Claim snapshots the resulting policy once into Linear; the
+runtime thereafter reads policy and assessments only from Linear/Git. This is
+operator configuration, not a Desktop workflow mutation, a Podium workflow
+store, or a local per-Root policy cache. The Root convergence algorithm is
+owned by [Root Reconciliation](root-reconciliation.md).
+
 所有mutation使用stable write/directive/execution ID和remote preconditions。一次directive可以描述一个领域级
 Tree patch；其内部多条Linear mutation必须幂等收敛，不能在partial failure后要求模型重新生成另一份patch。
 

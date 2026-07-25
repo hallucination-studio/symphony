@@ -16,6 +16,7 @@ import type {
   RootBootstrap,
   RootBootstrapSnapshot,
   RootCommentThreadState,
+  RootConvergenceSnapshot,
   RootDelta,
   RootDeltaChange,
   RootFactComment,
@@ -43,6 +44,7 @@ export function buildRootFactSet(input: {
   root: DiscoveredRoot;
   tree: LinearWorkflowTreeSnapshot;
   git: GitWorkspaceSnapshot;
+  convergence: RootConvergenceSnapshot;
   mechanicalViolations: MechanicalViolation[];
 }): RootFactSet {
   const manifest = new Map(input.tree.source_manifest.map((entry) => [`${entry.source_kind}:${entry.source_id}`, entry]));
@@ -167,6 +169,14 @@ export function buildRootFactSet(input: {
     observedAt: input.tree.observed_at,
     mechanicalViolations: input.mechanicalViolations,
   });
+  add(entries, `convergence:${input.root.issueId}`, {
+    kind: "convergence_current_value",
+    sourceId: input.root.issueId,
+    sourceVersion: digest(input.convergence),
+    actorKind: "symphony",
+    observedAt: input.tree.observed_at,
+    convergence: input.convergence,
+  });
 
   const cycles = input.tree.issues
     .filter((issue) => issue.issue_kind === "cycle")
@@ -187,7 +197,7 @@ export function buildRootFactSet(input: {
       constraints: [],
       rootStatus: rootIssue.status,
       ownership,
-      convergenceSummary: "Root convergence is governed by durable Linear and Git facts.",
+      convergence: input.convergence,
     },
     cycles,
     issues,

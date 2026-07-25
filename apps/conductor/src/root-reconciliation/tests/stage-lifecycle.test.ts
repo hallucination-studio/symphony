@@ -7,6 +7,7 @@ import type {
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
   ManagedRecord,
+  RootConvergencePolicyInterface,
   RootDirective,
   StageModelTurnRecord,
   StageResult,
@@ -78,6 +79,26 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
   assert.deepEqual(statusMutations(linear), ["In Progress", "Done"]);
   assert.equal(stage(linear.tree).status_name, "Done");
   assert.equal(linear.stageResultCount(), 1);
+});
+
+test("a Cycle repair limit rejects another stage before accepting its directive", async () => {
+  const linear = new FakeLinear("plan");
+  let performerCalls = 0;
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "plan",
+    outcomeKind: "plan_completed",
+    convergence: exhaustedCycleConvergence(),
+    onExecute(input) {
+      performerCalls += 1;
+      return completedPlanResult(input);
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(performerCalls, 0);
+  assert.equal(linear.managedRecords().some(({ kind }) => kind === "root_directive"), false);
+  assert.equal(stage(linear.tree).status_name, "Todo");
 });
 
 test("a durable Stage Result must materialize its Cycle timeline before the terminal status", async () => {
@@ -400,6 +421,7 @@ function dependencies(input: {
   outcomeKind: StageResult["outcome"]["kind"];
   model?: string;
   onExecute(stageInput: StageTurnInput): StageResult;
+  convergence?: RootConvergencePolicyInterface;
   timeline?: RootReconciliationRuntimeDependencies["timeline"];
   log?: RootReconciliationRuntimeDependencies["log"];
 }): RootReconciliationRuntimeDependencies {
@@ -426,6 +448,7 @@ function dependencies(input: {
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
+    convergence: input.convergence ?? allowingConvergence(),
     reconciler: {
       async open(openInput) {
         return {
@@ -497,6 +520,88 @@ function directive(
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1", reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1", modelTurn: rootModelTurn("turn-1"), basedOnTargetRootDigest: digest, rationale: "Execute the selected stage.",
     evidenceRefs: [], consumedInputIds, commentReplies: [], humanActionResolutions: [], action,
+  };
+}
+
+function allowingConvergence(): RootConvergencePolicyInterface {
+  return {
+    assess() {
+      return {
+        trigger: "none",
+        snapshot: {
+          policy: {
+            kind: "root_convergence_policy",
+            version: 1,
+            policyId: "root-convergence-policy-1",
+            rootIssueId: "root-1",
+            maxCyclesPerRoot: 3,
+            maxSameOpenFindingCycles: 2,
+            maxConsecutiveNoProgress: 2,
+            maxTotalTokens: 10_000,
+            maxCycleRepairAttempts: 0,
+            deadlineAt: "2026-07-26T00:00:00.000Z",
+          },
+          view: {
+            cycleCount: 1,
+            openFindingPersistence: [],
+            consecutiveNoProgress: 0,
+            settledTokens: 0,
+            openTokenReservations: [],
+            activeCycleIssueId: "cycle-1",
+            activeCycleRepairAttempts: 0,
+            isDeadlineExceeded: false,
+            rootIsCanceled: false,
+          },
+        },
+      };
+    },
+    async persistNonAllowing() {
+      throw new Error("convergence_persist_unexpected");
+    },
+  };
+}
+
+function exhaustedCycleConvergence(): RootConvergencePolicyInterface {
+  return {
+    assess() {
+      return {
+        trigger: "max_cycle_repair_attempts" as const,
+        snapshot: {
+          policy: {
+            kind: "root_convergence_policy",
+            version: 1,
+            policyId: "root-convergence-policy-1",
+            rootIssueId: "root-1",
+            maxCyclesPerRoot: 3,
+            maxSameOpenFindingCycles: 2,
+            maxConsecutiveNoProgress: 2,
+            maxTotalTokens: 10_000,
+            maxCycleRepairAttempts: 0,
+            deadlineAt: "2026-07-26T00:00:00.000Z",
+          },
+          view: {
+            cycleCount: 1,
+            openFindingPersistence: [],
+            consecutiveNoProgress: 0,
+            settledTokens: 0,
+            openTokenReservations: [],
+            activeCycleIssueId: "cycle-1",
+            activeCycleRepairAttempts: 1,
+            isDeadlineExceeded: false,
+            rootIsCanceled: false,
+          },
+          assessment: {
+            recordId: "convergence-1",
+            recordKind: "convergence",
+            recordVersion: "1",
+            writeId: "convergence-1",
+          },
+        },
+      };
+    },
+    async persistNonAllowing() {
+      throw new Error("convergence_persist_unexpected");
+    },
   };
 }
 

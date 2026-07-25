@@ -5,7 +5,11 @@ import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
+import {
+  parseManagedRecord,
+  rootConvergencePolicyId,
+  serializeManagedRecord,
+} from "../../root-reconciliation/api/index.js";
 import { LinearRootOwnershipClaimImpl } from "../internal/LinearRootOwnershipClaimImpl.js";
 
 const rootId = "root-1";
@@ -20,11 +24,78 @@ test("claims an unclaimed Root only after profile readiness and persists the wor
   const result = await claim.claim({ root: discoveredRoot() });
 
   assert.equal(result.kind, "claimed");
-  assert.deepEqual(events, ["read", "profile", "state", "read", "ensure", "inspect", "ownership", "read"]);
+  assert.deepEqual(events, ["read", "profile", "state", "read", "ensure", "inspect", "policy", "read", "ownership", "read"]);
   assert.equal(fake.tree.issues[0]?.status_name, "In Progress");
   assert.equal(result.ownership.conductorId, "conductor-1");
   assert.equal(result.ownership.performerProfileId, "profile-1");
   assert.equal(result.ownership.deliveryBranch, "symphony/runs/sym-1");
+});
+
+test("snapshots the public convergence configuration once and reads it back with the claim", async () => {
+  const fake = new FakeLinear();
+  const claim = createClaim(fake, [], { profileId: "profile-1", ready: true });
+
+  await claim.claim({ root: discoveredRoot() });
+
+  assert.deepEqual(fake.convergencePolicy(), {
+    kind: "root_convergence_policy",
+    version: 1,
+    policyId: rootConvergencePolicyId(rootId),
+    rootIssueId: rootId,
+    maxCyclesPerRoot: 3,
+    maxSameOpenFindingCycles: 2,
+    maxConsecutiveNoProgress: 2,
+    maxTotalTokens: 10_000,
+    maxCycleRepairAttempts: 0,
+    deadlineAt: "2026-07-26T00:00:00.000Z",
+  });
+});
+
+test("resumes an interrupted policy-first claim without writing a second policy", async () => {
+  const fake = new FakeLinear(undefined, "In Progress", convergencePolicyRecord());
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: true });
+
+  const result = await claim.claim({ root: discoveredRoot() });
+
+  assert.equal(result.kind, "claimed");
+  assert.deepEqual(events, ["read", "profile", "ensure", "inspect", "ownership", "read"]);
+  assert.equal(fake.mutations.filter(({ kind }) => kind === "append_workflow_comment").length, 1);
+  assert.deepEqual(fake.convergencePolicy(), convergencePolicyRecord());
+});
+
+test("fails closed when an owned Root has no convergence policy", async () => {
+  const fake = new FakeLinear(ownershipRecord(), "In Progress", null);
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: true });
+
+  await assert.rejects(claim.claim({ root: discoveredRoot() }), /root_convergence_policy_missing/u);
+  assert.deepEqual(events, ["read"]);
+  assert.equal(fake.mutations.length, 0);
+});
+
+test("fails closed when an unowned Root has a policy from another launch configuration", async () => {
+  const fake = new FakeLinear(undefined, "In Progress", convergencePolicyRecord({ maxCycleRepairAttempts: 1 }));
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: true });
+
+  await assert.rejects(claim.claim({ root: discoveredRoot() }), /root_convergence_policy_mismatch/u);
+  assert.deepEqual(events, ["read"]);
+  assert.equal(fake.mutations.length, 0);
+});
+
+test("reuses an owned Root policy without reading the current launch configuration", async () => {
+  const fake = new FakeLinear(ownershipRecord(), "In Progress", convergencePolicyRecord({ maxCycleRepairAttempts: 1 }));
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-ignored", ready: true }, {
+    convergencePolicyFor: async () => { throw new Error("current_configuration_must_not_be_read"); },
+  });
+
+  const result = await claim.claim({ root: discoveredRoot() });
+
+  assert.equal(result.kind, "already_owned");
+  assert.deepEqual(events, ["read", "profile", "ensure", "inspect", "read"]);
+  assert.equal(fake.mutations.length, 0);
 });
 
 test("reuses a same-Conductor ownership record without writing a second claim", async () => {
@@ -37,7 +108,7 @@ test("reuses a same-Conductor ownership record without writing a second claim", 
   assert.equal(result.kind, "already_owned");
   assert.deepEqual(events, ["read", "profile", "ensure", "inspect", "read"]);
   assert.equal(fake.mutations.length, 0);
-  assert.equal(fake.tree.comments.filter(({ issue_id }) => issue_id === rootId).length, 1);
+  assert.equal(fake.tree.comments.filter(({ issue_id }) => issue_id === rootId).length, 2);
 });
 
 test("preserves an owned delivered Root in In Review during admission", async () => {
@@ -120,10 +191,24 @@ function createClaim(
   fake: FakeLinear,
   events: string[],
   profile: { profileId: string; ready: boolean },
-  options: { inspectBranch?: string } = {},
+  options: {
+    inspectBranch?: string;
+    convergencePolicyFor?: () => Promise<{
+      maxCyclesPerRoot: number;
+      maxSameOpenFindingCycles: number;
+      maxConsecutiveNoProgress: number;
+      maxTotalTokens: number;
+      maxCycleRepairAttempts: number;
+      deadlineAt: string;
+    }>;
+  } = {},
 ) {
   fake.onRead = () => { events.push("read"); };
-  fake.onMutation = (command) => { events.push(command.kind === "update_workflow_issue" ? "state" : "ownership"); };
+  fake.onMutation = (command) => {
+    events.push(command.kind === "update_workflow_issue"
+      ? "state"
+      : command.writeId.startsWith("root-convergence-policy:") ? "policy" : "ownership");
+  };
   return new LinearRootOwnershipClaimImpl({
     linear: fake,
     git: {
@@ -148,6 +233,14 @@ function createClaim(
     conductorId: "conductor-1",
     ownerGeneration: "generation-1",
     baseBranch: "main",
+    convergencePolicyFor: options.convergencePolicyFor ?? (async () => ({
+      maxCyclesPerRoot: 3,
+      maxSameOpenFindingCycles: 2,
+      maxConsecutiveNoProgress: 2,
+      maxTotalTokens: 10_000,
+      maxCycleRepairAttempts: 0,
+      deadlineAt: "2026-07-26T00:00:00.000Z",
+    })),
   });
 }
 
@@ -186,18 +279,44 @@ function ownershipRecord(overrides: Partial<{
   };
 }
 
+function convergencePolicyRecord(overrides: Partial<{
+  maxCyclesPerRoot: number;
+  maxSameOpenFindingCycles: number;
+  maxConsecutiveNoProgress: number;
+  maxTotalTokens: number;
+  maxCycleRepairAttempts: number;
+  deadlineAt: string;
+}> = {}) {
+  return {
+    kind: "root_convergence_policy" as const,
+    version: 1 as const,
+    policyId: rootConvergencePolicyId(rootId),
+    rootIssueId: rootId,
+    maxCyclesPerRoot: overrides.maxCyclesPerRoot ?? 3,
+    maxSameOpenFindingCycles: overrides.maxSameOpenFindingCycles ?? 2,
+    maxConsecutiveNoProgress: overrides.maxConsecutiveNoProgress ?? 2,
+    maxTotalTokens: overrides.maxTotalTokens ?? 10_000,
+    maxCycleRepairAttempts: overrides.maxCycleRepairAttempts ?? 0,
+    deadlineAt: overrides.deadlineAt ?? "2026-07-26T00:00:00.000Z",
+  };
+}
+
 class FakeLinear {
   tree: LinearWorkflowTreeSnapshot;
   mutations: LinearWorkflowMutationCommand[] = [];
   onRead?: () => void;
   onMutation?: (command: LinearWorkflowMutationCommand) => void;
 
-  constructor(record?: ReturnType<typeof ownershipRecord>, rootStatus: "Todo" | "In Progress" | "In Review" | "Canceled" = record ? "In Progress" : "Todo") {
+  constructor(
+    record?: ReturnType<typeof ownershipRecord>,
+    rootStatus: "Todo" | "In Progress" | "In Review" | "Canceled" = record ? "In Progress" : "Todo",
+    policy: ReturnType<typeof convergencePolicyRecord> | null = record ? convergencePolicyRecord() : null,
+  ) {
     const rootState = rootStatus === "In Review"
       ? { statusId: "status-review", statusName: "In Review", statusCategory: "started" as const, statusPosition: 2 }
       : rootStatus === "Canceled"
         ? { statusId: "status-canceled", statusName: "Canceled", statusCategory: "canceled" as const, statusPosition: 3 }
-      : record
+      : rootStatus === "In Progress"
         ? { statusId: "status-progress", statusName: "In Progress", statusCategory: "started" as const, statusPosition: 1 }
         : { statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted" as const, statusPosition: 0 };
     this.tree = {
@@ -214,11 +333,18 @@ class FakeLinear {
         status_category: rootState.statusCategory, status_position: rootState.statusPosition, order: 0, depth: 0, title: "Root", description: "Build it",
         issue_kind: "root", labels: [], is_archived: false, remote_version: "root-v1", updated_at: now,
       }],
-      comments: record ? [{
-        comment_id: "ownership-comment", issue_id: rootId, body: serializeManagedRecord(record),
-        author_kind: "symphony", author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: now,
-        thread_root_comment_id: "ownership-comment", thread_state: "unresolved", reactions: [], remote_version: "comment-v1", updated_at: now,
-      }] : [],
+      comments: [
+        ...(record ? [{
+          comment_id: "ownership-comment", issue_id: rootId, body: serializeManagedRecord(record),
+          author_kind: "symphony" as const, author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: now,
+          thread_root_comment_id: "ownership-comment", thread_state: "unresolved" as const, reactions: [], remote_version: "comment-v1", updated_at: now,
+        }] : []),
+        ...(policy ? [{
+          comment_id: "policy-comment", issue_id: rootId, body: serializeManagedRecord(policy),
+          author_kind: "symphony" as const, author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: now,
+          thread_root_comment_id: "policy-comment", thread_state: "unresolved" as const, reactions: [], remote_version: "comment-v1", updated_at: now,
+        }] : []),
+      ],
       relations: [],
       source_manifest: [],
       coverage: { is_complete: true, omissions: [] },
@@ -271,5 +397,12 @@ class FakeLinear {
       .map(({ body }) => parseManagedRecord(body))
       .find((record) => record.ok && record.value.kind === "root_ownership");
     return parsed?.ok && parsed.value.kind === "root_ownership" ? parsed.value : undefined;
+  }
+
+  convergencePolicy() {
+    const parsed = this.tree.comments
+      .map(({ body }) => parseManagedRecord(body))
+      .find((record) => record.ok && record.value.kind === "root_convergence_policy");
+    return parsed?.ok && parsed.value.kind === "root_convergence_policy" ? parsed.value : undefined;
   }
 }

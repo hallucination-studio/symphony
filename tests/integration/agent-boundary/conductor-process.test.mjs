@@ -48,6 +48,11 @@ test("production Conductor completes its closed process boundary before agent ad
     SYMPHONY_BASE_BRANCH: "main",
     SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
     SYMPHONY_ROOT_DEADLINE_AT: new Date(Date.now() + EVIDENCE_DEADLINE_MS).toISOString(),
+    SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
+    SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
+    SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
+    SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
+    SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
     SYMPHONY_CYCLE_DELAY_MS: "25",
   } });
   const harness = await startConductorHarness({

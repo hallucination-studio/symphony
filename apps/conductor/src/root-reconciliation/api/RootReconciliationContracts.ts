@@ -5,6 +5,8 @@ import type {
   PlanContract,
   PlanContractProposal,
   ProposedWorkDag,
+  RootConvergencePolicy,
+  RootConvergenceView,
   RootReconcilerFailureRecord,
   RootReconcilerModelTurnRecord,
   StageModelTurnRecord,
@@ -111,6 +113,12 @@ export interface RootRecordReference {
   writeId: string;
 }
 
+export interface RootConvergenceSnapshot {
+  policy: RootConvergencePolicy;
+  view: RootConvergenceView;
+  assessment?: RootRecordReference;
+}
+
 export type RootRecordKind =
   | "root_ownership"
   | "workflow_issue"
@@ -203,7 +211,7 @@ export interface RootObservation {
   constraints: string[];
   rootStatus: LinearFactState;
   ownership: RootRecordReference;
-  convergenceSummary: string;
+  convergence: RootConvergenceSnapshot;
 }
 
 export interface RootGitFacts {
@@ -262,7 +270,8 @@ export type RootDeltaChange =
   | (RootDeltaChangeBase & { kind: "plan_contract_removed"; cycleIssueId: string; planIssueId: string; planContractDigest: string })
   | (RootDeltaChangeBase & { kind: "plan_completed_result_removed"; cycleIssueId: string; resultId: string })
   | (RootDeltaChangeBase & { kind: "git_facts_current_value"; gitFacts: RootGitFacts })
-  | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] });
+  | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] })
+  | (RootDeltaChangeBase & { kind: "convergence_current_value"; convergence: RootConvergenceSnapshot });
 
 export interface RootDelta {
   baseRootDigest: string;

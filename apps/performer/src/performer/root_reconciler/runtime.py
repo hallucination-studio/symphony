@@ -266,6 +266,13 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
         if kind == "mechanical_violations_current_value":
             snapshot["mechanical_violations"] = deepcopy(change["mechanical_violations"])
             continue
+        if kind == "convergence_current_value":
+            root = snapshot.get("root")
+            convergence = change.get("convergence")
+            if not isinstance(root, dict) or not isinstance(convergence, dict):
+                raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+            root["convergence"] = deepcopy(convergence)
+            continue
         if kind == "plan_contract_current_value":
             _apply_plan_contract(snapshot, change)
             continue

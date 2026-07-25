@@ -636,6 +636,81 @@ tombstones。无业务影响时也
 返回`acknowledge`并消费输入，不创建另一份disposition状态。`human_action_resolutions[]`只在matching Action terminal status、actor、proposal digest和
 所需comment事实成立时出现；Conductor验证并materialize，但不能自行生成resolution。
 
+### 7.0 Root convergence policy and gate
+
+`RootConvergencePolicy` is the one immutable Root managed record that snapshots
+the public Conductor convergence configuration at successful Root claim:
+
+```text
+RootConvergencePolicy
+  policy_id
+  root_issue_id
+  max_cycles_per_root
+  max_same_open_finding_cycles
+  max_consecutive_no_progress
+  max_total_tokens
+  max_cycle_repair_attempts
+  deadline_at
+```
+
+The public configuration is operator configuration for newly claimed Roots,
+not a Desktop workflow control and not a user-editable Root field. Conductor
+strictly validates it before claim, writes one policy comment on the Root, and
+reads it back before it writes the Root ownership record. An unowned Root with
+one matching policy may resume that interrupted claim. Once ownership exists,
+the Root must have exactly one policy whose complete content matches the policy
+it was claimed with. Missing, duplicate, foreign, malformed, mismatched, or
+unreadable policies stop the Root; Conductor never rewrites an existing policy
+or keeps a local replacement. Admission of an owned Root reads and validates
+only that Root's persisted policy; a later launch configuration applies only to
+new claims and cannot invalidate an already owned Root.
+
+`RootConvergenceView` is an in-memory calculation over the complete active and
+archived Root Tree, immutable turn records, Finding dispositions, and current
+native Root status. It contains the policy, total Cycle count, open-Finding
+persistence, consecutive no-progress count, settled tokens, open token
+reservations, current Cycle repair-attempt count, deadline result, and native
+Root cancellation fact. It is sent in the initial Root bootstrap and as a
+typed delta only when its canonical value changes. It is never a checkpoint,
+queue, mutable ledger, or second lifecycle state.
+
+When the View reaches a non-allowing limit, Conductor writes one immutable,
+strictly read-back `ConvergenceRecord` on the Root before another Reconciler
+turn:
+
+```text
+ConvergenceRecord
+  convergence_record_id
+  root_issue_id
+  policy_id
+  policy
+  view
+  trigger:
+    root_canceled | deadline_exceeded | max_cycles_per_root |
+    max_same_open_finding_cycles | max_consecutive_no_progress |
+    token_budget | max_cycle_repair_attempts
+```
+
+`convergence_record_id` is derived from `root_issue_id`, `policy_id`, the
+canonical View, and `trigger`; the same fact has one write identity across
+restart. Allowing Views are transmitted but do not create assessment comments.
+The record is evidence of a mechanical constraint, not a directive, Human
+Action, status, or replacement for the current View.
+
+The gate cannot select a business next step. A Root-level trigger blocks new
+Cycle and Stage execution. A `max_cycle_repair_attempts` trigger blocks further
+Plan, Work, Verify, or rerun execution in that Cycle while still permitting a
+Reconciler-proposed `conclude_cycle(exhausted)` and a valid exhausted
+successor. The Root Reconciler receives the typed View/record and chooses the
+closed directive. Conductor validates that directive against the same fresh
+View; it does not create a Human Action, terminalize a Cycle, or create a
+successor by itself.
+
+`max_cycles_per_root` permits the one active Cycle whose `cycle_count` equals
+the limit to finish. At that same count with no active Cycle it blocks a
+successor; if an active Cycle already makes `cycle_count` exceed the limit, it
+blocks every Stage in that over-cap Cycle as well.
+
 ### 7.1 Stage执行与重跑
 
 ```text

@@ -29,6 +29,7 @@ import { InProcessWorkflowTimelinePublisherImpl } from "./workflow-events/intern
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
+import { LinearRootConvergencePolicyImpl } from "./root-reconciliation/internal/LinearRootConvergencePolicyImpl.js";
 import { PodiumRuntimeLogPublisherImpl } from "./runtime-logs/internal/PodiumRuntimeLogPublisherImpl.js";
 import type { DiscoveredRoot } from "./root-reconciliation/api/RootModels.js";
 
@@ -136,6 +137,7 @@ export async function runConductor(environment = process.env): Promise<void> {
       };
     },
     workspaceFor,
+    convergencePolicyFor: async () => config.rootConvergencePolicy,
     conductorId: config.conductorId,
     ownerGeneration: config.instanceId,
     baseBranch: config.baseBranch,
@@ -168,6 +170,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     ownership: ownershipClaim,
     scheduling: new LinearPriorityRootSchedulingPolicyImpl(),
     safety: new LinearRootSafetyPolicyImpl(),
+    convergence: new LinearRootConvergencePolicyImpl(gateway),
     reconciler,
     performer,
     materializer: new LinearRootDirectiveMaterializerImpl(
@@ -241,7 +244,10 @@ function isKind(value: JsonValue, kind: string): boolean {
 }
 
 function runtimeConfig(environment: NodeJS.ProcessEnv) {
-  const rootDeadlineAt = environment.SYMPHONY_ROOT_DEADLINE_AT;
+  const rootDeadlineAt = validTimestamp(
+    required(environment.SYMPHONY_ROOT_DEADLINE_AT, "root_deadline_missing"),
+    "root_deadline_invalid",
+  );
   return {
     privateIpcFd: positiveInteger(environment.SYMPHONY_PRIVATE_IPC_FD, "private_ipc_fd_invalid"),
     instanceId: required(environment.SYMPHONY_INSTANCE_ID, "instance_id_missing"),
@@ -259,9 +265,15 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
       : 1_000,
-    rootDeadlineAt: rootDeadlineAt === undefined
-      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-      : validTimestamp(rootDeadlineAt, "root_deadline_invalid"),
+    rootDeadlineAt,
+    rootConvergencePolicy: {
+      maxCyclesPerRoot: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT, "root_max_cycles_per_root_invalid"),
+      maxSameOpenFindingCycles: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES, "root_max_same_open_finding_cycles_invalid"),
+      maxConsecutiveNoProgress: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS, "root_max_consecutive_no_progress_invalid"),
+      maxTotalTokens: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_TOTAL_TOKENS, "root_max_total_tokens_invalid"),
+      maxCycleRepairAttempts: rootPolicyNonNegativeInteger(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "root_max_cycle_repair_attempts_invalid"),
+      deadlineAt: rootDeadlineAt,
+    },
   };
 }
 
@@ -287,6 +299,19 @@ function positiveInteger(value: string | undefined, code: string): number {
   if (!value || !/^\d+$/.test(value)) throw new Error(code);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 300_000) throw new Error(code);
+  return parsed;
+}
+
+function rootPolicyPositiveInteger(value: string | undefined, code: string): number {
+  const parsed = rootPolicyNonNegativeInteger(value, code);
+  if (parsed < 1) throw new Error(code);
+  return parsed;
+}
+
+function rootPolicyNonNegativeInteger(value: string | undefined, code: string): number {
+  if (!value || !/^\d+$/u.test(value)) throw new Error(code);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 1_000_000_000) throw new Error(code);
   return parsed;
 }
 

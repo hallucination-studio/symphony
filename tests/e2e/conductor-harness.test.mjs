@@ -11,6 +11,8 @@ import {
   startConductorHarness,
 } from "../../tools/e2e/conductor-harness.mjs";
 
+const harnessRootDeadlineAt = new Date(Date.now() + 60_000).toISOString();
+
 test("production harness observes a real Conductor handshake and shuts down boundedly", {
   skip: !existsSync("packages/podium/dist/internal/storage/SqlitePodiumStoreImpl.js") ||
     !existsSync("apps/conductor/dist/main.js"),
@@ -61,6 +63,12 @@ test("production harness observes a real Conductor handshake and shuts down boun
       SYMPHONY_REPOSITORY_ROOT: repositoryRoot,
       SYMPHONY_BASE_BRANCH: "main",
       SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
+      SYMPHONY_ROOT_DEADLINE_AT: harnessRootDeadlineAt,
+      SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
+      SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
+      SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
+      SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
+      SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
       SYMPHONY_CYCLE_DELAY_MS: "1000",
     },
   });
@@ -96,6 +104,12 @@ test("real Conductor continues with an unbound project after handshake", async (
     SYMPHONY_REPOSITORY_ROOT: path.join(root, "repository"),
     SYMPHONY_BASE_BRANCH: "main",
     SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
+    SYMPHONY_ROOT_DEADLINE_AT: harnessRootDeadlineAt,
+    SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
+    SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
+    SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
+    SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
+    SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
     SYMPHONY_CYCLE_DELAY_MS: "1000",
   } });
   const handler = {
@@ -169,6 +183,12 @@ test("real Conductor can be restarted after an abrupt process exit", async () =>
     SYMPHONY_REPOSITORY_ROOT: path.join(root, "repository"),
     SYMPHONY_BASE_BRANCH: "main",
     SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
+    SYMPHONY_ROOT_DEADLINE_AT: harnessRootDeadlineAt,
+    SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
+    SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
+    SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
+    SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
+    SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
     SYMPHONY_CYCLE_DELAY_MS: "1000",
   } });
 

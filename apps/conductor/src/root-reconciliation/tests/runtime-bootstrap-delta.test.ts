@@ -7,6 +7,7 @@ import {
   parseManagedRecord,
   serializeManagedRecord,
   type RootDirective,
+  type RootConvergencePolicyInterface,
   type RootReconcilerFailureRecord,
   type UserCommentReply,
 } from "../api/index.js";
@@ -15,6 +16,7 @@ import {
   directiveMaterializationComplete,
   RootReconciliationRuntime,
   type RootReconciliationRuntimeDependencies,
+  validateConvergenceDirective,
   validateDirectiveInputs,
 } from "../internal/RootReconciliationRuntime.js";
 
@@ -45,6 +47,7 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
+    convergence: allowingConvergence(),
     reconciler: {
       async open(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]) {
         opens += 1;
@@ -102,6 +105,77 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   assert.equal(await runtime.cycle(), "waiting-human");
   assert.equal(opens, 1);
   assert.equal(advances, 1);
+});
+
+test("Root runtime persists a non-allowing convergence record before opening the Reconciler", async () => {
+  const tree = workflowTree();
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  let persisted = false;
+  let opens = 0;
+  const dependencies = failureDependencies({
+    tree,
+    logs,
+    onOpen(input) {
+      opens += 1;
+      assert.equal(persisted, true);
+      assert.equal(input.bootstrap.rootSnapshot.root.convergence.assessment?.recordId, "convergence-1");
+      return failureFor(input);
+    },
+  });
+  dependencies.convergence = repairLimitConvergence({
+    tree,
+    onPersist() { persisted = true; },
+  });
+
+  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
+  assert.equal(opens, 1);
+  assert.equal(persisted, true);
+});
+
+test("convergence gates leave business choice to the Reconciler within their closed bounds", () => {
+  const rootLevel = rootLevelConvergence();
+  const repairLimit = repairLimitConvergence({ tree: workflowTree(), onPersist() {} });
+
+  assert.equal(
+    validateConvergenceDirective({
+      ...directive("tree-v1"),
+      action: {
+        kind: "execute_plan", cycleIssueId: "cycle-1", planIssueId: "plan-1", planGoal: "Plan",
+        requiredOutputs: [], priorPlanResultIds: [], humanResolutionIds: [],
+      },
+    }, rootLevel.assess({} as never)),
+    "root_convergence_max_cycles_per_root_execute_plan_blocked",
+  );
+  assert.equal(
+    validateConvergenceDirective({
+      ...directive("tree-v1"),
+      action: {
+        kind: "create_cycle", predecessorCycleIssueId: "cycle-1", reason: "exhausted", planTrigger: "retry",
+        inheritedFactRefs: [], invalidatedDeliveryRefs: [],
+      },
+    }, rootLevel.assess({} as never)),
+    "root_convergence_max_cycles_per_root_create_cycle_blocked",
+  );
+  assert.equal(
+    validateConvergenceDirective({
+      ...directive("tree-v1"),
+      action: {
+        kind: "conclude_cycle", cycleIssueId: "cycle-1", conclusion: "repair_required", completedWorkIds: [],
+        unresolvedFindingIds: [], attemptedApproachRefs: [], verificationEvidenceRefs: [],
+      },
+    }, repairLimit.assess({} as never)),
+    "root_convergence_max_cycle_repair_attempts_requires_exhausted_cycle",
+  );
+  assert.equal(
+    validateConvergenceDirective({
+      ...directive("tree-v1"),
+      action: {
+        kind: "conclude_cycle", cycleIssueId: "cycle-1", conclusion: "exhausted", completedWorkIds: [],
+        unresolvedFindingIds: [], attemptedApproachRefs: [], verificationEvidenceRefs: [],
+      },
+    }, repairLimit.assess({} as never)),
+    undefined,
+  );
 });
 
 test("Root runtime persists a Reconciler failure once and blocks restart until a new user input exists", async () => {
@@ -289,6 +363,7 @@ function failureDependencies(input: {
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
+    convergence: allowingConvergence(),
     reconciler: {
       async open(openInput) {
         return {
@@ -375,6 +450,158 @@ function rootModelTurn(): RootDirective["modelTurn"] {
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
     model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
     terminalAt: "2026-07-23T00:00:00Z",
+  };
+}
+
+function allowingConvergence(): RootConvergencePolicyInterface {
+  return {
+    assess() {
+      return {
+        trigger: "none",
+        snapshot: {
+          policy: {
+            kind: "root_convergence_policy",
+            version: 1,
+            policyId: "root-convergence-policy-1",
+            rootIssueId: "root-1",
+            maxCyclesPerRoot: 3,
+            maxSameOpenFindingCycles: 2,
+            maxConsecutiveNoProgress: 2,
+            maxTotalTokens: 10_000,
+            maxCycleRepairAttempts: 0,
+            deadlineAt: "2026-07-26T00:00:00.000Z",
+          },
+          view: {
+            cycleCount: 0,
+            openFindingPersistence: [],
+            consecutiveNoProgress: 0,
+            settledTokens: 0,
+            openTokenReservations: [],
+            activeCycleRepairAttempts: 0,
+            isDeadlineExceeded: false,
+            rootIsCanceled: false,
+          },
+        },
+      };
+    },
+    async persistNonAllowing() {
+      throw new Error("convergence_persist_unexpected");
+    },
+  };
+}
+
+function repairLimitConvergence(input: {
+  tree: LinearWorkflowTreeSnapshot;
+  onPersist(): void;
+}): RootConvergencePolicyInterface {
+  const policy = {
+    kind: "root_convergence_policy" as const,
+    version: 1 as const,
+    policyId: "root-convergence-policy-1",
+    rootIssueId: "root-1",
+    maxCyclesPerRoot: 3,
+    maxSameOpenFindingCycles: 2,
+    maxConsecutiveNoProgress: 2,
+    maxTotalTokens: 10_000,
+    maxCycleRepairAttempts: 0,
+    deadlineAt: "2026-07-26T00:00:00.000Z",
+  };
+  const view = {
+    cycleCount: 1,
+    openFindingPersistence: [],
+    consecutiveNoProgress: 0,
+    settledTokens: 0,
+    openTokenReservations: [],
+    activeCycleIssueId: "cycle-1",
+    activeCycleRepairAttempts: 1,
+    isDeadlineExceeded: false,
+    rootIsCanceled: false,
+  };
+  const record = {
+    kind: "convergence" as const,
+    version: 1 as const,
+    convergenceRecordId: "convergence-1",
+    rootIssueId: "root-1",
+    policyId: policy.policyId,
+    policy: {
+      maxCyclesPerRoot: policy.maxCyclesPerRoot,
+      maxSameOpenFindingCycles: policy.maxSameOpenFindingCycles,
+      maxConsecutiveNoProgress: policy.maxConsecutiveNoProgress,
+      maxTotalTokens: policy.maxTotalTokens,
+      maxCycleRepairAttempts: policy.maxCycleRepairAttempts,
+      deadlineAt: policy.deadlineAt,
+    },
+    view,
+    trigger: "max_cycle_repair_attempts" as const,
+  };
+  let persisted = false;
+  return {
+    assess() {
+      return {
+        trigger: "max_cycle_repair_attempts" as const,
+        record,
+        snapshot: {
+          policy,
+          view,
+          ...(persisted ? {
+            assessment: {
+              recordId: record.convergenceRecordId,
+              recordKind: "convergence" as const,
+              recordVersion: "1" as const,
+              writeId: record.convergenceRecordId,
+            },
+          } : {}),
+        },
+      };
+    },
+    async persistNonAllowing() {
+      persisted = true;
+      input.onPersist();
+      return input.tree;
+    },
+  };
+}
+
+function rootLevelConvergence(): RootConvergencePolicyInterface {
+  return {
+    assess() {
+      return {
+        trigger: "max_cycles_per_root" as const,
+        snapshot: {
+          policy: {
+            kind: "root_convergence_policy",
+            version: 1,
+            policyId: "root-convergence-policy-1",
+            rootIssueId: "root-1",
+            maxCyclesPerRoot: 1,
+            maxSameOpenFindingCycles: 2,
+            maxConsecutiveNoProgress: 2,
+            maxTotalTokens: 10_000,
+            maxCycleRepairAttempts: 0,
+            deadlineAt: "2026-07-26T00:00:00.000Z",
+          },
+          view: {
+            cycleCount: 1,
+            openFindingPersistence: [],
+            consecutiveNoProgress: 0,
+            settledTokens: 0,
+            openTokenReservations: [],
+            activeCycleRepairAttempts: 0,
+            isDeadlineExceeded: false,
+            rootIsCanceled: false,
+          },
+          assessment: {
+            recordId: "convergence-1",
+            recordKind: "convergence",
+            recordVersion: "1",
+            writeId: "convergence-1",
+          },
+        },
+      };
+    },
+    async persistNonAllowing() {
+      throw new Error("convergence_persist_unexpected");
+    },
   };
 }
 

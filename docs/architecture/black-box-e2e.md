@@ -311,7 +311,7 @@ Linear/Git references，不输出Issue正文、credential、Provider transcript�
 | Plan rejection and supersession | Human Actor拒绝Plan Action并给出reason | rejected resolution、旧Contract/Action/Result保留、Contract supersession、fresh Plan execution/Contract/Action；archive严格匹配accepted directive |
 | Root revision and comment | 修改Root description，写/编辑comment并resolve/reopen | Root Reconciler消费增量，产生matching reply、closed reaction disposition和thread action后再推进 |
 | Conductor restart isolation | `CaseRootSet`按`C,A,B`创建；C Stage in-flight时仅经process controller `SIGKILL`并fresh start C，A/B继续 | C旧failure/cancel、无stale成功Result、同Cycle/Node的新session replacement Result；A/B各一条跨越C恢复的连续成功interval和不变ownership |
-| Cycle exhaustion and successor | 使用公开convergence配置触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
+| Cycle exhaustion and successor | 在Root claim前通过公开Conductor配置设置Cycle repair limit，并触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
 | delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
 | required Linear write fail-closed | 在required reply/timeline write边界使真实Linear channel暂时不可用后恢复 | outage期间无后续Stage事实；恢复后同stable identity写入/read-back，且后续Stage `started_at`晚于required write |
 

@@ -260,7 +260,7 @@
           "enum": [
             "root_ownership", "workflow_issue", "root_convergence_policy", "root_directive",
             "root_reconciler_failure", "root_reconciler_reply", "delivery", "model_turn",
-            "stage_execution", "plan_contract", "plan_result", "work_result", "stage_result",
+            "stage_execution", "plan_contract", "plan_contract_supersession", "plan_result", "work_result", "stage_result",
             "verify_result", "human_action_request", "human_action_resolution", "finding",
             "finding_disposition", "progress_assessment", "cycle_outcome", "convergence",
             "workflow_timeline"
@@ -306,7 +306,7 @@
     "RootObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue", "objective", "scope", "acceptance_criteria", "root_status", "ownership", "convergence_summary"],
+      "required": ["issue", "objective", "scope", "acceptance_criteria", "root_status", "ownership", "convergence"],
       "properties": {
         "issue": { "$ref": "#/$defs/IssueSnapshot" },
         "objective": { "$ref": "common.schema.json#/$defs/BoundedText" },
@@ -315,7 +315,68 @@
         "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } },
         "root_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
         "ownership": { "$ref": "#/$defs/RecordReference" },
-        "convergence_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "convergence": { "$ref": "#/$defs/RootConvergenceSnapshot" }
+      }
+    },
+    "RootConvergencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "version", "policy_id", "root_issue_id", "max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_total_tokens", "max_cycle_repair_attempts", "deadline_at"],
+      "properties": {
+        "kind": { "const": "root_convergence_policy" },
+        "version": { "const": 1, "type": "integer" },
+        "policy_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "max_cycles_per_root": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_same_open_finding_cycles": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_consecutive_no_progress": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_total_tokens": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_cycle_repair_attempts": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "OpenFindingPersistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_id", "open_cycle_count"],
+      "properties": {
+        "finding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "open_cycle_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
+      }
+    },
+    "OpenTokenReservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_execution_id", "reserved_total_tokens"],
+      "properties": {
+        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "reserved_total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
+      }
+    },
+    "RootConvergenceView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cycle_count", "open_finding_persistence", "consecutive_no_progress", "settled_tokens", "open_token_reservations", "active_cycle_repair_attempts", "is_deadline_exceeded", "root_is_canceled"],
+      "properties": {
+        "cycle_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "open_finding_persistence": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/OpenFindingPersistence" } },
+        "consecutive_no_progress": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "settled_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "open_token_reservations": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/OpenTokenReservation" } },
+        "active_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "active_cycle_repair_attempts": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "is_deadline_exceeded": { "type": "boolean" },
+        "root_is_canceled": { "type": "boolean" }
+      }
+    },
+    "RootConvergenceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "view"],
+      "properties": {
+        "policy": { "$ref": "#/$defs/RootConvergencePolicy" },
+        "view": { "$ref": "#/$defs/RootConvergenceView" },
+        "assessment": { "$ref": "#/$defs/RecordReference" }
       }
     },
     "CycleObservation": {
@@ -368,7 +429,7 @@
       "additionalProperties": false,
       "required": ["violation_kind", "source_issue_ids", "summary"],
       "properties": {
-        "violation_kind": { "enum": ["multiple_nonterminal_cycles", "canceled_root_has_active_cycle", "archived_dependency", "missing_stage_result", "invalid_tree"] },
+        "violation_kind": { "enum": ["multiple_nonterminal_cycles", "canceled_root_has_active_cycle", "archived_dependency", "missing_stage_result", "cycle_terminal_outcome_mismatch", "invalid_tree"] },
         "source_issue_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
         "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
@@ -602,6 +663,19 @@
         "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
       }
     },
+    "ConvergenceCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "convergence"],
+      "properties": {
+        "kind": { "const": "convergence_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "const": "symphony" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "convergence": { "$ref": "#/$defs/RootConvergenceSnapshot" }
+      }
+    },
     "RootDeltaChange": {
       "oneOf": [
         { "$ref": "#/$defs/IssueCurrentValue" }, { "$ref": "#/$defs/IssueDetached" },
@@ -610,7 +684,8 @@
         { "$ref": "#/$defs/ManagedRecordCurrentValue" }, { "$ref": "#/$defs/ManagedRecordRemoved" },
         { "$ref": "#/$defs/PlanContractCurrentValue" }, { "$ref": "#/$defs/PlanCompletedResultCurrentValue" },
         { "$ref": "#/$defs/PlanContractRemoved" }, { "$ref": "#/$defs/PlanCompletedResultRemoved" },
-        { "$ref": "#/$defs/GitFactsCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" }
+        { "$ref": "#/$defs/GitFactsCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" },
+        { "$ref": "#/$defs/ConvergenceCurrentValue" }
       ]
     },
     "RootDelta": {

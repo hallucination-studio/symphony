@@ -57,6 +57,34 @@ export interface WorkflowIssueRecord {
   issueKind: "cycle" | "plan" | "work" | "verify" | "human";
 }
 
+export interface RootConvergencePolicyValues {
+  maxCyclesPerRoot: number;
+  maxSameOpenFindingCycles: number;
+  maxConsecutiveNoProgress: number;
+  maxTotalTokens: number;
+  maxCycleRepairAttempts: number;
+  deadlineAt: string;
+}
+
+export interface RootConvergencePolicy extends RootConvergencePolicyValues {
+  kind: "root_convergence_policy";
+  version: ManagedRecordVersion;
+  policyId: string;
+  rootIssueId: string;
+}
+
+export interface RootConvergenceView {
+  cycleCount: number;
+  openFindingPersistence: Array<{ findingId: string; openCycleCount: number }>;
+  consecutiveNoProgress: number;
+  settledTokens: number;
+  openTokenReservations: Array<{ stageExecutionId: string; reservedTotalTokens: number }>;
+  activeCycleIssueId?: string;
+  activeCycleRepairAttempts: number;
+  isDeadlineExceeded: boolean;
+  rootIsCanceled: boolean;
+}
+
 export interface RootDirectiveRecord {
   kind: "root_directive";
   version: ManagedRecordVersion;
@@ -469,36 +497,24 @@ export type ConvergenceTrigger =
   | "max_cycles_per_root"
   | "max_same_open_finding_cycles"
   | "max_consecutive_no_progress"
-  | "token_budget";
+  | "token_budget"
+  | "max_cycle_repair_attempts";
 
 export interface ConvergenceRecord {
   kind: "convergence";
   version: ManagedRecordVersion;
+  convergenceRecordId: string;
   rootIssueId: string;
-  observedAt: string;
-  policy: {
-    maxCyclesPerRoot: number;
-    maxSameOpenFindingCycles: number;
-    maxConsecutiveNoProgress: number;
-    maxTotalTokens: number;
-    deadlineAt: string;
-  };
-  view: {
-    cycleCount: number;
-    openFindingPersistence: Array<{ findingId: string; openCycleCount: number }>;
-    consecutiveNoProgress: number;
-    settledTokens: number;
-    openTokenReservations: Array<{ stageExecutionId: string; reservedTotalTokens: number }>;
-    isDeadlineExceeded: boolean;
-    rootIsCanceled: boolean;
-  };
-  trigger: ConvergenceTrigger;
-  decision: "allow" | "escalate" | "canceled";
+  policyId: string;
+  policy: RootConvergencePolicyValues;
+  view: RootConvergenceView;
+  trigger: Exclude<ConvergenceTrigger, "none">;
 }
 
 export type ManagedRecord =
   | RootOwnershipRecord
   | WorkflowIssueRecord
+  | RootConvergencePolicy
   | RootDirectiveRecord
   | RootReconcilerFailureRecord
   | RootReconcilerReplyRecord

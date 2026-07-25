@@ -11,6 +11,7 @@ test("production E2E process starter passes only non-secret runtime configuratio
     performerExecutable: "/tmp/performer",
     codexBaseUrl: "https://codex.example.test",
     rootDeadlineAt: "2026-07-25T00:05:00.000Z",
+    convergencePolicy: convergencePolicy(),
     environment: {
       HOME: "/tmp/home",
       PATH: "/usr/bin",
@@ -47,6 +48,11 @@ test("production E2E process starter passes only non-secret runtime configuratio
   assert.equal(environment.SYMPHONY_CONDUCTOR_ID, "conductor-a");
   assert.equal(environment.SYMPHONY_REPOSITORY_ROOT, "/tmp/repository-a");
   assert.equal(environment.SYMPHONY_CODEX_BASE_URL, "https://codex.example.test");
+  assert.equal(environment.SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT, "3");
+  assert.equal(environment.SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES, "2");
+  assert.equal(environment.SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS, "2");
+  assert.equal(environment.SYMPHONY_ROOT_MAX_TOTAL_TOKENS, "10000");
+  assert.equal(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "0");
   assert.equal(environment.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
   assert.equal(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(environment.LINEAR_CLIENT_SECRET, undefined);
@@ -74,7 +80,18 @@ function runtimeInput() {
     performerExecutable: "/tmp/performer",
     codexBaseUrl: "https://codex.example.test",
     rootDeadlineAt: "2026-07-25T00:05:00.000Z",
+    convergencePolicy: convergencePolicy(),
     environment: { HOME: "/tmp/home", PATH: "/usr/bin" },
+  };
+}
+
+function convergencePolicy() {
+  return {
+    maxCyclesPerRoot: 3,
+    maxSameOpenFindingCycles: 2,
+    maxConsecutiveNoProgress: 2,
+    maxTotalTokens: 10_000,
+    maxCycleRepairAttempts: 0,
   };
 }
 

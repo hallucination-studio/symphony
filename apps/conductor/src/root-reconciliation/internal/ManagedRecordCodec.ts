@@ -20,6 +20,7 @@ import type {
   PlanWorkNode,
   ProgressAssessment,
   RootOwnershipRecord,
+  RootConvergencePolicy,
   RootDirectiveRecord,
   RootReconcilerFailureRecord,
   RootReconcilerReplyRecord,
@@ -103,6 +104,7 @@ function managedRecordSummary(kind: ManagedRecord["kind"]): string {
   switch (kind) {
     case "root_ownership": return "Root ownership recorded.";
     case "workflow_issue": return "Workflow issue identity recorded.";
+    case "root_convergence_policy": return "Root convergence policy recorded.";
     case "root_directive": return "Root decision recorded.";
     case "root_reconciler_failure": return "Root Reconciler failure recorded.";
     case "root_reconciler_reply": return "Root Reconciler reply recorded.";
@@ -130,6 +132,7 @@ function decodeRecord(value: unknown): ManagedRecord {
   switch (kind) {
     case "root_ownership": return decodeRootOwnership(object);
     case "workflow_issue": return decodeWorkflowIssue(object);
+    case "root_convergence_policy": return decodeRootConvergencePolicy(object);
     case "root_directive": return decodeRootDirectiveRecord(object);
     case "root_reconciler_failure": return decodeRootReconcilerFailureRecord(object);
     case "root_reconciler_reply": return decodeRootReconcilerReplyRecord(object);
@@ -169,6 +172,22 @@ function decodeRootOwnership(o: Record<string, unknown>): RootOwnershipRecord {
     kind: "root_ownership", version: 1, rootIssueId: id(o, "root_issue_id"), conductorId: id(o, "conductor_id"),
     performerProfileId: id(o, "performer_profile_id"), deliveryBranch: text(o, "delivery_branch"),
     ...(o.pull_request === undefined ? {} : { pullRequest: text(o, "pull_request") }), ownerGeneration: id(o, "owner_generation"),
+  };
+}
+
+function decodeRootConvergencePolicy(o: Record<string, unknown>): RootConvergencePolicy {
+  fields(o, ["kind", "version", "policy_id", "root_issue_id", "max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_total_tokens", "max_cycle_repair_attempts", "deadline_at"]);
+  return {
+    kind: "root_convergence_policy",
+    version: 1,
+    policyId: id(o, "policy_id"),
+    rootIssueId: id(o, "root_issue_id"),
+    maxCyclesPerRoot: integer(o, "max_cycles_per_root"),
+    maxSameOpenFindingCycles: integer(o, "max_same_open_finding_cycles"),
+    maxConsecutiveNoProgress: integer(o, "max_consecutive_no_progress"),
+    maxTotalTokens: integer(o, "max_total_tokens"),
+    maxCycleRepairAttempts: integer(o, "max_cycle_repair_attempts"),
+    deadlineAt: timestamp(o, "deadline_at"),
   };
 }
 
@@ -656,12 +675,44 @@ function decodeCycleBudgetUsage(o: Record<string, unknown>): CycleOutcomeRecord[
 }
 
 function decodeConvergence(o: Record<string, unknown>): ConvergenceRecord {
-  fields(o, ["kind", "version", "root_issue_id", "observed_at", "policy", "view", "trigger", "decision"]);
+  fields(o, ["kind", "version", "convergence_record_id", "root_issue_id", "policy_id", "policy", "view", "trigger"]);
   const policy = requiredObject(o, "policy");
-  fields(policy, ["max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_total_tokens", "deadline_at"]);
+  fields(policy, ["max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_total_tokens", "max_cycle_repair_attempts", "deadline_at"]);
   const view = requiredObject(o, "view");
-  fields(view, ["cycle_count", "open_finding_persistence", "consecutive_no_progress", "settled_tokens", "open_token_reservations", "is_deadline_exceeded", "root_is_canceled"]);
-  return { kind: "convergence", version: 1, rootIssueId: id(o, "root_issue_id"), observedAt: timestamp(o, "observed_at"), policy: { maxCyclesPerRoot: integer(policy, "max_cycles_per_root"), maxSameOpenFindingCycles: integer(policy, "max_same_open_finding_cycles"), maxConsecutiveNoProgress: integer(policy, "max_consecutive_no_progress"), maxTotalTokens: integer(policy, "max_total_tokens"), deadlineAt: timestamp(policy, "deadline_at") }, view: { cycleCount: integer(view, "cycle_count"), openFindingPersistence: array(view, "open_finding_persistence", (entry) => { fields(entry, ["finding_id", "open_cycle_count"]); return { findingId: id(entry, "finding_id"), openCycleCount: integer(entry, "open_cycle_count") }; }), consecutiveNoProgress: integer(view, "consecutive_no_progress"), settledTokens: integer(view, "settled_tokens"), openTokenReservations: array(view, "open_token_reservations", (entry) => { fields(entry, ["stage_execution_id", "reserved_total_tokens"]); return { stageExecutionId: id(entry, "stage_execution_id"), reservedTotalTokens: integer(entry, "reserved_total_tokens") }; }), isDeadlineExceeded: bool(view, "is_deadline_exceeded"), rootIsCanceled: bool(view, "root_is_canceled") }, trigger: enumValue(o, "trigger", ["none", "root_canceled", "deadline_exceeded", "max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "token_budget"]), decision: enumValue(o, "decision", ["allow", "escalate", "canceled"]) };
+  fields(view, ["cycle_count", "open_finding_persistence", "consecutive_no_progress", "settled_tokens", "open_token_reservations", "active_cycle_issue_id", "active_cycle_repair_attempts", "is_deadline_exceeded", "root_is_canceled"], ["active_cycle_issue_id"]);
+  return {
+    kind: "convergence",
+    version: 1,
+    convergenceRecordId: id(o, "convergence_record_id"),
+    rootIssueId: id(o, "root_issue_id"),
+    policyId: id(o, "policy_id"),
+    policy: {
+      maxCyclesPerRoot: integer(policy, "max_cycles_per_root"),
+      maxSameOpenFindingCycles: integer(policy, "max_same_open_finding_cycles"),
+      maxConsecutiveNoProgress: integer(policy, "max_consecutive_no_progress"),
+      maxTotalTokens: integer(policy, "max_total_tokens"),
+      maxCycleRepairAttempts: integer(policy, "max_cycle_repair_attempts"),
+      deadlineAt: timestamp(policy, "deadline_at"),
+    },
+    view: {
+      cycleCount: integer(view, "cycle_count"),
+      openFindingPersistence: array(view, "open_finding_persistence", (entry) => {
+        fields(entry, ["finding_id", "open_cycle_count"]);
+        return { findingId: id(entry, "finding_id"), openCycleCount: integer(entry, "open_cycle_count") };
+      }),
+      consecutiveNoProgress: integer(view, "consecutive_no_progress"),
+      settledTokens: integer(view, "settled_tokens"),
+      openTokenReservations: array(view, "open_token_reservations", (entry) => {
+        fields(entry, ["stage_execution_id", "reserved_total_tokens"]);
+        return { stageExecutionId: id(entry, "stage_execution_id"), reservedTotalTokens: integer(entry, "reserved_total_tokens") };
+      }),
+      ...(view.active_cycle_issue_id === undefined ? {} : { activeCycleIssueId: id(view, "active_cycle_issue_id") }),
+      activeCycleRepairAttempts: integer(view, "active_cycle_repair_attempts"),
+      isDeadlineExceeded: bool(view, "is_deadline_exceeded"),
+      rootIsCanceled: bool(view, "root_is_canceled"),
+    },
+    trigger: enumValue(o, "trigger", ["root_canceled", "deadline_exceeded", "max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "token_budget", "max_cycle_repair_attempts"]),
+  };
 }
 
 function decodeCriterion(o: Record<string, unknown>): AcceptanceCriterion { fields(o, ["criterion_key", "statement", "verification_method"]); return { criterionKey: id(o, "criterion_key"), statement: text(o, "statement"), verificationMethod: text(o, "verification_method") }; }
@@ -721,6 +772,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
   const topFields: Record<ManagedRecord["kind"], { allowed: string[]; optional?: string[] }> = {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
     workflow_issue: { allowed: ["kind", "version", "issueKey", "rootIssueId", "parentIssueId", "issueKind"] },
+    root_convergence_policy: { allowed: ["kind", "version", "policyId", "rootIssueId", "maxCyclesPerRoot", "maxSameOpenFindingCycles", "maxConsecutiveNoProgress", "maxTotalTokens", "maxCycleRepairAttempts", "deadlineAt"] },
     root_directive: { allowed: ["kind", "version", "rootDirectiveId", "rootIssueId", "reconcilerSessionId", "reconcilerTurnId", "basedOnTargetRootDigest", "consumedInputIds", "directive", "acceptedAt"] },
     root_reconciler_failure: { allowed: ["kind", "version", "failureId", "reconcilerSessionId", "reconcilerTurnId", "targetRootDigest", "attemptedInputIds", "modelTurn", "category", "sanitizedReason", "failedAt"] },
     root_reconciler_reply: { allowed: ["kind", "version", "replyId", "replyWriteId", "rootDirectiveId", "sourceInputId", "source", "targetIssueId", "disposition", "reaction", "threadAction", "materializedOutcomeRefs", "renderedSchemaVersion", "repliedAt"] },
@@ -737,18 +789,28 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     verify_result: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "conclusion", "criteriaResults", "checks", "verifiedRevision"] },
     progress_assessment: { allowed: ["kind", "version", "rootIssueId", "previousVerifyId", "currentVerifyId", "resolvedFindingIds", "previousPassedCriterionKeys", "currentPassedCriterionKeys", "previousPassedCheckKeys", "currentPassedCheckKeys", "isProgress"] },
     cycle_outcome: { allowed: ["kind", "version", "cycleOutcomeId", "rootIssueId", "cycleIssueId", "sourceRootDirectiveId", "conclusion", "planContractDigest", "completedWorkIds", "unresolvedFindingIds", "attemptedApproachRefs", "verificationEvidenceRefs", "gitRevision", "budgetUsage", "successorReason", "concludedAt"], optional: ["planContractDigest", "successorReason"] },
-    convergence: { allowed: ["kind", "version", "rootIssueId", "observedAt", "policy", "view", "trigger", "decision"] },
+    convergence: { allowed: ["kind", "version", "convergenceRecordId", "rootIssueId", "policyId", "policy", "view", "trigger"] },
   };
   const shape = topFields[record.kind];
   if (!shape) fail("managed_record_kind_invalid");
   recordFields(record, shape.allowed, shape.optional);
   if (record.kind === "convergence") {
-    recordFields(record.policy, ["maxCyclesPerRoot", "maxSameOpenFindingCycles", "maxConsecutiveNoProgress", "maxTotalTokens", "deadlineAt"]);
-    recordFields(record.view, ["cycleCount", "openFindingPersistence", "consecutiveNoProgress", "settledTokens", "openTokenReservations", "isDeadlineExceeded", "rootIsCanceled"]);
+    recordFields(record.policy, ["maxCyclesPerRoot", "maxSameOpenFindingCycles", "maxConsecutiveNoProgress", "maxTotalTokens", "maxCycleRepairAttempts", "deadlineAt"]);
+    recordFields(record.view, ["cycleCount", "openFindingPersistence", "consecutiveNoProgress", "settledTokens", "openTokenReservations", "activeCycleIssueId", "activeCycleRepairAttempts", "isDeadlineExceeded", "rootIsCanceled"], ["activeCycleIssueId"]);
   }
   switch (record.kind) {
     case "root_ownership": return encodeRootOwnership(record);
     case "workflow_issue": return encodeSimple(record, { issue_key: record.issueKey, root_issue_id: record.rootIssueId, parent_issue_id: record.parentIssueId, issue_kind: record.issueKind });
+    case "root_convergence_policy": return encodeSimple(record, {
+      policy_id: record.policyId,
+      root_issue_id: record.rootIssueId,
+      max_cycles_per_root: record.maxCyclesPerRoot,
+      max_same_open_finding_cycles: record.maxSameOpenFindingCycles,
+      max_consecutive_no_progress: record.maxConsecutiveNoProgress,
+      max_total_tokens: record.maxTotalTokens,
+      max_cycle_repair_attempts: record.maxCycleRepairAttempts,
+      deadline_at: record.deadlineAt,
+    });
     case "root_directive": return encodeSimple(record, {
       root_directive_id: record.rootDirectiveId,
       root_issue_id: record.rootIssueId,
@@ -820,7 +882,37 @@ function encodeRecord(value: unknown): Record<string, unknown> {
       ...(record.successorReason === undefined ? {} : { successor_reason: record.successorReason }),
       concluded_at: record.concludedAt,
     });
-    case "convergence": return encodeSimple(record, { root_issue_id: record.rootIssueId, observed_at: record.observedAt, policy: { max_cycles_per_root: record.policy.maxCyclesPerRoot, max_same_open_finding_cycles: record.policy.maxSameOpenFindingCycles, max_consecutive_no_progress: record.policy.maxConsecutiveNoProgress, max_total_tokens: record.policy.maxTotalTokens, deadline_at: record.policy.deadlineAt }, view: { cycle_count: record.view.cycleCount, open_finding_persistence: record.view.openFindingPersistence.map((entry) => { recordFields(entry, ["findingId", "openCycleCount"]); return { finding_id: entry.findingId, open_cycle_count: entry.openCycleCount }; }), consecutive_no_progress: record.view.consecutiveNoProgress, settled_tokens: record.view.settledTokens, open_token_reservations: record.view.openTokenReservations.map((entry) => { recordFields(entry, ["stageExecutionId", "reservedTotalTokens"]); return { stage_execution_id: entry.stageExecutionId, reserved_total_tokens: entry.reservedTotalTokens }; }), is_deadline_exceeded: record.view.isDeadlineExceeded, root_is_canceled: record.view.rootIsCanceled }, trigger: record.trigger, decision: record.decision });
+    case "convergence": return encodeSimple(record, {
+      convergence_record_id: record.convergenceRecordId,
+      root_issue_id: record.rootIssueId,
+      policy_id: record.policyId,
+      policy: {
+        max_cycles_per_root: record.policy.maxCyclesPerRoot,
+        max_same_open_finding_cycles: record.policy.maxSameOpenFindingCycles,
+        max_consecutive_no_progress: record.policy.maxConsecutiveNoProgress,
+        max_total_tokens: record.policy.maxTotalTokens,
+        max_cycle_repair_attempts: record.policy.maxCycleRepairAttempts,
+        deadline_at: record.policy.deadlineAt,
+      },
+      view: {
+        cycle_count: record.view.cycleCount,
+        open_finding_persistence: record.view.openFindingPersistence.map((entry) => {
+          recordFields(entry, ["findingId", "openCycleCount"]);
+          return { finding_id: entry.findingId, open_cycle_count: entry.openCycleCount };
+        }),
+        consecutive_no_progress: record.view.consecutiveNoProgress,
+        settled_tokens: record.view.settledTokens,
+        open_token_reservations: record.view.openTokenReservations.map((entry) => {
+          recordFields(entry, ["stageExecutionId", "reservedTotalTokens"]);
+          return { stage_execution_id: entry.stageExecutionId, reserved_total_tokens: entry.reservedTotalTokens };
+        }),
+        ...(record.view.activeCycleIssueId === undefined ? {} : { active_cycle_issue_id: record.view.activeCycleIssueId }),
+        active_cycle_repair_attempts: record.view.activeCycleRepairAttempts,
+        is_deadline_exceeded: record.view.isDeadlineExceeded,
+        root_is_canceled: record.view.rootIsCanceled,
+      },
+      trigger: record.trigger,
+    });
   }
 }
 

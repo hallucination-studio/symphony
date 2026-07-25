@@ -66,6 +66,8 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "ConductorPerformerMessage",
     "RootBootstrapSnapshot",
     "RootDelta",
+    "RootConvergenceSnapshot",
+    "ConvergenceCurrentValue",
     "AdvanceRootReconcilerRequest",
     "RootDirective",
     "RootReconcilerTurnFailure",
@@ -302,6 +304,7 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/PlanContractRemoved", "#/$defs/PlanCompletedResultRemoved",
     "#/$defs/GitFactsCurrentValue",
     "#/$defs/MechanicalViolationsCurrentValue",
+    "#/$defs/ConvergenceCurrentValue",
   ]);
   for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
     const definition = schema.$defs[name];

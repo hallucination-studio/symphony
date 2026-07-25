@@ -1,5 +1,13 @@
-import { parseManagedRecord, serializeManagedRecord } from "../../root-reconciliation/api/index.js";
-import type { RootOwnershipRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import {
+  parseManagedRecord,
+  rootConvergencePolicyId,
+  serializeManagedRecord,
+} from "../../root-reconciliation/api/index.js";
+import type {
+  RootConvergencePolicy,
+  RootConvergencePolicyValues,
+  RootOwnershipRecord,
+} from "../../root-reconciliation/api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../../root-reconciliation/api/RootModels.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
@@ -18,6 +26,14 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     const existing = rootOwnership(tree, input.root.issueId);
     if (existing && existing.conductorId !== this.dependencies.conductorId) {
       return { kind: "foreign_owner" };
+    }
+    const persistedPolicy = rootConvergencePolicy(tree, input.root.issueId);
+    if (existing && !persistedPolicy) throw new Error("root_convergence_policy_missing");
+    const expectedPolicy = existing
+      ? undefined
+      : convergencePolicy(input.root.issueId, await this.dependencies.convergencePolicyFor(input.root));
+    if (persistedPolicy && expectedPolicy && !sameConvergencePolicy(persistedPolicy, expectedPolicy)) {
+      throw new Error("root_convergence_policy_mismatch");
     }
 
     if (root.status_name === "Canceled" && existing) {
@@ -83,10 +99,38 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     const snapshot = await this.dependencies.git.inspect(workspace);
     if (snapshot.branch !== expectedWorkspace.branch) throw new Error("git_workspace_identity_conflict");
 
+    if (!persistedPolicy) {
+      if (!expectedPolicy) throw new Error("root_convergence_policy_missing");
+      const freshRoot = rootIssue(tree, input.root.issueId);
+      const outcome = await this.dependencies.linear.mutateWorkflow({
+        kind: "append_workflow_comment",
+        writeId: expectedPolicy.policyId,
+        expectedProjectId: input.root.projectId,
+        rootIssueId: input.root.issueId,
+        expectedRootRemoteVersion: freshRoot.remote_version,
+        target: {
+          targetIssueId: freshRoot.issue_id,
+          expectedRemoteVersion: freshRoot.remote_version,
+          expectedStatusId: freshRoot.status_id,
+        },
+        body: serializeManagedRecord(expectedPolicy),
+      });
+      requireApplied(outcome, "root_convergence_policy_write_failed");
+      tree = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);
+      const policy = rootConvergencePolicy(tree, input.root.issueId);
+      if (!policy || !sameConvergencePolicy(policy, expectedPolicy)) {
+        throw new Error("root_convergence_policy_read_back_failed");
+      }
+    }
+
     if (existing) {
       const readBack = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);
       const ownership = rootOwnership(readBack, input.root.issueId);
       if (!ownership || !sameOwnership(ownership, existing)) throw new Error("root_ownership_read_back_failed");
+      const policy = rootConvergencePolicy(readBack, input.root.issueId);
+      if (!policy || !persistedPolicy || !sameConvergencePolicy(policy, persistedPolicy)) {
+        throw new Error("root_convergence_policy_read_back_failed");
+      }
       return { kind: "already_owned", ownership, workspace };
     }
 
@@ -117,6 +161,10 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     const readBack = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);
     const persisted = rootOwnership(readBack, input.root.issueId);
     if (!persisted || !sameOwnership(persisted, ownership)) throw new Error("root_ownership_read_back_failed");
+    const policy = rootConvergencePolicy(readBack, input.root.issueId);
+    if (!policy || !expectedPolicy || !sameConvergencePolicy(policy, expectedPolicy)) {
+      throw new Error("root_convergence_policy_read_back_failed");
+    }
     const persistedRoot = rootIssue(readBack, input.root.issueId);
     if (persistedRoot.status_name !== "In Progress") {
       throw new Error(`root_ownership_state_read_back_${statusCode(persistedRoot.status_name)}`);
@@ -167,6 +215,39 @@ function rootOwnership(tree: LinearWorkflowTreeSnapshot, rootIssueId: string): R
   return records[0];
 }
 
+function rootConvergencePolicy(
+  tree: LinearWorkflowTreeSnapshot,
+  rootIssueId: string,
+): RootConvergencePolicy | undefined {
+  const records: RootConvergencePolicy[] = [];
+  for (const comment of tree.comments) {
+    if (comment.issue_id !== rootIssueId || comment.author_kind !== "symphony") continue;
+    const parsed = parseManagedRecord(comment.body);
+    if (!parsed.ok) throw new Error("root_convergence_policy_record_invalid");
+    if (parsed.value.kind !== "root_convergence_policy") continue;
+    if (parsed.value.rootIssueId !== rootIssueId) throw new Error("root_convergence_policy_scope_invalid");
+    if (parsed.value.policyId !== rootConvergencePolicyId(rootIssueId)) {
+      throw new Error("root_convergence_policy_identity_invalid");
+    }
+    records.push(parsed.value);
+  }
+  if (records.length > 1) throw new Error("root_convergence_policy_duplicate");
+  return records[0];
+}
+
+function convergencePolicy(
+  rootIssueId: string,
+  values: RootConvergencePolicyValues,
+): RootConvergencePolicy {
+  return {
+    kind: "root_convergence_policy",
+    version: 1,
+    policyId: rootConvergencePolicyId(rootIssueId),
+    rootIssueId,
+    ...values,
+  };
+}
+
 function requireApplied(
   outcome: Awaited<ReturnType<RootOwnershipClaimDependencies["linear"]["mutateWorkflow"]>>,
   code: string,
@@ -175,6 +256,10 @@ function requireApplied(
 }
 
 function sameOwnership(left: RootOwnershipRecord, right: RootOwnershipRecord): boolean {
+  return serializeManagedRecord(left) === serializeManagedRecord(right);
+}
+
+function sameConvergencePolicy(left: RootConvergencePolicy, right: RootConvergencePolicy): boolean {
   return serializeManagedRecord(left) === serializeManagedRecord(right);
 }
 

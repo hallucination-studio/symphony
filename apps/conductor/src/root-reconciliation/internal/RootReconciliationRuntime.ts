@@ -4,6 +4,10 @@ import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPol
 import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import type { RootSafetyPolicyInterface } from "../api/RootSafetyPolicyInterface.js";
+import type {
+  RootConvergenceAssessment,
+  RootConvergencePolicyInterface,
+} from "../api/RootConvergencePolicyInterface.js";
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
@@ -71,6 +75,7 @@ export interface RootReconciliationRuntimeDependencies {
   ownership: { claim(input: { root: DiscoveredRoot }): Promise<RootOwnershipClaimResult> };
   scheduling: RootSchedulingPolicyInterface;
   safety: RootSafetyPolicyInterface;
+  convergence: RootConvergencePolicyInterface;
   reconciler: RootReconcilerClientInterface;
   performer: PerformerAgentClientInterface;
   materializer: RootDirectiveMaterializerInterface;
@@ -167,7 +172,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     setPhase("read_tree");
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
+    let tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
     setPhase("validate_tree");
     const safety = this.dependencies.safety.validate({ root, tree });
     if (safety.kind === "blocked") {
@@ -184,8 +189,27 @@ export class RootReconciliationRuntime {
       baseBranch: this.dependencies.baseBranch,
     });
     setPhase("build_root_facts");
-    const git = await this.dependencies.git.inspect(workspace);
-    const factSet = buildRootFactSet({ root, tree, git, mechanicalViolations: safety.mechanicalViolations });
+    let git = await this.dependencies.git.inspect(workspace);
+    setPhase("assess_root_convergence");
+    let convergence = this.dependencies.convergence.assess({ root, tree, git });
+    if (convergence.record && !convergence.snapshot.assessment) {
+      setPhase("persist_root_convergence_record");
+      tree = await this.dependencies.convergence.persistNonAllowing({ root, tree, assessment: convergence });
+      setPhase("refresh_git_after_convergence_record");
+      git = await this.dependencies.git.inspect(workspace);
+      setPhase("reassess_root_convergence");
+      convergence = this.dependencies.convergence.assess({ root, tree, git });
+      if (!convergence.snapshot.assessment || convergence.trigger === "none") {
+        throw new Error("root_convergence_record_read_back_invalid");
+      }
+    }
+    const factSet = buildRootFactSet({
+      root,
+      tree,
+      git,
+      convergence: convergence.snapshot,
+      mechanicalViolations: safety.mechanicalViolations,
+    });
     const view: RootReconciliationView = viewFromFactSet({ root, tree, git, factSet });
     const resumable = findResumableDirective(tree, root.issueId);
     if (resumable && !directiveMaterializationComplete(resumable.directive, tree)) {
@@ -197,6 +221,7 @@ export class RootReconciliationRuntime {
         profileId,
         setPhase,
         factSet.bootstrap.pendingInputIds,
+        convergence,
         true,
       );
       if (materialization.kind === "failed") return "needs-attention";
@@ -304,7 +329,16 @@ export class RootReconciliationRuntime {
     if (result.directive.basedOnTargetRootDigest !== view.treeDigest) {
       throw new Error("root_directive_stale_tree");
     }
-    const materialization = await this.finishDirective(result.directive, view, root, profileId, setPhase, factSet.bootstrap.pendingInputIds, false);
+    const materialization = await this.finishDirective(
+      result.directive,
+      view,
+      root,
+      profileId,
+      setPhase,
+      factSet.bootstrap.pendingInputIds,
+      convergence,
+      false,
+    );
     this.dependencies.log("root_directive_received", {
       root_issue_id: root.issueId,
       directive_kind: result.directive.action.kind,
@@ -329,8 +363,11 @@ export class RootReconciliationRuntime {
     profileId: string,
     setPhase: (phase: string) => void,
     pendingInputIds: string[],
+    convergence: RootConvergenceAssessment,
     alreadyAccepted: boolean,
   ) {
+    const convergenceValidation = validateConvergenceDirective(directive, convergence);
+    if (convergenceValidation) return failedMaterialization(directive, convergenceValidation);
     if (!alreadyAccepted) {
       const inputValidation = validateDirectiveInputs(directive, view.tree, pendingInputIds);
       if (inputValidation) return failedMaterialization(directive, inputValidation);
@@ -1169,6 +1206,35 @@ function statusForOutcome(outcome: HumanActionResolution["outcome"]): "Approved"
 
 function failedMaterialization(directive: RootDirective, code: string) {
   return { kind: "failed" as const, rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [], sanitizedReason: code };
+}
+
+export function validateConvergenceDirective(
+  directive: RootDirective,
+  assessment: RootConvergenceAssessment,
+): string | undefined {
+  const { action } = directive;
+  if (assessment.trigger === "none") return undefined;
+  const stageAction = action.kind === "execute_plan" || action.kind === "execute_work" ||
+    action.kind === "execute_verify" || action.kind === "rerun_stage";
+  if (assessment.trigger !== "max_cycle_repair_attempts") {
+    if (stageAction || action.kind === "create_cycle") {
+      return `root_convergence_${assessment.trigger}_${action.kind}_blocked`;
+    }
+    return undefined;
+  }
+
+  const activeCycleIssueId = assessment.snapshot.view.activeCycleIssueId;
+  if (stageAction && action.cycleIssueId === activeCycleIssueId) {
+    return "root_convergence_max_cycle_repair_attempts_stage_blocked";
+  }
+  if (
+    action.kind === "conclude_cycle" &&
+    action.cycleIssueId === activeCycleIssueId &&
+    action.conclusion !== "exhausted"
+  ) {
+    return "root_convergence_max_cycle_repair_attempts_requires_exhausted_cycle";
+  }
+  return undefined;
 }
 
 export function validateDirectiveInputs(

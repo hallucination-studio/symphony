@@ -4,7 +4,7 @@ import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { cycleOutcomeId, parseManagedRecord, serializeManagedRecord } from "../api/index.js";
-import { buildRootFactSet, diffRootFactSets } from "../internal/RootFactSet.js";
+import { buildRootFactSet as buildRootFactSetImpl, diffRootFactSets } from "../internal/RootFactSet.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 
 const root = {
@@ -13,6 +13,36 @@ const root = {
   parentIssueId: null, isDelegatedToSymphony: true, priority: "normal" as const, order: 0,
   blockers: [], rootConductorLabels: [],
 };
+
+function buildRootFactSet(input: Omit<Parameters<typeof buildRootFactSetImpl>[0], "convergence">) {
+  return buildRootFactSetImpl({
+    ...input,
+    convergence: {
+      policy: {
+        kind: "root_convergence_policy",
+        version: 1,
+        policyId: "root-convergence-policy:test",
+        rootIssueId: "root-1",
+        maxCyclesPerRoot: 3,
+        maxSameOpenFindingCycles: 2,
+        maxConsecutiveNoProgress: 2,
+        maxTotalTokens: 10_000,
+        maxCycleRepairAttempts: 0,
+        deadlineAt: "2026-07-26T00:00:00.000Z",
+      },
+      view: {
+        cycleCount: 0,
+        openFindingPersistence: [],
+        consecutiveNoProgress: 0,
+        settledTokens: 0,
+        openTokenReservations: [],
+        activeCycleRepairAttempts: 0,
+        isDeadlineExceeded: false,
+        rootIsCanceled: false,
+      },
+    },
+  });
+}
 
 test("fact sets send a bootstrap snapshot and only changed current values afterward", () => {
   const first = buildRootFactSet({ root, tree: tree("Root", "root-v1", "comment-v1"), git: git("head-1"), mechanicalViolations: [] });

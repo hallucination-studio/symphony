@@ -329,6 +329,9 @@ function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
   if (change.kind === "mechanical_violations_current_value") {
     return { ...base, mechanical_violations: change.mechanicalViolations.map(toWireMechanicalViolation) };
   }
+  if (change.kind === "convergence_current_value") {
+    return { ...base, convergence: toWireRootConvergence(change.convergence) };
+  }
   return base;
 }
 
@@ -345,7 +348,44 @@ function toWireRootObservation(input: import("../../root-reconciliation/api/Root
     constraints: input.constraints,
     root_status: input.rootStatus,
     ownership: toWireRecordReference(input.ownership),
-    convergence_summary: input.convergenceSummary,
+    convergence: toWireRootConvergence(input.convergence),
+  };
+}
+
+function toWireRootConvergence(
+  input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootConvergenceSnapshot,
+): JsonRecord {
+  return {
+    policy: {
+      kind: input.policy.kind,
+      version: input.policy.version,
+      policy_id: input.policy.policyId,
+      root_issue_id: input.policy.rootIssueId,
+      max_cycles_per_root: input.policy.maxCyclesPerRoot,
+      max_same_open_finding_cycles: input.policy.maxSameOpenFindingCycles,
+      max_consecutive_no_progress: input.policy.maxConsecutiveNoProgress,
+      max_total_tokens: input.policy.maxTotalTokens,
+      max_cycle_repair_attempts: input.policy.maxCycleRepairAttempts,
+      deadline_at: input.policy.deadlineAt,
+    },
+    view: {
+      cycle_count: input.view.cycleCount,
+      open_finding_persistence: input.view.openFindingPersistence.map((finding) => ({
+        finding_id: finding.findingId,
+        open_cycle_count: finding.openCycleCount,
+      })),
+      consecutive_no_progress: input.view.consecutiveNoProgress,
+      settled_tokens: input.view.settledTokens,
+      open_token_reservations: input.view.openTokenReservations.map((reservation) => ({
+        stage_execution_id: reservation.stageExecutionId,
+        reserved_total_tokens: reservation.reservedTotalTokens,
+      })),
+      ...(input.view.activeCycleIssueId ? { active_cycle_issue_id: input.view.activeCycleIssueId } : {}),
+      active_cycle_repair_attempts: input.view.activeCycleRepairAttempts,
+      is_deadline_exceeded: input.view.isDeadlineExceeded,
+      root_is_canceled: input.view.rootIsCanceled,
+    },
+    ...(input.assessment ? { assessment: toWireRecordReference(input.assessment) } : {}),
   };
 }
 
