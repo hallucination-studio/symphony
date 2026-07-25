@@ -161,6 +161,7 @@ function directive(candidate: UserCommentReply): RootDirective {
     rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1",
+    modelTurn: rootModelTurn(),
     basedOnTargetRootDigest: "tree-v1",
     rationale: "The user requested a fresh check.",
     evidenceRefs: [{ referenceId: "comment-1", sourceKind: "linear_comment" }],
@@ -168,6 +169,15 @@ function directive(candidate: UserCommentReply): RootDirective {
     commentReplies: [candidate],
     humanActionResolutions: [],
     action: { kind: "wait", reasonCode: "runtime_condition", blockingFactRefs: [{ referenceId: "comment-1", sourceKind: "linear_comment" }] },
+  };
+}
+
+function rootModelTurn(): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
+    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-24T00:00:00Z",
   };
 }
 

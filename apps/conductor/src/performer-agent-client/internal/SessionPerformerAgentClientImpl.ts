@@ -655,6 +655,11 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
       denied_tools: [],
       network_policy: "disabled",
     },
+    model_settings: {
+      model: input.modelSettings.model,
+      reasoning_effort: input.modelSettings.reasoningEffort,
+      is_fast_mode_enabled: input.modelSettings.isFastModeEnabled,
+    },
     limits: defaultLimits(300_000),
     context_digest: input.contextDigest,
     context,
@@ -819,6 +824,7 @@ function decodeStageResult(value: unknown): StageResult {
     summary: stageResultSummary(outcome),
     sourceManifest: [],
     completedAt: result.completed_at,
+    modelTurn: camelizeKeys(record(result.model_turn)) as StageResult["modelTurn"],
     outcome: normalizedOutcome,
   } as StageResult;
 }

@@ -254,6 +254,13 @@ function planTree(completed: boolean): LinearWorkflowTreeSnapshot {
         nodeIssueId: "plan-1", stage: "plan" as const, roleSessionId: "session-1", roleTurnId: "turn-1", observedTreeDigest: "tree-1",
         contextDigest: "context-1", outcomeKind: "plan_completed" as const, summary: "Plan ready for review.", sourceManifest: ["input-1"],
         completedAt: "2026-07-23T00:00:00Z", planContractDigest: "a".repeat(64),
+        modelTurn: {
+          turnRecordId: "plan-result-1:turn-1", role: "plan" as const, rootIssueId: "root-1", cycleIssueId: "cycle-1",
+          targetIssueId: "plan-1", stageExecutionId: "plan-result-1", roleSessionId: "session-1", roleTurnId: "turn-1",
+          invocationState: "confirmed" as const, model: "gpt", outcome: "plan_completed" as const,
+          usage: { status: "measured" as const, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 },
+          terminalAt: "2026-07-23T00:00:00Z",
+        },
         planContract: { objective: "Deliver the deployment workflow.", includedScope: ["deployment service"], excludedScope: [], assumptions: [], constraints: [], acceptanceCriteria: [{ criterionKey: "deploy", statement: "Deployments complete safely.", verificationMethod: "integration test" }], verificationRequirements: ["npm test -w @symphony/conductor"] },
         proposedWorkDag: {
           workNodes: [{ proposalKey: "work-1", title: "Implement deployment", description: "Implement it.", expectedOutcome: "Done.", requiredChecks: ["test"], dependencyProposalKeys: [] }],

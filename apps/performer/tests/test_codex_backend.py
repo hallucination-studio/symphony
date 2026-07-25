@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from performer.backends.codex.codex_backend_impl import CodexBackendImpl
+from performer.backends.codex.codex_backend_impl import CodexBackendImpl, _usage
 from performer.backends.provider_backend_interface import ProviderBackendError, ProviderTurnDeadlineExpired
 
 
@@ -73,6 +73,19 @@ class BlockingThread(FakeThread):
     def turn(self, prompt: str, **kwargs: object):
         self.calls.append((prompt, kwargs))
         return self.turn_handle
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "1"])
+def test_provider_usage_rejects_non_integer_token_counts(value: object):
+    usage = SimpleNamespace(total=SimpleNamespace(
+        input_tokens=value,
+        cached_input_tokens=0,
+        output_tokens=1,
+        reasoning_output_tokens=0,
+        total_tokens=1,
+    ))
+
+    assert _usage(usage) == {"status": "unavailable", "reason": "invalid_provider_usage"}
 
 
 def test_role_session_uses_role_specific_instructions_and_returns_json():

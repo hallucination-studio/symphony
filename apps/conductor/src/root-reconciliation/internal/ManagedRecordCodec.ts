@@ -319,7 +319,7 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
   fields(o, [
     "kind", "version", "result_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "stage",
     "role_session_id", "role_turn_id", "observed_tree_digest", "context_digest", "outcome_kind", "summary",
-    "source_manifest", "completed_at", "plan_contract_digest", "changed_paths", "commit_revision",
+    "source_manifest", "completed_at", "model_turn", "plan_contract_digest", "changed_paths", "commit_revision",
     "verify_conclusion", "verified_revision", "failure_code", "plan_contract", "proposed_work_dag", "risks",
     "required_permissions", "evidence_refs",
   ], [
@@ -360,12 +360,13 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
   if (o.failure_code !== undefined && outcomeKind !== "execution_failed") {
     fail("managed_record_stage_result_field_invalid");
   }
-  return {
+  const record: StageResultRecord = {
     kind: "stage_result", version: 1,
     resultId: id(o, "result_id"), rootIssueId: id(o, "root_issue_id"), cycleIssueId: id(o, "cycle_issue_id"),
     nodeIssueId: id(o, "node_issue_id"), stage, roleSessionId: id(o, "role_session_id"), roleTurnId: id(o, "role_turn_id"),
     observedTreeDigest: id(o, "observed_tree_digest"), contextDigest: id(o, "context_digest"), outcomeKind,
     summary: text(o, "summary"), sourceManifest: strings(o, "source_manifest"), completedAt: timestamp(o, "completed_at"),
+    modelTurn: decodeStageModelTurn(requiredObject(o, "model_turn")),
     ...(o.plan_contract_digest === undefined ? {} : { planContractDigest: id(o, "plan_contract_digest") }),
     ...(o.plan_contract === undefined ? {} : { planContract: decodePlanContractProposal(requiredObject(o, "plan_contract")) }),
     ...(o.proposed_work_dag === undefined ? {} : { proposedWorkDag: decodePlanDag(requiredObject(o, "proposed_work_dag")) }),
@@ -377,6 +378,70 @@ function decodeStageResult(o: Record<string, unknown>): StageResultRecord {
     ...(o.verify_conclusion === undefined ? {} : { verifyConclusion: enumValue(o, "verify_conclusion", ["passed", "changes_required", "inconclusive", "escalate_human"]) }),
     ...(o.verified_revision === undefined ? {} : { verifiedRevision: id(o, "verified_revision") }),
     ...(o.failure_code === undefined ? {} : { failureCode: id(o, "failure_code") }),
+  };
+  const modelTurn = record.modelTurn;
+  if (
+    modelTurn.role !== record.stage ||
+    modelTurn.rootIssueId !== record.rootIssueId ||
+    modelTurn.cycleIssueId !== record.cycleIssueId ||
+    modelTurn.targetIssueId !== record.nodeIssueId ||
+    modelTurn.stageExecutionId !== record.resultId ||
+    modelTurn.roleSessionId !== record.roleSessionId ||
+    modelTurn.roleTurnId !== record.roleTurnId ||
+    modelTurn.turnRecordId !== `${record.resultId}:${record.roleTurnId}` ||
+    modelTurn.outcome !== record.outcomeKind ||
+    modelTurn.terminalAt !== record.completedAt ||
+    (modelTurn.invocationState === "ambiguous" && modelTurn.usage.status !== "unavailable")
+  ) {
+    fail("managed_record_model_turn_correlation_invalid");
+  }
+  return record;
+}
+
+function decodeStageModelTurn(o: Record<string, unknown>): StageResultRecord["modelTurn"] {
+  fields(o, [
+    "turn_record_id", "role", "root_issue_id", "cycle_issue_id", "target_issue_id", "stage_execution_id",
+    "role_session_id", "role_turn_id", "invocation_state", "model", "outcome", "usage", "terminal_at",
+  ]);
+  return {
+    turnRecordId: id(o, "turn_record_id"),
+    role: stageValue(o, "role"),
+    rootIssueId: id(o, "root_issue_id"),
+    cycleIssueId: id(o, "cycle_issue_id"),
+    targetIssueId: id(o, "target_issue_id"),
+    stageExecutionId: id(o, "stage_execution_id"),
+    roleSessionId: id(o, "role_session_id"),
+    roleTurnId: id(o, "role_turn_id"),
+    invocationState: enumValue(o, "invocation_state", ["confirmed", "ambiguous"]),
+    model: text(o, "model"),
+    outcome: enumValue(o, "outcome", [
+      "plan_completed", "plan_needs_information", "plan_blocked", "work_completed", "work_blocked",
+      "work_plan_assumption_invalid", "work_scope_conflict", "work_permission_required", "work_information_required",
+      "verify_passed", "verify_changes_required", "verify_inconclusive", "verify_plan_contract_violation", "verify_blocked",
+      "budget_exhausted", "canceled", "execution_failed",
+    ] as const),
+    usage: decodeTurnUsage(requiredObject(o, "usage")),
+    terminalAt: timestamp(o, "terminal_at"),
+  };
+}
+
+function decodeTurnUsage(o: Record<string, unknown>): StageResultRecord["modelTurn"]["usage"] {
+  const status = enumValue(o, "status", ["measured", "unavailable"] as const);
+  if (status === "unavailable") {
+    fields(o, ["status", "reason"]);
+    return {
+      status,
+      reason: enumValue(o, "reason", ["provider_omitted", "transport_lost", "process_lost", "invalid_provider_usage"]),
+    };
+  }
+  fields(o, ["status", "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]);
+  return {
+    status,
+    inputTokens: integer(o, "input_tokens"),
+    cachedInputTokens: integer(o, "cached_input_tokens"),
+    outputTokens: integer(o, "output_tokens"),
+    reasoningOutputTokens: integer(o, "reasoning_output_tokens"),
+    totalTokens: integer(o, "total_tokens"),
   };
 }
 
@@ -508,7 +573,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "materializedAt"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements", "proposedWorkDag"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
-    stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
+    stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "modelTurn", "planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
     human_action_request: { allowed: ["kind", "version", "actionId", "actionIssueId", "actionKind", "parentScope", "rootIssueId", "cycleIssueId", "relatedIssueIds", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest", "proposalDigest", "expectedParentRemoteVersion", "createdAt"], optional: ["cycleIssueId", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest"] },
     human_action_resolution: { allowed: ["kind", "version", "resolutionId", "actionId", "actionIssueId", "actionKind", "outcome", "terminalStatus", "terminalRemoteVersion", "sourceCommentIds", "sourceCommentVersions", "actorKind", "proposalDigest", "resolvedAt"] },
     finding: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "category", "severity", "evidence", "affectedScope", "retryable", "suggestedRemediation", "acceptanceCriteria"] },
@@ -582,7 +647,7 @@ function encodeStageResult(record: StageResultRecord): Record<string, unknown> {
   result_id: record.resultId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId,
   stage: record.stage, role_session_id: record.roleSessionId, role_turn_id: record.roleTurnId, observed_tree_digest: record.observedTreeDigest,
   context_digest: record.contextDigest, outcome_kind: record.outcomeKind, summary: record.summary, source_manifest: record.sourceManifest,
-  completed_at: record.completedAt, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }),
+  completed_at: record.completedAt, model_turn: encodeStageModelTurn(record.modelTurn), ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }),
   ...(record.planContract === undefined ? {} : { plan_contract: encodePlanContractProposal(record.planContract) }),
   ...(record.proposedWorkDag === undefined ? {} : { proposed_work_dag: encodePlanDag(record.proposedWorkDag) }),
   ...(record.risks === undefined ? {} : { risks: record.risks }),
@@ -592,6 +657,32 @@ function encodeStageResult(record: StageResultRecord): Record<string, unknown> {
   ...(record.verifyConclusion === undefined ? {} : { verify_conclusion: record.verifyConclusion }), ...(record.verifiedRevision === undefined ? {} : { verified_revision: record.verifiedRevision }),
   ...(record.failureCode === undefined ? {} : { failure_code: record.failureCode }),
 }); }
+function encodeStageModelTurn(record: StageResultRecord["modelTurn"]): Record<string, unknown> {
+  return {
+    turn_record_id: record.turnRecordId,
+    role: record.role,
+    root_issue_id: record.rootIssueId,
+    cycle_issue_id: record.cycleIssueId,
+    target_issue_id: record.targetIssueId,
+    stage_execution_id: record.stageExecutionId,
+    role_session_id: record.roleSessionId,
+    role_turn_id: record.roleTurnId,
+    invocation_state: record.invocationState,
+    model: record.model,
+    outcome: record.outcome,
+    usage: record.usage.status === "measured"
+      ? {
+        status: record.usage.status,
+        input_tokens: record.usage.inputTokens,
+        cached_input_tokens: record.usage.cachedInputTokens,
+        output_tokens: record.usage.outputTokens,
+        reasoning_output_tokens: record.usage.reasoningOutputTokens,
+        total_tokens: record.usage.totalTokens,
+      }
+      : { status: record.usage.status, reason: record.usage.reason },
+    terminal_at: record.terminalAt,
+  };
+}
 function encodePlanContract(record: PlanContract): Record<string, unknown> { return encodeSimple(record, {
   root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, plan_contract_digest: record.planContractDigest,
   ...encodePlanContractProposal({

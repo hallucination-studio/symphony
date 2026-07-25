@@ -350,6 +350,13 @@ function planResult() {
     summary: "The deployment Plan is ready for review.",
     sourceManifest: ["plan-input-1"],
     completedAt: "2026-07-24T00:00:00Z",
+    modelTurn: {
+      turnRecordId: "plan-result-1:plan-turn-1", role: "plan" as const, rootIssueId: "root-1", cycleIssueId: "cycle-1",
+      targetIssueId: "plan-1", stageExecutionId: "plan-result-1", roleSessionId: "plan-session-1", roleTurnId: "plan-turn-1",
+      invocationState: "confirmed" as const, model: "gpt", outcome: "plan_completed" as const,
+      usage: { status: "measured" as const, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 },
+      terminalAt: "2026-07-24T00:00:00Z",
+    },
     planContractDigest: "a".repeat(64),
     planContract: {
       objective: "Deliver the deployment workflow.", includedScope: ["deployment service"], excludedScope: ["Podium Desktop"],

@@ -5,7 +5,14 @@ import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { ManagedRecord, RootDirective, StageResult, StageTurnInput } from "../api/index.js";
+import type {
+  ManagedRecord,
+  RootDirective,
+  StageModelTurnRecord,
+  StageResult,
+  StageTurnInput,
+  TurnUsage,
+} from "../api/index.js";
 import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import {
@@ -70,6 +77,106 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
   assert.deepEqual(statusMutations(linear), ["In Progress", "Done"]);
   assert.equal(stage(linear.tree).status_name, "Done");
   assert.equal(linear.stageResultCount(), 1);
+});
+
+test("Stage Result comments show actual model and derive Issue usage from immutable Results", async () => {
+  const linear = new FakeLinear("work");
+  linear.addManagedComment("stage-1", serializeManagedRecord({
+    kind: "stage_result" as const,
+    version: 1 as const,
+    resultId: "previous-work-execution",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "stage-1",
+    stage: "work" as const,
+    roleSessionId: "previous-session",
+    roleTurnId: "previous-turn",
+    observedTreeDigest: "previous-tree",
+    contextDigest: "previous-context",
+    outcomeKind: "work_completed" as const,
+    summary: "The earlier work turn completed.",
+    sourceManifest: [],
+    completedAt: "2026-07-24T00:00:01Z",
+    modelTurn: {
+      turnRecordId: "previous-work-execution:previous-turn",
+      role: "work" as const,
+      rootIssueId: "root-1",
+      cycleIssueId: "cycle-1",
+      targetIssueId: "stage-1",
+      stageExecutionId: "previous-work-execution",
+      roleSessionId: "previous-session",
+      roleTurnId: "previous-turn",
+      invocationState: "confirmed" as const,
+      model: "gpt-4.1",
+      outcome: "work_completed" as const,
+      usage: {
+        status: "measured" as const,
+        inputTokens: 2,
+        cachedInputTokens: 1,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+        totalTokens: 5,
+      },
+      terminalAt: "2026-07-24T00:00:01Z",
+    },
+    changedPaths: ["src/previous.ts"],
+    commitRevision: "previous-revision",
+  }));
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "work",
+    outcomeKind: "work_completed",
+    onExecute(input) { return stageResult(input, "work_completed"); },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  const currentComment = linear.tree.comments.find(({ body }) => body.includes('"result_id":"stage-execution:'));
+  assert.ok(currentComment);
+  assert.match(currentComment.body, /^## Symphony · Work/mu);
+  assert.match(currentComment.body, /- Model: `gpt`/u);
+  assert.match(currentComment.body, /- This turn: input=1, cached=0, output=1, reasoning=0, total=2\./u);
+  assert.match(currentComment.body, /- `gpt`: input=1, cached=0, output=1, reasoning=0, total=2/u);
+  assert.match(currentComment.body, /- `gpt-4\.1`: input=2, cached=1, output=3, reasoning=1, total=5/u);
+  assert.match(currentComment.body, /- Completeness: complete \(2 source records\)\./u);
+  assert.equal((currentComment.body.match(/```symphony/g) ?? []).length, 1);
+});
+
+test("Stage Result comments make unavailable Provider usage explicit", async () => {
+  const linear = new FakeLinear("verify");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "verify",
+    outcomeKind: "verify_blocked",
+    onExecute(input) {
+      return {
+        ...stageResult(input, "verify_blocked"),
+        modelTurn: stageModelTurn(input, "verify_blocked", { status: "unavailable", reason: "provider_omitted" }),
+      };
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  const comment = linear.tree.comments.find(({ body }) => body.includes('"kind":"stage_result"'));
+  assert.ok(comment);
+  assert.match(comment.body, /- This turn: unavailable \(provider_omitted\)\./u);
+  assert.match(comment.body, /- Completeness: incomplete \(1 unavailable turn\)\./u);
+});
+
+test("Stage Result Markdown keeps configured model text within its structured field", async () => {
+  const linear = new FakeLinear("work");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "work",
+    outcomeKind: "work_completed",
+    model: "gpt`not-code",
+    onExecute(input) { return stageResult(input, "work_completed"); },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  const comment = linear.tree.comments.find(({ body }) => body.includes('"kind":"stage_result"'));
+  assert.ok(comment);
+  assert.match(comment.body, /- Model: ``gpt`not-code``/u);
+  assert.doesNotMatch(comment.body, /\n## /u);
 });
 
 test("a completed Plan persists its canonical contract before In Review", async () => {
@@ -248,6 +355,7 @@ function dependencies(input: {
   linear: FakeLinear;
   role: "plan" | "work" | "verify";
   outcomeKind: StageResult["outcome"]["kind"];
+  model?: string;
   onExecute(stageInput: StageTurnInput): StageResult;
 }): RootReconciliationRuntimeDependencies {
   const root = {
@@ -321,7 +429,7 @@ function dependencies(input: {
     humanActionResolutionMaterializer: { async materialize() { throw new Error("human_action_unexpected"); } },
     timeline: { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
     profileIdFor: async () => "profile-1",
-    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
+    modelSettingsFor: async () => ({ model: input.model ?? "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
     log() {},
   };
 }
@@ -338,7 +446,7 @@ function directive(
       : { kind: "execute_verify" as const, cycleIssueId: "cycle-1", verifyIssueId: "stage-1", targetGitRevision: "head-1", requiredEvidenceRefs: [] };
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1", reconcilerSessionId: "session-1",
-    reconcilerTurnId: "turn-1", basedOnTargetRootDigest: digest, rationale: "Execute the selected stage.",
+    reconcilerTurnId: "turn-1", modelTurn: rootModelTurn("turn-1"), basedOnTargetRootDigest: digest, rationale: "Execute the selected stage.",
     evidenceRefs: [], consumedInputIds, commentReplies: [], humanActionResolutions: [], action,
   };
 }
@@ -350,7 +458,52 @@ function stageResult(input: StageTurnInput, outcomeKind: StageResult["outcome"][
     role: input.role, roleSessionId: input.roleSessionId, roleTurnId: input.roleTurnId,
     observedTreeDigest: input.observedTreeDigest, contextDigest: input.contextDigest,
     summary: "The stage finished.", sourceManifest: [], completedAt: "2026-07-24T00:00:02Z",
+    modelTurn: stageModelTurn(input, outcomeKind),
     outcome: { kind: outcomeKind },
+  };
+}
+
+function rootModelTurn(turnId: string): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: `root-1:${turnId}`,
+    role: "root_reconciler",
+    rootIssueId: "root-1",
+    reconcilerSessionId: "session-1",
+    reconcilerTurnId: turnId,
+    invocationState: "confirmed",
+    model: "gpt",
+    outcome: "directive_accepted",
+    usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-24T00:00:01Z",
+  };
+}
+
+function stageModelTurn(
+  input: StageTurnInput,
+  outcome: StageResult["outcome"]["kind"],
+  usage: TurnUsage = {
+    status: "measured",
+    inputTokens: 1,
+    cachedInputTokens: 0,
+    outputTokens: 1,
+    reasoningOutputTokens: 0,
+    totalTokens: 2,
+  },
+): StageModelTurnRecord {
+  return {
+    turnRecordId: `${input.stageExecutionId}:${input.roleTurnId}`,
+    role: input.role,
+    rootIssueId: input.rootIssueId,
+    cycleIssueId: input.cycleIssueId,
+    targetIssueId: input.targetIssueId,
+    stageExecutionId: input.stageExecutionId,
+    roleSessionId: input.roleSessionId,
+    roleTurnId: input.roleTurnId,
+    invocationState: "confirmed",
+    model: input.modelSettings.model,
+    outcome: outcome as StageModelTurnRecord["outcome"],
+    usage,
+    terminalAt: "2026-07-24T00:00:02Z",
   };
 }
 
@@ -437,6 +590,15 @@ class FakeLinear {
       comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-24T00:00:00Z",
     };
+    this.addManagedComment("root-1", serializeManagedRecord({
+      kind: "root_ownership" as const,
+      version: 1 as const,
+      rootIssueId: "root-1",
+      conductorId: "conductor-1",
+      performerProfileId: "profile-1",
+      deliveryBranch: "symphony/runs/sym-1",
+      ownerGeneration: "generation-1",
+    }));
   }
 
   statusName(statusId: string): string {

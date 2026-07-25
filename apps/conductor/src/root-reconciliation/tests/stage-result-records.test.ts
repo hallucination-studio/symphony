@@ -20,6 +20,7 @@ test("stage result records round-trip as closed managed records", () => {
     summary: "Work completed",
     sourceManifest: [],
     completedAt: "2026-07-23T00:00:06Z",
+    modelTurn: stageModelTurn("work-execution-1", "work", "work-1", "work-session-1", "work-turn-1", "work_completed", "2026-07-23T00:00:06Z"),
     changedPaths: ["src/example.ts"],
     commitRevision: "revision-1",
   };
@@ -44,6 +45,7 @@ test("managed records require exactly one strict symphony code block", () => {
     summary: "Implemented the requested change.",
     sourceManifest: [],
     completedAt: "2026-07-24T00:00:00Z",
+    modelTurn: stageModelTurn("result-1", "work", "work-1", "session-1", "turn-1", "work_completed", "2026-07-24T00:00:00Z"),
     changedPaths: ["apps/conductor/src/root-reconciliation/tests/stage-result-records.test.ts"],
     commitRevision: "revision-1",
   };
@@ -105,6 +107,7 @@ test("stage result records reject role-specific fields on the wrong outcome", ()
     summary: "Verify passed",
     sourceManifest: [],
     completedAt: "2026-07-23T00:00:06Z",
+    modelTurn: stageModelTurn("verify-execution-1", "verify", "verify-1", "verify-session-1", "verify-turn-1", "verify_passed", "2026-07-23T00:00:06Z"),
     changedPaths: ["src/example.ts"],
   }), /managed_record_stage_result_field_invalid/u);
 });
@@ -126,5 +129,91 @@ test("a completed Plan Stage Result requires its complete canonical input", () =
     summary: "Plan completed",
     sourceManifest: [],
     completedAt: "2026-07-23T00:00:06Z",
+    modelTurn: stageModelTurn("plan-execution-1", "plan", "plan-1", "plan-session-1", "plan-turn-1", "plan_completed", "2026-07-23T00:00:06Z"),
   }), /managed_record_required_field:plan_completed/u);
 });
+
+test("stage result records reject Model Turns that do not match their execution", () => {
+  assert.throws(() => serializeManagedRecord({
+    kind: "stage_result",
+    version: 1,
+    resultId: "work-execution-1",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "work-1",
+    stage: "work",
+    roleSessionId: "work-session-1",
+    roleTurnId: "work-turn-1",
+    observedTreeDigest: "tree-v1",
+    contextDigest: "context-v1",
+    outcomeKind: "work_completed",
+    summary: "Work completed",
+    sourceManifest: [],
+    completedAt: "2026-07-23T00:00:06Z",
+    modelTurn: {
+      ...stageModelTurn("work-execution-1", "work", "work-1", "work-session-1", "work-turn-1", "work_completed", "2026-07-23T00:00:06Z"),
+      targetIssueId: "other-work-1",
+    },
+    changedPaths: ["src/example.ts"],
+    commitRevision: "revision-1",
+  }), /managed_record_model_turn_correlation_invalid/u);
+});
+
+test("stage result records reject measured usage from an ambiguous Provider invocation", () => {
+  assert.throws(() => serializeManagedRecord({
+    kind: "stage_result",
+    version: 1,
+    resultId: "work-execution-1",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    nodeIssueId: "work-1",
+    stage: "work",
+    roleSessionId: "work-session-1",
+    roleTurnId: "work-turn-1",
+    observedTreeDigest: "tree-v1",
+    contextDigest: "context-v1",
+    outcomeKind: "work_completed",
+    summary: "Work completed",
+    sourceManifest: [],
+    completedAt: "2026-07-23T00:00:06Z",
+    modelTurn: {
+      ...stageModelTurn("work-execution-1", "work", "work-1", "work-session-1", "work-turn-1", "work_completed", "2026-07-23T00:00:06Z"),
+      invocationState: "ambiguous",
+    },
+    changedPaths: ["src/example.ts"],
+    commitRevision: "revision-1",
+  }), /managed_record_model_turn_correlation_invalid/u);
+});
+
+function stageModelTurn(
+  stageExecutionId: string,
+  role: "plan" | "work" | "verify",
+  targetIssueId: string,
+  roleSessionId: string,
+  roleTurnId: string,
+  outcome: string,
+  terminalAt: string,
+) {
+  return {
+    turnRecordId: `${stageExecutionId}:${roleTurnId}`,
+    role,
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    targetIssueId,
+    stageExecutionId,
+    roleSessionId,
+    roleTurnId,
+    invocationState: "confirmed" as const,
+    model: "gpt",
+    outcome: outcome as "plan_completed" | "work_completed" | "verify_passed",
+    usage: {
+      status: "measured" as const,
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      reasoningOutputTokens: 0,
+      totalTokens: 2,
+    },
+    terminalAt,
+  };
+}

@@ -5,6 +5,8 @@ import type {
   PlanContract,
   PlanContractProposal,
   ProposedWorkDag,
+  RootReconcilerModelTurnRecord,
+  StageModelTurnRecord,
 } from "./ManagedRecords.js";
 import type { DiscoveredRoot } from "./RootModels.js";
 
@@ -273,6 +275,7 @@ export interface RootDirectiveBase {
   rootDirectiveId: string;
   reconcilerSessionId: string;
   reconcilerTurnId: string;
+  modelTurn: RootReconcilerModelTurnRecord;
   basedOnTargetRootDigest: string;
   rationale: string;
   evidenceRefs: EvidenceRef[];
@@ -546,6 +549,7 @@ export interface StageResultBase {
   summary: string;
   sourceManifest: string[];
   completedAt: string;
+  modelTurn: StageModelTurnRecord;
 }
 
 export type StageResult = StageResultBase & {

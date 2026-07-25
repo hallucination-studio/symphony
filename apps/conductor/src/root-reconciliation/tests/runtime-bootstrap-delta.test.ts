@@ -197,9 +197,18 @@ function directive(
 ): RootDirective {
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1",
-    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", basedOnTargetRootDigest: digest,
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", modelTurn: rootModelTurn(), basedOnTargetRootDigest: digest,
     rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies, humanActionResolutions: [],
     action: { kind: "wait", reasonCode: "test", blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }] },
+  };
+}
+
+function rootModelTurn(): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
+    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-23T00:00:00Z",
   };
 }
 

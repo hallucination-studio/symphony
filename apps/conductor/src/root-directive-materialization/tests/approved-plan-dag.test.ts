@@ -128,6 +128,7 @@ function directive(): RootDirective & { action: Extract<RootDirective["action"],
     rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1",
+    modelTurn: rootModelTurn(),
     basedOnTargetRootDigest: "tree-v1",
     rationale: "The approved Plan can now become the active Cycle DAG.",
     evidenceRefs: [{ referenceId: "plan-result-1", sourceKind: "result" }],
@@ -153,6 +154,15 @@ function directive(): RootDirective & { action: Extract<RootDirective["action"],
       approvalActionIssueId: "action-1",
       approvalResolutionId: "resolution-1",
     },
+  };
+}
+
+function rootModelTurn(): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
+    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-24T00:00:00Z",
   };
 }
 
@@ -346,6 +356,13 @@ function completedPlanResult() {
     kind: "stage_result", version: 1, resultId: "plan-result-1", rootIssueId: "root-1", cycleIssueId: "cycle-1", nodeIssueId: "plan-1",
     stage: "plan", roleSessionId: "plan-session-1", roleTurnId: "plan-turn-1", observedTreeDigest: "before-plan", contextDigest: "plan-context",
     outcomeKind: "plan_completed", summary: "Plan is ready for review.", sourceManifest: [], completedAt: "2026-07-24T00:00:00Z",
+    modelTurn: {
+      turnRecordId: "plan-result-1:plan-turn-1", role: "plan" as const, rootIssueId: "root-1", cycleIssueId: "cycle-1",
+      targetIssueId: "plan-1", stageExecutionId: "plan-result-1", roleSessionId: "plan-session-1", roleTurnId: "plan-turn-1",
+      invocationState: "confirmed" as const, model: "gpt", outcome: "plan_completed" as const,
+      usage: { status: "measured" as const, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 },
+      terminalAt: "2026-07-24T00:00:00Z",
+    },
     planContractDigest: digest,
     planContract: {
       objective: "Deliver the reviewed deployment.", includedScope: ["deployment"], excludedScope: [], assumptions: [], constraints: [],

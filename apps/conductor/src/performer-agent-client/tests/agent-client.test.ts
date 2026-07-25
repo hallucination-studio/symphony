@@ -139,7 +139,36 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string) 
     observed_tree_digest: "tree-1",
     context_digest: "context-1",
     completed_at: "2026-07-23T00:00:01Z",
+    model_turn: stageModelTurn(role, "canceled"),
     outcome: { kind: "canceled", sanitized_reason: "test cancellation" },
+  };
+}
+
+function stageModelTurn(
+  role: "plan" | "work" | "verify",
+  outcome: string,
+) {
+  return {
+    turn_record_id: `${role}-execution:${role}-turn`,
+    role,
+    root_issue_id: "root-1",
+    cycle_issue_id: "cycle-1",
+    target_issue_id: `${role}-1`,
+    stage_execution_id: `${role}-execution`,
+    role_session_id: `${role}-session`,
+    role_turn_id: `${role}-turn`,
+    invocation_state: "confirmed",
+    model: "gpt",
+    outcome,
+    usage: {
+      status: "measured",
+      input_tokens: 1,
+      cached_input_tokens: 0,
+      output_tokens: 1,
+      reasoning_output_tokens: 0,
+      total_tokens: 2,
+    },
+    terminal_at: "2026-07-23T00:00:01Z",
   };
 }
 
@@ -157,6 +186,7 @@ function completedPlanResult(requestId: string) {
     observed_tree_digest: "tree-1",
     context_digest: "context-1",
     completed_at: "2026-07-23T00:00:01Z",
+    model_turn: stageModelTurn("plan", "plan_completed"),
     outcome: {
       kind: "plan_completed",
       plan_contract: {
@@ -625,6 +655,11 @@ test("agent client sends role-specific closed stage contexts", async () => {
   assert.deepEqual(requests.map((request) => request.role), ["plan", "work", "verify"]);
   assert.equal("kind" in requests[0]!, false);
   assert.equal("payload" in requests[0]!, false);
+  assert.deepEqual(requests[0]!.model_settings, {
+    model: "gpt",
+    reasoning_effort: "medium",
+    is_fast_mode_enabled: false,
+  });
   assert.deepEqual(Object.keys(requests[0]!.context as object).sort(), [
     "current_git_facts", "current_plan_issue", "cycle", "human_resolutions", "prior_plan_contracts",
     "prior_plan_results", "required_output", "root_contract", "unresolved_findings",
@@ -682,6 +717,7 @@ test("agent client normalizes the Root directive wire fields", async () => {
       : {
         protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
         reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_target_root_digest: "tree-1",
+        model_turn: rootModelTurn("turn-1"),
         rationale: "execute the plan", evidence_refs: [], consumed_input_ids: [], comment_replies: [], human_action_resolutions: [],
         action: {
           kind: "execute_plan", cycle_issue_id: "cycle-1", plan_issue_id: "plan-1", plan_goal: "plan",

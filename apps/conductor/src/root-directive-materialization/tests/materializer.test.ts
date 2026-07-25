@@ -171,6 +171,7 @@ function directive(action: RootDirective["action"]): RootDirective {
     rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1",
+    modelTurn: rootModelTurn(),
     basedOnTargetRootDigest: "tree-v1",
     rationale: "The cycle has completed.",
     evidenceRefs: [],
@@ -178,6 +179,15 @@ function directive(action: RootDirective["action"]): RootDirective {
     commentReplies: [],
     humanActionResolutions: [],
     action,
+  };
+}
+
+function rootModelTurn(): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
+    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-23T00:00:00Z",
   };
 }
 

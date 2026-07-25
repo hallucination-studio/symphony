@@ -204,6 +204,59 @@ export type StageResultOutcomeKind =
   | "canceled"
   | "execution_failed";
 
+export type ModelTurnOutcome =
+  | "directive_accepted"
+  | "transport_failed"
+  | "timed_out"
+  | "schema_invalid"
+  | "stale_output"
+  | StageResultOutcomeKind;
+
+export type TurnUsage =
+  | {
+    status: "measured";
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    reasoningOutputTokens: number;
+    totalTokens: number;
+  }
+  | {
+    status: "unavailable";
+    reason: "provider_omitted" | "transport_lost" | "process_lost" | "invalid_provider_usage";
+  };
+
+export interface RootReconcilerModelTurnRecord {
+  turnRecordId: string;
+  role: "root_reconciler";
+  rootIssueId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  invocationState: "confirmed" | "ambiguous";
+  model: string;
+  outcome: ModelTurnOutcome;
+  usage: TurnUsage;
+  terminalAt: string;
+}
+
+export interface StageModelTurnRecord {
+  turnRecordId: string;
+  role: "plan" | "work" | "verify";
+  rootIssueId: string;
+  cycleIssueId: string;
+  targetIssueId: string;
+  stageExecutionId: string;
+  roleSessionId: string;
+  roleTurnId: string;
+  invocationState: "confirmed" | "ambiguous";
+  model: string;
+  outcome: StageResultOutcomeKind;
+  usage: TurnUsage;
+  terminalAt: string;
+}
+
+export type ModelTurnRecord = RootReconcilerModelTurnRecord | StageModelTurnRecord;
+
 export interface StageResultRecord {
   kind: "stage_result";
   version: ManagedRecordVersion;
@@ -220,6 +273,7 @@ export interface StageResultRecord {
   summary: string;
   sourceManifest: string[];
   completedAt: string;
+  modelTurn: StageModelTurnRecord;
   planContractDigest?: string;
   planContract?: PlanContractProposal;
   proposedWorkDag?: ProposedWorkDag;

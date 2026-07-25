@@ -38,6 +38,7 @@ import type {
   RootDirectiveRecord,
   StageResultRecord,
   StageResultOutcomeKind,
+  TurnUsage,
 } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
@@ -511,13 +512,16 @@ export class RootReconciliationRuntime {
     if (result.rootIssueId !== view.root.issueId || result.cycleIssueId !== target.parent_issue_id) throw new Error("role_result_target_invalid");
     setPhase(`persist_${result.role}_record`);
     const record = toStageResultRecord(result);
-    const body = serializeManagedRecord(record);
-    for (const comment of view.tree.comments) {
-      if (comment.author_kind !== "symphony") continue;
-      const parsed = parseManagedRecord(comment.body);
-      if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) continue;
-      if (comment.body === body) return view;
-      throw new Error("role_result_conflict");
+    const existing = stageResultRecords(view.tree, target.issue_id);
+    const matching = existing.filter((candidate) => candidate.resultId === record.resultId);
+    if (matching.length > 1) throw new Error("role_result_duplicate");
+    const records = matching.length === 1 ? existing : [...existing, record];
+    const body = renderStageResultComment(record, stageUsageSnapshot(records));
+    if (matching.length === 1) {
+      if (!sameStageResultRecord(matching[0]!, record)) throw new Error("role_result_conflict");
+      const comment = view.tree.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
+      if (!comment) throw new Error("role_result_canonical_comment_invalid");
+      return view;
     }
     setPhase(`persist_${result.role}_linear_write`);
     const command = {
@@ -569,8 +573,15 @@ export class RootReconciliationRuntime {
       throw new Error("role_result_read_back_missing");
     }
     const parsed = parseManagedRecord(readBackComment.body);
-    if (!parsed.ok || parsed.value.kind !== "stage_result" || parsed.value.resultId !== record.resultId) {
+    if (!parsed.ok || parsed.value.kind !== "stage_result" || !sameStageResultRecord(parsed.value, record)) {
       throw new Error("role_result_read_back_invalid");
+    }
+    const readBackRecords = stageResultRecords(readBack, target.issue_id);
+    if (readBackRecords.filter((candidate) => candidate.resultId === record.resultId).length !== 1) {
+      throw new Error("role_result_read_back_duplicate");
+    }
+    if (readBackComment.body !== renderStageResultComment(record, stageUsageSnapshot(readBackRecords))) {
+      throw new Error("role_result_read_back_render_invalid");
     }
     return { ...view, tree: readBack, observedAt: readBack.observed_at };
   }
@@ -1092,6 +1103,22 @@ function validateStageResult(input: StageTurnInput, result: StageResult): void {
   ) {
     throw new Error("role_result_correlation_invalid");
   }
+  const modelTurn = result.modelTurn;
+  if (
+    modelTurn.role !== input.role ||
+    modelTurn.rootIssueId !== input.rootIssueId ||
+    modelTurn.cycleIssueId !== input.cycleIssueId ||
+    modelTurn.targetIssueId !== input.targetIssueId ||
+    modelTurn.stageExecutionId !== input.stageExecutionId ||
+    modelTurn.roleSessionId !== input.roleSessionId ||
+    modelTurn.roleTurnId !== input.roleTurnId ||
+    modelTurn.turnRecordId !== `${input.stageExecutionId}:${input.roleTurnId}` ||
+    modelTurn.outcome !== result.outcome.kind ||
+    modelTurn.terminalAt !== result.completedAt ||
+    modelTurn.model !== input.modelSettings.model
+  ) {
+    throw new Error("role_result_model_turn_invalid");
+  }
 }
 
 function toStageResultRecord(result: StageResult): StageResultRecord {
@@ -1126,6 +1153,7 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     summary: result.summary,
     sourceManifest: result.sourceManifest,
     completedAt: result.completedAt,
+    modelTurn: result.modelTurn,
     ...(completedPlan === undefined ? {} : {
       planContractDigest: canonicalPlanContractDigest(completedPlan),
       planContract: completedPlan.planContract,
@@ -1141,6 +1169,155 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     ...(outcome.errorCode === undefined ? {} : { failureCode: outcome.errorCode }),
   };
   return record;
+}
+
+interface StageUsageGroup {
+  model: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  unavailableTurnCount: number;
+}
+
+interface StageUsageSnapshot {
+  sourceRecordCount: number;
+  isComplete: boolean;
+  unknownTurnCount: number;
+  groups: StageUsageGroup[];
+}
+
+function stageResultRecords(
+  tree: RootReconciliationView["tree"],
+  targetIssueId: string,
+): StageResultRecord[] {
+  const records: StageResultRecord[] = [];
+  for (const comment of tree.comments) {
+    if (comment.issue_id !== targetIssueId || comment.author_kind !== "symphony") continue;
+    const parsed = parseManagedRecord(comment.body);
+    if (!parsed.ok || parsed.value.kind !== "stage_result") continue;
+    if (parsed.value.nodeIssueId !== targetIssueId) throw new Error("stage_result_comment_target_invalid");
+    records.push(parsed.value);
+  }
+  return records;
+}
+
+function sameStageResultRecord(left: StageResultRecord, right: StageResultRecord): boolean {
+  return serializeManagedRecord(left) === serializeManagedRecord(right);
+}
+
+function stageUsageSnapshot(records: StageResultRecord[]): StageUsageSnapshot {
+  const turnRecordIds = new Set<string>();
+  const groups = new Map<string, StageUsageGroup>();
+  let unknownTurnCount = 0;
+  for (const record of records) {
+    const turn = record.modelTurn;
+    if (turnRecordIds.has(turn.turnRecordId)) throw new Error("stage_usage_duplicate_turn");
+    turnRecordIds.add(turn.turnRecordId);
+    const group = groups.get(turn.model) ?? {
+      model: turn.model,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+      unavailableTurnCount: 0,
+    };
+    if (turn.usage.status === "measured") {
+      group.inputTokens += turn.usage.inputTokens;
+      group.cachedInputTokens += turn.usage.cachedInputTokens;
+      group.outputTokens += turn.usage.outputTokens;
+      group.reasoningOutputTokens += turn.usage.reasoningOutputTokens;
+      group.totalTokens += turn.usage.totalTokens;
+    } else {
+      group.unavailableTurnCount += 1;
+      unknownTurnCount += 1;
+    }
+    groups.set(turn.model, group);
+  }
+  return {
+    sourceRecordCount: records.length,
+    isComplete: unknownTurnCount === 0,
+    unknownTurnCount,
+    groups: [...groups.values()].sort((left, right) => left.model.localeCompare(right.model)),
+  };
+}
+
+function renderStageResultComment(record: StageResultRecord, usage: StageUsageSnapshot): string {
+  const sections = [
+    `## Symphony · ${stageDisplayName(record.stage)}`,
+    compactMarkdownText(record.summary),
+    "",
+    "**Result**",
+    stageOutcomeDisplayName(record.outcomeKind),
+  ];
+  const evidence = stageEvidenceLines(record);
+  if (evidence.length > 0) sections.push("", "**Evidence**", ...evidence.map((line) => `- ${line}`));
+  sections.push(
+    "",
+    "**Usage**",
+    `- Model: ${inlineCode(record.modelTurn.model)}`,
+    `- This turn: ${turnUsageDisplay(record.modelTurn.usage)}`,
+    "- This Issue:",
+    ...usage.groups.map((group) => `  - ${inlineCode(group.model)}: ${stageUsageGroupDisplay(group)}`),
+    `  - Completeness: ${usageCompletenessDisplay(usage)}`,
+    "",
+    "**Next**",
+    "The Root Reconciler will evaluate the durable result.",
+  );
+  return serializeManagedRecord(record, sections.join("\n"));
+}
+
+function stageDisplayName(stage: StageResultRecord["stage"]): "Plan" | "Work" | "Verify" {
+  if (stage === "plan") return "Plan";
+  if (stage === "work") return "Work";
+  return "Verify";
+}
+
+function stageOutcomeDisplayName(outcome: StageResultOutcomeKind): string {
+  return outcome.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") + ".";
+}
+
+function stageEvidenceLines(record: StageResultRecord): string[] {
+  const lines: string[] = [];
+  if (record.commitRevision) lines.push(`Commit: ${inlineCode(record.commitRevision)}`);
+  if (record.verifiedRevision) lines.push(`Verified revision: ${inlineCode(record.verifiedRevision)}`);
+  if (record.failureCode) lines.push(`Failure code: ${inlineCode(record.failureCode)}`);
+  for (const path of record.changedPaths?.slice(0, 12) ?? []) lines.push(`Changed path: ${inlineCode(path)}`);
+  for (const reference of record.evidenceRefs?.slice(0, 12) ?? []) {
+    lines.push(`Evidence: ${inlineCode(reference.sourceKind)} ${inlineCode(reference.referenceId)}`);
+  }
+  return lines;
+}
+
+function stageUsageGroupDisplay(group: StageUsageGroup): string {
+  const measured = `input=${group.inputTokens}, cached=${group.cachedInputTokens}, output=${group.outputTokens}, reasoning=${group.reasoningOutputTokens}, total=${group.totalTokens}`;
+  return group.unavailableTurnCount === 0
+    ? measured
+    : `${measured}; unavailable turns=${group.unavailableTurnCount}`;
+}
+
+function usageCompletenessDisplay(usage: StageUsageSnapshot): string {
+  if (usage.isComplete) return `complete (${usage.sourceRecordCount} source ${usage.sourceRecordCount === 1 ? "record" : "records"}).`;
+  return `incomplete (${usage.unknownTurnCount} unavailable ${usage.unknownTurnCount === 1 ? "turn" : "turns"}).`;
+}
+
+function turnUsageDisplay(usage: TurnUsage): string {
+  if (usage.status === "unavailable") return `unavailable (${usage.reason}).`;
+  return `input=${usage.inputTokens}, cached=${usage.cachedInputTokens}, output=${usage.outputTokens}, reasoning=${usage.reasoningOutputTokens}, total=${usage.totalTokens}.`;
+}
+
+function compactMarkdownText(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= 1_024 ? compact : `${compact.slice(0, 1_021)}...`;
+}
+
+function inlineCode(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  const longestDelimiter = Math.max(0, ...(compact.match(/`+/gu) ?? []).map((delimiter) => delimiter.length));
+  const delimiter = "`".repeat(longestDelimiter + 1);
+  return `${delimiter}${compact}${delimiter}`;
 }
 
 function planContractFromStageResult(result: StageResultRecord): PlanContract {

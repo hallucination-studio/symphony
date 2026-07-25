@@ -17,7 +17,7 @@ class FakeBackend:
     def open_role_session(self, role: str, settings: dict[str, object]) -> ProviderSession:
         handle = f"provider-{len(self.opened) + 1}"
         self.opened.append(f"{role}:{handle}")
-        return ProviderSession(role, handle)
+        return ProviderSession(role, handle, settings)
 
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         self.turns.append((session.provider_handle, request, workspace_root))
@@ -30,7 +30,17 @@ class FakeBackend:
                 "human_action_resolutions": [],
                 "action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]},
             }}
-        return {"output": {"kind": "canceled", "sanitized_reason": "test cancellation"}, "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+        return {
+            "output": {"kind": "canceled", "sanitized_reason": "test cancellation"},
+            "usage": {
+                "status": "measured",
+                "input_tokens": 1,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 2,
+            },
+        }
 
     def interrupt_turn(self, session) -> None:
         pass
@@ -270,6 +280,12 @@ def test_host_keeps_root_session_and_returns_root_directive():
 
     assert opened["kind"] == "root_reconciler_opened"
     assert opened["initial_directive"]["action"]["kind"] == "wait"
+    model_turn = opened["initial_directive"]["model_turn"]
+    assert model_turn["turn_record_id"] == "root-1:turn-1"
+    assert model_turn["role"] == "root_reconciler"
+    assert model_turn["model"] == "gpt"
+    assert model_turn["outcome"] == "directive_accepted"
+    assert model_turn["usage"] == {"status": "unavailable", "reason": "provider_omitted"}
     assert opened["bootstrap_root_digest"] == "tree-1"
     assert backend.turns[0][0] == "provider-1"
     assert backend.turns[0][1]["kind"] == "open_root_reconciler"
@@ -436,6 +452,7 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "observed_tree_digest": "tree-1",
         "context_digest": "context-1",
         "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
+        "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
         "target_issue_id": "target-1",
         "source_manifest": [],
         "coverage": {"is_complete": True, "omissions": []},

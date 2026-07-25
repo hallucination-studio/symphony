@@ -617,13 +617,15 @@ def _provider_failure_reason(error: Exception) -> str:
     return f"The Provider turn failed: {detail}"[:1_024]
 
 
-def _usage(usage: Any) -> dict[str, int] | None:
+def _usage(usage: Any) -> dict[str, Any]:
     if usage is None:
-        return None
+        return {"status": "unavailable", "reason": "provider_omitted"}
     total = getattr(usage, "total", usage)
     fields = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
     try:
-        snapshot = {field: int(getattr(total, field)) for field in fields}
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return snapshot if all(value >= 0 for value in snapshot.values()) else None
+        snapshot = {field: getattr(total, field) for field in fields}
+    except AttributeError:
+        return {"status": "unavailable", "reason": "invalid_provider_usage"}
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in snapshot.values()):
+        return {"status": "unavailable", "reason": "invalid_provider_usage"}
+    return {"status": "measured", **snapshot}

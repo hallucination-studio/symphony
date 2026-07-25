@@ -2,13 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PerformerRootReconcilerClientImpl } from "../internal/PerformerRootReconcilerClientImpl.js";
+import type { RootDirective } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 const directive = {
   protocolVersion: 1 as const, requestId: "request-1", rootDirectiveId: "directive-1",
-  reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", basedOnTargetRootDigest: "root-1",
+  reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", modelTurn: rootModelTurn(), basedOnTargetRootDigest: "root-1",
   rationale: "wait", evidenceRefs: [], consumedInputIds: [], commentReplies: [], humanActionResolutions: [],
   action: { kind: "wait" as const, reasonCode: "test", blockingFactRefs: [] },
 };
+
+function rootModelTurn(): RootDirective["modelTurn"] {
+  return {
+    turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
+    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    terminalAt: "2026-07-23T00:00:01Z",
+  };
+}
 
 test("root reconciler client owns session-to-root close correlation", async () => {
   const calls: Array<{ kind: string; rootIssueId?: string; sessionId?: string }> = [];

@@ -58,10 +58,10 @@ class RoleExecutionRuntime:
         )
         _validate_turn_scope(role, request)
         if cancel_event.is_set():
-            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn was canceled."}, self._now())
+            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn was canceled."}, self._now(), record)
         deadline = _deadline(request)
         if deadline is not None and deadline <= self._now():
-            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn deadline expired."}, self._now())
+            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn deadline expired."}, self._now(), record)
         output: dict[str, Any] | None = None
         try:
             output = self._sessions.execute(
@@ -98,7 +98,7 @@ class RoleExecutionRuntime:
             }
         if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed"}:
             result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."}
-        return _terminal(request, role, result, self._now(), output if isinstance(output, dict) else None)
+        return _terminal(request, role, result, self._now(), record, output if isinstance(output, dict) else None)
 
 
 def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
@@ -142,8 +142,10 @@ def _terminal(
     role: str,
     result: dict[str, Any],
     completed_at: datetime,
+    session_record: Any,
     provider_output: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    model_turn = _model_turn(request, role, result, completed_at, session_record, provider_output)
     if role == "root_reconciler":
         payload = {
             "protocol_version": "1",
@@ -161,6 +163,7 @@ def _terminal(
                 "root_directive_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}",
                 "reconciler_session_id": request["reconciler_session_id"],
                 "reconciler_turn_id": request["reconciler_turn_id"],
+                "model_turn": model_turn,
                 "based_on_target_root_digest": _root_target_digest(request),
                 "rationale": result["rationale"],
                 "evidence_refs": result["evidence_refs"],
@@ -168,10 +171,8 @@ def _terminal(
                 "comment_replies": result["comment_replies"],
                 "human_action_resolutions": result["human_action_resolutions"],
                 "action": result["action"],
-            }
+        }
         payload["completed_at"] = _timestamp(completed_at)
-        if provider_output and provider_output.get("usage") is not None:
-            payload["usage"] = provider_output["usage"]
         return payload
     payload = {
         "protocol_version": "1",
@@ -185,12 +186,85 @@ def _terminal(
         "target_issue_id": request.get("target_issue_id"),
         "observed_tree_digest": request["observed_tree_digest"],
         "context_digest": request.get("context_digest"),
+        "model_turn": model_turn,
         "outcome": result,
         "completed_at": _timestamp(completed_at),
     }
-    if provider_output and provider_output.get("usage") is not None:
-        payload["usage"] = provider_output["usage"]
     return payload
+
+
+def _model_turn(
+    request: dict[str, Any],
+    role: str,
+    result: dict[str, Any],
+    completed_at: datetime,
+    session_record: Any,
+    provider_output: dict[str, Any] | None,
+) -> dict[str, Any]:
+    settings = getattr(getattr(session_record, "provider_session", None), "settings", None)
+    if not isinstance(settings, dict):
+        raise ValueError("provider_model_settings_missing")
+    model = settings.get("model")
+    if not isinstance(model, str) or not model:
+        raise ValueError("provider_model_missing")
+    outcome = "directive_accepted" if role == "root_reconciler" and result.get("kind") not in {"execution_failed", "canceled"} else result.get("kind")
+    if not isinstance(outcome, str):
+        raise ValueError("model_turn_outcome_invalid")
+    terminal_at = _timestamp(completed_at)
+    usage = _turn_usage(provider_output, result)
+    invocation_state = "confirmed" if provider_output is not None else "ambiguous"
+    if role == "root_reconciler":
+        turn_id = _required_text(request, "reconciler_turn_id")
+        session_id = _required_text(request, "reconciler_session_id")
+        root_issue_id = _required_text(request, "root_issue_id")
+        return {
+            "turn_record_id": f"{root_issue_id}:{turn_id}",
+            "role": role,
+            "root_issue_id": root_issue_id,
+            "reconciler_session_id": session_id,
+            "reconciler_turn_id": turn_id,
+            "invocation_state": invocation_state,
+            "model": model,
+            "outcome": outcome,
+            "usage": usage,
+            "terminal_at": terminal_at,
+        }
+    stage_execution_id = _required_text(request, "stage_execution_id")
+    role_turn_id = _required_text(request, "role_turn_id")
+    return {
+        "turn_record_id": f"{stage_execution_id}:{role_turn_id}",
+        "role": role,
+        "root_issue_id": _required_text(request, "root_issue_id"),
+        "cycle_issue_id": _required_text(request, "cycle_issue_id"),
+        "target_issue_id": _required_text(request, "target_issue_id"),
+        "stage_execution_id": stage_execution_id,
+        "role_session_id": _required_text(request, "role_session_id"),
+        "role_turn_id": role_turn_id,
+        "invocation_state": invocation_state,
+        "model": model,
+        "outcome": outcome,
+        "usage": usage,
+        "terminal_at": terminal_at,
+    }
+
+
+def _turn_usage(provider_output: dict[str, Any] | None, result: dict[str, Any]) -> dict[str, Any]:
+    if provider_output is None:
+        reason = "transport_lost" if result.get("kind") == "execution_failed" else "provider_omitted"
+        return {"status": "unavailable", "reason": reason}
+    usage = provider_output.get("usage")
+    if not isinstance(usage, dict):
+        return {"status": "unavailable", "reason": "provider_omitted"}
+    if usage.get("status") == "unavailable" and set(usage) == {"status", "reason"}:
+        if usage.get("reason") in {"provider_omitted", "transport_lost", "process_lost", "invalid_provider_usage"}:
+            return usage
+        return {"status": "unavailable", "reason": "invalid_provider_usage"}
+    fields = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
+    if usage.get("status") == "measured" and set(usage) == {"status", *fields}:
+        values = [usage.get(field) for field in fields]
+        if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values):
+            return usage
+    return {"status": "unavailable", "reason": "invalid_provider_usage"}
 
 
 def _provider_output(value: Any, role: str) -> dict[str, Any]:
