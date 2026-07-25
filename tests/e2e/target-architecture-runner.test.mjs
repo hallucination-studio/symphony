@@ -12,6 +12,7 @@ import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architect
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
 import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
+import { rootRevisionCommentRow } from "./root-revision-comment-fixture.mjs";
 import { sameConductorPreemptionRow } from "./same-conductor-preemption-fixture.mjs";
 
 const now = "2026-07-25T00:00:00.000Z";
@@ -72,6 +73,62 @@ test("parallel black-box Campaign begins Case work from an already-ready Conduct
     "linear:root-happy-b:stage_execution:plan-execution-happy-b",
     "linear:root-happy-b:stage_result:plan-result-happy-b",
   ]);
+});
+
+test("parallel black-box Campaign rejects a Root revision Case without its public reply-wait boundary", async () => {
+  const command = campaignCommand();
+  command.cases = [{
+    case_id: "root-revision-comment",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "revise_root",
+    evidence_predicate_id: "root_revision_comment",
+  }];
+  const events = [];
+  const campaignPorts = ports(events);
+  delete campaignPorts.waitForRootReconcilerReply;
+
+  await assert.rejects(
+    runParallelBlackBoxE2ECampaign({ command, ports: campaignPorts, now: () => Date.parse(now) }),
+    (error) => error.code === "parallel_black_box_campaign_ports_invalid",
+  );
+  assert.deepEqual(events, []);
+});
+
+test("parallel black-box Campaign derives the Root revision verdict only from final fresh Linear evidence", async () => {
+  const command = campaignCommand();
+  command.cases = [{
+    case_id: "root-revision-comment",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "revise_root",
+    evidence_predicate_id: "root_revision_comment",
+  }];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({ case_id, status, reason_code })), [{
+    case_id: "root-revision-comment",
+    status: "passed",
+    reason_code: "root_revision_comment_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("human-revision:")), [
+    "human-revision:update:root-revision",
+    "human-revision:create:root-revision",
+    "human-revision:edit:comment-revision",
+    "human-revision:resolve:comment-revision",
+    "human-revision:wait:resolved:comment-revision",
+    "human-revision:reopen:comment-revision",
+    "human-revision:wait:unresolved:comment-revision",
+  ]);
+  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:root-revision-comment"]);
 });
 
 test("parallel black-box Campaign final-reads after an approved Plan action failure and lets durable facts decide", async () => {
@@ -574,18 +631,39 @@ function ports(events, {
       if (e2eCase.human_script_id === "reject_plan") {
         return { root_issue_ids: ["root-plan-rejection"] };
       }
+      if (e2eCase.human_script_id === "revise_root") {
+        return { root_issue_ids: ["root-revision"] };
+      }
       return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
     human: {
       async readActorId() { return "human-actor"; },
+      async readSymphonyActorId() { return "symphony-actor"; },
       async resolveHumanAction({ human_action_issue_id: actionIssueId, terminal_status: terminalStatus }) {
         if (terminalStatus === "rejected") events.push(`human-reject:${actionIssueId}`);
         const caseId = actionIssueId.slice("action-".length);
         if (caseId === rejectCaseId) throw new Error("external failure");
       },
       async updateRoot({ root_issue_id: rootIssueId }) {
+        if (rootIssueId === "root-revision") events.push(`human-revision:update:${rootIssueId}`);
         events.push(`human-update:${rootIssueId}`);
       },
+      async createComment({ issue_id: issueId }) {
+        events.push(`human-revision:create:${issueId}`);
+        return { comment_id: "comment-revision" };
+      },
+      async editComment({ comment_id: commentId }) {
+        events.push(`human-revision:edit:${commentId}`);
+      },
+      async resolveCommentThread({ thread_root_comment_id: commentId }) {
+        events.push(`human-revision:resolve:${commentId}`);
+      },
+      async reopenCommentThread({ thread_root_comment_id: commentId }) {
+        events.push(`human-revision:reopen:${commentId}`);
+      },
+    },
+    async waitForRootReconcilerReply({ comment_id: commentId, thread_state: threadState }) {
+      events.push(`human-revision:wait:${threadState}:${commentId}`);
     },
     async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId, action_kind: actionKind }) {
       events.push(`human:${e2eCase.case_id}`);
@@ -614,6 +692,11 @@ function ports(events, {
       }
       if (e2eCase.evidence_predicate_id === "plan_rejection_supersession") {
         const fixture = planRejectionSupersessionRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "root_revision_comment") {
+        const fixture = rootRevisionCommentRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
       }

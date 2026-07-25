@@ -38,7 +38,7 @@ export async function createVerifiedExternalLinearActors({
   return Object.freeze({
     symphony_actor_id: symphonyActorId,
     human_actor_id: humanActorId,
-    human: human.operations({ actorId: humanActorId }),
+    human: human.operations({ actorId: humanActorId, symphonyActorId }),
   });
 }
 
@@ -65,10 +65,11 @@ function externalActorClient({ accessToken, createClient }) {
       }
       return viewer.id;
     },
-    operations({ actorId }) {
+    operations({ actorId, symphonyActorId }) {
       const createdRootIds = new Set();
       return Object.freeze({
         readActorId: this.readActorId,
+        async readSymphonyActorId() { return symphonyActorId; },
         async createRoot(input) {
           const root = rootCreateInput(input);
           const payload = await sdkCall("external_linear_human_root_create_failed", () => client.createIssue({
@@ -103,7 +104,10 @@ function externalActorClient({ accessToken, createClient }) {
             issueId: comment.issue_id,
             body: comment.body,
           }));
-          assertWriteSuccess(payload, "external_linear_human_comment_create_failed");
+          if (!payload || payload.success !== true || !identifier(payload.commentId)) {
+            throw stableError("external_linear_human_comment_create_failed");
+          }
+          return Object.freeze({ comment_id: payload.commentId });
         },
         async editComment(input) {
           const comment = commentEditInput(input);

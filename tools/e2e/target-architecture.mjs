@@ -8,6 +8,7 @@ import { analyzeHappyPathCampaignEvidence } from "./approved-happy-path-evidence
 import { createFinalCaseVerdict } from "./final-evidence-verdict.mjs";
 import { executeHumanScript } from "./human-scripts.mjs";
 import { analyzePlanRejectionSupersessionCampaignEvidence } from "./plan-rejection-supersession-evidence.mjs";
+import { analyzeRootRevisionCommentCampaignEvidence } from "./root-revision-comment-evidence.mjs";
 import { analyzeSameConductorPreemptionCampaignEvidence } from "./same-conductor-preemption-evidence.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
@@ -22,14 +23,14 @@ export async function runParallelBlackBoxE2ECampaign({
   clearTimer = clearTimeout,
 }) {
   const campaign = assertParallelBlackBoxE2ECampaignCommand(command);
-  assertPorts(ports);
-  const humanActorId = await readHumanActorId(ports.human);
+  assertPorts(ports, campaign);
+  const actorIds = await readActorIds(ports.human);
 
   const actionSettlements = await Promise.allSettled(campaign.cases.map((e2eCase) => runCaseAction({
     campaign,
     e2eCase,
     ports,
-    humanActorId,
+    actorIds,
     observedAt,
     now,
     setTimer,
@@ -47,10 +48,12 @@ export async function runParallelBlackBoxE2ECampaign({
     : unavailableCaseEvidence({ campaign, e2eCase: campaign.cases[index], observedAt }));
   const happyPathEvidence = analyzeHappyPathCampaignEvidence({ rows: evidence });
   const planRejectionEvidence = analyzePlanRejectionSupersessionCampaignEvidence({ rows: evidence });
+  const rootRevisionEvidence = analyzeRootRevisionCommentCampaignEvidence({ rows: evidence });
   const preemptionEvidence = analyzeSameConductorPreemptionCampaignEvidence({ rows: evidence });
   const outcomesByCaseId = new Map([
     ...happyPathEvidence.case_outcomes,
     ...planRejectionEvidence.case_outcomes,
+    ...rootRevisionEvidence.case_outcomes,
     ...preemptionEvidence.case_outcomes,
   ].map((entry) => [entry.case_id, entry.outcome]));
   const results = await Promise.all(evidence.map(({ e2eCase, caseRoots, snapshot }) => createFinalCaseVerdict({
@@ -72,8 +75,8 @@ export async function runParallelBlackBoxE2ECampaign({
   });
 }
 
-async function runCaseAction({ campaign, e2eCase, ports, humanActorId, now, setTimer, clearTimer }) {
-  const caseContext = createCaseContext(campaign, e2eCase, humanActorId);
+async function runCaseAction({ campaign, e2eCase, ports, actorIds, now, setTimer, clearTimer }) {
+  const caseContext = createCaseContext(campaign, e2eCase, actorIds);
   const rootsSettlement = await settleBeforeDeadline(
     () => ports.createCaseRoots({ caseContext, e2eCase }),
     e2eCase.deadline_at,
@@ -90,6 +93,7 @@ async function runCaseAction({ campaign, e2eCase, ports, humanActorId, now, setT
       human: ports.human,
       waitForHumanAction: (input) => ports.waitForHumanAction({ caseContext, e2eCase, ...input }),
       waitForInFlightStage: (input) => ports.waitForInFlightStage({ caseContext, e2eCase, ...input }),
+      waitForRootReconcilerReply: (input) => ports.waitForRootReconcilerReply({ caseContext, e2eCase, ...input }),
     }),
     e2eCase.deadline_at,
     { now, setTimer, clearTimer },
@@ -106,12 +110,13 @@ async function finalizeCaseEvidence({ actionSettlement, e2eCase, campaign, ports
   return Object.freeze({ e2eCase, caseContext, caseRoots, snapshot });
 }
 
-function createCaseContext(campaign, e2eCase, humanActorId) {
+function createCaseContext(campaign, e2eCase, actorIds = {}) {
   const routedConductorIds = new Set(e2eCase.routed_conductor_ids);
   return Object.freeze({
     campaign_id: campaign.campaign_id,
     project_id: campaign.project_id,
-    human_actor_id: humanActorId,
+    human_actor_id: actorIds.humanActorId,
+    symphony_actor_id: actorIds.symphonyActorId,
     conductors: Object.freeze(campaign.conductors
       .filter(({ conductor_id: conductorId }) => routedConductorIds.has(conductorId))
       .map((conductor) => Object.freeze({ ...conductor }))),
@@ -177,7 +182,7 @@ function settleBeforeDeadline(operation, deadlineAt, { now, setTimer, clearTimer
   });
 }
 
-function assertPorts(ports) {
+function assertPorts(ports, campaign) {
   if (!ports || typeof ports !== "object") throw stableError("parallel_black_box_campaign_ports_invalid");
   for (const method of [
     "createCaseRoots",
@@ -187,17 +192,28 @@ function assertPorts(ports) {
   ]) {
     if (typeof ports[method] !== "function") throw stableError("parallel_black_box_campaign_ports_invalid");
   }
-  if (!ports.human || typeof ports.human.readActorId !== "function" ||
+  if (!ports.human || typeof ports.human.readActorId !== "function" || typeof ports.human.readSymphonyActorId !== "function" ||
       typeof ports.human.resolveHumanAction !== "function" || typeof ports.human.updateRoot !== "function") {
+    throw stableError("parallel_black_box_campaign_ports_invalid");
+  }
+  if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "revise_root") && [
+    "createComment", "editComment", "resolveCommentThread", "reopenCommentThread",
+  ].some((method) => typeof ports.human[method] !== "function")) {
+    throw stableError("parallel_black_box_campaign_ports_invalid");
+  }
+  if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "revise_root") &&
+      typeof ports.waitForRootReconcilerReply !== "function") {
     throw stableError("parallel_black_box_campaign_ports_invalid");
   }
 }
 
-async function readHumanActorId(human) {
+async function readActorIds(human) {
   try {
-    const actorId = await human.readActorId();
-    if (!ROOT_ISSUE_ID.test(actorId)) throw new Error("invalid actor");
-    return actorId;
+    const [humanActorId, symphonyActorId] = await Promise.all([human.readActorId(), human.readSymphonyActorId()]);
+    if (!ROOT_ISSUE_ID.test(humanActorId) || !ROOT_ISSUE_ID.test(symphonyActorId) || humanActorId === symphonyActorId) {
+      throw new Error("invalid actors");
+    }
+    return Object.freeze({ humanActorId, symphonyActorId });
   } catch {
     throw stableError("parallel_black_box_human_actor_identity_invalid");
   }

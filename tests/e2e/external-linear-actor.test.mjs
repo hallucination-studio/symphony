@@ -24,6 +24,7 @@ test("external Linear actors use independent clients and return only the verifie
   assert.equal(actors.human_actor_id, "human-actor");
   assert.notEqual(actors.human, humanClient);
   assert.equal(await actors.human.readActorId(), "human-actor");
+  assert.equal(await actors.human.readSymphonyActorId(), "symphony-actor");
   assert.equal("viewer" in actors.human, false);
   assert.equal("symphony" in actors, false);
 });
@@ -117,6 +118,7 @@ test("verified Human Actor exposes only bounded Root and ordinary Markdown comme
     "createRoot",
     "editComment",
     "readActorId",
+    "readSymphonyActorId",
     "reopenCommentThread",
     "resolveCommentThread",
     "resolveHumanAction",
@@ -159,7 +161,8 @@ test("verified Human Actor exposes only bounded Root and ordinary Markdown comme
   });
 
   const markdown = "User input \u2705\n\n```js\nconst approved = true;\n```";
-  await human.createComment({ issue_id: root.root_issue_id, body: markdown });
+  const createdComment = await human.createComment({ issue_id: root.root_issue_id, body: markdown });
+  assert.deepEqual(createdComment, { comment_id: "human-comment-2" });
   await human.editComment({ comment_id: "human-comment-1", body: "Edited \ud83d\udd0d\n\n```text\nverified\n```" });
   assert.deepEqual(calls, [
     { kind: "create_comment", input: { issueId: "root-1", body: markdown } },

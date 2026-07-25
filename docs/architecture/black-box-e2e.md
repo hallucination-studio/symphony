@@ -153,6 +153,13 @@ deadline和promise，单Case的failure、timeout或process exit不cancel其他Ca
 轮询只用于发现何时可以执行下一次真实human action。轮询缓存、webhook、process stdout和本地Case observation在最终
 判定前全部丢弃。全局deadline到达时停止新增human action，但仍对每个Case执行一次bounded final fresh read。
 
+Root revision and comment Case必须避免把用户连续的native thread操作压缩为一个不可观察的当前值：Human Actor在`resolve`
+后，必须通过新建外部client的fresh Linear read等待matching `resolved` thread-state input的accepted directive、reply和
+read-back；只有该边界成立后才能`reopen`。`reopen`后也必须同样等待matching `unresolved` input的durable reply，才可结束
+该Case的human script。两次等待只决定何时执行下一次真实用户操作，不构成事件历史、checkpoint或verdict输入；最终判定仍只
+使用Case settle后的独立final fresh Linear/Git snapshot。这样Case不要求Conductor重放close/reopen history，而是在两次
+用户操作之间保留可从Linear重建的durable事实。
+
 Campaign不自动删除、archive、cancel或quiesce测试Roots。Root保留其生产Workflow最终状态和完整active/archived历史。
 重复运行使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels，不复用旧Root作为本次通过
 证据，也不让新Conductor admit旧Campaign未完成的Root。
