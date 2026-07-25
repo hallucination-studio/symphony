@@ -4,7 +4,7 @@ export const ROOT_REVISION_DESCRIPTION = "Deliver the revised Root requirement a
 export const ROOT_REVISION_COMMENT = "Please use the revised Root requirement when deciding the next step.\n\n```text\nrevision: accepted input must be reconciled\n```";
 const ROOT_REVISION_INITIAL_COMMENT = "Please use the revised Root requirement when deciding the next step.";
 
-export async function executeHumanScript({ humanScript, caseRoots, human, waitForHumanAction, waitForInFlightStage, waitForRootReconcilerReply } = {}) {
+export async function executeHumanScript({ humanScript, caseRoots, human, waitForHumanAction, waitForInFlightStage, waitForRootReconcilerReply, restartConductor } = {}) {
   const rootIssueIds = rootIssueIdsFrom(caseRoots);
   if (!rootIssueIds || !human || typeof human !== "object") {
     throw stableError("parallel_black_box_human_script_input_invalid");
@@ -20,6 +20,9 @@ export async function executeHumanScript({ humanScript, caseRoots, human, waitFo
   }
   if (humanScript?.id === "preempt_same_priority") {
     return preemptSamePriority({ rootIssueIds, human, waitForInFlightStage });
+  }
+  if (humanScript?.id === "restart_conductor") {
+    return restartConductorDuringStage({ rootIssueIds, waitForInFlightStage, restartConductor });
   }
   throw stableError("parallel_black_box_human_script_unavailable");
 }
@@ -99,6 +102,18 @@ async function preemptSamePriority({ rootIssueIds, human, waitForInFlightStage }
     root_issue_id: rootIssueIds[1],
     description: "Please run this Root next.",
   });
+}
+
+async function restartConductorDuringStage({ rootIssueIds, waitForInFlightStage, restartConductor }) {
+  if (rootIssueIds.length !== 3 || typeof waitForInFlightStage !== "function" || typeof restartConductor !== "function") {
+    throw stableError("parallel_black_box_human_script_input_invalid");
+  }
+  const stage = await waitForInFlightStage({ root_issue_id: rootIssueIds[0] });
+  if (!stage || typeof stage !== "object" || Array.isArray(stage) || Object.keys(stage).length !== 1 ||
+      !identifier(stage.stage_execution_id)) {
+    throw stableError("parallel_black_box_human_inflight_stage_invalid");
+  }
+  await restartConductor({ root_issue_id: rootIssueIds[0] });
 }
 
 function rootIssueIdsFrom(value) {

@@ -13,6 +13,7 @@ import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/conf
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
 import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
 import { rootRevisionCommentRow } from "./root-revision-comment-fixture.mjs";
+import { restartIsolationRow } from "./restart-isolation-fixture.mjs";
 import { sameConductorPreemptionRow } from "./same-conductor-preemption-fixture.mjs";
 
 const now = "2026-07-25T00:00:00.000Z";
@@ -51,6 +52,20 @@ test("parallel black-box Campaign accepts only the closed version-one command", 
     () => assertParallelBlackBoxE2ECampaignCommand({
       ...command,
       cases: [{ ...command.cases[0], deadline_at: command.started_at }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...restartCase(), evidence_predicate_id: "happy_path" }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...restartCase(), routed_conductor_ids: ["conductor-c", "conductor-a"] }],
     }),
     /parallel_black_box_campaign_case_invalid/u,
   );
@@ -129,6 +144,39 @@ test("parallel black-box Campaign derives the Root revision verdict only from fi
     "human-revision:wait:unresolved:comment-revision",
   ]);
   assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:root-revision-comment"]);
+});
+
+test("parallel black-box Campaign requires the external restart port only for the restart isolation Case", async () => {
+  const command = campaignCommand();
+  command.cases = [restartCase()];
+  const events = [];
+  const campaignPorts = ports(events);
+  delete campaignPorts.restartConductor;
+
+  await assert.rejects(
+    runParallelBlackBoxE2ECampaign({ command, ports: campaignPorts, now: () => Date.parse(now) }),
+    (error) => error.code === "parallel_black_box_campaign_ports_invalid",
+  );
+  assert.deepEqual(events, []);
+});
+
+test("parallel black-box Campaign invokes only the external C restart boundary and final-reads restart isolation", async () => {
+  const command = campaignCommand();
+  command.cases = [restartCase()];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "passed",
+    reason_code: "restart_isolation_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("restart:")), ["restart:conductor-c:root-restart-c"]);
+  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:restart-isolation"]);
 });
 
 test("parallel black-box Campaign final-reads after an approved Plan action failure and lets durable facts decide", async () => {
@@ -606,6 +654,17 @@ function campaignCommand() {
   };
 }
 
+function restartCase() {
+  return {
+    case_id: "restart-isolation",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-c", "conductor-a", "conductor-b"],
+    deadline_at: deadline,
+    human_script_id: "restart_conductor",
+    evidence_predicate_id: "restart_isolation",
+  };
+}
+
 function conductor(suffix) {
   return {
     binding_id: `binding-${suffix}`,
@@ -633,6 +692,9 @@ function ports(events, {
       }
       if (e2eCase.human_script_id === "revise_root") {
         return { root_issue_ids: ["root-revision"] };
+      }
+      if (e2eCase.human_script_id === "restart_conductor") {
+        return { root_issue_ids: ["root-restart-c", "root-restart-a", "root-restart-b"] };
       }
       return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
@@ -672,9 +734,21 @@ function ports(events, {
       return { human_action_issue_id: `action-${e2eCase.case_id}` };
     },
     async waitForInFlightStage({ e2eCase, root_issue_id: rootIssueId }) {
+      if (e2eCase.human_script_id === "restart_conductor") {
+        assert.equal(rootIssueId, "root-restart-c");
+        return { stage_execution_id: "execution-c-before-restart" };
+      }
       assert.equal(e2eCase.human_script_id, "preempt_same_priority");
       assert.equal(rootIssueId, "root-inflight");
       return { stage_execution_id: "execution-inflight" };
+    },
+    async restartConductor({ caseContext, e2eCase, root_issue_id: rootIssueId }) {
+      assert.equal(e2eCase.human_script_id, "restart_conductor");
+      assert.deepEqual(caseContext.conductors.map(({ conductor_id: conductorId }) => conductorId), [
+        "conductor-c", "conductor-a", "conductor-b",
+      ]);
+      assert.equal(rootIssueId, "root-restart-c");
+      events.push("restart:conductor-c:root-restart-c");
     },
     async readFreshEvidenceSnapshot({ e2eCase, caseRoots }) {
       events.push(`fresh:${e2eCase.case_id}`);
@@ -697,6 +771,11 @@ function ports(events, {
       }
       if (e2eCase.evidence_predicate_id === "root_revision_comment") {
         const fixture = rootRevisionCommentRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "restart_isolation") {
+        const fixture = restartIsolationRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
       }

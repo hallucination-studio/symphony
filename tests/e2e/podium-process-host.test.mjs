@@ -19,11 +19,13 @@ test("E2E process host owns process lifecycle and relays Profile commands only t
       const harness = {
         requests: [],
         closes: 0,
+        abruptTerminates: [],
         async request(body, secret) {
           this.requests.push({ body, secret });
           return { kind: "profile_status", profile: { profile_id: "profile-a" } };
         },
         async close() { this.closes += 1; },
+        async terminateAbruptly(signal) { this.abruptTerminates.push(signal); },
       };
       harnesses.push(harness);
       return harness;
@@ -50,11 +52,31 @@ test("E2E process host owns process lifecycle and relays Profile commands only t
   assert.equal(harnesses[0].requests[0].secret, secret);
 
   await hostOwner.host.restartConductor("conductor-a");
-  assert.equal(harnesses[0].closes, 1);
+  assert.deepEqual(harnesses[0].abruptTerminates, ["SIGKILL"]);
+  assert.equal(harnesses[0].closes, 0);
   assert.equal(starts.length, 2);
 
   await hostOwner.close();
   assert.equal(harnesses[1].closes, 1);
+});
+
+test("E2E process host refuses a process without a hard termination boundary", async () => {
+  const process = {
+    closes: 0,
+    async request() { return {}; },
+    async close() { this.closes += 1; },
+  };
+  const hostOwner = createE2EProcessHost({
+    repositories: [repository()],
+    async startProcess() { return process; },
+  });
+
+  await assert.rejects(
+    hostOwner.host.startConductor(conductorInput()),
+    /e2e_conductor_process_invalid/u,
+  );
+  assert.equal(process.closes, 1);
+  await hostOwner.close();
 });
 
 test("E2E process host rejects an unknown repository or Profile command target", async () => {
@@ -85,6 +107,7 @@ test("E2E process host closes a process that finishes starting after its owner c
     closes: 0,
     async request() { return {}; },
     async close() { this.closes += 1; },
+    async terminateAbruptly() {},
   };
   const hostOwner = createE2EProcessHost({
     repositories: [{
@@ -120,6 +143,16 @@ function conductorInput() {
     repositoryHandle: "repo-a",
     repositoryRoot: "/tmp/repository-a",
     baseBranch: "main",
+  };
+}
+
+function repository() {
+  return {
+    repository_handle: "repo-a",
+    repository_identity: "repository-a",
+    repository_display_name: "Repository A",
+    repository_root: "/tmp/repository-a",
+    base_branch: "main",
   };
 }
 

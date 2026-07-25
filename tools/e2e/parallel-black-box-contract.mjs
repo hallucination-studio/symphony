@@ -183,6 +183,11 @@ function assertCase(value, conductorIds, { startedAt, campaignDeadlineAt }) {
     }
     routes.add(conductorId);
   }
+  const isRestartScript = e2eCase.human_script_id === "restart_conductor";
+  const isRestartPredicate = e2eCase.evidence_predicate_id === "restart_isolation";
+  if (isRestartScript !== isRestartPredicate || (isRestartScript && routes.size !== 3)) {
+    throw stableError("parallel_black_box_campaign_case_invalid");
+  }
 }
 
 function freezeCommand(command) {

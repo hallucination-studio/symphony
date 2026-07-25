@@ -9,6 +9,7 @@ import { createFinalCaseVerdict } from "./final-evidence-verdict.mjs";
 import { executeHumanScript } from "./human-scripts.mjs";
 import { analyzePlanRejectionSupersessionCampaignEvidence } from "./plan-rejection-supersession-evidence.mjs";
 import { analyzeRootRevisionCommentCampaignEvidence } from "./root-revision-comment-evidence.mjs";
+import { analyzeRestartIsolationCampaignEvidence } from "./restart-isolation-evidence.mjs";
 import { analyzeSameConductorPreemptionCampaignEvidence } from "./same-conductor-preemption-evidence.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
@@ -49,11 +50,13 @@ export async function runParallelBlackBoxE2ECampaign({
   const happyPathEvidence = analyzeHappyPathCampaignEvidence({ rows: evidence });
   const planRejectionEvidence = analyzePlanRejectionSupersessionCampaignEvidence({ rows: evidence });
   const rootRevisionEvidence = analyzeRootRevisionCommentCampaignEvidence({ rows: evidence });
+  const restartIsolationEvidence = analyzeRestartIsolationCampaignEvidence({ rows: evidence });
   const preemptionEvidence = analyzeSameConductorPreemptionCampaignEvidence({ rows: evidence });
   const outcomesByCaseId = new Map([
     ...happyPathEvidence.case_outcomes,
     ...planRejectionEvidence.case_outcomes,
     ...rootRevisionEvidence.case_outcomes,
+    ...restartIsolationEvidence.case_outcomes,
     ...preemptionEvidence.case_outcomes,
   ].map((entry) => [entry.case_id, entry.outcome]));
   const results = await Promise.all(evidence.map(({ e2eCase, caseRoots, snapshot }) => createFinalCaseVerdict({
@@ -94,6 +97,7 @@ async function runCaseAction({ campaign, e2eCase, ports, actorIds, now, setTimer
       waitForHumanAction: (input) => ports.waitForHumanAction({ caseContext, e2eCase, ...input }),
       waitForInFlightStage: (input) => ports.waitForInFlightStage({ caseContext, e2eCase, ...input }),
       waitForRootReconcilerReply: (input) => ports.waitForRootReconcilerReply({ caseContext, e2eCase, ...input }),
+      restartConductor: (input) => ports.restartConductor({ caseContext, e2eCase, ...input }),
     }),
     e2eCase.deadline_at,
     { now, setTimer, clearTimer },
@@ -111,15 +115,14 @@ async function finalizeCaseEvidence({ actionSettlement, e2eCase, campaign, ports
 }
 
 function createCaseContext(campaign, e2eCase, actorIds = {}) {
-  const routedConductorIds = new Set(e2eCase.routed_conductor_ids);
+  const conductorsById = new Map(campaign.conductors.map((conductor) => [conductor.conductor_id, conductor]));
   return Object.freeze({
     campaign_id: campaign.campaign_id,
     project_id: campaign.project_id,
     human_actor_id: actorIds.humanActorId,
     symphony_actor_id: actorIds.symphonyActorId,
-    conductors: Object.freeze(campaign.conductors
-      .filter(({ conductor_id: conductorId }) => routedConductorIds.has(conductorId))
-      .map((conductor) => Object.freeze({ ...conductor }))),
+    conductors: Object.freeze(e2eCase.routed_conductor_ids
+      .map((conductorId) => Object.freeze({ ...conductorsById.get(conductorId) }))),
   });
 }
 
@@ -203,6 +206,10 @@ function assertPorts(ports, campaign) {
   }
   if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "revise_root") &&
       typeof ports.waitForRootReconcilerReply !== "function") {
+    throw stableError("parallel_black_box_campaign_ports_invalid");
+  }
+  if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "restart_conductor") &&
+      typeof ports.restartConductor !== "function") {
     throw stableError("parallel_black_box_campaign_ports_invalid");
   }
 }

@@ -39,7 +39,9 @@ export function createE2EProcessHost({ repositories, startProcess }) {
       starts.set(value.conductorId, start);
       try {
         const process = await start;
-        if (!process || typeof process.request !== "function" || typeof process.close !== "function") {
+        if (!process || typeof process.request !== "function" || typeof process.close !== "function" ||
+            typeof process.terminateAbruptly !== "function") {
+          await process?.close?.();
           throw stableError("e2e_conductor_process_invalid");
         }
         if (closed) {
@@ -61,7 +63,7 @@ export function createE2EProcessHost({ repositories, startProcess }) {
       const active = processes.get(conductorId);
       if (!active) throw stableError("e2e_conductor_process_missing");
       processes.delete(conductorId);
-      await active.process.close();
+      await active.process.terminateAbruptly("SIGKILL");
       await host.startConductor(active.input);
     },
     async relayProfile(body, secret) {

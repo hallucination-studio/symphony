@@ -215,7 +215,9 @@ CaseRootSet
 
 它是Human Actor创建后返回的精确final-read目标，不是Command字段、Linear事实、Product contract、checkpoint或恢复输入。
 任何额外字段、重复ID或缺失ID都使该Case不能产生通过verdict。普通Case的集合恰有一个Root；same-Conductor preemption
-Case恰有两个，顺序固定为`in_flight_root`、`updated_root`，仅供其closed Human script和predicate使用。
+Case恰有两个，顺序固定为`in_flight_root`、`updated_root`；Conductor restart isolation Case恰有三个，顺序固定为
+`C_root`、`A_root`、`B_root`，并且必须与`routed_conductor_ids[]`中的`C`、`A`、`B`顺序严格对应。它们只供closed
+Human/operator script和predicate定位外部对象，不是durable checkpoint。
 
 ## 8. Final Evidence Snapshot
 
@@ -243,6 +245,30 @@ incomplete，不能使用较早轮询结果补齐。最终predicate必须同时�
 
 process exit code、Conductor/Performer内存、Provider session、runtime log、timeline event publish返回值、polling cache和
 runner本地`final`字段只能帮助诊断，不能进入通过predicate或`evidence_refs`。
+
+### 8.2 Conductor restart isolation
+
+restart isolation Case的operator script必须先从公开观察边界等待`C_root`出现in-flight Stage，再只通过process controller
+对`C`执行`SIGKILL`和使用相同公开Binding输入的fresh process start。该等待和kill/restart调用只决定何时触发真实故障；
+它们不写Linear/Git，不保留restart checkpoint，也不进入final predicate。
+
+settle后final fresh snapshot必须同时证明以下durable事实：
+
+1. `C_root`只有一个matching `root_ownership`，其full `conductor_id`严格等于路由中的`C`；旧in-flight
+   `StageExecutionRecord`有唯一matching terminal Result，且其`outcome_kind`为`execution_failed`或`canceled`。
+2. 旧execution不得有任何`plan_completed`、`work_completed`或`verify_passed`的matching Result。旧execution的第二个
+   或success Result都是stale output已materialize，Case必须失败，不能依据process日志推断其是否曾经返回。
+3. C的replacement execution与旧execution拥有相同Root、Cycle、Node和Stage，使用不同`stage_execution_id`，在旧failure
+   Result完成后开始；它的唯一非`canceled`/`execution_failed` terminal Result使用不同`role_session_id`，并在旧failure后
+   完成。该Result证明fresh session已由Linear/Git durable facts重新打开；Provider thread、PID或内存session不能代替它。
+4. `A_root`和`B_root`各自只有一个matching ownership，分别严格等于路由中的`A`和`B`。各自存在一条唯一成功的
+   execution/result interval：开始早于C旧failure完成，完成晚于C replacement Result完成。interval内不得出现
+   `execution_failed`、`canceled`或第二个execution/result；这条连续durable链是A/B未被停止、重启、重配置或接管的唯一
+   可验收证据。
+
+任何ownership、lineage、session、timestamp或terminal Result歧义都是`incomplete`；已读取到的stale成功output、错误
+ownership、A/B failure/cancel/replacement或不连续interval都是`failed`。没有durable的“process restarted”记录，且不得创建
+该记录。
 
 ### 8.1 Durable overlap
 
@@ -284,7 +310,7 @@ Linear/Git references，不输出Issue正文、credential、Provider transcript�
 | same-Conductor preemption | Conductor已有in-flight turn时创建同Priority Roots，并由Human Actor更新其中一个Root | native activity证明admission前的Priority/`updatedAt`顺序，Stage records证明下一boundary先选择最新Root且未取消in-flight turn |
 | Plan rejection and supersession | Human Actor拒绝Plan Action并给出reason | rejected resolution、旧Contract/Action/Result保留、Contract supersession、fresh Plan execution/Contract/Action；archive严格匹配accepted directive |
 | Root revision and comment | 修改Root description，写/编辑comment并resolve/reopen | Root Reconciler消费增量，产生matching reply、closed reaction disposition和thread action后再推进 |
-| Conductor restart isolation | Stage执行中停止并重启C，同时A/B继续 | C只从Linear/Git恢复并拒绝旧output；A/B的durable链未被停止或接管 |
+| Conductor restart isolation | `CaseRootSet`按`C,A,B`创建；C Stage in-flight时仅经process controller `SIGKILL`并fresh start C，A/B继续 | C旧failure/cancel、无stale成功Result、同Cycle/Node的新session replacement Result；A/B各一条跨越C恢复的连续成功interval和不变ownership |
 | Cycle exhaustion and successor | 使用公开convergence配置触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
 | delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
 | required Linear write fail-closed | 在required reply/timeline write边界使真实Linear channel暂时不可用后恢复 | outage期间无后续Stage事实；恢复后同stable identity写入/read-back，且后续Stage `started_at`晚于required write |
