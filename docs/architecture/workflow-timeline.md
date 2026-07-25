@@ -254,8 +254,10 @@ Next
 <next Plan/Work/Verify/Human/wait/conclusion step>
 ```
 
-Stage Result comment使用同一Cycle模板，但`Decision`替换为`Result`，只展示bounded事实、checks、Findings和
-artifact references。不得输出模型思维链或未经验证的成功声明。
+Plan、Work和Verify Issue上的canonical Stage Result comment不属于时间轴，且其固定用户结构、Result与
+`ModelTurnRecord` materialization只由[Performer Stage Contracts](stage-orchestration.md)定义。Cycle comment只引用
+已经read-back的Stage Result，并以`Observed`展示其bounded事实、checks、Findings和artifact references；不得输出模型
+思维链或未经验证的成功声明。
 
 ## 7. 结构化渲染规则
 
@@ -274,6 +276,10 @@ artifact references。不得输出模型思维链或未经验证的成功声明�
 renderer可以使用heading、表格、列表、链接、引用和非`symphony` code block，让用户区分输入、已验证事实、影响和下一步。
 无论可见Markdown多丰富，每个event仍只产生一个comment，且该comment的最后一个且唯一`symphony` block才承载
 `WorkflowTimelineRecord`；普通Markdown或HTML不能保存重启后需要的Workflow事实。
+
+Timeline subscriber不为timeline comment写✅/❌ receipt。用户comment的source receipt、child reply以及原生thread
+resolve/reopen只属于[Root Reconciliation](root-reconciliation.md)定义的directive materialization；把emoji写进timeline
+renderer会把叙事事件与用户输入处理混成第二条交互路径。
 
 Stage Result自身的immutable Result、model和turn usage只写在matching Plan/Work/Verify Issue的canonical managed
 comment；Cycle timeline event只能引用该source record并展示本次结果与派生Cycle累计值。前者是唯一的Result

@@ -173,6 +173,21 @@ Podium configures Linear and Project Conductor Pool
 普通Work错误在当前Work turn内由Agent诊断和修复。Provider/session丢失时从Linear/Git重新open matching role；
 不会恢复raw thread pointer，也不会清空已落地事实。
 
+### 9.1 端到端证据
+
+任何生产边界E2E只以测试结束时fresh read-back的Linear与Git事实判定成功、失败或阻塞：Issue status/archive/tree、
+原生comment body/thread state/reaction、strict managed code blocks、Result/ModelTurnRecord、usage聚合以及Git revision/
+checks。process exit、Conductor/Performer内存、Provider session、日志、timeline event是否发布、测试脚本的`final`字段或
+synthetic completion都不是完成证据。
+
+涉及用户comment回执的E2E还必须fresh read-back证明：human body input的✅/❌由Symphony写在原source comment，
+matching child reply只包含结构化Markdown与一个terminal `symphony` block；native close/reopen input没有receipt。
+这三项都是Linear原生事实或严格managed comment，不能用测试本地mutation记录、事件发布结果或Provider输出替代。
+
+一次E2E观察到非成功Stage Result、缺失必需Linear write/read-back或不完整usage时必须立即失败并报告对应的durable
+Linear/Git事实；测试不得等待内部状态“最终变好”，也不得用本地补写的状态代替真实边界。E2E可以创建可见测试Root，
+但不能以cleanup、compatibility或额外Workflow路径改变被验证的目标行为。
+
 ## 10. 不变量
 
 1. Podium是唯一Linear SDK和Token owner。
@@ -185,3 +200,4 @@ Podium configures Linear and Project Conductor Pool
 8. mutation、Reconciler reply、native reaction/thread action和timeline comment都以Linear durable read-back和stable identity收敛。
 9. Root convergence跨所有active/archived Cycle历史计算。
 10. 完整Tree只用于Conductor fresh derivation和fresh Reconciler bootstrap；已有session的advance严格只发送delta。
+11. 生产边界E2E只接受fresh Linear/Git事实，运行时状态、日志、session和synthetic `final`不是Workflow完成证据。

@@ -368,9 +368,18 @@ Cycle累计不包含Root Reconciler turn。Root累计的公式唯一为`sum(all 
 canonical source digest、`is_complete`和`unknown_turn_count`。只要任一input record为`unavailable`，累计仍展示所有已知
 维度，但必须`is_complete: false`并明确未知turn数量，不能显示为精确总量。
 
-Stage managed comment展示本turn和该Issue累计值；Cycle timeline展示该事件后的Cycle累计值；Root Reconciliation
-timeline展示该事件后的Root累计值。累计值从fresh Linear事实计算并随matching event comment一起read-back，不通过修改
-Issue description或单独维护可变summary record实现。
+用户可见的展示位置固定，且只渲染同一次fresh Linear派生的snapshot：
+
+| Linear位置 | 必须展示 |
+|---|---|
+| Plan/Work/Verify Issue的canonical Stage Result comment | 本turn的实际`model`、本turn usage或明确unavailable原因、该Issue按model分组的累计值与完整性 |
+| Cycle Issue的timeline comment | 触发该event的Stage实际`model`与usage（如有），以及该Cycle仅含Plan/Work/Verify的按stage/model累计值与完整性 |
+| Root Issue的Root Reconciliation timeline comment | 触发该event的Root Reconciler实际`model`与usage（如有），以及全部Cycle Stage turn加全部Root Reconciler turn的按Cycle/role/model累计值与完整性 |
+
+这三个位置是同一组immutable `ModelTurnRecord`的不同范围展示，不是三个usage ledger、更不是第二个Stage Result。
+Stage、Cycle和Root renderer只消费source record identity和fresh snapshot；它们不接受模型、event producer、description
+或本地counter提供的aggregate。累计值从fresh Linear事实计算并随matching event comment一起read-back，不通过修改Issue
+description或单独维护可变summary record实现。
 
 Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
 model/usage record或累计comment写入、strict decode、聚合校验或read-back失败时当前Root停止，turn启动前的Linear token
