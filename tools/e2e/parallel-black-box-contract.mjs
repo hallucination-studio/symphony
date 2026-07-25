@@ -23,6 +23,32 @@ const EVIDENCE_PREDICATE_REGISTRY = registry([
 ]);
 const CASE_STATUSES = new Set(["passed", "failed", "incomplete"]);
 
+export const MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY = Object.freeze([
+  mandatoryCase("cross_conductor_happy_paths", "approve_plan", "happy_path", [0, 1]),
+  mandatoryCase("same_conductor_preemption", "preempt_same_priority", "same_conductor_preemption", [0]),
+  mandatoryCase("plan_rejection_and_supersession", "reject_plan", "plan_rejection_supersession", [0]),
+  mandatoryCase("root_revision_and_comment", "revise_root", "root_revision_comment", [0]),
+  mandatoryCase("conductor_restart_isolation", "restart_conductor", "restart_isolation", [2, 0, 1]),
+  mandatoryCase("cycle_exhaustion_and_successor", "exhaust_cycle_budget", "cycle_successor", [0]),
+  mandatoryCase("delivery_and_review", "deliver_and_review", "delivery_review", [0]),
+  mandatoryCase("required_linear_write_fail_closed", "required_write_outage", "required_write_fail_closed", [0]),
+]);
+
+export function createMandatoryParallelBlackBoxCases({ conductor_ids: conductorIds, deadline_at: deadlineAt } = {}) {
+  if (!Array.isArray(conductorIds) || conductorIds.length < 3 || !conductorIds.every(identifier) ||
+      new Set(conductorIds).size !== conductorIds.length || typeof deadlineAt !== "string") {
+    throw stableError("parallel_black_box_campaign_registry_invalid");
+  }
+  return Object.freeze(MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY.map((definition) => Object.freeze({
+    case_id: definition.case_id,
+    mandatory: true,
+    routed_conductor_ids: Object.freeze(definition.routed_conductor_indexes.map((index) => conductorIds[index])),
+    deadline_at: deadlineAt,
+    human_script_id: definition.human_script_id,
+    evidence_predicate_id: definition.evidence_predicate_id,
+  })));
+}
+
 export function assertParallelBlackBoxE2ECampaignCommand(value) {
   const command = record(value, "parallel_black_box_campaign_command_invalid");
   assertExactKeys(command, [
@@ -71,6 +97,7 @@ export function assertParallelBlackBoxE2ECampaignCommand(value) {
     if (caseIds.has(e2eCase.case_id)) throw stableError("parallel_black_box_campaign_case_invalid");
     caseIds.add(e2eCase.case_id);
   }
+  assertMandatoryCaseRegistry(command.cases, command.conductors);
   return freezeCommand(command);
 }
 
@@ -205,6 +232,23 @@ function assertCase(value, conductorIds, { startedAt, campaignDeadlineAt }) {
   }
 }
 
+function assertMandatoryCaseRegistry(cases, conductors) {
+  if (cases.length !== MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY.length) {
+    throw stableError("parallel_black_box_campaign_registry_invalid");
+  }
+  for (const [index, definition] of MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY.entries()) {
+    const e2eCase = cases[index];
+    if (e2eCase.case_id !== definition.case_id || e2eCase.mandatory !== true ||
+        e2eCase.human_script_id !== definition.human_script_id ||
+        e2eCase.evidence_predicate_id !== definition.evidence_predicate_id ||
+        e2eCase.routed_conductor_ids.length !== definition.routed_conductor_indexes.length ||
+        e2eCase.routed_conductor_ids.some((conductorId, routeIndex) =>
+          conductorId !== conductors[definition.routed_conductor_indexes[routeIndex]].conductor_id)) {
+      throw stableError("parallel_black_box_campaign_registry_invalid");
+    }
+  }
+}
+
 function freezeCommand(command) {
   return Object.freeze({
     version: 1,
@@ -255,6 +299,15 @@ function record(value, code) {
 
 function registry(ids) {
   return Object.freeze(Object.fromEntries(ids.map((id) => [id, Object.freeze({ id })])));
+}
+
+function mandatoryCase(caseId, humanScriptId, evidencePredicateId, routedConductorIndexes) {
+  return Object.freeze({
+    case_id: caseId,
+    human_script_id: humanScriptId,
+    evidence_predicate_id: evidencePredicateId,
+    routed_conductor_indexes: Object.freeze(routedConductorIndexes),
+  });
 }
 
 function stableError(code) {

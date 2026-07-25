@@ -143,12 +143,13 @@ export function analyzeHappyPathCampaignEvidence({ rows } = {}) {
   if (!Array.isArray(rows)) return Object.freeze({ case_outcomes: Object.freeze([]), durable_overlap_evidence_refs: Object.freeze([]) });
   const assessed = rows
     .filter((row) => row?.e2eCase?.evidence_predicate_id === "happy_path")
-    .map((row) => ({ row, assessment: assessApprovedHappyPathEvidence(row) }));
+    .map((row) => ({ row, assessments: assessHappyPathCase(row) }));
+  const chains = assessed.flatMap(({ row, assessments }) => assessments.map((assessment) => ({ row, assessment })));
   const pairs = [];
-  for (let left = 0; left < assessed.length; left += 1) {
-    for (let right = left + 1; right < assessed.length; right += 1) {
-      const a = assessed[left];
-      const b = assessed[right];
+  for (let left = 0; left < chains.length; left += 1) {
+    for (let right = left + 1; right < chains.length; right += 1) {
+      const a = chains[left];
+      const b = chains[right];
       if (a.assessment.outcome.kind !== "satisfied" || b.assessment.outcome.kind !== "satisfied") continue;
       for (const aInterval of a.assessment.intervals) {
         for (const bInterval of b.assessment.intervals) {
@@ -159,16 +160,18 @@ export function analyzeHappyPathCampaignEvidence({ rows } = {}) {
     }
   }
   const caseIdsWithOverlap = new Set(pairs.flatMap(({ a, b }) => [a.row.e2eCase.case_id, b.row.e2eCase.case_id]));
-  const successful = assessed.filter(({ assessment: value }) => value.outcome.kind === "satisfied");
-  const outcomes = assessed.map(({ row, assessment: value }) => {
-    if (value.outcome.kind !== "satisfied") return Object.freeze({ case_id: row.e2eCase.case_id, outcome: value.outcome });
+  const successfulChains = chains.filter(({ assessment }) => assessment.outcome.kind === "satisfied");
+  const outcomes = assessed.map(({ row, assessments }) => {
+    const violated = assessments.find(({ outcome: value }) => value.kind === "violated");
+    if (violated) return Object.freeze({ case_id: row.e2eCase.case_id, outcome: violated.outcome });
+    const inconclusive = assessments.find(({ outcome: value }) => value.kind === "inconclusive");
+    if (inconclusive) return Object.freeze({ case_id: row.e2eCase.case_id, outcome: inconclusive.outcome });
     if (caseIdsWithOverlap.has(row.e2eCase.case_id)) {
       return Object.freeze({ case_id: row.e2eCase.case_id, outcome: outcome("satisfied", "happy_path_overlap_confirmed") });
     }
-    const otherComplete = successful.some(({ row: other }) => other.e2eCase.case_id !== row.e2eCase.case_id);
     return Object.freeze({
       case_id: row.e2eCase.case_id,
-      outcome: otherComplete
+      outcome: successfulChains.length > 1
         ? outcome("violated", "happy_path_overlap_absent")
         : outcome("inconclusive", "happy_path_overlap_missing"),
     });
@@ -178,6 +181,31 @@ export function analyzeHappyPathCampaignEvidence({ rows } = {}) {
     case_outcomes: Object.freeze(outcomes),
     durable_overlap_evidence_refs: Object.freeze(evidenceRefs),
   });
+}
+
+function assessHappyPathCase(row) {
+  try {
+    return splitHappyPathCase(row).map((member) => assessApprovedHappyPathEvidence(member));
+  } catch {
+    return [assessment("inconclusive", "happy_path_evidence_invalid")];
+  }
+}
+
+function splitHappyPathCase(value) {
+  const row = object(value);
+  const caseRoots = object(row.caseRoots);
+  const context = object(row.caseContext);
+  const rootIssueIds = array(caseRoots.root_issue_ids);
+  const conductors = array(context.conductors);
+  if (rootIssueIds.length === 0 || rootIssueIds.length !== conductors.length ||
+      !rootIssueIds.every(identifier) || new Set(rootIssueIds).size !== rootIssueIds.length) {
+    throw new Error("invalid happy path case");
+  }
+  return rootIssueIds.map((rootIssueId, index) => ({
+    ...row,
+    caseRoots: { root_issue_ids: [rootIssueId] },
+    caseContext: { ...context, conductors: [conductors[index]] },
+  }));
 }
 
 function rowInput(value) {

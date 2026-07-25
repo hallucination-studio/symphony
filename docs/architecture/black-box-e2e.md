@@ -239,10 +239,11 @@ CaseRootSet
 ```
 
 它是Human Actor创建后返回的精确final-read目标，不是Command字段、Linear事实、Product contract、checkpoint或恢复输入。
-任何额外字段、重复ID或缺失ID都使该Case不能产生通过verdict。普通Case的集合恰有一个Root；same-Conductor preemption
-Case恰有两个，顺序固定为`in_flight_root`、`updated_root`；Conductor restart isolation Case恰有三个，顺序固定为
-`C_root`、`A_root`、`B_root`，并且必须与`routed_conductor_ids[]`中的`C`、`A`、`B`顺序严格对应。它们只供closed
-Human/operator script和predicate定位外部对象，不是durable checkpoint。
+任何额外字段、重复ID或缺失ID都使该Case不能产生通过verdict。普通Case的集合恰有一个Root；cross-Conductor happy-path
+Case恰有两个，顺序固定为`A_root`、`B_root`，并且必须与`routed_conductor_ids[]`中的`A`、`B`顺序严格对应；
+same-Conductor preemption Case恰有两个，顺序固定为`in_flight_root`、`updated_root`；Conductor restart isolation Case恰有
+三个，顺序固定为`C_root`、`A_root`、`B_root`，并且必须与`routed_conductor_ids[]`中的`C`、`A`、`B`顺序严格对应。
+它们只供closed Human/operator script和predicate定位外部对象，不是durable checkpoint。
 
 ## 8. Final Evidence Snapshot
 
@@ -329,20 +330,24 @@ Linear/Git references，不输出Issue正文、credential、Provider transcript�
 
 ## 10. Mandatory Case matrix
 
-| Case | 外部用户/故障动作 | final fresh evidence |
-|---|---|---|
-| cross-Conductor happy paths | 为A和B各创建并批准一个Root | 两条完整Plan -> approval -> Work -> Verify -> delivery链，且满足durable overlap |
-| same-Conductor preemption | Conductor已有in-flight turn时创建同Priority Roots，并由Human Actor更新其中一个Root | native activity证明admission前的Priority/`updatedAt`顺序，Stage records证明下一boundary先选择最新Root且未取消in-flight turn |
-| Plan rejection and supersession | Human Actor拒绝Plan Action并给出reason | rejected resolution、旧Contract/Action/Result保留、Contract supersession、fresh Plan execution/Contract/Action；archive严格匹配accepted directive |
-| Root revision and comment | 修改Root description，写/编辑comment并resolve/reopen | Root Reconciler消费增量，产生matching reply、closed reaction disposition和thread action后再推进 |
-| Conductor restart isolation | `CaseRootSet`按`C,A,B`创建；C Stage in-flight时仅经process controller `SIGKILL`并fresh start C，A/B继续 | C旧failure/cancel、无stale成功Result、同Cycle/Node的新session replacement Result；A/B各一条跨越C恢复的连续成功interval和不变ownership |
-| Cycle exhaustion and successor | 在Root claim前通过公开Conductor配置设置Cycle repair limit，并触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
-| delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
-| required Linear write fail-closed | 通过bounded physical request gate暂停matching Plan Result的Cycle timeline write，恢复同一request后批准真实Plan Action | 唯一Plan Result的deterministic timeline identity已read-back，所有后续Stage `started_at`/Result `completed_at`严格晚于timeline comment；gate状态、日志、timeout不参与verdict |
+| Case ID | Human script | Evidence predicate | Case | 外部用户/故障动作 | final fresh evidence |
+|---|---|---|---|---|---|
+| `cross_conductor_happy_paths` | `approve_plan` | `happy_path` | cross-Conductor happy paths | 为A和B各创建并批准一个Root | 两条完整Plan -> approval -> Work -> Verify -> delivery链，且满足durable overlap |
+| `same_conductor_preemption` | `preempt_same_priority` | `same_conductor_preemption` | same-Conductor preemption | Conductor已有in-flight turn时创建同Priority Roots，并由Human Actor更新其中一个Root | native activity证明admission前的Priority/`updatedAt`顺序，Stage records证明下一boundary先选择最新Root且未取消in-flight turn |
+| `plan_rejection_and_supersession` | `reject_plan` | `plan_rejection_supersession` | Plan rejection and supersession | Human Actor拒绝Plan Action并给出reason | rejected resolution、旧Contract/Action/Result保留、Contract supersession、fresh Plan execution/Contract/Action；archive严格匹配accepted directive |
+| `root_revision_and_comment` | `revise_root` | `root_revision_comment` | Root revision and comment | 修改Root description，写/编辑comment并resolve/reopen | Root Reconciler消费增量，产生matching reply、closed reaction disposition和thread action后再推进 |
+| `conductor_restart_isolation` | `restart_conductor` | `restart_isolation` | Conductor restart isolation | `CaseRootSet`按`C,A,B`创建；C Stage in-flight时仅经process controller `SIGKILL`并fresh start C，A/B继续 | C旧failure/cancel、无stale成功Result、同Cycle/Node的新session replacement Result；A/B各一条跨越C恢复的连续成功interval和不变ownership |
+| `cycle_exhaustion_and_successor` | `exhaust_cycle_budget` | `cycle_successor` | Cycle exhaustion and successor | 在Root claim前通过公开Conductor配置设置Cycle repair limit，并触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
+| `delivery_and_review` | `deliver_and_review` | `delivery_review` | delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
+| `required_linear_write_fail_closed` | `required_write_outage` | `required_write_fail_closed` | required Linear write fail-closed | 通过bounded physical request gate暂停matching Plan Result的Cycle timeline write，恢复同一request后批准真实Plan Action | 唯一Plan Result的deterministic timeline identity已read-back，所有后续Stage `started_at`/Result `completed_at`严格晚于timeline comment；gate状态、日志、timeout不参与verdict |
 
 每个Case可以使用多个Root，但每个Root只能属于一个Case。Case不得通过修改managed事实、手工完成Stage或调用内部
 materializer制造证据。Plan approval由happy paths覆盖；rejection、普通comment、resolve/reopen、restart和successor分别由
 独立Case覆盖，避免一个长Case失败后掩盖其他边界。
+
+Campaign Command必须按上表顺序包含且仅包含这八个Case；每个都是`mandatory: true`。`cross_conductor_happy_paths`
+固定路由到A、B，`conductor_restart_isolation`固定路由到C、A、B，其余Case路由到A。Case ID、Human script、
+Evidence predicate、路由数量或mandatory标志的任一偏差都是无效Campaign，不能作为optional替代或别名接受。
 
 ## 11. 实现硬切换
 

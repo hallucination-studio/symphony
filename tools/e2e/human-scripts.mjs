@@ -53,21 +53,23 @@ export async function executeHumanScript({
 }
 
 async function approvePlan({ rootIssueIds, human, waitForHumanAction }) {
-  if (rootIssueIds.length !== 1 || typeof human.resolveHumanAction !== "function" || typeof waitForHumanAction !== "function") {
+  if (typeof human.resolveHumanAction !== "function" || typeof waitForHumanAction !== "function") {
     throw stableError("parallel_black_box_human_script_input_invalid");
   }
-  const action = await waitForHumanAction({
-    root_issue_id: rootIssueIds[0],
-    action_kind: "plan_review",
-  });
-  if (!action || typeof action !== "object" || Array.isArray(action) ||
-      Object.keys(action).length !== 1 || !identifier(action.human_action_issue_id)) {
-    throw stableError("parallel_black_box_human_action_invalid");
-  }
-  await human.resolveHumanAction({
-    human_action_issue_id: action.human_action_issue_id,
-    terminal_status: "approved",
-  });
+  await Promise.all(rootIssueIds.map(async (rootIssueId) => {
+    const action = await waitForHumanAction({
+      root_issue_id: rootIssueId,
+      action_kind: "plan_review",
+    });
+    if (!action || typeof action !== "object" || Array.isArray(action) ||
+        Object.keys(action).length !== 1 || !identifier(action.human_action_issue_id)) {
+      throw stableError("parallel_black_box_human_action_invalid");
+    }
+    await human.resolveHumanAction({
+      human_action_issue_id: action.human_action_issue_id,
+      terminal_status: "approved",
+    });
+  }));
 }
 
 async function rejectPlan({ rootIssueIds, human, waitForHumanAction }) {

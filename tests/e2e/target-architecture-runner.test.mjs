@@ -5,7 +5,9 @@ import test from "node:test";
 import {
   assertParallelBlackBoxE2ECampaignCommand,
   assertParallelBlackBoxE2ECampaignResult,
+  createMandatoryParallelBlackBoxCases,
   getParallelBlackBoxE2ECampaignExitCode,
+  MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY,
 } from "../../tools/e2e/parallel-black-box-contract.mjs";
 import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.mjs";
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
@@ -37,67 +39,105 @@ test("parallel black-box Campaign accepts only the closed version-one command", 
     /parallel_black_box_campaign_conductors_invalid/u,
   );
   assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...command.cases[0], human_script_id: "arbitrary" }],
-    }),
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "cross_conductor_happy_paths", {
+      human_script_id: "arbitrary",
+    })),
     /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "cross_conductor_happy_paths", {
+      deadline_at: "2026-07-25T00:05:01.000Z",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "cross_conductor_happy_paths", {
+      deadline_at: command.started_at,
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "conductor_restart_isolation", {
+      evidence_predicate_id: "happy_path",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "conductor_restart_isolation", {
+      routed_conductor_ids: ["conductor-c", "conductor-a"],
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "cross_conductor_happy_paths", {
+      human_script_id: "exhaust_cycle_budget",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "cross_conductor_happy_paths", {
+      evidence_predicate_id: "cycle_successor",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "delivery_and_review", {
+      human_script_id: "approve_plan",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(command, "required_linear_write_fail_closed", {
+      evidence_predicate_id: "happy_path",
+    })),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+});
+
+test("parallel black-box Campaign rejects a partial or aliased mandatory Case registry", () => {
+  const command = campaignCommand();
+
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({ ...command, cases: command.cases.slice(0, -1) }),
+    /parallel_black_box_campaign_registry_invalid/u,
   );
   assert.throws(
     () => assertParallelBlackBoxE2ECampaignCommand({
       ...command,
-      cases: [{ ...command.cases[0], deadline_at: "2026-07-25T00:05:01.000Z" }],
+      cases: command.cases.map((e2eCase) => e2eCase.case_id === "cross_conductor_happy_paths"
+        ? { ...e2eCase, case_id: "cross_conductor_happy_paths_alias" }
+        : e2eCase),
     }),
-    /parallel_black_box_campaign_case_invalid/u,
+    /parallel_black_box_campaign_registry_invalid/u,
+  );
+});
+
+test("parallel black-box Campaign exposes exactly the documented mandatory Case registry", () => {
+  assert.deepEqual(MANDATORY_PARALLEL_BLACK_BOX_CASE_REGISTRY.map((definition) => ({
+    case_id: definition.case_id,
+    human_script_id: definition.human_script_id,
+    evidence_predicate_id: definition.evidence_predicate_id,
+    routed_conductor_indexes: definition.routed_conductor_indexes,
+  })), [
+    { case_id: "cross_conductor_happy_paths", human_script_id: "approve_plan", evidence_predicate_id: "happy_path", routed_conductor_indexes: [0, 1] },
+    { case_id: "same_conductor_preemption", human_script_id: "preempt_same_priority", evidence_predicate_id: "same_conductor_preemption", routed_conductor_indexes: [0] },
+    { case_id: "plan_rejection_and_supersession", human_script_id: "reject_plan", evidence_predicate_id: "plan_rejection_supersession", routed_conductor_indexes: [0] },
+    { case_id: "root_revision_and_comment", human_script_id: "revise_root", evidence_predicate_id: "root_revision_comment", routed_conductor_indexes: [0] },
+    { case_id: "conductor_restart_isolation", human_script_id: "restart_conductor", evidence_predicate_id: "restart_isolation", routed_conductor_indexes: [2, 0, 1] },
+    { case_id: "cycle_exhaustion_and_successor", human_script_id: "exhaust_cycle_budget", evidence_predicate_id: "cycle_successor", routed_conductor_indexes: [0] },
+    { case_id: "delivery_and_review", human_script_id: "deliver_and_review", evidence_predicate_id: "delivery_review", routed_conductor_indexes: [0] },
+    { case_id: "required_linear_write_fail_closed", human_script_id: "required_write_outage", evidence_predicate_id: "required_write_fail_closed", routed_conductor_indexes: [0] },
+  ]);
+
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(campaignCommand(), "delivery_and_review", { mandatory: false })),
+    /parallel_black_box_campaign_registry_invalid/u,
   );
   assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...command.cases[0], deadline_at: command.started_at }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...restartCase(), evidence_predicate_id: "happy_path" }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...restartCase(), routed_conductor_ids: ["conductor-c", "conductor-a"] }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...command.cases[0], human_script_id: "exhaust_cycle_budget" }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...command.cases[0], evidence_predicate_id: "cycle_successor" }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...deliveryReviewCase(), human_script_id: "approve_plan" }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
-  );
-  assert.throws(
-    () => assertParallelBlackBoxE2ECampaignCommand({
-      ...command,
-      cases: [{ ...requiredWriteOutageCase(), evidence_predicate_id: "happy_path" }],
-    }),
-    /parallel_black_box_campaign_case_invalid/u,
+    () => assertParallelBlackBoxE2ECampaignCommand(changeCase(campaignCommand(), "cross_conductor_happy_paths", {
+      routed_conductor_ids: ["conductor-b", "conductor-a"],
+    })),
+    /parallel_black_box_campaign_registry_invalid/u,
   );
 });
 
@@ -109,9 +149,18 @@ test("parallel black-box Campaign begins Case work from an already-ready Conduct
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(events.slice(0, 2), ["root:happy-a", "root:happy-b"]);
-  assert.deepEqual(result.cases.map(({ status }) => status), ["passed", "passed"]);
-  assert.deepEqual(events.filter((event) => event.startsWith("human:")), ["human:happy-a", "human:happy-b"]);
+  assert.deepEqual(events.slice(0, 8), [
+    "root:cross_conductor_happy_paths",
+    "root:same_conductor_preemption",
+    "root:plan_rejection_and_supersession",
+    "root:root_revision_and_comment",
+    "root:conductor_restart_isolation",
+    "root:cycle_exhaustion_and_successor",
+    "root:delivery_and_review",
+    "root:required_linear_write_fail_closed",
+  ]);
+  assert.deepEqual(result.cases.map(({ status }) => status), Array(8).fill("passed"));
+  assert.equal(events.filter((event) => event === "human:cross_conductor_happy_paths").length, 2);
   assert.deepEqual(result.durable_overlap_evidence_refs, [
     "linear:root-happy-a:stage_execution:plan-execution-happy-a",
     "linear:root-happy-a:stage_result:plan-result-happy-a",
@@ -121,35 +170,27 @@ test("parallel black-box Campaign begins Case work from an already-ready Conduct
 });
 
 test("parallel black-box Campaign accepts delivery and review only from the final fresh Linear and Git chain", async () => {
-  const command = campaignCommand();
-  command.cases = [deliveryReviewCase()];
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({ case_id, status, reason_code })), [{
-    case_id: "delivery-review",
+  assert.deepEqual(caseResult(result, "delivery_and_review"), {
+    case_id: "delivery_and_review",
     status: "passed",
     reason_code: "delivery_review_confirmed",
-  }]);
-  assert.deepEqual(events.filter((event) => event.startsWith("human:")), ["human:delivery-review"]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:delivery-review"]);
+    evidence_refs: ["linear:root-delivery_and_review", "git:repository-a"],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "human:delivery_and_review"), ["human:delivery_and_review"]);
+  assert.deepEqual(events.filter((event) => event === "fresh:delivery_and_review"), ["fresh:delivery_and_review"]);
 });
 
 test("parallel black-box Campaign rejects a Root revision Case without its public reply-wait boundary", async () => {
   const command = campaignCommand();
-  command.cases = [{
-    case_id: "root-revision-comment",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "revise_root",
-    evidence_predicate_id: "root_revision_comment",
-  }];
   const events = [];
   const campaignPorts = ports(events);
   delete campaignPorts.waitForRootReconcilerReply;
@@ -163,14 +204,6 @@ test("parallel black-box Campaign rejects a Root revision Case without its publi
 
 test("parallel black-box Campaign derives the Root revision verdict only from final fresh Linear evidence", async () => {
   const command = campaignCommand();
-  command.cases = [{
-    case_id: "root-revision-comment",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "revise_root",
-    evidence_predicate_id: "root_revision_comment",
-  }];
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
@@ -179,11 +212,13 @@ test("parallel black-box Campaign derives the Root revision verdict only from fi
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({ case_id, status, reason_code })), [{
-    case_id: "root-revision-comment",
+  assert.deepEqual(caseResult(result, "root_revision_and_comment"), {
+    case_id: "root_revision_and_comment",
     status: "passed",
     reason_code: "root_revision_comment_confirmed",
-  }]);
+    evidence_refs: ["linear:root-revision", "git:repository-a"],
+    observed_at: now,
+  });
   assert.deepEqual(events.filter((event) => event.startsWith("human-revision:")), [
     "human-revision:update:root-revision",
     "human-revision:create:root-revision",
@@ -193,12 +228,11 @@ test("parallel black-box Campaign derives the Root revision verdict only from fi
     "human-revision:reopen:comment-revision",
     "human-revision:wait:unresolved:comment-revision",
   ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:root-revision-comment"]);
+  assert.deepEqual(events.filter((event) => event === "fresh:root_revision_and_comment"), ["fresh:root_revision_and_comment"]);
 });
 
-test("parallel black-box Campaign requires the external restart port only for the restart isolation Case", async () => {
+test("parallel black-box Campaign requires the external restart port for the mandatory registry", async () => {
   const command = campaignCommand();
-  command.cases = [restartCase()];
   const events = [];
   const campaignPorts = ports(events);
   delete campaignPorts.restartConductor;
@@ -211,27 +245,27 @@ test("parallel black-box Campaign requires the external restart port only for th
 });
 
 test("parallel black-box Campaign invokes only the external C restart boundary and final-reads restart isolation", async () => {
-  const command = campaignCommand();
-  command.cases = [restartCase()];
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "conductor_restart_isolation"), {
+    case_id: "conductor_restart_isolation",
     status: "passed",
     reason_code: "restart_isolation_confirmed",
-  }]);
+    evidence_refs: ["linear:root-restart-c", "linear:root-restart-a", "linear:root-restart-b", "git:repository-c", "git:repository-a", "git:repository-b"],
+    observed_at: now,
+  });
   assert.deepEqual(events.filter((event) => event.startsWith("restart:")), ["restart:conductor-c:root-restart-c"]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:restart-isolation"]);
+  assert.deepEqual(events.filter((event) => event === "fresh:conductor_restart_isolation"), ["fresh:conductor_restart_isolation"]);
 });
 
-test("parallel black-box Campaign requires bounded outage control ports only for the required-write Case", async () => {
+test("parallel black-box Campaign requires bounded outage control ports for the mandatory registry", async () => {
   const command = campaignCommand();
-  command.cases = [requiredWriteOutageCase()];
   const events = [];
   const campaignPorts = ports(events);
   delete campaignPorts.waitForRequiredWriteOutage;
@@ -244,25 +278,27 @@ test("parallel black-box Campaign requires bounded outage control ports only for
 });
 
 test("parallel black-box Campaign restores the bounded required write before approving Plan and final-reading durable evidence", async () => {
-  const command = campaignCommand();
-  command.cases = [requiredWriteOutageCase()];
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "required_linear_write_fail_closed"), {
+    case_id: "required_linear_write_fail_closed",
     status: "passed",
     reason_code: "required_write_fail_closed_confirmed",
-  }]);
-  assert.deepEqual(events.filter((event) => event.startsWith("required-write:") || event.startsWith("human:") || event.startsWith("fresh:")), [
+    evidence_refs: ["linear:root-required-write", "git:repository-a"],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event.startsWith("required-write:") ||
+    event === "human:required_linear_write_fail_closed" || event === "fresh:required_linear_write_fail_closed"), [
     "required-write:wait:root-required-write",
     "required-write:restore:root-required-write",
-    "human:required-write-outage",
-    "fresh:required-write-outage",
+    "human:required_linear_write_fail_closed",
+    "fresh:required_linear_write_fail_closed",
   ]);
 });
 
@@ -272,7 +308,10 @@ test("parallel black-box Campaign marks required-write outage incomplete when it
   const command = campaignCommand();
   command.started_at = startedAt;
   command.deadline_at = new Date(Date.now() + 1_000).toISOString();
-  command.cases = [{ ...requiredWriteOutageCase(), deadline_at: deadlineAt }];
+  command.cases = command.cases.map((e2eCase) => ({
+    ...e2eCase,
+    deadline_at: e2eCase.case_id === "required_linear_write_fail_closed" ? deadlineAt : command.deadline_at,
+  }));
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
@@ -285,87 +324,92 @@ test("parallel black-box Campaign marks required-write outage incomplete when it
     },
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "required_linear_write_fail_closed"), {
+    case_id: "required_linear_write_fail_closed",
     status: "incomplete",
     reason_code: "fresh_evidence_incomplete",
-  }]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), []);
+    evidence_refs: [],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "fresh:required_linear_write_fail_closed"), []);
 });
 
 test("parallel black-box Campaign final-reads after an approved Plan action failure and lets durable facts decide", async () => {
   const events = [];
   const result = await runParallelBlackBoxE2ECampaign({
     command: campaignCommand(),
-    ports: ports(events, { rejectCaseId: "happy-a" }),
+    ports: ports(events, { rejectCaseId: "cross_conductor_happy_paths" }),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({
-    case_id,
-    status,
-    reason_code,
-  })), [
-    { case_id: "happy-a", status: "passed", reason_code: "happy_path_overlap_confirmed" },
-    { case_id: "happy-b", status: "passed", reason_code: "happy_path_overlap_confirmed" },
-  ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), [
-    "fresh:happy-a", "fresh:happy-b",
-  ]);
+  assert.deepEqual(caseResult(result, "cross_conductor_happy_paths"), {
+    case_id: "cross_conductor_happy_paths",
+    status: "passed",
+    reason_code: "happy_path_overlap_confirmed",
+    evidence_refs: [
+      "linear:root-happy-a", "linear:root-happy-b", "git:repository-a", "git:repository-b",
+    ],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "fresh:cross_conductor_happy_paths"), ["fresh:cross_conductor_happy_paths"]);
 });
 
 test("parallel black-box Campaign settles every Case when another Case Root cannot be created", async () => {
   const events = [];
   const result = await runParallelBlackBoxE2ECampaign({
     command: campaignCommand(),
-    ports: ports(events, { rejectRootCaseId: "happy-a" }),
+    ports: ports(events, { rejectRootCaseId: "cross_conductor_happy_paths" }),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({
-    case_id,
-    status,
-    reason_code,
-  })), [
-    { case_id: "happy-a", status: "incomplete", reason_code: "fresh_evidence_incomplete" },
-    { case_id: "happy-b", status: "incomplete", reason_code: "happy_path_overlap_missing" },
-  ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:happy-b"]);
+  assert.deepEqual(caseResult(result, "cross_conductor_happy_paths"), {
+    case_id: "cross_conductor_happy_paths",
+    status: "incomplete",
+    reason_code: "fresh_evidence_incomplete",
+    evidence_refs: [],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "fresh:cross_conductor_happy_paths"), []);
   assert.deepEqual(events.filter((event) => event.startsWith("predicate:")), []);
 });
 
 test("parallel black-box Campaign treats a malformed Case Root as isolated incomplete evidence", async () => {
   const events = [];
+  const base = ports(events);
   const result = await runParallelBlackBoxE2ECampaign({
     command: campaignCommand(),
     ports: {
-      ...ports(events),
-      async createCaseRoots({ e2eCase }) {
-        events.push(`root:${e2eCase.case_id}`);
-        if (e2eCase.case_id === "happy-a") return { root_issue_ids: ["not a Linear issue id"] };
-        return { root_issue_ids: [`root-${e2eCase.case_id}`] };
+      ...base,
+      async createCaseRoots(input) {
+        if (input.e2eCase.case_id === "cross_conductor_happy_paths") {
+          events.push(`root:${input.e2eCase.case_id}`);
+          return { root_issue_ids: ["not a Linear issue id"] };
+        }
+        return base.createCaseRoots(input);
       },
     },
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({
-    case_id,
-    status,
-    reason_code,
-  })), [
-    { case_id: "happy-a", status: "incomplete", reason_code: "fresh_evidence_incomplete" },
-    { case_id: "happy-b", status: "incomplete", reason_code: "happy_path_overlap_missing" },
-  ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:happy-b"]);
+  assert.deepEqual(caseResult(result, "cross_conductor_happy_paths"), {
+    case_id: "cross_conductor_happy_paths",
+    status: "incomplete",
+    reason_code: "fresh_evidence_incomplete",
+    evidence_refs: [],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "fresh:cross_conductor_happy_paths"), []);
 });
 
 test("parallel black-box Campaign gives each Case only its routed Conductor context", async () => {
   const contexts = [];
+  const base = ports([]);
   await runParallelBlackBoxE2ECampaign({
     command: campaignCommand(),
     ports: {
-      ...ports([]),
-      async createCaseRoots({ caseContext, e2eCase }) {
+      ...base,
+      async createCaseRoots(input) {
+        const { caseContext, e2eCase } = input;
         contexts.push({
           case_id: e2eCase.case_id,
           campaign_id: caseContext?.campaign_id,
@@ -376,30 +420,24 @@ test("parallel black-box Campaign gives each Case only its routed Conductor cont
             && Object.isFrozen(caseContext?.conductors)
             && caseContext?.conductors.every((conductor) => Object.isFrozen(conductor)),
         });
-        return { root_issue_ids: [`root-${e2eCase.case_id}`] };
+        return base.createCaseRoots(input);
       },
     },
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(contexts, [
-    {
-      case_id: "happy-a",
-      campaign_id: "campaign-1",
-      project_id: "project-1",
-      human_actor_id: "human-actor",
-      conductor_ids: ["conductor-a"],
-      frozen: true,
-    },
-    {
-      case_id: "happy-b",
-      campaign_id: "campaign-1",
-      project_id: "project-1",
-      human_actor_id: "human-actor",
-      conductor_ids: ["conductor-b"],
-      frozen: true,
-    },
+  assert.deepEqual(contexts.map(({ case_id, conductor_ids }) => ({ case_id, conductor_ids })), [
+    { case_id: "cross_conductor_happy_paths", conductor_ids: ["conductor-a", "conductor-b"] },
+    { case_id: "same_conductor_preemption", conductor_ids: ["conductor-a"] },
+    { case_id: "plan_rejection_and_supersession", conductor_ids: ["conductor-a"] },
+    { case_id: "root_revision_and_comment", conductor_ids: ["conductor-a"] },
+    { case_id: "conductor_restart_isolation", conductor_ids: ["conductor-c", "conductor-a", "conductor-b"] },
+    { case_id: "cycle_exhaustion_and_successor", conductor_ids: ["conductor-a"] },
+    { case_id: "delivery_and_review", conductor_ids: ["conductor-a"] },
+    { case_id: "required_linear_write_fail_closed", conductor_ids: ["conductor-a"] },
   ]);
+  assert.equal(contexts.every(({ campaign_id, project_id, human_actor_id, frozen }) =>
+    campaign_id === "campaign-1" && project_id === "project-1" && human_actor_id === "human-actor" && frozen), true);
 });
 
 test("parallel black-box Campaign verifies the external Human identity before creating any Case Root", async () => {
@@ -424,15 +462,11 @@ test("parallel black-box Campaign verifies the external Human identity before cr
 
 test("parallel black-box Campaign exposes only a frozen CaseRootSet to final evidence", async () => {
   const observedRoots = [];
-  const command = campaignCommand();
-  command.cases = [command.cases[0]];
+  const base = ports([]);
   await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: {
-      ...ports([]),
-      async createCaseRoots() {
-        return { root_issue_ids: ["root-happy-a"] };
-      },
+      ...base,
       async readFreshEvidenceSnapshot({ caseRoots }) {
         observedRoots.push({ port: "evidence", caseRoots, frozen: Object.isFrozen(caseRoots) });
         return {
@@ -446,84 +480,69 @@ test("parallel black-box Campaign exposes only a frozen CaseRootSet to final evi
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(observedRoots, [
-    { port: "evidence", caseRoots: { root_issue_ids: ["root-happy-a"] }, frozen: true },
-  ]);
+  assert.equal(observedRoots.length, 8);
+  assert.equal(observedRoots.every(({ frozen }) => frozen), true);
+  assert.deepEqual(observedRoots[0], {
+    port: "evidence",
+    caseRoots: { root_issue_ids: ["root-happy-a", "root-happy-b"] },
+    frozen: true,
+  });
 });
 
 test("parallel black-box Campaign derives same-Conductor preemption from its two fresh Root Trees", async () => {
-  const command = campaignCommand();
-  command.cases = [{
-    case_id: "same-priority",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "preempt_same_priority",
-    evidence_predicate_id: "same_conductor_preemption",
-  }];
   const events = [];
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "same_conductor_preemption"), {
+    case_id: "same_conductor_preemption",
     status: "passed",
     reason_code: "same_conductor_preemption_confirmed",
-  }]);
-  assert.deepEqual(result.durable_overlap_evidence_refs, []);
-  assert.deepEqual(events.filter((event) => event.startsWith("human-update:")), ["human-update:root-updated"]);
+    evidence_refs: ["linear:root-inflight", "linear:root-updated", "git:repository-a"],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "human-update:root-updated"), ["human-update:root-updated"]);
 });
 
 test("parallel black-box Campaign derives Plan rejection supersession only from its final fresh Root Tree", async () => {
-  const command = campaignCommand();
-  command.cases = [{
-    case_id: "plan-rejection",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "reject_plan",
-    evidence_predicate_id: "plan_rejection_supersession",
-  }];
   const events = [];
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "plan_rejection_and_supersession"), {
+    case_id: "plan_rejection_and_supersession",
     status: "passed",
     reason_code: "plan_rejection_supersession_confirmed",
-  }]);
-  assert.deepEqual(events.filter((event) => event.startsWith("human-reject:")), ["human-reject:action-plan-rejection"]);
+    evidence_refs: ["linear:root-plan-rejection", "git:repository-a"],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event.startsWith("human-reject:")), ["human-reject:action-plan_rejection_and_supersession"]);
 });
 
 test("parallel black-box Campaign approves the initial Plan and derives Cycle exhaustion only from final fresh evidence", async () => {
-  const command = campaignCommand();
-  command.cases = [{
-    case_id: "cycle-exhaustion",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "exhaust_cycle_budget",
-    evidence_predicate_id: "cycle_successor",
-  }];
   const events = [];
 
   const result = await runParallelBlackBoxE2ECampaign({
-    command,
+    command: campaignCommand(),
     ports: ports(events),
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+  assert.deepEqual(caseResult(result, "cycle_exhaustion_and_successor"), {
+    case_id: "cycle_exhaustion_and_successor",
     status: "passed",
     reason_code: "cycle_successor_confirmed",
-  }]);
-  assert.deepEqual(events.filter((event) => event.startsWith("human:")), ["human:cycle-exhaustion"]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:cycle-exhaustion"]);
+    evidence_refs: ["linear:root-cycle-exhaustion", "git:repository-a"],
+    observed_at: now,
+  });
+  assert.deepEqual(events.filter((event) => event === "human:cycle_exhaustion_and_successor"), ["human:cycle_exhaustion_and_successor"]);
+  assert.deepEqual(events.filter((event) => event === "fresh:cycle_exhaustion_and_successor"), ["fresh:cycle_exhaustion_and_successor"]);
 });
 
 test("parallel black-box Campaign final-reads after a Human deadline and lets an inconclusive predicate decide", async () => {
@@ -533,24 +552,34 @@ test("parallel black-box Campaign final-reads after a Human deadline and lets an
   const command = campaignCommand();
   command.started_at = startedAt;
   command.deadline_at = new Date(Date.now() + 1_000).toISOString();
-  command.cases = [{
-    ...command.cases[0],
-    deadline_at: deadlineAt,
-  }];
+  command.cases = command.cases.map((e2eCase) => ({
+    ...e2eCase,
+    deadline_at: e2eCase.case_id === "cross_conductor_happy_paths" ? deadlineAt : command.deadline_at,
+  }));
   const campaign = await runParallelBlackBoxE2ECampaign({
     command,
     ports: {
       ...ports(events, { snapshotKind: "incomplete" }),
-      async waitForHumanAction() {
-        return new Promise(() => {});
+      async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId }) {
+        if (e2eCase.case_id === "cross_conductor_happy_paths") return new Promise(() => {});
+        return { human_action_issue_id: `action-${rootIssueId}` };
       },
     },
   });
 
-  assert.deepEqual(campaign.cases.map(({ status, reason_code }) => ({ status, reason_code })), [
-    { status: "incomplete", reason_code: "fresh_evidence_incomplete" },
-  ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:happy-a"]);
+  const timedOutCase = caseResult(campaign, "cross_conductor_happy_paths");
+  assert.deepEqual({
+    case_id: timedOutCase.case_id,
+    status: timedOutCase.status,
+    reason_code: timedOutCase.reason_code,
+    evidence_refs: timedOutCase.evidence_refs,
+  }, {
+    case_id: "cross_conductor_happy_paths",
+    status: "incomplete",
+    reason_code: "fresh_evidence_incomplete",
+    evidence_refs: [],
+  });
+  assert.deepEqual(events.filter((event) => event === "fresh:cross_conductor_happy_paths"), ["fresh:cross_conductor_happy_paths"]);
 });
 
 test("parallel black-box Campaign waits for every Human action before final fresh reads", async () => {
@@ -562,32 +591,27 @@ test("parallel black-box Campaign waits for every Human action before final fres
   const command = campaignCommand();
   command.started_at = startedAt;
   command.deadline_at = campaignDeadline;
-  command.cases = [
-    { ...command.cases[0], deadline_at: aDeadline },
-    { ...command.cases[1], deadline_at: bDeadline },
-  ];
+  command.cases = command.cases.map((e2eCase) => ({
+    ...e2eCase,
+    deadline_at: e2eCase.case_id === "cross_conductor_happy_paths" ? aDeadline : bDeadline,
+  }));
   const campaign = await runParallelBlackBoxE2ECampaign({
     command,
     ports: {
       ...ports(events),
-      async waitForHumanAction({ e2eCase }) {
+      async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId }) {
         events.push(`human:${e2eCase.case_id}`);
-        if (e2eCase.case_id === "happy-a") await new Promise(() => {});
-        return { human_action_issue_id: `action-${e2eCase.case_id}` };
+        if (e2eCase.case_id === "cross_conductor_happy_paths" && rootIssueId === "root-happy-a") {
+          await new Promise(() => {});
+        }
+        return { human_action_issue_id: `action-${rootIssueId}` };
       },
     },
   });
 
-  assert.deepEqual(campaign.cases.map(({ case_id, status, reason_code }) => ({
-    case_id,
-    status,
-    reason_code,
-  })), [
-    { case_id: "happy-a", status: "passed", reason_code: "happy_path_overlap_confirmed" },
-    { case_id: "happy-b", status: "passed", reason_code: "happy_path_overlap_confirmed" },
-  ]);
-  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:happy-a", "fresh:happy-b"]);
-  assert.equal(events.indexOf("human:happy-b") < events.indexOf("fresh:happy-a"), true);
+  assert.equal(caseResult(campaign, "cross_conductor_happy_paths").status, "passed");
+  assert.equal(events.indexOf("human:plan_rejection_and_supersession") <
+    events.indexOf("fresh:same_conductor_preemption"), true);
 });
 
 test("parallel black-box Campaign makes an incomplete fresh snapshot incomplete without invoking a predicate", async () => {
@@ -598,14 +622,8 @@ test("parallel black-box Campaign makes an incomplete fresh snapshot incomplete 
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(campaign.cases.map(({ status, reason_code, evidence_refs }) => ({
-    status,
-    reason_code,
-    evidence_refs,
-  })), [
-    { status: "incomplete", reason_code: "fresh_evidence_incomplete", evidence_refs: [] },
-    { status: "incomplete", reason_code: "fresh_evidence_incomplete", evidence_refs: [] },
-  ]);
+  assert.deepEqual(campaign.cases.map(({ status, reason_code, evidence_refs }) => ({ status, reason_code, evidence_refs })),
+    Array(8).fill({ status: "incomplete", reason_code: "fresh_evidence_incomplete", evidence_refs: [] }));
   assert.deepEqual(events.filter((event) => event.startsWith("predicate:")), []);
 });
 
@@ -616,10 +634,13 @@ test("parallel black-box Campaign maps a durable non-overlap to failed", async (
     now: () => Date.parse(now),
   });
 
-  assert.deepEqual(campaign.cases.map(({ status, reason_code }) => ({ status, reason_code })), [
-    { status: "failed", reason_code: "happy_path_overlap_absent" },
-    { status: "failed", reason_code: "happy_path_overlap_absent" },
-  ]);
+  assert.deepEqual(caseResult(campaign, "cross_conductor_happy_paths"), {
+    case_id: "cross_conductor_happy_paths",
+    status: "failed",
+    reason_code: "happy_path_overlap_absent",
+    evidence_refs: ["linear:root-happy-a", "linear:root-happy-b", "git:repository-a", "git:repository-b"],
+    observed_at: now,
+  });
 });
 
 test("final Case verdict fails closed when its predicate evaluator is unavailable", async () => {
@@ -724,10 +745,24 @@ test("parallel black-box Campaign exit code fails when a mandatory final verdict
   });
 
   assert.equal(getParallelBlackBoxE2ECampaignExitCode(command, result), 1);
-  assert.equal(getParallelBlackBoxE2ECampaignExitCode({
-    ...command,
-    cases: command.cases.map((e2eCase) => ({ ...e2eCase, mandatory: false })),
-  }, result), 0);
+  assert.throws(
+    () => getParallelBlackBoxE2ECampaignExitCode({
+      ...command,
+      cases: command.cases.map((e2eCase) => ({ ...e2eCase, mandatory: false })),
+    }, result),
+    /parallel_black_box_campaign_registry_invalid/u,
+  );
+});
+
+test("parallel black-box Campaign exit code fails when a mandatory Case is incomplete", async () => {
+  const command = campaignCommand();
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports([], { snapshotKind: "incomplete" }),
+    now: () => Date.parse(now),
+  });
+
+  assert.equal(getParallelBlackBoxE2ECampaignExitCode(command, result), 1);
 });
 
 test("real E2E configuration requires a distinct external Human Actor credential", () => {
@@ -772,58 +807,23 @@ function campaignCommand() {
       conductor("b"),
       conductor("c"),
     ],
-    cases: [
-      {
-        case_id: "happy-a",
-        mandatory: true,
-        routed_conductor_ids: ["conductor-a"],
-        deadline_at: deadline,
-        human_script_id: "approve_plan",
-        evidence_predicate_id: "happy_path",
-      },
-      {
-        case_id: "happy-b",
-        mandatory: true,
-        routed_conductor_ids: ["conductor-b"],
-        deadline_at: deadline,
-        human_script_id: "approve_plan",
-        evidence_predicate_id: "happy_path",
-      },
-    ],
+    cases: createMandatoryParallelBlackBoxCases({
+      conductor_ids: ["conductor-a", "conductor-b", "conductor-c"],
+      deadline_at: deadline,
+    }),
   };
 }
 
-function restartCase() {
+function changeCase(command, caseId, changes) {
   return {
-    case_id: "restart-isolation",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-c", "conductor-a", "conductor-b"],
-    deadline_at: deadline,
-    human_script_id: "restart_conductor",
-    evidence_predicate_id: "restart_isolation",
+    ...command,
+    cases: command.cases.map((e2eCase) => e2eCase.case_id === caseId ? { ...e2eCase, ...changes } : e2eCase),
   };
 }
 
-function deliveryReviewCase() {
-  return {
-    case_id: "delivery-review",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "deliver_and_review",
-    evidence_predicate_id: "delivery_review",
-  };
-}
-
-function requiredWriteOutageCase() {
-  return {
-    case_id: "required-write-outage",
-    mandatory: true,
-    routed_conductor_ids: ["conductor-a"],
-    deadline_at: deadline,
-    human_script_id: "required_write_outage",
-    evidence_predicate_id: "required_write_fail_closed",
-  };
+function caseResult(result, caseId) {
+  const entry = result.cases.find((candidate) => candidate.case_id === caseId);
+  return entry ? { ...entry, observed_at: now } : entry;
 }
 
 function conductor(suffix) {
@@ -845,6 +845,9 @@ function ports(events, {
     async createCaseRoots({ e2eCase }) {
       events.push(`root:${e2eCase.case_id}`);
       if (e2eCase.case_id === rejectRootCaseId) throw new Error("external root failure");
+      if (e2eCase.case_id === "cross_conductor_happy_paths") {
+        return { root_issue_ids: ["root-happy-a", "root-happy-b"] };
+      }
       if (e2eCase.human_script_id === "preempt_same_priority") {
         return { root_issue_ids: ["root-inflight", "root-updated"] };
       }
@@ -860,6 +863,9 @@ function ports(events, {
       if (e2eCase.human_script_id === "required_write_outage") {
         return { root_issue_ids: ["root-required-write"] };
       }
+      if (e2eCase.human_script_id === "exhaust_cycle_budget") {
+        return { root_issue_ids: ["root-cycle-exhaustion"] };
+      }
       return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
     human: {
@@ -867,7 +873,9 @@ function ports(events, {
       async readSymphonyActorId() { return "symphony-actor"; },
       async resolveHumanAction({ human_action_issue_id: actionIssueId, terminal_status: terminalStatus }) {
         if (terminalStatus === "rejected") events.push(`human-reject:${actionIssueId}`);
-        const caseId = actionIssueId.slice("action-".length);
+        const caseId = actionIssueId.startsWith("action-root-happy-")
+          ? "cross_conductor_happy_paths"
+          : actionIssueId.slice("action-".length);
         if (caseId === rejectCaseId) throw new Error("external failure");
       },
       async updateRoot({ root_issue_id: rootIssueId }) {
@@ -893,12 +901,16 @@ function ports(events, {
     },
     async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId, action_kind: actionKind }) {
       events.push(`human:${e2eCase.case_id}`);
-      assert.equal(
-        rootIssueId,
-        e2eCase.human_script_id === "required_write_outage" ? "root-required-write" : `root-${e2eCase.case_id}`,
-      );
+      const expectedRootIssueIds = e2eCase.case_id === "cross_conductor_happy_paths"
+        ? ["root-happy-a", "root-happy-b"]
+        : [e2eCase.human_script_id === "required_write_outage" ? "root-required-write" :
+          e2eCase.human_script_id === "exhaust_cycle_budget" ? "root-cycle-exhaustion" :
+          e2eCase.human_script_id === "reject_plan" ? "root-plan-rejection" : `root-${e2eCase.case_id}`];
+      assert.equal(expectedRootIssueIds.includes(rootIssueId), true);
       assert.equal(actionKind, "plan_review");
-      return { human_action_issue_id: `action-${e2eCase.case_id}` };
+      return { human_action_issue_id: e2eCase.case_id === "cross_conductor_happy_paths"
+        ? `action-${rootIssueId}`
+        : `action-${e2eCase.case_id}` };
     },
     async waitForInFlightStage({ e2eCase, root_issue_id: rootIssueId }) {
       if (e2eCase.human_script_id === "restart_conductor") {
@@ -965,6 +977,27 @@ function ports(events, {
         const fixture = requiredWriteOutageRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "happy_path") {
+        const a = happyPathRow({
+          caseId: "happy-a",
+          conductorId: "conductor-a",
+          repositoryIdentity: "repository-a",
+          startOffset: startOffsetsByCaseId["happy-a"] ?? 0,
+        });
+        const b = happyPathRow({
+          caseId: "happy-b",
+          conductorId: "conductor-b",
+          repositoryIdentity: "repository-b",
+          startOffset: startOffsetsByCaseId["happy-b"] ?? 0,
+        });
+        assert.deepEqual(caseRoots, { root_issue_ids: ["root-happy-a", "root-happy-b"] });
+        return {
+          kind: "complete",
+          observed_at: now,
+          root_trees: [...a.snapshot.root_trees, ...b.snapshot.root_trees],
+          repositories: [...a.snapshot.repositories, ...b.snapshot.repositories],
+        };
       }
       const conductorId = e2eCase.routed_conductor_ids[0];
       const suffix = conductorId.slice("conductor-".length);

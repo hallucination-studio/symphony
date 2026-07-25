@@ -23,6 +23,23 @@ test("approve_plan resolves only the discovered Plan Review Action through the e
   assert.deepEqual(calls, [{ human_action_issue_id: "action-a", terminal_status: "approved" }]);
 });
 
+test("approve_plan resolves each Plan Review Action in a cross-Conductor Case", async () => {
+  const calls = [];
+  await executeHumanScript({
+    humanScript: { id: "approve_plan" },
+    caseRoots: { root_issue_ids: ["root-a", "root-b"] },
+    human: { async resolveHumanAction(input) { calls.push(input); } },
+    async waitForHumanAction({ root_issue_id: rootIssueId }) {
+      return { human_action_issue_id: `action-${rootIssueId}` };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    { human_action_issue_id: "action-root-a", terminal_status: "approved" },
+    { human_action_issue_id: "action-root-b", terminal_status: "approved" },
+  ]);
+});
+
 test("deliver_and_review resolves only the discovered Plan Review Action through the external Human Actor", async () => {
   const calls = [];
   await executeHumanScript({
@@ -120,6 +137,38 @@ test("campaign evidence proves a strict cross-Conductor durable interval overlap
     "linear:root-happy-b:stage_execution:plan-execution-happy-b",
     "linear:root-happy-b:stage_result:plan-result-happy-b",
   ]);
+});
+
+test("campaign evidence proves cross-Conductor overlap inside one mandatory Case", () => {
+  const a = happyPathRow({ caseId: "happy-a", conductorId: "conductor-a", repositoryIdentity: "repository-a", startOffset: 0 });
+  const b = happyPathRow({ caseId: "happy-b", conductorId: "conductor-b", repositoryIdentity: "repository-b", startOffset: 500 });
+  const row = {
+    e2eCase: { case_id: "cross_conductor_happy_paths", evidence_predicate_id: "happy_path" },
+    caseRoots: { root_issue_ids: ["root-happy-a", "root-happy-b"] },
+    caseContext: { conductors: [
+      { conductor_id: "conductor-a", repository_identity: "repository-a" },
+      { conductor_id: "conductor-b", repository_identity: "repository-b" },
+    ] },
+    snapshot: {
+      kind: "complete",
+      observed_at: a.snapshot.observed_at,
+      root_trees: [...a.snapshot.root_trees, ...b.snapshot.root_trees],
+      repositories: [...a.snapshot.repositories, ...b.snapshot.repositories],
+    },
+  };
+
+  assert.deepEqual(analyzeHappyPathCampaignEvidence({ rows: [row] }), {
+    case_outcomes: [{
+      case_id: "cross_conductor_happy_paths",
+      outcome: { kind: "satisfied", reason_code: "happy_path_overlap_confirmed" },
+    }],
+    durable_overlap_evidence_refs: [
+      "linear:root-happy-a:stage_execution:plan-execution-happy-a",
+      "linear:root-happy-a:stage_result:plan-result-happy-a",
+      "linear:root-happy-b:stage_execution:plan-execution-happy-b",
+      "linear:root-happy-b:stage_result:plan-result-happy-b",
+    ],
+  });
 });
 
 test("campaign evidence does not treat two non-overlapping durable intervals as parallel work", () => {
