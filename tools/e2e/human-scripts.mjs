@@ -1,17 +1,25 @@
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
-export async function executeHumanScript({ humanScript, root, human, waitForHumanAction } = {}) {
-  if (!root || typeof root !== "object" || !identifier(root.root_issue_id) ||
-      !human || typeof human.resolveHumanAction !== "function" ||
-      typeof waitForHumanAction !== "function") {
+export async function executeHumanScript({ humanScript, caseRoots, human, waitForHumanAction, waitForInFlightStage } = {}) {
+  const rootIssueIds = rootIssueIdsFrom(caseRoots);
+  if (!rootIssueIds || !human || typeof human !== "object") {
     throw stableError("parallel_black_box_human_script_input_invalid");
   }
-  if (humanScript?.id !== "approve_plan") {
-    throw stableError("parallel_black_box_human_script_unavailable");
+  if (humanScript?.id === "approve_plan") {
+    return approvePlan({ rootIssueIds, human, waitForHumanAction });
   }
+  if (humanScript?.id === "preempt_same_priority") {
+    return preemptSamePriority({ rootIssueIds, human, waitForInFlightStage });
+  }
+  throw stableError("parallel_black_box_human_script_unavailable");
+}
 
+async function approvePlan({ rootIssueIds, human, waitForHumanAction }) {
+  if (rootIssueIds.length !== 1 || typeof human.resolveHumanAction !== "function" || typeof waitForHumanAction !== "function") {
+    throw stableError("parallel_black_box_human_script_input_invalid");
+  }
   const action = await waitForHumanAction({
-    root_issue_id: root.root_issue_id,
+    root_issue_id: rootIssueIds[0],
     action_kind: "plan_review",
   });
   if (!action || typeof action !== "object" || Array.isArray(action) ||
@@ -22,6 +30,30 @@ export async function executeHumanScript({ humanScript, root, human, waitForHuma
     human_action_issue_id: action.human_action_issue_id,
     terminal_status: "approved",
   });
+}
+
+async function preemptSamePriority({ rootIssueIds, human, waitForInFlightStage }) {
+  if (rootIssueIds.length !== 2 || typeof human.updateRoot !== "function" || typeof waitForInFlightStage !== "function") {
+    throw stableError("parallel_black_box_human_script_input_invalid");
+  }
+  const stage = await waitForInFlightStage({ root_issue_id: rootIssueIds[0] });
+  if (!stage || typeof stage !== "object" || Array.isArray(stage) || Object.keys(stage).length !== 1 ||
+      !identifier(stage.stage_execution_id)) {
+    throw stableError("parallel_black_box_human_inflight_stage_invalid");
+  }
+  await human.updateRoot({
+    root_issue_id: rootIssueIds[1],
+    description: "Please run this Root next.",
+  });
+}
+
+function rootIssueIdsFrom(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1 ||
+      !Array.isArray(value.root_issue_ids) || value.root_issue_ids.length === 0 || value.root_issue_ids.length > 8 ||
+      !value.root_issue_ids.every(identifier) || new Set(value.root_issue_ids).size !== value.root_issue_ids.length) {
+    return null;
+  }
+  return value.root_issue_ids;
 }
 
 function identifier(value) {

@@ -6,7 +6,7 @@ const PREDICATE_OUTCOMES = new Set(["satisfied", "violated", "inconclusive"]);
 
 export async function createFinalCaseVerdict({
   e2eCase,
-  root,
+  caseRoots,
   snapshot,
   evaluateEvidencePredicate,
   observedAt = () => new Date().toISOString(),
@@ -22,8 +22,8 @@ export async function createFinalCaseVerdict({
   if (snapshot.kind === "incomplete") {
     return verdict(caseId, "incomplete", "fresh_evidence_incomplete", [], observedAtValue);
   }
-  const rootIssueId = requiredIdentifier(root?.root_issue_id, "parallel_black_box_campaign_verdict_invalid");
-  if (!completeSnapshotHasRoot(snapshot, rootIssueId)) {
+  const rootIssueIds = requiredRootIssueIds(caseRoots, "parallel_black_box_campaign_verdict_invalid");
+  if (!completeSnapshotHasRoots(snapshot, rootIssueIds)) {
     return verdict(caseId, "incomplete", "fresh_evidence_root_missing", [], observedAtValue);
   }
 
@@ -40,7 +40,7 @@ export async function createFinalCaseVerdict({
   try {
     outcome = await evaluateEvidencePredicate({
       e2e_case: e2eCase,
-      root,
+      case_roots: caseRoots,
       snapshot: deepFreeze(snapshot),
       evidence_predicate: predicate,
     });
@@ -58,8 +58,10 @@ export async function createFinalCaseVerdict({
   return verdict(caseId, "incomplete", outcome.reason_code, evidenceRefs, observedAtValue);
 }
 
-function completeSnapshotHasRoot(snapshot, rootIssueId) {
-  return Array.isArray(snapshot.root_trees) && snapshot.root_trees.some((tree) => tree && tree.root_issue_id === rootIssueId) &&
+function completeSnapshotHasRoots(snapshot, rootIssueIds) {
+  return Array.isArray(snapshot.root_trees) && rootIssueIds.every((rootIssueId) =>
+    snapshot.root_trees.some((tree) => tree && tree.root_issue_id === rootIssueId),
+  ) &&
     Array.isArray(snapshot.repositories) && snapshot.repositories.length > 0;
 }
 
@@ -96,6 +98,15 @@ function verdict(caseId, status, reasonCode, evidenceRefs, observedAt) {
 function requiredIdentifier(value, code) {
   if (!identifier(value)) throw stableError(code);
   return value;
+}
+
+function requiredRootIssueIds(value, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1 ||
+      !Array.isArray(value.root_issue_ids) || value.root_issue_ids.length === 0 || value.root_issue_ids.length > 8 ||
+      !value.root_issue_ids.every(identifier) || new Set(value.root_issue_ids).size !== value.root_issue_ids.length) {
+    throw stableError(code);
+  }
+  return value.root_issue_ids;
 }
 
 function identifier(value) {

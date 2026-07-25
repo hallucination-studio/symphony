@@ -27,7 +27,7 @@ export function happyPathRow({ caseId, conductorId, repositoryIdentity, startOff
   ];
   return {
     e2eCase: { case_id: caseId, evidence_predicate_id: "happy_path" },
-    root: { root_issue_id: rootIssueId },
+    caseRoots: { root_issue_ids: [rootIssueId] },
     caseContext: { conductors: [{ conductor_id: conductorId, repository_identity: repositoryIdentity }] },
     snapshot: {
       kind: "complete", observed_at: observedAt,

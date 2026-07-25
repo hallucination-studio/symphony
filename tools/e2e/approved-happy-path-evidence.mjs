@@ -177,10 +177,11 @@ export function analyzeHappyPathCampaignEvidence({ rows } = {}) {
 
 function rowInput(value) {
   const row = object(value);
-  const root = object(row.root);
+  const caseRoots = object(row.caseRoots);
   const context = object(row.caseContext);
   const conductors = array(context.conductors);
-  if (!identifier(root.root_issue_id) || conductors.length !== 1) throw new Error("invalid row");
+  if (!Array.isArray(caseRoots.root_issue_ids) || caseRoots.root_issue_ids.length !== 1 ||
+      !identifier(caseRoots.root_issue_ids[0]) || conductors.length !== 1) throw new Error("invalid row");
   const conductor = object(conductors[0]);
   if (!identifier(conductor.conductor_id) || !identifier(conductor.repository_identity)) throw new Error("invalid conductor");
   const snapshot = object(row.snapshot);
@@ -188,7 +189,7 @@ function rowInput(value) {
     throw new Error("invalid snapshot");
   }
   return {
-    root,
+    root: { root_issue_id: caseRoots.root_issue_ids[0] },
     conductor,
     snapshot: {
       ...snapshot,

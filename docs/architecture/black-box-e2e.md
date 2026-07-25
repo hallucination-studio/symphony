@@ -199,6 +199,17 @@ E2ECaseResult
 表达式。`E2ECaseResult`只输出到CI报告；它不是Linear comment、managed record、product Event或下一轮Campaign输入。不存在
 `pending/running/final` Case lifecycle，也不存在从旧verdict恢复Campaign。
 
+每个Case创建Root后，runner只在内存中保留一个closed `CaseRootSet`：
+
+```text
+CaseRootSet
+  root_issue_ids[]  # 1..8, unique Linear Issue IDs
+```
+
+它是Human Actor创建后返回的精确final-read目标，不是Command字段、Linear事实、Product contract、checkpoint或恢复输入。
+任何额外字段、重复ID或缺失ID都使该Case不能产生通过verdict。普通Case的集合恰有一个Root；same-Conductor preemption
+Case恰有两个，顺序固定为`in_flight_root`、`updated_root`，仅供其closed Human script和predicate使用。
+
 ## 8. Final Evidence Snapshot
 
 每个Case在settle后重新创建外部clients，并以其spec中的精确Root IDs读取：
@@ -211,6 +222,13 @@ E2ECaseResult
 需要证明same-priority `updatedAt`抢占时，还要fresh-read matching Roots的Linear原生Issue activity/audit entries，以重建
 human mutation后的admission输入和actor/time顺序。该history只属于外部验收证据，不发送给Conductor/Performer、不进入
 Root Tree或Root Reconciler，也不成为产品Workflow authority。
+
+该Case只有同时满足以下事实才成立：两个Root具有同一Priority和同一full `conductor_id` ownership；预验证的Human Actor
+对`updated_root`写入普通description；一个in-flight Stage满足`started_at < human update < matching Result.completed_at`；
+且`updated_root`在该update后的最早且时间戳唯一的Stage Execution在该Result之后开始，期间没有`in_flight_root`的新Stage
+Execution。最早候选的时间戳并列时证据不足，必须`incomplete`，不能按读取顺序猜测。此前已完成的
+同Root Stage不影响in-flight识别。任一顺序、ownership、actor或record linkage不成立时必须failed或incomplete，不能用
+polling、process或本地timer补足。
 
 任一required page、archived child、comment、reaction、thread state、managed block或Git fact读取不完整时，snapshot标记coverage
 incomplete，不能使用较早轮询结果补齐。最终predicate必须同时验证预期事实和禁止事实；例如不能只验证Root进入

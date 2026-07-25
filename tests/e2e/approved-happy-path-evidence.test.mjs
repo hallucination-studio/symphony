@@ -12,7 +12,7 @@ test("approve_plan resolves only the discovered Plan Review Action through the e
   const calls = [];
   await executeHumanScript({
     humanScript: { id: "approve_plan" },
-    root: { root_issue_id: "root-a" },
+    caseRoots: { root_issue_ids: ["root-a"] },
     human: { async resolveHumanAction(input) { calls.push(input); } },
     async waitForHumanAction(input) {
       assert.deepEqual(input, { root_issue_id: "root-a", action_kind: "plan_review" });
@@ -52,7 +52,7 @@ test("happy-path evidence rejects a second durable delivery path", () => {
     record: { ...original.record },
   };
   tree.managed_blocks.push(duplicate);
-  tree.comments.push({ comment_id: duplicate.source_id, issue_id: row.root.root_issue_id });
+  tree.comments.push({ comment_id: duplicate.source_id, issue_id: row.caseRoots.root_issue_ids[0] });
 
   assert.deepEqual(assessApprovedHappyPathEvidence(row).outcome, {
     kind: "violated",

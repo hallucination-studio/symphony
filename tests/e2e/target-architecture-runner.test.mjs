@@ -11,6 +11,7 @@ import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.m
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
+import { sameConductorPreemptionRow } from "./same-conductor-preemption-fixture.mjs";
 
 const now = "2026-07-25T00:00:00.000Z";
 const deadline = "2026-07-25T00:05:00.000Z";
@@ -119,10 +120,10 @@ test("parallel black-box Campaign treats a malformed Case Root as isolated incom
     command: campaignCommand(),
     ports: {
       ...ports(events),
-      async createCaseRoot({ e2eCase }) {
+      async createCaseRoots({ e2eCase }) {
         events.push(`root:${e2eCase.case_id}`);
-        if (e2eCase.case_id === "happy-a") return { root_issue_id: "not a Linear issue id" };
-        return { root_issue_id: `root-${e2eCase.case_id}` };
+        if (e2eCase.case_id === "happy-a") return { root_issue_ids: ["not a Linear issue id"] };
+        return { root_issue_ids: [`root-${e2eCase.case_id}`] };
       },
     },
     now: () => Date.parse(now),
@@ -145,17 +146,18 @@ test("parallel black-box Campaign gives each Case only its routed Conductor cont
     command: campaignCommand(),
     ports: {
       ...ports([]),
-      async createCaseRoot({ caseContext, e2eCase }) {
+      async createCaseRoots({ caseContext, e2eCase }) {
         contexts.push({
           case_id: e2eCase.case_id,
           campaign_id: caseContext?.campaign_id,
           project_id: caseContext?.project_id,
+          human_actor_id: caseContext?.human_actor_id,
           conductor_ids: caseContext?.conductors.map(({ conductor_id }) => conductor_id),
           frozen: Object.isFrozen(caseContext)
             && Object.isFrozen(caseContext?.conductors)
             && caseContext?.conductors.every((conductor) => Object.isFrozen(conductor)),
         });
-        return { root_issue_id: `root-${e2eCase.case_id}` };
+        return { root_issue_ids: [`root-${e2eCase.case_id}`] };
       },
     },
     now: () => Date.parse(now),
@@ -166,6 +168,7 @@ test("parallel black-box Campaign gives each Case only its routed Conductor cont
       case_id: "happy-a",
       campaign_id: "campaign-1",
       project_id: "project-1",
+      human_actor_id: "human-actor",
       conductor_ids: ["conductor-a"],
       frozen: true,
     },
@@ -173,13 +176,34 @@ test("parallel black-box Campaign gives each Case only its routed Conductor cont
       case_id: "happy-b",
       campaign_id: "campaign-1",
       project_id: "project-1",
+      human_actor_id: "human-actor",
       conductor_ids: ["conductor-b"],
       frozen: true,
     },
   ]);
 });
 
-test("parallel black-box Campaign normalizes a created Root before exposing it to final evidence", async () => {
+test("parallel black-box Campaign verifies the external Human identity before creating any Case Root", async () => {
+  const events = [];
+  const base = ports(events);
+  await assert.rejects(
+    runParallelBlackBoxE2ECampaign({
+      command: campaignCommand(),
+      ports: {
+        ...base,
+        human: {
+          ...base.human,
+          async readActorId() { throw new Error("external identity unavailable"); },
+        },
+      },
+      now: () => Date.parse(now),
+    }),
+    (error) => error.code === "parallel_black_box_human_actor_identity_invalid",
+  );
+  assert.deepEqual(events.filter((event) => event.startsWith("root:")), []);
+});
+
+test("parallel black-box Campaign exposes only a frozen CaseRootSet to final evidence", async () => {
   const observedRoots = [];
   const command = campaignCommand();
   command.cases = [command.cases[0]];
@@ -187,18 +211,15 @@ test("parallel black-box Campaign normalizes a created Root before exposing it t
     command,
     ports: {
       ...ports([]),
-      async createCaseRoot() {
-        return { root_issue_id: "root-happy-a", unexpected: "must-not-cross-port" };
+      async createCaseRoots() {
+        return { root_issue_ids: ["root-happy-a"] };
       },
-      async runHumanScript({ root }) {
-        observedRoots.push({ port: "human", root, frozen: Object.isFrozen(root) });
-      },
-      async readFreshEvidenceSnapshot({ root }) {
-        observedRoots.push({ port: "evidence", root, frozen: Object.isFrozen(root) });
+      async readFreshEvidenceSnapshot({ caseRoots }) {
+        observedRoots.push({ port: "evidence", caseRoots, frozen: Object.isFrozen(caseRoots) });
         return {
           kind: "complete",
           observed_at: now,
-          root_trees: [{ root_issue_id: root.root_issue_id }],
+          root_trees: [{ root_issue_id: caseRoots.root_issue_ids[0] }],
           repositories: [{ repository_identity: "repository-a" }],
         };
       },
@@ -207,8 +228,33 @@ test("parallel black-box Campaign normalizes a created Root before exposing it t
   });
 
   assert.deepEqual(observedRoots, [
-    { port: "evidence", root: { root_issue_id: "root-happy-a" }, frozen: true },
+    { port: "evidence", caseRoots: { root_issue_ids: ["root-happy-a"] }, frozen: true },
   ]);
+});
+
+test("parallel black-box Campaign derives same-Conductor preemption from its two fresh Root Trees", async () => {
+  const command = campaignCommand();
+  command.cases = [{
+    case_id: "same-priority",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "preempt_same_priority",
+    evidence_predicate_id: "same_conductor_preemption",
+  }];
+  const events = [];
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "passed",
+    reason_code: "same_conductor_preemption_confirmed",
+  }]);
+  assert.deepEqual(result.durable_overlap_evidence_refs, []);
+  assert.deepEqual(events.filter((event) => event.startsWith("human-update:")), ["human-update:root-updated"]);
 });
 
 test("parallel black-box Campaign final-reads after a Human deadline and lets an inconclusive predicate decide", async () => {
@@ -309,14 +355,14 @@ test("parallel black-box Campaign maps a durable non-overlap to failed", async (
 
 test("final Case verdict fails closed when its predicate evaluator is unavailable", async () => {
   const e2eCase = campaignCommand().cases[0];
-  const root = { root_issue_id: "root-happy-a" };
+  const caseRoots = { root_issue_ids: ["root-happy-a"] };
   const verdict = await createFinalCaseVerdict({
     e2eCase,
-    root,
+    caseRoots,
     snapshot: {
       kind: "complete",
       observed_at: now,
-      root_trees: [{ root_issue_id: root.root_issue_id }],
+      root_trees: [{ root_issue_id: caseRoots.root_issue_ids[0] }],
       repositories: [{ repository_identity: "repository-a" }],
     },
     observedAt: () => now,
@@ -333,14 +379,14 @@ test("final Case verdict fails closed when its predicate evaluator is unavailabl
 
 test("final Case verdict fails closed when a complete snapshot has malformed durable references", async () => {
   const e2eCase = campaignCommand().cases[0];
-  const root = { root_issue_id: "root-happy-a" };
+  const caseRoots = { root_issue_ids: ["root-happy-a"] };
   const verdict = await createFinalCaseVerdict({
     e2eCase,
-    root,
+    caseRoots,
     snapshot: {
       kind: "complete",
       observed_at: now,
-      root_trees: [{ root_issue_id: root.root_issue_id }],
+      root_trees: [{ root_issue_id: caseRoots.root_issue_ids[0] }],
       repositories: [{ repository_identity: null }],
     },
     evaluateEvidencePredicate: async () => ({
@@ -354,6 +400,29 @@ test("final Case verdict fails closed when a complete snapshot has malformed dur
     case_id: e2eCase.case_id,
     status: "incomplete",
     reason_code: "fresh_evidence_invalid",
+    evidence_refs: [],
+    observed_at: now,
+  });
+});
+
+test("final Case verdict fails closed when fresh evidence omits a CaseRootSet member", async () => {
+  const e2eCase = campaignCommand().cases[0];
+  const verdict = await createFinalCaseVerdict({
+    e2eCase,
+    caseRoots: { root_issue_ids: ["root-happy-a", "root-related"] },
+    snapshot: {
+      kind: "complete",
+      observed_at: now,
+      root_trees: [{ root_issue_id: "root-happy-a" }],
+      repositories: [{ repository_identity: "repository-a" }],
+    },
+    observedAt: () => now,
+  });
+
+  assert.deepEqual(verdict, {
+    case_id: e2eCase.case_id,
+    status: "incomplete",
+    reason_code: "fresh_evidence_root_missing",
     evidence_refs: [],
     observed_at: now,
   });
@@ -415,6 +484,7 @@ test("hard-cut runner source has no internal Podium imports, direct store access
   assert.doesNotMatch(source, /for\s*\([^)]*scenario|runScenarioEvidence|targetArchitectureScenarioManifest/u);
   assert.doesNotMatch(source, /waitForPlanReviewEvidence|waitForExecutionEvidence|approvePlanReviewAction/u);
   assert.doesNotMatch(source, /runHumanScript|ports\.evaluateEvidencePredicate/u);
+  assert.doesNotMatch(source, /\bcreateCaseRoot\b/u);
   assert.doesNotMatch(source, /createFreshEvidenceReader|\.readFinalEvidence\(|caseResult\(|readDurableOverlapEvidence/u);
   assert.doesNotMatch(source, /\b(?:startConductor|provisionProfile|waitForProfileReady)\b/u);
   assert.match(source, /createFinalCaseVerdict\(/u);
@@ -470,15 +540,22 @@ function ports(events, {
   startOffsetsByCaseId = {},
 } = {}) {
   return {
-    async createCaseRoot({ e2eCase }) {
+    async createCaseRoots({ e2eCase }) {
       events.push(`root:${e2eCase.case_id}`);
       if (e2eCase.case_id === rejectRootCaseId) throw new Error("external root failure");
-      return { root_issue_id: `root-${e2eCase.case_id}` };
+      if (e2eCase.human_script_id === "preempt_same_priority") {
+        return { root_issue_ids: ["root-inflight", "root-updated"] };
+      }
+      return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
     human: {
+      async readActorId() { return "human-actor"; },
       async resolveHumanAction({ human_action_issue_id: actionIssueId }) {
         const caseId = actionIssueId.slice("action-".length);
         if (caseId === rejectCaseId) throw new Error("external failure");
+      },
+      async updateRoot({ root_issue_id: rootIssueId }) {
+        events.push(`human-update:${rootIssueId}`);
       },
     },
     async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId, action_kind: actionKind }) {
@@ -487,14 +564,24 @@ function ports(events, {
       assert.equal(actionKind, "plan_review");
       return { human_action_issue_id: `action-${e2eCase.case_id}` };
     },
-    async readFreshEvidenceSnapshot({ e2eCase, root }) {
+    async waitForInFlightStage({ e2eCase, root_issue_id: rootIssueId }) {
+      assert.equal(e2eCase.human_script_id, "preempt_same_priority");
+      assert.equal(rootIssueId, "root-inflight");
+      return { stage_execution_id: "execution-inflight" };
+    },
+    async readFreshEvidenceSnapshot({ e2eCase, caseRoots }) {
       events.push(`fresh:${e2eCase.case_id}`);
       if (snapshotKind === "incomplete") {
         return {
           kind: "incomplete",
           observed_at: now,
-          omissions: [{ source_id: root.root_issue_id, reason_code: "fresh_linear_coverage_incomplete" }],
+          omissions: [{ source_id: caseRoots.root_issue_ids[0], reason_code: "fresh_linear_coverage_incomplete" }],
         };
+      }
+      if (e2eCase.evidence_predicate_id === "same_conductor_preemption") {
+        const fixture = sameConductorPreemptionRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
       }
       const conductorId = e2eCase.routed_conductor_ids[0];
       const suffix = conductorId.slice("conductor-".length);
@@ -504,7 +591,7 @@ function ports(events, {
         repositoryIdentity: `repository-${suffix}`,
         startOffset: startOffsetsByCaseId[e2eCase.case_id] ?? 0,
       });
-      assert.equal(root.root_issue_id, fixture.root.root_issue_id);
+      assert.deepEqual(caseRoots, fixture.caseRoots);
       return fixture.snapshot;
     },
   };
