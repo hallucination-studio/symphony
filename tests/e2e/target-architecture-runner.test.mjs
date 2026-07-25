@@ -11,6 +11,7 @@ import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.m
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
+import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
 import { sameConductorPreemptionRow } from "./same-conductor-preemption-fixture.mjs";
 
 const now = "2026-07-25T00:00:00.000Z";
@@ -255,6 +256,30 @@ test("parallel black-box Campaign derives same-Conductor preemption from its two
   }]);
   assert.deepEqual(result.durable_overlap_evidence_refs, []);
   assert.deepEqual(events.filter((event) => event.startsWith("human-update:")), ["human-update:root-updated"]);
+});
+
+test("parallel black-box Campaign derives Plan rejection supersession only from its final fresh Root Tree", async () => {
+  const command = campaignCommand();
+  command.cases = [{
+    case_id: "plan-rejection",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "reject_plan",
+    evidence_predicate_id: "plan_rejection_supersession",
+  }];
+  const events = [];
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "passed",
+    reason_code: "plan_rejection_supersession_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("human-reject:")), ["human-reject:action-plan-rejection"]);
 });
 
 test("parallel black-box Campaign final-reads after a Human deadline and lets an inconclusive predicate decide", async () => {
@@ -546,11 +571,15 @@ function ports(events, {
       if (e2eCase.human_script_id === "preempt_same_priority") {
         return { root_issue_ids: ["root-inflight", "root-updated"] };
       }
+      if (e2eCase.human_script_id === "reject_plan") {
+        return { root_issue_ids: ["root-plan-rejection"] };
+      }
       return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
     human: {
       async readActorId() { return "human-actor"; },
-      async resolveHumanAction({ human_action_issue_id: actionIssueId }) {
+      async resolveHumanAction({ human_action_issue_id: actionIssueId, terminal_status: terminalStatus }) {
+        if (terminalStatus === "rejected") events.push(`human-reject:${actionIssueId}`);
         const caseId = actionIssueId.slice("action-".length);
         if (caseId === rejectCaseId) throw new Error("external failure");
       },
@@ -580,6 +609,11 @@ function ports(events, {
       }
       if (e2eCase.evidence_predicate_id === "same_conductor_preemption") {
         const fixture = sameConductorPreemptionRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "plan_rejection_supersession") {
+        const fixture = planRejectionSupersessionRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
       }

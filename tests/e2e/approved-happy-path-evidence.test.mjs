@@ -23,6 +23,25 @@ test("approve_plan resolves only the discovered Plan Review Action through the e
   assert.deepEqual(calls, [{ human_action_issue_id: "action-a", terminal_status: "approved" }]);
 });
 
+test("reject_plan resolves only the discovered Plan Review Action through the external Human Actor with a required reason", async () => {
+  const calls = [];
+  await executeHumanScript({
+    humanScript: { id: "reject_plan" },
+    caseRoots: { root_issue_ids: ["root-a"] },
+    human: { async resolveHumanAction(input) { calls.push(input); } },
+    async waitForHumanAction(input) {
+      assert.deepEqual(input, { root_issue_id: "root-a", action_kind: "plan_review" });
+      return { human_action_issue_id: "action-a" };
+    },
+  });
+
+  assert.deepEqual(calls, [{
+    human_action_issue_id: "action-a",
+    terminal_status: "rejected",
+    reason_or_answer: "The Plan does not satisfy the requested outcome. Please replan it.",
+  }]);
+});
+
 test("happy-path evidence requires one approved durable Plan to delivery chain", () => {
   const row = happyPathRow({ caseId: "happy-a", conductorId: "conductor-a", repositoryIdentity: "repository-a" });
   const assessment = assessApprovedHappyPathEvidence(row);

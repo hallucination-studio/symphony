@@ -7,6 +7,7 @@ import {
 import { analyzeHappyPathCampaignEvidence } from "./approved-happy-path-evidence.mjs";
 import { createFinalCaseVerdict } from "./final-evidence-verdict.mjs";
 import { executeHumanScript } from "./human-scripts.mjs";
+import { analyzePlanRejectionSupersessionCampaignEvidence } from "./plan-rejection-supersession-evidence.mjs";
 import { analyzeSameConductorPreemptionCampaignEvidence } from "./same-conductor-preemption-evidence.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
@@ -45,9 +46,11 @@ export async function runParallelBlackBoxE2ECampaign({
     ? settlement.value
     : unavailableCaseEvidence({ campaign, e2eCase: campaign.cases[index], observedAt }));
   const happyPathEvidence = analyzeHappyPathCampaignEvidence({ rows: evidence });
+  const planRejectionEvidence = analyzePlanRejectionSupersessionCampaignEvidence({ rows: evidence });
   const preemptionEvidence = analyzeSameConductorPreemptionCampaignEvidence({ rows: evidence });
   const outcomesByCaseId = new Map([
     ...happyPathEvidence.case_outcomes,
+    ...planRejectionEvidence.case_outcomes,
     ...preemptionEvidence.case_outcomes,
   ].map((entry) => [entry.case_id, entry.outcome]));
   const results = await Promise.all(evidence.map(({ e2eCase, caseRoots, snapshot }) => createFinalCaseVerdict({

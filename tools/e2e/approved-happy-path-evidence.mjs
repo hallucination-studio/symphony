@@ -7,7 +7,7 @@ export function assessApprovedHappyPathEvidence(row) {
   try {
     const input = rowInput(row);
     const tree = rootTree(input.snapshot, input.root.root_issue_id);
-    const facts = collectFacts(tree);
+    const facts = collectManagedRecordFacts(tree);
     if (facts.invalid) return assessment("inconclusive", "happy_path_evidence_invalid");
 
     const rootIssue = issue(tree, input.root.root_issue_id);
@@ -226,11 +226,11 @@ function repositoryFacts(value) {
   };
 }
 
-function collectFacts(tree) {
+export function collectManagedRecordFacts(tree) {
   const comments = new Map(tree.comments.map((comment) => [comment?.comment_id, comment]));
   const facts = {
     invalid: false, ownership: [], planContracts: [], executions: [], results: [], actionRequests: [],
-    actionResolutions: [], verifyResults: [], deliveries: [],
+    actionResolutions: [], verifyResults: [], deliveries: [], planContractSupersessions: [],
   };
   for (const block of tree.managed_blocks) {
     const source = comments.get(block?.source_id);
@@ -254,6 +254,7 @@ function decodeRecord(record, sourceIssueId) {
   if (record.kind === "human_action_resolution") return decoded("actionResolutions", decodeActionResolution(record, sourceIssueId));
   if (record.kind === "verify_result") return decoded("verifyResults", decodeVerifyResult(record, sourceIssueId));
   if (record.kind === "delivery") return decoded("deliveries", decodeDelivery(record, sourceIssueId));
+  if (record.kind === "plan_contract_supersession") return decoded("planContractSupersessions", decodePlanContractSupersession(record, sourceIssueId));
   return null;
 }
 
@@ -338,7 +339,24 @@ function decodeActionResolution(record, sourceIssueId) {
   return {
     actionId: record.action_id, actionIssueId: record.action_issue_id, actionKind: record.action_kind,
     outcome: record.outcome, terminalStatus: record.terminal_status, terminalRemoteVersion: record.terminal_remote_version,
-    actorKind: record.actor_kind, proposalDigest: record.proposal_digest, resolvedAt: record.resolved_at, sourceIssueId,
+    actorKind: record.actor_kind, proposalDigest: record.proposal_digest, resolvedAt: record.resolved_at,
+    sourceCommentIds: record.source_comment_ids, sourceCommentVersions: record.source_comment_versions, sourceIssueId,
+  };
+}
+
+function decodePlanContractSupersession(record, sourceIssueId) {
+  exactKeys(record, [
+    "kind", "version", "supersession_id", "root_issue_id", "cycle_issue_id", "superseded_plan_contract_digest",
+    "source_root_directive_id", "fresh_plan_issue_id", "superseded_at",
+  ]);
+  if (!version(record) || !identifier(record.supersession_id) || !identifier(record.root_issue_id) ||
+      !identifier(record.cycle_issue_id) || !identifier(record.superseded_plan_contract_digest) ||
+      !identifier(record.source_root_directive_id) || !identifier(record.fresh_plan_issue_id) || !timestamp(record.superseded_at)) return null;
+  return {
+    supersessionId: record.supersession_id, rootIssueId: record.root_issue_id, cycleIssueId: record.cycle_issue_id,
+    supersededPlanContractDigest: record.superseded_plan_contract_digest,
+    sourceRootDirectiveId: record.source_root_directive_id, freshPlanIssueId: record.fresh_plan_issue_id,
+    supersededAt: record.superseded_at, sourceIssueId,
   };
 }
 
@@ -480,7 +498,7 @@ function validLimits(value) {
 }
 
 function requiredRecordKind(kind) {
-  return ["root_ownership", "plan_contract", "stage_execution", "stage_result", "human_action_request", "human_action_resolution", "verify_result", "delivery"].includes(kind);
+  return ["root_ownership", "plan_contract", "plan_contract_supersession", "stage_execution", "stage_result", "human_action_request", "human_action_resolution", "verify_result", "delivery"].includes(kind);
 }
 
 function assessment(kind, reasonCode, intervals = []) {

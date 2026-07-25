@@ -8,6 +8,9 @@ export async function executeHumanScript({ humanScript, caseRoots, human, waitFo
   if (humanScript?.id === "approve_plan") {
     return approvePlan({ rootIssueIds, human, waitForHumanAction });
   }
+  if (humanScript?.id === "reject_plan") {
+    return rejectPlan({ rootIssueIds, human, waitForHumanAction });
+  }
   if (humanScript?.id === "preempt_same_priority") {
     return preemptSamePriority({ rootIssueIds, human, waitForInFlightStage });
   }
@@ -29,6 +32,25 @@ async function approvePlan({ rootIssueIds, human, waitForHumanAction }) {
   await human.resolveHumanAction({
     human_action_issue_id: action.human_action_issue_id,
     terminal_status: "approved",
+  });
+}
+
+async function rejectPlan({ rootIssueIds, human, waitForHumanAction }) {
+  if (rootIssueIds.length !== 1 || typeof human.resolveHumanAction !== "function" || typeof waitForHumanAction !== "function") {
+    throw stableError("parallel_black_box_human_script_input_invalid");
+  }
+  const action = await waitForHumanAction({
+    root_issue_id: rootIssueIds[0],
+    action_kind: "plan_review",
+  });
+  if (!action || typeof action !== "object" || Array.isArray(action) ||
+      Object.keys(action).length !== 1 || !identifier(action.human_action_issue_id)) {
+    throw stableError("parallel_black_box_human_action_invalid");
+  }
+  await human.resolveHumanAction({
+    human_action_issue_id: action.human_action_issue_id,
+    terminal_status: "rejected",
+    reason_or_answer: "The Plan does not satisfy the requested outcome. Please replan it.",
   });
 }
 
