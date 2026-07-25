@@ -2,6 +2,8 @@ import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/Linear
 import type { RootSafetyPolicyInterface, RootSafetyValidationResult } from "../api/RootSafetyPolicyInterface.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type { MechanicalViolation } from "../api/RootReconciliationContracts.js";
+import { cycleOutcomeId } from "../api/CycleOutcome.js";
+import { parseManagedRecord } from "./ManagedRecordCodec.js";
 
 function blocked(reason: string): RootSafetyValidationResult {
   return { kind: "blocked", reason };
@@ -39,7 +41,7 @@ function mechanicalViolations(
   rootIssueId: string,
 ): MechanicalViolation[] {
   const activeCycles = tree.issues.filter((issue) =>
-    issue.issue_kind === "cycle" && issue.parent_issue_id === rootIssueId && !issue.is_archived,
+    issue.issue_kind === "cycle" && issue.parent_issue_id === rootIssueId && !issue.is_archived && !isTerminalCycle(issue),
   );
   const violations: MechanicalViolation[] = [];
   if (activeCycles.length > 1) {
@@ -72,5 +74,48 @@ function mechanicalViolations(
     }
   }
 
+  for (const cycle of tree.issues.filter((issue) =>
+    issue.issue_kind === "cycle" && issue.parent_issue_id === rootIssueId && isTerminalCycle(issue),
+  )) {
+    const outcomes = tree.comments.flatMap((comment) => {
+      if (comment.issue_id !== cycle.issue_id || comment.author_kind !== "symphony") return [];
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "cycle_outcome" ? [parsed.value] : [];
+    });
+    const outcome = outcomes[0];
+    if (
+      outcomes.length !== 1 ||
+      !outcome ||
+      outcome.rootIssueId !== rootIssueId ||
+      outcome.cycleIssueId !== cycle.issue_id ||
+      outcome.cycleOutcomeId !== cycleOutcomeId({
+        rootIssueId: outcome.rootIssueId,
+        cycleIssueId: outcome.cycleIssueId,
+        rootDirectiveId: outcome.sourceRootDirectiveId,
+      }) ||
+      !outcomeMatchesStatus(outcome.conclusion, cycle.status_name)
+    ) {
+      violations.push({
+        violationKind: "cycle_terminal_outcome_mismatch",
+        sourceIssueIds: [cycle.issue_id],
+        summary: "A terminal Cycle does not have one matching CycleOutcome.",
+      });
+    }
+  }
+
   return violations;
+}
+
+function isTerminalCycle(issue: LinearWorkflowTreeSnapshot["issues"][number]): boolean {
+  return issue.status_category === "completed" || issue.status_category === "canceled" ||
+    ["Succeeded", "Changes Required", "Canceled"].includes(issue.status_name);
+}
+
+function outcomeMatchesStatus(
+  conclusion: "succeeded" | "repair_required" | "exhausted" | "superseded" | "canceled",
+  statusName: string,
+): boolean {
+  if (conclusion === "succeeded") return statusName === "Succeeded";
+  if (conclusion === "canceled") return statusName === "Canceled";
+  return statusName === "Changes Required";
 }

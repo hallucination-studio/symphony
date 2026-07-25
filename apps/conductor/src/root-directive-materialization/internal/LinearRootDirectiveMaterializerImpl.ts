@@ -8,6 +8,7 @@ import type {
   TreeOperation,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import {
+  cycleOutcomeId,
   findWorkflowIssue,
   planContractSupersessionId,
   parseManagedRecord,
@@ -16,7 +17,8 @@ import {
   serializeManagedRecord,
   workflowIssueLabel,
 } from "../../root-reconciliation/api/index.js";
-import type { PlanContractSupersessionRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import type { CycleOutcomeRecord, PlanContractSupersessionRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import { deriveCycleUsageAggregate } from "../../root-reconciliation/internal/UsageAggregation.js";
 import type {
   RootDirectiveMaterializationResult,
   RootDirectiveMaterializerInterface,
@@ -47,33 +49,7 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
     }
     if (action.kind === "revise_root_tree") return this.applyTreeOperations(directive, view, action.operations);
     if (action.kind === "create_cycle") return this.createCycle(directive, view, action);
-    if (action.kind === "supersede_cycle") {
-      const current = view.tree.issues.find((issue) => issue.issue_id === action.currentCycleIssueId);
-      if (!current || current.parent_issue_id !== view.root.issueId || current.issue_kind !== "cycle" || current.is_archived) {
-        return failed(directive, "successor_cycle_current_target_invalid");
-      }
-      if (current.status_name !== "Changes Required") {
-        const concluded = await this.applyStatusChange(directive, view, current, "Changes Required", "cycle_supersede");
-        if (concluded.kind === "failed") return concluded;
-        const refreshed = await refreshView(this.linear, view);
-        return this.createCycle(directive, refreshed, {
-          kind: "create_cycle",
-          predecessorCycleIssueId: action.currentCycleIssueId,
-          reason: action.reason === "root_contract_changed" ? "root_contract_changed" : "repair_required",
-          planTrigger: action.successor.planTrigger,
-          inheritedFactRefs: action.successor.inheritedFactRefs,
-          invalidatedDeliveryRefs: [],
-        });
-      }
-      return this.createCycle(directive, view, {
-        kind: "create_cycle",
-        predecessorCycleIssueId: action.currentCycleIssueId,
-        reason: action.reason === "root_contract_changed" ? "root_contract_changed" : "repair_required",
-        planTrigger: action.successor.planTrigger,
-        inheritedFactRefs: action.successor.inheritedFactRefs,
-        invalidatedDeliveryRefs: [],
-      });
-    }
+    if (action.kind === "supersede_cycle") return this.supersedeCycle(directive, view, action);
     if (action.kind === "conclude_cycle") return this.concludeCycle(directive, view, action);
     if (action.kind === "wait" || action.kind === "acknowledge") {
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [] };
@@ -218,14 +194,51 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
       if (!cycle || cycle.parent_issue_id !== view.root.issueId || cycle.issue_kind !== "cycle" || cycle.is_archived) {
         return failed(directive, "root_cancel_active_cycle_invalid");
       }
-      if (cycle.status_name !== "Canceled") {
-        const canceled = await this.applyStatusChange(directive, view, cycle, "Canceled", "root_cancel_cycle");
-        if (canceled.kind === "failed") return canceled;
-        view = await refreshView(this.linear, view);
-      }
+      const canceled = await this.terminalizeCycle(
+        directive,
+        view,
+        cycle,
+        "Canceled",
+        cycleOutcomeDetailsForCancellation(view, cycle.issue_id, action),
+        "root_cancel_cycle",
+      );
+      if (canceled.kind === "failed") return canceled;
+      view = await refreshView(this.linear, view);
     }
     const root = rootIssue(view, view.root.issueId);
+    if (root.status_name === "Canceled") {
+      return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [root.issue_id] };
+    }
     return this.applyStatusChange(directive, view, root, "Canceled", "root_cancel");
+  }
+
+  private async supersedeCycle(
+    directive: RootDirective,
+    view: RootReconciliationView,
+    action: Extract<RootDirective["action"], { kind: "supersede_cycle" }>,
+  ): Promise<RootDirectiveMaterializationResult> {
+    const current = view.tree.issues.find((issue) => issue.issue_id === action.currentCycleIssueId);
+    if (!current || current.parent_issue_id !== view.root.issueId || current.issue_kind !== "cycle" || current.is_archived) {
+      return failed(directive, "successor_cycle_current_target_invalid");
+    }
+    const concluded = await this.terminalizeCycle(
+      directive,
+      view,
+      current,
+      "Changes Required",
+      cycleOutcomeDetailsForSupersession(view, current.issue_id, action),
+      "cycle_supersede",
+    );
+    if (concluded.kind === "failed") return concluded;
+    const refreshed = await refreshView(this.linear, view);
+    return this.createCycle(directive, refreshed, {
+      kind: "create_cycle",
+      predecessorCycleIssueId: action.currentCycleIssueId,
+      reason: action.reason === "root_contract_changed" ? "root_contract_changed" : "repair_required",
+      planTrigger: action.successor.planTrigger,
+      inheritedFactRefs: action.successor.inheritedFactRefs,
+      invalidatedDeliveryRefs: [],
+    });
   }
 
   private async createCycle(
@@ -245,6 +258,16 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
       : undefined;
     if (action.reason !== "initial" && (!predecessor || predecessor.parent_issue_id !== view.root.issueId || predecessor.issue_kind !== "cycle" || !isTerminalCycle(predecessor))) {
       return failed(directive, "successor_cycle_predecessor_invalid");
+    }
+    if (predecessor) {
+      const predecessorOutcome = cycleOutcomeFor(view, predecessor.issue_id);
+      if (predecessorOutcome.kind === "invalid") return failed(directive, `successor_cycle_predecessor_outcome_${predecessorOutcome.code}`);
+      if (!outcomeMatchesCycleStatus(predecessorOutcome.record, predecessor.status_name)) {
+        return failed(directive, "successor_cycle_predecessor_outcome_status_mismatch");
+      }
+      if (action.reason === "exhausted" && predecessorOutcome.record.conclusion !== "exhausted") {
+        return failed(directive, "successor_cycle_predecessor_outcome_reason_mismatch");
+      }
     }
     const cycleKey = `${directive.rootDirectiveId}:cycle`;
     let currentView = view;
@@ -348,7 +371,86 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
     const statusName = action.conclusion === "succeeded"
       ? "Succeeded"
       : action.conclusion === "canceled" ? "Canceled" : "Changes Required";
-    return this.applyStatusChange(directive, view, cycle, statusName, "cycle_conclusion");
+    return this.terminalizeCycle(directive, view, cycle, statusName, {
+      conclusion: action.conclusion,
+      completedWorkIds: action.completedWorkIds,
+      unresolvedFindingIds: action.unresolvedFindingIds,
+      attemptedApproachRefs: action.attemptedApproachRefs,
+      verificationEvidenceRefs: action.verificationEvidenceRefs,
+    }, "cycle_conclusion");
+  }
+
+  private async terminalizeCycle(
+    directive: RootDirective,
+    view: RootReconciliationView,
+    cycle: RootReconciliationView["tree"]["issues"][number],
+    statusName: "Succeeded" | "Changes Required" | "Canceled",
+    details: CycleOutcomeDetails,
+    failurePrefix: string,
+  ): Promise<RootDirectiveMaterializationResult> {
+    const outcome = buildCycleOutcome(directive, view, cycle.issue_id, details);
+    if (outcome.kind === "invalid") return failed(directive, outcome.code);
+    const persisted = await this.materializeCycleOutcome(directive, view, cycle, outcome.record);
+    if (persisted.kind === "failed") return persisted;
+    const refreshedCycle = persisted.view.tree.issues.find((issue) => issue.issue_id === cycle.issue_id);
+    if (!refreshedCycle) return failed(directive, "cycle_outcome_read_back_cycle_missing");
+    if (isTerminalCycle(refreshedCycle)) {
+      return refreshedCycle.status_name === statusName
+        ? { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [cycle.issue_id] }
+        : failed(directive, "cycle_outcome_terminal_status_conflict");
+    }
+    return this.applyStatusChange(directive, persisted.view, refreshedCycle, statusName, failurePrefix);
+  }
+
+  private async materializeCycleOutcome(
+    directive: RootDirective,
+    view: RootReconciliationView,
+    cycle: RootReconciliationView["tree"]["issues"][number],
+    record: CycleOutcomeRecord,
+  ): Promise<
+    | { kind: "materialized"; view: RootReconciliationView }
+    | { kind: "failed"; rootDirectiveId: string; code: string; sanitizedReason: string }
+  > {
+    const existing = cycleOutcomeFor(view, cycle.issue_id);
+    if (existing.kind === "invalid" && existing.code !== "missing") {
+      return cycleOutcomeFailed(directive, `cycle_outcome_${existing.code}`);
+    }
+    const body = serializeManagedRecord(record);
+    if (existing.kind === "valid") {
+      const matching = existing.comment.body === body && existing.record.cycleOutcomeId === record.cycleOutcomeId;
+      return matching
+        ? { kind: "materialized", view }
+        : cycleOutcomeFailed(directive, "cycle_outcome_conflict");
+    }
+    if (isTerminalCycle(cycle)) return cycleOutcomeFailed(directive, "cycle_outcome_terminal_status_without_record");
+    const root = rootIssue(view, view.root.issueId);
+    const outcome = await this.linear.mutateWorkflow({
+      kind: "append_workflow_comment",
+      writeId: `cycle-outcome:${record.cycleOutcomeId}`,
+      expectedProjectId: cycle.project_id,
+      rootIssueId: view.root.issueId,
+      expectedRootRemoteVersion: root.remote_version,
+      target: {
+        targetIssueId: cycle.issue_id,
+        expectedRemoteVersion: cycle.remote_version,
+        expectedStatusId: cycle.status_id,
+        expectedParentIssueId: view.root.issueId,
+      },
+      body,
+    });
+    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+      return cycleOutcomeFailed(directive, `cycle_outcome_write_${outcome.kind}`);
+    }
+    const refreshed = await refreshView(this.linear, view);
+    const confirmed = cycleOutcomeFor(refreshed, cycle.issue_id);
+    if (
+      confirmed.kind !== "valid" ||
+      confirmed.comment.body !== body ||
+      confirmed.record.cycleOutcomeId !== record.cycleOutcomeId
+    ) {
+      return cycleOutcomeFailed(directive, "cycle_outcome_read_back_missing");
+    }
+    return { kind: "materialized", view: refreshed };
   }
 
   private async applyStatusChange(
@@ -805,6 +907,265 @@ function preservedDescription(
   markdown: string,
 ): string {
   return target.issue_kind === "root" ? markdown : rewriteWorkflowIssueDescription(target, markdown);
+}
+
+function buildCycleOutcome(
+  directive: RootDirective,
+  view: RootReconciliationView,
+  cycleIssueId: string,
+  details: CycleOutcomeDetails,
+): { kind: "valid"; record: CycleOutcomeRecord } | { kind: "invalid"; code: string } {
+  const planContract = activeCyclePlanContract(view, cycleIssueId);
+  if (planContract.kind === "invalid") return planContract;
+  let budgetUsage: CycleOutcomeRecord["budgetUsage"];
+  try {
+    const aggregate = deriveCycleUsageAggregate({ tree: view.tree, cycleIssueId });
+    if (aggregate.scope !== "cycle") {
+      return { kind: "invalid", code: "cycle_outcome_budget_usage_invalid" };
+    }
+    const groups: CycleOutcomeRecord["budgetUsage"]["groups"] = [];
+    for (const group of aggregate.groups) {
+      if (group.role === "root_reconciler") return { kind: "invalid", code: "cycle_outcome_budget_usage_invalid" };
+      groups.push({
+        ...(group.cycleIssueId === undefined ? {} : { cycleIssueId: group.cycleIssueId }),
+        role: group.role,
+        model: group.model,
+        inputTokens: group.inputTokens,
+        cachedInputTokens: group.cachedInputTokens,
+        outputTokens: group.outputTokens,
+        reasoningOutputTokens: group.reasoningOutputTokens,
+        totalTokens: group.totalTokens,
+        unavailableTurnCount: group.unavailableTurnCount,
+      });
+    }
+    budgetUsage = {
+      scope: "cycle",
+      sourceRecordCount: aggregate.sourceRecordCount,
+      sourceDigest: aggregate.sourceDigest,
+      isComplete: aggregate.isComplete,
+      unknownTurnCount: aggregate.unknownTurnCount,
+      groups,
+    };
+  } catch {
+    return { kind: "invalid", code: "cycle_outcome_budget_usage_invalid" };
+  }
+  return {
+    kind: "valid",
+    record: {
+      kind: "cycle_outcome",
+      version: 1,
+      cycleOutcomeId: cycleOutcomeId({
+        rootIssueId: view.root.issueId,
+        cycleIssueId,
+        rootDirectiveId: directive.rootDirectiveId,
+      }),
+      rootIssueId: view.root.issueId,
+      cycleIssueId,
+      sourceRootDirectiveId: directive.rootDirectiveId,
+      conclusion: details.conclusion,
+      ...(planContract.planContractDigest === undefined ? {} : { planContractDigest: planContract.planContractDigest }),
+      completedWorkIds: details.completedWorkIds,
+      unresolvedFindingIds: details.unresolvedFindingIds,
+      attemptedApproachRefs: details.attemptedApproachRefs,
+      verificationEvidenceRefs: details.verificationEvidenceRefs,
+      gitRevision: view.git.head,
+      budgetUsage,
+      ...(details.successorReason === undefined ? {} : { successorReason: details.successorReason }),
+      concludedAt: directive.modelTurn.terminalAt,
+    },
+  };
+}
+
+type CycleOutcomeDetails = Pick<
+  CycleOutcomeRecord,
+  "conclusion" | "completedWorkIds" | "unresolvedFindingIds" | "attemptedApproachRefs" | "verificationEvidenceRefs" | "successorReason"
+>;
+
+function cycleOutcomeDetailsForSupersession(
+  view: RootReconciliationView,
+  cycleIssueId: string,
+  action: Extract<RootDirective["action"], { kind: "supersede_cycle" }>,
+): CycleOutcomeDetails {
+  const facts = durableCycleFacts(view, cycleIssueId);
+  return {
+    conclusion: "superseded",
+    completedWorkIds: facts.completedWorkIds,
+    unresolvedFindingIds: action.unresolvedFindingIds,
+    attemptedApproachRefs: mergeEvidenceRefs(action.preservedEvidenceRefs, facts.attemptedApproachRefs),
+    verificationEvidenceRefs: facts.verificationEvidenceRefs,
+    successorReason: action.reason === "root_contract_changed" ? "root_contract_changed" : "repair_required",
+  };
+}
+
+function cycleOutcomeDetailsForCancellation(
+  view: RootReconciliationView,
+  cycleIssueId: string,
+  action: Extract<RootDirective["action"], { kind: "cancel_root" }>,
+): CycleOutcomeDetails {
+  const facts = durableCycleFacts(view, cycleIssueId);
+  return {
+    conclusion: "canceled",
+    completedWorkIds: facts.completedWorkIds,
+    unresolvedFindingIds: facts.unresolvedFindingIds,
+    attemptedApproachRefs: mergeEvidenceRefs(action.preservedFactRefs, facts.attemptedApproachRefs),
+    verificationEvidenceRefs: facts.verificationEvidenceRefs,
+  };
+}
+
+function durableCycleFacts(
+  view: RootReconciliationView,
+  cycleIssueId: string,
+): Pick<CycleOutcomeDetails, "completedWorkIds" | "unresolvedFindingIds" | "attemptedApproachRefs" | "verificationEvidenceRefs"> {
+  const cycleIssueIds = cycleDescendantIssueIds(view, cycleIssueId);
+  const results = view.tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony" || !cycleIssueIds.has(comment.issue_id)) return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "stage_result" &&
+      parsed.value.rootIssueId === view.root.issueId && parsed.value.cycleIssueId === cycleIssueId &&
+      cycleIssueIds.has(parsed.value.nodeIssueId)
+      ? [parsed.value]
+      : [];
+  });
+  const workResults = results.filter(({ stage }) => stage === "work");
+  const verifyResults = results.filter(({ stage }) => stage === "verify");
+  const verifyExecutionIds = new Set(verifyResults.map(({ modelTurn }) => modelTurn.stageExecutionId));
+  for (const comment of view.tree.comments) {
+    if (comment.author_kind !== "symphony" || !cycleIssueIds.has(comment.issue_id)) continue;
+    const parsed = parseManagedRecord(comment.body);
+    if (parsed.ok && parsed.value.kind === "verify_result" &&
+      parsed.value.rootIssueId === view.root.issueId && parsed.value.cycleIssueId === cycleIssueId &&
+      cycleIssueIds.has(parsed.value.nodeIssueId)) {
+      verifyExecutionIds.add(parsed.value.stageExecutionId);
+    }
+  }
+  const closedFindingIds = new Set(view.tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony") return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "finding_disposition" &&
+      verifyExecutionIds.has(parsed.value.sourceVerifyId) &&
+      ["resolved", "waived"].includes(parsed.value.disposition)
+      ? [parsed.value.findingId]
+      : [];
+  }));
+  const unresolvedFindingIds = view.tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony") return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "finding" &&
+      verifyExecutionIds.has(parsed.value.sourceVerifyId) && !closedFindingIds.has(parsed.value.findingId)
+      ? [parsed.value.findingId]
+      : [];
+  });
+  return {
+    completedWorkIds: uniqueSorted(workResults.filter(({ outcomeKind }) => outcomeKind === "work_completed").map(({ nodeIssueId }) => nodeIssueId)),
+    unresolvedFindingIds: uniqueSorted(unresolvedFindingIds),
+    attemptedApproachRefs: resultEvidenceRefs(workResults),
+    verificationEvidenceRefs: resultEvidenceRefs(verifyResults),
+  };
+}
+
+function cycleDescendantIssueIds(view: RootReconciliationView, cycleIssueId: string): Set<string> {
+  const descendants = new Set([cycleIssueId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const issue of view.tree.issues) {
+      if (issue.parent_issue_id && descendants.has(issue.parent_issue_id) && !descendants.has(issue.issue_id)) {
+        descendants.add(issue.issue_id);
+        changed = true;
+      }
+    }
+  }
+  return descendants;
+}
+
+function resultEvidenceRefs(results: Array<{ resultId: string }>): CycleOutcomeDetails["attemptedApproachRefs"] {
+  return uniqueSorted(results.map(({ resultId }) => resultId)).map((referenceId) => ({ referenceId, sourceKind: "result" }));
+}
+
+function mergeEvidenceRefs(
+  primary: CycleOutcomeDetails["attemptedApproachRefs"],
+  supplemental: CycleOutcomeDetails["attemptedApproachRefs"],
+): CycleOutcomeDetails["attemptedApproachRefs"] {
+  const seen = new Set<string>();
+  return [...primary, ...supplemental].filter((reference) => {
+    const key = `${reference.sourceKind}\0${reference.referenceId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function activeCyclePlanContract(
+  view: RootReconciliationView,
+  cycleIssueId: string,
+): { kind: "valid"; planContractDigest?: string } | { kind: "invalid"; code: string } {
+  const planIssueIds = new Set(view.tree.issues
+    .filter((issue) => issue.parent_issue_id === cycleIssueId && issue.issue_kind === "plan")
+    .map((issue) => issue.issue_id));
+  const contracts = view.tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony" || !planIssueIds.has(comment.issue_id)) return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "plan_contract" ? [parsed.value] : [];
+  });
+  if (contracts.some((contract) => contract.rootIssueId !== view.root.issueId || contract.cycleIssueId !== cycleIssueId)) {
+    return { kind: "invalid", code: "cycle_outcome_plan_contract_foreign" };
+  }
+  const superseded = new Set(view.tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony") return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "plan_contract_supersession" &&
+      parsed.value.rootIssueId === view.root.issueId && parsed.value.cycleIssueId === cycleIssueId
+      ? [parsed.value.supersededPlanContractDigest]
+      : [];
+  }));
+  const active = contracts.filter((contract) => !superseded.has(contract.planContractDigest));
+  if (active.length === 0) return { kind: "valid" };
+  if (active.length !== 1) return { kind: "invalid", code: "cycle_outcome_plan_contract_conflict" };
+  return { kind: "valid", planContractDigest: active[0]!.planContractDigest };
+}
+
+function cycleOutcomeFor(
+  view: RootReconciliationView,
+  cycleIssueId: string,
+):
+  | { kind: "valid"; record: CycleOutcomeRecord; comment: RootReconciliationView["tree"]["comments"][number] }
+  | { kind: "invalid"; code: "missing" | "conflict" | "foreign" } {
+  const outcomes = view.tree.comments.flatMap((comment) => {
+    if (comment.issue_id !== cycleIssueId || comment.author_kind !== "symphony") return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "cycle_outcome" ? [{ record: parsed.value, comment }] : [];
+  });
+  if (outcomes.length === 0) return { kind: "invalid", code: "missing" };
+  if (outcomes.length !== 1) return { kind: "invalid", code: "conflict" };
+  const outcome = outcomes[0]!;
+  if (outcome.record.rootIssueId !== view.root.issueId || outcome.record.cycleIssueId !== cycleIssueId) {
+    return { kind: "invalid", code: "foreign" };
+  }
+  if (outcome.record.cycleOutcomeId !== cycleOutcomeId({
+    rootIssueId: outcome.record.rootIssueId,
+    cycleIssueId: outcome.record.cycleIssueId,
+    rootDirectiveId: outcome.record.sourceRootDirectiveId,
+  })) {
+    return { kind: "invalid", code: "foreign" };
+  }
+  return { kind: "valid", ...outcome };
+}
+
+function outcomeMatchesCycleStatus(record: CycleOutcomeRecord, statusName: string): boolean {
+  if (record.conclusion === "succeeded") return statusName === "Succeeded";
+  if (record.conclusion === "canceled") return statusName === "Canceled";
+  return statusName === "Changes Required";
+}
+
+function cycleOutcomeFailed(
+  directive: RootDirective,
+  code: string,
+): { kind: "failed"; rootDirectiveId: string; code: string; sanitizedReason: string } {
+  return { kind: "failed", rootDirectiveId: directive.rootDirectiveId, code, sanitizedReason: code };
 }
 
 function treeOperationIssueKey(

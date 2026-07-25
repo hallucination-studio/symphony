@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { parseManagedRecord } from "../api/index.js";
+import { cycleOutcomeId, parseManagedRecord } from "../api/index.js";
 import type {
+  FindingRecord,
   ManagedRecord,
   PlanContract,
   StageResultRecord,
@@ -481,6 +482,7 @@ function cycleObservation(
     }
   }
   const cycleIssues = issues.filter(({ issueId }) => descendants.has(issueId));
+  const cycleCommentIssueIds = new Set([cycle.issue_id, ...descendants]);
   const cycleRelations = tree.relations
     .filter((relation) => descendants.has(relation.source_issue_id) && descendants.has(relation.target_issue_id))
     .map(toFactRelation);
@@ -511,6 +513,44 @@ function cycleObservation(
       ? [{ comment: entry.comment, record: entry.record }]
       : [],
   );
+  const workResults = managedRecordComments.flatMap((entry) =>
+    entry.record.kind === "stage_result" &&
+    entry.record.stage === "work" &&
+    entry.record.rootIssueId === tree.root_issue_id &&
+    entry.record.cycleIssueId === cycle.issue_id &&
+    descendants.has(entry.record.nodeIssueId)
+      ? [{ comment: entry.comment, record: entry.record }]
+      : [],
+  );
+  const verifyResults = managedRecordComments.flatMap((entry) =>
+    entry.record.kind === "verify_result" &&
+    entry.record.rootIssueId === tree.root_issue_id &&
+    entry.record.cycleIssueId === cycle.issue_id &&
+    descendants.has(entry.record.nodeIssueId)
+      ? [{ comment: entry.comment, record: entry.record }]
+      : [],
+  );
+  const verifyExecutionIds = new Set(verifyResults.map(({ record }) => record.stageExecutionId));
+  const findings = managedRecordComments.flatMap((entry) =>
+    entry.record.kind === "finding" &&
+    cycleCommentIssueIds.has(entry.comment.issue_id) &&
+    verifyExecutionIds.has(entry.record.sourceVerifyId)
+      ? [rootFinding(entry.record)]
+      : [],
+  );
+  const outcomes = managedRecordComments.flatMap((entry) =>
+    entry.record.kind === "cycle_outcome" &&
+    entry.comment.issue_id === cycle.issue_id &&
+    entry.record.rootIssueId === tree.root_issue_id &&
+    entry.record.cycleIssueId === cycle.issue_id &&
+    entry.record.cycleOutcomeId === cycleOutcomeId({
+      rootIssueId: entry.record.rootIssueId,
+      cycleIssueId: entry.record.cycleIssueId,
+      rootDirectiveId: entry.record.sourceRootDirectiveId,
+    })
+      ? [{ comment: entry.comment, record: entry.record }]
+      : [],
+  );
   const activePlanIssueIds = new Set(tree.issues
     .filter((issue) => issue.parent_issue_id === cycle.issue_id && issue.issue_kind === "plan" && !issue.is_archived && issue.status_name === "In Review")
     .map(({ issue_id }) => issue_id));
@@ -528,15 +568,25 @@ function cycleObservation(
     cycleStatus: cycle.status_name as RootFactIssue["status"],
     isArchived: cycle.is_archived,
     ...(activePlanContracts[0] ? { activePlanContract: activePlanContracts[0].record } : {}),
+    ...(outcomes.length === 1 ? { outcome: recordReference(outcomes[0]!.record) } : {}),
     issues: cycleIssues,
     relations: cycleRelations,
     planResults: planResults.map(({ comment, record }) => recordReference(record, comment.remote_version)),
     planCompletedResults: planResults.map(({ record }) => planCompletedResult(record)),
-    workResults: [],
-    verifyResults: [],
-    findings: [],
+    workResults: workResults.map(({ record }) => recordReference(record)),
+    verifyResults: verifyResults.map(({ record }) => recordReference(record)),
+    findings,
     humanActionRecords,
     humanActionResolutions,
+  };
+}
+
+function rootFinding(record: FindingRecord) {
+  return {
+    findingId: record.findingId,
+    category: record.category,
+    severity: record.severity,
+    summary: record.suggestedRemediation.join(" ") || `Finding ${record.findingId}.`,
   };
 }
 
@@ -607,6 +657,7 @@ function recordReference(record: ManagedRecord, stableWriteId?: string): RootRec
       : "rootDirectiveId" in record ? record.rootDirectiveId
       : "actionId" in record ? record.actionId
         : "supersessionId" in record ? record.supersessionId
+          : "cycleOutcomeId" in record ? record.cycleOutcomeId
         : `${record.kind}:${digest(record).slice(0, 24)}`;
   return {
     recordId: identity,

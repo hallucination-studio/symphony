@@ -3,6 +3,7 @@ import type {
   AffectedScope,
   CheckEvidence,
   ConvergenceRecord,
+  CycleOutcomeRecord,
   DeliveryRecord,
   FindingDispositionRecord,
   FindingEvidence,
@@ -117,6 +118,7 @@ function managedRecordSummary(kind: ManagedRecord["kind"]): string {
     case "finding_disposition": return "Finding disposition recorded.";
     case "verify_result": return "Verification result recorded.";
     case "progress_assessment": return "Progress assessment recorded.";
+    case "cycle_outcome": return "Cycle outcome recorded.";
     case "convergence": return "Convergence assessment recorded.";
   }
 }
@@ -143,6 +145,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "finding_disposition": return decodeFindingDisposition(object);
     case "verify_result": return decodeVerifyResult(object);
     case "progress_assessment": return decodeProgressAssessment(object);
+    case "cycle_outcome": return decodeCycleOutcome(object);
     case "convergence": return decodeConvergence(object);
     default: fail("managed_record_kind_invalid");
   }
@@ -593,6 +596,65 @@ function decodeProgressAssessment(o: Record<string, unknown>): ProgressAssessmen
   return { kind: "progress_assessment", version: 1, rootIssueId: id(o, "root_issue_id"), previousVerifyId: id(o, "previous_verify_id"), currentVerifyId: id(o, "current_verify_id"), resolvedFindingIds: ids(o, "resolved_finding_ids"), previousPassedCriterionKeys: ids(o, "previous_passed_criterion_keys"), currentPassedCriterionKeys: ids(o, "current_passed_criterion_keys"), previousPassedCheckKeys: ids(o, "previous_passed_check_keys"), currentPassedCheckKeys: ids(o, "current_passed_check_keys"), isProgress: bool(o, "is_progress") };
 }
 
+function decodeCycleOutcome(o: Record<string, unknown>): CycleOutcomeRecord {
+  fields(o, [
+    "kind", "version", "cycle_outcome_id", "root_issue_id", "cycle_issue_id", "source_root_directive_id",
+    "conclusion", "plan_contract_digest", "completed_work_ids", "unresolved_finding_ids", "attempted_approach_refs",
+    "verification_evidence_refs", "git_revision", "budget_usage", "successor_reason", "concluded_at",
+  ], ["plan_contract_digest", "successor_reason"]);
+  const budgetUsage = decodeCycleBudgetUsage(requiredObject(o, "budget_usage"));
+  return {
+    kind: "cycle_outcome",
+    version: 1,
+    cycleOutcomeId: id(o, "cycle_outcome_id"),
+    rootIssueId: id(o, "root_issue_id"),
+    cycleIssueId: id(o, "cycle_issue_id"),
+    sourceRootDirectiveId: id(o, "source_root_directive_id"),
+    conclusion: enumValue(o, "conclusion", ["succeeded", "repair_required", "exhausted", "superseded", "canceled"]),
+    ...(o.plan_contract_digest === undefined ? {} : { planContractDigest: id(o, "plan_contract_digest") }),
+    completedWorkIds: ids(o, "completed_work_ids"),
+    unresolvedFindingIds: ids(o, "unresolved_finding_ids"),
+    attemptedApproachRefs: array(o, "attempted_approach_refs", decodeEvidenceReference),
+    verificationEvidenceRefs: array(o, "verification_evidence_refs", decodeEvidenceReference),
+    gitRevision: id(o, "git_revision"),
+    budgetUsage,
+    ...(o.successor_reason === undefined ? {} : {
+      successorReason: enumValue(o, "successor_reason", ["root_contract_changed", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"]),
+    }),
+    concludedAt: timestamp(o, "concluded_at"),
+  };
+}
+
+function decodeCycleBudgetUsage(o: Record<string, unknown>): CycleOutcomeRecord["budgetUsage"] {
+  fields(o, ["scope", "source_record_count", "source_digest", "is_complete", "unknown_turn_count", "groups"]);
+  if (enumValue(o, "scope", ["cycle"]) !== "cycle") fail("managed_record_cycle_budget_scope_invalid");
+  const groups = array(o, "groups", (entry) => {
+    fields(entry, [
+      "cycle_issue_id", "role", "model", "input_tokens", "cached_input_tokens", "output_tokens",
+      "reasoning_output_tokens", "total_tokens", "unavailable_turn_count",
+    ], ["cycle_issue_id"]);
+    return {
+      ...(entry.cycle_issue_id === undefined ? {} : { cycleIssueId: id(entry, "cycle_issue_id") }),
+      role: enumValue(entry, "role", ["plan", "work", "verify"]),
+      model: text(entry, "model"),
+      inputTokens: integer(entry, "input_tokens"),
+      cachedInputTokens: integer(entry, "cached_input_tokens"),
+      outputTokens: integer(entry, "output_tokens"),
+      reasoningOutputTokens: integer(entry, "reasoning_output_tokens"),
+      totalTokens: integer(entry, "total_tokens"),
+      unavailableTurnCount: integer(entry, "unavailable_turn_count"),
+    };
+  });
+  return {
+    scope: "cycle",
+    sourceRecordCount: integer(o, "source_record_count"),
+    sourceDigest: id(o, "source_digest"),
+    isComplete: bool(o, "is_complete"),
+    unknownTurnCount: integer(o, "unknown_turn_count"),
+    groups,
+  };
+}
+
 function decodeConvergence(o: Record<string, unknown>): ConvergenceRecord {
   fields(o, ["kind", "version", "root_issue_id", "observed_at", "policy", "view", "trigger", "decision"]);
   const policy = requiredObject(o, "policy");
@@ -674,6 +736,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     finding_disposition: { allowed: ["kind", "version", "findingId", "sourceVerifyId", "disposition", "evidence"] },
     verify_result: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "conclusion", "criteriaResults", "checks", "verifiedRevision"] },
     progress_assessment: { allowed: ["kind", "version", "rootIssueId", "previousVerifyId", "currentVerifyId", "resolvedFindingIds", "previousPassedCriterionKeys", "currentPassedCriterionKeys", "previousPassedCheckKeys", "currentPassedCheckKeys", "isProgress"] },
+    cycle_outcome: { allowed: ["kind", "version", "cycleOutcomeId", "rootIssueId", "cycleIssueId", "sourceRootDirectiveId", "conclusion", "planContractDigest", "completedWorkIds", "unresolvedFindingIds", "attemptedApproachRefs", "verificationEvidenceRefs", "gitRevision", "budgetUsage", "successorReason", "concludedAt"], optional: ["planContractDigest", "successorReason"] },
     convergence: { allowed: ["kind", "version", "rootIssueId", "observedAt", "policy", "view", "trigger", "decision"] },
   };
   const shape = topFields[record.kind];
@@ -741,8 +804,49 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "finding_disposition": return encodeSimple(record, { finding_id: record.findingId, source_verify_id: record.sourceVerifyId, disposition: record.disposition, evidence: record.evidence.map(encodeFindingEvidence) });
     case "verify_result": return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, conclusion: record.conclusion, criteria_results: record.criteriaResults.map((criterion) => { recordFields(criterion, ["criterionKey", "outcome", "summary"]); return { criterion_key: criterion.criterionKey, outcome: criterion.outcome, summary: criterion.summary }; }), checks: record.checks.map(encodeCheck), verified_revision: record.verifiedRevision });
     case "progress_assessment": return encodeSimple(record, { root_issue_id: record.rootIssueId, previous_verify_id: record.previousVerifyId, current_verify_id: record.currentVerifyId, resolved_finding_ids: record.resolvedFindingIds, previous_passed_criterion_keys: record.previousPassedCriterionKeys, current_passed_criterion_keys: record.currentPassedCriterionKeys, previous_passed_check_keys: record.previousPassedCheckKeys, current_passed_check_keys: record.currentPassedCheckKeys, is_progress: record.isProgress });
+    case "cycle_outcome": return encodeSimple(record, {
+      cycle_outcome_id: record.cycleOutcomeId,
+      root_issue_id: record.rootIssueId,
+      cycle_issue_id: record.cycleIssueId,
+      source_root_directive_id: record.sourceRootDirectiveId,
+      conclusion: record.conclusion,
+      ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }),
+      completed_work_ids: record.completedWorkIds,
+      unresolved_finding_ids: record.unresolvedFindingIds,
+      attempted_approach_refs: record.attemptedApproachRefs.map(encodeEvidenceReference),
+      verification_evidence_refs: record.verificationEvidenceRefs.map(encodeEvidenceReference),
+      git_revision: record.gitRevision,
+      budget_usage: encodeCycleBudgetUsage(record.budgetUsage),
+      ...(record.successorReason === undefined ? {} : { successor_reason: record.successorReason }),
+      concluded_at: record.concludedAt,
+    });
     case "convergence": return encodeSimple(record, { root_issue_id: record.rootIssueId, observed_at: record.observedAt, policy: { max_cycles_per_root: record.policy.maxCyclesPerRoot, max_same_open_finding_cycles: record.policy.maxSameOpenFindingCycles, max_consecutive_no_progress: record.policy.maxConsecutiveNoProgress, max_total_tokens: record.policy.maxTotalTokens, deadline_at: record.policy.deadlineAt }, view: { cycle_count: record.view.cycleCount, open_finding_persistence: record.view.openFindingPersistence.map((entry) => { recordFields(entry, ["findingId", "openCycleCount"]); return { finding_id: entry.findingId, open_cycle_count: entry.openCycleCount }; }), consecutive_no_progress: record.view.consecutiveNoProgress, settled_tokens: record.view.settledTokens, open_token_reservations: record.view.openTokenReservations.map((entry) => { recordFields(entry, ["stageExecutionId", "reservedTotalTokens"]); return { stage_execution_id: entry.stageExecutionId, reserved_total_tokens: entry.reservedTotalTokens }; }), is_deadline_exceeded: record.view.isDeadlineExceeded, root_is_canceled: record.view.rootIsCanceled }, trigger: record.trigger, decision: record.decision });
   }
+}
+
+function encodeCycleBudgetUsage(usage: CycleOutcomeRecord["budgetUsage"]): Record<string, unknown> {
+  recordFields(usage, ["scope", "sourceRecordCount", "sourceDigest", "isComplete", "unknownTurnCount", "groups"]);
+  return {
+    scope: usage.scope,
+    source_record_count: usage.sourceRecordCount,
+    source_digest: usage.sourceDigest,
+    is_complete: usage.isComplete,
+    unknown_turn_count: usage.unknownTurnCount,
+    groups: usage.groups.map((group) => {
+      recordFields(group, ["cycleIssueId", "role", "model", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens", "unavailableTurnCount"], ["cycleIssueId"]);
+      return {
+        ...(group.cycleIssueId === undefined ? {} : { cycle_issue_id: group.cycleIssueId }),
+        role: group.role,
+        model: group.model,
+        input_tokens: group.inputTokens,
+        cached_input_tokens: group.cachedInputTokens,
+        output_tokens: group.outputTokens,
+        reasoning_output_tokens: group.reasoningOutputTokens,
+        total_tokens: group.totalTokens,
+        unavailable_turn_count: group.unavailableTurnCount,
+      };
+    }),
+  };
 }
 
 function encodeRootOwnership(record: RootOwnershipRecord): Record<string, unknown> { return encodeSimple(record, { root_issue_id: record.rootIssueId, conductor_id: record.conductorId, performer_profile_id: record.performerProfileId, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), owner_generation: record.ownerGeneration }); }

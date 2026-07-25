@@ -4,7 +4,7 @@ import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPol
 import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import type { RootSafetyPolicyInterface } from "../api/RootSafetyPolicyInterface.js";
-import type { LinearGatewayInterface, LinearWorkflowMutationCommand } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { LinearGatewayInterface, LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
@@ -20,6 +20,7 @@ import type {
   RootDirective,
   RootReconciliationView,
   RootReconcilerTurnResult,
+  EvidenceRef,
   ReconcilerLimits,
   StageResult,
   StageTurnInput,
@@ -27,6 +28,7 @@ import type {
   UserCommentReply,
 } from "../api/index.js";
 import {
+  cycleOutcomeId,
   findWorkflowIssue,
   planContractSupersessionId,
   parseManagedRecord,
@@ -965,14 +967,31 @@ export function directiveMaterializationComplete(directive: RootDirective, tree:
   if (action.kind === "conclude_cycle") {
     const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
     const expected = action.conclusion === "succeeded" ? "Succeeded" : action.conclusion === "canceled" ? "Canceled" : "Changes Required";
-    return cycle?.status_name === expected;
+    return cycle?.status_name === expected && tree.comments.some((comment) => {
+      if (comment.issue_id !== action.cycleIssueId || comment.author_kind !== "symphony") return false;
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "cycle_outcome" &&
+        parsed.value.cycleOutcomeId === cycleOutcomeId({
+          rootIssueId: tree.root_issue_id,
+          cycleIssueId: action.cycleIssueId,
+          rootDirectiveId: directive.rootDirectiveId,
+        }) &&
+        parsed.value.rootIssueId === tree.root_issue_id &&
+        parsed.value.cycleIssueId === action.cycleIssueId &&
+        parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
+        parsed.value.conclusion === action.conclusion &&
+        sameIds(parsed.value.completedWorkIds, action.completedWorkIds) &&
+        sameIds(parsed.value.unresolvedFindingIds, action.unresolvedFindingIds) &&
+        sameEvidenceRefs(parsed.value.attemptedApproachRefs, action.attemptedApproachRefs) &&
+        sameEvidenceRefs(parsed.value.verificationEvidenceRefs, action.verificationEvidenceRefs);
+    });
   }
   if (action.kind === "create_cycle") {
     return Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
       Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
   }
   if (action.kind === "supersede_cycle") {
-    return tree.issues.some(({ issue_id, status_name }) => issue_id === action.currentCycleIssueId && status_name === "Changes Required") &&
+    return cycleOutcomeMaterialized(tree, directive, action.currentCycleIssueId, "superseded", "Changes Required") &&
       Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
       Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
   }
@@ -1008,10 +1027,36 @@ export function directiveMaterializationComplete(directive: RootDirective, tree:
   if (action.kind === "conclude_root") return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "In Review";
   if (action.kind === "cancel_root") {
     return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "Canceled" &&
-      (!action.activeCycleIssueId || tree.issues.find(({ issue_id }) => issue_id === action.activeCycleIssueId)?.status_name === "Canceled");
+      (!action.activeCycleIssueId || cycleOutcomeMaterialized(tree, directive, action.activeCycleIssueId, "canceled", "Canceled"));
   }
   if (action.kind === "revise_root_tree") return treeOperationsComplete(action.operations, tree);
   return false;
+}
+
+function cycleOutcomeMaterialized(
+  tree: LinearWorkflowTreeSnapshot,
+  directive: RootDirective,
+  cycleIssueId: string,
+  conclusion: "succeeded" | "repair_required" | "exhausted" | "superseded" | "canceled",
+  expectedStatus: "Succeeded" | "Changes Required" | "Canceled",
+): boolean {
+  const cycle = tree.issues.find(({ issue_id }) => issue_id === cycleIssueId);
+  if (cycle?.status_name !== expectedStatus) return false;
+  const outcomes = tree.comments.filter((comment) => {
+    if (comment.issue_id !== cycleIssueId || comment.author_kind !== "symphony") return false;
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "cycle_outcome" &&
+      parsed.value.cycleOutcomeId === cycleOutcomeId({
+        rootIssueId: tree.root_issue_id,
+        cycleIssueId,
+        rootDirectiveId: directive.rootDirectiveId,
+      }) &&
+      parsed.value.rootIssueId === tree.root_issue_id &&
+      parsed.value.cycleIssueId === cycleIssueId &&
+      parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
+      parsed.value.conclusion === conclusion;
+  });
+  return outcomes.length === 1;
 }
 
 function sameReplySource(
@@ -1105,6 +1150,14 @@ function viewWithDigest(view: RootReconciliationView, treeDigest: string): RootR
 
 function sameIds(left: string[], right: string[]): boolean {
   return left.length === right.length && left.slice().sort().every((value, index) => value === right.slice().sort()[index]);
+}
+
+function sameEvidenceRefs(
+  left: EvidenceReference[],
+  right: EvidenceRef[],
+): boolean {
+  const key = (value: { referenceId: string; sourceKind: string }) => `${value.sourceKind}\0${value.referenceId}`;
+  return left.length === right.length && left.map(key).sort().every((value, index) => value === right.map(key).sort()[index]);
 }
 
 function statusForOutcome(outcome: HumanActionResolution["outcome"]): "Approved" | "Rejected" | "Answered" | "Canceled" {

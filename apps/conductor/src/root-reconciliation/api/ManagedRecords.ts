@@ -422,6 +422,46 @@ export interface ProgressAssessment {
   isProgress: boolean;
 }
 
+export interface CycleBudgetUsageGroup {
+  cycleIssueId?: string;
+  role: "plan" | "work" | "verify";
+  model: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  unavailableTurnCount: number;
+}
+
+export interface CycleBudgetUsage {
+  scope: "cycle";
+  sourceRecordCount: number;
+  sourceDigest: string;
+  isComplete: boolean;
+  unknownTurnCount: number;
+  groups: CycleBudgetUsageGroup[];
+}
+
+export interface CycleOutcomeRecord {
+  kind: "cycle_outcome";
+  version: ManagedRecordVersion;
+  cycleOutcomeId: string;
+  rootIssueId: string;
+  cycleIssueId: string;
+  sourceRootDirectiveId: string;
+  conclusion: "succeeded" | "repair_required" | "exhausted" | "superseded" | "canceled";
+  planContractDigest?: string;
+  completedWorkIds: string[];
+  unresolvedFindingIds: string[];
+  attemptedApproachRefs: EvidenceReference[];
+  verificationEvidenceRefs: EvidenceReference[];
+  gitRevision: string;
+  budgetUsage: CycleBudgetUsage;
+  successorReason?: "root_contract_changed" | "repair_required" | "exhausted" | "user_requested_retry" | "unresolved_findings";
+  concludedAt: string;
+}
+
 export type ConvergenceTrigger =
   | "none"
   | "root_canceled"
@@ -474,4 +514,5 @@ export type ManagedRecord =
   | FindingDispositionRecord
   | VerifyResultRecord
   | ProgressAssessment
+  | CycleOutcomeRecord
   | ConvergenceRecord;

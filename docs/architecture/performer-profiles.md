@@ -352,8 +352,9 @@ execution failure，不伪造ModelTurnRecord或token使用。Stage Result record
 实际SDK调用设置和SDK usage填充。
 
 Conductor只从Linear中immutable `ModelTurnRecord`重建累计值。execution identity防止同一个turn重复计算；Timeline和
-aggregate snapshot只是派生显示，不是第二份usage ledger，也不得再次计数。没有本地counter、usage数据库、Control Record
-副本或Desktop计数器。
+aggregate snapshot，以及terminal `CycleOutcome.budget_usage`，都只是带source digest的派生证明或显示，不是第二份usage
+ledger，也不得再次计数。每次fresh read必须能从同一组turn records逐字段重建并校验这些派生值。没有本地counter、usage数据库、
+Control Record副本或Desktop计数器。
 
 聚合范围固定为：
 

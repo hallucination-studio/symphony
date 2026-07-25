@@ -214,7 +214,7 @@ export interface RootGitFacts {
 }
 
 export interface MechanicalViolation {
-  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "missing_stage_result" | "invalid_tree";
+  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "missing_stage_result" | "cycle_terminal_outcome_mismatch" | "invalid_tree";
   sourceIssueIds: string[];
   summary: string;
 }

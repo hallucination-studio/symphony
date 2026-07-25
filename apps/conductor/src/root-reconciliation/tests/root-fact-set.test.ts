@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { serializeManagedRecord } from "../api/index.js";
+import { cycleOutcomeId, parseManagedRecord, serializeManagedRecord } from "../api/index.js";
 import { buildRootFactSet, diffRootFactSets } from "../internal/RootFactSet.js";
+import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 
 const root = {
   issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
@@ -170,6 +171,64 @@ test("a completed Plan enters the next delta as its full Result and canonical Co
   }
 });
 
+test("reconstructs an archived CycleOutcome with its durable Finding history", () => {
+  const workflow = cycleOutcomeTree();
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+  const cycle = factSet.bootstrap.rootSnapshot.cycles.find(({ cycleIssue }) => cycleIssue.issueId === "cycle-1");
+
+  assert.deepEqual(cycle?.outcome, {
+    recordId: cycleOutcomeId({ rootIssueId: "root-1", cycleIssueId: "cycle-1", rootDirectiveId: "directive-1" }),
+    recordKind: "cycle_outcome",
+    recordVersion: "1",
+    writeId: cycleOutcomeId({ rootIssueId: "root-1", cycleIssueId: "cycle-1", rootDirectiveId: "directive-1" }),
+  });
+  assert.deepEqual(cycle?.findings, [{
+    findingId: "finding-1",
+    category: "code",
+    severity: "high",
+    summary: "Fix the failing verification before retrying.",
+  }]);
+  assert.ok(cycle?.verifyResults.some(({ recordKind }) => recordKind === "verify_result"));
+});
+
+test("a terminal Cycle without one matching Outcome is a Reconciler mechanical violation", () => {
+  const policy = new LinearRootSafetyPolicyImpl();
+  const validTree = cycleOutcomeTree();
+  const valid = policy.validate({ root, tree: validTree });
+  assert.equal(valid.kind, "safe");
+  if (valid.kind === "safe") {
+    assert.equal(valid.mechanicalViolations.some(({ violationKind }) => violationKind === "cycle_terminal_outcome_mismatch"), false);
+    assert.equal(valid.mechanicalViolations.some(({ violationKind }) => violationKind === "multiple_nonterminal_cycles"), false);
+  }
+
+  const missingOutcomeTree = cycleOutcomeTree();
+  missingOutcomeTree.comments = missingOutcomeTree.comments.filter((comment) => !comment.body.includes("cycle_outcome"));
+  const missing = policy.validate({ root, tree: missingOutcomeTree });
+  assert.equal(missing.kind, "safe");
+  if (missing.kind === "safe") {
+    assert.ok(missing.mechanicalViolations.some(({ violationKind }) => violationKind === "cycle_terminal_outcome_mismatch"));
+  }
+
+  const identityMismatchTree = cycleOutcomeTree();
+  const comment = identityMismatchTree.comments.find((candidate) => {
+    const parsed = parseManagedRecord(candidate.body);
+    return parsed.ok && parsed.value.kind === "cycle_outcome";
+  });
+  assert.ok(comment);
+  const parsed = parseManagedRecord(comment.body);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok || parsed.value.kind !== "cycle_outcome") throw new Error("cycle_outcome_fixture_invalid");
+  comment.body = serializeManagedRecord({ ...parsed.value, cycleOutcomeId: "cycle-outcome-invalid" });
+
+  const identityMismatch = policy.validate({ root, tree: identityMismatchTree });
+  assert.equal(identityMismatch.kind, "safe");
+  if (identityMismatch.kind === "safe") {
+    assert.ok(identityMismatch.mechanicalViolations.some(({ violationKind }) => violationKind === "cycle_terminal_outcome_mismatch"));
+  }
+  const facts = buildRootFactSet({ root, tree: identityMismatchTree, git: git("head-1"), mechanicalViolations: [] });
+  assert.equal(facts.bootstrap.rootSnapshot.cycles.find(({ cycleIssue }) => cycleIssue.issueId === "cycle-1")?.outcome, undefined);
+});
+
 test("a Symphony-authored malformed record fails closed instead of becoming an ignored comment", () => {
   const workflow = tree("Root", "root-v1");
   workflow.comments = [{
@@ -271,6 +330,56 @@ function planTree(completed: boolean): LinearWorkflowTreeSnapshot {
       })),
     ];
   }
+  return workflow;
+}
+
+function cycleOutcomeTree(): LinearWorkflowTreeSnapshot {
+  const workflow = planTree(true);
+  const cycle = workflow.issues.find(({ issue_id }) => issue_id === "cycle-1")!;
+  cycle.is_archived = true;
+  cycle.status_id = "changes-required";
+  cycle.status_name = "Changes Required";
+  cycle.status_category = "completed";
+  workflow.status_catalog.push({ status_id: "changes-required", name: "Changes Required", category: "completed", position: 4 });
+  workflow.issues.push({
+    issue_id: "verify-1", identifier: "SYM-4", project_id: "project-1", parent_issue_id: "cycle-1",
+    status_id: "changes-required", status_name: "Changes Required", status_category: "completed", status_position: 4,
+    order: 3, depth: 2, title: "Verify", description: "Verify", labels: [], is_archived: true,
+    issue_kind: "verify", remote_version: "verify-v1", updated_at: "2026-07-23T00:00:00Z",
+  });
+  workflow.comments.push(
+    managedComment("verify-1", serializeManagedRecord({
+      kind: "stage_result" as const, version: 1 as const, resultId: "verify-stage-result-1", rootIssueId: "root-1", cycleIssueId: "cycle-1",
+      nodeIssueId: "verify-1", stage: "verify" as const, roleSessionId: "verify-session-1", roleTurnId: "verify-turn-1",
+      observedTreeDigest: "tree-1", contextDigest: "context-1", outcomeKind: "verify_changes_required" as const,
+      summary: "Verification found a failure.", sourceManifest: [], completedAt: "2026-07-23T00:00:03Z",
+      modelTurn: {
+        turnRecordId: "verify-stage-result-1:verify-turn-1", role: "verify" as const, rootIssueId: "root-1", cycleIssueId: "cycle-1",
+        targetIssueId: "verify-1", stageExecutionId: "verify-stage-result-1", roleSessionId: "verify-session-1", roleTurnId: "verify-turn-1",
+        invocationState: "confirmed" as const, model: "gpt", outcome: "verify_changes_required" as const,
+        usage: { status: "measured" as const, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 },
+        terminalAt: "2026-07-23T00:00:03Z",
+      },
+      verifyConclusion: "changes_required" as const, verifiedRevision: "head-1",
+    })),
+    managedComment("verify-1", serializeManagedRecord({
+      kind: "verify_result" as const, version: 1 as const, stageExecutionId: "verify-stage-result-1", rootIssueId: "root-1",
+      cycleIssueId: "cycle-1", nodeIssueId: "verify-1", conclusion: "changes_required" as const,
+      criteriaResults: [], checks: [], verifiedRevision: "head-1",
+    })),
+    managedComment("verify-1", serializeManagedRecord({
+      kind: "finding" as const, version: 1 as const, findingId: "finding-1", sourceVerifyId: "verify-stage-result-1",
+      category: "code" as const, severity: "high" as const, evidence: [], affectedScope: [], retryable: true,
+      suggestedRemediation: ["Fix the failing verification before retrying."], acceptanceCriteria: [],
+    })),
+    managedComment("cycle-1", serializeManagedRecord({
+      kind: "cycle_outcome", version: 1, cycleOutcomeId: cycleOutcomeId({ rootIssueId: "root-1", cycleIssueId: "cycle-1", rootDirectiveId: "directive-1" }), rootIssueId: "root-1", cycleIssueId: "cycle-1",
+      sourceRootDirectiveId: "directive-1", conclusion: "exhausted", planContractDigest: "a".repeat(64),
+      completedWorkIds: [], unresolvedFindingIds: ["finding-1"], attemptedApproachRefs: [], verificationEvidenceRefs: [],
+      gitRevision: "head-1", budgetUsage: { scope: "cycle", sourceRecordCount: 3, sourceDigest: "0".repeat(64), isComplete: true, unknownTurnCount: 0, groups: [] },
+      concludedAt: "2026-07-23T00:00:04Z",
+    } as never)),
+  );
   return workflow;
 }
 

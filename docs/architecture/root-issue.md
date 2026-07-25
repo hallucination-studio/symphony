@@ -272,8 +272,10 @@ disposition；archive本身不能解决Finding。
 
 ```text
 CycleOutcome
+  cycle_outcome_id
+  source_root_directive_id
   conclusion: succeeded | repair_required | exhausted | superseded | canceled
-  plan_contract_digest
+  plan_contract_digest?
   completed_work_ids[]
   unresolved_finding_ids[]
   attempted_approach_refs[]
@@ -281,7 +283,16 @@ CycleOutcome
   git_revision
   budget_usage
   successor_reason?
+  concluded_at
 ```
+
+每个`CycleOutcome`是Cycle Issue上的唯一immutable managed comment。`cycle_outcome_id`由
+`root_issue_id`、`cycle_issue_id`和source directive确定；同一Cycle不得存在第二个outcome，也不得改写已有
+outcome。所有读取方必须重算并验证该ID后才可将它作为有效事实。Conductor只从fresh Linear/Git事实派生`plan_contract_digest`、`git_revision`和`budget_usage`，先append并
+strict decode/read-back该record，再写终态status。`budget_usage`固定为该Cycle的Plan/Work/Verify
+`ModelTurnRecord`派生聚合，携带canonical source digest/count、完整性、unknown turn count和按stage/model分组；它只是一份
+可逐字段重算的终态证明，不能作为usage ledger、预算gate输入或恢复来源。尚未产生Plan Contract的Cycle可以被取消或
+supersede，此时`plan_contract_digest`缺席；Conductor不得伪造digest，也不得因此跳过Outcome。
 
 映射：
 
@@ -295,6 +306,9 @@ CycleOutcome
 Cycle预算耗尽结束当前Cycle，不机械打扰用户。Root Reconciler根据完整历史选择successor或Root级convergence Human
 Action；Conductor只从全部active/archived历史重新计算cycle count、same Finding persistence、no-progress、token和
 deadline gate，并允许或拒绝matching directive，不能把gate结果转换成另一种动作。
+创建non-initial successor前，Conductor必须确认predecessor保持terminal且恰有一个scope正确、status映射正确的
+`CycleOutcome`；`reason=exhausted`还必须matching predecessor `conclusion=exhausted`。缺失、冲突、foreign或read-back
+失败都使当前Root停在Linear事实处，不能创建Cycle或Plan。
 
 ## 10. Root control record与Timeline
 
