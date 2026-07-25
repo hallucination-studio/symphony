@@ -105,12 +105,25 @@ types、production code、tests、fixtures和E2E证据；task文件、日志、r
 - 明确拒绝三类双路径：从timeline/reply恢复或重计Stage Result/usage、由reaction/thread/record/delta驱动Issue
   lifecycle、由thread-change history/webhook cache/local state重放Root输入，以及任何HTML marker/managed-marker/
   revision-event/compatibility reader、writer或fallback；
-- E2E通过条件只能是fresh Linear/Git read-back；不得以process exit、runtime state、session、log或synthetic `final`
-  代替；
+- E2E审计必须验证实现只遵守[并行黑盒端到端验收](black-box-e2e.md)这一处测试拓扑、证据和verdict权威；
 - 每个finding必须成为一个有architecture source、删除范围、验收条件和验证命令的独立修复项。修复后重跑完整audit，
   直到零finding；不得以waiver关闭。
 
 ## 10. 真实边界验收
+
+### 10.1 R8：并行黑盒E2E Campaign
+
+- 硬切删除串行scenario runner、产品`internal` import、direct Store write和Symphony actor代替human actor的路径；
+- 在同一真实Project provision至少三个独立Conductor，并通过start barrier并发启动；
+- 使用独立E2E Human Actor并行执行全部mandatory Cases；
+- all-settled后丢弃polling cache，从Linear/Git生成每个Case的Final Evidence Snapshot；
+- 用durable Stage execution/result interval证明至少两个不同Conductor真正overlap；
+- architecture guards拒绝任何旧runner、synthetic completion或第二套Case lifecycle重新出现。
+
+R8的topology、actor隔离、Case matrix、证据和verdict只由
+[并行黑盒端到端验收](black-box-e2e.md)定义。本Roadmap只拥有实施顺序，不复制runner contract。
+
+### 10.2 Acceptance
 
 最终必须证明：
 
@@ -124,9 +137,9 @@ types、production code、tests、fixtures和E2E证据；task文件、日志、r
 6. process/session重启只靠Linear/Git恢复并拒绝旧output。
 7. Root/Cycle timeline comments从events幂等materialize并可在crash后补齐；每个event恰有一条同时包含用户Markdown和
    strict `symphony` code block的comment，tracked surface不存在HTML marker reader/writer或第二timeline record。
-8. delivery read-back与Root `In Review`一致；E2E只以fresh Linear Issue status、strict managed code blocks、native
-   thread/reaction和Git事实作为通过证据，process exit、runtime state、session、日志或synthetic `final` marker不能证明完成，
-   也不存在另一套Workflow completion路径。
+8. [并行黑盒端到端验收](black-box-e2e.md)的全部mandatory Cases通过，包括delivery与Root `In Review`一致、
+   三Conductor topology、durable overlap、restart isolation、Human/revision和successor事实；不存在另一套E2E或Workflow
+   completion路径。
 
 ## 11. 明确延期
 
@@ -136,5 +149,6 @@ types、production code、tests、fixtures和E2E证据；task文件、日志、r
 - durable Provider transcript、vector memory或Workflow数据库；
 - 任何Desktop Workflow、Root/Stage/Human Action View或Agent transcript；
 - authoritative monetary cost gate。
+- load、soak、随机revision fuzz或无界Conductor chaos Campaign。
 
 这些能力需要独立授权，不能通过预留任意variant或metadata进入当前contracts。

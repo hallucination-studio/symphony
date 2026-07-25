@@ -198,9 +198,9 @@ cleanup只删除可证明属于同一Conductor/Root的deterministic worktree，�
 
 任一证明失败都停止并显示具体原因。cleanup不作为Root completion的必要步骤，也不改变Linear状态。
 
-E2E遗留Root的显式quiescence是独立的operator mutation：只接受目标Project内唯一的合法
-run identity digest和确认词，将Root置为Canceled并做Project、managed code block、parent和state read-back。
-它不改变Root ownership或Conductor routing；并行runner不会隐式调用它。
+并行E2E的process topology、start barrier、restart动作和artifact retention只由
+[并行黑盒端到端验收](black-box-e2e.md)定义。Runtime只提供本节已有的生产start/stop/kill语义；不存在E2E专用
+quiescence、cleanup mutation或test-only daemon lifecycle。
 
 ## 10. Failure matrix
 

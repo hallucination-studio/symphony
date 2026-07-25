@@ -413,9 +413,23 @@ ApplicationInfoView
 Desktop View不得包含Workflow事实，是可丢弃查询结果而不是数据库事实。文档不使用没有具体类型名的
 `安全View`、`Runtime View`或`Operator View`代替代码名称。
 
-## 12. 状态名称
+## 12. 黑盒端到端验收
 
-### 12.1 领域状态
+| Canonical Term | 代码类型/字段 | 定义 |
+|---|---|---|
+| Parallel Black-Box E2E Campaign | `RunParallelBlackBoxE2ECampaignCommand` / `ParallelBlackBoxE2ECampaignResult` | 在同一真实Linear Project并行驱动至少三个真实Conductor和多个Cases的test-only transient编排 |
+| E2E Case | Campaign Command中的closed Case entry | 一组外部human/operator动作和final evidence predicate；不是Root、Cycle或Workflow lifecycle |
+| E2E Human Actor | test-only actor configuration | 使用独立Linear identity和credential执行真实用户操作的外部测试actor |
+| Final Evidence Snapshot | `FinalEvidenceSnapshot` | Case settle后丢弃缓存并fresh-read的完整Linear/Git事实；不是managed record或completion marker |
+| E2E Case Verdict | `E2ECaseResult` | `passed | failed | incomplete`临时CI分类；不写Linear/Git且不参与恢复 |
+
+完整拓扑、actor边界、closed test contract和判定规则只由
+[并行黑盒端到端验收](black-box-e2e.md)定义。这些术语不能进入产品cross-process contracts、managed comments或
+Linear status catalog。
+
+## 13. 状态名称
+
+### 13.1 领域状态
 
 - `RootDirective`使用closed semantic variants：`execute_plan`、`execute_work`、`execute_verify`、`rerun_stage`、
   `revise_root_tree`、`replan_current_cycle`、`supersede_cycle`、
@@ -441,19 +455,19 @@ Desktop View不得包含Workflow事实，是可丢弃查询结果而不是数据
 - `PerformerProfileReadiness`使用：
   `login-required`、`ready`、`invalid`。
 
-### 12.2 UI label
+### 13.2 UI label
 
 Desktop的连接与daemon状态只显示Connected、Disconnected、Online和Offline；Profile页面可以显示配置/认证Result，
 但不能把它组合成新的daemon或Workflow状态。Workflow用户语言只出现在Linear comments和statuses。
 
-## 13. 后缀引用
+## 14. 后缀引用
 
 后缀含义和文件组织只由
 [代码模块与命名规范](code-organization.md)定义。本文为每个领域概念指定完整代码
 类型名；其他文档不得去掉后缀、替换为近义后缀，或把`Snapshot`、`View`和持久化事实
 混为一类。
 
-## 14. 禁止的模糊名称
+## 15. 禁止的模糊名称
 
 | 不使用 | 改用 |
 |---|---|
@@ -475,7 +489,7 @@ Desktop的连接与daemon状态只显示Connected、Disconnected、Online和Offl
 | `PodiumRuntimeReportImpl` | `PodiumRuntimeLogPublisherImpl` |
 | Manager、Service、Helper、Utils | 表达真实能力或行为的领域名称 |
 
-## 15. 文档审阅规则
+## 16. 文档审阅规则
 
 新增或修改架构文档时：
 

@@ -259,6 +259,11 @@ Performer -X-> Linear
 - Conductor workflow database/repository；
 - 未带规定后缀的public contract。
 
+生产边界Campaign还必须遵守[并行黑盒端到端验收](black-box-e2e.md)：E2E driver是产品外测试系统，只依赖
+正式control-plane、Linear公开API、生产executable和Git公开边界。它不能跨角色导入`internal`、实例化产品Impl、直接写
+`podium.db`或调用内部harness推进Workflow。外部E2E Human Actor使用独立Linear credential不改变Podium的产品内SDK
+ownership。
+
 ## 9. 不变量
 
 1. 模块交互只依赖Interface。
@@ -268,3 +273,4 @@ Performer -X-> Linear
 5. contracts只保存必要的wire schema。
 6. Interface只服务当前模块交互，不预建未来能力。
 7. 业务词和代码类型名必须遵守[架构术语表](glossary.md)。
+8. 完整黑盒E2E不能通过test code跨越产品public/runtime boundary。

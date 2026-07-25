@@ -1,0 +1,297 @@
+# 并行黑盒端到端验收
+
+状态：目标架构提案。本文是Symphony生产边界并行黑盒E2E拓扑、actor隔离、证据读取和Case判定的唯一
+事实源；不代表当前E2E runner已经匹配，也不定义产品Workflow。
+
+## 1. Scope record
+
+```text
+authorized
+  - 在同一个真实Linear Project中并行运行多个E2E Cases
+  - 至少三个真实Conductor Binding、process、Profile和Repository Context
+  - 使用独立Linear human actor完成真实用户交互
+  - 只以最终fresh Linear/Git read-back和durable overlap判定
+  - all-settled收集全部Case结果
+
+required_consequences
+  - E2E只能通过生产公开边界启动、配置、观察和交互
+  - 测试不能代替Symphony创建managed records或推进Stage lifecycle
+  - Case verdict只属于临时测试报告，不写Linear/Git且不参与恢复
+  - mandatory Case非passed时Campaign必须非零退出
+  - E2E Roots保留在Linear中作为可审计事实
+
+out_of_scope
+  - Desktop UI自动化和视觉验收
+  - fake Linear、fake Provider或synthetic completion
+  - load、soak、随机fuzz和无界chaos
+  - 同一Root的多个active Cycles或多个workspace writers
+
+assumptions_requiring_approval
+  - none
+
+deferred_ideas
+  - 独立的load/soak Campaign
+  - seeded revision fuzz和大规模Conductor churn
+```
+
+## 2. 权威边界
+
+产品事实仍只由Linear和Git拥有。E2E读取并验证这些事实，但不创建E2E专用Workflow record、Issue status、managed
+comment、checkpoint、completion marker或恢复账本。
+
+`Parallel Black-Box E2E Campaign`、`E2E Case`和`E2E Case Verdict`是test-only transient概念：
+
+- Campaign只组织并发进程、deadline和Case promise；
+- Case只声明用户操作和最终证据predicate；
+- verdict只在所有读取结束后分类为`passed | failed | incomplete`；
+- 它们都不能写入Linear、Git或`podium.db`，也不能被Conductor、Performer或Root Reconciler读取。
+
+Linear中的Root、Cycle、Stage、Human Action、managed records和comment thread仍遵守各自named concern文档。
+本文件只定义如何从产品外部证明这些设计在真实边界成立。
+
+## 3. 完整黑盒边界
+
+Campaign只能使用以下外部边界：
+
+- 通过正式Podium/Desktop control-plane入口创建Conductor Binding、Profile和process；
+- 启动未修改的生产Conductor和Performer executable；
+- E2E Human Actor通过Linear公开API执行真实用户可执行的操作；
+- Git Observer通过标准Git命令或远端公开API读取repository、revision、checks和delivery；
+- process controller只做启动、停止、kill和restart，用于验证真实恢复边界；
+- 结束时从Linear公开API和Git重新读取全部验收事实。
+
+完整黑盒E2E禁止：
+
+- 导入Podium、Conductor或Performer的`internal/*`实现；
+- 直接实例化`LinearSdkImpl`、`LinearGatewayProtocolHandlerImpl`或任一产品Impl；
+- 直接读取或写入`podium.db`、Profile文件、Conductor data root或Provider session；
+- 调用内部Conductor/Performer/harness方法推进Root、Stage或Human Action；
+- 测试直接创建或修改strict `symphony` code block、Stage Result、Plan Contract、Finding、usage、timeline或reply record；
+- 测试修改Plan/Work/Verify Issue status、archive、relation或description以帮助Workflow完成；
+- fake gateway、fake Provider、synthetic Result、synthetic `final`或测试专用production branch。
+
+测试工具可以在自身进程中使用Linear公开client，但不能从产品包深路径复用Podium内部SDK实现。这个外部测试client
+代表真实human actor，不改变“Podium是产品内唯一Linear SDK和credential owner”的产品边界。
+
+## 4. Actor与credential隔离
+
+一个Campaign至少使用两个可在Linear read-back中区分的actor：
+
+| Actor | Credential owner | 允许行为 |
+|---|---|---|
+| Symphony Actor | production Podium installation | 生产Conductor经Podium执行的全部Workflow read/write |
+| E2E Human Actor | external test secret store | 创建Root、写普通comment、修改Root description/status、处理Human Action、resolve/reopen thread |
+
+两个actor必须具有不同的Linear actor identity。E2E启动前通过公开read验证身份，不能只依赖环境变量名称或测试配置中的
+声明。credential不能写入Root、comment、日志、verdict或artifact；错误只报告脱敏actor identity和operation。
+
+E2E Human Actor只能模拟产品用户：
+
+- 创建带唯一Campaign/Case标识和明确需求的Root Issue；
+- 设置用户可设置的Priority、routing label、description和Root status；
+- 写入、编辑普通Markdown comment和code block；
+- 将Human Action从`Todo`/`In Progress`流转到批准的terminal status并提供必要reason/answer；
+- 对comment thread执行Linear原生resolve/reopen。
+
+reaction、managed reply、timeline、Plan/Work/Verify结果、Cycle创建和所有Symphony-owned mutation必须由生产进程生成。
+
+## 5. 最低真实拓扑
+
+所有Conductor和Cases共享一个真实Linear Project。Project Conductor Pool至少包含三个member：
+
+```text
+Parallel Black-Box E2E Campaign
+├── External Linear Human Driver
+├── Git Observer
+├── Conductor A
+│   ├── parallel happy path
+│   └── same-Conductor scheduling Cases
+├── Conductor B
+│   ├── parallel happy path
+│   └── Human Action / revision Cases
+└── Conductor C
+    ├── restart / recovery Case
+    └── convergence / successor Case
+```
+
+每个Conductor必须拥有不同的：
+
+- `ConductorBinding`、full `conductor_id`和Conductor Short Hash；
+- OS process tree和private protocol connection；
+- active Performer Profile及隔离的`CODEX_HOME`；
+- `RepositoryContext`和实际Git repository/worktree root；
+- Root routing label集合。
+
+共享Project只用于验证真实pool、routing、rate-limit和多Conductor并发。Case按创建时记录的Root Issue ID和唯一routing
+label读取证据，不能以Project中“最新Issue”或无界title搜索猜测归属。一个Conductor故障不能停止、重启或重新配置其他
+Conductor。
+
+## 6. Campaign执行协议
+
+Campaign按以下单向阶段执行；这些阶段是测试编排步骤，不是可恢复状态机：
+
+```text
+validate external credentials and production binaries
+-> provision three or more public Bindings and repositories
+-> reach one process-start barrier
+-> release all production Conductor process starts concurrently
+-> provision and activate isolated Profiles through each live control-plane
+-> reach one Case-readiness barrier
+-> create every Case Root concurrently with explicit routing
+-> run independent human drivers and observers concurrently
+-> await every Case with all-settled semantics
+-> discard polling caches
+-> fresh-read final Linear Trees and Git facts
+-> derive Case verdicts and one Campaign exit code
+```
+
+process-start barrier必须在全部Bindings和repositories可从公开边界read-back后才释放。Profile属于Conductor，所以只能在
+matching process online后经正式control-plane创建和激活；不能由runner直接写Profile文件。Case-readiness barrier必须等待
+三个或更多Profile全部fresh read-back为ready，随后并发创建Cases，不能用串行`for await`逐个执行。每个Case拥有独立
+deadline和promise，单Case的failure、timeout或process exit不cancel其他Case。
+
+轮询只用于发现何时可以执行下一次真实human action。轮询缓存、webhook、process stdout和本地Case observation在最终
+判定前全部丢弃。全局deadline到达时停止新增human action，但仍对每个Case执行一次bounded final fresh read。
+
+Campaign不自动删除、archive、cancel或quiesce测试Roots。Root保留其生产Workflow最终状态和完整active/archived历史。
+重复运行使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels，不复用旧Root作为本次通过
+证据，也不让新Conductor admit旧Campaign未完成的Root。
+
+## 7. Test-only closed contract
+
+runner内部使用versioned、closed的test-only Command/Result，禁止任意metadata：
+
+```text
+RunParallelBlackBoxE2ECampaignCommand
+  version: 1
+  campaign_id
+  project_id
+  started_at
+  deadline_at
+  conductors[]:
+    binding_id
+    conductor_id
+    conductor_short_hash
+    repository_identity
+  cases[]:
+    case_id
+    mandatory
+    routed_conductor_ids[]
+    deadline_at
+    human_script_id
+    evidence_predicate_id
+
+ParallelBlackBoxE2ECampaignResult
+  version: 1
+  campaign_id
+  cases[]: E2ECaseResult
+  durable_overlap_evidence_refs[]
+
+E2ECaseResult
+  case_id
+  status: passed | failed | incomplete
+  reason_code
+  evidence_refs[]
+  observed_at
+```
+
+`human_script_id`和`evidence_predicate_id`必须从runner代码中的closed registry选择，不能执行来自Linear的脚本或任意
+表达式。`E2ECaseResult`只输出到CI报告；它不是Linear comment、managed record、product Event或下一轮Campaign输入。不存在
+`pending/running/final` Case lifecycle，也不存在从旧verdict恢复Campaign。
+
+## 8. Final Evidence Snapshot
+
+每个Case在settle后重新创建外部clients，并以其spec中的精确Root IDs读取：
+
+1. 每个Root的完整active和archived Issue Tree、status catalog、relations、comments、native thread state和reactions；
+2. 全部strict `symphony` managed code blocks及其stable identity、remote version和actor；
+3. matching Stage Execution、Stage Result、Plan Contract、Human resolution、Finding、timeline、reply和Model Turn records；
+4. matching repository的fresh branch、commit、diff、checks和delivery read-back。
+
+需要证明same-priority `updatedAt`抢占时，还要fresh-read matching Roots的Linear原生Issue activity/audit entries，以重建
+human mutation后的admission输入和actor/time顺序。该history只属于外部验收证据，不发送给Conductor/Performer、不进入
+Root Tree或Root Reconciler，也不成为产品Workflow authority。
+
+任一required page、archived child、comment、reaction、thread state、managed block或Git fact读取不完整时，snapshot标记coverage
+incomplete，不能使用较早轮询结果补齐。最终predicate必须同时验证预期事实和禁止事实；例如不能只验证Root进入
+`In Review`，还必须验证matching Verify、delivery、usage和required timeline/reply都存在且无第二条completion路径。
+
+process exit code、Conductor/Performer内存、Provider session、runtime log、timeline event publish返回值、polling cache和
+runner本地`final`字段只能帮助诊断，不能进入通过predicate或`evidence_refs`。
+
+### 8.1 Durable overlap
+
+Campaign必须证明至少两个不同Conductor执行过真正重叠的Stage interval。唯一允许的证据是final fresh read中的：
+
+- matching `StageExecutionRecord.started_at`；
+- 同一`stage_execution_id`的Plan/Work/Verify Result `completed_at`；
+- Root routing和Root Control Record证明两个interval属于不同full `conductor_id`。
+
+存在interval A和B满足以下条件才算overlap：
+
+```text
+conductor(A) != conductor(B)
+max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
+```
+
+process存活时间、日志交错、Promise并发、Root `In Progress`时间重叠或本地timer都不能证明并行执行。
+
+## 9. Verdict与failure语义
+
+final snapshot读取完成后才产生verdict：
+
+- `passed`：全部required positive/negative predicates成立，snapshot coverage完整；
+- `failed`：fresh durable事实证明出现禁止行为、错误terminal Result、错误routing/ownership、错误顺序或越过required write；
+- `incomplete`：deadline或外部读取失败后仍缺少足够durable事实，无法证明passed或failed。
+
+发现错误terminal Stage Result或已经越过必需Linear write的后续事实时立即settle该Case为`failed`，不能继续等待它“最终
+变好”。只有事实尚未收敛且不存在相反证据时才等待到Case deadline；deadline不是成功，也不能合成completion。
+
+Campaign使用all-settled：等待全部Case各自完成final fresh read，再汇总所有verdict。任一mandatory Case不是`passed`，
+Campaign非零退出；optional Case只能补充诊断，不能抵消mandatory failure。报告按Case列出脱敏reason和durable
+Linear/Git references，不输出Issue正文、credential、Provider transcript或内部runtime state。
+
+## 10. Mandatory Case matrix
+
+| Case | 外部用户/故障动作 | final fresh evidence |
+|---|---|---|
+| cross-Conductor happy paths | 为A和B各创建并批准一个Root | 两条完整Plan -> approval -> Work -> Verify -> delivery链，且满足durable overlap |
+| same-Conductor preemption | Conductor已有in-flight turn时创建同Priority Roots，并由Human Actor更新其中一个Root | native activity证明admission前的Priority/`updatedAt`顺序，Stage records证明下一boundary先选择最新Root且未取消in-flight turn |
+| Plan rejection and supersession | Human Actor拒绝Plan Action并给出reason | rejected resolution、旧Contract/Action/Result保留、Contract supersession、fresh Plan execution/Contract/Action；archive严格匹配accepted directive |
+| Root revision and comment | 修改Root description，写/编辑comment并resolve/reopen | Root Reconciler消费增量，产生matching reply、closed reaction disposition和thread action后再推进 |
+| Conductor restart isolation | Stage执行中停止并重启C，同时A/B继续 | C只从Linear/Git恢复并拒绝旧output；A/B的durable链未被停止或接管 |
+| Cycle exhaustion and successor | 使用公开convergence配置触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
+| delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
+| required Linear write fail-closed | 在required reply/timeline write边界使真实Linear channel暂时不可用后恢复 | outage期间无后续Stage事实；恢复后同stable identity写入/read-back，且后续Stage `started_at`晚于required write |
+
+每个Case可以使用多个Root，但每个Root只能属于一个Case。Case不得通过修改managed事实、手工完成Stage或调用内部
+materializer制造证据。Plan approval由happy paths覆盖；rejection、普通comment、resolve/reopen、restart和successor分别由
+独立Case覆盖，避免一个长Case失败后掩盖其他边界。
+
+## 11. 实现硬切换
+
+实现本设计时直接删除串行、白盒或synthetic runner路径，不保留feature flag、adapter、dual runner或fallback。尤其必须
+删除以下行为及其tests/fixtures：
+
+- 从architecture acceptance条目串行选择少量scenario并复用同一production root；
+- 通过产品`internal` import构造Linear/Podium边界；
+- 直接写Store配置Binding、installation或Project；
+- runner使用Symphony actor代替human actor批准Human Action；
+- 用process/log/session/local evidence或synthetic `final`宣告完成；
+- E2E cleanup/quiescence mutation改变被验收Root的最终事实。
+
+新runner只有一条Campaign入口和一套mandatory Case registry。旧代码、旧配置项、旧fixture和旧测试必须在同一原子切换中
+删除，不能声明deprecated后继续存在。
+
+## 12. 不变量
+
+1. 所有Cases共享一个真实Linear Project，最低拓扑是三个独立真实Conductor。
+2. Symphony Actor和E2E Human Actor身份可从Linear durable facts区分。
+3. 测试只做真实用户和外部operator可做的动作，不生成Symphony-owned Workflow事实。
+4. 至少两个不同Conductor的Stage interval由durable Linear timestamps证明重叠。
+5. 每个Case最终丢弃缓存并fresh-read完整Linear/Git事实。
+6. verdict是transient CI classification，不是产品状态、record或恢复输入。
+7. all-settled不因单Case失败而取消其他Case；mandatory非passed使Campaign失败。
+8. 日志、process exit、session、runtime state和synthetic `final`永远不是完成证据。
+9. E2E Roots不被runner清理或改写为测试专用terminal状态。
+10. 旧串行/白盒runner与新Campaign不能并存。
