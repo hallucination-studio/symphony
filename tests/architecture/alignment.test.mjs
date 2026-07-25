@@ -2,24 +2,75 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  auditArchitectureReports,
   inspectAlignment,
   inspectArchitectureEvidence,
+  inspectArchitectureTraceRules,
   inspectArchitectureTargets,
   inspectSchemaCoverage,
+  inspectSingleAuthority,
 } from "../../tools/architecture/audit-alignment.mjs";
 
 const retiredTimelineScope = ["timeline", "projections"].join("-");
 
-test("static alignment recognizes the typed timeline comment boundaries", async () => {
-  const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
-  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), []);
+test("architecture audit emits exactly the alignment and single-authority reports", async () => {
+  const reports = await auditArchitectureReports(process.cwd(), { mode: "static" });
+
+  assert.deepEqual(Object.keys(reports), ["architectureAlignmentReport", "singleAuthorityReport"]);
+  assert.equal(reports.architectureAlignmentReport.kind, "ArchitectureAlignmentReport");
+  assert.equal(reports.singleAuthorityReport.kind, "SingleAuthorityReport");
+  assert.deepEqual(reports.architectureAlignmentReport.findings, []);
+  assert.deepEqual(reports.singleAuthorityReport.findings, []);
+  assert.ok(reports.architectureAlignmentReport.traces.some(({ id }) => id === "stage_result"));
+  assert.ok(reports.singleAuthorityReport.traces.some(({ id }) => id === "workflow_lifecycle"));
 });
 
-test("full alignment no longer accepts the retired timeline projection module", async () => {
-  const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
-  const findings = await auditArchitectureAlignment(process.cwd(), { mode: "full" });
-  assert.ok(!findings.some((finding) => finding.path?.includes(retiredTimelineScope)));
-  assert.ok(!findings.some((finding) => finding.scope === retiredTimelineScope));
+test("single-authority audit rejects a retired timeline projection path", () => {
+  const findings = inspectSingleAuthority(new Map([
+    ["apps/conductor/src/unsafe.ts", `class ${retiredTimelineScope} {}`],
+  ]));
+
+  assert.deepEqual(findings, [{
+    code: "parallel_authority_surface",
+    path: "apps/conductor/src/unsafe.ts",
+    rule: "retired_timeline_projection",
+  }]);
+});
+
+test("single-authority audit rejects a parallel lifecycle record", () => {
+  const lifecycleRecord = ["Status", "Record"].join("");
+  const findings = inspectSingleAuthority(new Map([
+    ["apps/conductor/src/unsafe.ts", `type ${lifecycleRecord} = {};`],
+  ]));
+
+  assert.deepEqual(findings, [{
+    code: "parallel_authority_surface",
+    path: "apps/conductor/src/unsafe.ts",
+    rule: "parallel_lifecycle_record",
+  }]);
+});
+
+test("architecture traces require an existing owning document anchor", () => {
+  const trace = {
+    id: "missing_anchor",
+    architectureSource: "docs/architecture/example.md#missing",
+    contractPaths: [],
+    implementationPaths: [],
+    testPaths: [],
+  };
+  const findings = inspectArchitectureTraceRules(
+    [trace],
+    new Map(),
+    new Map([["docs/architecture/example.md", "# Present"]]),
+    "ArchitectureAlignmentReport",
+  );
+
+  assert.deepEqual(findings, [{
+    code: "trace_architecture_anchor_missing",
+    report: "ArchitectureAlignmentReport",
+    source: "docs/architecture/example.md#missing",
+    traceId: "missing_anchor",
+  }]);
 });
 
 test("alignment reports missing target paths with their owning architecture source", () => {

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { auditArchitectureDocs } from "./audit-docs.mjs";
+import { architectureHeadingAnchors, auditArchitectureDocs } from "./audit-docs.mjs";
 import { auditRetiredInventory } from "./audit-retired.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -66,6 +66,89 @@ const evidenceRules = [
   ["Performer role runtime", "docs/architecture/performer.md#调用协议", ["apps/performer/tests/test_agent_runtime.py"]],
   ["runtime shutdown", "docs/architecture/runtime-hardening.md#bounded-shutdown", ["tests/integration/runtime-hardening/performer-shutdown.test.mjs"]],
   ["production agent boundary", "docs/architecture/runtime-hardening.md#agent-sessionturn-runtime-boundary", ["tests/integration/agent-boundary/performer-process.test.mjs", "tests/integration/agent-boundary/conductor-process.test.mjs"]],
+];
+
+const alignmentTraceRules = [
+  {
+    id: "root_reconciler_turn_result",
+    owner: "RootReconcilerTurnResult",
+    architectureSource: "docs/architecture/root-reconciliation.md#7-rootdirective-contract",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: [
+      "apps/performer/src/performer/root_reconciler/runtime.py",
+      "apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts",
+    ],
+    testPaths: ["apps/conductor/src/root-reconciliation/tests/runtime-bootstrap-delta.test.ts"],
+  },
+  {
+    id: "stage_result",
+    owner: "canonical Stage Result",
+    architectureSource: "docs/architecture/stage-orchestration.md#10-eventresult与materialization",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: ["apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts"],
+    testPaths: ["apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts"],
+  },
+  {
+    id: "workflow_lifecycle",
+    owner: "Linear Issue custom status and native archive flag",
+    architectureSource: "docs/architecture/root-issue.md#2-linear-status-catalog",
+    contractPaths: ["packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"],
+    implementationPaths: ["apps/conductor/src/root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.ts"],
+    testPaths: ["apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts"],
+  },
+  {
+    id: "human_action_lifecycle",
+    owner: "Linear Human Action status and archive flag",
+    architectureSource: "docs/architecture/human-actions.md#4-状态模型",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: ["apps/conductor/src/human-actions/internal/LinearHumanActionResolutionValidatorImpl.ts"],
+    testPaths: ["apps/conductor/src/human-actions/tests/resolution-validator.test.ts"],
+  },
+  {
+    id: "root_input_recovery",
+    owner: "RootBootstrapSnapshot and RootDelta",
+    architectureSource: "docs/architecture/root-reconciliation.md#4-bootstrap与delta-contract",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: ["apps/conductor/src/root-reconciliation/internal/RootFactSet.ts"],
+    testPaths: ["apps/conductor/src/root-reconciliation/tests/runtime-bootstrap-delta.test.ts"],
+  },
+  {
+    id: "native_comment_interaction",
+    owner: "Linear native comment body, thread state, and reaction set",
+    architectureSource: "docs/architecture/root-reconciliation.md#6-用户comment回复contract",
+    contractPaths: ["packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"],
+    implementationPaths: ["apps/conductor/src/root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts"],
+    testPaths: ["apps/conductor/src/root-directive-materialization/tests/reply-writer.test.ts"],
+  },
+  {
+    id: "workflow_timeline",
+    owner: "one-event one-comment WorkflowTimelineRecord",
+    architectureSource: "docs/architecture/workflow-timeline.md#2-解耦机制",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: ["apps/conductor/src/timeline-comments/internal/LinearTimelineCommentMaterializer.ts"],
+    testPaths: ["apps/conductor/src/timeline-comments/tests/timeline-comment-subscribers.test.ts"],
+  },
+  {
+    id: "model_usage",
+    owner: "immutable ModelTurnRecord",
+    architectureSource: "docs/architecture/performer-profiles.md#11-token-usage",
+    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
+    implementationPaths: ["apps/conductor/src/root-reconciliation/internal/UsageAggregation.ts"],
+    testPaths: ["apps/conductor/src/root-reconciliation/tests/usage-aggregation.test.ts"],
+  },
+];
+
+const legacyManagedSnake = ["managed", "marker"].join("_");
+const legacyManagedCamel = ["managed", "Marker"].join("");
+const legacyHtmlPrefix = ["<", "!", "-", "-"].join("");
+const symphonyActor = ["sym", "phony"].join("");
+
+const parallelAuthorityRules = [
+  ["retired_timeline_projection", /(?:TimelineProjection|timeline-projections|LinearWorkflowTimelinePublisher)/u],
+  ["retired_timeline_time_anchor", /(?:materializedAt|materialized_at)/u],
+  ["retired_html_record", new RegExp(`(?:${legacyManagedCamel}|${legacyManagedSnake}|${escapeRegExp(legacyHtmlPrefix)}\\s*${symphonyActor})`, "u")],
+  ["parallel_lifecycle_record", /\b(?:StatusRecord|WorkflowStateRecord|LifecycleRecord|ThreadStateRecord)\b/u],
+  ["parallel_thread_history", /(?:comment_thread_change|webhook_history|last_seen_thread)/u],
 ];
 
 const schemaConsumers = {
@@ -279,6 +362,67 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
+function trace(rule) {
+  return {
+    id: rule.id,
+    owner: rule.owner,
+    architectureSource: rule.architectureSource,
+    contractPaths: rule.contractPaths,
+    implementationPaths: rule.implementationPaths,
+    testPaths: rule.testPaths,
+  };
+}
+
+export function inspectArchitectureTraceRules(rules, sources, architectureSources, report) {
+  const paths = normalizeFiles(sources);
+  return rules.flatMap((rule) => {
+    const [architecturePath, encodedAnchor] = rule.architectureSource.split("#", 2);
+    const architectureSource = architectureSources.get(architecturePath);
+    const sourceFindings = architectureSource === undefined
+      ? [{
+        code: "trace_architecture_source_missing",
+        report,
+        traceId: rule.id,
+        source: rule.architectureSource,
+      }]
+      : !encodedAnchor || !architectureHeadingAnchors(architectureSource).has(decodeURIComponent(encodedAnchor))
+        ? [{
+          code: "trace_architecture_anchor_missing",
+          report,
+          traceId: rule.id,
+          source: rule.architectureSource,
+        }]
+        : [];
+    const evidenceFindings = [
+      ...rule.contractPaths,
+      ...rule.implementationPaths,
+      ...rule.testPaths,
+    ].filter((path) => !paths.has(path)).map((path) => ({
+      code: "trace_evidence_missing",
+      report,
+      traceId: rule.id,
+      path,
+      source: rule.architectureSource,
+    }));
+    return [...sourceFindings, ...evidenceFindings];
+  });
+}
+
+function isProductionSource(path) {
+  return path.startsWith("apps/") || path.startsWith("packages/");
+}
+
+export function inspectSingleAuthority(sources) {
+  const findings = [];
+  for (const [path, source] of sources) {
+    if (!isProductionSource(path)) continue;
+    for (const [rule, pattern] of parallelAuthorityRules) {
+      if (pattern.test(source)) findings.push({ code: "parallel_authority_surface", path, rule });
+    }
+  }
+  return findings.sort(compareViolation);
+}
+
 async function trackedSources(root) {
   const { stdout } = await execFileAsync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: root, encoding: "buffer" });
   const files = stdout.toString("utf8").split("\0").filter(Boolean).sort();
@@ -303,29 +447,53 @@ async function architectureSources(root) {
   return sources;
 }
 
-export async function auditArchitectureAlignment(root, options = {}) {
+export async function auditArchitectureReports(root, options = {}) {
   if (options.mode !== "static" && options.mode !== "full") throw new Error("alignment_mode_required");
   const sources = await trackedSources(root);
   const architecture = await architectureSources(root);
-  const staticViolations = [
+  const alignmentFindings = [
     ...inspectArchitectureTargets(targetRules, sources),
     ...inspectInterfaceRules(interfaceRules, sources),
     ...inspectArchitectureReferences([...targetRules, ...interfaceRules, ...evidenceRules], architecture),
     ...inspectArchitectureEvidence(evidenceRules, sources),
     ...inspectSchemaCoverage(sources),
     ...inspectOwnerRules(sources),
+    ...inspectArchitectureTraceRules(
+      alignmentTraceRules,
+      sources,
+      architecture,
+      "ArchitectureAlignmentReport",
+    ),
   ];
-  if (options.mode === "static") return staticViolations.sort(compareViolation);
-  const [documentationViolations, retiredViolations] = await Promise.all([
-    auditArchitectureDocs(root),
-    auditRetiredInventory(root, { mode: "final" }),
-  ]);
-  return [...staticViolations, ...documentationViolations, ...retiredViolations].sort(compareViolation);
+  const authorityFindings = inspectSingleAuthority(sources);
+  if (options.mode === "full") {
+    const [documentationViolations, retiredViolations] = await Promise.all([
+      auditArchitectureDocs(root),
+      auditRetiredInventory(root, { mode: "final" }),
+    ]);
+    alignmentFindings.push(...documentationViolations);
+    authorityFindings.push(...retiredViolations);
+  }
+  return {
+    architectureAlignmentReport: {
+      kind: "ArchitectureAlignmentReport",
+      version: 1,
+      findings: alignmentFindings.sort(compareViolation),
+      traces: alignmentTraceRules.map(trace),
+    },
+    singleAuthorityReport: {
+      kind: "SingleAuthorityReport",
+      version: 1,
+      findings: authorityFindings.sort(compareViolation),
+      traces: alignmentTraceRules.map(trace),
+    },
+  };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const mode = process.argv.find((argument) => argument.startsWith("--mode="))?.slice("--mode=".length);
-  const violations = await auditArchitectureAlignment(process.cwd(), { mode });
-  for (const violation of violations) process.stderr.write(`${JSON.stringify(violation)}\n`);
-  if (violations.length > 0) process.exitCode = 1;
+  const reports = await auditArchitectureReports(process.cwd(), { mode });
+  const output = [reports.architectureAlignmentReport, reports.singleAuthorityReport];
+  for (const report of output) process.stdout.write(`${JSON.stringify(report)}\n`);
+  if (output.some((report) => report.findings.length > 0)) process.exitCode = 1;
 }

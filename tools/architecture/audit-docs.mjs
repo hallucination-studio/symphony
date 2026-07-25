@@ -24,7 +24,7 @@ function externalTarget(target) {
   return /^[a-z][a-z0-9+.-]*:/iu.test(target) || target.startsWith("//");
 }
 
-function headingAnchors(source) {
+export function architectureHeadingAnchors(source) {
   const anchors = new Set();
   const occurrences = new Map();
   for (const match of source.matchAll(/^#{1,6}\s+(.+?)\s*#*\s*$/gmu)) {
@@ -84,7 +84,7 @@ export function inspectArchitectureSources(sources, auditedFiles = new Set(sourc
         violations.push({ code: "broken_architecture_link", file, target: link.target });
         continue;
       }
-      if (anchor && !headingAnchors(sources.get(resolved)).has(decodeURIComponent(anchor))) {
+      if (anchor && !architectureHeadingAnchors(sources.get(resolved)).has(decodeURIComponent(anchor))) {
         violations.push({ code: "broken_architecture_anchor", file, target: link.target });
       }
     }
