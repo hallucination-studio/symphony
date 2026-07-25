@@ -5,6 +5,7 @@ import type {
   PlanContract,
   PlanContractProposal,
   ProposedWorkDag,
+  RootReconcilerFailureRecord,
   RootReconcilerModelTurnRecord,
   StageModelTurnRecord,
 } from "./ManagedRecords.js";
@@ -507,8 +508,17 @@ export interface RootReconcilerOpenInput {
   bootstrap: RootBootstrap;
   limits: ReconcilerLimits;
 }
-export interface RootReconcilerOpenResult { kind: "opened"; sessionId: string; bootstrapRootDigest: string; initialDirective: RootDirective; }
-export interface RootReconcilerAdvanceResult { kind: "directive"; directive: RootDirective; }
+export type RootReconcilerTurnResult =
+  | { kind: "directive"; directive: RootDirective }
+  | { kind: "failed"; failure: RootReconcilerFailureRecord };
+
+export interface RootReconcilerOpenResult {
+  kind: "opened";
+  sessionId: string;
+  bootstrapRootDigest: string;
+  initialResult: RootReconcilerTurnResult;
+}
+export type RootReconcilerAdvanceResult = RootReconcilerTurnResult;
 
 export interface AgentModelSettings { model: string; reasoningEffort: "low" | "medium" | "high"; isFastModeEnabled: boolean; }
 

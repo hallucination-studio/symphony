@@ -25,18 +25,22 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
 
   async open(input: RootReconcilerOpenInput): Promise<RootReconcilerOpenResult> {
     const result = await this.transport.openRootReconciler(input);
-    this.rootsBySession.set(result.sessionId, input.rootIssueId);
+    if (result.initialResult.kind === "directive") {
+      this.rootsBySession.set(result.sessionId, input.rootIssueId);
+    }
     return result;
   }
 
-  advance(input: {
+  async advance(input: {
     requestId: string;
     sessionId: string;
     reconcilerTurnId: string;
     observedAt: string;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
-    return this.transport.advanceRootReconciler(input);
+    const result = await this.transport.advanceRootReconciler(input);
+    if (result.kind === "failed") this.rootsBySession.delete(input.sessionId);
+    return result;
   }
 
   async close(input: { requestId: string; sessionId: string }): Promise<void> {

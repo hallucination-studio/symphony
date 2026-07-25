@@ -44,8 +44,9 @@ R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任�
 - 只有新建、丢失或无法证明baseline的session才重新发送一次`RootBootstrapSnapshot`；普通用户修改本身不触发Conductor
   重建session；
 - delta只是跨进程turn输入，不创建Linear revision/event lifecycle；session丢失或baseline无法证明时丢弃旧session并重新bootstrap；
-- Root Reconciler返回一个closed `RootDirective`；
-- Conductor校验Tree digest、persist directive、materialize/read-back；
+- Root Reconciler返回一个closed `RootReconcilerTurnResult`；只有directive variant拥有下一步语义，failure variant先
+  durable write/read-back后停在其Root Reconciliation retry barrier；
+- Conductor校验Tree digest，并对directive或failure执行其各自规定的persist/read-back；
 - 支持Stage选择、rerun、replan、active Cycle supersede、terminal predecessor successor和Tree patch；
 - 过滤普通human comment body及non-Symphony当前thread-state revision，并在处理后写回matching reply；不得创建可恢复的
   thread-change event、webhook history或本地状态账本；

@@ -11,6 +11,7 @@ RootSchedulingPolicyInterface          <- LinearPriorityRootSchedulingPolicyImpl
 RootSafetyPolicyInterface              <- LinearRootSafetyPolicyImpl
 RootReconcilerClientInterface          <- PerformerRootReconcilerClientImpl
 RootDirectiveMaterializerInterface     <- LinearRootDirectiveMaterializerImpl
+RootReconcilerFailureRecordWriterInterface <- LinearRootReconcilerFailureRecordWriterImpl
 PerformerAgentClientInterface          <- SessionPerformerAgentClientImpl
 WorkflowTimelinePublisherInterface     <- InProcessWorkflowTimelinePublisherImpl
 RootTimelineCommentSubscriberInterface <- LinearRootTimelineCommentSubscriberImpl
@@ -95,7 +96,7 @@ Conductor始终是caller。公共message union覆盖：
 
 ```text
 OpenRootReconcilerRequest    | RootReconcilerOpenedResult
-AdvanceRootReconcilerRequest | RootDirective
+AdvanceRootReconcilerRequest | RootReconcilerTurnResult
 PlanTurnRequest             | PlanResult
 WorkTurnRequest             | WorkResult
 VerifyTurnRequest           | VerifyResult
@@ -160,7 +161,12 @@ human_action_resolutions[]
 ```
 
 `OpenRootReconcilerRequest`是唯一允许携带完整`RootBootstrapSnapshot`的Conductor-Performer message；matching
-`RootReconcilerOpenedResult`包含该bootstrap turn产生的initial `RootDirective`。
+`RootReconcilerOpenedResult`包含该bootstrap turn产生的`initial_result: RootReconcilerTurnResult`。
+`RootReconcilerTurnResult`是`RootDirective | RootReconcilerTurnFailure`的closed union；failure variant携带matching
+`RootReconcilerFailureRecord`，包括实际model turn和本次尝试的pending input identities。已进入Provider invocation
+边界的Root turn只能通过这个failure variant结束，不能被通用Protocol error、throw、null或partial result替代。
+`RootReconcilerFailureRecordWriterInterface`只负责把这个failure record写入matching Root的managed comment并fresh
+read-back、strict decode；它不渲染timeline、不选择retry或下一步，写入失败由Root Reconciliation host fail closed。
 `AdvanceRootReconcilerRequest`只允许携带`base_root_digest`、`target_root_digest`和`RootDeltaChange[]`；schema不提供
 full snapshot、before/after diff或兼容union。baseline不匹配返回closed failure并要求fresh session bootstrap。
 Conductor可以为了计算delta在自己的单轮内存视图中读取完整active和archived Tree，但不得把该视图、完整source manifest

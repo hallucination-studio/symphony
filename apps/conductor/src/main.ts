@@ -21,6 +21,7 @@ import { LinearHumanActionResolutionMaterializerImpl } from "./human-actions/int
 import { LinearHumanActionResolutionValidatorImpl } from "./human-actions/internal/LinearHumanActionResolutionValidatorImpl.js";
 import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
 import { LinearRootDirectiveRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootDirectiveRecordWriterImpl.js";
+import { LinearRootReconcilerFailureRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerFailureRecordWriterImpl.js";
 import { LinearRootReconcilerReplyWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
 import { LinearWorkflowTimelinePublisherImpl } from "./timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
@@ -172,6 +173,7 @@ export async function runConductor(environment = process.env): Promise<void> {
       new LinearHumanActionMaterializerImpl(gateway),
     ),
     directiveRecordWriter: new LinearRootDirectiveRecordWriterImpl(gateway),
+    failureRecordWriter: new LinearRootReconcilerFailureRecordWriterImpl(gateway),
     replyWriter: new LinearRootReconcilerReplyWriterImpl(gateway),
     humanActionResolutionValidator: new LinearHumanActionResolutionValidatorImpl(),
     humanActionResolutionMaterializer: new LinearHumanActionResolutionMaterializerImpl(gateway),

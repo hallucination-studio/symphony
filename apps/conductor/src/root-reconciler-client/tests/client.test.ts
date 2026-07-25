@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { PerformerRootReconcilerClientImpl } from "../internal/PerformerRootReconcilerClientImpl.js";
 import type { RootDirective } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { RootReconcilerFailureRecord } from "../../root-reconciliation/api/ManagedRecords.js";
 
 const directive = {
   protocolVersion: 1 as const, requestId: "request-1", rootDirectiveId: "directive-1",
@@ -25,7 +26,12 @@ test("root reconciler client owns session-to-root close correlation", async () =
   const client = new PerformerRootReconcilerClientImpl({
     async openRootReconciler(input) {
       calls.push({ kind: "open", rootIssueId: input.rootIssueId });
-      return { kind: "opened", sessionId: "session-1", bootstrapRootDigest: "root-1", initialDirective: directive };
+      return {
+        kind: "opened",
+        sessionId: "session-1",
+        bootstrapRootDigest: "root-1",
+        initialResult: { kind: "directive", directive },
+      };
     },
     async advanceRootReconciler(input) {
       calls.push({ kind: "advance", sessionId: input.sessionId });
@@ -53,3 +59,99 @@ test("root reconciler client owns session-to-root close correlation", async () =
   ]);
   await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
 });
+
+test("root reconciler client does not retain a failed bootstrap session", async () => {
+  let closeCalls = 0;
+  const client = new PerformerRootReconcilerClientImpl({
+    async openRootReconciler() {
+      return {
+        kind: "opened" as const,
+        sessionId: "session-1",
+        bootstrapRootDigest: "root-1",
+        initialResult: { kind: "failed" as const, failure: failureRecord() },
+      };
+    },
+    async advanceRootReconciler() { throw new Error("not exercised"); },
+    async closeRootReconciler() { closeCalls += 1; },
+  });
+
+  const opened = await client.open({
+    protocolVersion: 1,
+    requestId: "request-1",
+    rootIssueId: "root-1",
+    profileId: "profile-1",
+    modelSettings: { model: "model", reasoningEffort: "medium", isFastModeEnabled: false },
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", observedAt: "2026-07-23T00:00:00Z",
+    bootstrap: {} as never,
+    limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
+  });
+
+  assert.equal(opened.initialResult.kind, "failed");
+  await assert.rejects(() => client.close({ requestId: "request-2", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
+  assert.equal(closeCalls, 0);
+});
+
+test("root reconciler client discards an advance session after a closed failure", async () => {
+  const client = new PerformerRootReconcilerClientImpl({
+    async openRootReconciler() {
+      return {
+        kind: "opened" as const,
+        sessionId: "session-1",
+        bootstrapRootDigest: "root-1",
+        initialResult: { kind: "directive" as const, directive },
+      };
+    },
+    async advanceRootReconciler() {
+      return { kind: "failed" as const, failure: failureRecord() };
+    },
+    async closeRootReconciler() { throw new Error("not exercised"); },
+  });
+
+  await client.open({
+    protocolVersion: 1,
+    requestId: "request-1",
+    rootIssueId: "root-1",
+    profileId: "profile-1",
+    modelSettings: { model: "model", reasoningEffort: "medium", isFastModeEnabled: false },
+    reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", observedAt: "2026-07-23T00:00:00Z",
+    bootstrap: {} as never,
+    limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
+  });
+  const result = await client.advance({
+    requestId: "request-2",
+    sessionId: "session-1",
+    reconcilerTurnId: "turn-2",
+    observedAt: "2026-07-23T00:00:02Z",
+    delta: {} as never,
+  });
+
+  assert.equal(result.kind, "failed");
+  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
+});
+
+function failureRecord(): RootReconcilerFailureRecord {
+  return {
+    kind: "root_reconciler_failure",
+    version: 1,
+    failureId: "root-1:turn-1:failure",
+    reconcilerSessionId: "session-1",
+    reconcilerTurnId: "turn-1",
+    targetRootDigest: "root-1",
+    attemptedInputIds: [],
+    modelTurn: {
+      turnRecordId: "root-1:turn-1",
+      role: "root_reconciler",
+      rootIssueId: "root-1",
+      reconcilerSessionId: "session-1",
+      reconcilerTurnId: "turn-1",
+      invocationState: "confirmed",
+      model: "gpt",
+      outcome: "schema_invalid",
+      usage: { status: "unavailable", reason: "provider_omitted" },
+      terminalAt: "2026-07-23T00:00:01Z",
+    },
+    category: "schema_invalid",
+    sanitizedReason: "The Root Reconciler response was invalid.",
+    failedAt: "2026-07-23T00:00:01Z",
+  };
+}

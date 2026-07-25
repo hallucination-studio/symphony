@@ -10,7 +10,8 @@ Performer负责：
 - 通过官方Provider SDK创建、继续、interrupt和关闭role thread；
 - 每个Root一个Root Reconciler thread，每个Cycle隔离Plan、Work、Verify三个Stage threads；
 - open时接收一次完整Root bootstrap，后续ReAct turn只接收严格连续的delta；
-- 返回closed `RootDirective`与matching用户comment replies；
+- 返回closed `RootReconcilerTurnResult`；只有directive variant携带matching用户comment replies和下一步语义，
+  failure variant只提供durable failure evidence；
 - 执行Plan/Work/Verify turn并返回matching强类型Result；
 - Work turn内部运行有界coding-agent tool loop；
 - 映射model、effort、Fast、sandbox、deadline和structured output；
@@ -51,8 +52,8 @@ Conductor始终是caller：
 
 ```text
 PerformerAgentClientInterface
-  openRootReconciler(bootstrap) -> RootReconcilerOpenedResult + initial RootDirective
-  advanceRootReconciler(delta) -> RootDirective
+  openRootReconciler(bootstrap) -> RootReconcilerOpenedResult + initial RootReconcilerTurnResult
+  advanceRootReconciler(delta) -> RootReconcilerTurnResult
   executePlanTurn(request) -> PlanResult
   executeWorkTurn(request) -> WorkResult
   executeVerifyTurn(request) -> VerifyResult
@@ -87,7 +88,8 @@ private SDK成员或静默放宽sandbox。无法表达完整policy时fail closed
 ### 5.1 Root Reconciler
 
 Root Reconciler在session open时消费一次完整bootstrap，此后只消费`base_root_digest`连续的delta，并返回一个closed
-directive及matching用户comment replies。它
+`RootReconcilerTurnResult`。其directive variant可包含matching用户comment replies；failure variant不包含下一步动作或
+回复。它
 不能访问workspace write tool、Linear、Git mutation或其他role thread transcript。其rationale必须是bounded、
 可审计解释，不包含raw chain-of-thought。
 

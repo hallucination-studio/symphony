@@ -10,6 +10,7 @@ import type { PerformerAgentClientInterface } from "../../performer-agent-client
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
 import type { RootDirectiveMaterializerInterface } from "../../root-directive-materialization/api/RootDirectiveMaterializerInterface.js";
 import type { RootDirectiveRecordWriterInterface } from "../../root-directive-materialization/api/RootDirectiveRecordWriterInterface.js";
+import type { RootReconcilerFailureRecordWriterInterface } from "../../root-directive-materialization/api/RootReconcilerFailureRecordWriterInterface.js";
 import type { RootReconcilerReplyWriterInterface } from "../../root-directive-materialization/api/RootReconcilerReplyWriterInterface.js";
 import type { HumanActionResolutionValidatorInterface } from "../../human-actions/api/HumanActionResolutionValidatorInterface.js";
 import type { HumanActionResolutionMaterializerInterface } from "../../human-actions/api/HumanActionResolutionMaterializerInterface.js";
@@ -18,6 +19,7 @@ import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTi
 import type {
   RootDirective,
   RootReconciliationView,
+  RootReconcilerTurnResult,
   ReconcilerLimits,
   StageResult,
   StageTurnInput,
@@ -36,12 +38,18 @@ import type {
   PlanContractProposal,
   ProposedWorkDag,
   RootDirectiveRecord,
+  RootReconcilerFailureRecord,
   StageResultRecord,
   StageResultOutcomeKind,
   TurnUsage,
 } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
+import {
+  deriveIssueUsageAggregate,
+  type UsageAggregate,
+  type UsageAggregateGroup,
+} from "./UsageAggregation.js";
 
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
@@ -64,6 +72,7 @@ export interface RootReconciliationRuntimeDependencies {
   performer: PerformerAgentClientInterface;
   materializer: RootDirectiveMaterializerInterface;
   directiveRecordWriter: RootDirectiveRecordWriterInterface;
+  failureRecordWriter: RootReconcilerFailureRecordWriterInterface;
   replyWriter: RootReconcilerReplyWriterInterface;
   humanActionResolutionValidator: HumanActionResolutionValidatorInterface;
   humanActionResolutionMaterializer: HumanActionResolutionMaterializerInterface;
@@ -192,18 +201,32 @@ export class RootReconciliationRuntime {
       if (resumedSession) await this.closeSessionsAfterDirective(resumable.directive, root, resumedSession.sessionId);
       return dispositionAfterDirective(resumable.directive, await this.dependencies.linear.readWorkflowIssueTree(root.issueId));
     }
+    const unresolvedFailure = latestUnresolvedRootReconcilerFailure(tree, root.issueId);
+    if (
+      unresolvedFailure &&
+      !factSet.bootstrap.pendingInputIds.some((inputId) => !unresolvedFailure.attemptedInputIds.includes(inputId))
+    ) {
+      this.dependencies.log("root_reconciler_failure_barrier", {
+        root_issue_id: root.issueId,
+        failure_id: unresolvedFailure.failureId,
+      });
+      return "needs-attention";
+    }
     const limits = reconcilerLimits();
     const currentSession = this.sessions.get(root.issueId);
     const trustedSession = currentSession?.profileId === profileId ? currentSession : undefined;
     let sessionId: string;
-    let result: { kind: "directive"; directive: RootDirective };
+    let reconcilerTurnId: string;
+    let attemptedInputIds: string[];
+    let result: RootReconcilerTurnResult;
     if (!trustedSession) {
       setPhase("open_reconciler");
+      reconcilerTurnId = randomUUID();
       const opened = await this.dependencies.reconciler.open({
         protocolVersion: 1,
         requestId: randomUUID(),
         reconcilerSessionId: randomUUID(),
-        reconcilerTurnId: randomUUID(),
+        reconcilerTurnId,
         observedAt: tree.observed_at,
         rootIssueId: root.issueId,
         profileId,
@@ -213,30 +236,33 @@ export class RootReconciliationRuntime {
       });
       if (opened.bootstrapRootDigest !== factSet.bootstrap.rootDigest) throw new Error("root_bootstrap_digest_mismatch");
       sessionId = opened.sessionId;
-      this.sessions.set(root.issueId, { sessionId, profileId, factSet });
-      result = { kind: "directive", directive: opened.initialDirective };
+      attemptedInputIds = factSet.bootstrap.pendingInputIds;
+      result = opened.initialResult;
     } else {
       sessionId = trustedSession.sessionId;
       const delta = diffRootFactSets(trustedSession.factSet, factSet);
       if (delta.changes.length === 0 && delta.pendingInputIds.length === 0) return "empty";
       setPhase("root_reconciler_advance");
+      reconcilerTurnId = randomUUID();
       try {
         result = await this.dependencies.reconciler.advance({
           requestId: randomUUID(),
           sessionId,
-          reconcilerTurnId: randomUUID(),
+          reconcilerTurnId,
           observedAt: tree.observed_at,
           delta,
         });
+        attemptedInputIds = delta.pendingInputIds;
       } catch (error) {
         if (!isRootSessionLoss(error)) throw error;
         this.sessions.delete(root.issueId);
         setPhase("reopen_root_reconciler");
+        reconcilerTurnId = randomUUID();
         const opened = await this.dependencies.reconciler.open({
           protocolVersion: 1,
           requestId: randomUUID(),
           reconcilerSessionId: randomUUID(),
-          reconcilerTurnId: randomUUID(),
+          reconcilerTurnId,
           observedAt: tree.observed_at,
           rootIssueId: root.issueId,
           profileId,
@@ -246,10 +272,32 @@ export class RootReconciliationRuntime {
         });
         if (opened.bootstrapRootDigest !== factSet.bootstrap.rootDigest) throw new Error("root_bootstrap_digest_mismatch");
         sessionId = opened.sessionId;
-        result = { kind: "directive", directive: opened.initialDirective };
+        attemptedInputIds = factSet.bootstrap.pendingInputIds;
+        result = opened.initialResult;
       }
-      this.sessions.set(root.issueId, { sessionId, profileId, factSet });
     }
+    if (result.kind === "failed") {
+      const failureValidation = validateRootReconcilerFailure({
+        failure: result.failure,
+        rootIssueId: root.issueId,
+        sessionId,
+        reconcilerTurnId,
+        targetRootDigest: view.treeDigest,
+        attemptedInputIds,
+      });
+      if (failureValidation) throw new Error(failureValidation);
+      setPhase("persist_root_reconciler_failure_record");
+      const persisted = await this.dependencies.failureRecordWriter.write({ failure: result.failure, view });
+      this.sessions.delete(root.issueId);
+      if (persisted.kind === "failed") throw new Error(persisted.code);
+      this.dependencies.log("root_reconciler_failure_recorded", {
+        root_issue_id: root.issueId,
+        failure_id: result.failure.failureId,
+        category: result.failure.category,
+      });
+      return "needs-attention";
+    }
+    this.sessions.set(root.issueId, { sessionId, profileId, factSet });
     if (result.directive.basedOnTargetRootDigest !== view.treeDigest) {
       throw new Error("root_directive_stale_tree");
     }
@@ -515,8 +563,12 @@ export class RootReconciliationRuntime {
     const existing = stageResultRecords(view.tree, target.issue_id);
     const matching = existing.filter((candidate) => candidate.resultId === record.resultId);
     if (matching.length > 1) throw new Error("role_result_duplicate");
-    const records = matching.length === 1 ? existing : [...existing, record];
-    const body = renderStageResultComment(record, stageUsageSnapshot(records));
+    const usage = deriveIssueUsageAggregate({
+      tree: view.tree,
+      targetIssueId: target.issue_id,
+      ...(matching.length === 0 ? { prospectiveRecord: record } : {}),
+    });
+    const body = renderStageResultComment(record, usage);
     if (matching.length === 1) {
       if (!sameStageResultRecord(matching[0]!, record)) throw new Error("role_result_conflict");
       const comment = view.tree.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
@@ -580,7 +632,8 @@ export class RootReconciliationRuntime {
     if (readBackRecords.filter((candidate) => candidate.resultId === record.resultId).length !== 1) {
       throw new Error("role_result_read_back_duplicate");
     }
-    if (readBackComment.body !== renderStageResultComment(record, stageUsageSnapshot(readBackRecords))) {
+    const readBackUsage = deriveIssueUsageAggregate({ tree: readBack, targetIssueId: target.issue_id });
+    if (!sameUsageAggregate(usage, readBackUsage) || readBackComment.body !== renderStageResultComment(record, readBackUsage)) {
       throw new Error("role_result_read_back_render_invalid");
     }
     return { ...view, tree: readBack, observedAt: readBack.observed_at };
@@ -742,6 +795,65 @@ function findResumableDirective(
     })
     .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt) || right.rootDirectiveId.localeCompare(left.rootDirectiveId));
   return records.find((record) => !directiveMaterializationComplete(record.directive, tree));
+}
+
+function latestUnresolvedRootReconcilerFailure(
+  tree: RootReconciliationView["tree"],
+  rootIssueId: string,
+): RootReconcilerFailureRecord | undefined {
+  const terminalRecords: Array<
+    | { createdAt: string; commentId: string; kind: "directive" }
+    | { createdAt: string; commentId: string; kind: "failure"; failure: RootReconcilerFailureRecord }
+  > = [];
+  for (const comment of tree.comments) {
+    if (comment.author_kind !== "symphony") continue;
+    const parsed = parseManagedRecord(comment.body);
+    if (!parsed.ok) continue;
+    if (parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId) {
+      terminalRecords.push({ createdAt: comment.created_at, commentId: comment.comment_id, kind: "directive" });
+    }
+    if (parsed.value.kind === "root_reconciler_failure" && parsed.value.modelTurn.rootIssueId === rootIssueId) {
+      terminalRecords.push({ createdAt: comment.created_at, commentId: comment.comment_id, kind: "failure", failure: parsed.value });
+    }
+  }
+  terminalRecords.sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) || right.commentId.localeCompare(left.commentId),
+  );
+  const latest = terminalRecords[0];
+  return latest?.kind === "failure" ? latest.failure : undefined;
+}
+
+function validateRootReconcilerFailure(input: {
+  failure: RootReconcilerFailureRecord;
+  rootIssueId: string;
+  sessionId: string;
+  reconcilerTurnId: string;
+  targetRootDigest: string;
+  attemptedInputIds: string[];
+}): string | undefined {
+  const { failure } = input;
+  const turn = failure.modelTurn;
+  if (
+    turn.rootIssueId !== input.rootIssueId ||
+    failure.reconcilerSessionId !== input.sessionId ||
+    failure.reconcilerTurnId !== input.reconcilerTurnId ||
+    failure.targetRootDigest !== input.targetRootDigest
+  ) return "root_reconciler_failure_correlation_invalid";
+  if (
+    failure.failureId !== `${input.rootIssueId}:${input.reconcilerTurnId}:failure` ||
+    turn.turnRecordId !== `${input.rootIssueId}:${input.reconcilerTurnId}` ||
+    turn.reconcilerSessionId !== input.sessionId ||
+    turn.reconcilerTurnId !== input.reconcilerTurnId ||
+    turn.outcome !== failure.category ||
+    turn.terminalAt !== failure.failedAt
+  ) return "root_reconciler_failure_record_invalid";
+  if (new Set(failure.attemptedInputIds).size !== failure.attemptedInputIds.length || !sameIds(failure.attemptedInputIds, input.attemptedInputIds)) {
+    return "root_reconciler_failure_inputs_invalid";
+  }
+  if (turn.invocationState === "ambiguous" && turn.usage.status !== "unavailable") {
+    return "root_reconciler_failure_usage_invalid";
+  }
+  return undefined;
 }
 
 export function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
@@ -1171,23 +1283,6 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
   return record;
 }
 
-interface StageUsageGroup {
-  model: string;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-  unavailableTurnCount: number;
-}
-
-interface StageUsageSnapshot {
-  sourceRecordCount: number;
-  isComplete: boolean;
-  unknownTurnCount: number;
-  groups: StageUsageGroup[];
-}
-
 function stageResultRecords(
   tree: RootReconciliationView["tree"],
   targetIssueId: string,
@@ -1207,44 +1302,16 @@ function sameStageResultRecord(left: StageResultRecord, right: StageResultRecord
   return serializeManagedRecord(left) === serializeManagedRecord(right);
 }
 
-function stageUsageSnapshot(records: StageResultRecord[]): StageUsageSnapshot {
-  const turnRecordIds = new Set<string>();
-  const groups = new Map<string, StageUsageGroup>();
-  let unknownTurnCount = 0;
-  for (const record of records) {
-    const turn = record.modelTurn;
-    if (turnRecordIds.has(turn.turnRecordId)) throw new Error("stage_usage_duplicate_turn");
-    turnRecordIds.add(turn.turnRecordId);
-    const group = groups.get(turn.model) ?? {
-      model: turn.model,
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-      reasoningOutputTokens: 0,
-      totalTokens: 0,
-      unavailableTurnCount: 0,
-    };
-    if (turn.usage.status === "measured") {
-      group.inputTokens += turn.usage.inputTokens;
-      group.cachedInputTokens += turn.usage.cachedInputTokens;
-      group.outputTokens += turn.usage.outputTokens;
-      group.reasoningOutputTokens += turn.usage.reasoningOutputTokens;
-      group.totalTokens += turn.usage.totalTokens;
-    } else {
-      group.unavailableTurnCount += 1;
-      unknownTurnCount += 1;
-    }
-    groups.set(turn.model, group);
-  }
-  return {
-    sourceRecordCount: records.length,
-    isComplete: unknownTurnCount === 0,
-    unknownTurnCount,
-    groups: [...groups.values()].sort((left, right) => left.model.localeCompare(right.model)),
-  };
+function sameUsageAggregate(left: UsageAggregate, right: UsageAggregate): boolean {
+  return left.scope === right.scope &&
+    left.sourceRecordCount === right.sourceRecordCount &&
+    left.sourceDigest === right.sourceDigest &&
+    left.isComplete === right.isComplete &&
+    left.unknownTurnCount === right.unknownTurnCount &&
+    JSON.stringify(left.groups) === JSON.stringify(right.groups);
 }
 
-function renderStageResultComment(record: StageResultRecord, usage: StageUsageSnapshot): string {
+function renderStageResultComment(record: StageResultRecord, usage: UsageAggregate): string {
   const sections = [
     `## Symphony · ${stageDisplayName(record.stage)}`,
     compactMarkdownText(record.summary),
@@ -1252,7 +1319,7 @@ function renderStageResultComment(record: StageResultRecord, usage: StageUsageSn
     "**Result**",
     stageOutcomeDisplayName(record.outcomeKind),
   ];
-  const evidence = stageEvidenceLines(record);
+  const evidence = stageSupportingLines(record);
   if (evidence.length > 0) sections.push("", "**Evidence**", ...evidence.map((line) => `- ${line}`));
   sections.push(
     "",
@@ -1279,7 +1346,7 @@ function stageOutcomeDisplayName(outcome: StageResultOutcomeKind): string {
   return outcome.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") + ".";
 }
 
-function stageEvidenceLines(record: StageResultRecord): string[] {
+function stageSupportingLines(record: StageResultRecord): string[] {
   const lines: string[] = [];
   if (record.commitRevision) lines.push(`Commit: ${inlineCode(record.commitRevision)}`);
   if (record.verifiedRevision) lines.push(`Verified revision: ${inlineCode(record.verifiedRevision)}`);
@@ -1291,14 +1358,14 @@ function stageEvidenceLines(record: StageResultRecord): string[] {
   return lines;
 }
 
-function stageUsageGroupDisplay(group: StageUsageGroup): string {
+function stageUsageGroupDisplay(group: UsageAggregateGroup): string {
   const measured = `input=${group.inputTokens}, cached=${group.cachedInputTokens}, output=${group.outputTokens}, reasoning=${group.reasoningOutputTokens}, total=${group.totalTokens}`;
   return group.unavailableTurnCount === 0
     ? measured
     : `${measured}; unavailable turns=${group.unavailableTurnCount}`;
 }
 
-function usageCompletenessDisplay(usage: StageUsageSnapshot): string {
+function usageCompletenessDisplay(usage: UsageAggregate): string {
   if (usage.isComplete) return `complete (${usage.sourceRecordCount} source ${usage.sourceRecordCount === 1 ? "record" : "records"}).`;
   return `incomplete (${usage.unknownTurnCount} unavailable ${usage.unknownTurnCount === 1 ? "turn" : "turns"}).`;
 }

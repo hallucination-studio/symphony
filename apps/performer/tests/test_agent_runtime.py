@@ -279,8 +279,8 @@ def test_host_keeps_root_session_and_returns_root_directive():
     opened = host.handle(open_root_request())
 
     assert opened["kind"] == "root_reconciler_opened"
-    assert opened["initial_directive"]["action"]["kind"] == "wait"
-    model_turn = opened["initial_directive"]["model_turn"]
+    assert opened["initial_result"]["action"]["kind"] == "wait"
+    model_turn = opened["initial_result"]["model_turn"]
     assert model_turn["turn_record_id"] == "root-1:turn-1"
     assert model_turn["role"] == "root_reconciler"
     assert model_turn["model"] == "gpt"
@@ -418,19 +418,40 @@ def test_delta_retains_and_removes_canonical_plan_facts_in_the_root_baseline():
     assert cycle["plan_completed_results"] == []
 
 
-def test_host_preserves_root_provider_failure_code():
+def test_host_persists_root_provider_failure_as_a_typed_model_turn_result():
     backend = RootFailureBackend()
     host = AgentProtocolHost(backend)
     result = host.handle(open_root_request())
 
-    assert result["code"] == "provider_turn_failed"
+    assert result["kind"] == "root_reconciler_opened"
+    failure = result["initial_result"]
+    assert failure["kind"] == "root_reconciler_failed"
+    assert failure["root_issue_id"] == "root-1"
+    assert failure["failure"]["category"] == "transport_failed"
+    assert failure["failure"]["attempted_input_ids"] == []
+    assert failure["failure"]["model_turn"] == {
+        "turn_record_id": "root-1:turn-1",
+        "role": "root_reconciler",
+        "root_issue_id": "root-1",
+        "reconciler_session_id": "root-session",
+        "reconciler_turn_id": "turn-1",
+        "invocation_state": "ambiguous",
+        "model": "gpt",
+        "outcome": "transport_failed",
+        "usage": {"status": "unavailable", "reason": "transport_lost"},
+        "terminal_at": failure["failure"]["failed_at"],
+    }
 
 
 def test_host_reports_root_directive_contract_failure():
     host = AgentProtocolHost(InvalidRootDirectiveBackend())
     result = host.handle(open_root_request())
 
-    assert result["code"] == "root_directive_wait_missing_blocking_fact_refs"
+    assert result["kind"] == "root_reconciler_opened"
+    failure = result["initial_result"]
+    assert failure["kind"] == "root_reconciler_failed"
+    assert failure["failure"]["category"] == "schema_invalid"
+    assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
 
 
 def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):

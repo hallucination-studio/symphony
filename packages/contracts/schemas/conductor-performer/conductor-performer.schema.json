@@ -698,13 +698,14 @@
     "RootReconcilerFailureRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "model_turn", "category", "sanitized_reason", "failed_at"],
+      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "category", "sanitized_reason", "failed_at"],
       "properties": {
         "failure_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "target_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output"] },
+        "attempted_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
+        "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"] },
         "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "model_turn": { "$ref": "#/$defs/RootReconcilerModelTurnRecord" },
         "failed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
@@ -862,6 +863,24 @@
         "action": { "$ref": "#/$defs/RootDirectiveAction" }
       }
     },
+    "RootReconcilerTurnFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "kind", "root_issue_id", "failure"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "kind": { "const": "root_reconciler_failed" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "failure": { "$ref": "#/$defs/RootReconcilerFailureRecord" }
+      }
+    },
+    "RootReconcilerTurnResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/RootDirective" },
+        { "$ref": "#/$defs/RootReconcilerTurnFailure" }
+      ]
+    },
     "RootDirectiveAction": {
       "oneOf": [
         { "$ref": "#/$defs/ExecutePlanDirective" }, { "$ref": "#/$defs/ExecuteWorkDirective" }, { "$ref": "#/$defs/ExecuteVerifyDirective" },
@@ -961,7 +980,7 @@
     "WaitDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason_code", "blocking_fact_refs"], "properties": { "kind": { "const": "wait" }, "reason_code": { "$ref": "common.schema.json#/$defs/ShortText" }, "blocking_fact_refs": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "AcknowledgeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "acknowledge" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "continue_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "OpenRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "reconciler_turn_id", "observed_at", "root_issue_id", "performer_profile_id", "model_settings", "execution_policy", "bootstrap", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "open_root_reconciler" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "bootstrap": { "$ref": "#/$defs/RootBootstrap" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
-    "RootReconcilerOpenedResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "bootstrap_root_digest", "initial_directive"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_opened" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "bootstrap_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "initial_directive": { "$ref": "#/$defs/RootDirective" } } },
+    "RootReconcilerOpenedResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "bootstrap_root_digest", "initial_result"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "root_reconciler_opened" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "bootstrap_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "initial_result": { "$ref": "#/$defs/RootReconcilerTurnResult" } } },
     "AdvanceRootReconcilerRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "reconciler_session_id", "reconciler_turn_id", "observed_at", "delta", "limits"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "advance_root_reconciler" }, "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "delta": { "$ref": "#/$defs/RootDelta" }, "limits": { "$ref": "#/$defs/TurnLimits" } } },
     "CloseCycleStageSessionsCommand": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id", "reason"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "close_cycle_stage_sessions" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/ShortText" } } },
     "CloseCycleStageSessionsResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "kind", "root_issue_id", "cycle_issue_id"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "kind": { "const": "cycle_stage_sessions_closed" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
@@ -1021,7 +1040,7 @@
     },
     "ConductorPerformerMessage": {
       "oneOf": [
-        { "$ref": "#/$defs/OpenRootReconcilerRequest" }, { "$ref": "#/$defs/RootReconcilerOpenedResult" }, { "$ref": "#/$defs/AdvanceRootReconcilerRequest" }, { "$ref": "#/$defs/RootDirective" },
+        { "$ref": "#/$defs/OpenRootReconcilerRequest" }, { "$ref": "#/$defs/RootReconcilerOpenedResult" }, { "$ref": "#/$defs/AdvanceRootReconcilerRequest" }, { "$ref": "#/$defs/RootDirective" }, { "$ref": "#/$defs/RootReconcilerTurnFailure" },
         { "$ref": "#/$defs/PlanTurnRequest" }, { "$ref": "#/$defs/PlanResult" }, { "$ref": "#/$defs/WorkTurnRequest" }, { "$ref": "#/$defs/WorkResult" },
         { "$ref": "#/$defs/VerifyTurnRequest" }, { "$ref": "#/$defs/VerifyResult" }, { "$ref": "#/$defs/CloseCycleStageSessionsCommand" }, { "$ref": "#/$defs/CloseCycleStageSessionsResult" },
         { "$ref": "#/$defs/CloseRootReconcilerCommand" }, { "$ref": "#/$defs/CloseRootReconcilerResult" }, { "$ref": "#/$defs/PerformerProfileControlMetadata" }, { "$ref": "#/$defs/PerformerProfileControlResult" }

@@ -48,7 +48,14 @@ class RootReconcilerRuntime:
         )
         try:
             result = self._roles.execute_root_reconciler(request)
-            directive = _successful_directive(result, request, root_digest)
+            turn_result = _reconciler_turn_result(result, request, root_digest)
+            if turn_result.get("kind") == "root_reconciler_failed":
+                self._sessions.close(record.session_id)
+                return {
+                    "reconciler_session_id": record.session_id,
+                    "bootstrap_root_digest": root_digest,
+                    "initial_result": turn_result,
+                }
             self._baselines[record.session_id] = RootSessionBaseline(
                 root_issue_id=root_issue_id,
                 root_digest=root_digest,
@@ -58,7 +65,7 @@ class RootReconcilerRuntime:
             return {
                 "reconciler_session_id": record.session_id,
                 "bootstrap_root_digest": root_digest,
-                "initial_directive": directive,
+                "initial_result": turn_result,
             }
         except Exception:
             self._sessions.close(record.session_id)
@@ -102,11 +109,14 @@ class RootReconcilerRuntime:
         execution_request = {**request, "root_issue_id": baseline.root_issue_id}
         try:
             result = self._roles.execute_root_reconciler(execution_request)
-            directive = _successful_directive(result, execution_request, target_digest)
+            turn_result = _reconciler_turn_result(result, execution_request, target_digest)
+            if turn_result.get("kind") == "root_reconciler_failed":
+                self._discard(session_id)
+                return turn_result
             baseline.canonical_facts = _apply_delta(baseline.canonical_facts, delta)
             baseline.previous_root_digest = baseline.root_digest
             baseline.root_digest = target_digest
-            return directive
+            return turn_result
         except Exception:
             self._discard(session_id)
             raise
@@ -137,18 +147,18 @@ def _text(request: dict[str, Any], key: str) -> str:
     return value
 
 
-def _successful_directive(result: dict[str, Any], request: dict[str, Any], expected_digest: str) -> dict[str, Any]:
-    directive = result.get("directive")
+def _reconciler_turn_result(result: dict[str, Any], request: dict[str, Any], expected_digest: str) -> dict[str, Any]:
+    if result.get("kind") == "root_reconciler_failed":
+        return _validate_failure_result(result, request, expected_digest)
+    try:
+        return _successful_directive(result, request, expected_digest)
+    except RootReconcilerTurnError as error:
+        return _failure_from_invalid_directive(result, request, expected_digest, error)
+
+
+def _successful_directive(directive: dict[str, Any], request: dict[str, Any], expected_digest: str) -> dict[str, Any]:
     if not isinstance(directive, dict):
         raise RootReconcilerTurnError("root_directive_missing", "The Root Reconciler turn did not produce a directive.")
-    if directive.get("kind") in {"execution_failed", "canceled"}:
-        code = directive.get("error_code")
-        if not isinstance(code, str) or not code:
-            code = "root_reconciler_turn_canceled" if directive["kind"] == "canceled" else "root_reconciler_turn_failed"
-        reason = directive.get("sanitized_reason")
-        if not isinstance(reason, str) or not reason:
-            reason = "The Root Reconciler turn did not produce a directive."
-        raise RootReconcilerTurnError(code, reason)
     validated = _validate_directive(directive)
     if validated["reconciler_session_id"] != request["reconciler_session_id"]:
         raise RootReconcilerTurnError("root_directive_session_mismatch", "The Root directive session does not match the request.")
@@ -157,6 +167,83 @@ def _successful_directive(result: dict[str, Any], request: dict[str, Any], expec
     if validated["based_on_target_root_digest"] != expected_digest:
         raise RootReconcilerTurnError("root_directive_digest_mismatch", "The Root directive does not match the requested facts.")
     return validated
+
+
+def _validate_failure_result(value: dict[str, Any], request: dict[str, Any], expected_digest: str) -> dict[str, Any]:
+    try:
+        validated = validate("RootReconcilerTurnFailure", value)
+    except ValueError as error:
+        raise RootReconcilerTurnError(
+            "root_reconciler_failure_contract_invalid",
+            "The Root Reconciler failure did not match its closed contract.",
+        ) from error
+    failure = validated["failure"]
+    turn = failure["model_turn"]
+    if (
+        validated["root_issue_id"] != request["root_issue_id"] or
+        failure["reconciler_session_id"] != request["reconciler_session_id"] or
+        failure["reconciler_turn_id"] != request["reconciler_turn_id"] or
+        failure["target_root_digest"] != expected_digest or
+        turn["root_issue_id"] != request["root_issue_id"] or
+        turn["reconciler_session_id"] != request["reconciler_session_id"] or
+        turn["reconciler_turn_id"] != request["reconciler_turn_id"] or
+        turn["turn_record_id"] != f"{request['root_issue_id']}:{request['reconciler_turn_id']}" or
+        turn["outcome"] != failure["category"] or
+        turn["terminal_at"] != failure["failed_at"] or
+        (turn["invocation_state"] == "ambiguous" and turn["usage"]["status"] != "unavailable")
+    ):
+        raise RootReconcilerTurnError(
+            "root_reconciler_failure_correlation_invalid",
+            "The Root Reconciler failure does not match the requested turn.",
+        )
+    return validated
+
+
+def _failure_from_invalid_directive(
+    directive: dict[str, Any],
+    request: dict[str, Any],
+    expected_digest: str,
+    error: RootReconcilerTurnError,
+) -> dict[str, Any]:
+    model_turn = directive.get("model_turn")
+    if not isinstance(model_turn, dict):
+        raise error
+    try:
+        validated_turn = validate("RootReconcilerModelTurnRecord", model_turn)
+    except ValueError:
+        raise error
+    category = "stale_output" if error.code.endswith(("session_mismatch", "turn_mismatch", "digest_mismatch")) else "schema_invalid"
+    failed_turn = {**validated_turn, "outcome": category}
+    return _validate_failure_result({
+        "protocol_version": "1",
+        "request_id": request["request_id"],
+        "kind": "root_reconciler_failed",
+        "root_issue_id": request["root_issue_id"],
+        "failure": {
+            "failure_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}:failure",
+            "reconciler_session_id": request["reconciler_session_id"],
+            "reconciler_turn_id": request["reconciler_turn_id"],
+            "target_root_digest": expected_digest,
+            "attempted_input_ids": _attempted_input_ids(request),
+            "model_turn": failed_turn,
+            "category": category,
+            "sanitized_reason": error.sanitized_reason,
+            "failed_at": failed_turn["terminal_at"],
+        },
+    }, request, expected_digest)
+
+
+def _attempted_input_ids(request: dict[str, Any]) -> list[str]:
+    if request.get("kind") == "open_root_reconciler":
+        source = request.get("bootstrap")
+    else:
+        source = request.get("delta")
+    if not isinstance(source, dict):
+        raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root turn inputs are invalid.")
+    pending = source.get("pending_input_ids")
+    if not isinstance(pending, list) or any(not isinstance(input_id, str) or not input_id for input_id in pending):
+        raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root turn inputs are invalid.")
+    return pending
 
 
 def _bootstrap_facts(bootstrap: dict[str, Any]) -> dict[str, Any]:

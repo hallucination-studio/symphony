@@ -191,7 +191,7 @@ export function inspectAuthoredFile(file, source) {
   }
 
   if (role === "conductor") {
-    const retiredConductorPattern = /(?:agent-symphony-harness|performer-turns|PerformerTurnObservation|RuntimeConvergence|root[-_]?gate|\bV3\b|\bConversation\b|RootTurn|AgentCommand)/u;
+    const retiredConductorPattern = /(?:agent-symphony-harness|performer-turns|PerformerTurnObservation|RuntimeConvergence|root[-_]?gate|\bV3\b|\bConversation\b|\bRootTurn\w*\b|AgentCommand)/u;
     if (retiredConductorPattern.test(normalizedFile) || retiredConductorPattern.test(source)) {
       violations.push(
         violation(
@@ -225,7 +225,7 @@ export function inspectAuthoredFile(file, source) {
     }
   }
 
-  const retiredPerformerPattern = /(?:conversation[-_]?protocol|root[-_]?turn|command[-_]?broker|OpenRootConversation|RootTurn|AgentCommand|agent-command|root[-_]?conversation|Protocol V3)/u;
+  const retiredPerformerPattern = /(?:conversation[-_]?protocol|\broot[-_]?turn\b|command[-_]?broker|OpenRootConversation|\bRootTurn\w*\b|AgentCommand|agent-command|root[-_]?conversation|Protocol V3)/u;
   if (
     (role === "performer" &&
       (retiredPerformerPattern.test(normalizedFile) || retiredPerformerPattern.test(source))) ||

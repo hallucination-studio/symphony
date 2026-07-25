@@ -381,6 +381,12 @@ Stage、Cycle和Root renderer只消费source record identity和fresh snapshot；
 或本地counter提供的aggregate。累计值从fresh Linear事实计算并随matching event comment一起read-back，不通过修改Issue
 description或单独维护可变summary record实现。
 
+首次创建canonical Stage Result comment时，Conductor可把已经通过Result correlation校验、即将与该comment原子写入的
+本次`StageResultRecord`作为同一个纯aggregate derivation的prospective source，并与此前fresh Linear sources共同渲染。
+这只解决“本次record尚未存在而comment必须同时展示本次累计”的写入顺序，不是本地usage事实、ledger或E2E证据：append后
+必须只从fresh read-back的strict records重新派生同一aggregate并逐字段相等，否则当前Root停止。Cycle、Root timeline和
+任何恢复/E2E路径绝不接受prospective source；它们只读取fresh Linear records。
+
 Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
 model/usage record或累计comment写入、strict decode、聚合校验或read-back失败时当前Root停止，turn启动前的Linear token
 reservation继续全额计入，不能因少计而绕过Root

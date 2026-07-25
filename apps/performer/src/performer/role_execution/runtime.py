@@ -74,13 +74,20 @@ class RoleExecutionRuntime:
         except ProviderTurnCanceled as error:
             result = {"kind": "canceled", "sanitized_reason": error.sanitized_reason}
         except ProviderTurnDeadlineExpired:
-            result = {"kind": "canceled", "sanitized_reason": "The turn deadline expired."}
+            result = {
+                "kind": "execution_failed",
+                "error_code": "turn_deadline_expired",
+                "sanitized_reason": "The turn deadline expired.",
+                "retryable": False,
+                "failure_category": "timed_out",
+            }
         except ProviderBackendError as error:
             result = {
                 "kind": "execution_failed",
                 "error_code": error.code,
                 "sanitized_reason": error.sanitized_reason,
                 "retryable": error.retryable,
+                "failure_category": "transport_failed",
             }
         except (KeyError, TypeError, ValueError, SessionError):
             result = {
@@ -88,6 +95,7 @@ class RoleExecutionRuntime:
                 "error_code": "performer_turn_invalid",
                 "sanitized_reason": "The Performer could not validate the turn result.",
                 "retryable": False,
+                "failure_category": "schema_invalid",
             }
         except Exception:
             result = {
@@ -95,6 +103,7 @@ class RoleExecutionRuntime:
                 "error_code": "performer_turn_failed",
                 "sanitized_reason": "The Performer could not complete the turn.",
                 "retryable": False,
+                "failure_category": "transport_failed",
             }
         if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed"}:
             result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."}
@@ -147,33 +156,40 @@ def _terminal(
 ) -> dict[str, Any]:
     model_turn = _model_turn(request, role, result, completed_at, session_record, provider_output)
     if role == "root_reconciler":
-        payload = {
-            "protocol_version": "1",
-            "request_id": request["request_id"],
-            "reconciler_session_id": request["reconciler_session_id"],
-            "reconciler_turn_id": request["reconciler_turn_id"],
-            "root_issue_id": request["root_issue_id"],
-        }
         if result.get("kind") in {"execution_failed", "canceled"}:
-            payload["directive"] = result
-        else:
-            payload["directive"] = {
+            category = _root_failure_category(result)
+            return {
                 "protocol_version": "1",
                 "request_id": request["request_id"],
-                "root_directive_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}",
-                "reconciler_session_id": request["reconciler_session_id"],
-                "reconciler_turn_id": request["reconciler_turn_id"],
-                "model_turn": model_turn,
-                "based_on_target_root_digest": _root_target_digest(request),
-                "rationale": result["rationale"],
-                "evidence_refs": result["evidence_refs"],
-                "consumed_input_ids": result["consumed_input_ids"],
-                "comment_replies": result["comment_replies"],
-                "human_action_resolutions": result["human_action_resolutions"],
-                "action": result["action"],
+                "kind": "root_reconciler_failed",
+                "root_issue_id": request["root_issue_id"],
+                "failure": {
+                    "failure_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}:failure",
+                    "reconciler_session_id": request["reconciler_session_id"],
+                    "reconciler_turn_id": request["reconciler_turn_id"],
+                    "target_root_digest": _root_target_digest(request),
+                    "attempted_input_ids": _root_attempted_input_ids(request),
+                    "model_turn": model_turn,
+                    "category": category,
+                    "sanitized_reason": result["sanitized_reason"],
+                    "failed_at": _timestamp(completed_at),
+                },
+            }
+        return {
+            "protocol_version": "1",
+            "request_id": request["request_id"],
+            "root_directive_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}",
+            "reconciler_session_id": request["reconciler_session_id"],
+            "reconciler_turn_id": request["reconciler_turn_id"],
+            "model_turn": model_turn,
+            "based_on_target_root_digest": _root_target_digest(request),
+            "rationale": result["rationale"],
+            "evidence_refs": result["evidence_refs"],
+            "consumed_input_ids": result["consumed_input_ids"],
+            "comment_replies": result["comment_replies"],
+            "human_action_resolutions": result["human_action_resolutions"],
+            "action": result["action"],
         }
-        payload["completed_at"] = _timestamp(completed_at)
-        return payload
     payload = {
         "protocol_version": "1",
         "request_id": request["request_id"],
@@ -207,7 +223,13 @@ def _model_turn(
     model = settings.get("model")
     if not isinstance(model, str) or not model:
         raise ValueError("provider_model_missing")
-    outcome = "directive_accepted" if role == "root_reconciler" and result.get("kind") not in {"execution_failed", "canceled"} else result.get("kind")
+    outcome = (
+        "directive_accepted"
+        if role == "root_reconciler" and result.get("kind") not in {"execution_failed", "canceled"}
+        else _root_failure_category(result)
+        if role == "root_reconciler"
+        else result.get("kind")
+    )
     if not isinstance(outcome, str):
         raise ValueError("model_turn_outcome_invalid")
     terminal_at = _timestamp(completed_at)
@@ -265,6 +287,29 @@ def _turn_usage(provider_output: dict[str, Any] | None, result: dict[str, Any]) 
         if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values):
             return usage
     return {"status": "unavailable", "reason": "invalid_provider_usage"}
+
+
+def _root_failure_category(result: dict[str, Any]) -> str:
+    category = result.get("failure_category")
+    if category in {"transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"}:
+        return category
+    return "canceled" if result.get("kind") == "canceled" else "transport_failed"
+
+
+def _root_attempted_input_ids(request: dict[str, Any]) -> list[str]:
+    if request.get("kind") == "open_root_reconciler":
+        bootstrap = request.get("bootstrap")
+        if not isinstance(bootstrap, dict):
+            raise ValueError("root_bootstrap_invalid")
+        pending = bootstrap.get("pending_input_ids")
+    else:
+        delta = request.get("delta")
+        if not isinstance(delta, dict):
+            raise ValueError("root_delta_invalid")
+        pending = delta.get("pending_input_ids")
+    if not isinstance(pending, list) or any(not isinstance(item, str) or not item for item in pending):
+        raise ValueError("root_pending_inputs_invalid")
+    return pending
 
 
 def _provider_output(value: Any, role: str) -> dict[str, Any]:

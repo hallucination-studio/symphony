@@ -19,6 +19,7 @@ import type {
   ProgressAssessment,
   RootOwnershipRecord,
   RootDirectiveRecord,
+  RootReconcilerFailureRecord,
   RootReconcilerReplyRecord,
   StageContextCoverage,
   StageContextSource,
@@ -30,7 +31,11 @@ import type {
   WorkflowIssueRecord,
   WorkflowTimelineRecord,
 } from "../api/ManagedRecords.js";
-import { decodeConductorPerformerRootDirective, type JsonValue } from "@symphony/contracts";
+import {
+  decodeConductorPerformerRootDirective,
+  decodeConductorPerformerRootReconcilerFailureRecord,
+  type JsonValue,
+} from "@symphony/contracts";
 import type { RootDirective, UserCommentReplySource } from "../api/RootReconciliationContracts.js";
 
 const symphonyBlock = /^```symphony\r?\n([\s\S]*?)^```[ \t]*(?:\r?\n|$)/gmu;
@@ -97,6 +102,7 @@ function managedRecordSummary(kind: ManagedRecord["kind"]): string {
     case "root_ownership": return "Root ownership recorded.";
     case "workflow_issue": return "Workflow issue identity recorded.";
     case "root_directive": return "Root decision recorded.";
+    case "root_reconciler_failure": return "Root Reconciler failure recorded.";
     case "root_reconciler_reply": return "Root Reconciler reply recorded.";
     case "delivery": return "Delivery recorded.";
     case "workflow_timeline": return "Workflow timeline recorded.";
@@ -121,6 +127,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "root_ownership": return decodeRootOwnership(object);
     case "workflow_issue": return decodeWorkflowIssue(object);
     case "root_directive": return decodeRootDirectiveRecord(object);
+    case "root_reconciler_failure": return decodeRootReconcilerFailureRecord(object);
     case "root_reconciler_reply": return decodeRootReconcilerReplyRecord(object);
     case "delivery": return decodeDelivery(object);
     case "workflow_timeline": return decodeWorkflowTimeline(object);
@@ -182,6 +189,51 @@ function decodeRootDirectiveRecord(o: Record<string, unknown>): RootDirectiveRec
     consumedInputIds: ids(o, "consumed_input_ids"),
     directive,
     acceptedAt: timestamp(o, "accepted_at"),
+  };
+}
+
+function decodeRootReconcilerFailureRecord(o: Record<string, unknown>): RootReconcilerFailureRecord {
+  fields(o, [
+    "kind", "version", "failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest",
+    "attempted_input_ids", "model_turn", "category", "sanitized_reason", "failed_at",
+  ]);
+  const wire = { ...o };
+  delete wire.kind;
+  delete wire.version;
+  try {
+    decodeConductorPerformerRootReconcilerFailureRecord(wire as JsonValue);
+  } catch {
+    fail("managed_record_root_reconciler_failure_invalid");
+  }
+  const modelTurn = decodeRootModelTurn(requiredObject(o, "model_turn"));
+  const failureId = id(o, "failure_id");
+  const reconcilerSessionId = id(o, "reconciler_session_id");
+  const reconcilerTurnId = id(o, "reconciler_turn_id");
+  const targetRootDigest = id(o, "target_root_digest");
+  const attemptedInputIds = identifiers(o, "attempted_input_ids", 512);
+  const category = enumValue(o, "category", ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"] as const);
+  const failedAt = timestamp(o, "failed_at");
+  if (
+    failureId !== `${modelTurn.rootIssueId}:${reconcilerTurnId}:failure` ||
+    modelTurn.reconcilerSessionId !== reconcilerSessionId ||
+    modelTurn.reconcilerTurnId !== reconcilerTurnId ||
+    modelTurn.turnRecordId !== `${modelTurn.rootIssueId}:${reconcilerTurnId}` ||
+    modelTurn.outcome !== category ||
+    modelTurn.terminalAt !== failedAt ||
+    (modelTurn.invocationState === "ambiguous" && modelTurn.usage.status !== "unavailable")
+  ) fail("managed_record_root_reconciler_failure_correlation_invalid");
+  return {
+    kind: "root_reconciler_failure",
+    version: 1,
+    failureId,
+    reconcilerSessionId,
+    reconcilerTurnId,
+    targetRootDigest,
+    attemptedInputIds,
+    modelTurn,
+    category,
+    sanitizedReason: text(o, "sanitized_reason"),
+    failedAt,
   };
 }
 
@@ -425,6 +477,25 @@ function decodeStageModelTurn(o: Record<string, unknown>): StageResultRecord["mo
   };
 }
 
+function decodeRootModelTurn(o: Record<string, unknown>): RootReconcilerFailureRecord["modelTurn"] {
+  fields(o, [
+    "turn_record_id", "role", "root_issue_id", "reconciler_session_id", "reconciler_turn_id",
+    "invocation_state", "model", "outcome", "usage", "terminal_at",
+  ]);
+  return {
+    turnRecordId: id(o, "turn_record_id"),
+    role: enumValue(o, "role", ["root_reconciler"]),
+    rootIssueId: id(o, "root_issue_id"),
+    reconcilerSessionId: id(o, "reconciler_session_id"),
+    reconcilerTurnId: id(o, "reconciler_turn_id"),
+    invocationState: enumValue(o, "invocation_state", ["confirmed", "ambiguous"]),
+    model: text(o, "model"),
+    outcome: enumValue(o, "outcome", ["directive_accepted", "transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"]),
+    usage: decodeTurnUsage(requiredObject(o, "usage")),
+    terminalAt: timestamp(o, "terminal_at"),
+  };
+}
+
 function decodeTurnUsage(o: Record<string, unknown>): StageResultRecord["modelTurn"]["usage"] {
   const status = enumValue(o, "status", ["measured", "unavailable"] as const);
   if (status === "unavailable") {
@@ -568,6 +639,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
     workflow_issue: { allowed: ["kind", "version", "issueKey", "rootIssueId", "parentIssueId", "issueKind"] },
     root_directive: { allowed: ["kind", "version", "rootDirectiveId", "rootIssueId", "reconcilerSessionId", "reconcilerTurnId", "basedOnTargetRootDigest", "consumedInputIds", "directive", "acceptedAt"] },
+    root_reconciler_failure: { allowed: ["kind", "version", "failureId", "reconcilerSessionId", "reconcilerTurnId", "targetRootDigest", "attemptedInputIds", "modelTurn", "category", "sanitizedReason", "failedAt"] },
     root_reconciler_reply: { allowed: ["kind", "version", "replyId", "replyWriteId", "rootDirectiveId", "sourceInputId", "source", "targetIssueId", "disposition", "reaction", "threadAction", "materializedOutcomeRefs", "renderedSchemaVersion", "repliedAt"] },
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "materializedAt"] },
@@ -601,6 +673,17 @@ function encodeRecord(value: unknown): Record<string, unknown> {
       consumed_input_ids: record.consumedInputIds,
       directive: encodeRootDirective(record.directive),
       accepted_at: record.acceptedAt,
+    });
+    case "root_reconciler_failure": return encodeSimple(record, {
+      failure_id: record.failureId,
+      reconciler_session_id: record.reconcilerSessionId,
+      reconciler_turn_id: record.reconcilerTurnId,
+      target_root_digest: record.targetRootDigest,
+      attempted_input_ids: record.attemptedInputIds,
+      model_turn: encodeRootModelTurn(record.modelTurn),
+      category: record.category,
+      sanitized_reason: record.sanitizedReason,
+      failed_at: record.failedAt,
     });
     case "root_reconciler_reply": return encodeSimple(record, {
       reply_id: record.replyId,
@@ -641,6 +724,29 @@ function encodeRootDirective(record: RootDirective): Record<string, unknown> {
   }
   if (!isObject(wire)) fail("managed_record_root_directive_invalid");
   return wire;
+}
+function encodeRootModelTurn(record: RootReconcilerFailureRecord["modelTurn"]): Record<string, unknown> {
+  return {
+    turn_record_id: record.turnRecordId,
+    role: record.role,
+    root_issue_id: record.rootIssueId,
+    reconciler_session_id: record.reconcilerSessionId,
+    reconciler_turn_id: record.reconcilerTurnId,
+    invocation_state: record.invocationState,
+    model: record.model,
+    outcome: record.outcome,
+    usage: record.usage.status === "measured"
+      ? {
+        status: record.usage.status,
+        input_tokens: record.usage.inputTokens,
+        cached_input_tokens: record.usage.cachedInputTokens,
+        output_tokens: record.usage.outputTokens,
+        reasoning_output_tokens: record.usage.reasoningOutputTokens,
+        total_tokens: record.usage.totalTokens,
+      }
+      : { status: record.usage.status, reason: record.usage.reason },
+    terminal_at: record.terminalAt,
+  };
 }
 function encodeStageExecution(record: StageExecutionRecord): Record<string, unknown> { return encodeSimple(record, { stage_execution_id: record.stageExecutionId, root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, node_issue_id: record.nodeIssueId, stage: record.stage, ...(record.planContractDigest === undefined ? {} : { plan_contract_digest: record.planContractDigest }), context_digest: record.contextDigest, source_manifest: record.sourceManifest.map(encodeSource), coverage: encodeCoverage(record.coverage), instruction_set_id: record.instructionSetId, execution_policy_id: record.executionPolicyId, limits: encodeLimits(record.limits), repository_revision: record.repositoryRevision, started_at: record.startedAt, deadline_at: record.deadlineAt }); }
 function encodeStageResult(record: StageResultRecord): Record<string, unknown> { return encodeSimple(record, {
@@ -738,6 +844,16 @@ function text(o: Record<string, unknown>, key: string): string { const value = o
 function strings(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || entry.length === 0 || entry.length > maxText || /[\0\r\n]/u.test(entry)) fail("managed_record_bounded_text_invalid"); return entry; }); }
 function paths(o: Record<string, unknown>, key: string): string[] { const value = strings(o, key); return value.map((entry) => { if (entry.startsWith("/") || entry.split("/").some((part) => part === "..")) fail(`managed_record_path_invalid:${key}`); return entry; }); }
 function ids(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || !identifierPattern.test(entry)) fail(`managed_record_identifier_invalid:${key}`); return entry; }); }
+function identifiers(o: Record<string, unknown>, key: string, limit: number): string[] {
+  const value = o[key];
+  if (!Array.isArray(value) || value.length > limit) fail(`managed_record_array_invalid:${key}`);
+  const values = value.map((entry) => {
+    if (typeof entry !== "string" || !identifierPattern.test(entry)) fail(`managed_record_identifier_invalid:${key}`);
+    return entry;
+  });
+  if (new Set(values).size !== values.length) fail(`managed_record_identifier_duplicate:${key}`);
+  return values;
+}
 function opaques(o: Record<string, unknown>, key: string): string[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => { if (typeof entry !== "string" || entry.length === 0 || entry.length > 512 || /[\0\r\n]/u.test(entry)) fail(`managed_record_opaque_invalid:${key}`); return entry; }); }
 function criteria(o: Record<string, unknown>, key: string): AcceptanceCriterion[] { return array(o, key, (value) => decodeCriterion(recordObject(value))); }
 function array<T>(o: Record<string, unknown>, key: string, decode: (value: Record<string, unknown>) => T): T[] { const value = o[key]; if (!Array.isArray(value) || value.length > maxItems) fail(`managed_record_array_invalid:${key}`); return value.map((entry) => decode(recordObject(entry))); }

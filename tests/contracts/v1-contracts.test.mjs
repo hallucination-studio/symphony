@@ -68,7 +68,10 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "RootDelta",
     "AdvanceRootReconcilerRequest",
     "RootDirective",
+    "RootReconcilerTurnFailure",
+    "RootReconcilerTurnResult",
     "UserCommentReply",
+    "UserCommentThreadStateInput",
     "CancelRootDirective",
     "MaterializeApprovedPlanDagDirective",
     "PlanTurnRequest",
@@ -77,7 +80,6 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "PlanResult",
     "WorkResult",
     "VerifyResult",
-    "WorkflowCommentThreadChangeSnapshot",
     "CreateCommentReplyCommand",
     "SetCommentReceiptReactionCommand",
     "SetCommentThreadStateCommand",
@@ -128,6 +130,8 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "managed" + "Marker",
     "expected" + "_managed" + "_marker",
     "Usage" + "Snapshot",
+    "WorkflowCommentThread" + "ChangeSnapshot",
+    "UserCommentThread" + "ChangeInput",
     "Archive" + "WorkflowIssueCommand",
     "Restore" + "WorkflowIssueCommand",
     "Remove" + "WorkflowRelationCommand",
@@ -251,6 +255,7 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/RootReconcilerOpenedResult",
     "#/$defs/AdvanceRootReconcilerRequest",
     "#/$defs/RootDirective",
+    "#/$defs/RootReconcilerTurnFailure",
     "#/$defs/PlanTurnRequest",
     "#/$defs/PlanResult",
     "#/$defs/WorkTurnRequest",
@@ -267,6 +272,17 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   const open = schema.$defs.OpenRootReconcilerRequest;
   assert.ok(open.required.includes("bootstrap"));
   assert.equal(open.properties.bootstrap.$ref, "#/$defs/RootBootstrap");
+  const opened = schema.$defs.RootReconcilerOpenedResult;
+  assert.ok(opened.required.includes("initial_result"));
+  assert.equal(opened.properties.initial_result.$ref, "#/$defs/RootReconcilerTurnResult");
+  assert.equal(Object.hasOwn(opened.properties, "initial_" + "directive"), false);
+  assert.deepEqual(schema.$defs.RootReconcilerTurnResult.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/RootDirective",
+    "#/$defs/RootReconcilerTurnFailure",
+  ]);
+  assert.deepEqual(schema.$defs.RootReconcilerTurnFailure.required, [
+    "protocol_version", "request_id", "kind", "root_issue_id", "failure",
+  ]);
   const advance = schema.$defs.AdvanceRootReconcilerRequest;
   assert.deepEqual(advance.required, [
     "protocol_version", "request_id", "kind", "reconciler_session_id",
@@ -279,7 +295,7 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   );
   assert.deepEqual(schema.$defs.RootDeltaChange.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/IssueCurrentValue", "#/$defs/IssueDetached",
-    "#/$defs/CommentCurrentValue", "#/$defs/CommentRemoved",
+    "#/$defs/CommentCurrentValue", "#/$defs/CommentThreadStateCurrentValue", "#/$defs/CommentRemoved",
     "#/$defs/RelationCurrentValue", "#/$defs/RelationRemoved",
     "#/$defs/ManagedRecordCurrentValue", "#/$defs/ManagedRecordRemoved",
     "#/$defs/PlanContractCurrentValue", "#/$defs/PlanCompletedResultCurrentValue",
@@ -334,7 +350,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   const tree = schema.$defs.WorkflowRootTreeSnapshot;
   assert.deepEqual(tree.required, [
     "root_issue_id", "status_catalog", "issues", "comments", "relations", "observed_at",
-    "comment_thread_changes", "source_manifest", "coverage",
+    "source_manifest", "coverage",
   ]);
   assert.equal(schema.$defs.WorkflowSourceManifestEntry.additionalProperties, false);
   assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.required, [
@@ -350,15 +366,9 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "comment_id", "issue_id", "body", "author_kind", "author_id", "thread_root_comment_id",
     "thread_state", "reactions", "created_at", "remote_version", "updated_at",
   ]);
-  assert.deepEqual(
-    schema.$defs.WorkflowCommentThreadChangeSnapshot.required,
-    [
-      "thread_change_id", "source_comment_id", "thread_root_comment_id", "action",
-      "actor_kind", "occurred_at",
-    ],
-  );
+  assert.equal(Object.hasOwn(tree.properties, "comment_" + "thread_changes"), false);
   assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.properties.source_kind.enum, [
-    "linear_issue", "linear_comment", "linear_comment_thread_change", "linear_relation",
+    "linear_issue", "linear_comment", "linear_relation",
     "linear_status_catalog",
   ]);
   assert.equal(schema.$defs.WorkflowRelationSnapshot.additionalProperties, false);
@@ -428,10 +438,10 @@ test("turn facts, comment replies, and timelines have one closed durable record 
 
   assert.deepEqual(schema.$defs.UserCommentInput.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/UserCommentBodyInput",
-    "#/$defs/UserCommentThreadChangeInput",
+    "#/$defs/UserCommentThreadStateInput",
   ]);
   assert.deepEqual(schema.$defs.UserCommentReply.required, [
-    "reply_id", "source_input_id", "source_comment_id", "source_comment_version",
+    "reply_id", "source_input_id", "source",
     "acknowledgement", "interpreted_request", "decided_action", "next_step", "disposition",
     "reaction", "thread_action",
   ]);

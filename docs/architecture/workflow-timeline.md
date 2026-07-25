@@ -160,6 +160,8 @@ RootTimelineEvent =
 Root时间轴只记录跨Cycle或Root级业务边界，不复制每个Work turn。`RootConvergenceEvaluatedEvent`展示本次
 Cycle count、Finding persistence、no-progress、token/deadline和触发阈值；不得只写“budget exceeded”。
 `RootContractChangedEvent`说明最新Root contract变化和旧delivery/Cycle是否仍匹配。
+`RootFailureRecordedEvent`只引用已经strict read-back的`RootReconcilerFailureRecord`，说明本次调用为什么停止以及
+Root正在等待哪类新的用户输入；它不能暗示retry、恢复执行或另一条下一步决策。
 
 ### 5.2 Root comment模板
 

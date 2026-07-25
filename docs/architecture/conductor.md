@@ -14,7 +14,8 @@ Conductor负责：
 - 把lifecycle、DAG和Tree矛盾计算为`mechanical_violations[]`，不自行修正或决定业务后果；
 - 新Root Reconciler session构造一次完整bootstrap，后续从fresh完整读取与session baseline计算delta；
 - 主动调用Performer Root Reconciler，并保证已有session只接收delta；
-- 校验、持久化和materialize accepted `RootDirective`；
+- 校验closed `RootReconcilerTurnResult`：持久化并materialize accepted `RootDirective`，或strict-write/read-back
+  `RootReconcilerFailureRecord`后停止；
 - 构造Plan/Work/Verify强类型request并调用对应Performer role thread；
 - 验证和持久化Stage Results，再交给Root Reconciler；
 - 根据directive创建Human Action，把Human status/comments作为用户输入，并根据directive持久化resolution；
@@ -59,7 +60,7 @@ apps/conductor/src/
 | `root-scheduling` | blocker eligibility、Priority和`updatedAt`抢占排序；不拥有capacity或Root语义 |
 | `root-reconciliation` | deterministic host、diff、safety validation和convergence gate；不产生业务下一步 |
 | `root-reconciler-client` | open时发送一次bootstrap，advance时只发送delta，并调用Root Reconciler |
-| `root-directive-materialization` | 校验、幂等执行和read-back Root directive及required user replies |
+| `root-directive-materialization` | 校验、幂等执行和read-back Root directive、required user replies及Reconciler failure record |
 | `performer-agent-client` | Root Reconciler和三个Stage role session/turn transport |
 | `human-actions` | Action Issue、labels、status/comment validation和resolution |
 | `workflow-events` | 发布closed timeline events |
@@ -99,11 +100,9 @@ fresh view
 -> if an accepted directive is incomplete: finish the same materialization
 -> else if no usable session baseline: open with one complete bootstrap
 -> otherwise compute and send only RootDelta
--> validate and persist one RootDirective
--> materialize that directive
--> semantic read-back
--> materialize and read back required user-comment replies
--> publish and materialize typed timeline event
+-> obtain one closed RootReconcilerTurnResult
+-> directive: validate/persist, materialize, semantic read-back, write required replies and publish its typed timeline event
+-> failure: write and strict-read-back RootReconcilerFailureRecord, then stop at the durable retry barrier
 -> discard view
 ```
 
@@ -169,7 +168,8 @@ verified HEAD。
 ## 10. 不变量
 
 1. Conductor运行确定性Root Reconciliation host，不运行模型或Agent SDK。
-2. Root和Cycle语义只来自Root Reconciler directive。
+2. Root和Cycle下一步语义只来自Root Reconciler turn result的directive variant；failure variant只留下
+   durable evidence并阻止继续调用，不能形成第二条决策路径。
 3. Conductor是Linear/Git workflow副作用和Performer调用的唯一owner。
 4. active和archived Issues都必须读取；只有active DAG可dispatch。
 5. 每次accepted Result先durable，再交给Root Reconciler。

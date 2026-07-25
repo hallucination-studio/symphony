@@ -108,8 +108,8 @@ Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository
 `root-reconciliation`拥有只验证ownership、coverage、schema、capability、budget和convergence边界的
 `RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
 `root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
-`root-directive-materialization`验证和执行closed directive；`performer-agent-client`拥有Root Reconciler和三个
-Stage role session/turn
+`root-directive-materialization`验证和执行closed directive，并以独立strict writer持久化Root Reconciler failure record；
+`performer-agent-client`拥有Root Reconciler和三个Stage role session/turn
 transport。`workflow-events`只发布typed timeline event，`timeline-comments`只渲染和写Root/Cycle timeline；
 用户comment reply由`root-directive-materialization`通过closed writer完成。
 完整边界分别由[Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和

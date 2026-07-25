@@ -277,7 +277,7 @@ function bootstrap() {
   };
 }
 
-function initialDirective() {
+function rootDirective() {
   return {
     protocol_version: "1",
     request_id: "request-1",
@@ -325,6 +325,29 @@ function rootModelTurn(turnId: string) {
     outcome: "directive_accepted",
     usage: { status: "unavailable", reason: "provider_omitted" },
     terminal_at: "2026-07-23T00:00:01Z",
+  };
+}
+
+function rootFailure(requestId: string, turnId: string, targetRootDigest: string) {
+  return {
+    protocol_version: "1",
+    request_id: requestId,
+    kind: "root_reconciler_failed",
+    root_issue_id: "root-1",
+    failure: {
+      failure_id: `root-1:${turnId}:failure`,
+      reconciler_session_id: "session-1",
+      reconciler_turn_id: turnId,
+      target_root_digest: targetRootDigest,
+      attempted_input_ids: [],
+      model_turn: {
+        ...rootModelTurn(turnId),
+        outcome: "schema_invalid",
+      },
+      category: "schema_invalid",
+      sanitized_reason: "The Root Reconciler response was invalid.",
+      failed_at: "2026-07-23T00:00:01Z",
+    },
   };
 }
 
@@ -437,14 +460,16 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
         kind: "root_reconciler_opened",
         reconciler_session_id: "session-1",
         bootstrap_root_digest: "tree-1",
-        initial_directive: initialDirective(),
+        initial_result: rootDirective(),
       };
     }, calls),
     deadlineMs: 30_000,
   });
   const input = openInput();
 
-  assert.equal((await client.openRootReconciler(input)).initialDirective.action.kind, "wait");
+  const opened = await client.openRootReconciler(input);
+  assert.equal(opened.initialResult.kind, "directive");
+  if (opened.initialResult.kind === "directive") assert.equal(opened.initialResult.directive.action.kind, "wait");
   assert.equal(calls.length, 1);
   const sent = calls[0]!;
   assert.equal(sent.protocol_version, "1");
@@ -452,6 +477,81 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal("payload" in sent, false);
   assert.equal(sent.root_issue_id, "root-1");
   assert.equal(sent.performer_profile_id, "profile-1");
+});
+
+test("agent client decodes a closed Root Reconciler failure without retaining a session", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId }) => ({
+      protocol_version: "1",
+      request_id: requestId,
+      kind: "root_reconciler_opened",
+      reconciler_session_id: "session-1",
+      bootstrap_root_digest: "tree-1",
+      initial_result: rootFailure(requestId, "turn-1", "tree-1"),
+    })),
+    deadlineMs: 30_000,
+  });
+
+  const opened = await client.openRootReconciler(openInput());
+
+  assert.equal(opened.initialResult.kind, "failed");
+  if (opened.initialResult.kind === "failed") {
+    assert.equal(opened.initialResult.failure.failureId, "root-1:turn-1:failure");
+    assert.equal(opened.initialResult.failure.modelTurn.outcome, "schema_invalid");
+  }
+  await assert.rejects(
+    () => client.advanceRootReconciler({
+      requestId: "advance-request",
+      sessionId: "session-1",
+      reconcilerTurnId: "turn-2",
+      observedAt: "2026-07-23T00:00:02Z",
+      delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
+    }),
+    /root_reconciler_session_profile_unknown/u,
+  );
+});
+
+test("agent client discards a session after an advance returns a closed Root failure", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
+      ? {
+        protocol_version: "1",
+        request_id: requestId,
+        kind: "root_reconciler_opened",
+        reconciler_session_id: "session-1",
+        bootstrap_root_digest: "tree-1",
+        initial_result: rootDirective(),
+      }
+      : rootFailure(requestId, "turn-2", "tree-2"), calls),
+    deadlineMs: 30_000,
+  });
+
+  await client.openRootReconciler(openInput());
+  const result = await client.advanceRootReconciler({
+    requestId: "advance-request-1",
+    sessionId: "session-1",
+    reconcilerTurnId: "turn-2",
+    observedAt: "2026-07-23T00:00:02Z",
+    delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
+  });
+
+  assert.equal(result.kind, "failed");
+  await assert.rejects(
+    () => client.advanceRootReconciler({
+      requestId: "advance-request-2",
+      sessionId: "session-1",
+      reconcilerTurnId: "turn-3",
+      observedAt: "2026-07-23T00:00:03Z",
+      delta: { baseRootDigest: "tree-2", targetRootDigest: "tree-3", changes: [], pendingInputIds: [] },
+    }),
+    /root_reconciler_session_profile_unknown/u,
+  );
+  assert.equal(calls.length, 2);
 });
 
 test("agent client carries canonical Plan facts in Root bootstrap and delta wires", async () => {
@@ -462,7 +562,7 @@ test("agent client carries canonical Plan facts in Root bootstrap and delta wire
     channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
       ? {
         protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_directive: waitDirective(requestId, "tree-1", "turn-1"),
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: waitDirective(requestId, "tree-1", "turn-1"),
       }
       : waitDirective(requestId, "tree-2", "advance-turn"), calls),
     deadlineMs: 30_000,
@@ -529,7 +629,7 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
             ? {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
               reconciler_session_id: "session-1",
-              bootstrap_root_digest: "tree-1", initial_directive: initialDirective(),
+              bootstrap_root_digest: "tree-1", initial_result: rootDirective(),
             }
             : {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_closed", root_issue_id: "root-1",
@@ -712,7 +812,7 @@ test("agent client normalizes the Root directive wire fields", async () => {
     channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
       ? {
         protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_directive: initialDirective(),
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: rootDirective(),
       }
       : {
         protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
@@ -736,9 +836,14 @@ test("agent client normalizes the Root directive wire fields", async () => {
     delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
   });
 
-  assert.equal(result.directive.action.kind, "execute_plan");
-  assert.equal(result.directive.action.planIssueId, "plan-1");
-  assert.equal(result.directive.action.cycleIssueId, "cycle-1");
+  assert.equal(result.kind, "directive");
+  if (result.kind === "directive") {
+    assert.equal(result.directive.action.kind, "execute_plan");
+    if (result.directive.action.kind === "execute_plan") {
+      assert.equal(result.directive.action.planIssueId, "plan-1");
+      assert.equal(result.directive.action.cycleIssueId, "cycle-1");
+    }
+  }
 });
 
 test("agent client preserves the structured Performer error code", async () => {

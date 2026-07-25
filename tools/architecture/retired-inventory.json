@@ -141,7 +141,8 @@
       ],
       "paths": [
         "apps/conductor/src/timeline-projections/api/TimelineProjectionSubscriberInterface.ts",
-        "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts"
+        "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
+        "apps/conductor/src/timeline-projections/tests/LinearWorkflowTimelinePublisherImpl.test.ts"
       ],
       "symbols": {
         "TimelineProjection": [

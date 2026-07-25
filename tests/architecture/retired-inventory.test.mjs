@@ -55,10 +55,7 @@ test("hard-cut inventory names every retired comment, timeline, usage, and E2E s
 test("final findings identify the architecture rule that owns each reachable legacy surface", async () => {
   const findings = await auditRetiredInventory(process.cwd(), { mode: "final" });
 
-  assert.ok(findings.some((finding) =>
-    finding.scope === managedHtmlRecordsScope &&
-    finding.symbol === snakeMarker &&
-    finding.source === "docs/architecture/contracts.md#契约与接口边界"));
+  assert.ok(!findings.some((finding) => finding.scope === managedHtmlRecordsScope));
   assert.ok(findings.some((finding) =>
     finding.scope === timelineProjectionsScope &&
     finding.code === "retired_path_remaining" &&

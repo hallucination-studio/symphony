@@ -387,7 +387,10 @@ function dependencies(input: {
           kind: "opened" as const,
           sessionId: "session-1",
           bootstrapRootDigest: openInput.bootstrap.rootDigest,
-          initialDirective: directive(openInput.bootstrap.rootDigest, openInput.bootstrap.pendingInputIds, input.role),
+          initialResult: {
+            kind: "directive" as const,
+            directive: directive(openInput.bootstrap.rootDigest, openInput.bootstrap.pendingInputIds, input.role),
+          },
         };
       },
       async advance() { throw new Error("advance_unexpected"); },
@@ -424,6 +427,7 @@ function dependencies(input: {
         return { kind: "materialized" as const, record: {} as never };
       },
     },
+    failureRecordWriter: { async write() { throw new Error("failure_record_writer_unexpected"); } },
     replyWriter: { async write() { return { kind: "materialized" as const, replyId: "reply-1" }; } },
     humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
     humanActionResolutionMaterializer: { async materialize() { throw new Error("human_action_unexpected"); } },

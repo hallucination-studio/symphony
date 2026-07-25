@@ -70,6 +70,20 @@ export interface RootDirectiveRecord {
   acceptedAt: string;
 }
 
+export interface RootReconcilerFailureRecord {
+  kind: "root_reconciler_failure";
+  version: ManagedRecordVersion;
+  failureId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  targetRootDigest: string;
+  attemptedInputIds: string[];
+  modelTurn: RootReconcilerModelTurnRecord;
+  category: "transport_failed" | "timed_out" | "schema_invalid" | "stale_output" | "canceled";
+  sanitizedReason: string;
+  failedAt: string;
+}
+
 export interface RootReconcilerReplyRecord {
   kind: "root_reconciler_reply";
   version: ManagedRecordVersion;
@@ -434,6 +448,7 @@ export type ManagedRecord =
   | RootOwnershipRecord
   | WorkflowIssueRecord
   | RootDirectiveRecord
+  | RootReconcilerFailureRecord
   | RootReconcilerReplyRecord
   | DeliveryRecord
   | WorkflowTimelineRecord

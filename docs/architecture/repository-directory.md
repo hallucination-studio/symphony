@@ -70,9 +70,11 @@ apps/conductor/
     ├── root-directive-materialization/
     │   ├── api/
     │   │   ├── RootDirectiveMaterializerInterface.ts
+    │   │   ├── RootReconcilerFailureRecordWriterInterface.ts
     │   │   └── RootReconcilerReplyWriterInterface.ts
     │   └── internal/
     │       ├── LinearRootDirectiveMaterializerImpl.ts
+    │       ├── LinearRootReconcilerFailureRecordWriterImpl.ts
     │       └── LinearRootReconcilerReplyWriterImpl.ts
     ├── performer-agent-client/
     │   ├── api/

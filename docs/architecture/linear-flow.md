@@ -108,10 +108,10 @@ Conductor host不直接从Result选择ready Stage：
 fresh complete Root/Cycle Tree inside Conductor
 -> safety/coverage gate and mechanical violation derivation
 -> open Root Reconciler once with complete bootstrap, or advance it with delta only
--> persist accepted RootDirective, consumed input IDs and user-comment replies
--> materialize directive or execute matching role turn
--> persist Result
--> next fresh-derived delta returns to Root Reconciler
+-> obtain one closed RootReconcilerTurnResult
+-> directive: persist consumed input IDs and user-comment replies, then materialize its one action or execute its matching role turn
+-> failure: persist and fresh-read-back RootReconcilerFailureRecord, then stop at its retry barrier
+-> each durable Stage Result returns through a next fresh-derived delta
 ```
 
 Root Reconciler、Plan、Work和Verify全部运行在Performer，且由Conductor主动调用。contract分别见

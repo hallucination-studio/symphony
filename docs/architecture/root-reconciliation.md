@@ -8,8 +8,9 @@
 ## 1. 决定
 
 每个Root只有一个语义决策者：运行在Performer中的Root Reconciler。它跨当前Root的全部Cycles持续追求Root
-目标，观察Linear/Git durable facts，解释用户普通comment和Stage Results，并返回一个closed、versioned
-`RootDirective`告诉Conductor下一步。
+目标，观察Linear/Git durable facts，解释用户普通comment和Stage Results。每个已进入Provider的turn返回一个closed、
+versioned `RootReconcilerTurnResult`：成功variant是告诉Conductor下一步的`RootDirective`；failure variant是
+`RootReconcilerTurnFailure`，其中只携带必须持久化的`RootReconcilerFailureRecord`，没有下一步语义。
 
 Linear是唯一的Workflow状态模型。用户直接修改Issue的status、description、archive、parent、relation或comment，
 这些当前值由Root Reconciler解释；Conductor不把它们改写成另一套Linear mutation、revision或change-event状态机。
@@ -59,14 +60,9 @@ wake on durable change
 -> Conductor reads fresh complete Root Tree, Linear input sources and Git facts internally
 -> enforce ownership, coverage, schema and execution-safety gates
 -> open a fresh session with one bootstrap, or compute one RootDelta from the session baseline
--> obtain one directive from that bootstrap turn or delta turn
--> validate one RootDirective
--> persist accepted directive
--> materialize and read back any Human Action resolutions
--> materialize one semantic action with stable write IDs
--> semantic read-back
--> materialize and read back required user-comment replies
--> publish and materialize required timeline events
+-> obtain one RootReconcilerTurnResult from that bootstrap turn or delta turn
+-> directive: validate, persist, materialize one semantic action and required replies/events
+-> failure: persist the typed failure record, read it back, then wait for a new durable user input
 -> discard transient view
 ```
 
@@ -117,7 +113,7 @@ OpenRootReconcilerRequest
 RootReconcilerOpenedResult
   reconciler_session_id
   bootstrap_root_digest
-  initial_directive: RootDirective
+  initial_result: RootReconcilerTurnResult
 ```
 
 bootstrap必须包含Root下全部active和archived Cycles、Issues、relations、managed records、用户comments和Git事实。
@@ -141,7 +137,9 @@ identity、version和actor kind；`coverage.is_complete`为false或存在未解�
 Reconciler。Linear读取必须分页到完整并使用include-archived能力。它只允许用于新建Root Reconciler session，或原session丢失、
 baseline mismatch、context无法继续可信使用后的fresh session；普通advance不得携带完整snapshot。Conductor不得因为普通
 用户修改而主动重建session；只有无法继续证明当前session baseline时才触发Bootstrap。
-open本身执行首个ReAct turn并返回`initial_directive`，不能再发送空delta来取得第一步。
+open本身执行首个ReAct turn并返回`initial_result`，不能再发送空delta来取得第一步。这个结果是directive时，
+Conductor才可以持久化并materialize下一步；结果是failure时，Conductor必须先持久化该failure record并停在其
+durable retry barrier，不能把open失败降级成空directive、通用成功或一次空advance。
 
 所有Linear文本和Provider输出都是untrusted data。每个source保留identity、actor kind、remote version或digest
 和长度边界。未知字段、required source被静默截断、Tree digest不匹配或coverage不完整时不得调用Reconciler。
@@ -197,8 +195,10 @@ source manifest。
 Conductor每轮仍完整读取Linear/Git，但完整Tree只在Conductor内存中用于coverage、按source version/hash计算diff和
 precondition校验；正常
 advance只把`RootDelta`发送给Performer。session baseline snapshot和source manifest只存在于runtime memory，不写
-workflow DB、checkpoint或Linear镜像。合法directive返回后baseline推进到target digest；directive invalid、session
-丢失、delta不连续或baseline无法证明时，关闭旧session并从fresh完整事实重新bootstrap，不尝试兼容或猜测缺失delta。
+workflow DB、checkpoint或Linear镜像。只有合法directive返回后baseline才推进到target digest。已进入Provider的failure
+result不推进baseline；下一次被durable retry barrier允许的turn仍以最后确认baseline为基准，携带此前失败turn已观察到的
+当前事实以及至少一个新的pending user input。若无法证明这个baseline，关闭旧session并从fresh完整事实重新bootstrap。
+directive invalid、session丢失或delta不连续同样关闭旧session，不尝试兼容或猜测缺失delta。
 
 因此，完整读取和完整传输是两个不同的边界：Conductor可以每轮从Linear重建完整事实来保证diff正确，但Performer
 已有session永远只看到从已确认baseline到新target的当前值/tombstone增量。任何把完整Tree塞入advance request的实现都
@@ -591,8 +591,9 @@ RootReconcilerFailureRecord
   reconciler_session_id
   reconciler_turn_id
   target_root_digest
+  attempted_input_ids[]
   model_turn: ModelTurnRecord
-  category: transport_failed | timed_out | schema_invalid | stale_output
+  category: transport_failed | timed_out | schema_invalid | stale_output | canceled
   sanitized_reason
   failed_at
 ```
@@ -602,6 +603,27 @@ schema-invalid和其他失败turn都必须记录。accepted directive与`RootRec
 `ModelTurnRecord`，其中的`model`和`usage`是唯一的turn事实，不能在directive或failure record顶层重复。nested object让
 Root聚合只读取一种turn事实；它不是第二个comment或第二个managed block。该record只参与retry/budget计数和用户时间轴，不拥有Root/Cycle status或下一步。写入并read-back失败时matching Root
 立即停止；不得把失败只记在memory/log后继续调用模型。
+
+`attempted_input_ids[]`精确复制该Provider invocation的bootstrap或delta中的pending input identities；它只证明
+本次失败turn看过哪些用户输入，绝不表示输入已经被directive消费或已经获得reply。Conductor从fresh Linear Tree重建
+当前pending inputs后，只有发现至少一个不在最新matching failure record的`attempted_input_ids[]`中的输入，才能为该
+Root再次调用Reconciler。failure record本身、它的timeline comment和任何Symphony写入都不能解除这个barrier；没有新
+Linear用户输入时Root停在该failure事实处。该判定只读strict-decoded Linear records和当前input identities，不保存
+本地retry counter、timer、checkpoint或revision状态机。failure record由
+`RootReconcilerFailureRecordWriterInterface`写入Root managed comment，并且只有该comment的strict decode和fresh
+read-back成功后才能认为Root已停在这个barrier；writer不解释用户输入、决定retry或写timeline。
+
+这里的“latest matching failure”是matching Root的最新Reconciler terminal managed record：Conductor按fresh Linear
+comment creation order比较`RootDirectiveRecord`与`RootReconcilerFailureRecord`。最新terminal record仍是failure时才应用
+上述barrier；在failure之后已经read-back的accepted directive只可能来自允许的新input，因而证明该barrier已经越过。
+这不是failure的mutable resolved state、status或第二份记录，也不授权Conductor选择恢复动作；下一步仍只来自该后续
+directive。
+
+Root turn的跨进程终端结果是closed `RootReconcilerTurnResult = RootDirective | RootReconcilerTurnFailure`。
+后者携带`root_issue_id`和完整`RootReconcilerFailureRecord`；它是调用失败的transport terminal result，不是第二个
+业务Result、directive、lifecycle或retry state。`RootReconcilerOpenedResult.initial_result`与
+`AdvanceRootReconcilerRequest`的response都使用这个同一union。通用Protocol error只表示Provider invocation前的
+request/session/precondition拒绝或无法形成并验证该closed result；已经进入Provider边界的turn绝不能降级为通用error。
 
 所有variants是closed、versioned、`additionalProperties: false`的discriminated union。每个turn最多返回一个
 directive；需要多个Linear/Git writes的单一领域动作共享一个stable directive ID，Conductor按明确顺序幂等
@@ -908,7 +930,8 @@ Reconciler有Root级turn/token/deadline limits；Stage仍有Cycle/turn budgets�
 2. Conductor始终调用Performer；Performer从不回调Conductor或直接修改Linear/Git。
 3. Root Reconciler session跨Cycles；Plan、Work、Verify sessions按Cycle隔离且不跨Cycle复用。
 4. 新Root Reconciler session接收一次完整active和archived bootstrap；后续turn只接收从matching baseline严格连续的
-   `RootDelta`，并最多返回一个closed `RootDirective`。
+   `RootDelta`，并返回一个closed `RootReconcilerTurnResult`。只有其directive variant可包含一个下一步动作；failure
+   variant必须先durable read-back并等待新的用户input，且不推进session baseline。
 5. 所有用户status、content、archive、parent、relation和普通comment变化都作为pending inputs进入Root Reconciler；
    managed/system comments按validated actor和strict `symphony` code block排除。
 6. 每个处理过且仍存在的用户comment body version或non-Symphony thread-state revision都有matching consumed input和

@@ -2,8 +2,8 @@ import {
   decodeConductorPerformerCloseCycleStageSessionsResult,
   decodeConductorPerformerCloseRootReconcilerResult,
   decodeConductorPerformerPlanResult,
-  decodeConductorPerformerRootDirective,
   decodeConductorPerformerRootReconcilerOpenedResult,
+  decodeConductorPerformerRootReconcilerTurnResult,
   decodeConductorPerformerVerifyResult,
   decodeConductorPerformerWorkResult,
   type JsonValue,
@@ -18,6 +18,7 @@ import type {
   RootDeltaChange,
   RootDirective,
   RootReconcilerAdvanceResult,
+  RootReconcilerTurnResult,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
   RootTree,
@@ -73,13 +74,16 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         ) {
           throw new Error("root_reconciler_open_result_invalid");
         }
-        this.profileByRoot.set(input.rootIssueId, input.profileId);
-        this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
+        const initialResult = decodeRootTurnResult(response.initial_result);
+        if (initialResult.kind === "directive") {
+          this.profileByRoot.set(input.rootIssueId, input.profileId);
+          this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
+        }
         return {
           kind: "opened",
           sessionId: response.reconciler_session_id,
           bootstrapRootDigest: response.bootstrap_root_digest,
-          initialDirective: decodeDirective(response.initial_directive),
+          initialResult,
         };
       });
   }
@@ -106,11 +110,13 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         delta: toWireDelta(input.delta),
         limits: defaultLimits(this.options.deadlineMs),
       },
-      decodeConductorPerformerRootDirective,
-      "root_directive_response_contract_invalid",
+      decodeConductorPerformerRootReconcilerTurnResult,
+      "root_reconciler_turn_response_contract_invalid",
     )
       .then((response) => {
-        return { kind: "directive", directive: decodeDirective(response) };
+        const result = decodeRootTurnResult(response);
+        if (result.kind === "failed") this.profileByRootSession.delete(input.sessionId);
+        return result;
       });
   }
 
@@ -788,6 +794,84 @@ function decodeDirective(value: unknown): RootDirective {
     "conclude_cycle", "conclude_root", "cancel_root", "wait", "acknowledge",
   ]).has(action.kind)) throw new Error("root_directive_action_invalid");
   return camelizeKeys(directive) as RootDirective;
+}
+
+function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
+  const response = record(value);
+  if (response.kind !== "root_reconciler_failed") {
+    return { kind: "directive", directive: decodeDirective(response) };
+  }
+  const failure = record(response.failure);
+  const modelTurn = record(failure.model_turn);
+  const rootIssueId = textValue(response, "root_issue_id");
+  if (rootIssueId !== textValue(modelTurn, "root_issue_id")) {
+    throw new Error("root_reconciler_failure_root_correlation_invalid");
+  }
+  const usage = record(modelTurn.usage);
+  return {
+    kind: "failed",
+    failure: {
+      kind: "root_reconciler_failure",
+      version: 1,
+      failureId: textValue(failure, "failure_id"),
+      reconcilerSessionId: textValue(failure, "reconciler_session_id"),
+      reconcilerTurnId: textValue(failure, "reconciler_turn_id"),
+      targetRootDigest: textValue(failure, "target_root_digest"),
+      attemptedInputIds: textArray(failure, "attempted_input_ids"),
+      modelTurn: {
+        turnRecordId: textValue(modelTurn, "turn_record_id"),
+        role: "root_reconciler",
+        rootIssueId: textValue(modelTurn, "root_issue_id"),
+        reconcilerSessionId: textValue(modelTurn, "reconciler_session_id"),
+        reconcilerTurnId: textValue(modelTurn, "reconciler_turn_id"),
+        invocationState: enumValue(modelTurn, "invocation_state", ["confirmed", "ambiguous"]),
+        model: textValue(modelTurn, "model"),
+        outcome: enumValue(modelTurn, "outcome", ["directive_accepted", "transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"]),
+        usage: usage.status === "measured"
+          ? {
+            status: "measured",
+            inputTokens: numberValue(usage, "input_tokens"),
+            cachedInputTokens: numberValue(usage, "cached_input_tokens"),
+            outputTokens: numberValue(usage, "output_tokens"),
+            reasoningOutputTokens: numberValue(usage, "reasoning_output_tokens"),
+            totalTokens: numberValue(usage, "total_tokens"),
+          }
+          : { status: "unavailable", reason: enumValue(usage, "reason", ["provider_omitted", "transport_lost", "process_lost", "invalid_provider_usage"]) },
+        terminalAt: textValue(modelTurn, "terminal_at"),
+      },
+      category: enumValue(failure, "category", ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"]),
+      sanitizedReason: textValue(failure, "sanitized_reason"),
+      failedAt: textValue(failure, "failed_at"),
+    },
+  };
+}
+
+function textValue(value: JsonRecord, key: string): string {
+  const field = value[key];
+  if (typeof field !== "string") throw new Error(`agent_response_${key}_invalid`);
+  return field;
+}
+
+function textArray(value: JsonRecord, key: string): string[] {
+  const field = value[key];
+  if (!Array.isArray(field) || field.some((entry) => typeof entry !== "string")) {
+    throw new Error(`agent_response_${key}_invalid`);
+  }
+  return field as string[];
+}
+
+function numberValue(value: JsonRecord, key: string): number {
+  const field = value[key];
+  if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
+    throw new Error(`agent_response_${key}_invalid`);
+  }
+  return field;
+}
+
+function enumValue<T extends string>(value: JsonRecord, key: string, variants: readonly T[]): T {
+  const field = value[key];
+  if (typeof field !== "string" || !variants.includes(field as T)) throw new Error(`agent_response_${key}_invalid`);
+  return field as T;
 }
 
 function camelizeKeys(value: unknown): unknown {

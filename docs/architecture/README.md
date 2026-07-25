@@ -32,7 +32,8 @@ Root Reconciler
   receives one complete bootstrap, then strict Root deltas
   handles every user Linear change and comment reply
   spans all Cycles
-  proposes the next closed directive
+  returns one closed turn result: a next-step directive or a failure variant
+  whose durable failure evidence must be written before the Root stops
 ```
 
 Root Reconciler thread不能兼任Stage role。每个Cycle有三个隔离Provider thread：Plan、Work、Verify。Work
@@ -44,7 +45,9 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
   authority；
 - Conductor不保存Workflow DB、Root Queue、DAG mirror、durable event queue、gate table或checkpoint；
 - Conductor host不运行模型，只执行ownership、coverage、schema、capability、budget、convergence、materialization和delivery；
-- Root/Cycle下一步语义只来自matching Root Reconciler的closed `RootDirective`；
+- Root/Cycle下一步语义只来自matching Root Reconciler的closed `RootDirective`；每个已进入Provider的
+  Reconciler turn以`RootReconcilerTurnResult`结束：其failure variant只携带必须strict-write/read-back的
+  `RootReconcilerFailureRecord`，不拥有下一步语义；
 - fresh Root Reconciler session接收一次完整active和archived Root bootstrap；后续turn只接收严格连续的Root delta；
 - Conductor可以在内存中完整读取Linear以计算source diff和校验digest，但已有session的advance request绝不携带完整Tree；session新建、丢失或baseline无法证明时才重新发送一次`RootBootstrapSnapshot`；
 - 所有用户status、content、archive、parent、relation和comment修改都由Root Reconciler解释，Conductor不主动纠正；
@@ -105,9 +108,9 @@ online/offline，并提供Conductor/Profile配置与脱敏运行日志。
 
 ```text
 Conductor -> openRootReconciler(complete bootstrap once)     -> Performer
-Conductor <- RootReconcilerOpenedResult + initial directive <- Performer
+Conductor <- RootReconcilerOpenedResult + initial RootReconcilerTurnResult <- Performer
 Conductor -> advanceRootReconciler(strict RootDelta)     -> Performer
-Conductor <- RootDirective                               <- Performer
+Conductor <- RootReconcilerTurnResult                    <- Performer
 
 Conductor -> executePlan|Work|Verify(strong request)     -> Performer
 Conductor <- Plan|Work|VerifyResult                      <- Performer
@@ -149,7 +152,7 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 ## 7. 文档导航
 
 - [Root Reconciliation](root-reconciliation.md)：唯一语义Reconciler、bootstrap/delta、全部用户Linear输入与回复、
-  `RootDirective`、Root/Cycle用户修改和确定性materialization。
+  closed `RootReconcilerTurnResult`、Root/Cycle用户修改和确定性materialization。
 - [Performer Plan、Work与Verify Contracts](stage-orchestration.md)：三个role thread的强类型request/result。
 - [Root与Cycle Workflow Timeline](workflow-timeline.md)：事件发布、订阅和Linear comment materialization。
 - [Human Action交互与恢复](human-actions.md)：Issue层级、labels、专用状态和resolution。

@@ -25,9 +25,9 @@ test("full alignment audit remains RED until H09 removes retired records", async
   assert.ok(findings.some((finding) =>
     finding.code === "architecture_rule_unowned" && finding.expected === timelineProjections));
   assert.ok(findings.some((finding) =>
-    finding.code === "retired_symbol_remaining" &&
-    finding.scope === "managed-html-records" &&
-    finding.source === "docs/architecture/contracts.md#契约与接口边界"));
+    finding.code === "retired_path_remaining" &&
+    finding.scope === timelineProjections &&
+    finding.source === "docs/architecture/workflow-timeline.md#解耦机制"));
 });
 
 test("alignment reports missing target paths with their owning architecture source", () => {
