@@ -1155,13 +1155,12 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     },
     async createReaction(input) {
       calls.push({ kind: "create_reaction", input });
-      const reply = root.comments.nodes.find(({ id }) => id === input.commentId);
-      reply.reactions.nodes.push({ id: "receipt-check", emoji: input.emoji, user: { id: "symphony-bot" } });
+      const comment = root.comments.nodes.find(({ id }) => id === input.commentId);
+      comment.reactions.nodes.push({ id: "receipt-check", emoji: input.emoji, user: { id: "symphony-bot" } });
     },
     async deleteReaction(reactionId) {
       calls.push({ kind: "delete_reaction", reactionId });
-      const reply = root.comments.nodes.find(({ id }) => id === "reply-comment");
-      reply.reactions.nodes = reply.reactions.nodes.filter(({ id }) => id !== reactionId);
+      source.reactions.nodes = source.reactions.nodes.filter(({ id }) => id !== reactionId);
     },
     async commentResolve(commentId) {
       calls.push({ kind: "resolve", commentId });
@@ -1223,8 +1222,8 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     kind: "set_comment_receipt_reaction",
     writeId: "receipt-write-1",
     replyWriteId: "reply-write-1",
-    replyCommentId: "reply-comment",
-    expectedReplyCommentRemoteVersion: "2026-07-16T00:00:02.000Z",
+    sourceCommentId: "source-comment",
+    expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
     threadRootCommentId: "source-comment",
     expectedReceipt: "none",
     receipt: "check",
@@ -1232,14 +1231,14 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
   await adapter.executeWorkflowMutation(receipt);
   assert.deepEqual(calls.shift(), {
     kind: "create_reaction",
-    input: { commentId: "reply-comment", emoji: "✅" },
+    input: { commentId: "source-comment", emoji: "✅" },
   });
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(receipt), {
     writeId: "receipt-write-1",
     targetIssueId: "root-1",
-    remoteVersion: "2026-07-16T00:00:02.000Z",
+    remoteVersion: "2026-07-16T00:00:01.000Z",
     symphonyReceipt: {
-      replyWriteId: "reply-write-1", replyCommentId: "reply-comment",
+      replyWriteId: "reply-write-1", sourceCommentId: "source-comment",
       threadRootCommentId: "source-comment", receipt: "check",
     },
   });

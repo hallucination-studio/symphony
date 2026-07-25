@@ -110,17 +110,6 @@ export interface WorkflowCommentReactionValue {
   actorId: string;
 }
 
-export interface WorkflowCommentThreadChangeValue {
-  threadChangeId: string;
-  sourceCommentId: string;
-  threadRootCommentId: string;
-  action: "resolved" | "reopened";
-  actorKind: WorkflowCommentAuthorKind;
-  actorId: string;
-  actorUserId?: string;
-  occurredAt: string;
-}
-
 export type WorkflowCommentAuthorKind =
   | "human"
   | "symphony"
@@ -138,7 +127,6 @@ export interface WorkflowRelationValue {
 export type WorkflowSourceKind =
   | "linear_issue"
   | "linear_comment"
-  | "linear_comment_thread_change"
   | "linear_relation"
   | "linear_status_catalog";
 
@@ -165,7 +153,6 @@ export interface WorkflowRootTreeValue {
   statusCatalog: WorkflowStatusValue[];
   issues: WorkflowIssueValue[];
   comments: WorkflowCommentValue[];
-  commentThreadChanges: WorkflowCommentThreadChangeValue[];
   relations: WorkflowRelationValue[];
   sourceManifest: WorkflowSourceManifestEntryValue[];
   coverage: WorkflowSourceCoverageValue;
@@ -240,8 +227,8 @@ export type WorkflowMutationCommand =
   | (WorkflowMutationBase & {
       kind: "set_comment_receipt_reaction";
       replyWriteId: string;
-      replyCommentId: string;
-      expectedReplyCommentRemoteVersion: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
       threadRootCommentId: string;
       expectedReceipt: "check" | "cross" | "none";
       receipt: "check" | "cross" | "none";
@@ -291,7 +278,7 @@ export interface WorkflowMutationReadBack {
   comment?: WorkflowCommentValue;
   symphonyReceipt?: {
     replyWriteId: string;
-    replyCommentId: string;
+    sourceCommentId: string;
     threadRootCommentId: string;
     receipt: "check" | "cross" | "none";
   };

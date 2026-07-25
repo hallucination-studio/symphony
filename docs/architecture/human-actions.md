@@ -100,6 +100,12 @@ Action comment使用Linear原生thread resolve/unresolve。thread lifecycle只�
 status、resolution或Root/Cycle lifecycle。用户reopen、编辑已处理comment或新增reply都会作为新的Root Reconciler输入；
 Symphony的✅/❌只表示matching comment input是否被采纳，不是审批按钮。
 
+这里的“关闭评论”是把Linear原生comment thread设为`resolved`；“重新打开评论”是把同一原生thread设为
+`unresolved`。两者不创建Action子状态、comment revision record或本地历史。只有matching Root Reconciler reply在
+必要业务mutation read-back后才可在用户自己的reason、answer或普通输入comment上写Symphony自身的✅或❌receipt；
+child reply本身不承载该receipt。它不能修改用户reaction、也不能代替`Approved`、
+`Rejected`、`Answered`或`Canceled`状态。
+
 ## 5. 用户如何操作
 
 ### 5.1 Approved
@@ -126,8 +132,8 @@ Conductor不能从title、其他Issue comment或模型猜测拒绝原因。
 
 若用户已经提供reason但Action仍为`Todo`或`In Progress`，该comment可以被Root Reconciler消费并收到“还需要把Action
 移到Rejected”的原生thread reply，但thread保持unresolved、不添加terminal reaction，也不形成resolution。只有
-matching `Rejected` status、fresh reason和accepted `HumanActionResolutionRecord`全部成立后，reason comment才收到
-✅并resolve；若reason明确不被采纳则使用❌并说明原因。reaction永远不代替Action status。
+matching `Rejected` status、fresh reason和accepted `HumanActionResolutionRecord`全部成立后，用户的原reason comment才收到
+✅并resolve；若reason明确不被采纳则在同一source comment使用❌并说明原因。reaction永远不代替Action status。
 
 ### 5.3 Answered
 
@@ -249,7 +255,9 @@ Root Reconciler returns request_human_action directive
 -> create relations to relevant Plan/Work/Verify
 -> append HumanActionRequestRecord
 -> read back Issue, labels, relations, status and HumanActionRequestRecord code block
--> project Root to Needs Approval or Needs Info
+-> the active Action becomes the durable waiting fact; materialize a Root/Cycle
+   waiting-status mutation only when the accepted directive explicitly requires it,
+   then read it back from Linear
 -> stop dispatching the blocked Cycle path
 ```
 
@@ -310,7 +318,8 @@ capability，并再次验证当前Root/Cycle/target和grant digest。
 - restore不是reopen，不能重放旧resolution；
 - stale status/comment、非Human actor、旧proposal digest、重复terminal transition不推进workflow；
 - 用户修改Root/Cycle/DAG或Action期间产生的旧Root directive在digest检查时被拒绝；
-- relation或parent冲突使matching Root fail closed并写Linear timeline，不能按title或时间猜测target。
+- relation或parent冲突使matching Root fail closed并发布typed timeline event；对应subscriber成功写入并read-back
+  Linear timeline comment前，不能按title或时间猜测target或继续推进。
 
 ## 12. 不变量
 

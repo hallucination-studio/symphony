@@ -245,6 +245,9 @@ function validateSchema(
   } else if (expectedType === "boolean" && typeof value !== "boolean") {
     errors.push(\`\${location}: expected boolean\`);
     return;
+  } else if (expectedType === "null" && value !== null) {
+    errors.push(\`\${location}: expected null\`);
+    return;
   }
 
   if (typeof value === "number") {
@@ -395,6 +398,8 @@ def _validate(schema: dict[str, Any] | bool, value: Any, schema_id: str, locatio
             return errors + [f"{location}: expected number"]
     elif expected_type == "boolean" and not isinstance(value, bool):
         return errors + [f"{location}: expected boolean"]
+    elif expected_type == "null" and value is not None:
+        return errors + [f"{location}: expected null"]
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if value < schema.get("minimum", -math.inf):
@@ -616,6 +621,12 @@ fn validate(
         Some("boolean") => {
             if !value.is_boolean() {
                 errors.push(format!("{location}: expected boolean"));
+                return errors;
+            }
+        }
+        Some("null") => {
+            if !value.is_null() {
+                errors.push(format!("{location}: expected null"));
                 return errors;
             }
         }

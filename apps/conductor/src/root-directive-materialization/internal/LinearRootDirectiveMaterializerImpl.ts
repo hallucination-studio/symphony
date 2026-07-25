@@ -575,6 +575,11 @@ function rebaseOperationPrecondition(
 
 function mutationIssueIds(command: LinearWorkflowMutationCommand): string[] {
   if (command.kind === "create_workflow_issue") return [command.parentIssueId];
+  if (
+    command.kind === "create_comment_reply" ||
+    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "set_comment_thread_state"
+  ) return [];
   if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") {
     return [command.sourceIssueId, command.targetIssueId];
   }

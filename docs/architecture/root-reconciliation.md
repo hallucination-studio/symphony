@@ -121,10 +121,17 @@ RootReconcilerOpenedResult
 ```
 
 bootstrap必须包含Root下全部active和archived Cycles、Issues、relations、managed records、用户comments和Git事实。
+`root.ownership`必须引用已read-back的Root ownership managed record；尚未claim的Root不得打开Reconciler。
+`delivery`是已read-back的DeliveryRecord reference，尚无delivery时为`null`，不能使用虚构的`none` record、local
+checkpoint或Markdown placeholder表达缺失。
+任何bootstrap/delta或Stage context中的`RecordReference`都必须包含实际record的`record_id`、`record_kind`、
+`record_version`和`write_id`，并与fresh strict-decoded host comment一致；旧`version`字段、synthetic identity或
+宿主comment remote version均不构成reference。reference的缺失或不一致是protocol validation failure，不是让
+Reconciler猜测的业务输入。
 其中用户comment事实包括human-authored body versions和non-Symphony native thread-state revisions，即使thread target是
 Symphony timeline或reply comment。body version由canonical body digest识别；thread-state revision是comment当前
-`resolved`/`unresolved`值连同该comment remote version的快照。两者不能共用一个version，因为close/reopen可以改变remote
-version但不改变正文。thread-state revision不假设Linear提供可重放action history；两次fresh read之间的多次close/reopen
+`resolved`/`unresolved`值连同该comment remote version和thread root comment identity的快照。两者不能共用一个version，因为
+close/reopen可以改变remote version但不改变正文。thread-state revision不假设Linear提供可重放action history；两次fresh read之间的多次close/reopen
 只合并为最新当前值。
 reaction current set只用于回执read-back和审计，不成为Root pending input。
 `user_comment_thread_states[]`只是从matching Linear `linear_comment` snapshot导出的typed transport view，不能成为第二个
@@ -213,6 +220,10 @@ delta传输失败、过期、不连续、schema无效或session丢失时，不�
 Conductor关闭不可证明的session，从新的完整Linear/Git事实发送一次`RootBootstrapSnapshot`。Linear中实际存在的Issue、
 comment、relation、managed record和accepted directive仍是唯一durable事实；delta只是把这些事实交给同一个Root
 Reconciler session的增量边界。
+
+`RootBootstrapSnapshot.pending_input_ids[]`从全部fresh、未被accepted directive消费的当前输入派生；已有session的
+`RootDelta.pending_input_ids[]`只能列出该delta实际携带且仍未消费的current-value input。单独body edit导致的remote
+version变化不能伪造thread-state input；对应state current value未进入delta时，它也不得进入delta pending list。
 
 `root_digest`只覆盖canonical Root Reconciler Fact Set：业务Issue当前值、relations、业务managed records、普通human
 comment body versions、non-Symphony comment thread-state revisions、Git/delivery事实和mechanical violations。Timeline/Reconciler
@@ -323,8 +334,9 @@ Symphony自身带matching stable write ID且已经read-back的mutation会进入�
 
 pending comment input不是持久集合。Conductor每次从完整Linear comments及其当前thread-state revisions减去accepted
 directive中的`consumed_input_ids[]`后派生。comment body version和thread-state revision是两个closed input variant；
-thread-state revision以source comment的当前remote version和state构成identity，而不是由Conductor、webhook或进程内存
-保存历史action。Linear能暴露state actor时才使用该actor；否则actor kind为`unknown`，绝不从comment author推断。
+thread-state revision以source comment的当前remote version、thread root comment identity和state构成identity，而不是由
+Conductor、webhook或进程内存保存历史action。Linear能暴露state actor时才使用该actor；否则actor kind为`unknown`，绝不从
+comment author推断。
 因此用户可以reopen Symphony timeline/reply thread而不被错误过滤。reaction不是pending input。
 
 下列排除只适用于Symphony-authored managed **body version**，不排除用户或unknown actor改变其原生thread state所产生的
@@ -352,8 +364,11 @@ UserCommentInput =
     issue_id
     issue_kind: root | cycle | plan | work | verify | human_action
     cycle_issue_id?
+    author_kind: human
+    author_id
     author_user_id
     body
+    thread_root_comment_id
     thread_state: resolved | unresolved
     created_at
     updated_at
@@ -361,6 +376,9 @@ UserCommentInput =
     comment_id
     comment_remote_version
     thread_root_comment_id
+    issue_id
+    issue_kind: root | cycle | plan | work | verify | human_action
+    cycle_issue_id?
     thread_state: resolved | unresolved
     actor_kind: human | external_automation | unknown
     resolved_at?
@@ -369,10 +387,15 @@ UserCommentInput =
 
 body input identity是`comment_body + comment_id + canonical_body_digest`；其中wire field固定为
 `comment_body_digest`，它是canonical body digest而不是Linear remote version、递增revision或本地计数器。thread-state input identity是
-`thread_state + comment_id + comment_remote_version + thread_state`。每个identity最多处理一次。human body及所有non-Symphony thread-state
+`comment_thread_state + comment_id + comment_remote_version + thread_root_comment_id + thread_state`。每个identity最多处理一次。human body及所有non-Symphony thread-state
 revision（包括无法由Linear归属的`unknown`）进入pending input；matching Symphony reply/reaction/resolve writes按stable
 write correlation排除。reaction不机械映射为approval、rejection或任何status，也不作为模型控制通道。
 编辑后的comment version是新的输入；
+
+新comment初始的`unresolved`且`created_at == updated_at`只是Linear当前事实，不是用户close/reopen revision，不能单独
+变成pending Root input。`resolved`，或创建后`updated_at`已变化的`unresolved`，才是可消费的current state revision。
+每次fresh fact derivation还必须排除全部已accepted `RootDirective.consumed_input_ids[]`；新body digest或新thread-state
+identity不会被旧directive消费。这样不需要本地last-seen state、revision队列或第二个pending store。
 已经materialize的旧comment决定不会因删除或编辑自动回滚，用户必须通过新version或新comment明确纠正。
 
 当前thread state不是独立的Linear revision、event或历史记录。Conductor可以用webhook/poll唤醒fresh read，但不能把
@@ -432,6 +455,11 @@ UserCommentReply
 `follow_up_required + none`表示仍需用户补充或执行状态操作。reaction只是输入处理回执，不是Human Action lifecycle、
 Plan approval或Workflow command。
 
+`check`和`cross`只允许用于`HumanCommentBodyInput`，并由Symphony写在该输入的source comment上。这样用户能在自己
+写下的请求、reason或answer上看到已采纳或未采纳的回执；child reply只承载结构化解释与其managed record，绝不成为
+receipt target。`NativeCommentThreadStateInput`没有用户comment body可标记，reaction固定为`none`。这项展示规则不改变
+reaction的原生事实属性：它仍不能驱动Action status、Root/Cycle lifecycle或任何下一步。
+
 reply renderer只能从这些bounded字段生成结构化用户Markdown。它可以使用heading、强调、列表、链接、引用和非
 `symphony` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
 唯一末尾`symphony` block之外放置restart-required事实。
@@ -457,6 +485,24 @@ closed renderer使用固定用户结构，不把模型原文直接当comment：
 
 `follow_up_required`不得显示✅或❌；其thread保持open或被reopen。`accepted`和`not_applied`只有在matching业务mutation
 已经read-back后才可分别显示✅或❌并resolve thread。
+
+`thread_action`只映射到source comment所属的**原生Linear thread**，不是Symphony记录、Action状态或另一条
+comment生命周期。它的含义固定如下：
+
+| directive值 | 原生Linear效果 | 成功判定 |
+|---|---|---|
+| `resolve` | 将source thread收敛为`resolved` | fresh read-back显示同一thread为`resolved` |
+| `keep_open` | 不写thread状态 | fresh read-back必须显示同一thread仍为`unresolved` |
+| `reopen` | 将source thread收敛为`unresolved` | fresh read-back显示同一thread为`unresolved` |
+
+因此，处理已关闭thread但仍需要用户操作的输入必须返回`reopen`，不能以`keep_open`悄悄接受已关闭状态。用户在
+Linear中点击resolve或reopen只改变这个原生当前事实；它形成下一份thread-state Root input，由Root Reconciler解释，
+但绝不直接批准、拒绝、完成或重开任何Workflow节点。
+
+同一个source thread在同一directive中同时有body和thread-state input时，两条reply必须指定相同的
+`thread_action`；冲突directive fail closed。Conductor确定性地先materialize thread-state reply、再materialize body
+reply，以保持state source的当前remote-version precondition。两条reply、source receipt（仅body）和source thread最终
+state都fresh read-back后才算materialized；只有child reply存在不能视为完成，也不能跳过崩溃恢复。
 
 回复是accepted `RootDirective`的必需Linear materialization，不是timeline event。Conductor在matching directive及其
 必要mutation read-back后，把回复作为原生child reply写入source comment thread，并在同一comment底部写唯一
@@ -487,11 +533,14 @@ RootReconcilerReplyRecord
 
 宿主reply comment的Linear ID与remote version属于外层comment snapshot，不属于record正文：服务端在首次创建comment后
 才生成它们。reply materializer在fresh read-back中以validated Symphony actor、`reply_id`和`reply_write_id`严格定位
-宿主comment；后续reaction/thread mutation使用这个已read-back的外层事实，不能预填、猜测或另写一份record。
+宿主comment；随后receipt mutation使用source comment自身的fresh外层事实，thread mutation使用source thread root的
+fresh外层事实，三者都不能预填、猜测或另写一份record。
 
-固定materialization顺序是reply create/read-back、reaction create/delete/read-back、thread resolve/unresolve read-back。
-`RootReconcilerReplyWriterInterface`只在matching reply comment及其code block、reaction和thread action全部read-back后
-返回success；不存在queued或accepted中间成功。失败返回closed error并触发相同的Root停止语义。
+固定materialization顺序是reply create/read-back、source comment receipt create/delete/read-back、thread
+resolve/unresolve read-back。source receipt write必须重新验证source comment的expected remote version；state-only input
+没有receipt write。`RootReconcilerReplyWriterInterface`只在matching reply comment及其code block、需要时的source
+reaction和thread action全部read-back后返回success；不存在queued或accepted中间成功。失败返回closed error并触发相同的
+Root停止语义。
 
 reply comment由closed renderer生成；validated Symphony actor和`RootReconcilerReplyRecord`使它永远不会重新进入
 pending inputs。accepted directive

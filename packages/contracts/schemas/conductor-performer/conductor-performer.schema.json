@@ -42,7 +42,7 @@
       "additionalProperties": false,
       "required": ["source_kind", "source_id", "version_or_digest", "actor_kind"],
       "properties": {
-        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_comment_thread_change", "linear_relation", "git", "repository_instruction"] },
+        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_relation", "git", "repository_instruction"] },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "version_or_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "actor_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
@@ -153,12 +153,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "comment_id", "comment_version", "issue_id", "author_kind", "author_id", "body", "thread_root_comment_id",
+        "comment_id", "comment_remote_version", "issue_id", "author_kind", "author_id", "body", "thread_root_comment_id",
         "thread_state", "reactions", "created_at", "updated_at"
       ],
       "properties": {
         "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "author_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "author_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
@@ -183,38 +183,38 @@
         "actor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
-    "CommentThreadChangeSnapshot": {
+    "CommentThreadStateSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["thread_change_id", "source_comment_id", "thread_root_comment_id", "action", "actor_kind", "occurred_at"],
+      "required": ["comment_id", "comment_remote_version", "thread_root_comment_id", "thread_state", "actor_kind", "observed_at"],
       "properties": {
-        "thread_change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action": { "enum": ["resolved", "reopened"] },
-        "actor_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
-        "actor_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "thread_state": { "enum": ["resolved", "unresolved"] },
+        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
+        "resolved_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
     "UserCommentInput": {
       "oneOf": [
         { "$ref": "#/$defs/UserCommentBodyInput" },
-        { "$ref": "#/$defs/UserCommentThreadChangeInput" }
+        { "$ref": "#/$defs/UserCommentThreadStateInput" }
       ]
     },
     "UserCommentBodyInput": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind", "input_id", "comment_id", "comment_version", "issue_id", "issue_kind", "author_kind", "author_id",
+        "kind", "input_id", "comment_id", "comment_body_digest", "issue_id", "issue_kind", "author_kind", "author_id",
         "body", "thread_root_comment_id", "thread_state", "created_at", "updated_at"
       ],
       "properties": {
         "kind": { "const": "comment_body" },
         "input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "comment_body_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -228,28 +228,26 @@
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "UserCommentThreadChangeInput": {
+    "UserCommentThreadStateInput": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind", "input_id", "thread_change_id", "source_comment_id", "source_comment_version",
-        "thread_root_comment_id", "issue_id", "issue_kind", "actor_kind", "actor_id", "action", "occurred_at"
+        "kind", "input_id", "comment_id", "comment_remote_version", "thread_root_comment_id",
+        "issue_id", "issue_kind", "actor_kind", "thread_state", "observed_at"
       ],
       "properties": {
-        "kind": { "const": "comment_thread_change" },
+        "kind": { "const": "comment_thread_state" },
         "input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "thread_change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "actor_kind": { "enum": ["human", "linear_integration", "external_automation", "unknown"] },
-        "actor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "actor_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action": { "enum": ["resolved", "reopened"] },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
+        "thread_state": { "enum": ["resolved", "unresolved"] },
+        "resolved_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
     "RecordReference": {
@@ -260,10 +258,12 @@
         "record_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "record_kind": {
           "enum": [
-            "root_ownership", "root_convergence_policy", "root_directive", "root_reconciler_failure",
-            "root_reconciler_reply", "model_turn", "stage_execution", "plan_contract", "plan_result",
-            "work_result", "verify_result", "human_action_request", "human_action_resolution", "finding",
-            "progress_assessment", "cycle_outcome", "workflow_timeline"
+            "root_ownership", "workflow_issue", "root_convergence_policy", "root_directive",
+            "root_reconciler_failure", "root_reconciler_reply", "delivery", "model_turn",
+            "stage_execution", "plan_contract", "plan_result", "work_result", "stage_result",
+            "verify_result", "human_action_request", "human_action_resolution", "finding",
+            "finding_disposition", "progress_assessment", "cycle_outcome", "convergence",
+            "workflow_timeline"
           ]
         },
         "record_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
@@ -376,7 +376,7 @@
     "RootBootstrapSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "cycles", "issues", "relations", "managed_records", "user_comments", "comment_thread_changes", "git_facts", "delivery", "mechanical_violations"],
+      "required": ["root", "cycles", "issues", "relations", "managed_records", "user_comments", "user_comment_thread_states", "git_facts", "delivery", "mechanical_violations"],
       "properties": {
         "root": { "$ref": "#/$defs/RootObservation" },
         "cycles": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CycleObservation" } },
@@ -384,9 +384,14 @@
         "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
         "managed_records": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RecordReference" } },
         "user_comments": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentSnapshot" } },
-        "comment_thread_changes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentThreadChangeSnapshot" } },
+        "user_comment_thread_states": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentThreadStateSnapshot" } },
         "git_facts": { "$ref": "#/$defs/GitFacts" },
-        "delivery": { "$ref": "#/$defs/RecordReference" },
+        "delivery": {
+          "oneOf": [
+            { "$ref": "#/$defs/RecordReference" },
+            { "type": "null" }
+          ]
+        },
         "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
       }
     },
@@ -450,6 +455,19 @@
         "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "CommentThreadStateCurrentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "thread_state"],
+      "properties": {
+        "kind": { "const": "comment_thread_state_current_value" },
+        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "thread_state": { "$ref": "#/$defs/CommentThreadStateSnapshot" }
       }
     },
     "RelationCurrentValue": {
@@ -587,7 +605,7 @@
     "RootDeltaChange": {
       "oneOf": [
         { "$ref": "#/$defs/IssueCurrentValue" }, { "$ref": "#/$defs/IssueDetached" },
-        { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
+        { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentThreadStateCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
         { "$ref": "#/$defs/RelationCurrentValue" }, { "$ref": "#/$defs/RelationRemoved" },
         { "$ref": "#/$defs/ManagedRecordCurrentValue" }, { "$ref": "#/$defs/ManagedRecordRemoved" },
         { "$ref": "#/$defs/PlanContractCurrentValue" }, { "$ref": "#/$defs/PlanCompletedResultCurrentValue" },
@@ -606,12 +624,39 @@
         "pending_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true }
       }
     },
+    "CommentBodyVersionReplySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "comment_id", "comment_body_digest"],
+      "properties": {
+        "kind": { "const": "comment_body" },
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_body_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "CommentThreadStateReplySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "comment_id", "comment_remote_version", "thread_root_comment_id", "thread_state"],
+      "properties": {
+        "kind": { "const": "comment_thread_state" },
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "thread_state": { "enum": ["resolved", "unresolved"] }
+      }
+    },
+    "UserCommentReplySource": {
+      "oneOf": [
+        { "$ref": "#/$defs/CommentBodyVersionReplySource" },
+        { "$ref": "#/$defs/CommentThreadStateReplySource" }
+      ]
+    },
     "RootReconcilerReplyRecord": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source_comment_id",
-        "source_comment_version", "target_issue_id", "disposition", "reaction", "thread_action",
+        "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source", "target_issue_id", "disposition", "reaction", "thread_action",
         "materialized_outcome_refs", "rendered_schema_version",
         "replied_at"
       ],
@@ -620,8 +665,7 @@
         "reply_write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "root_directive_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "source": { "$ref": "#/$defs/UserCommentReplySource" },
         "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "disposition": { "enum": ["accepted", "not_applied", "follow_up_required"] },
         "reaction": { "enum": ["check", "cross", "none"] },
@@ -635,15 +679,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "reply_id", "source_input_id", "source_comment_id", "source_comment_version", "acknowledgement",
+        "reply_id", "source_input_id", "source", "acknowledgement",
         "interpreted_request", "decided_action", "next_step", "disposition", "reaction", "thread_action"
       ],
       "properties": {
         "reply_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "source_thread_change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source": { "$ref": "#/$defs/UserCommentReplySource" },
         "acknowledgement": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "interpreted_request": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "decided_action": { "$ref": "common.schema.json#/$defs/BoundedText" },

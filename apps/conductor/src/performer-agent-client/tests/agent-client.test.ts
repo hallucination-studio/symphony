@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  decodeConductorPerformerOpenRootReconcilerRequest,
   decodeConductorPerformerPlanTurnRequest,
   decodeConductorPerformerVerifyTurnRequest,
   decodeConductorPerformerWorkTurnRequest,
@@ -229,12 +230,18 @@ function bootstrap() {
     rootSnapshot: {
       root: {
         issue, objective: "Root description", scope: "Root", acceptanceCriteria: [], constraints: [],
-        rootStatus: "Todo" as const, ownership: { recordId: "none:root_ownership", recordKind: "root_ownership", version: "none" },
+        rootStatus: "Todo" as const,
+        ownership: {
+          recordId: "root-1:ownership",
+          recordKind: "root_ownership" as const,
+          recordVersion: "1" as const,
+          writeId: "root-1:ownership",
+        },
         convergenceSummary: "none",
       },
-      cycles: [], issues: [issue], relations: [], managedRecords: [], userComments: [],
+      cycles: [], issues: [issue], relations: [], managedRecords: [], userComments: [], userCommentThreadStates: [],
       gitFacts: { headRevision: "head-1", baselineRevision: "head-1", statusSummary: "clean", changedPaths: [] },
-      delivery: { recordId: "none:delivery", recordKind: "delivery", version: "none" }, mechanicalViolations: [],
+      delivery: null, mechanicalViolations: [],
     },
     sourceManifest: [], coverage: { isComplete: true, omissions: [] }, rootDigest: "tree-1", pendingInputIds: [],
   };
@@ -247,6 +254,7 @@ function initialDirective() {
     root_directive_id: "directive-1",
     reconciler_session_id: "session-1",
     reconciler_turn_id: "turn-1",
+    model_turn: rootModelTurn("turn-1"),
     based_on_target_root_digest: "tree-1",
     rationale: "Open the root.",
     evidence_refs: [],
@@ -264,6 +272,7 @@ function waitDirective(requestId: string, digest: string, turnId: string) {
     root_directive_id: `directive-${turnId}`,
     reconciler_session_id: "session-1",
     reconciler_turn_id: turnId,
+    model_turn: rootModelTurn(turnId),
     based_on_target_root_digest: digest,
     rationale: "Wait for the next durable fact.",
     evidence_refs: [],
@@ -271,6 +280,21 @@ function waitDirective(requestId: string, digest: string, turnId: string) {
     comment_replies: [],
     human_action_resolutions: [],
     action: { kind: "wait", reason_code: "human", blocking_fact_refs: [{ reference_id: "fact-1", source_kind: "result" }] },
+  };
+}
+
+function rootModelTurn(turnId: string) {
+  return {
+    turn_record_id: `root-1:${turnId}`,
+    role: "root_reconciler",
+    root_issue_id: "root-1",
+    reconciler_session_id: "session-1",
+    reconciler_turn_id: turnId,
+    invocation_state: "confirmed",
+    model: "gpt",
+    outcome: "directive_accepted",
+    usage: { status: "unavailable", reason: "provider_omitted" },
+    terminal_at: "2026-07-23T00:00:01Z",
   };
 }
 
@@ -375,14 +399,17 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
     environment: () => ({ CODEX_HOME: "/tmp/profile" }),
-    channelFactory: channelFactoryFor(({ requestId }) => ({
-      protocol_version: "1",
-      request_id: requestId,
-      kind: "root_reconciler_opened",
-      reconciler_session_id: "session-1",
-      bootstrap_root_digest: "tree-1",
-      initial_directive: initialDirective(),
-    }), calls),
+    channelFactory: channelFactoryFor(({ requestId, body }) => {
+      decodeConductorPerformerOpenRootReconcilerRequest(body as JsonValue);
+      return {
+        protocol_version: "1",
+        request_id: requestId,
+        kind: "root_reconciler_opened",
+        reconciler_session_id: "session-1",
+        bootstrap_root_digest: "tree-1",
+        initial_directive: initialDirective(),
+      };
+    }, calls),
     deadlineMs: 30_000,
   });
   const input = openInput();

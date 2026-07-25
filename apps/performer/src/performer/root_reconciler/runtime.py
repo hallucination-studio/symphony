@@ -191,6 +191,10 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
         if kind == "plan_completed_result_removed":
             _remove_plan_completed_result(snapshot, change)
             continue
+        if kind == "comment_removed":
+            comment_id = _text(change, "source_id")
+            _remove_comment_facts(snapshot, comment_id)
+            continue
         collection, nested_key, nested_value = _change_target(kind)
         items = snapshot.get(collection)
         if not isinstance(items, list):
@@ -203,6 +207,14 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
             snapshot["root"]["issue"] = deepcopy(change[nested_value])
     next_facts["pending_input_ids"] = deepcopy(delta["pending_input_ids"])
     return next_facts
+
+
+def _remove_comment_facts(snapshot: dict[str, Any], comment_id: str) -> None:
+    for collection in ("user_comments", "user_comment_thread_states"):
+        items = snapshot.get(collection)
+        if not isinstance(items, list):
+            raise RootReconcilerTurnError("root_delta_fact_set_invalid", "The Root delta cannot advance the session fact set.")
+        items[:] = [item for item in items if item.get("comment_id") != comment_id]
 
 
 def _cycle(snapshot: dict[str, Any], cycle_issue_id: str) -> dict[str, Any]:
@@ -256,7 +268,9 @@ def _change_target(kind: str) -> tuple[str, str, str | None]:
     if kind in {"issue_current_value", "issue_detached"}:
         return "issues", "issue_id", "issue" if kind.endswith("current_value") else None
     if kind in {"comment_current_value", "comment_removed"}:
-        return "user_comments", "comment_id", "comment" if kind.endswith("current_value") else None
+        return "user_comments", "comment_id", "user_input" if kind.endswith("current_value") else None
+    if kind == "comment_thread_state_current_value":
+        return "user_comment_thread_states", "comment_id", "thread_state"
     if kind in {"relation_current_value", "relation_removed"}:
         return "relations", "relation_id", "relation" if kind.endswith("current_value") else None
     if kind in {"managed_record_current_value", "managed_record_removed"}:

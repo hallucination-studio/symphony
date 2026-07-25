@@ -451,7 +451,7 @@ class FakeLinear {
     this.tree.comments.push({
       comment_id: `comment-${this.tree.comments.length + 1}`, issue_id: issueId, body, author_kind: "symphony",
       author_id: "symphony", created_at: "2026-07-24T00:00:01Z",
-      remote_version: `comment-${this.tree.comments.length + 1}`, updated_at: "2026-07-24T00:00:01Z",
+      thread_root_comment_id: `comment-${this.tree.comments.length + 1}`, thread_state: "unresolved", reactions: [], remote_version: `comment-${this.tree.comments.length + 1}`, updated_at: "2026-07-24T00:00:01Z",
     });
     this.bump(issueId);
   }

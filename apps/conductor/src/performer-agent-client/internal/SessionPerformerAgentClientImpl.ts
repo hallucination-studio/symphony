@@ -259,14 +259,17 @@ function toWireBootstrap(input: RootBootstrap): JsonRecord {
       relations: input.rootSnapshot.relations.map(toWireRelation),
       managed_records: input.rootSnapshot.managedRecords.map(toWireRecordReference),
       user_comments: input.rootSnapshot.userComments.map(toWireComment),
+      user_comment_thread_states: input.rootSnapshot.userCommentThreadStates.map(toWireCommentThreadState),
       git_facts: toWireGitFacts(input.rootSnapshot.gitFacts),
-      delivery: toWireRecordReference(input.rootSnapshot.delivery),
+      delivery: input.rootSnapshot.delivery === null ? null : toWireRecordReference(input.rootSnapshot.delivery),
       mechanical_violations: input.rootSnapshot.mechanicalViolations.map(toWireMechanicalViolation),
     },
     source_manifest: input.sourceManifest.map((entry) => ({
       source_kind: entry.sourceKind,
       source_id: entry.sourceId,
-      version_or_digest: entry.versionOrDigest,
+      source_version: entry.sourceVersion,
+      actor_kind: entry.actorKind,
+      ...(entry.stableWriteId ? { stable_write_id: entry.stableWriteId } : {}),
     })),
     coverage: {
       is_complete: input.coverage.isComplete,
@@ -295,7 +298,8 @@ function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
     observed_at: change.observedAt,
   };
   if (change.kind === "issue_current_value") return { ...base, issue: toWireFactIssue(change.issue) };
-  if (change.kind === "comment_current_value") return { ...base, comment: toWireComment(change.comment) };
+  if (change.kind === "comment_current_value") return { ...base, user_input: toWireUserCommentInput(change.userInput) };
+  if (change.kind === "comment_thread_state_current_value") return { ...base, thread_state: toWireCommentThreadState(change.threadState) };
   if (change.kind === "relation_current_value") return { ...base, relation: toWireRelation(change.relation) };
   if (change.kind === "managed_record_current_value") return { ...base, record: toWireRecordReference(change.record) };
   if (change.kind === "plan_contract_current_value") {
@@ -464,20 +468,85 @@ function toWireHumanActionResolution(input: import("../../root-reconciliation/ap
 
 function toWireRecordReference(reference: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootRecordReference): JsonRecord {
   return {
-    record_id: reference.recordId, record_kind: reference.recordKind, version: reference.version,
+    record_id: reference.recordId,
+    record_kind: reference.recordKind,
+    record_version: reference.recordVersion,
+    write_id: reference.writeId,
   };
 }
 
 function toWireComment(comment: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFactComment): JsonRecord {
   return {
     comment_id: comment.commentId,
-    comment_version: comment.commentVersion,
+    comment_remote_version: comment.commentRemoteVersion,
     issue_id: comment.issueId,
+    author_id: comment.authorId,
     ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
     author_kind: comment.authorKind,
+    ...(comment.parentCommentId ? { parent_comment_id: comment.parentCommentId } : {}),
+    thread_root_comment_id: comment.threadRootCommentId,
+    thread_state: comment.threadState,
+    reactions: comment.reactions.map((reaction) => ({
+      reaction_id: reaction.reactionId,
+      emoji: reaction.emoji,
+      actor_kind: reaction.actorKind,
+      actor_id: reaction.actorId,
+    })),
     body: comment.body,
     created_at: comment.createdAt,
     updated_at: comment.updatedAt,
+  };
+}
+
+function toWireCommentThreadState(
+  state: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootCommentThreadState,
+): JsonRecord {
+  return {
+    comment_id: state.commentId,
+    comment_remote_version: state.commentRemoteVersion,
+    thread_root_comment_id: state.threadRootCommentId,
+    thread_state: state.threadState,
+    actor_kind: state.actorKind,
+    ...(state.resolvedAt ? { resolved_at: state.resolvedAt } : {}),
+    observed_at: state.observedAt,
+  };
+}
+
+function toWireUserCommentInput(
+  input: import("../../root-reconciliation/api/RootReconciliationContracts.js").UserCommentInput,
+): JsonRecord {
+  if (input.kind === "comment_thread_state") {
+    return {
+      kind: input.kind,
+      input_id: input.inputId,
+      comment_id: input.commentId,
+      comment_remote_version: input.commentRemoteVersion,
+      thread_root_comment_id: input.threadRootCommentId,
+      issue_id: input.issueId,
+      issue_kind: input.issueKind,
+      ...(input.cycleIssueId ? { cycle_issue_id: input.cycleIssueId } : {}),
+      actor_kind: input.actorKind,
+      thread_state: input.threadState,
+      ...(input.resolvedAt ? { resolved_at: input.resolvedAt } : {}),
+      observed_at: input.observedAt,
+    };
+  }
+  return {
+    kind: input.kind,
+    input_id: input.inputId,
+    comment_id: input.commentId,
+    comment_body_digest: input.commentBodyDigest,
+    issue_id: input.issueId,
+    issue_kind: input.issueKind,
+    ...(input.cycleIssueId ? { cycle_issue_id: input.cycleIssueId } : {}),
+    author_kind: input.authorKind,
+    author_id: input.authorId,
+    ...(input.authorUserId ? { author_user_id: input.authorUserId } : {}),
+    body: input.body,
+    thread_root_comment_id: input.threadRootCommentId,
+    thread_state: input.threadState,
+    created_at: input.createdAt,
+    updated_at: input.updatedAt,
   };
 }
 

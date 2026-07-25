@@ -76,6 +76,11 @@ Todo | In Progress | Needs Approval | Needs Info | In Review -> Canceled
 Root waiting status是Root header summary；canonical Action和resolution仍在完整Tree。Root不能在没有matching active
 Action时保持waiting，也不能在有阻塞Action时继续dispatch。
 
+这些图只定义各自Linear Issue的原生custom-status lifecycle，不是彼此的投影或第二套状态机：Root status属于Root
+Issue，Cycle status属于Cycle Issue，Node status属于Plan/Work/Verify Issue，Action status属于Human Action Issue。任何
+derived view、timeline、reply、reaction、thread state、directive或record都不得保存、推断或推进其中任一status；它们只能由
+accepted directive materialize后从Linear read-back确认。
+
 ## 4. Cycle state
 
 ```text
@@ -104,22 +109,18 @@ any nonterminal -> Canceled
 create/update/archive/restore/reorder/dependency patch；Conductor验证并materialize。触碰目标、scope、acceptance
 criteria或protected constraint时必须走fresh Plan/Human Action，而不能伪装成DAG patch。
 
-## 5. Node与Action状态
+## 5. Node状态
 
 ```text
 Plan:   Todo -> In Progress -> In Review -> Done | Failed | Canceled
 Work:   Todo -> In Progress -> Done | Failed | Canceled
 Verify: Todo -> In Progress -> Done | Failed | Canceled
-
-Approval Human Action:
-        Todo -> In Progress -> Approved | Rejected | Canceled
-
-Clarification Human Action:
-        Todo -> In Progress -> Answered | Canceled
 ```
 
 Plan/Work/Verify的status只记录durable执行生命周期；重试次数和turn identity来自matching execution records。
-Human Action状态、comments和resolution由[Human Action](human-actions.md)定义。
+Human Action使用同一status catalog中的专用display status，但其允许迁移、用户操作、comment/thread交互和resolution
+只由[Human Action](human-actions.md)定义。本文不复制Action transition，避免status catalog变成第二套Action
+lifecycle定义。
 
 每次`execute_plan`、`execute_work`、`execute_verify`或`rerun_stage`在调用Performer前，Conductor必须先把matching
 active Node写为`In Progress`并read-back。它只在matching Stage Result已经durable写入和read-back后，才按closed

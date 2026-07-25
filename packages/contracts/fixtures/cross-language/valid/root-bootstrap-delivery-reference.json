@@ -1,0 +1,54 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RootBootstrapSnapshot",
+  "value": {
+    "root": {
+      "issue": {
+        "issue_id": "root-1",
+        "issue_kind": "root",
+        "title": "Root",
+        "description": "Complete the requested objective.",
+        "status": "Todo",
+        "is_archived": false,
+        "labels": [],
+        "remote_version": "root-v1"
+      },
+      "objective": "Complete the requested objective.",
+      "scope": "The approved Root scope.",
+      "acceptance_criteria": [
+        {
+          "criterion_key": "criterion-1",
+          "statement": "The objective is complete.",
+          "verification_method": "automated test"
+        }
+      ],
+      "constraints": [],
+      "root_status": "Todo",
+      "ownership": {
+        "record_id": "root-ownership-1",
+        "record_kind": "root_ownership",
+        "record_version": "1",
+        "write_id": "root-ownership-write-1"
+      },
+      "convergence_summary": "No convergence limit has been reached."
+    },
+    "cycles": [],
+    "issues": [],
+    "relations": [],
+    "managed_records": [],
+    "user_comments": [],
+    "user_comment_thread_states": [],
+    "git_facts": {
+      "head_revision": "head-1",
+      "baseline_revision": "head-1",
+      "status_summary": "clean",
+      "changed_paths": []
+    },
+    "delivery": {
+      "record_id": "delivery-1",
+      "record_kind": "delivery",
+      "record_version": "1",
+      "write_id": "delivery-write-1"
+    },
+    "mechanical_violations": []
+  }
+}

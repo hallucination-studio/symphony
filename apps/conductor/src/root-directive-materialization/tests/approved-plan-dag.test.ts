@@ -309,7 +309,7 @@ function issue(
 function managedComment(commentId: string, issueId: string, body: string) {
   return {
     comment_id: commentId, issue_id: issueId, body, author_kind: "symphony" as const, author_id: "symphony",
-    created_at: "2026-07-24T00:00:00Z", remote_version: `${commentId}-v1`, updated_at: "2026-07-24T00:00:00Z",
+    thread_root_comment_id: commentId, thread_state: "unresolved" as const, reactions: [], created_at: "2026-07-24T00:00:00Z", remote_version: `${commentId}-v1`, updated_at: "2026-07-24T00:00:00Z",
   };
 }
 

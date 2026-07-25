@@ -405,7 +405,6 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   assert.deepEqual(result.tree.comments[0].reactions, []);
   assert.equal(result.tree.comments[0].thread_root_comment_id, "comment-1");
   assert.equal(result.tree.comments[0].thread_state, "unresolved");
-  assert.deepEqual(result.tree.comment_thread_changes, []);
   assert.equal(result.tree.coverage.is_complete, true);
   assert.ok(result.tree.source_manifest.some(({ source_kind, source_id }) =>
     source_kind === "linear_comment" && source_id === "comment-1"));
@@ -668,7 +667,6 @@ function workflowTree(projectId) {
       { ...issue("work-1", projectId), parentIssueId: "root-1", statusId: "status-todo", statusName: "Todo", statusCategory: "unstarted", statusPosition: 1, depth: 1, remoteVersion: "2026-07-16T00:00:00Z" },
     ],
     comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", threadRootCommentId: "comment-1", threadState: "unresolved", reactions: [], createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
-    commentThreadChanges: [],
     relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
     sourceManifest: [
       { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown" },

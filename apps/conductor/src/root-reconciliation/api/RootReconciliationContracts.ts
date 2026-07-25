@@ -39,10 +39,11 @@ export interface ReconcilerLimits {
 }
 
 export interface RootSourceManifestEntry {
-  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "git" | "repository_instruction";
+  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_status_catalog";
   sourceId: string;
-  versionOrDigest: string;
-  actorKind?: RootActorKind;
+  sourceVersion: string;
+  actorKind: RootActorKind;
+  stableWriteId?: string;
 }
 
 export interface RootCoverage {
@@ -71,20 +72,65 @@ export interface RootFactRelation {
 
 export interface RootFactComment {
   commentId: string;
-  commentVersion: string;
+  commentRemoteVersion: string;
   issueId: string;
+  authorId: string;
   authorUserId?: string;
   authorKind: RootActorKind;
+  parentCommentId?: string;
+  threadRootCommentId: string;
+  threadState: "resolved" | "unresolved";
+  reactions: Array<{
+    reactionId: string;
+    emoji: string;
+    actorKind: RootActorKind;
+    actorId: string;
+  }>;
   body: string;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface RootCommentThreadState {
+  commentId: string;
+  commentRemoteVersion: string;
+  threadRootCommentId: string;
+  threadState: "resolved" | "unresolved";
+  actorKind: "human" | "external_automation" | "unknown";
+  resolvedAt?: string;
+  observedAt: string;
+}
+
 export interface RootRecordReference {
   recordId: string;
-  recordKind: string;
-  version: string;
+  recordKind: RootRecordKind;
+  recordVersion: "1";
+  writeId: string;
 }
+
+export type RootRecordKind =
+  | "root_ownership"
+  | "workflow_issue"
+  | "root_convergence_policy"
+  | "root_directive"
+  | "root_reconciler_failure"
+  | "root_reconciler_reply"
+  | "delivery"
+  | "model_turn"
+  | "stage_execution"
+  | "plan_contract"
+  | "plan_result"
+  | "work_result"
+  | "stage_result"
+  | "verify_result"
+  | "human_action_request"
+  | "human_action_resolution"
+  | "finding"
+  | "finding_disposition"
+  | "progress_assessment"
+  | "cycle_outcome"
+  | "convergence"
+  | "workflow_timeline";
 
 export interface RootHumanActionRecord {
   actionId: string;
@@ -176,8 +222,9 @@ export interface RootBootstrapSnapshot {
   relations: RootFactRelation[];
   managedRecords: RootRecordReference[];
   userComments: RootFactComment[];
+  userCommentThreadStates: RootCommentThreadState[];
   gitFacts: RootGitFacts;
-  delivery: RootRecordReference;
+  delivery: RootRecordReference | null;
   mechanicalViolations: MechanicalViolation[];
 }
 
@@ -199,7 +246,8 @@ interface RootDeltaChangeBase {
 export type RootDeltaChange =
   | (RootDeltaChangeBase & { kind: "issue_current_value"; issue: RootFactIssue })
   | (RootDeltaChangeBase & { kind: "issue_detached" })
-  | (RootDeltaChangeBase & { kind: "comment_current_value"; comment: RootFactComment })
+  | (RootDeltaChangeBase & { kind: "comment_current_value"; userInput: UserCommentInput })
+  | (RootDeltaChangeBase & { kind: "comment_thread_state_current_value"; threadState: RootCommentThreadState })
   | (RootDeltaChangeBase & { kind: "comment_removed" })
   | (RootDeltaChangeBase & { kind: "relation_current_value"; relation: RootFactRelation })
   | (RootDeltaChangeBase & { kind: "relation_removed" })
@@ -255,24 +303,53 @@ export type RootDirective = RootDirectiveBase & {
 export interface EvidenceRef { referenceId: string; sourceKind: "linear_issue" | "linear_comment" | "linear_record" | "git" | "check" | "result"; }
 export interface RootAcceptanceCriterion { criterionKey: string; statement: string; verificationMethod: string; }
 
-export interface UserCommentInput {
-  commentId: string;
-  commentVersion: string;
-  issueId: string;
-  issueKind: RootFactIssueKind;
-  cycleIssueId?: string;
-  authorUserId: string;
-  body: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type UserCommentInput =
+  | {
+      kind: "comment_body";
+      inputId: string;
+      commentId: string;
+      commentBodyDigest: string;
+      issueId: string;
+      issueKind: RootFactIssueKind;
+      cycleIssueId?: string;
+      authorKind: RootActorKind;
+      authorId: string;
+      authorUserId?: string;
+      body: string;
+      threadRootCommentId: string;
+      threadState: "resolved" | "unresolved";
+      createdAt: string;
+      updatedAt: string;
+    }
+  | {
+      kind: "comment_thread_state";
+      inputId: string;
+      commentId: string;
+      commentRemoteVersion: string;
+      threadRootCommentId: string;
+      issueId: string;
+      issueKind: RootFactIssueKind;
+      cycleIssueId?: string;
+      actorKind: "human" | "external_automation" | "unknown";
+      threadState: "resolved" | "unresolved";
+      resolvedAt?: string;
+      observedAt: string;
+    };
+
+export type UserCommentReplySource =
+  | { kind: "comment_body"; commentId: string; commentBodyDigest: string }
+  | {
+      kind: "comment_thread_state";
+      commentId: string;
+      commentRemoteVersion: string;
+      threadRootCommentId: string;
+      threadState: "resolved" | "unresolved";
+    };
 
 export interface UserCommentReply {
   replyId: string;
   sourceInputId: string;
-  sourceCommentId: string;
-  sourceCommentVersion: string;
-  sourceThreadChangeId?: string;
+  source: UserCommentReplySource;
   acknowledgement: string;
   interpretedRequest: string;
   decidedAction: string;

@@ -835,17 +835,11 @@ export class LinearSdkImpl implements LinearClientInterface {
         project: { projectId: input.projectId, updatedAt: project.updatedAt.toISOString() },
         currentMembers,
         desiredMembers,
-        roots: roots.map((root) => {
-          const ownershipConductorId = rootOwnershipConductorId(root.rootManagedComments);
-          const base = {
-            issueId: root.issue.issueId,
-            state: root.issue.state ?? "Draft",
-            labels: root.rootConductorLabels.map(({ conductorShortHash }) => conductorShortHash),
-          };
-          return ownershipConductorId === undefined
-            ? base
-            : { ...base, ownershipConductorId };
-        }),
+        roots: roots.map((root) => ({
+          issueId: root.issue.issueId,
+          state: root.issue.state ?? "Draft",
+          labels: root.rootConductorLabels.map(({ conductorShortHash }) => conductorShortHash),
+        })),
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : "";
@@ -1449,7 +1443,6 @@ export class LinearSdkImpl implements LinearClientInterface {
       statusCatalog,
       issues,
       comments,
-      commentThreadChanges: [],
       relations: tree.relations,
     });
     return {
@@ -1457,7 +1450,6 @@ export class LinearSdkImpl implements LinearClientInterface {
       statusCatalog,
       issues,
       comments,
-      commentThreadChanges: [],
       relations: tree.relations,
       sourceManifest,
       coverage: { isComplete: true, omissions: [] },
@@ -1553,8 +1545,8 @@ export class LinearSdkImpl implements LinearClientInterface {
           return;
         }
         case "set_comment_receipt_reaction": {
-          const reply = comments.get(command.replyCommentId)!;
-          const current = symphonyReceipt(reply);
+          const source = comments.get(command.sourceCommentId)!;
+          const current = symphonyReceipt(source);
           if (command.receipt === "none") {
             if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
             return;
@@ -1562,7 +1554,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           if (current.receipt === command.receipt) return;
           if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
           await this.#client.createReaction({
-            commentId: command.replyCommentId,
+            commentId: command.sourceCommentId,
             emoji: receiptEmoji(command.receipt),
           });
           return;
@@ -1739,17 +1731,17 @@ export class LinearSdkImpl implements LinearClientInterface {
           : undefined;
       }
       case "set_comment_receipt_reaction": {
-        const reply = comments.get(command.replyCommentId);
-        if (!reply || reply.threadRootCommentId !== command.threadRootCommentId) return undefined;
-        const current = symphonyReceipt(reply);
+        const source = comments.get(command.sourceCommentId);
+        if (!source || source.threadRootCommentId !== command.threadRootCommentId) return undefined;
+        const current = symphonyReceipt(source);
         return current.receipt === command.receipt
           ? {
               writeId: command.writeId,
-              targetIssueId: reply.issueId,
-              remoteVersion: reply.remoteVersion,
+              targetIssueId: source.issueId,
+              remoteVersion: source.remoteVersion,
               symphonyReceipt: {
                 replyWriteId: command.replyWriteId,
-                replyCommentId: command.replyCommentId,
+                sourceCommentId: command.sourceCommentId,
                 threadRootCommentId: command.threadRootCommentId,
                 receipt: command.receipt,
               },
@@ -2719,7 +2711,6 @@ function workflowSourceManifest(input: {
   statusCatalog: readonly WorkflowStatusCatalogEntry[];
   issues: readonly LinearIssueValue[];
   comments: readonly WorkflowCommentValue[];
-  commentThreadChanges: readonly import("../types.js").WorkflowCommentThreadChangeValue[];
   relations: readonly WorkflowRelationValue[];
 }): WorkflowSourceManifestEntryValue[] {
   const statusVersion = createHash("sha256")
@@ -2742,12 +2733,6 @@ function workflowSourceManifest(input: {
       sourceId: comment.commentId,
       sourceVersion: comment.updatedAt,
       actorKind: comment.authorKind,
-    })),
-    ...input.commentThreadChanges.map((change) => ({
-      sourceKind: "linear_comment_thread_change" as const,
-      sourceId: change.threadChangeId,
-      sourceVersion: change.threadChangeId,
-      actorKind: change.actorKind,
     })),
     ...input.relations.map((relation) => ({
       sourceKind: "linear_relation" as const,
@@ -2970,10 +2955,10 @@ function nativeCommentPreconditionsMatch(
         source.threadState === command.expectedThreadState;
     }
     case "set_comment_receipt_reaction": {
-      const reply = tree.comments.get(command.replyCommentId);
-      return reply?.remoteVersion === command.expectedReplyCommentRemoteVersion &&
-        reply.threadRootCommentId === command.threadRootCommentId &&
-        symphonyReceipt(reply).receipt === command.expectedReceipt;
+      const source = tree.comments.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(source).receipt === command.expectedReceipt;
     }
     case "set_comment_thread_state": {
       const source = tree.comments.get(command.sourceCommentId);
@@ -3260,12 +3245,6 @@ function normalizePoolMembers(values: readonly string[]): string[] | undefined {
 
 function boundedRootText(value: string, maximum: number): boolean {
   return typeof value === "string" && value.length > 0 && value.length <= maximum;
-}
-
-function rootOwnershipConductorId(
-  _comments: readonly { body: string }[],
-): string | undefined {
-  return undefined;
 }
 
 function projectPoolFingerprint(input: {

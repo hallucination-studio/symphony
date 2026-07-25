@@ -21,11 +21,11 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     reply: UserCommentReply;
     view: RootReconciliationView;
   }): Promise<{ kind: "materialized"; replyId: string } | { kind: "failed"; code: string }> {
-    const source = input.view.tree.comments.find(({ comment_id }) => comment_id === input.reply.sourceCommentId);
+    let tree = input.view.tree;
+    let source = sourceComment(tree, input.reply);
     if (!source) return failed("reply_source_comment_missing");
-    if (source.remote_version !== input.reply.sourceCommentVersion) return failed("reply_source_comment_stale");
-    if (source.author_kind !== "human" || !source.author_user_id || source.author_id !== source.author_user_id) {
-      return failed("reply_source_comment_actor_invalid");
+    if (input.reply.source.kind === "comment_thread_state" && input.reply.reaction !== "none") {
+      return failed("reply_thread_state_receipt_invalid");
     }
     const acceptedReplies = input.directive.commentReplies.filter((reply) =>
       reply.replyId === input.reply.replyId);
@@ -33,54 +33,130 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
       return failed("reply_disposition_not_accepted");
     }
 
-    const target = input.view.tree.issues.find(({ issue_id }) => issue_id === source.issue_id);
-    const root = input.view.tree.issues.find(({ issue_id }) => issue_id === input.view.root.issueId);
+    let target = targetIssue(tree, source.issue_id);
+    let root = rootIssue(tree, input.view.root.issueId);
     if (!target || !root) return failed("reply_target_missing");
 
     const replyId = input.reply.replyId;
     if (replyId !== deterministicReplyId({
       rootDirectiveId: input.directive.rootDirectiveId,
-      sourceCommentId: source.comment_id,
-      sourceCommentVersion: source.remote_version,
+      source: input.reply.source,
     })) return failed("reply_id_invalid");
-    const existing = findReply(input.view.tree.comments, target.issue_id, replyId);
-    if (existing) return { kind: "materialized", replyId };
 
     const body = render(input.reply, replyId, input.directive, target.issue_id, input.view.observedAt);
     if (!body) return failed("reply_content_invalid");
     if (Buffer.byteLength(body, "utf8") > MAX_REPLY_BYTES) return failed("reply_comment_too_large");
 
-    const outcome = await this.linear.mutateWorkflow({
-      kind: "append_workflow_comment",
-      writeId: replyId,
-      expectedProjectId: target.project_id,
-      rootIssueId: input.view.root.issueId,
-      expectedRootRemoteVersion: root.remote_version,
-      target: {
-        targetIssueId: target.issue_id,
-        expectedRemoteVersion: target.remote_version,
-        expectedStatusId: target.status_id,
-        ...(target.parent_issue_id ? { expectedParentIssueId: target.parent_issue_id } : {}),
-      },
-      body,
-    });
-    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      return failed(`reply_write_${outcome.kind}`);
+    let replyComment = findReply(tree.comments, source, replyId, input.reply.source);
+    const sourceValidation = validateSource(source, input.reply);
+    if (sourceValidation && !isRecoveredThreadAction(source, input.reply, replyComment)) {
+      return failed(sourceValidation);
+    }
+    if (!replyComment) {
+      const outcome = await this.linear.mutateWorkflow({
+        kind: "create_comment_reply",
+        writeId: replyId,
+        expectedProjectId: target.project_id,
+        rootIssueId: input.view.root.issueId,
+        expectedRootRemoteVersion: root.remote_version,
+        sourceCommentId: source.comment_id,
+        expectedSourceCommentRemoteVersion: source.remote_version,
+        expectedThreadRootCommentId: source.thread_root_comment_id,
+        expectedThreadState: source.thread_state,
+        body,
+      });
+      if (!applied(outcome)) return failed(`reply_create_${outcome.kind}`);
+      tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
+      source = sourceComment(tree, input.reply);
+      target = source ? targetIssue(tree, source.issue_id) : undefined;
+      root = rootIssue(tree, input.view.root.issueId);
+      if (!source || !target || !root) return failed("reply_read_back_missing");
+      replyComment = findReply(tree.comments, source, replyId, input.reply.source);
+      if (!replyComment) return failed("reply_read_back_missing");
     }
 
-    const readBack = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
-    const confirmed = findReply(readBack.comments, target.issue_id, replyId);
-    return confirmed ? { kind: "materialized", replyId } : failed("reply_read_back_missing");
+    const expectedReceipt = input.reply.source.kind === "comment_body" ? receipt(source) : undefined;
+    if (expectedReceipt === undefined && input.reply.source.kind === "comment_body") {
+      return failed("reply_receipt_ambiguous");
+    }
+    if (expectedReceipt !== undefined && expectedReceipt !== input.reply.reaction) {
+      const reactionOutcome = await this.linear.mutateWorkflow({
+        kind: "set_comment_receipt_reaction",
+        writeId: `${replyId}:receipt`,
+        expectedProjectId: target.project_id,
+        rootIssueId: input.view.root.issueId,
+        expectedRootRemoteVersion: root.remote_version,
+        replyWriteId: replyId,
+        sourceCommentId: source.comment_id,
+        expectedSourceCommentRemoteVersion: source.remote_version,
+        threadRootCommentId: source.thread_root_comment_id,
+        expectedReceipt,
+        receipt: input.reply.reaction,
+      });
+      if (!applied(reactionOutcome)) return failed(`reply_reaction_${reactionOutcome.kind}`);
+
+      tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
+      source = sourceComment(tree, input.reply);
+      target = source ? targetIssue(tree, source.issue_id) : undefined;
+      root = rootIssue(tree, input.view.root.issueId);
+      replyComment = source ? findReply(tree.comments, source, replyId, input.reply.source) : undefined;
+      if (!source || !target || !root || !replyComment || receipt(source) !== input.reply.reaction) {
+        return failed("reply_reaction_read_back_missing");
+      }
+    }
+
+    const desiredState = input.reply.threadAction === "resolve" ? "resolved" : "unresolved";
+    if (input.reply.threadAction === "keep_open") {
+      if (source.thread_state !== desiredState) return failed("reply_thread_state_not_open");
+      return { kind: "materialized", replyId };
+    }
+    if (source.thread_state !== desiredState) {
+      const stateOutcome = await this.linear.mutateWorkflow({
+        kind: "set_comment_thread_state",
+        writeId: `${replyId}:thread-state`,
+        expectedProjectId: target.project_id,
+        rootIssueId: input.view.root.issueId,
+        expectedRootRemoteVersion: root.remote_version,
+        replyWriteId: replyId,
+        sourceCommentId: source.comment_id,
+        expectedSourceCommentRemoteVersion: source.remote_version,
+        threadRootCommentId: source.thread_root_comment_id,
+        expectedThreadState: source.thread_state,
+        threadState: desiredState,
+      });
+      if (!applied(stateOutcome)) return failed(`reply_thread_state_${stateOutcome.kind}`);
+
+      tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);
+      source = sourceComment(tree, input.reply);
+      replyComment = source ? findReply(tree.comments, source, replyId, input.reply.source) : undefined;
+      if (
+        !source ||
+        !replyComment ||
+        source.thread_state !== desiredState ||
+        (input.reply.source.kind === "comment_body" && receipt(source) !== input.reply.reaction)
+      ) {
+        return failed("reply_thread_state_read_back_missing");
+      }
+    }
+    return { kind: "materialized", replyId };
   }
 }
 
 function deterministicReplyId(input: {
   rootDirectiveId: string;
-  sourceCommentId: string;
-  sourceCommentVersion: string;
+  source: UserCommentReply["source"];
 }): string {
+  const source = input.source.kind === "comment_body"
+    ? [input.source.kind, input.source.commentId, input.source.commentBodyDigest]
+    : [
+      input.source.kind,
+      input.source.commentId,
+      input.source.commentRemoteVersion,
+      input.source.threadRootCommentId,
+      input.source.threadState,
+    ];
   return createHash("sha256")
-    .update([input.rootDirectiveId, input.sourceCommentId, input.sourceCommentVersion].join("\0"))
+    .update([input.rootDirectiveId, ...source].join("\0"))
     .digest("hex");
 }
 
@@ -103,8 +179,7 @@ function render(reply: UserCommentReply, replyId: string, directive: RootDirecti
     replyWriteId: replyId,
     rootDirectiveId: directive.rootDirectiveId,
     sourceInputId: reply.sourceInputId,
-    sourceCommentId: reply.sourceCommentId,
-    sourceCommentVersion: reply.sourceCommentVersion,
+    source: reply.source,
     targetIssueId,
     disposition: reply.disposition,
     reaction: reply.reaction,
@@ -132,8 +207,7 @@ function render(reply: UserCommentReply, replyId: string, directive: RootDirecti
 
 function sameReply(left: UserCommentReply, right: UserCommentReply): boolean {
   return left.replyId === right.replyId &&
-    left.sourceCommentId === right.sourceCommentId &&
-    left.sourceCommentVersion === right.sourceCommentVersion &&
+    sameSource(left.source, right.source) &&
     left.sourceInputId === right.sourceInputId &&
     left.acknowledgement === right.acknowledgement &&
     left.interpretedRequest === right.interpretedRequest &&
@@ -146,16 +220,95 @@ function sameReply(left: UserCommentReply, right: UserCommentReply): boolean {
 
 function findReply(
   comments: RootReconciliationView["tree"]["comments"],
-  issueId: string,
+  source: RootReconciliationView["tree"]["comments"][number],
   replyId: string,
+  replySource: UserCommentReply["source"],
 ) {
   const matches = comments.filter((comment) => {
-    if (comment.issue_id !== issueId || comment.author_kind !== "symphony") return false;
+    if (
+      comment.issue_id !== source.issue_id ||
+      comment.parent_comment_id !== source.comment_id ||
+      comment.thread_root_comment_id !== source.thread_root_comment_id ||
+      comment.author_kind !== "symphony"
+    ) return false;
     const parsed = parseManagedRecord(comment.body);
-    return parsed.ok && parsed.value.kind === "root_reconciler_reply" && parsed.value.replyId === replyId;
+    return parsed.ok && parsed.value.kind === "root_reconciler_reply" &&
+      parsed.value.replyId === replyId && sameSource(parsed.value.source, replySource);
   });
   if (matches.length > 1) throw new Error("root_reconciler_reply_ambiguous");
   return matches[0];
+}
+
+function sourceComment(
+  tree: RootReconciliationView["tree"],
+  reply: UserCommentReply,
+): RootReconciliationView["tree"]["comments"][number] | undefined {
+  return tree.comments.find(({ comment_id }) => comment_id === reply.source.commentId);
+}
+
+function validateSource(
+  source: RootReconciliationView["tree"]["comments"][number],
+  reply: UserCommentReply,
+): string | undefined {
+  if (reply.source.kind === "comment_body") {
+    if (bodyDigest(source.body) !== reply.source.commentBodyDigest) return "reply_source_comment_stale";
+    if (source.author_kind !== "human" || !source.author_user_id || source.author_id !== source.author_user_id) {
+      return "reply_source_comment_actor_invalid";
+    }
+    return undefined;
+  }
+  if (
+    source.remote_version !== reply.source.commentRemoteVersion ||
+    source.thread_root_comment_id !== reply.source.threadRootCommentId ||
+    source.thread_state !== reply.source.threadState
+  ) return "reply_source_thread_state_stale";
+  return undefined;
+}
+
+function rootIssue(tree: RootReconciliationView["tree"], rootIssueId: string) {
+  return tree.issues.find(({ issue_id }) => issue_id === rootIssueId);
+}
+
+function targetIssue(tree: RootReconciliationView["tree"], issueId: string) {
+  return tree.issues.find(({ issue_id }) => issue_id === issueId);
+}
+
+function receipt(comment: RootReconciliationView["tree"]["comments"][number]): "check" | "cross" | "none" | undefined {
+  const receipts = new Set(comment.reactions
+    .filter(({ actor_kind, emoji }) => actor_kind === "symphony" && (emoji === "✅" || emoji === "❌"))
+    .map(({ emoji }) => emoji === "✅" ? "check" : "cross"));
+  if (receipts.size > 1) return undefined;
+  return receipts.values().next().value ?? "none";
+}
+
+function applied(outcome: Awaited<ReturnType<LinearGatewayInterface["mutateWorkflow"]>>): boolean {
+  return outcome.kind === "applied" || outcome.kind === "already_applied";
+}
+
+function sameSource(left: UserCommentReply["source"], right: UserCommentReply["source"]): boolean {
+  if (left.kind !== right.kind || left.commentId !== right.commentId) return false;
+  if (left.kind === "comment_body" && right.kind === "comment_body") {
+    return left.commentBodyDigest === right.commentBodyDigest;
+  }
+  if (left.kind === "comment_thread_state" && right.kind === "comment_thread_state") {
+    return left.commentRemoteVersion === right.commentRemoteVersion &&
+      left.threadRootCommentId === right.threadRootCommentId && left.threadState === right.threadState;
+  }
+  return false;
+}
+
+function bodyDigest(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+function isRecoveredThreadAction(
+  source: RootReconciliationView["tree"]["comments"][number],
+  reply: UserCommentReply,
+  existingReply: RootReconciliationView["tree"]["comments"][number] | undefined,
+): boolean {
+  return reply.source.kind === "comment_thread_state" && existingReply !== undefined &&
+    source.thread_root_comment_id === reply.source.threadRootCommentId &&
+    source.thread_state === (reply.threadAction === "resolve" ? "resolved" : "unresolved");
 }
 
 function failed(code: string): { kind: "failed"; code: string } {

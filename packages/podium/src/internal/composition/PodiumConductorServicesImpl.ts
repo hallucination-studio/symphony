@@ -333,16 +333,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           remote_version: comment.remoteVersion,
           updated_at: comment.updatedAt,
         })),
-        comment_thread_changes: tree.commentThreadChanges.map((change) => ({
-          thread_change_id: change.threadChangeId,
-          source_comment_id: change.sourceCommentId,
-          thread_root_comment_id: change.threadRootCommentId,
-          action: change.action,
-          actor_kind: change.actorKind,
-          actor_id: change.actorId,
-          ...(change.actorUserId ? { actor_user_id: change.actorUserId } : {}),
-          occurred_at: change.occurredAt,
-        })),
         relations: tree.relations.map((relation) => ({
           relation_id: relation.relationId,
           relation_kind: relation.relationKind,
@@ -550,8 +540,8 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       ...common,
       kind: body.kind,
       replyWriteId: requiredString(body.reply_write_id, "linear_workflow_reply_write_id_missing"),
-      replyCommentId: requiredString(body.reply_comment_id, "linear_workflow_reply_comment_id_missing"),
-      expectedReplyCommentRemoteVersion: requiredString(body.expected_reply_comment_remote_version, "linear_workflow_reply_comment_version_missing"),
+      sourceCommentId: requiredString(body.source_comment_id, "linear_workflow_source_comment_id_missing"),
+      expectedSourceCommentRemoteVersion: requiredString(body.expected_source_comment_remote_version, "linear_workflow_source_comment_version_missing"),
       threadRootCommentId: requiredString(body.thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
       expectedReceipt: workflowCommentReceipt(body.expected_receipt, "linear_workflow_expected_receipt_invalid"),
       receipt: workflowCommentReceipt(body.receipt, "linear_workflow_receipt_invalid"),
@@ -603,13 +593,6 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     };
   }
   throw new Error("linear_workflow_kind_unsupported");
-}
-
-function workflowIssueKind(value: JsonValue | undefined): "cycle" | "plan" | "work" | "verify" | "human" {
-  if (value === "cycle" || value === "plan" || value === "work" || value === "verify" || value === "human") {
-    return value;
-  }
-  throw new Error("linear_workflow_issue_kind_invalid");
 }
 
 function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" | "triggered_by" {
@@ -666,7 +649,7 @@ function workflowMutationResult(
     ...(result.readBack.comment ? { comment: workflowCommentSnapshot(result.readBack.comment) } : {}),
     ...(result.readBack.symphonyReceipt ? { symphony_receipt: {
       reply_write_id: result.readBack.symphonyReceipt.replyWriteId,
-      reply_comment_id: result.readBack.symphonyReceipt.replyCommentId,
+      source_comment_id: result.readBack.symphonyReceipt.sourceCommentId,
       thread_root_comment_id: result.readBack.symphonyReceipt.threadRootCommentId,
       receipt: result.readBack.symphonyReceipt.receipt,
     } } : {}),

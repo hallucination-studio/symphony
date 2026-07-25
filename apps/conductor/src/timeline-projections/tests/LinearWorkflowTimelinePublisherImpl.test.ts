@@ -16,7 +16,7 @@ test("timeline publishes one Markdown comment with one terminal managed record a
       tree.comments.push({
         comment_id: "timeline-comment-1", issue_id: command.target.targetIssueId, body: command.body,
         author_kind: "symphony", author_id: "symphony-1", created_at: "2026-07-24T00:00:00Z",
-        remote_version: "timeline-v1", updated_at: "2026-07-24T00:00:00Z",
+        thread_root_comment_id: "timeline-comment-1", thread_state: "unresolved", reactions: [], remote_version: "timeline-v1", updated_at: "2026-07-24T00:00:00Z",
       });
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: "timeline-v1" } };
     },

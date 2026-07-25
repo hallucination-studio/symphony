@@ -167,7 +167,6 @@ export class LinearGatewayProtocolHandlerImpl {
       tree.issues.length === 0 ||
       tree.issues.length > MAX_TREE_NODES ||
       tree.comments.length > 4_096 ||
-      tree.commentThreadChanges.length > 4_096 ||
       tree.relations.length > 1_024
     ) {
       throw new Error("linear_workflow_tree_invalid");
@@ -275,24 +274,6 @@ export class LinearGatewayProtocolHandlerImpl {
         }
         reactionIds.add(reaction.reactionId);
       }
-    }
-    const threadChangeIds = new Set<string>();
-    for (const change of tree.commentThreadChanges) {
-      const source = tree.comments.find((comment) => comment.commentId === change.sourceCommentId);
-      if (
-        !identifier(change.threadChangeId, 128) ||
-        !source ||
-        change.threadRootCommentId !== source.threadRootCommentId ||
-        (change.action !== "resolved" && change.action !== "reopened") ||
-        !workflowCommentAuthorKind(change.actorKind) ||
-        !identifier(change.actorId, 128) ||
-        (change.actorUserId !== undefined && !identifier(change.actorUserId, 128)) ||
-        !timestamp(change.occurredAt) ||
-        threadChangeIds.has(change.threadChangeId)
-      ) {
-        throw new Error("linear_workflow_comment_thread_change_invalid");
-      }
-      threadChangeIds.add(change.threadChangeId);
     }
     for (const comment of tree.comments) {
       if (
@@ -539,10 +520,10 @@ function nativeCommentPreconditionsMatch(
         source.threadState === command.expectedThreadState;
     }
     case "set_comment_receipt_reaction": {
-      const reply = byId.get(command.replyCommentId);
-      return reply?.remoteVersion === command.expectedReplyCommentRemoteVersion &&
-        reply.threadRootCommentId === command.threadRootCommentId &&
-        symphonyReceipt(reply) === command.expectedReceipt;
+      const source = byId.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(source) === command.expectedReceipt;
     }
     case "set_comment_thread_state": {
       const source = byId.get(command.sourceCommentId);
@@ -725,9 +706,6 @@ function validateWorkflowSourceFacts(
   for (const comment of tree.comments) {
     expected.set(`linear_comment:${comment.commentId}`, comment.remoteVersion);
   }
-  for (const change of tree.commentThreadChanges) {
-    expected.set(`linear_comment_thread_change:${change.threadChangeId}`, change.threadChangeId);
-  }
   for (const relation of tree.relations) {
     expected.set(`linear_relation:${relation.relationId}`, relation.relationId);
   }
@@ -764,7 +742,7 @@ function validateWorkflowSourceFacts(
 
 function workflowSourceKind(value: string | undefined): boolean {
   return value === "linear_issue" || value === "linear_comment" ||
-    value === "linear_comment_thread_change" || value === "linear_relation" ||
+    value === "linear_relation" ||
     value === "linear_status_catalog";
 }
 

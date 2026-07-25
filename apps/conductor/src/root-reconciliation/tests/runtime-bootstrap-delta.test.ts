@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import type { RootDirective } from "../api/index.js";
+import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import {
+  serializeManagedRecord,
+  type RootDirective,
+  type UserCommentReply,
+} from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
-import { RootReconciliationRuntime, type RootReconciliationRuntimeDependencies } from "../internal/RootReconciliationRuntime.js";
+import {
+  directiveMaterializationComplete,
+  RootReconciliationRuntime,
+  type RootReconciliationRuntimeDependencies,
+  validateDirectiveInputs,
+} from "../internal/RootReconciliationRuntime.js";
 
 test("Root runtime opens with bootstrap and advances with only a delta", async () => {
   const root = {
@@ -85,16 +96,114 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   assert.equal(advances, 1);
 });
 
-function directive(digest: string, consumedInputIds: string[] = []): RootDirective {
+test("partial native reply materialization remains resumable until its receipt and thread state read back", () => {
+  const source = workflowComment({
+    commentId: "comment-1",
+    authorKind: "human",
+    authorId: "user-1",
+    authorUserId: "user-1",
+    body: "Please rerun this check.",
+  });
+  const candidate = commentBodyReply(source);
+  const tree = workflowTree();
+  tree.comments = [
+    source,
+    workflowComment({
+      commentId: "reply-1",
+      parentCommentId: source.comment_id,
+      threadRootCommentId: source.thread_root_comment_id,
+      authorKind: "symphony",
+      authorId: "symphony-bot",
+      body: serializeManagedRecord({
+        kind: "root_reconciler_reply",
+        version: 1,
+        replyId: candidate.replyId,
+        replyWriteId: candidate.replyId,
+        rootDirectiveId: "directive-1",
+        sourceInputId: candidate.sourceInputId,
+        source: candidate.source,
+        targetIssueId: "root-1",
+        disposition: candidate.disposition,
+        reaction: candidate.reaction,
+        threadAction: candidate.threadAction,
+        materializedOutcomeRefs: [],
+        renderedSchemaVersion: "1",
+        repliedAt: "2026-07-23T00:00:01Z",
+      }),
+    }),
+  ];
+
+  assert.equal(
+    directiveMaterializationComplete(
+      directive("tree-v1", [candidate.sourceInputId], [candidate]),
+      tree,
+    ),
+    false,
+  );
+});
+
+test("native thread-state inputs require their matching reply without relying on a legacy comment version", () => {
+  const source = workflowComment({
+    commentId: "comment-1",
+    authorKind: "symphony",
+    authorId: "symphony-bot",
+    body: serializeManagedRecord({
+      kind: "root_ownership",
+      version: 1,
+      rootIssueId: "root-1",
+      conductorId: "conductor-1",
+      performerProfileId: "profile-1",
+      deliveryBranch: "symphony/runs/root-1",
+      ownerGeneration: "generation-1",
+    }),
+    threadState: "resolved",
+  });
+  const sourceInputId = `comment_thread_state:${source.comment_id}:${source.thread_root_comment_id}:${source.thread_state}:${source.remote_version}`;
+  const candidate: UserCommentReply = {
+    replyId: "reply-state-1",
+    sourceInputId,
+    source: {
+      kind: "comment_thread_state",
+      commentId: source.comment_id,
+      commentRemoteVersion: source.remote_version,
+      threadRootCommentId: source.thread_root_comment_id,
+      threadState: source.thread_state,
+    },
+    acknowledgement: "We received the thread update.",
+    interpretedRequest: "The thread is resolved.",
+    decidedAction: "The thread needs to stay open.",
+    nextStep: "Provide more information.",
+    disposition: "follow_up_required",
+    reaction: "none",
+    threadAction: "reopen",
+  };
+  const tree = workflowTree();
+  tree.comments = [source];
+
+  assert.equal(
+    validateDirectiveInputs(
+      directive("tree-v1", [sourceInputId], [candidate]),
+      tree,
+      [sourceInputId],
+    ),
+    undefined,
+  );
+});
+
+function directive(
+  digest: string,
+  consumedInputIds: string[] = [],
+  commentReplies: UserCommentReply[] = [],
+): RootDirective {
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", basedOnTargetRootDigest: digest,
-    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies: [], humanActionResolutions: [],
+    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies, humanActionResolutions: [],
     action: { kind: "wait", reasonCode: "test", blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }] },
   };
 }
 
-function workflowTree() {
+function workflowTree(): LinearWorkflowTreeSnapshot {
   return {
     root_issue_id: "root-1",
     status_catalog: [{ status_id: "todo", name: "Todo", category: "unstarted" as const, position: 1 }],
@@ -104,7 +213,65 @@ function workflowTree() {
       description: "Build it", labels: [], is_archived: false, issue_kind: "root" as const,
       remote_version: "root-v1", updated_at: "2026-07-23T00:00:00Z",
     }],
-    comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+    comments: [workflowComment({
+      commentId: "ownership-comment",
+      authorKind: "symphony",
+      authorId: "symphony-bot",
+      body: serializeManagedRecord({
+        kind: "root_ownership",
+        version: 1,
+        rootIssueId: "root-1",
+        conductorId: "conductor-1",
+        performerProfileId: "profile-1",
+        deliveryBranch: "symphony/runs/root-1",
+        ownerGeneration: "generation-1",
+      }),
+    })],
+    relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:00Z",
+  };
+}
+
+function commentBodyReply(source: LinearWorkflowTreeSnapshot["comments"][number]): UserCommentReply {
+  const commentBodyDigest = createHash("sha256").update(source.body, "utf8").digest("hex");
+  const sourceInputId = `comment_body:${source.comment_id}:${commentBodyDigest}`;
+  return {
+    replyId: "reply-body-1",
+    sourceInputId,
+    source: { kind: "comment_body", commentId: source.comment_id, commentBodyDigest },
+    acknowledgement: "We received your request.",
+    interpretedRequest: "Rerun the check.",
+    decidedAction: "The check will be rerun.",
+    nextStep: "Wait for the result.",
+    disposition: "accepted",
+    reaction: "check",
+    threadAction: "resolve",
+  };
+}
+
+function workflowComment(input: {
+  commentId: string;
+  authorKind: "human" | "symphony";
+  authorId: string;
+  body: string;
+  authorUserId?: string;
+  parentCommentId?: string;
+  threadRootCommentId?: string;
+  threadState?: "resolved" | "unresolved";
+}): LinearWorkflowTreeSnapshot["comments"][number] {
+  return {
+    comment_id: input.commentId,
+    issue_id: "root-1",
+    body: input.body,
+    author_kind: input.authorKind,
+    author_id: input.authorId,
+    ...(input.authorUserId ? { author_user_id: input.authorUserId } : {}),
+    ...(input.parentCommentId ? { parent_comment_id: input.parentCommentId } : {}),
+    thread_root_comment_id: input.threadRootCommentId ?? input.commentId,
+    thread_state: input.threadState ?? "unresolved",
+    reactions: [],
+    created_at: "2026-07-23T00:00:00Z",
+    remote_version: `${input.commentId}-v1`,
+    updated_at: "2026-07-23T00:00:00Z",
   };
 }

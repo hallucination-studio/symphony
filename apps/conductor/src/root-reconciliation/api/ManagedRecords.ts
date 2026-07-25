@@ -1,4 +1,4 @@
-import type { HumanActionKind, RootDirective } from "./RootReconciliationContracts.js";
+import type { HumanActionKind, RootDirective, UserCommentReplySource } from "./RootReconciliationContracts.js";
 
 export type ManagedRecordVersion = 1;
 
@@ -77,8 +77,7 @@ export interface RootReconcilerReplyRecord {
   replyWriteId: string;
   rootDirectiveId: string;
   sourceInputId: string;
-  sourceCommentId: string;
-  sourceCommentVersion: string;
+  source: UserCommentReplySource;
   targetIssueId: string;
   disposition: "accepted" | "not_applied" | "follow_up_required";
   reaction: "check" | "cross" | "none";

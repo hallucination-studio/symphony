@@ -285,7 +285,7 @@ function issue(
 function managedComment(issueId: string, body: string) {
   return {
     comment_id: `comment-${issueId}-${body.length}`, issue_id: issueId, body, author_kind: "symphony" as const,
-    author_id: "symphony", created_at: "2026-07-24T00:00:00Z", remote_version: `comment-${body.length}`,
+    author_id: "symphony", thread_root_comment_id: `comment-${issueId}-${body.length}`, thread_state: "unresolved" as const, reactions: [], created_at: "2026-07-24T00:00:00Z", remote_version: `comment-${body.length}`,
     updated_at: "2026-07-24T00:00:00Z",
   };
 }

@@ -437,20 +437,7 @@ function workflowTree(
     }
     issueIds.add(issue.issue_id);
   }
-  const comments = array(value.comments, "linear_workflow_comments_invalid").map((item) => {
-    const comment = record(item);
-    return {
-      comment_id: string(comment.comment_id, "linear_workflow_comment_invalid"),
-      issue_id: string(comment.issue_id, "linear_workflow_comment_invalid"),
-      body: string(comment.body, "linear_workflow_comment_invalid"),
-      author_kind: workflowCommentAuthorKind(comment.author_kind),
-      author_id: string(comment.author_id, "linear_workflow_comment_invalid"),
-      ...(comment.author_user_id === undefined ? {} : { author_user_id: string(comment.author_user_id, "linear_workflow_comment_invalid") }),
-      created_at: string(comment.created_at, "linear_workflow_comment_invalid"),
-      remote_version: string(comment.remote_version, "linear_workflow_comment_invalid"),
-      updated_at: string(comment.updated_at, "linear_workflow_comment_invalid"),
-    };
-  });
+  const comments = array(value.comments, "linear_workflow_comments_invalid").map(workflowComment);
   if (comments.length > 4_096) throw new Error("linear_workflow_comments_invalid");
   const commentIds = new Set<string>();
   for (const comment of comments) {
@@ -458,6 +445,26 @@ function workflowTree(
       throw new Error("linear_workflow_comment_invalid");
     }
     commentIds.add(comment.comment_id);
+    if (
+      (comment.parent_comment_id === undefined && comment.thread_root_comment_id !== comment.comment_id) ||
+      (comment.parent_comment_id !== undefined &&
+        comment.parent_comment_id === comment.comment_id)
+    ) {
+      throw new Error("linear_workflow_comment_thread_invalid");
+    }
+    const reactionIds = new Set<string>();
+    for (const reaction of comment.reactions) {
+      if (reactionIds.has(reaction.reaction_id)) throw new Error("linear_workflow_comment_reaction_invalid");
+      reactionIds.add(reaction.reaction_id);
+    }
+  }
+  for (const comment of comments) {
+    if (
+      comment.parent_comment_id !== undefined &&
+      (!commentIds.has(comment.parent_comment_id) || !commentIds.has(comment.thread_root_comment_id))
+    ) {
+      throw new Error("linear_workflow_comment_thread_invalid");
+    }
   }
   const relations = array(value.relations, "linear_workflow_relations_invalid").map((item) => {
     const relation = record(item);
@@ -559,6 +566,39 @@ function workflowCommentAuthorKind(value: JsonValue | undefined): LinearWorkflow
   throw new Error("linear_workflow_comment_author_kind_invalid");
 }
 
+function workflowComment(value: JsonValue): LinearWorkflowTreeSnapshot["comments"][number] {
+  const comment = record(value);
+  const reactions = array(comment.reactions, "linear_workflow_comment_reactions_invalid").map((value) => {
+    const reaction = record(value);
+    return {
+      reaction_id: string(reaction.reaction_id, "linear_workflow_comment_reaction_invalid"),
+      emoji: string(reaction.emoji, "linear_workflow_comment_reaction_invalid"),
+      actor_kind: workflowCommentAuthorKind(reaction.actor_kind),
+      actor_id: string(reaction.actor_id, "linear_workflow_comment_reaction_invalid"),
+    };
+  });
+  return {
+    comment_id: string(comment.comment_id, "linear_workflow_comment_invalid"),
+    issue_id: string(comment.issue_id, "linear_workflow_comment_invalid"),
+    body: string(comment.body, "linear_workflow_comment_invalid"),
+    author_kind: workflowCommentAuthorKind(comment.author_kind),
+    author_id: string(comment.author_id, "linear_workflow_comment_invalid"),
+    ...(comment.author_user_id === undefined ? {} : { author_user_id: string(comment.author_user_id, "linear_workflow_comment_invalid") }),
+    ...(comment.parent_comment_id === undefined ? {} : { parent_comment_id: string(comment.parent_comment_id, "linear_workflow_comment_invalid") }),
+    thread_root_comment_id: string(comment.thread_root_comment_id, "linear_workflow_comment_invalid"),
+    thread_state: workflowCommentThreadState(comment.thread_state),
+    reactions,
+    created_at: string(comment.created_at, "linear_workflow_comment_invalid"),
+    remote_version: string(comment.remote_version, "linear_workflow_comment_invalid"),
+    updated_at: string(comment.updated_at, "linear_workflow_comment_invalid"),
+  };
+}
+
+function workflowCommentThreadState(value: JsonValue | undefined): "resolved" | "unresolved" {
+  if (value === "resolved" || value === "unresolved") return value;
+  throw new Error("linear_workflow_comment_thread_state_invalid");
+}
+
 function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {
   if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
@@ -624,6 +664,38 @@ function workflowMutationBody(
           }
           : input.kind === "append_workflow_comment" ? { body: input.body } : {}),
       };
+    case "create_comment_reply":
+      return {
+        ...common,
+        kind: input.kind,
+        source_comment_id: input.sourceCommentId,
+        expected_source_comment_remote_version: input.expectedSourceCommentRemoteVersion,
+        expected_thread_root_comment_id: input.expectedThreadRootCommentId,
+        expected_thread_state: input.expectedThreadState,
+        body: input.body,
+      };
+    case "set_comment_receipt_reaction":
+      return {
+        ...common,
+        kind: input.kind,
+        reply_write_id: input.replyWriteId,
+        source_comment_id: input.sourceCommentId,
+        expected_source_comment_remote_version: input.expectedSourceCommentRemoteVersion,
+        thread_root_comment_id: input.threadRootCommentId,
+        expected_receipt: input.expectedReceipt,
+        receipt: input.receipt,
+      };
+    case "set_comment_thread_state":
+      return {
+        ...common,
+        kind: input.kind,
+        reply_write_id: input.replyWriteId,
+        source_comment_id: input.sourceCommentId,
+        expected_source_comment_remote_version: input.expectedSourceCommentRemoteVersion,
+        thread_root_comment_id: input.threadRootCommentId,
+        expected_thread_state: input.expectedThreadState,
+        thread_state: input.threadState,
+      };
     case "create_workflow_relation":
       return {
         ...common,
@@ -648,7 +720,7 @@ function workflowMutationBody(
   }
 }
 
-function workflowMutationReadBack(value: JsonValue | undefined) {
+function workflowMutationReadBack(value: JsonValue | undefined): import("../api/LinearGatewayInterface.js").WorkflowMutationReadBack {
   const readBack = record(value);
   const issueVersions = Array.isArray(readBack.issue_versions)
     ? readBack.issue_versions.map((value) => {
@@ -659,10 +731,31 @@ function workflowMutationReadBack(value: JsonValue | undefined) {
       };
     })
     : undefined;
+  const comment = readBack.comment === undefined
+    ? undefined
+    : workflowComment(readBack.comment);
+  const receipt = readBack.symphony_receipt === undefined
+    ? undefined
+    : (() => {
+      const value = record(readBack.symphony_receipt);
+      const rawReceipt = value.receipt;
+      if (rawReceipt !== "check" && rawReceipt !== "cross" && rawReceipt !== "none") {
+        throw new Error("linear_workflow_read_back_invalid");
+      }
+      const receipt: "check" | "cross" | "none" = rawReceipt;
+      return {
+        replyWriteId: string(value.reply_write_id, "linear_workflow_read_back_invalid"),
+        sourceCommentId: string(value.source_comment_id, "linear_workflow_read_back_invalid"),
+        threadRootCommentId: string(value.thread_root_comment_id, "linear_workflow_read_back_invalid"),
+        receipt,
+      };
+    })();
   return {
     writeId: string(readBack.write_id, "linear_workflow_read_back_invalid"),
     targetIssueId: string(readBack.target_issue_id, "linear_workflow_read_back_invalid"),
     remoteVersion: string(readBack.remote_version, "linear_workflow_read_back_invalid"),
     ...(issueVersions ? { issueVersions } : {}),
+    ...(comment ? { comment } : {}),
+    ...(receipt ? { symphonyReceipt: receipt } : {}),
   };
 }

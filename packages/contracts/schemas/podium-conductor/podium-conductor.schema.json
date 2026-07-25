@@ -665,32 +665,12 @@
     "WorkflowCommentReceiptSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reply_write_id", "reply_comment_id", "thread_root_comment_id", "receipt"],
+      "required": ["reply_write_id", "source_comment_id", "thread_root_comment_id", "receipt"],
       "properties": {
         "reply_write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "receipt": { "enum": ["check", "cross", "none"] }
-      }
-    },
-    "WorkflowCommentThreadChangeSnapshot": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "thread_change_id", "source_comment_id", "thread_root_comment_id", "action", "actor_kind",
-        "occurred_at"
-      ],
-      "properties": {
-        "thread_change_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action": { "enum": ["resolved", "reopened"] },
-        "actor_kind": {
-          "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"]
-        },
-        "actor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "actor_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "receipt": { "enum": ["check", "cross", "none"] }
       }
     },
     "WorkflowCommentSnapshot": {
@@ -804,7 +784,6 @@
           "enum": [
             "linear_issue",
             "linear_comment",
-            "linear_comment_thread_change",
             "linear_relation",
             "linear_status_catalog"
           ]
@@ -875,7 +854,6 @@
         "comments",
         "relations",
         "observed_at",
-        "comment_thread_changes",
         "source_manifest",
         "coverage"
       ],
@@ -911,13 +889,6 @@
           "maxItems": 1024,
           "items": {
             "$ref": "#/$defs/WorkflowRelationSnapshot"
-          }
-        },
-        "comment_thread_changes": {
-          "type": "array",
-          "maxItems": 4096,
-          "items": {
-            "$ref": "#/$defs/WorkflowCommentThreadChangeSnapshot"
           }
         },
         "observed_at": {
@@ -1244,8 +1215,8 @@
       "additionalProperties": false,
       "required": [
         "kind", "binding_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id",
-        "expected_root_remote_version", "reply_write_id", "reply_comment_id",
-        "expected_reply_comment_remote_version", "thread_root_comment_id", "expected_receipt", "receipt"
+        "expected_root_remote_version", "reply_write_id", "source_comment_id",
+        "expected_source_comment_remote_version", "thread_root_comment_id", "expected_receipt", "receipt"
       ],
       "properties": {
         "kind": { "const": "set_comment_receipt_reaction" },
@@ -1256,8 +1227,8 @@
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "reply_write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "expected_reply_comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_source_comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_receipt": { "enum": ["check", "cross", "none"] },
         "receipt": { "enum": ["check", "cross", "none"] }
@@ -1417,9 +1388,6 @@
         },
         "comment": {
           "$ref": "#/$defs/WorkflowCommentSnapshot"
-        },
-        "thread_change": {
-          "$ref": "#/$defs/WorkflowCommentThreadChangeSnapshot"
         },
         "symphony_receipt": {
           "$ref": "#/$defs/WorkflowCommentReceiptSnapshot"

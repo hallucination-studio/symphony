@@ -217,7 +217,7 @@ class FakeLinear {
       comments: record ? [{
         comment_id: "ownership-comment", issue_id: rootId, body: serializeManagedRecord(record),
         author_kind: "symphony", author_id: "symphony-bot", author_user_id: "symphony-bot", created_at: now,
-        remote_version: "comment-v1", updated_at: now,
+        thread_root_comment_id: "ownership-comment", thread_state: "unresolved", reactions: [], remote_version: "comment-v1", updated_at: now,
       }] : [],
       relations: [],
       source_manifest: [],
@@ -254,6 +254,9 @@ class FakeLinear {
         author_kind: "symphony",
         author_id: "symphony-bot",
         author_user_id: "symphony-bot",
+        thread_root_comment_id: command.writeId,
+        thread_state: "unresolved",
+        reactions: [],
         created_at: now,
         remote_version: "comment-v2",
         updated_at: now,

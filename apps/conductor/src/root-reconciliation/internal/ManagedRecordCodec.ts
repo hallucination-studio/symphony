@@ -31,7 +31,7 @@ import type {
   WorkflowTimelineRecord,
 } from "../api/ManagedRecords.js";
 import { decodeConductorPerformerRootDirective, type JsonValue } from "@symphony/contracts";
-import type { RootDirective } from "../api/RootReconciliationContracts.js";
+import type { RootDirective, UserCommentReplySource } from "../api/RootReconciliationContracts.js";
 
 const symphonyBlock = /^```symphony\r?\n([\s\S]*?)^```[ \t]*(?:\r?\n|$)/gmu;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -187,8 +187,7 @@ function decodeRootDirectiveRecord(o: Record<string, unknown>): RootDirectiveRec
 
 function decodeRootReconcilerReplyRecord(o: Record<string, unknown>): RootReconcilerReplyRecord {
   fields(o, [
-    "kind", "version", "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source_comment_id",
-    "source_comment_version", "target_issue_id", "disposition", "reaction", "thread_action", "materialized_outcome_refs",
+    "kind", "version", "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source", "target_issue_id", "disposition", "reaction", "thread_action", "materialized_outcome_refs",
     "rendered_schema_version", "replied_at",
   ]);
   return {
@@ -198,8 +197,7 @@ function decodeRootReconcilerReplyRecord(o: Record<string, unknown>): RootReconc
     replyWriteId: id(o, "reply_write_id"),
     rootDirectiveId: id(o, "root_directive_id"),
     sourceInputId: id(o, "source_input_id"),
-    sourceCommentId: id(o, "source_comment_id"),
-    sourceCommentVersion: id(o, "source_comment_version"),
+    source: decodeReplySource(requiredObject(o, "source")),
     targetIssueId: id(o, "target_issue_id"),
     disposition: enumValue(o, "disposition", ["accepted", "not_applied", "follow_up_required"]),
     reaction: enumValue(o, "reaction", ["check", "cross", "none"]),
@@ -207,6 +205,35 @@ function decodeRootReconcilerReplyRecord(o: Record<string, unknown>): RootReconc
     materializedOutcomeRefs: array(o, "materialized_outcome_refs", decodeEvidenceReference),
     renderedSchemaVersion: enumValue(o, "rendered_schema_version", ["1"]),
     repliedAt: timestamp(o, "replied_at"),
+  };
+}
+
+function decodeReplySource(o: Record<string, unknown>): UserCommentReplySource {
+  const kind = enumValue(o, "kind", ["comment_body", "comment_thread_state"]);
+  if (kind === "comment_body") {
+    fields(o, ["kind", "comment_id", "comment_body_digest"]);
+    return { kind, commentId: id(o, "comment_id"), commentBodyDigest: id(o, "comment_body_digest") };
+  }
+  fields(o, ["kind", "comment_id", "comment_remote_version", "thread_root_comment_id", "thread_state"]);
+  return {
+    kind,
+    commentId: id(o, "comment_id"),
+    commentRemoteVersion: opaque(o, "comment_remote_version"),
+    threadRootCommentId: id(o, "thread_root_comment_id"),
+    threadState: enumValue(o, "thread_state", ["resolved", "unresolved"]),
+  };
+}
+
+function encodeReplySource(source: UserCommentReplySource): Record<string, unknown> {
+  if (source.kind === "comment_body") {
+    return { kind: source.kind, comment_id: source.commentId, comment_body_digest: source.commentBodyDigest };
+  }
+  return {
+    kind: source.kind,
+    comment_id: source.commentId,
+    comment_remote_version: source.commentRemoteVersion,
+    thread_root_comment_id: source.threadRootCommentId,
+    thread_state: source.threadState,
   };
 }
 
@@ -476,7 +503,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     root_ownership: { allowed: ["kind", "version", "rootIssueId", "conductorId", "performerProfileId", "deliveryBranch", "pullRequest", "ownerGeneration"], optional: ["pullRequest"] },
     workflow_issue: { allowed: ["kind", "version", "issueKey", "rootIssueId", "parentIssueId", "issueKind"] },
     root_directive: { allowed: ["kind", "version", "rootDirectiveId", "rootIssueId", "reconcilerSessionId", "reconcilerTurnId", "basedOnTargetRootDigest", "consumedInputIds", "directive", "acceptedAt"] },
-    root_reconciler_reply: { allowed: ["kind", "version", "replyId", "replyWriteId", "rootDirectiveId", "sourceInputId", "sourceCommentId", "sourceCommentVersion", "targetIssueId", "disposition", "reaction", "threadAction", "materializedOutcomeRefs", "renderedSchemaVersion", "repliedAt"] },
+    root_reconciler_reply: { allowed: ["kind", "version", "replyId", "replyWriteId", "rootDirectiveId", "sourceInputId", "source", "targetIssueId", "disposition", "reaction", "threadAction", "materializedOutcomeRefs", "renderedSchemaVersion", "repliedAt"] },
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "materializedAt"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements", "proposedWorkDag"] },
@@ -515,8 +542,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
       reply_write_id: record.replyWriteId,
       root_directive_id: record.rootDirectiveId,
       source_input_id: record.sourceInputId,
-      source_comment_id: record.sourceCommentId,
-      source_comment_version: record.sourceCommentVersion,
+      source: encodeReplySource(record.source),
       target_issue_id: record.targetIssueId,
       disposition: record.disposition,
       reaction: record.reaction,

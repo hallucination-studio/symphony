@@ -22,6 +22,7 @@ import type {
   StageResult,
   StageTurnInput,
   HumanActionResolution,
+  UserCommentReply,
 } from "../api/index.js";
 import {
   findWorkflowIssue,
@@ -320,7 +321,7 @@ export class RootReconciliationRuntime {
     if (materialization.kind === "failed") return materialization;
     view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
     setPhase("materialize_root_reconciler_replies");
-    for (const reply of directive.commentReplies) {
+    for (const reply of orderedCommentReplies(directive.commentReplies)) {
       const written = await this.dependencies.replyWriter.write({ directive, reply, view });
       if (written.kind === "failed") return failedMaterialization(directive, written.code);
       view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
@@ -732,18 +733,27 @@ function findResumableDirective(
   return records.find((record) => !directiveMaterializationComplete(record.directive, tree));
 }
 
-function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
+export function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
   const repliesComplete = directive.commentReplies.every((reply) => {
-    return tree.comments.some((comment) => {
-      if (comment.author_kind !== "symphony") return false;
+    const source = tree.comments.find((comment) => comment.comment_id === reply.source.commentId);
+    if (!source || !sourceMatchesReply(source, reply)) return false;
+    const matches = tree.comments.filter((comment) => {
+      if (
+        comment.author_kind !== "symphony" ||
+        comment.parent_comment_id !== source.comment_id ||
+        comment.thread_root_comment_id !== source.thread_root_comment_id
+      ) return false;
       const parsed = parseManagedRecord(comment.body);
       return parsed.ok && parsed.value.kind === "root_reconciler_reply" &&
         parsed.value.replyId === reply.replyId &&
         parsed.value.rootDirectiveId === directive.rootDirectiveId &&
         parsed.value.sourceInputId === reply.sourceInputId &&
-        parsed.value.sourceCommentId === reply.sourceCommentId &&
-        parsed.value.sourceCommentVersion === reply.sourceCommentVersion;
+        sameReplySource(parsed.value.source, reply.source);
     });
+    if (matches.length !== 1) return false;
+    if (reply.source.kind === "comment_body" && symphonyReceipt(source) !== reply.reaction) return false;
+    if (reply.source.kind === "comment_thread_state" && reply.reaction !== "none") return false;
+    return source.thread_state === desiredThreadState(reply.threadAction);
   });
   if (!repliesComplete) return false;
   const resolutionsComplete = directive.humanActionResolutions.every((resolution) => tree.comments.some((comment) => {
@@ -818,6 +828,21 @@ function directiveMaterializationComplete(directive: RootDirective, tree: RootRe
       (!action.activeCycleIssueId || tree.issues.find(({ issue_id }) => issue_id === action.activeCycleIssueId)?.status_name === "Canceled");
   }
   if (action.kind === "revise_root_tree") return treeOperationsComplete(action.operations, tree);
+  return false;
+}
+
+function sameReplySource(
+  left: RootDirective["commentReplies"][number]["source"],
+  right: RootDirective["commentReplies"][number]["source"],
+): boolean {
+  if (left.kind !== right.kind || left.commentId !== right.commentId) return false;
+  if (left.kind === "comment_body" && right.kind === "comment_body") {
+    return left.commentBodyDigest === right.commentBodyDigest;
+  }
+  if (left.kind === "comment_thread_state" && right.kind === "comment_thread_state") {
+    return left.commentRemoteVersion === right.commentRemoteVersion &&
+      left.threadRootCommentId === right.threadRootCommentId && left.threadState === right.threadState;
+  }
   return false;
 }
 
@@ -910,7 +935,7 @@ function failedMaterialization(directive: RootDirective, code: string) {
   return { kind: "failed" as const, rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [], sanitizedReason: code };
 }
 
-function validateDirectiveInputs(
+export function validateDirectiveInputs(
   directive: RootDirective,
   tree: RootReconciliationView["tree"],
   pendingInputIds: string[],
@@ -922,15 +947,80 @@ function validateDirectiveInputs(
   if (consumed.size !== pending.size || [...pending].some((inputId) => !consumed.has(inputId))) {
     return "root_directive_consumed_inputs_incomplete";
   }
-  const commentInputs = tree.comments
-    .filter((comment) => comment.author_kind === "human")
-    .map((comment) => `${comment.comment_id}:${comment.remote_version}`)
-    .filter((inputId) => pending.has(inputId));
+  const commentInputs = currentCommentInputIds(tree).filter((inputId) => pending.has(inputId));
   const replies = directive.commentReplies.map((reply) => reply.sourceInputId);
-  if (new Set(replies).size !== replies.length || replies.length !== commentInputs.length || commentInputs.some((inputId) => !replies.includes(inputId))) {
+  if (
+    new Set(replies).size !== replies.length ||
+    replies.some((inputId) => !commentInputs.includes(inputId)) ||
+    directive.commentReplies.some((reply) => reply.sourceInputId !== sourceInputId(reply)) ||
+    commentInputs.length !== replies.length ||
+    commentInputs.some((inputId) => !replies.includes(inputId)) ||
+    hasConflictingThreadActions(directive.commentReplies)
+  ) {
     return "root_directive_comment_replies_incomplete";
   }
   return undefined;
+}
+
+function orderedCommentReplies(replies: RootDirective["commentReplies"]): RootDirective["commentReplies"] {
+  return [
+    ...replies.filter((reply) => reply.source.kind === "comment_thread_state"),
+    ...replies.filter((reply) => reply.source.kind === "comment_body"),
+  ];
+}
+
+function hasConflictingThreadActions(replies: RootDirective["commentReplies"]): boolean {
+  const actionByThread = new Map<string, UserCommentReply["threadAction"]>();
+  for (const reply of replies) {
+    const source = reply.source;
+    const threadId = source.kind === "comment_thread_state"
+      ? source.threadRootCommentId
+      : source.commentId;
+    const current = actionByThread.get(threadId);
+    if (current && current !== reply.threadAction) return true;
+    actionByThread.set(threadId, reply.threadAction);
+  }
+  return false;
+}
+
+function currentCommentInputIds(tree: RootReconciliationView["tree"]): string[] {
+  return tree.comments.flatMap((comment) => [
+    ...(comment.author_kind === "symphony" || comment.author_kind === "linear_integration"
+      ? []
+      : [`comment_body:${comment.comment_id}:${commentBodyDigest(comment.body)}`]),
+    `comment_thread_state:${comment.comment_id}:${comment.thread_root_comment_id}:${comment.thread_state}:${comment.remote_version}`,
+  ]);
+}
+
+function sourceInputId(reply: UserCommentReply): string {
+  return reply.source.kind === "comment_body"
+    ? `comment_body:${reply.source.commentId}:${reply.source.commentBodyDigest}`
+    : `comment_thread_state:${reply.source.commentId}:${reply.source.threadRootCommentId}:${reply.source.threadState}:${reply.source.commentRemoteVersion}`;
+}
+
+function sourceMatchesReply(
+  source: RootReconciliationView["tree"]["comments"][number],
+  reply: UserCommentReply,
+): boolean {
+  return reply.source.kind === "comment_body"
+    ? commentBodyDigest(source.body) === reply.source.commentBodyDigest
+    : source.thread_root_comment_id === reply.source.threadRootCommentId;
+}
+
+function commentBodyDigest(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+function desiredThreadState(action: UserCommentReply["threadAction"]): "resolved" | "unresolved" {
+  return action === "resolve" ? "resolved" : "unresolved";
+}
+
+function symphonyReceipt(comment: RootReconciliationView["tree"]["comments"][number]): "check" | "cross" | "none" | undefined {
+  const receipts = new Set(comment.reactions
+    .filter(({ actor_kind, emoji }) => actor_kind === "symphony" && (emoji === "✅" || emoji === "❌"))
+    .map(({ emoji }) => emoji === "✅" ? "check" : "cross"));
+  if (receipts.size > 1) return undefined;
+  return receipts.values().next().value ?? "none";
 }
 
 function issueMarkdown(issue: RootReconciliationView["tree"]["issues"][number] | undefined): string | undefined {

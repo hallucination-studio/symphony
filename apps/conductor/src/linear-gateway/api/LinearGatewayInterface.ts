@@ -33,6 +33,15 @@ export interface LinearWorkflowTreeSnapshot {
     author_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
     author_id: string;
     author_user_id?: string;
+    parent_comment_id?: string;
+    thread_root_comment_id: string;
+    thread_state: "resolved" | "unresolved";
+    reactions: Array<{
+      reaction_id: string;
+      emoji: string;
+      actor_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
+      actor_id: string;
+    }>;
     created_at: string;
     remote_version: string;
     updated_at: string;
@@ -114,6 +123,47 @@ export type LinearWorkflowMutationCommand =
       body: string;
     }
   | {
+      kind: "create_comment_reply";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      expectedThreadRootCommentId: string;
+      expectedThreadState: "resolved" | "unresolved";
+      body: string;
+    }
+  | {
+      kind: "set_comment_receipt_reaction";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      replyWriteId: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      expectedReceipt: "check" | "cross" | "none";
+      receipt: "check" | "cross" | "none";
+    }
+  | {
+      kind: "set_comment_thread_state";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      replyWriteId: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      expectedThreadState: "resolved" | "unresolved";
+      threadState: "resolved" | "unresolved";
+    }
+  | {
       kind: "archive_workflow_issue" | "restore_workflow_issue";
       writeId: string;
       conductorShortHash?: string;
@@ -168,6 +218,13 @@ export interface WorkflowMutationReadBack {
   targetIssueId: string;
   remoteVersion: string;
   issueVersions?: Array<{ issueId: string; remoteVersion: string }>;
+  comment?: LinearWorkflowTreeSnapshot["comments"][number];
+  symphonyReceipt?: {
+    replyWriteId: string;
+    sourceCommentId: string;
+    threadRootCommentId: string;
+    receipt: "check" | "cross" | "none";
+  };
 }
 
 export interface LinearGatewayInterface {

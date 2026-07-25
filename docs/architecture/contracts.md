@@ -49,8 +49,9 @@ actor kinds + stable write correlations
 
 Comment source必须包含native thread resolved/unresolved当前值以及reaction当前集合。body input的唯一wire field是
 `comment_body_digest`，它携带canonical body digest，不能替换为Linear remote version、递增revision或本地计数器；当前
-thread-state revision使用comment remote version。后者的identity由comment identity、remote version和当前state组成，而不是一个
-不可重建的thread-change event。二者不能共用remote version，避免close/reopen把未编辑的body重复变成输入。
+thread-state revision使用comment remote version。后者的identity由comment identity、remote version、thread root comment
+identity和当前state组成，而不是一个不可重建的thread-change event。二者不能共用remote version，避免close/reopen把未编辑的
+body重复变成输入。
 Linear仅在实际返回state actor时携带actor kind；缺失时为`unknown`，Podium和Conductor不得从comment author或webhook内存
 推断。reaction集合用于Symphony回执write/read-back与审计；human reaction不是Workflow command或Root pending input。
 Podium不得把reaction翻译成approval、rejection或其他Workflow语义。
@@ -76,10 +77,12 @@ CreateWorkflowIssueCommand
 ```
 
 `CreateCommentReplyCommand`只能向明确的source comment thread创建child reply；
-`SetCommentReceiptReactionCommand`只能把Symphony自己的matching receipt收敛为`check`、`cross`或`none`；
+`SetCommentReceiptReactionCommand`只能把Symphony自己的matching receipt收敛为`check`、`cross`或`none`，且
+`check`/`cross`只能写在matching human body input的**source comment**上，不能写在Symphony child reply上；
+`comment_thread_state` input的receipt必须为`none`，不发reaction mutation；
 `SetCommentThreadStateCommand`只能把明确thread收敛为`resolved`或`unresolved`。三者都必须携带matching directive/
 reply write identity、target remote version及相关thread/reaction precondition，并在fresh semantic read-back后才成功。
-`none`只删除同一reply identity先前写入的Symphony receipt，绝不修改human或其他actor的reaction。它们不接受任意emoji、
+`none`只删除同一source comment上由Symphony写入的matching receipt，绝不修改human或其他actor的reaction。它们不接受任意emoji、
 顶层reply、comment rewrite或Workflow语义字段。其他Root/Issue mutation同样携带binding、Project pool、Root
 routing/ownership、explicit target、expected remote version、expected status/archive/parent和stable write ID。
 `CreateWorkflowRelationCommand`以`relation_state: present | absent`收敛指定source、target和kind之间的relation，
@@ -201,6 +204,7 @@ RootConvergencePolicy
 RootDirectiveRecord
 RootReconcilerFailureRecord
 RootReconcilerReplyRecord
+DeliveryRecord
 ModelTurnRecord
 StageExecutionRecord
 PlanContractRecord
@@ -212,6 +216,13 @@ ProgressAssessment
 CycleOutcome
 WorkflowTimelineRecord
 ```
+
+跨进程`RecordReference`只能引用已经fresh read-back并strict decode的上述实际record；它固定携带
+`record_id`、`record_kind`、`record_version`和`write_id`。`record_version`是record schema版本，`write_id`是
+Symphony stable write correlation，二者都不能用旧`version`别名、本地计数器或宿主comment的remote version替代。
+不存在的事实必须由拥有它的closed contract显式用`null`表达，例如尚无交付时的`delivery: null`；禁止伪造
+`none:*`、placeholder或synthetic record reference。这些reference只证明immutable evidence的identity，不能表达
+current lifecycle、pending state或另一套恢复锚点。
 
 每个durable managed comment和Symphony创建的Root descendant Issue description都使用Markdown + 唯一
 `symphony` block；两者的record shape不同，不能把comment的`record_id`模板复制到Issue description：

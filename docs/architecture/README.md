@@ -169,3 +169,22 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 - [Runtime Hardening](runtime-hardening.md)
 
 上述named concern文档各自是唯一事实源。其他文档只能引用，不能复制第二份字段表、transition或thread规则。
+
+### 7.1 Named concern ownership
+
+下表只划分文档边界；每个命名文档内的具体规则才是其事实来源。其他架构文档、任务计划、代码注释和测试都只能
+引用，不能重述出另一份有独立语义的字段表、状态迁移、comment thread规则、恢复算法或Result链。
+
+| Sole owner | Fact or behavior |
+|---|---|
+| [Root Issue工作流](root-issue.md) | Linear Root/Cycle/Plan/Work/Verify status catalog and native archive membership |
+| [Human Action](human-actions.md) | Human Action lifecycle, user interaction and resolution requirements |
+| [Root Reconciliation](root-reconciliation.md) | ordinary user input filtering, native comment reply/receipt/thread behavior, bootstrap/delta and closed directives |
+| [Performer Stage Contracts](stage-orchestration.md) | canonical Plan/Work/Verify Result and nested `ModelTurnRecord` materialization |
+| [Performer Profile](performer-profiles.md) | actual model/Turn Usage semantics and Stage/Cycle/Root aggregation scope |
+| [Workflow Timeline](workflow-timeline.md) | typed event publication and one-event/one-comment rendering |
+| [契约与接口](contracts.md) | cross-process schema and strict managed-record wire format |
+| [Linear端到端流转](linear-flow.md) | production-boundary Linear/Git E2E evidence |
+
+一个事实在两处出现时，非owner必须链接到owner，而不是重新定义。例如`root-issue.md`列出Human Action可用的
+display status，但不定义其迁移；`human-actions.md`才定义用户如何批准、拒绝、补充和取消。

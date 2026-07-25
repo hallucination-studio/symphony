@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
@@ -24,6 +25,122 @@ test("fact sets send a bootstrap snapshot and only changed current values afterw
   assert.equal("rootSnapshot" in delta, false);
   assert.equal(delta.changes[0]?.kind, "issue_current_value");
   if (delta.changes[0]?.kind === "issue_current_value") assert.equal(delta.changes[0].issue.title, "Changed");
+});
+
+test("bootstrap includes the current native state for each comment thread", () => {
+  const factSet = buildRootFactSet({ root, tree: tree("Root", "root-v1", "comment-v1"), git: git("head-1"), mechanicalViolations: [] });
+
+  assert.deepEqual(factSet.bootstrap.rootSnapshot.userCommentThreadStates.find(({ commentId }) => commentId === "comment-1"), {
+    commentId: "comment-1",
+    commentRemoteVersion: "comment-v1",
+    threadRootCommentId: "comment-1",
+    threadState: "unresolved",
+    actorKind: "unknown",
+    observedAt: "2026-07-23T00:00:02Z",
+  });
+});
+
+test("initial unresolved states and consumed comment inputs do not re-enter pending work", () => {
+  const workflow = tree("Root", "root-v1", "comment-v1");
+  const commentBodyDigest = createHash("sha256").update("User input", "utf8").digest("hex");
+  const inputId = `comment_body:comment-1:${commentBodyDigest}`;
+  const initial = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+
+  assert.equal(initial.bootstrap.pendingInputIds.some((value) => value.startsWith("comment_thread_state:")), false);
+  assert.ok(initial.bootstrap.pendingInputIds.includes(inputId));
+
+  workflow.comments.push(managedComment("root-1", serializeManagedRecord({
+    kind: "root_directive" as const,
+    version: 1 as const,
+    rootDirectiveId: "directive-1",
+    rootIssueId: "root-1",
+    reconcilerSessionId: "session-1",
+    reconcilerTurnId: "turn-1",
+    basedOnTargetRootDigest: "tree-v1",
+    consumedInputIds: [inputId],
+    directive: {
+      protocolVersion: 1 as const,
+      requestId: "request-1",
+      rootDirectiveId: "directive-1",
+      reconcilerSessionId: "session-1",
+      reconcilerTurnId: "turn-1",
+      modelTurn: {
+        turnRecordId: "turn-record-1",
+        role: "root_reconciler",
+        rootIssueId: "root-1",
+        reconcilerSessionId: "session-1",
+        reconcilerTurnId: "turn-1",
+        invocationState: "confirmed",
+        model: "gpt",
+        outcome: "directive_accepted",
+        usage: {
+          status: "measured",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          outputTokens: 1,
+          reasoningOutputTokens: 0,
+          totalTokens: 2,
+        },
+        terminalAt: "2026-07-23T00:00:03Z",
+      },
+      basedOnTargetRootDigest: "tree-v1",
+      rationale: "The user request was handled.",
+      evidenceRefs: [],
+      consumedInputIds: [inputId],
+      commentReplies: [],
+      humanActionResolutions: [],
+      action: {
+        kind: "wait" as const,
+        reasonCode: "test",
+        blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" as const }],
+      },
+    },
+    acceptedAt: "2026-07-23T00:00:03Z",
+  })));
+
+  const afterDirective = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+  assert.equal(afterDirective.bootstrap.pendingInputIds.includes(inputId), false);
+});
+
+test("a body edit produces only the comment body current value", () => {
+  const before = tree("Root", "root-v1", "comment-v1");
+  const after = tree("Root", "root-v1", "comment-v2");
+  after.comments[0]!.body = "Edited user input";
+  after.comments[0]!.updated_at = "2026-07-23T00:00:03Z";
+
+  const delta = diffRootFactSets(
+    buildRootFactSet({ root, tree: before, git: git("head-1"), mechanicalViolations: [] }),
+    buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] }),
+  );
+
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["comment_current_value"]);
+  assert.deepEqual(delta.pendingInputIds, [
+    `comment_body:comment-1:${createHash("sha256").update("Edited user input", "utf8").digest("hex")}`,
+  ]);
+});
+
+test("a native thread-state change produces only the thread-state current value", () => {
+  const before = tree("Root", "root-v1", "comment-v1");
+  const after = tree("Root", "root-v1", "comment-v2");
+  after.comments[0]!.thread_state = "resolved";
+  after.comments[0]!.updated_at = "2026-07-23T00:00:03Z";
+
+  const delta = diffRootFactSets(
+    buildRootFactSet({ root, tree: before, git: git("head-1"), mechanicalViolations: [] }),
+    buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] }),
+  );
+
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["comment_thread_state_current_value"]);
+});
+
+test("a matching managed reply thread state does not re-enter as a pending input", () => {
+  const workflow = tree("Root", "root-v1", "comment-v2");
+  workflow.comments[0]!.thread_state = "resolved";
+  workflow.comments.push(replyComment());
+
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+
+  assert.equal(factSet.entries.has("linear_comment_thread_state:comment-1"), false);
 });
 
 test("removed source facts become tombstones", () => {
@@ -57,7 +174,7 @@ test("a Symphony-authored malformed record fails closed instead of becoming an i
   const workflow = tree("Root", "root-v1");
   workflow.comments = [{
     comment_id: "comment-invalid", issue_id: "root-1", body: "## System output", author_kind: "symphony",
-    author_id: "symphony", created_at: "2026-07-23T00:00:01Z", remote_version: "comment-v1",
+    author_id: "symphony", thread_root_comment_id: "comment-invalid", thread_state: "unresolved", reactions: [], created_at: "2026-07-23T00:00:01Z", remote_version: "comment-v1",
     updated_at: "2026-07-23T00:00:01Z",
   }];
 
@@ -72,6 +189,13 @@ function git(head: string) {
 }
 
 function tree(title: string, rootVersion: string, commentVersion?: string, includeComment = true): LinearWorkflowTreeSnapshot {
+  const userComment: LinearWorkflowTreeSnapshot["comments"][number] | undefined = includeComment && commentVersion
+    ? {
+        comment_id: "comment-1", issue_id: "root-1", body: "User input", author_kind: "human", author_id: "user-1",
+        author_user_id: "user-1", thread_root_comment_id: "comment-1", thread_state: "unresolved", reactions: [], created_at: "2026-07-23T00:00:01Z", remote_version: commentVersion,
+        updated_at: "2026-07-23T00:00:01Z",
+      }
+    : undefined;
   return {
     root_issue_id: "root-1",
     status_catalog: [{ status_id: "progress", name: "In Progress", category: "started", position: 1 }],
@@ -81,11 +205,10 @@ function tree(title: string, rootVersion: string, commentVersion?: string, inclu
       title, description: "Build it", labels: [], is_archived: false, issue_kind: "root",
       remote_version: rootVersion, updated_at: "2026-07-23T00:00:00Z",
     }],
-    comments: includeComment && commentVersion ? [{
-      comment_id: "comment-1", issue_id: "root-1", body: "User input", author_kind: "human", author_id: "user-1",
-      author_user_id: "user-1", created_at: "2026-07-23T00:00:01Z", remote_version: commentVersion,
-      updated_at: "2026-07-23T00:00:01Z",
-    }] : [],
+    comments: [
+      ...(userComment ? [userComment] : []),
+      rootOwnershipComment(),
+    ],
     relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:02Z",
   };
@@ -113,6 +236,7 @@ function planTree(completed: boolean): LinearWorkflowTreeSnapshot {
   );
   if (completed) {
     workflow.comments = [
+      rootOwnershipComment(),
       managedComment("plan-1", serializeManagedRecord({
         kind: "plan_contract" as const, version: 1 as const, rootIssueId: "root-1", cycleIssueId: "cycle-1",
         planContractDigest: "a".repeat(64), objective: "Deliver the deployment workflow.", includedScope: ["deployment service"],
@@ -146,6 +270,37 @@ function planTree(completed: boolean): LinearWorkflowTreeSnapshot {
 function managedComment(issueId: string, body: string) {
   return {
     comment_id: `comment-${body.length}-${issueId}`, issue_id: issueId, body, author_kind: "symphony" as const, author_id: "symphony",
-    created_at: "2026-07-23T00:00:00Z", remote_version: `version-${body.length}`, updated_at: "2026-07-23T00:00:00Z",
+    thread_root_comment_id: `comment-${body.length}-${issueId}`, thread_state: "unresolved" as const, reactions: [], created_at: "2026-07-23T00:00:00Z", remote_version: `version-${body.length}`, updated_at: "2026-07-23T00:00:00Z",
+  };
+}
+
+function rootOwnershipComment() {
+  return managedComment("root-1", serializeManagedRecord({
+    kind: "root_ownership" as const,
+    version: 1 as const,
+    rootIssueId: "root-1",
+    conductorId: "conductor-1",
+    performerProfileId: "profile-1",
+    deliveryBranch: "symphony/runs/root-1",
+    ownerGeneration: "generation-1",
+  }));
+}
+
+function replyComment() {
+  return {
+    comment_id: "reply-comment-1", issue_id: "root-1", author_kind: "symphony" as const, author_id: "symphony",
+    parent_comment_id: "comment-1", thread_root_comment_id: "comment-1", thread_state: "resolved" as const, reactions: [],
+    created_at: "2026-07-23T00:00:03Z", remote_version: "reply-comment-v1", updated_at: "2026-07-23T00:00:03Z",
+    body: serializeManagedRecord({
+      kind: "root_reconciler_reply" as const, version: 1 as const, replyId: "reply-1", replyWriteId: "reply-1",
+      rootDirectiveId: "directive-1", sourceInputId: "comment_body:comment-1", targetIssueId: "root-1",
+      source: {
+        kind: "comment_body" as const,
+        commentId: "comment-1",
+        commentBodyDigest: createHash("sha256").update("User input", "utf8").digest("hex"),
+      },
+      disposition: "accepted" as const, reaction: "check" as const, threadAction: "resolve" as const,
+      materializedOutcomeRefs: [], renderedSchemaVersion: "1", repliedAt: "2026-07-23T00:00:03Z",
+    }),
   };
 }
