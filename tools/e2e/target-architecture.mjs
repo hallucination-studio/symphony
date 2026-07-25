@@ -2,7 +2,9 @@ import { loadE2EConfig } from "./config.mjs";
 import {
   assertParallelBlackBoxE2ECampaignCommand,
   assertParallelBlackBoxE2ECampaignResult,
+  resolveHumanScript,
 } from "./parallel-black-box-contract.mjs";
+import { createFinalCaseVerdict } from "./final-evidence-verdict.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
 
@@ -31,42 +33,28 @@ export async function runParallelBlackBoxE2ECampaign({
   })));
   const results = await Promise.all(campaign.cases.map(async (e2eCase, index) => {
     const rootSettlement = rootSettlements[index];
-    if (rootSettlement.outcome.kind === "timed_out") {
-      return caseResult(e2eCase.case_id, "incomplete", "case_deadline_exceeded", [], observedAt);
-    }
-    if (rootSettlement.outcome.kind === "rejected") {
-      return caseResult(e2eCase.case_id, "failed", "root_creation_failed", [], observedAt);
-    }
+    if (rootSettlement.outcome.kind !== "fulfilled") throw stableError("parallel_black_box_campaign_root_unavailable");
     const root = rootSettlement.outcome.value;
-    const humanOutcome = await settleBeforeDeadline(
-      () => ports.runHumanScript({ campaign, e2eCase, root }),
+    await settleBeforeDeadline(
+      () => ports.runHumanScript({ campaign, e2eCase, root, human_script: resolveHumanScript(e2eCase.human_script_id) }),
       e2eCase.deadline_at,
       { now, setTimer, clearTimer },
     );
-    const evidenceSettlement = await Promise.allSettled([
-      readFinalEvidence({ ports, campaign, e2eCase, root }),
-    ]);
-    const evidence = evidenceSettlement[0].status === "fulfilled"
-      ? evidenceSettlement[0].value
-      : { status: "incomplete", reason_code: "final_evidence_read_failed", evidence_refs: [] };
-    if (humanOutcome.kind === "timed_out") {
-      return caseResult(e2eCase.case_id, "incomplete", "case_deadline_exceeded", evidence.evidence_refs, observedAt);
-    }
-    if (humanOutcome.kind === "rejected") {
-      return caseResult(e2eCase.case_id, "failed", "human_script_failed", evidence.evidence_refs, observedAt);
-    }
-    return caseResult(e2eCase.case_id, evidence.status, evidence.reason_code, evidence.evidence_refs, observedAt);
+    const snapshot = await readFinalEvidenceSnapshot({ ports, campaign, e2eCase, root, observedAt });
+    return createFinalCaseVerdict({
+      e2eCase,
+      root,
+      snapshot,
+      evaluateEvidencePredicate: ports.evaluateEvidencePredicate,
+      observedAt,
+    });
   }));
 
-  const overlapSettlement = await Promise.allSettled([ports.readDurableOverlapEvidence({ campaign })]);
-  const durableOverlapEvidenceRefs = overlapSettlement[0].status === "fulfilled"
-    ? overlapSettlement[0].value
-    : [];
   return assertParallelBlackBoxE2ECampaignResult({
     version: 1,
     campaign_id: campaign.campaign_id,
     cases: results,
-    durable_overlap_evidence_refs: durableOverlapEvidenceRefs,
+    durable_overlap_evidence_refs: [],
   });
 }
 
@@ -77,27 +65,16 @@ export async function runConfiguredParallelBlackBoxE2ECampaign({
   throw stableError("parallel_black_box_campaign_runtime_unavailable");
 }
 
-async function readFinalEvidence({ ports, campaign, e2eCase, root }) {
-  const reader = await ports.createFreshEvidenceReader({ campaign, e2eCase, root });
-  if (!reader || typeof reader.readFinalEvidence !== "function") {
-    throw stableError("parallel_black_box_campaign_evidence_reader_invalid");
+async function readFinalEvidenceSnapshot({ ports, campaign, e2eCase, root, observedAt }) {
+  try {
+    return await ports.readFreshEvidenceSnapshot({ campaign, e2eCase, root });
+  } catch {
+    return {
+      kind: "incomplete",
+      observed_at: observedAt(),
+      omissions: [{ source_id: root.root_issue_id, reason_code: "fresh_evidence_read_failed" }],
+    };
   }
-  const evidence = await reader.readFinalEvidence({ campaign, e2eCase, root });
-  if (!evidence || !["passed", "failed", "incomplete"].includes(evidence.status) ||
-      typeof evidence.reason_code !== "string" || !Array.isArray(evidence.evidence_refs)) {
-    throw stableError("parallel_black_box_campaign_evidence_invalid");
-  }
-  return evidence;
-}
-
-function caseResult(caseId, status, reasonCode, evidenceRefs, observedAt) {
-  return {
-    case_id: caseId,
-    status,
-    reason_code: reasonCode,
-    evidence_refs: evidenceRefs,
-    observed_at: observedAt(),
-  };
 }
 
 function settleBeforeDeadline(operation, deadlineAt, { now, setTimer, clearTimer }) {
@@ -126,8 +103,8 @@ function assertPorts(ports) {
     "waitForProfileReady",
     "createCaseRoot",
     "runHumanScript",
-    "createFreshEvidenceReader",
-    "readDurableOverlapEvidence",
+    "readFreshEvidenceSnapshot",
+    "evaluateEvidencePredicate",
   ]) {
     if (typeof ports[method] !== "function") throw stableError("parallel_black_box_campaign_ports_invalid");
   }

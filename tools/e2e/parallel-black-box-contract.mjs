@@ -1,7 +1,7 @@
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const IDENTIFIER = /^[a-z][a-z0-9_-]{2,120}$/u;
 const CONDUCTOR_HASH = /^[a-z0-9][a-z0-9-]{2,120}$/u;
-const HUMAN_SCRIPT_IDS = new Set([
+const HUMAN_SCRIPT_REGISTRY = registry([
   "approve_plan",
   "reject_plan",
   "revise_root",
@@ -11,7 +11,7 @@ const HUMAN_SCRIPT_IDS = new Set([
   "required_write_outage",
   "preempt_same_priority",
 ]);
-const EVIDENCE_PREDICATE_IDS = new Set([
+const EVIDENCE_PREDICATE_REGISTRY = registry([
   "happy_path",
   "plan_rejection_supersession",
   "root_revision_comment",
@@ -112,12 +112,35 @@ export function assertParallelBlackBoxE2ECampaignResult(value) {
   });
 }
 
+export function getParallelBlackBoxE2ECampaignExitCode(commandValue, resultValue) {
+  const command = assertParallelBlackBoxE2ECampaignCommand(commandValue);
+  const result = assertParallelBlackBoxE2ECampaignResult(resultValue);
+  if (result.campaign_id !== command.campaign_id || result.cases.length !== command.cases.length) {
+    throw stableError("parallel_black_box_campaign_exit_code_invalid");
+  }
+  const verdictsByCaseId = new Map(result.cases.map((entry) => [entry.case_id, entry]));
+  for (const e2eCase of command.cases) {
+    if (!verdictsByCaseId.has(e2eCase.case_id)) throw stableError("parallel_black_box_campaign_exit_code_invalid");
+  }
+  return command.cases.some((e2eCase) => e2eCase.mandatory && verdictsByCaseId.get(e2eCase.case_id).status !== "passed")
+    ? 1
+    : 0;
+}
+
 export function isKnownHumanScriptId(value) {
-  return HUMAN_SCRIPT_IDS.has(value);
+  return resolveHumanScript(value) !== null;
 }
 
 export function isKnownEvidencePredicateId(value) {
-  return EVIDENCE_PREDICATE_IDS.has(value);
+  return resolveEvidencePredicate(value) !== null;
+}
+
+export function resolveHumanScript(value) {
+  return typeof value === "string" ? HUMAN_SCRIPT_REGISTRY[value] ?? null : null;
+}
+
+export function resolveEvidencePredicate(value) {
+  return typeof value === "string" ? EVIDENCE_PREDICATE_REGISTRY[value] ?? null : null;
 }
 
 function assertConductor(value) {
@@ -202,6 +225,10 @@ function identifier(value) {
 function record(value, code) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw stableError(code);
   return value;
+}
+
+function registry(ids) {
+  return Object.freeze(Object.fromEntries(ids.map((id) => [id, Object.freeze({ id })])));
 }
 
 function stableError(code) {

@@ -5,7 +5,9 @@ import test from "node:test";
 import {
   assertParallelBlackBoxE2ECampaignCommand,
   assertParallelBlackBoxE2ECampaignResult,
+  getParallelBlackBoxE2ECampaignExitCode,
 } from "../../tools/e2e/parallel-black-box-contract.mjs";
+import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.mjs";
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
 import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
 
@@ -51,7 +53,7 @@ test("parallel black-box Campaign starts every Conductor before provisioning pro
   assert.deepEqual(result.cases.map(({ status }) => status), ["passed", "passed"]);
 });
 
-test("parallel black-box Campaign settles every Case and final-reads with a new evidence reader", async () => {
+test("parallel black-box Campaign final-reads after a Human script failure and lets the predicate decide", async () => {
   const events = [];
   const result = await runParallelBlackBoxE2ECampaign({
     command: campaignCommand(),
@@ -64,7 +66,7 @@ test("parallel black-box Campaign settles every Case and final-reads with a new 
     status,
     reason_code,
   })), [
-    { case_id: "happy-a", status: "failed", reason_code: "human_script_failed" },
+    { case_id: "happy-a", status: "passed", reason_code: "evidence_satisfied" },
     { case_id: "happy-b", status: "passed", reason_code: "evidence_satisfied" },
   ]);
   assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), [
@@ -72,7 +74,7 @@ test("parallel black-box Campaign settles every Case and final-reads with a new 
   ]);
 });
 
-test("parallel black-box Campaign makes an expired Case incomplete but still final-reads it", async () => {
+test("parallel black-box Campaign final-reads after a Human deadline and lets an inconclusive predicate decide", async () => {
   const startedAt = new Date().toISOString();
   const deadlineAt = new Date(Date.now() + 20).toISOString();
   const events = [];
@@ -86,7 +88,7 @@ test("parallel black-box Campaign makes an expired Case incomplete but still fin
   const campaign = await runParallelBlackBoxE2ECampaign({
     command,
     ports: {
-      ...ports(events),
+      ...ports(events, { predicateKind: "inconclusive" }),
       async runHumanScript() {
         await new Promise(() => {});
       },
@@ -94,9 +96,106 @@ test("parallel black-box Campaign makes an expired Case incomplete but still fin
   });
 
   assert.deepEqual(campaign.cases.map(({ status, reason_code }) => ({ status, reason_code })), [
-    { status: "incomplete", reason_code: "case_deadline_exceeded" },
+    { status: "incomplete", reason_code: "evidence_not_converged" },
   ]);
   assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:happy-a"]);
+});
+
+test("parallel black-box Campaign makes an incomplete fresh snapshot incomplete without invoking a predicate", async () => {
+  const events = [];
+  const campaign = await runParallelBlackBoxE2ECampaign({
+    command: campaignCommand(),
+    ports: ports(events, { snapshotKind: "incomplete" }),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(campaign.cases.map(({ status, reason_code, evidence_refs }) => ({
+    status,
+    reason_code,
+    evidence_refs,
+  })), [
+    { status: "incomplete", reason_code: "fresh_evidence_incomplete", evidence_refs: [] },
+    { status: "incomplete", reason_code: "fresh_evidence_incomplete", evidence_refs: [] },
+  ]);
+  assert.deepEqual(events.filter((event) => event.startsWith("predicate:")), []);
+});
+
+test("parallel black-box Campaign maps a violated final predicate to failed", async () => {
+  const campaign = await runParallelBlackBoxE2ECampaign({
+    command: campaignCommand(),
+    ports: ports([], { predicateKind: "violated" }),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(campaign.cases.map(({ status, reason_code }) => ({ status, reason_code })), [
+    { status: "failed", reason_code: "evidence_violation" },
+    { status: "failed", reason_code: "evidence_violation" },
+  ]);
+});
+
+test("parallel black-box Campaign rejects a predicate that attempts to return a Case verdict", async () => {
+  const campaign = await runParallelBlackBoxE2ECampaign({
+    command: campaignCommand(),
+    ports: ports([], { predicateKind: "passed" }),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(campaign.cases.map(({ status, reason_code }) => ({ status, reason_code })), [
+    { status: "incomplete", reason_code: "evidence_predicate_unavailable" },
+    { status: "incomplete", reason_code: "evidence_predicate_unavailable" },
+  ]);
+});
+
+test("final Case verdict fails closed when its predicate evaluator is unavailable", async () => {
+  const e2eCase = campaignCommand().cases[0];
+  const root = { root_issue_id: "root-happy-a" };
+  const verdict = await createFinalCaseVerdict({
+    e2eCase,
+    root,
+    snapshot: {
+      kind: "complete",
+      observed_at: now,
+      root_trees: [{ root_issue_id: root.root_issue_id }],
+      repositories: [{ repository_identity: "repository-a" }],
+    },
+    observedAt: () => now,
+  });
+
+  assert.deepEqual(verdict, {
+    case_id: e2eCase.case_id,
+    status: "incomplete",
+    reason_code: "evidence_predicate_unavailable",
+    evidence_refs: ["linear:root-happy-a", "git:repository-a"],
+    observed_at: now,
+  });
+});
+
+test("final Case verdict fails closed when a complete snapshot has malformed durable references", async () => {
+  const e2eCase = campaignCommand().cases[0];
+  const root = { root_issue_id: "root-happy-a" };
+  const verdict = await createFinalCaseVerdict({
+    e2eCase,
+    root,
+    snapshot: {
+      kind: "complete",
+      observed_at: now,
+      root_trees: [{ root_issue_id: root.root_issue_id }],
+      repositories: [{ repository_identity: null }],
+    },
+    evaluateEvidencePredicate: async () => ({
+      kind: "satisfied",
+      reason_code: "evidence_satisfied",
+    }),
+    observedAt: () => now,
+  });
+
+  assert.deepEqual(verdict, {
+    case_id: e2eCase.case_id,
+    status: "incomplete",
+    reason_code: "fresh_evidence_invalid",
+    evidence_refs: [],
+    observed_at: now,
+  });
 });
 
 test("parallel black-box result rejects verdict state outside passed failed or incomplete", () => {
@@ -115,6 +214,21 @@ test("parallel black-box result rejects verdict state outside passed failed or i
     }),
     /parallel_black_box_campaign_result_invalid/u,
   );
+});
+
+test("parallel black-box Campaign exit code fails when a mandatory final verdict is non-passing", async () => {
+  const command = campaignCommand();
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports([], { predicateKind: "violated" }),
+    now: () => Date.parse(now),
+  });
+
+  assert.equal(getParallelBlackBoxE2ECampaignExitCode(command, result), 1);
+  assert.equal(getParallelBlackBoxE2ECampaignExitCode({
+    ...command,
+    cases: command.cases.map((e2eCase) => ({ ...e2eCase, mandatory: false })),
+  }, result), 0);
 });
 
 test("real E2E configuration requires a distinct external Human Actor credential", () => {
@@ -139,6 +253,9 @@ test("hard-cut runner source has no internal Podium imports, direct store access
   assert.doesNotMatch(source, /packages\/podium\/dist\/internal|LinearSdkImpl|LinearGatewayProtocolHandlerImpl|SqlitePodiumStoreImpl/u);
   assert.doesNotMatch(source, /for\s*\([^)]*scenario|runScenarioEvidence|targetArchitectureScenarioManifest/u);
   assert.doesNotMatch(source, /waitForPlanReviewEvidence|waitForExecutionEvidence|approvePlanReviewAction/u);
+  assert.doesNotMatch(source, /createFreshEvidenceReader|\.readFinalEvidence\(|caseResult\(|readDurableOverlapEvidence/u);
+  assert.match(source, /createFinalCaseVerdict\(/u);
+  assert.doesNotMatch(source, /status:\s*["'](?:passed|failed|incomplete)["']/u);
 });
 
 function campaignCommand() {
@@ -183,7 +300,7 @@ function conductor(suffix) {
   };
 }
 
-function ports(events, { rejectCaseId } = {}) {
+function ports(events, { rejectCaseId, snapshotKind = "complete", predicateKind = "satisfied" } = {}) {
   return {
     async startConductor({ conductor }) {
       events.push(`start:${conductor.conductor_short_hash.slice(-1)}`);
@@ -202,20 +319,33 @@ function ports(events, { rejectCaseId } = {}) {
       events.push(`human:${e2eCase.case_id}`);
       if (e2eCase.case_id === rejectCaseId) throw new Error("external failure");
     },
-    async createFreshEvidenceReader({ e2eCase }) {
+    async readFreshEvidenceSnapshot({ e2eCase, root }) {
       events.push(`fresh:${e2eCase.case_id}`);
+      if (snapshotKind === "incomplete") {
+        return {
+          kind: "incomplete",
+          observed_at: now,
+          omissions: [{ source_id: root.root_issue_id, reason_code: "fresh_linear_coverage_incomplete" }],
+        };
+      }
       return {
-        async readFinalEvidence() {
-          return {
-            status: "passed",
-            reason_code: "evidence_satisfied",
-            evidence_refs: [`linear:${e2eCase.case_id}`],
-          };
-        },
+        kind: "complete",
+        observed_at: now,
+        root_trees: [{ root_issue_id: root.root_issue_id }],
+        repositories: [{ repository_identity: `repository-${e2eCase.routed_conductor_ids[0].slice(-1)}` }],
       };
     },
-    async readDurableOverlapEvidence() {
-      return ["linear:overlap-1"];
+    async evaluateEvidencePredicate({ e2e_case: e2eCase, snapshot }) {
+      events.push(`predicate:${e2eCase.case_id}`);
+      assert.equal(snapshot.kind, "complete");
+      return {
+        kind: predicateKind,
+        reason_code: {
+          satisfied: "evidence_satisfied",
+          violated: "evidence_violation",
+          inconclusive: "evidence_not_converged",
+        }[predicateKind],
+      };
     },
   };
 }
