@@ -4,7 +4,9 @@ import {
   assertParallelBlackBoxE2ECampaignResult,
   resolveHumanScript,
 } from "./parallel-black-box-contract.mjs";
+import { analyzeHappyPathCampaignEvidence } from "./approved-happy-path-evidence.mjs";
 import { createFinalCaseVerdict } from "./final-evidence-verdict.mjs";
+import { executeHumanScript } from "./human-scripts.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
 const ROOT_ISSUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -29,21 +31,34 @@ export async function runParallelBlackBoxE2ECampaign({
     setTimer,
     clearTimer,
   })));
-  const finalSettlements = await Promise.allSettled(campaign.cases.map((e2eCase, index) => finalizeCase({
+  const evidenceSettlements = await Promise.allSettled(campaign.cases.map((e2eCase, index) => finalizeCaseEvidence({
     actionSettlement: actionSettlements[index],
     e2eCase,
+    campaign,
     ports,
     observedAt,
   })));
-  const results = await Promise.all(finalSettlements.map((settlement, index) => settlement.status === "fulfilled"
+  const evidence = evidenceSettlements.map((settlement, index) => settlement.status === "fulfilled"
     ? settlement.value
-    : unavailableCaseVerdict({ e2eCase: campaign.cases[index], observedAt })));
+    : unavailableCaseEvidence({ campaign, e2eCase: campaign.cases[index], observedAt }));
+  const campaignEvidence = analyzeHappyPathCampaignEvidence({ rows: evidence });
+  const outcomesByCaseId = new Map(campaignEvidence.case_outcomes.map((entry) => [entry.case_id, entry.outcome]));
+  const results = await Promise.all(evidence.map(({ e2eCase, root, snapshot }) => createFinalCaseVerdict({
+    e2eCase,
+    root,
+    snapshot,
+    evaluateEvidencePredicate: async ({ e2e_case: currentCase }) => outcomesByCaseId.get(currentCase.case_id) ?? {
+      kind: "inconclusive",
+      reason_code: "evidence_predicate_unavailable",
+    },
+    observedAt,
+  })));
 
   return assertParallelBlackBoxE2ECampaignResult({
     version: 1,
     campaign_id: campaign.campaign_id,
     cases: results,
-    durable_overlap_evidence_refs: [],
+    durable_overlap_evidence_refs: campaignEvidence.durable_overlap_evidence_refs,
   });
 }
 
@@ -59,26 +74,25 @@ async function runCaseAction({ campaign, e2eCase, ports, now, setTimer, clearTim
     return null;
   }
   await settleBeforeDeadline(
-    () => ports.runHumanScript({ caseContext, e2eCase, root, human_script: resolveHumanScript(e2eCase.human_script_id) }),
+    () => executeHumanScript({
+      humanScript: resolveHumanScript(e2eCase.human_script_id),
+      root,
+      human: ports.human,
+      waitForHumanAction: (input) => ports.waitForHumanAction({ caseContext, e2eCase, ...input }),
+    }),
     e2eCase.deadline_at,
     { now, setTimer, clearTimer },
   );
   return Object.freeze({ caseContext, root });
 }
 
-async function finalizeCase({ actionSettlement, e2eCase, ports, observedAt }) {
+async function finalizeCaseEvidence({ actionSettlement, e2eCase, campaign, ports, observedAt }) {
   if (actionSettlement.status !== "fulfilled" || actionSettlement.value === null) {
-    return unavailableCaseVerdict({ e2eCase, observedAt });
+    return unavailableCaseEvidence({ campaign, e2eCase, observedAt });
   }
   const { caseContext, root } = actionSettlement.value;
   const snapshot = await readFinalEvidenceSnapshot({ ports, caseContext, e2eCase, root, observedAt });
-  return createFinalCaseVerdict({
-    e2eCase,
-    root,
-    snapshot,
-    evaluateEvidencePredicate: ports.evaluateEvidencePredicate,
-    observedAt,
-  });
+  return Object.freeze({ e2eCase, caseContext, root, snapshot });
 }
 
 function createCaseContext(campaign, e2eCase) {
@@ -92,15 +106,15 @@ function createCaseContext(campaign, e2eCase) {
   });
 }
 
-function unavailableCaseVerdict({ e2eCase, observedAt }) {
-  return createFinalCaseVerdict({
+function unavailableCaseEvidence({ campaign, e2eCase, observedAt }) {
+  return Object.freeze({
     e2eCase,
+    caseContext: createCaseContext(campaign, e2eCase),
     snapshot: {
       kind: "incomplete",
       observed_at: observedAt(),
       omissions: [{ source_id: e2eCase.case_id, reason_code: "case_root_unavailable" }],
     },
-    observedAt,
   });
 }
 
@@ -153,11 +167,13 @@ function assertPorts(ports) {
   if (!ports || typeof ports !== "object") throw stableError("parallel_black_box_campaign_ports_invalid");
   for (const method of [
     "createCaseRoot",
-    "runHumanScript",
+    "waitForHumanAction",
     "readFreshEvidenceSnapshot",
-    "evaluateEvidencePredicate",
   ]) {
     if (typeof ports[method] !== "function") throw stableError("parallel_black_box_campaign_ports_invalid");
+  }
+  if (!ports.human || typeof ports.human.resolveHumanAction !== "function") {
+    throw stableError("parallel_black_box_campaign_ports_invalid");
   }
 }
 
