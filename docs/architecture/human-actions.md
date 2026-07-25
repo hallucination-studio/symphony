@@ -96,7 +96,7 @@ Todo -> Answered | Canceled
 workflow；需要新的交互时创建新Action。原生archive flag独立于status：archive保留terminal或当前status，
 但使Action退出active Tree membership；restore后仍需Root Reconciler决定是否创建新Action，不能隐式重放旧结果。
 
-Action comment使用Linear原生thread resolve/unresolve。thread lifecycle只表示该段对话是否仍需跟进，不改变Action
+Action comment使用Linear原生thread resolve/reopen。thread lifecycle只表示该段对话是否仍需跟进，不改变Action
 status、resolution或Root/Cycle lifecycle。用户reopen、编辑已处理comment或新增reply都会作为新的Root Reconciler输入；
 Symphony的✅/❌只表示matching comment input是否被采纳，不是审批按钮。
 
@@ -331,4 +331,4 @@ capability，并再次验证当前Root/Cycle/target和grant digest。
 6. Rejected必须有reason，Answered必须有answer，Approved不要求comment。
 7. 原生archive flag不删除Action、comment、resolution或links；完整Tree始终包含archived facts。
 8. Human Action不能绕过Plan Contract、Root convergence gate或产品capability。
-9. Native comment resolve/unresolve和reaction不拥有Action lifecycle；只有专用Linear status表达审批结果。
+9. Native comment resolve/reopen和reaction不拥有Action lifecycle；只有专用Linear status表达审批结果。

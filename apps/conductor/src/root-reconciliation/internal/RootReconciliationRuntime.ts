@@ -376,8 +376,12 @@ export class RootReconciliationRuntime {
       view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
     }
     setPhase("publish_root_timeline");
-    const timeline = await this.dependencies.timeline.publish(timelineEvent(directive, root.issueId, view));
-    if (timeline.kind === "failed") return failedMaterialization(directive, timeline.code);
+    const event = timelineEvent(directive, root.issueId);
+    const timeline = await this.dependencies.timeline.publish(event);
+    if (timeline.kind === "failed") {
+      this.logTimelineFailure(root.issueId, event, timeline.code);
+      return failedMaterialization(directive, timeline.code);
+    }
     return materialization;
   }
 
@@ -407,7 +411,9 @@ export class RootReconciliationRuntime {
       );
       const existingResult = stageResultRecord(view.tree, stageExecutionId);
       if (existingResult) {
-        const contractView = await this.persistPlanContract(view, directive.rootDirectiveId, existingResult, setPhase);
+        const timelineView = await this.persistStageResultTimeline(view, directive, existingResult, setPhase);
+        if (timelineView.kind === "failed") return timelineView;
+        const contractView = await this.persistPlanContract(timelineView.view, directive.rootDirectiveId, existingResult, setPhase);
         await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, existingResult, setPhase);
         return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
       }
@@ -434,7 +440,9 @@ export class RootReconciliationRuntime {
       setPhase(`persist_${role}_result`);
       const resultView = await this.persistStageResult(executionView, directive.rootDirectiveId, stageResult, setPhase);
       const resultRecord = toStageResultRecord(stageResult);
-      const contractView = await this.persistPlanContract(resultView, directive.rootDirectiveId, resultRecord, setPhase);
+      const timelineView = await this.persistStageResultTimeline(resultView, directive, resultRecord, setPhase);
+      if (timelineView.kind === "failed") return timelineView;
+      const contractView = await this.persistPlanContract(timelineView.view, directive.rootDirectiveId, resultRecord, setPhase);
       await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, resultRecord, setPhase);
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
@@ -637,6 +645,34 @@ export class RootReconciliationRuntime {
       throw new Error("role_result_read_back_render_invalid");
     }
     return { ...view, tree: readBack, observedAt: readBack.observed_at };
+  }
+
+  private async persistStageResultTimeline(
+    view: RootReconciliationView,
+    directive: RootDirective,
+    result: StageResultRecord,
+    setPhase: (phase: string) => void,
+  ): Promise<{ kind: "materialized"; view: RootReconciliationView } | ReturnType<typeof failedMaterialization>> {
+    setPhase(`publish_${result.stage}_timeline`);
+    const event = stageTimelineEvent(result);
+    const timeline = await this.dependencies.timeline.publish(event);
+    if (timeline.kind === "failed") {
+      this.logTimelineFailure(result.rootIssueId, event, timeline.code);
+      return failedMaterialization(directive, timeline.code);
+    }
+    return {
+      kind: "materialized",
+      view: await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest),
+    };
+  }
+
+  private logTimelineFailure(rootIssueId: string, event: WorkflowTimelineEvent, code: string): void {
+    this.dependencies.log("workflow_timeline_materialization_failed", {
+      root_issue_id: rootIssueId,
+      timeline_event_id: event.timelineEventId,
+      timeline_kind: event.timelineKind,
+      reason: safeFailureCode(code),
+    });
   }
 
   private async persistPlanContract(
@@ -1167,7 +1203,6 @@ function treeOperationIssueKey(
 function timelineEvent(
   directive: RootDirective,
   rootIssueId: string,
-  view: RootReconciliationView,
 ): WorkflowTimelineEvent {
   const cycleIssueId = cycleIdForAction(directive.action);
   const timelineKind = cycleIssueId ? "cycle" : "root";
@@ -1178,7 +1213,7 @@ function timelineEvent(
     protocolVersion: 1 as const,
     timelineEventId,
     rootIssueId,
-    occurredAt: view.observedAt,
+    occurredAt: directive.modelTurn.terminalAt,
     sourceRecordIds: [directive.rootDirectiveId],
     sourceVersions: [directive.basedOnTargetRootDigest],
     actor: "root_reconciler" as const,
@@ -1190,6 +1225,35 @@ function timelineEvent(
   return cycleIssueId
     ? { ...base, timelineKind: "cycle", cycleIssueId, kind: "cycle_decision_accepted" }
     : { ...base, timelineKind: timelineKind as "root", kind: "root_decision_accepted" };
+}
+
+function stageTimelineEvent(result: StageResultRecord): WorkflowTimelineEvent {
+  const kind = result.stage === "plan"
+    ? "plan_turn_completed" as const
+    : result.stage === "verify"
+      ? "verify_turn_completed" as const
+      : result.outcomeKind === "work_completed"
+        ? "work_turn_completed" as const
+        : "work_turn_blocked" as const;
+  const timelineEventId = createHash("sha256")
+    .update(["stage_result", result.rootIssueId, result.cycleIssueId, result.resultId].join("\0"), "utf8")
+    .digest("hex");
+  return {
+    protocolVersion: 1,
+    timelineEventId,
+    timelineKind: "cycle",
+    rootIssueId: result.rootIssueId,
+    cycleIssueId: result.cycleIssueId,
+    occurredAt: result.completedAt,
+    sourceRecordIds: [result.resultId],
+    sourceVersions: [result.observedTreeDigest],
+    actor: result.stage,
+    kind,
+    summary: result.summary,
+    inputRefs: result.sourceManifest,
+    outputRefs: [result.resultId, result.nodeIssueId],
+    nextStep: "The Root Reconciler will evaluate the durable Stage Result.",
+  };
 }
 
 function cycleIdForAction(action: RootDirective["action"]): string | undefined {

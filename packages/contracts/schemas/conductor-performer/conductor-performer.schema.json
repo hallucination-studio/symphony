@@ -830,7 +830,7 @@
       "additionalProperties": false,
       "required": [
         "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids", "source_versions",
-        "write_id", "rendered_schema_version", "materialized_at"
+        "write_id", "rendered_schema_version", "occurred_at"
       ],
       "properties": {
         "timeline_event_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -840,7 +840,7 @@
         "source_versions": { "type": "array", "maxItems": 256, "items": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" } },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "rendered_schema_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "materialized_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
     "RootDirective": {

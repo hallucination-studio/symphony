@@ -86,7 +86,7 @@ WorkflowTimelineRecord
   source_record_ids[]
   source_versions[]
   rendered_schema_version
-  materialized_at
+  occurred_at
 ```
 
 comment materialization至少一次、Linear效果幂等：
@@ -128,6 +128,17 @@ TimelineEventBase
 
 事件是closed、versioned discriminated union，使用generated types。不得包含raw Provider reasoning、完整
 transcript、secret、credential、任意metadata map或未bounded stdout/stderr。
+`occurred_at`必须取自matching strict read-back source record的durable occurrence timestamp（例如Stage Result的
+`completed_at`或Root Reconciler turn的`terminal_at`），不能取某次fresh Tree read的当前观察时间。相同
+`timeline_event_id`在崩溃恢复时必须重新生成相同的record与Markdown body；既有comment的target、record或body
+不匹配时fail closed，不能追加第二条comment或以新时间覆盖旧叙事。
+单一source时，event `occurred_at`必须与该source occurrence完全相同；多个source时必须等于它们中最新的occurrence。
+没有`ModelTurnRecord`的source（例如Human Action resolution）仍可materialize其timeline event；它只没有“本次turn”
+展示，累计仍按同一source occurrence边界从fresh Linear `ModelTurnRecord`派生。
+`WorkflowTimelineRecord.occurred_at`保存的也是这个event source timestamp；它不是Linear comment的server
+`created_at`、一次重试的本地时钟或另一份materialization checkpoint。comment的实际创建/更新时间仍只属于Linear
+comment snapshot。这样重启后的同一event能重建相同的record和用户Markdown，而不会把每次写入尝试变成新的durable
+事实。
 `next_step`若存在，只是时间轴中面向用户的bounded说明文字；它不驱动Conductor调度、Linear状态迁移、Stage执行或
 任何其他语义决策。所有Workflow决策只能来自Root Reconciler返回的closed `RootDirective.action`。
 若该事件需要展示usage，subscriber只根据`source_record_ids[]`和fresh Linear `ModelTurnRecord`确定性派生本次与累计
@@ -264,8 +275,9 @@ Plan、Work和Verify Issue上的canonical Stage Result comment不属于时间轴
 ## 7. 结构化渲染规则
 
 - event contract保存语义字段，renderer负责Markdown，不让业务模块提供任意完整comment；
-- 一个event恰好生成一条comment；comment上半部分是用户Markdown，底部恰好一个`symphony` block保存
-  `WorkflowTimelineRecord`，两部分作为一次required Linear materialization共同read-back；
+- 一个event恰好生成一条comment；该event的两个输出层只能是同一comment上半部分的用户Markdown和底部恰好一个
+  `symphony` block中的`WorkflowTimelineRecord`。两部分作为一次required Linear materialization共同read-back，不能
+  拆成两条comment、两次write或两种可恢复事实；
 - 用户Markdown允许bounded普通fenced code block；只有info string精确为`symphony`的block参与managed decode；
 - Issue、Cycle、Action、Result和Git revision使用可点击引用；
 - status、directive kind、outcome使用用户可理解名称，不暴露内部enum作为正文；

@@ -317,7 +317,7 @@ function decodeDelivery(o: Record<string, unknown>): DeliveryRecord {
 function decodeWorkflowTimeline(o: Record<string, unknown>): WorkflowTimelineRecord {
   fields(o, [
     "kind", "version", "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids",
-    "source_versions", "write_id", "rendered_schema_version", "materialized_at",
+    "source_versions", "write_id", "rendered_schema_version", "occurred_at",
   ]);
   return {
     kind: "workflow_timeline",
@@ -329,7 +329,7 @@ function decodeWorkflowTimeline(o: Record<string, unknown>): WorkflowTimelineRec
     sourceVersions: strings(o, "source_versions"),
     writeId: id(o, "write_id"),
     renderedSchemaVersion: enumValue(o, "rendered_schema_version", ["1"]),
-    materializedAt: timestamp(o, "materialized_at"),
+    occurredAt: timestamp(o, "occurred_at"),
   };
 }
 
@@ -642,7 +642,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     root_reconciler_failure: { allowed: ["kind", "version", "failureId", "reconcilerSessionId", "reconcilerTurnId", "targetRootDigest", "attemptedInputIds", "modelTurn", "category", "sanitizedReason", "failedAt"] },
     root_reconciler_reply: { allowed: ["kind", "version", "replyId", "replyWriteId", "rootDirectiveId", "sourceInputId", "source", "targetIssueId", "disposition", "reaction", "threadAction", "materializedOutcomeRefs", "renderedSchemaVersion", "repliedAt"] },
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
-    workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "materializedAt"] },
+    workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "occurredAt"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements", "proposedWorkDag"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "modelTurn", "planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
@@ -700,7 +700,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
       replied_at: record.repliedAt,
     });
     case "delivery": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, verify_result_id: record.verifyResultId, verified_revision: record.verifiedRevision, delivery_kind: record.deliveryKind, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), delivered_at: record.deliveredAt });
-    case "workflow_timeline": return encodeSimple(record, { timeline_event_id: record.timelineEventId, timeline_kind: record.timelineKind, target_issue_id: record.targetIssueId, source_record_ids: record.sourceRecordIds, source_versions: record.sourceVersions, write_id: record.writeId, rendered_schema_version: record.renderedSchemaVersion, materialized_at: record.materializedAt });
+    case "workflow_timeline": return encodeSimple(record, { timeline_event_id: record.timelineEventId, timeline_kind: record.timelineKind, target_issue_id: record.targetIssueId, source_record_ids: record.sourceRecordIds, source_versions: record.sourceVersions, write_id: record.writeId, rendered_schema_version: record.renderedSchemaVersion, occurred_at: record.occurredAt });
     case "plan_contract": return encodePlanContract(record);
     case "stage_execution": return encodeStageExecution(record);
     case "stage_result": return encodeStageResult(record);

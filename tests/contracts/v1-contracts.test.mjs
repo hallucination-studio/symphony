@@ -455,7 +455,7 @@ test("turn facts, comment replies, and timelines have one closed durable record 
 
   assert.deepEqual(schema.$defs.WorkflowTimelineRecord.required, [
     "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids", "source_versions",
-    "write_id", "rendered_schema_version", "materialized_at",
+    "write_id", "rendered_schema_version", "occurred_at",
   ]);
   assert.deepEqual(schema.$defs.UsageAggregate.required, [
     "scope", "source_record_count", "source_digest", "is_complete", "unknown_turn_count", "entries",

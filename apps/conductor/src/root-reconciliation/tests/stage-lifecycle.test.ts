@@ -14,6 +14,7 @@ import type {
   TurnUsage,
 } from "../api/index.js";
 import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
+import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTimelineEvents.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import {
   RootReconciliationRuntime,
@@ -77,6 +78,48 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
   assert.deepEqual(statusMutations(linear), ["In Progress", "Done"]);
   assert.equal(stage(linear.tree).status_name, "Done");
   assert.equal(linear.stageResultCount(), 1);
+});
+
+test("a durable Stage Result must materialize its Cycle timeline before the terminal status", async () => {
+  const linear = new FakeLinear("work");
+  const events: WorkflowTimelineEvent[] = [];
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "work",
+    outcomeKind: "work_completed",
+    onExecute(input) { return stageResult(input, "work_completed"); },
+    timeline: {
+      async publish(event) {
+        events.push(event);
+        return {
+          kind: "failed" as const,
+          timelineEventId: event.timelineEventId,
+          code: "timeline_read_back_missing",
+          sanitizedReason: "timeline_read_back_missing",
+        };
+      },
+    },
+    log(event, fields) { logs.push({ event, fields }); },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(linear.stageResultCount(), 1);
+  assert.deepEqual(statusMutations(linear), ["In Progress"]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.timelineKind, "cycle");
+  assert.equal(events[0]?.kind, "work_turn_completed");
+  assert.equal(events[0]?.occurredAt, "2026-07-24T00:00:02Z");
+  assert.deepEqual(events[0]?.sourceRecordIds, [stageExecutionIdFor("root-1", "directive-1", "work", "stage-1")]);
+  assert.deepEqual(logs.find(({ event }) => event === "workflow_timeline_materialization_failed"), {
+    event: "workflow_timeline_materialization_failed",
+    fields: {
+      root_issue_id: "root-1",
+      timeline_event_id: events[0]?.timelineEventId ?? "",
+      timeline_kind: "cycle",
+      reason: "timeline_read_back_missing",
+    },
+  });
 });
 
 test("Stage Result comments show actual model and derive Issue usage from immutable Results", async () => {
@@ -357,6 +400,8 @@ function dependencies(input: {
   outcomeKind: StageResult["outcome"]["kind"];
   model?: string;
   onExecute(stageInput: StageTurnInput): StageResult;
+  timeline?: RootReconciliationRuntimeDependencies["timeline"];
+  log?: RootReconciliationRuntimeDependencies["log"];
 }): RootReconciliationRuntimeDependencies {
   const root = {
     issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
@@ -431,10 +476,10 @@ function dependencies(input: {
     replyWriter: { async write() { return { kind: "materialized" as const, replyId: "reply-1" }; } },
     humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
     humanActionResolutionMaterializer: { async materialize() { throw new Error("human_action_unexpected"); } },
-    timeline: { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
+    timeline: input.timeline ?? { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
     profileIdFor: async () => "profile-1",
     modelSettingsFor: async () => ({ model: input.model ?? "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
-    log() {},
+    log: input.log ?? (() => {}),
   };
 }
 

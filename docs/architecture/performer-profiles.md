@@ -381,6 +381,12 @@ Stage、Cycle和Root renderer只消费source record identity和fresh snapshot；
 或本地counter提供的aggregate。累计值从fresh Linear事实计算并随matching event comment一起read-back，不通过修改Issue
 description或单独维护可变summary record实现。
 
+为保证同一`timeline_event_id`在重试或重复投递时始终生成相同的Markdown，Cycle/Root timeline的累计snapshot以
+[Workflow Timeline](workflow-timeline.md)定义的source `occurred_at`为闭合边界：只计入`terminal_at`早于该时刻的turn，
+以及`source_record_ids[]`所解析出的同刻`ModelTurnRecord`；之后或同刻但不属于event source的turn不属于该event。边界
+不能取Tree观察时间、comment server创建时间或本地materialization时钟。它只约束fresh Linear records的派生集合，不保存
+usage snapshot、ledger或第二个恢复记录。
+
 首次创建canonical Stage Result comment时，Conductor可把已经通过Result correlation校验、即将与该comment原子写入的
 本次`StageResultRecord`作为同一个纯aggregate derivation的prospective source，并与此前fresh Linear sources共同渲染。
 这只解决“本次record尚未存在而comment必须同时展示本次累计”的写入顺序，不是本地usage事实、ledger或E2E证据：append后

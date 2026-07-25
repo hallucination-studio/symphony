@@ -296,7 +296,7 @@ function timeline(timelineKind) {
     kind: "workflow_timeline", version: 1, timeline_event_id: `${timelineKind}-event`, timeline_kind: timelineKind,
     target_issue_id: timelineKind === "root" ? "root-1" : "cycle-1", source_record_ids: ["record-1"],
     source_versions: ["version-1"], write_id: `${timelineKind}-write`, rendered_schema_version: "1",
-    materialized_at: "2026-07-24T00:03:00Z",
+    occurred_at: "2026-07-24T00:03:00Z",
   };
 }
 

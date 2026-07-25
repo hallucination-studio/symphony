@@ -10,12 +10,10 @@ import {
 const htmlMarker = "<!" + "-- symphony";
 const snakeMarker = "managed_" + "marker";
 const camelMarker = "managed" + "Marker";
-const timelineProjection = "Timeline" + "Projection";
-const timelineProjections = "timeline-" + "projections";
 const stageUsage = "Stage" + "Usage";
 const stageUsageSnapshot = stageUsage + "Snapshot";
 const managedHtmlRecordsScope = "managed-html-" + "records";
-const timelineProjectionsScope = "timeline-" + "projections";
+const retiredTimelineScope = ["timeline", "projections"].join("-");
 const legacyTurnUsageScope = "legacy-turn-" + "usage";
 const syntheticE2ECompletionScope = "synthetic-e2e-" + "completion";
 const syntheticFinal = "synthetic " + "final";
@@ -24,23 +22,18 @@ const syntheticFinalRecord = "target_e2e_" + "synthetic_final";
 test("hard-cut inventory names every retired comment, timeline, usage, and E2E surface", async () => {
   const inventory = JSON.parse(await readFile("tools/architecture/retired-inventory.json", "utf8"));
 
-  assert.deepEqual(Object.keys(inventory.scopes).slice(-4), [
+  assert.deepEqual(Object.keys(inventory.scopes).slice(-3), [
     managedHtmlRecordsScope,
-    timelineProjectionsScope,
     legacyTurnUsageScope,
     syntheticE2ECompletionScope,
   ]);
-  for (const scope of Object.values(inventory.scopes).slice(-4)) {
+  for (const scope of Object.values(inventory.scopes).slice(-3)) {
     assert.match(scope.source, /^docs\/architecture\/[^#]+\.md#/u);
   }
   assert.deepEqual(Object.keys(inventory.scopes[managedHtmlRecordsScope].symbols), [
     htmlMarker,
     snakeMarker,
     camelMarker,
-  ]);
-  assert.deepEqual(Object.keys(inventory.scopes[timelineProjectionsScope].symbols), [
-    timelineProjection,
-    timelineProjections,
   ]);
   assert.deepEqual(Object.keys(inventory.scopes[legacyTurnUsageScope].symbols), [
     stageUsage,
@@ -52,14 +45,11 @@ test("hard-cut inventory names every retired comment, timeline, usage, and E2E s
   ]);
 });
 
-test("final findings identify the architecture rule that owns each reachable legacy surface", async () => {
+test("final inventory contains no reachable hard-cut timeline projection surface", async () => {
   const findings = await auditRetiredInventory(process.cwd(), { mode: "final" });
 
   assert.ok(!findings.some((finding) => finding.scope === managedHtmlRecordsScope));
-  assert.ok(findings.some((finding) =>
-    finding.scope === timelineProjectionsScope &&
-    finding.code === "retired_path_remaining" &&
-    finding.source === "docs/architecture/workflow-timeline.md#解耦机制"));
+  assert.ok(!findings.some((finding) => finding.scope === retiredTimelineScope));
 });
 
 test("tracked code cannot expand beyond the retired baseline", async () => {

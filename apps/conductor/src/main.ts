@@ -23,7 +23,9 @@ import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materializ
 import { LinearRootDirectiveRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootDirectiveRecordWriterImpl.js";
 import { LinearRootReconcilerFailureRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerFailureRecordWriterImpl.js";
 import { LinearRootReconcilerReplyWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
-import { LinearWorkflowTimelinePublisherImpl } from "./timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.js";
+import { LinearCycleTimelineCommentSubscriberImpl } from "./timeline-comments/internal/LinearCycleTimelineCommentSubscriberImpl.js";
+import { LinearRootTimelineCommentSubscriberImpl } from "./timeline-comments/internal/LinearRootTimelineCommentSubscriberImpl.js";
+import { InProcessWorkflowTimelinePublisherImpl } from "./workflow-events/internal/InProcessWorkflowTimelinePublisherImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
@@ -177,7 +179,10 @@ export async function runConductor(environment = process.env): Promise<void> {
     replyWriter: new LinearRootReconcilerReplyWriterImpl(gateway),
     humanActionResolutionValidator: new LinearHumanActionResolutionValidatorImpl(),
     humanActionResolutionMaterializer: new LinearHumanActionResolutionMaterializerImpl(gateway),
-    timeline: new LinearWorkflowTimelinePublisherImpl(gateway),
+    timeline: new InProcessWorkflowTimelinePublisherImpl(
+      new LinearRootTimelineCommentSubscriberImpl(gateway),
+      new LinearCycleTimelineCommentSubscriberImpl(gateway),
+    ),
     profileIdFor: async () => {
       const file = await profiles.list();
       const profileId = file.activeProfileId;

@@ -77,7 +77,7 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - read Priority、normalized `updatedAt`、blocker和comments；Root `sortOrder`不定义跨Root调度；
 - read native comment thread resolved/unresolved state和reaction集合；
 - execute closed Issue mutation；
-- execute closed Issue/comment/relation mutation，包括child reply、comment resolve/unresolve和reaction create/delete；
+- execute closed Issue/comment/relation mutation，包括child reply、comment resolve/reopen和reaction create/delete；
 - execute `WorkflowMutationCommand`；
 - read-back ambiguous mutation。
 
@@ -89,7 +89,7 @@ remote precondition。修改已有Issue、Comment或Label时还携带目标对�
 解释status category、Issue kind和allowed transition。任一precondition不匹配时
 fail closed，不执行mutation，并返回封闭conflict Result供Conductor重新读取。
 
-Podium不解释✅/❌、resolve/unresolve或用户reaction的Workflow含义。它只执行closed Linear native operation并返回
+Podium不解释✅/❌、resolve/reopen或用户reaction的Workflow含义。它只执行closed Linear native operation并返回
 fresh read-back；managed comment身份由validated actor、strict `symphony` code block和stable write correlation证明，
 不存在HTML marker或`managed_marker`字段。
 

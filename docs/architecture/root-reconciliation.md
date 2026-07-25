@@ -537,7 +537,7 @@ RootReconcilerReplyRecord
 fresh外层事实，三者都不能预填、猜测或另写一份record。
 
 固定materialization顺序是reply create/read-back、source comment receipt create/delete/read-back、thread
-resolve/unresolve read-back。source receipt write必须重新验证source comment的expected remote version；state-only input
+resolve/reopen read-back。source receipt write必须重新验证source comment的expected remote version；state-only input
 没有receipt write。`RootReconcilerReplyWriterInterface`只在matching reply comment及其code block、需要时的source
 reaction和thread action全部read-back后返回success；不存在queued或accepted中间成功。失败返回closed error并触发相同的
 Root停止语义。

@@ -22,7 +22,7 @@
 - 定义Plan、Work、Verify request/result schemas；
 - 定义Human Action专用statuses、labels、request/resolution records；
 - 定义Root/Cycle timeline events以及一个event、一条Markdown + `symphony` block comment的materialization contract；
-- 定义native comment thread resolve/unresolve、reaction回执、actual model和required Turn Usage contracts；
+- 定义native comment thread resolve/reopen、reaction回执、actual model和required Turn Usage contracts；
 - 生成TypeScript/Python/Rust types及cross-language fixtures。
 
 R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任意Linear mutation。
@@ -76,7 +76,7 @@ R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任�
 - Root subscriber只写Root Timeline；Cycle subscriber只写Cycle Timeline；
 - 一个event只写一条同时包含结构化用户Markdown和唯一`symphony` code block的comment；
 - comment结构覆盖Observed、Decision/Result、Evidence、model/usage和Next；
-- 用户comment使用native child reply、✅/❌回执和resolve/unresolve，reaction不表达审批status；
+- 用户comment使用native child reply、✅/❌回执和resolve/reopen，reaction不表达审批status；
 - deterministic event ID支持duplicate、ambiguous write和crash backfill；
 - heartbeat/tool progress不进入Linear timeline。
 

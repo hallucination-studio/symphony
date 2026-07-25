@@ -68,7 +68,6 @@
           "apps/conductor/src/root-reconciliation/internal/ManagedRecordCodec.ts",
           "apps/conductor/src/root-reconciliation/internal/RootFactSet.ts",
           "apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts",
-          "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
           "packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts",
           "packages/podium/tests/linear-gateway.test.mjs",
           "packages/podium/tests/linear-sdk.test.mjs",
@@ -98,7 +97,6 @@
           "apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts",
           "apps/conductor/src/root-reconciliation/tests/root-fact-set.test.ts",
           "apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts",
-          "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
           "packages/contracts/fixtures/cross-language/valid/workflow-issue-tree.json",
           "packages/contracts/generated/python/contracts.py",
           "packages/contracts/generated/rust/src/lib.rs",
@@ -131,26 +129,6 @@
           "tests/e2e/target-architecture-runner.test.mjs",
           "tests/integration/linear-boundary-live.test.mjs",
           "tools/e2e/target-architecture.mjs"
-        ]
-      }
-    },
-    "timeline-projections": {
-      "source": "docs/architecture/workflow-timeline.md#解耦机制",
-      "path_patterns": [
-        "^apps/conductor/src/timeline-projections/"
-      ],
-      "paths": [
-        "apps/conductor/src/timeline-projections/api/TimelineProjectionSubscriberInterface.ts",
-        "apps/conductor/src/timeline-projections/internal/LinearWorkflowTimelinePublisherImpl.ts",
-        "apps/conductor/src/timeline-projections/tests/LinearWorkflowTimelinePublisherImpl.test.ts"
-      ],
-      "symbols": {
-        "TimelineProjection": [
-          "apps/conductor/src/timeline-projections/api/TimelineProjectionSubscriberInterface.ts"
-        ],
-        "timeline-projections": [
-          "apps/conductor/src/main.ts",
-          "tools/architecture/audit-alignment.mjs"
         ]
       }
     },

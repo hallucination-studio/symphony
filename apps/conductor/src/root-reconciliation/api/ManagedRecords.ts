@@ -124,7 +124,7 @@ export interface WorkflowTimelineRecord {
   sourceVersions: string[];
   writeId: string;
   renderedSchemaVersion: "1";
-  materializedAt: string;
+  occurredAt: string;
 }
 
 export interface PlanContractProposal {

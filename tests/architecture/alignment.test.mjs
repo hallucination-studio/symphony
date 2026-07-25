@@ -8,26 +8,18 @@ import {
   inspectSchemaCoverage,
 } from "../../tools/architecture/audit-alignment.mjs";
 
-const timelineProjections = "timeline-" + "projections";
+const retiredTimelineScope = ["timeline", "projections"].join("-");
 
-test("static alignment records the pending timeline module hard cut", async () => {
+test("static alignment recognizes the typed timeline comment boundaries", async () => {
   const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
-  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), [{
-    code: "architecture_rule_unowned",
-    expected: timelineProjections,
-    source: "docs/architecture/conductor.md#模块",
-  }]);
+  assert.deepEqual(await auditArchitectureAlignment(process.cwd(), { mode: "static" }), []);
 });
 
-test("full alignment audit remains RED until H09 removes retired records", async () => {
+test("full alignment no longer accepts the retired timeline projection module", async () => {
   const { auditArchitectureAlignment } = await import("../../tools/architecture/audit-alignment.mjs");
   const findings = await auditArchitectureAlignment(process.cwd(), { mode: "full" });
-  assert.ok(findings.some((finding) =>
-    finding.code === "architecture_rule_unowned" && finding.expected === timelineProjections));
-  assert.ok(findings.some((finding) =>
-    finding.code === "retired_path_remaining" &&
-    finding.scope === timelineProjections &&
-    finding.source === "docs/architecture/workflow-timeline.md#解耦机制"));
+  assert.ok(!findings.some((finding) => finding.path?.includes(retiredTimelineScope)));
+  assert.ok(!findings.some((finding) => finding.scope === retiredTimelineScope));
 });
 
 test("alignment reports missing target paths with their owning architecture source", () => {

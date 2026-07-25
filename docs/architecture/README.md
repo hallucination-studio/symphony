@@ -63,11 +63,12 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - Podium独占Linear OAuth、Token和SDK，Performer独占Provider SDK；
 - cross-process communication使用closed versioned schemas和generated types；
 - Root/Cycle timeline通过typed event和subscriber写入Linear comments，不由业务模块直接渲染；一个event恰好写一条
-  同时包含用户Markdown和一个machine-readable `symphony` block的comment。
+  同时包含结构化用户说明层和一个machine-readable `symphony` block记录层的comment。两层是同一event的
+  同一次Linear materialization，不得fan-out为两条comment或两种可恢复事实。
 - 每个Stage Result只在matching Plan、Work或Verify Issue的canonical managed comment中持久化一次，并嵌套唯一的
   `ModelTurnRecord`；Cycle timeline只引用并展示该事实，不能成为第二个Result、usage或Root input来源。
 - Root、Cycle、Node和Human Action的lifecycle只由Linear custom status与native archive flag表达；directive、Result、
-  resolution、timeline、reply、reaction、thread resolve/unresolve和`RootDelta`只能提供事实、回执、幂等关联或传输，
+  resolution、timeline、reply、reaction、thread resolve/reopen和`RootDelta`只能提供事实、回执、幂等关联或传输，
   不得形成并行状态机。
 - 除Linear原生的Issue current facts（status、archive、parent和relation）及comment current facts（body、thread
   state和reaction set）外，任何需要跨重启恢复的Symphony workflow record只能位于strict `symphony` code block；
@@ -129,7 +130,7 @@ read-back durable fact
 ```
 
 Root Timeline只写Root Issue；Cycle Timeline只写matching Cycle Issue。Reconciler comment reply、reaction和native
-thread resolve/unresolve作为matching `RootDirective`的必需Linear mutation写回原thread。event机制不是
+thread resolve/reopen作为matching `RootDirective`的必需Linear mutation写回原thread。event机制不是
 durable queue或workflow authority；任一required comment write/read-back失败时Root停在当前materialization，
 打印correlated error，并在恢复后使用同一deterministic ID继续，成功前不推进。
 

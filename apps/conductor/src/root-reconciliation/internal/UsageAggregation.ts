@@ -30,6 +30,11 @@ export interface UsageAggregate {
   groups: UsageAggregateGroup[];
 }
 
+export interface UsageAggregateHorizon {
+  occurredAt: string;
+  sourceTurnRecordIds: readonly string[];
+}
+
 type UsageSource = {
   recordId: string;
   record: RootDirectiveRecord | RootReconcilerFailureRecord | StageResultRecord;
@@ -56,18 +61,24 @@ export function deriveIssueUsageAggregate(input: {
 export function deriveCycleUsageAggregate(input: {
   tree: RootReconciliationView["tree"];
   cycleIssueId: string;
+  horizon?: UsageAggregateHorizon;
 }): UsageAggregate {
-  return aggregate("cycle", strictUsageSources(input.tree).filter((source) =>
-    source.record.kind === "stage_result" && source.record.cycleIssueId === input.cycleIssueId,
+  return aggregate("cycle", withinHorizon(
+    strictUsageSources(input.tree).filter((source) =>
+      source.record.kind === "stage_result" && source.record.cycleIssueId === input.cycleIssueId,
+    ),
+    input.horizon,
   ));
 }
 
 export function deriveRootUsageAggregate(input: {
   tree: RootReconciliationView["tree"];
   rootIssueId: string;
+  horizon?: UsageAggregateHorizon;
 }): UsageAggregate {
-  return aggregate("root", strictUsageSources(input.tree).filter((source) =>
-    source.turn.rootIssueId === input.rootIssueId,
+  return aggregate("root", withinHorizon(
+    strictUsageSources(input.tree).filter((source) => source.turn.rootIssueId === input.rootIssueId),
+    input.horizon,
   ));
 }
 
@@ -95,6 +106,16 @@ function strictUsageSources(tree: RootReconciliationView["tree"]): UsageSource[]
 
 function stageSource(record: StageResultRecord): UsageSource {
   return { recordId: record.resultId, record, turn: record.modelTurn };
+}
+
+function withinHorizon(sources: UsageSource[], horizon: UsageAggregateHorizon | undefined): UsageSource[] {
+  if (!horizon) return sources;
+  const occurredAt = Date.parse(horizon.occurredAt);
+  const sourceTurnRecordIds = new Set(horizon.sourceTurnRecordIds);
+  return sources.filter((source) => {
+    const terminalAt = Date.parse(source.turn.terminalAt);
+    return terminalAt < occurredAt || (terminalAt === occurredAt && sourceTurnRecordIds.has(source.turn.turnRecordId));
+  });
 }
 
 function aggregate(scope: UsageAggregate["scope"], sources: UsageSource[]): UsageAggregate {
