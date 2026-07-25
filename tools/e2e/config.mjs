@@ -2,6 +2,7 @@ const INPUT_KEYS = Object.freeze({
   linearDevToken: "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
   linearHumanToken: "SYMPHONY_E2E_LINEAR_HUMAN_TOKEN",
   linearClientId: "LINEAR_CLIENT_ID",
+  linearClientSecret: "LINEAR_CLIENT_SECRET",
   projectSlugId: "SYMPHONY_E2E_PROJECT_SLUG_ID",
   linearSetupAuthorized: "SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED",
   codexApiKey: "SYMPHONY_E2E_CODEX_API_KEY",
@@ -16,6 +17,7 @@ const DEFAULT_CHILD_ENVIRONMENT_KEYS = Object.freeze([
 const SECRET_ENVIRONMENT_KEYS = new Set([
   INPUT_KEYS.linearDevToken,
   INPUT_KEYS.linearHumanToken,
+  INPUT_KEYS.linearClientSecret,
   INPUT_KEYS.codexApiKey,
 ]);
 
@@ -29,6 +31,7 @@ export function loadE2EConfig({
   const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
   const linearHumanToken = required(environment, INPUT_KEYS.linearHumanToken, "linear_human_token_missing", issues);
   const linearClientId = required(environment, INPUT_KEYS.linearClientId, "linear_client_id_missing", issues);
+  const linearClientSecret = required(environment, INPUT_KEYS.linearClientSecret, "linear_client_secret_missing", issues);
   const projectSlugId = required(environment, INPUT_KEYS.projectSlugId, "linear_project_slug_id_missing", issues);
   const rawLinearSetupAuthorized = required(
     environment,
@@ -60,7 +63,7 @@ export function loadE2EConfig({
       projectSlugId,
       setupAuthorized: linearSetupAuthorized,
     }),
-    secrets: Object.freeze({ linearDevToken, linearHumanToken, codexApiKey }),
+    secrets: Object.freeze({ linearDevToken, linearHumanToken, linearClientSecret, codexApiKey }),
     codex: Object.freeze({ baseUrl, model }),
   });
 }
@@ -75,6 +78,7 @@ export function summarizeConfig(config) {
     secretPresence: Object.freeze({
       linearDevToken: Boolean(config.secrets.linearDevToken),
       linearHumanToken: Boolean(config.secrets.linearHumanToken),
+      linearClientSecret: Boolean(config.secrets.linearClientSecret),
       codexApiKey: Boolean(config.secrets.codexApiKey),
     }),
   });

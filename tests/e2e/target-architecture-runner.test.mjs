@@ -224,6 +224,7 @@ function configuredEnvironment() {
   return {
     SYMPHONY_E2E_LINEAR_DEV_TOKEN: "symphony-token",
     LINEAR_CLIENT_ID: "client-id",
+    LINEAR_CLIENT_SECRET: "client-secret",
     SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
     SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
     SYMPHONY_E2E_CODEX_API_KEY: "codex-key",
