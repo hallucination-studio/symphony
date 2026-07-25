@@ -68,28 +68,6 @@ export function loadE2EConfig({
   });
 }
 
-export function summarizeConfig(config) {
-  return Object.freeze({
-    platform: config.platform,
-    linear: Object.freeze({
-      projectSlugId: config.linear.projectSlugId,
-    }),
-    codex: Object.freeze({ ...config.codex }),
-    secretPresence: Object.freeze({
-      linearDevToken: Boolean(config.secrets.linearDevToken),
-      linearHumanToken: Boolean(config.secrets.linearHumanToken),
-      linearClientSecret: Boolean(config.secrets.linearClientSecret),
-      codexApiKey: Boolean(config.secrets.codexApiKey),
-    }),
-  });
-}
-
-export function isMissingInputConfiguration(error) {
-  return error?.code === "e2e_configuration_invalid" &&
-    Array.isArray(error.issues) && error.issues.length > 0 &&
-    error.issues.every((issue) => typeof issue === "string" && issue.endsWith("_missing"));
-}
-
 export function createChildEnvironment({
   environment = process.env,
   allowedKeys = DEFAULT_CHILD_ENVIRONMENT_KEYS,

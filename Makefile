@@ -29,7 +29,7 @@ test: install
 test-all: lint typecheck build test
 
 e2e:
-	@echo "E2E is deferred until the target architecture black-box scenarios are defined."
+	npm run e2e
 
 dev: install
 	npm run dev -w @symphony/podium-desktop

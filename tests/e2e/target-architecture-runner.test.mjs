@@ -11,7 +11,7 @@ import {
 } from "../../tools/e2e/parallel-black-box-contract.mjs";
 import { createFinalCaseVerdict } from "../../tools/e2e/final-evidence-verdict.mjs";
 import { runParallelBlackBoxE2ECampaign } from "../../tools/e2e/target-architecture.mjs";
-import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/config.mjs";
+import { loadE2EConfig } from "../../tools/e2e/config.mjs";
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
 import { cycleSuccessorRow } from "./cycle-successor-fixture.mjs";
 import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
@@ -1025,25 +1025,3 @@ function configuredEnvironment() {
     SYMPHONY_E2E_CODEX_MODEL: "gpt-5-codex",
   };
 }
-
-const missingConfiguration = (() => {
-  try {
-    loadE2EConfig({ environment: process.env });
-    return undefined;
-  } catch (error) {
-    if (isMissingInputConfiguration(error)) return "real parallel black-box E2E configuration is not present";
-    throw error;
-  }
-})();
-
-test("real parallel black-box Campaign runs only with complete distinct credentials", {
-  skip: missingConfiguration,
-  timeout: 301_000,
-}, async () => {
-  await assert.rejects(
-    import("../../tools/e2e/target-architecture.mjs").then(({ runConfiguredParallelBlackBoxE2ECampaign }) =>
-      runConfiguredParallelBlackBoxE2ECampaign({ environment: process.env }),
-    ),
-    /parallel_black_box_campaign_runtime_unavailable/u,
-  );
-});

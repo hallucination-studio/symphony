@@ -189,7 +189,24 @@ Campaign不自动删除、archive、cancel或quiesce测试Roots。Root保留其�
 重复运行使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels，不复用旧Root作为本次通过
 证据，也不让新Conductor admit旧Campaign未完成的Root。
 
-## 7. Test-only closed contract
+## 7. Command surface
+
+E2E只保留以下两条Campaign相关命令。它们不互为alias、fallback或替代证据：
+
+| Command | Purpose | Credentials | CI role |
+|---|---|---|---|
+| `npm run test:e2e:runner` | 确定性、无密钥的Campaign contract和negative-control验证 | 不读取`.env`或Workflow credential | required |
+| `npm run e2e` | 启动唯一的真实Parallel Black-Box E2E Campaign | 从已存在时的`.env`读取授权输入，或使用外部环境 | explicit authorized run only |
+
+`make e2e`只能调用`npm run e2e`。Desktop shell smoke是Podium Desktop production-entrypoint的独立观测，不是Campaign
+command、Campaign证据或Workflow E2E的替代；它不属于上表的任一命令。
+
+真实Campaign CLI在缺失或无效输入、required runtime不可用，或其他启动失败时必须fail closed：只向stderr写一行结构化JSON，格式为
+`{ "status": "failed", "reason_code", "issues" }`，并以exit code `1`结束。`reason_code`和`issues`只能是稳定的公开码；不输出
+credential、token、provider transcript、原始exception、Root/Issue正文或任意环境变量值。不存在`doctor`、环境测试alias、成功占位
+或配置不足时的synthetic Campaign result。
+
+## 8. Test-only closed contract
 
 runner内部使用versioned、closed的test-only Command/Result，禁止任意metadata：
 
@@ -245,7 +262,7 @@ same-Conductor preemption Case恰有两个，顺序固定为`in_flight_root`、`
 三个，顺序固定为`C_root`、`A_root`、`B_root`，并且必须与`routed_conductor_ids[]`中的`C`、`A`、`B`顺序严格对应。
 它们只供closed Human/operator script和predicate定位外部对象，不是durable checkpoint。
 
-## 8. Final Evidence Snapshot
+## 9. Final Evidence Snapshot
 
 每个Case在settle后重新创建外部clients，并以其spec中的精确Root IDs读取：
 
@@ -272,7 +289,7 @@ incomplete，不能使用较早轮询结果补齐。最终predicate必须同时�
 process exit code、Conductor/Performer内存、Provider session、runtime log、timeline event publish返回值、polling cache和
 runner本地`final`字段只能帮助诊断，不能进入通过predicate或`evidence_refs`。
 
-### 8.2 Conductor restart isolation
+### 9.1 Conductor restart isolation
 
 restart isolation Case的operator script必须先从公开观察边界等待`C_root`出现in-flight Stage，再只通过process controller
 对`C`执行`SIGKILL`和使用相同公开Binding输入的fresh process start。该等待和kill/restart调用只决定何时触发真实故障；
@@ -296,7 +313,7 @@ settle后final fresh snapshot必须同时证明以下durable事实：
 ownership、A/B failure/cancel/replacement或不连续interval都是`failed`。没有durable的“process restarted”记录，且不得创建
 该记录。
 
-### 8.1 Durable overlap
+### 9.2 Durable overlap
 
 Campaign必须证明至少两个不同Conductor执行过真正重叠的Stage interval。唯一允许的证据是final fresh read中的：
 
@@ -313,7 +330,7 @@ max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
 
 process存活时间、日志交错、Promise并发、Root `In Progress`时间重叠或本地timer都不能证明并行执行。
 
-## 9. Verdict与failure语义
+## 10. Verdict与failure语义
 
 final snapshot读取完成后才产生verdict：
 
@@ -328,7 +345,7 @@ Campaign使用all-settled：等待全部Case各自完成final fresh read，再�
 Campaign非零退出；optional Case只能补充诊断，不能抵消mandatory failure。报告按Case列出脱敏reason和durable
 Linear/Git references，不输出Issue正文、credential、Provider transcript或内部runtime state。
 
-## 10. Mandatory Case matrix
+## 11. Mandatory Case matrix
 
 | Case ID | Human script | Evidence predicate | Case | 外部用户/故障动作 | final fresh evidence |
 |---|---|---|---|---|---|
@@ -349,7 +366,7 @@ Campaign Command必须按上表顺序包含且仅包含这八个Case；每个都
 固定路由到A、B，`conductor_restart_isolation`固定路由到C、A、B，其余Case路由到A。Case ID、Human script、
 Evidence predicate、路由数量或mandatory标志的任一偏差都是无效Campaign，不能作为optional替代或别名接受。
 
-## 11. 实现硬切换
+## 12. 实现硬切换
 
 实现本设计时直接删除串行、白盒或synthetic runner路径，不保留feature flag、adapter、dual runner或fallback。尤其必须
 删除以下行为及其tests/fixtures：
@@ -364,7 +381,7 @@ Evidence predicate、路由数量或mandatory标志的任一偏差都是无效Ca
 新runner只有一条Campaign入口和一套mandatory Case registry。旧代码、旧配置项、旧fixture和旧测试必须在同一原子切换中
 删除，不能声明deprecated后继续存在。
 
-## 12. 不变量
+## 13. 不变量
 
 1. 所有Cases共享一个真实Linear Project，最低拓扑是三个独立真实Conductor。
 2. Symphony Actor和E2E Human Actor身份可从Linear durable facts区分。
