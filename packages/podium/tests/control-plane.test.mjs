@@ -267,7 +267,7 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     () => sdk,
   );
 
-  await services.command({
+  const created = await services.command({
     kind: "create_conductor",
     project_id: "project-1",
     repository: { repository_handle: "repo-handle-1", base_branch: "main" },
@@ -277,6 +277,13 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     ["team", { projectId: "project-1", authorized: true }],
     ["project", { projectId: "project-1", labelName: `symphony:conductor/${binding.conductorShortHash}` }],
   ]);
+  assert.deepEqual(created, {
+    kind: "conductor_created",
+    conductor_id: binding.conductorId,
+    binding_id: binding.bindingId,
+    conductor_short_hash: binding.conductorShortHash,
+    repository_identity: binding.repositoryContext.repositoryIdentity,
+  });
   assert.equal(binding.desiredState, "stopped");
 
   await services.command({

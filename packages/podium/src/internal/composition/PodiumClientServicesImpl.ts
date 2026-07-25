@@ -180,6 +180,9 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     return {
       kind: "conductor_created",
       conductor_id: binding.conductorId,
+      binding_id: binding.bindingId,
+      conductor_short_hash: binding.conductorShortHash,
+      repository_identity: binding.repositoryContext.repositoryIdentity,
     };
   }
 
