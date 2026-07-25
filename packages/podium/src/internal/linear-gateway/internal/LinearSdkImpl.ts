@@ -185,10 +185,7 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
         nodes {
           id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
           parent { id } resolvedAt
-          reactions(first: 256) {
-            nodes { id emoji user { id } botActor { id } externalUser { id } }
-            pageInfo { hasNextPage }
-          }
+          reactions { id emoji user { id } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -212,10 +209,7 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
           nodes {
             id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
             parent { id } resolvedAt
-            reactions(first: 256) {
-              nodes { id emoji user { id } botActor { id } externalUser { id } }
-              pageInfo { hasNextPage }
-            }
+            reactions { id emoji user { id } }
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -236,10 +230,7 @@ const WORKFLOW_ISSUE_TREE_COMMENTS_PAGE_QUERY = `
         nodes {
           id body createdAt updatedAt user { id } botActor { id } externalUser { id } issue { id }
           parent { id } resolvedAt
-          reactions(first: 256) {
-            nodes { id emoji user { id } botActor { id } externalUser { id } }
-            pageInfo { hasNextPage }
-          }
+          reactions { id emoji user { id } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -300,16 +291,11 @@ interface IssueTreeComment {
   issue: { id: string };
   parent: { id: string } | null;
   resolvedAt: string | null;
-  reactions: {
-    nodes: Array<{
-      id: string;
-      emoji: string;
-      user?: { id: string } | null;
-      botActor?: { id: string } | null;
-      externalUser?: { id: string } | null;
-    }>;
-    pageInfo: { hasNextPage: boolean };
-  };
+  reactions: Array<{
+    id: string;
+    emoji: string;
+    user?: { id: string } | null;
+  }>;
 }
 
 interface IssueTreeRelation {
@@ -2589,18 +2575,16 @@ function workflowCommentReactions(
   reactions: IssueTreeComment["reactions"],
   delegateActorId: string,
 ): import("../types.js").WorkflowCommentReactionValue[] {
-  if (reactions.pageInfo.hasNextPage || reactions.nodes.length > 256) {
+  if (!Array.isArray(reactions) || reactions.length > 256) {
     throw new Error("linear_workflow_comment_reactions_incomplete");
   }
   const reactionIds = new Set<string>();
-  return reactions.nodes.map((reaction) => {
+  return reactions.map((reaction) => {
     if (!reaction || typeof reaction !== "object") throw new Error("linear_workflow_comment_reaction_invalid");
     const value = reaction as {
       id?: unknown;
       emoji?: unknown;
       user?: unknown;
-      botActor?: unknown;
-      externalUser?: unknown;
     };
     if (typeof value.id !== "string" || !SAFE_ID.test(value.id) ||
         typeof value.emoji !== "string" || value.emoji.length === 0 || value.emoji.length > 256 ||
@@ -2614,8 +2598,6 @@ function workflowCommentReactions(
       createdAt: "1970-01-01T00:00:00.000Z",
       updatedAt: "1970-01-01T00:00:00.000Z",
       user: value.user,
-      botActor: value.botActor,
-      externalUser: value.externalUser,
     }, delegateActorId);
     return {
       reactionId: value.id,

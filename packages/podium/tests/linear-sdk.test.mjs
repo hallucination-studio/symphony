@@ -577,7 +577,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
       id: "comment-root", body: "Root status", createdAt: "2026-07-16T00:00:00Z",
       updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
       parent: null, resolvedAt: null,
-      reactions: { nodes: [{ id: "reaction-human", emoji: "eyes", user: { id: "human-2" } }], pageInfo: { hasNextPage: false } },
+      reactions: [{ id: "reaction-human", emoji: "eyes", user: { id: "human-2" } }],
     }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }], pageInfo: { hasNextPage: false } },
   };
@@ -591,7 +591,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
       createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z",
       user: { id: "symphony-bot" }, issue: { id: "work-1" }, parent: { id: "comment-root" },
       resolvedAt: "2026-07-16T00:00:04Z",
-      reactions: { nodes: [{ id: "reaction-symphony", emoji: "white_check_mark", user: { id: "symphony-bot" } }], pageInfo: { hasNextPage: false } },
+      reactions: [{ id: "reaction-symphony", emoji: "white_check_mark", user: { id: "symphony-bot" } }],
     }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   };
@@ -622,7 +622,10 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
   assert.ok(queries.some((query) => query.includes("comments(first: 8)")));
   assert.ok(queries.some((query) => query.includes("parent { id }")));
   assert.ok(queries.some((query) => query.includes("resolvedAt")));
-  assert.ok(queries.some((query) => query.includes("reactions(first: 256)")));
+  assert.ok(queries.some((query) => /reactions\s*\{\s*id emoji/u.test(query)));
+  assert.ok(queries.some((query) => query.includes("reactions { id emoji user { id } }")));
+  assert.ok(queries.every((query) => !query.includes("reactions(first:")));
+  assert.ok(queries.every((query) => !/reactions\s*\{\s*nodes\b/u.test(query)));
   assert.ok(queries.some((query) => query.includes("inverseRelations(first: 8)")));
   assert.ok(queries.some((query) => query.includes("includeArchived: true")));
 
@@ -677,7 +680,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
       nodes: [{
         id: "comment-1", body: "first", createdAt: "2026-07-16T00:00:00Z",
         updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
-        parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+        parent: null, resolvedAt: null, reactions: [],
       }],
       pageInfo: { hasNextPage: true, endCursor: "comments-2" },
     },
@@ -713,7 +716,7 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
         nodes: [{
           id: "comment-2", body: "second", createdAt: "2026-07-16T00:00:01Z",
           updatedAt: "2026-07-16T00:00:02Z", user: { id: "human-2" }, issue: { id: "root-1" },
-          parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+          parent: null, resolvedAt: null, reactions: [],
         }],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
@@ -1124,7 +1127,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
   const source = {
     id: "source-comment", body: "Please review the plan", createdAt: "2026-07-16T00:00:00Z",
     updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
-    parent: null, resolvedAt: null, reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+    parent: null, resolvedAt: null, reactions: [],
   };
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
@@ -1150,17 +1153,17 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
         id: "reply-comment", body: input.body, createdAt: "2026-07-16T00:00:02Z",
         updatedAt: "2026-07-16T00:00:02Z", user: { id: "symphony-bot" }, issue: { id: input.issueId },
         parent: { id: input.parentId }, resolvedAt: null,
-        reactions: { nodes: [], pageInfo: { hasNextPage: false } },
+        reactions: [],
       });
     },
     async createReaction(input) {
       calls.push({ kind: "create_reaction", input });
       const comment = root.comments.nodes.find(({ id }) => id === input.commentId);
-      comment.reactions.nodes.push({ id: "receipt-check", emoji: input.emoji, user: { id: "symphony-bot" } });
+      comment.reactions.push({ id: "receipt-check", emoji: input.emoji, user: { id: "symphony-bot" } });
     },
     async deleteReaction(reactionId) {
       calls.push({ kind: "delete_reaction", reactionId });
-      source.reactions.nodes = source.reactions.nodes.filter(({ id }) => id !== reactionId);
+      source.reactions = source.reactions.filter(({ id }) => id !== reactionId);
     },
     async commentResolve(commentId) {
       calls.push({ kind: "resolve", commentId });
