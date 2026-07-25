@@ -736,6 +736,8 @@ ReplanCurrentCycleDirective
 
 Root目标和contract未发生实质变化，但当前Plan错误、假设失效或执行方案需要重构时，可以在当前Cycle内
 replan。旧Plan Contract immutable并通过`PlanContractSupersessionRecord`失效；fresh Plan turn产生新Contract。
+`superseded_plan_contract_ids`必须非空且无重复：每项都必须对应matching Plan Issue内唯一、同Root同Cycle的旧Contract。
+Conductor须先写入并fresh read-back全部supersession records；任何验证、写入或read-back失败都不得改变Cycle或Plan状态。
 旧Work evidence只有被新Plan显式引用时才可复用。
 
 ### 7.4 结束当前Cycle并创建successor

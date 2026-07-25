@@ -9,10 +9,14 @@ import type {
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import {
   findWorkflowIssue,
+  planContractSupersessionId,
+  parseManagedRecord,
   renderWorkflowIssueDescription,
   rewriteWorkflowIssueDescription,
+  serializeManagedRecord,
   workflowIssueLabel,
 } from "../../root-reconciliation/api/index.js";
+import type { PlanContractSupersessionRecord } from "../../root-reconciliation/api/ManagedRecords.js";
 import type {
   RootDirectiveMaterializationResult,
   RootDirectiveMaterializerInterface,
@@ -94,6 +98,9 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
         plan.parent_issue_id !== cycle.issue_id || plan.issue_kind !== "plan" || plan.is_archived) {
       return failed(directive, "cycle_replan_target_invalid");
     }
+    const supersessions = await this.materializePlanContractSupersessions(directive, view, cycle.issue_id, plan.issue_id, action.supersededPlanContractIds);
+    if (supersessions.kind === "failed") return supersessions;
+    view = supersessions.view;
     if (action.archiveOrRestoreOperations.length > 0) {
       const patched = await this.applyTreeOperations(directive, view, action.archiveOrRestoreOperations);
       if (patched.kind === "failed") return patched;
@@ -111,6 +118,94 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
     const executed = await executeMutation(this.linear, view, directive, command, "update_node");
     if (executed.kind === "failed") return executed;
     return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [cycle.issue_id, plan.issue_id] };
+  }
+
+  private async materializePlanContractSupersessions(
+    directive: RootDirective,
+    view: RootReconciliationView,
+    cycleIssueId: string,
+    planIssueId: string,
+    supersededPlanContractDigests: string[],
+  ): Promise<PlanContractSupersessionMaterializationResult> {
+    if (supersededPlanContractDigests.length === 0) {
+      return supersessionFailed(directive, "cycle_replan_superseded_contract_required");
+    }
+    if (new Set(supersededPlanContractDigests).size !== supersededPlanContractDigests.length) {
+      return supersessionFailed(directive, "cycle_replan_superseded_contract_duplicate");
+    }
+    const contracts = view.tree.comments.flatMap((comment) => {
+      if (comment.issue_id !== planIssueId || comment.author_kind !== "symphony") return [];
+      const parsed = parseManagedRecord(comment.body);
+      return parsed.ok && parsed.value.kind === "plan_contract" ? [{ comment, record: parsed.value }] : [];
+    });
+    const records: PlanContractSupersessionRecord[] = [];
+    for (const digest of supersededPlanContractDigests) {
+      const candidates = contracts.filter(({ record }) => record.planContractDigest === digest);
+      if (candidates.length === 0) return supersessionFailed(directive, "cycle_replan_superseded_contract_missing");
+      if (candidates.some(({ record }) => record.rootIssueId !== view.root.issueId || record.cycleIssueId !== cycleIssueId)) {
+        return supersessionFailed(directive, "cycle_replan_superseded_contract_foreign");
+      }
+      if (candidates.length !== 1) return supersessionFailed(directive, "cycle_replan_superseded_contract_duplicate");
+      records.push({
+        kind: "plan_contract_supersession",
+        version: 1,
+        supersessionId: planContractSupersessionId({
+          rootIssueId: view.root.issueId,
+          cycleIssueId,
+          rootDirectiveId: directive.rootDirectiveId,
+          supersededPlanContractDigest: digest,
+        }),
+        rootIssueId: view.root.issueId,
+        cycleIssueId,
+        supersededPlanContractDigest: digest,
+        sourceRootDirectiveId: directive.rootDirectiveId,
+        freshPlanIssueId: planIssueId,
+        supersededAt: directive.modelTurn.terminalAt,
+      });
+    }
+
+    let currentView = view;
+    for (const record of records) {
+      const body = serializeManagedRecord(record);
+      const existing = currentView.tree.comments.filter((comment) => {
+        if (comment.issue_id !== planIssueId || comment.author_kind !== "symphony") return false;
+        const parsed = parseManagedRecord(comment.body);
+        return parsed.ok && parsed.value.kind === "plan_contract_supersession" && parsed.value.supersessionId === record.supersessionId;
+      });
+      if (existing.length > 1 || (existing.length === 1 && existing[0]!.body !== body)) {
+        return supersessionFailed(directive, "cycle_replan_supersession_conflict");
+      }
+      if (existing.length === 1) continue;
+
+      const root = rootIssue(currentView, currentView.root.issueId);
+      const plan = rootIssue(currentView, planIssueId);
+      const outcome = await this.linear.mutateWorkflow({
+        kind: "append_workflow_comment",
+        writeId: `plan-contract-supersession:${record.supersessionId}`,
+        expectedProjectId: plan.project_id,
+        rootIssueId: currentView.root.issueId,
+        expectedRootRemoteVersion: root.remote_version,
+        target: {
+          targetIssueId: plan.issue_id,
+          expectedRemoteVersion: plan.remote_version,
+          expectedStatusId: plan.status_id,
+          expectedParentIssueId: cycleIssueId,
+        },
+        body,
+      });
+      if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+        return supersessionFailed(directive, `cycle_replan_supersession_write_${outcome.kind}`);
+      }
+      const tree = await this.linear.readWorkflowIssueTree(currentView.root.issueId);
+      const confirmed = tree.comments.filter((comment) => {
+        if (comment.issue_id !== planIssueId || comment.author_kind !== "symphony" || comment.body !== body) return false;
+        const parsed = parseManagedRecord(comment.body);
+        return parsed.ok && parsed.value.kind === "plan_contract_supersession" && parsed.value.supersessionId === record.supersessionId;
+      });
+      if (confirmed.length !== 1) return supersessionFailed(directive, "cycle_replan_supersession_read_back_missing");
+      currentView = { ...currentView, tree, observedAt: tree.observed_at };
+    }
+    return { kind: "materialized", view: currentView };
   }
 
   private async cancelRoot(
@@ -310,6 +405,10 @@ export class LinearRootDirectiveMaterializerImpl implements RootDirectiveMateria
   }
 }
 
+type PlanContractSupersessionMaterializationResult =
+  | { kind: "materialized"; view: RootReconciliationView }
+  | Extract<RootDirectiveMaterializationResult, { kind: "failed" }>;
+
 function updateIssueCommand(
   view: RootReconciliationView,
   directive: RootDirective,
@@ -328,6 +427,13 @@ function updateIssueCommand(
     title: target.title,
     description: description === undefined ? target.description : preservedDescription(target, description),
   };
+}
+
+function supersessionFailed(
+  directive: RootDirective,
+  code: string,
+): Extract<RootDirectiveMaterializationResult, { kind: "failed" }> {
+  return { kind: "failed", rootDirectiveId: directive.rootDirectiveId, code, sanitizedReason: code };
 }
 
 interface OperationPlan {

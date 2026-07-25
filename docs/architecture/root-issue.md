@@ -204,6 +204,26 @@ CycleOutcome
 WorkflowTimelineRecord
 ```
 
+`PlanContractSupersessionRecord`是当前Cycle内`replan_current_cycle`使旧Contract失效的唯一不可变事实：
+
+```text
+supersession_id
+root_issue_id
+cycle_issue_id
+superseded_plan_contract_digest
+source_root_directive_id
+fresh_plan_issue_id
+superseded_at
+```
+
+它在matching accepted directive完成必要Linear write并fresh read-back后写在Plan Issue的managed comment中。它不拥有
+Cycle/Plan status、archive flag或fresh Plan execution；这些仍是Linear原生事实和随后独立的Stage Execution/Result。
+`fresh_plan_issue_id`只标识将接收新turn的现有Plan Issue，不能预填尚不存在的execution、result或新Contract digest。
+`supersession_id`由`root_issue_id`、`cycle_issue_id`、`source_root_directive_id`和
+`superseded_plan_contract_digest`确定性派生，以支持重启后的幂等read-back。
+`replan_current_cycle.superseded_plan_contract_ids`必须是非空且无重复的列表；每个元素都必须在matching Plan Issue上
+对应唯一、同Root同Cycle的旧`PlanContractRecord`，否则Conductor不得改变Cycle或Plan的Linear status。
+
 managed records位于Symphony actor所写Linear comment的唯一`symphony` fenced code block中；`WorkflowIssueRecord`
 位于matching descendant Issue description的唯一`symphony` block中。二者都使用closed、versioned schema，不包含SDK object、
 raw reasoning、secret或arbitrary metadata。不存在HTML marker、`managed_marker`字段或兼容reader。

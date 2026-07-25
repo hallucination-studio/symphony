@@ -28,6 +28,7 @@ import type {
 } from "../api/index.js";
 import {
   findWorkflowIssue,
+  planContractSupersessionId,
   parseManagedRecord,
   serializeManagedRecord,
   workflowIssueMarkdown,
@@ -978,7 +979,30 @@ export function directiveMaterializationComplete(directive: RootDirective, tree:
   if (action.kind === "replan_current_cycle") {
     const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
     const plan = tree.issues.find(({ issue_id }) => issue_id === action.planIssueId);
-    return treeOperationsComplete(action.archiveOrRestoreOperations, tree) &&
+    if (action.supersededPlanContractIds.length === 0) return false;
+    if (new Set(action.supersededPlanContractIds).size !== action.supersededPlanContractIds.length) return false;
+    const supersessionsComplete = action.supersededPlanContractIds.every((supersededPlanContractDigest) => {
+      const supersessionId = planContractSupersessionId({
+        rootIssueId: tree.root_issue_id,
+        cycleIssueId: action.cycleIssueId,
+        rootDirectiveId: directive.rootDirectiveId,
+        supersededPlanContractDigest,
+      });
+      const matches = tree.comments.filter((comment) => {
+        if (comment.issue_id !== action.planIssueId || comment.author_kind !== "symphony") return false;
+        const parsed = parseManagedRecord(comment.body);
+        return parsed.ok && parsed.value.kind === "plan_contract_supersession" &&
+          parsed.value.supersessionId === supersessionId &&
+          parsed.value.rootIssueId === tree.root_issue_id &&
+          parsed.value.cycleIssueId === action.cycleIssueId &&
+          parsed.value.supersededPlanContractDigest === supersededPlanContractDigest &&
+          parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
+          parsed.value.freshPlanIssueId === action.planIssueId &&
+          parsed.value.supersededAt === directive.modelTurn.terminalAt;
+      });
+      return matches.length === 1;
+    });
+    return supersessionsComplete && treeOperationsComplete(action.archiveOrRestoreOperations, tree) &&
       cycle?.status_name === "Planning" && plan?.status_name === "In Progress" && issueMarkdown(plan) === action.freshPlanGoal;
   }
   if (action.kind === "conclude_root") return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "In Review";

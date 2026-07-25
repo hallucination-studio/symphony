@@ -606,6 +606,7 @@ function recordReference(record: ManagedRecord, stableWriteId?: string): RootRec
     : "resolutionId" in record ? record.resolutionId
       : "rootDirectiveId" in record ? record.rootDirectiveId
       : "actionId" in record ? record.actionId
+        : "supersessionId" in record ? record.supersessionId
         : `${record.kind}:${digest(record).slice(0, 24)}`;
   return {
     recordId: identity,

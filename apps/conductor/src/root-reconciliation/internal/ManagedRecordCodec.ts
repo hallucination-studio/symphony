@@ -12,6 +12,7 @@ import type {
   ManagedRecord,
   EvidenceReference,
   PlanContract,
+  PlanContractSupersessionRecord,
   PlanContractProposal,
   PlanDependencyEdge,
   PlanVerifyNode,
@@ -107,6 +108,7 @@ function managedRecordSummary(kind: ManagedRecord["kind"]): string {
     case "delivery": return "Delivery recorded.";
     case "workflow_timeline": return "Workflow timeline recorded.";
     case "plan_contract": return "Plan contract recorded.";
+    case "plan_contract_supersession": return "Plan contract supersession recorded.";
     case "stage_execution": return "Stage execution recorded.";
     case "stage_result": return "Stage result recorded.";
     case "human_action_request": return "Human action request recorded.";
@@ -132,6 +134,7 @@ function decodeRecord(value: unknown): ManagedRecord {
     case "delivery": return decodeDelivery(object);
     case "workflow_timeline": return decodeWorkflowTimeline(object);
     case "plan_contract": return decodePlanContract(object);
+    case "plan_contract_supersession": return decodePlanContractSupersession(object);
     case "stage_execution": return decodeStageExecution(object);
     case "stage_result": return decodeStageResult(object);
     case "human_action_request": return decodeHumanActionRequest(object);
@@ -350,6 +353,24 @@ function decodePlanContract(o: Record<string, unknown>): PlanContract {
       verification_requirements: o.verification_requirements,
     }),
     proposedWorkDag: decodePlanDag(requiredObject(o, "proposed_work_dag")),
+  };
+}
+
+function decodePlanContractSupersession(o: Record<string, unknown>): PlanContractSupersessionRecord {
+  fields(o, [
+    "kind", "version", "supersession_id", "root_issue_id", "cycle_issue_id", "superseded_plan_contract_digest",
+    "source_root_directive_id", "fresh_plan_issue_id", "superseded_at",
+  ]);
+  return {
+    kind: "plan_contract_supersession",
+    version: 1,
+    supersessionId: id(o, "supersession_id"),
+    rootIssueId: id(o, "root_issue_id"),
+    cycleIssueId: id(o, "cycle_issue_id"),
+    supersededPlanContractDigest: id(o, "superseded_plan_contract_digest"),
+    sourceRootDirectiveId: id(o, "source_root_directive_id"),
+    freshPlanIssueId: id(o, "fresh_plan_issue_id"),
+    supersededAt: timestamp(o, "superseded_at"),
   };
 }
 
@@ -644,6 +665,7 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     delivery: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "verifyResultId", "verifiedRevision", "deliveryKind", "deliveryBranch", "pullRequest", "deliveredAt"], optional: ["pullRequest"] },
     workflow_timeline: { allowed: ["kind", "version", "timelineEventId", "timelineKind", "targetIssueId", "sourceRecordIds", "sourceVersions", "writeId", "renderedSchemaVersion", "occurredAt"] },
     plan_contract: { allowed: ["kind", "version", "rootIssueId", "cycleIssueId", "planContractDigest", "objective", "includedScope", "excludedScope", "assumptions", "constraints", "acceptanceCriteria", "verificationRequirements", "proposedWorkDag"] },
+    plan_contract_supersession: { allowed: ["kind", "version", "supersessionId", "rootIssueId", "cycleIssueId", "supersededPlanContractDigest", "sourceRootDirectiveId", "freshPlanIssueId", "supersededAt"] },
     stage_execution: { allowed: ["kind", "version", "stageExecutionId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "planContractDigest", "contextDigest", "sourceManifest", "coverage", "instructionSetId", "executionPolicyId", "limits", "repositoryRevision", "startedAt", "deadlineAt"], optional: ["planContractDigest"] },
     stage_result: { allowed: ["kind", "version", "resultId", "rootIssueId", "cycleIssueId", "nodeIssueId", "stage", "roleSessionId", "roleTurnId", "observedTreeDigest", "contextDigest", "outcomeKind", "summary", "sourceManifest", "completedAt", "modelTurn", "planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"], optional: ["planContractDigest", "planContract", "proposedWorkDag", "risks", "requiredPermissions", "evidenceRefs", "changedPaths", "commitRevision", "verifyConclusion", "verifiedRevision", "failureCode"] },
     human_action_request: { allowed: ["kind", "version", "actionId", "actionIssueId", "actionKind", "parentScope", "rootIssueId", "cycleIssueId", "relatedIssueIds", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest", "proposalDigest", "expectedParentRemoteVersion", "createdAt"], optional: ["cycleIssueId", "sourceRootDirectiveId", "sourceRootConvergenceRecordId", "basedOnTreeDigest"] },
@@ -702,6 +724,15 @@ function encodeRecord(value: unknown): Record<string, unknown> {
     case "delivery": return encodeSimple(record, { root_issue_id: record.rootIssueId, cycle_issue_id: record.cycleIssueId, verify_result_id: record.verifyResultId, verified_revision: record.verifiedRevision, delivery_kind: record.deliveryKind, delivery_branch: record.deliveryBranch, ...(record.pullRequest === undefined ? {} : { pull_request: record.pullRequest }), delivered_at: record.deliveredAt });
     case "workflow_timeline": return encodeSimple(record, { timeline_event_id: record.timelineEventId, timeline_kind: record.timelineKind, target_issue_id: record.targetIssueId, source_record_ids: record.sourceRecordIds, source_versions: record.sourceVersions, write_id: record.writeId, rendered_schema_version: record.renderedSchemaVersion, occurred_at: record.occurredAt });
     case "plan_contract": return encodePlanContract(record);
+    case "plan_contract_supersession": return encodeSimple(record, {
+      supersession_id: record.supersessionId,
+      root_issue_id: record.rootIssueId,
+      cycle_issue_id: record.cycleIssueId,
+      superseded_plan_contract_digest: record.supersededPlanContractDigest,
+      source_root_directive_id: record.sourceRootDirectiveId,
+      fresh_plan_issue_id: record.freshPlanIssueId,
+      superseded_at: record.supersededAt,
+    });
     case "stage_execution": return encodeStageExecution(record);
     case "stage_result": return encodeStageResult(record);
     case "human_action_request": return encodeSimple(record, { action_id: record.actionId, action_issue_id: record.actionIssueId, action_kind: record.actionKind, parent_scope: record.parentScope, root_issue_id: record.rootIssueId, ...(record.cycleIssueId === undefined ? {} : { cycle_issue_id: record.cycleIssueId }), related_issue_ids: record.relatedIssueIds, ...(record.sourceRootDirectiveId === undefined ? {} : { source_root_directive_id: record.sourceRootDirectiveId }), ...(record.sourceRootConvergenceRecordId === undefined ? {} : { source_root_convergence_record_id: record.sourceRootConvergenceRecordId }), ...(record.basedOnTreeDigest === undefined ? {} : { based_on_tree_digest: record.basedOnTreeDigest }), proposal_digest: record.proposalDigest, expected_parent_remote_version: record.expectedParentRemoteVersion, created_at: record.createdAt });

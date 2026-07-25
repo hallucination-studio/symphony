@@ -122,6 +122,7 @@ export type RootRecordKind =
   | "model_turn"
   | "stage_execution"
   | "plan_contract"
+  | "plan_contract_supersession"
   | "plan_result"
   | "work_result"
   | "stage_result"
@@ -440,7 +441,7 @@ export interface ReplanCurrentCycleDirective {
   kind: "replan_current_cycle";
   cycleIssueId: string;
   reason: string;
-  supersededPlanContractIds: string[];
+  supersededPlanContractIds: [string, ...string[]];
   invalidateExecutionIds: string[];
   preserveEvidenceRefs: EvidenceRef[];
   archiveOrRestoreOperations: TreeOperation[];

@@ -179,6 +179,18 @@ export interface PlanContract extends PlanContractProposal {
   proposedWorkDag: ProposedWorkDag;
 }
 
+export interface PlanContractSupersessionRecord {
+  kind: "plan_contract_supersession";
+  version: ManagedRecordVersion;
+  supersessionId: string;
+  rootIssueId: string;
+  cycleIssueId: string;
+  supersededPlanContractDigest: string;
+  sourceRootDirectiveId: string;
+  freshPlanIssueId: string;
+  supersededAt: string;
+}
+
 export interface StageExecutionRecord {
   kind: "stage_execution";
   version: ManagedRecordVersion;
@@ -453,6 +465,7 @@ export type ManagedRecord =
   | DeliveryRecord
   | WorkflowTimelineRecord
   | PlanContract
+  | PlanContractSupersessionRecord
   | StageExecutionRecord
   | StageResultRecord
   | HumanActionRequestRecord
