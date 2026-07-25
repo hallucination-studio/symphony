@@ -38,6 +38,7 @@ export { createConductorPresence } from "./createConductorPresence.js";
 export {
   bootstrapDevelopmentTokenInstallation,
   type DevelopmentTokenInstallationView,
+  type DevelopmentTokenTargetProject,
 } from "./bootstrapDevelopmentTokenInstallation.js";
 export {
   inspectTargetWorkflowCatalog,

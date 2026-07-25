@@ -239,6 +239,56 @@ test("development-token installation persists without OAuth placeholders", async
   store.close();
 });
 
+test("development-token bootstrap persists a fresh target Project through the public setup boundary", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-dev-project-"));
+  const databasePath = path.join(directory, "podium.db");
+
+  const result = await bootstrapDevelopmentTokenInstallation({
+    databasePath,
+    developmentToken: "development-secret",
+    delegateActorId: "app-user-1",
+    targetProject: {
+      projectId: "project-1",
+      name: "Target Project",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+    },
+    discoverOrganizationId: async () => "organization-1",
+  });
+
+  assert.deepEqual(result, {
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+  });
+  const store = new SqlitePodiumStoreImpl(databasePath);
+  assert.deepEqual(store.getProject("project-1"), {
+    projectId: "project-1",
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+    name: "Target Project",
+    updatedAt: "2026-07-25T00:00:00.000Z",
+  });
+  store.close();
+});
+
+test("development-token bootstrap rejects an invalid target Project before it contacts Linear", async () => {
+  await assert.rejects(
+    bootstrapDevelopmentTokenInstallation({
+      databasePath: ":memory:",
+      developmentToken: "development-secret",
+      delegateActorId: "app-user-1",
+      targetProject: {
+        projectId: "project with spaces",
+        name: "Target Project",
+        updatedAt: "2026-07-25T00:00:00.000Z",
+      },
+      discoverOrganizationId: async () => {
+        throw new Error("must_not_call_linear");
+      },
+    }),
+    /linear_development_token_project_invalid/u,
+  );
+});
+
 test("legacy OAuth installation schema migrates without losing credentials", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-migration-"));
   const databasePath = path.join(directory, "podium.db");
