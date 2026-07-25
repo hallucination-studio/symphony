@@ -12,6 +12,9 @@ export async function executeHumanScript({ humanScript, caseRoots, human, waitFo
   if (humanScript?.id === "approve_plan") {
     return approvePlan({ rootIssueIds, human, waitForHumanAction });
   }
+  if (humanScript?.id === "deliver_and_review") {
+    return approvePlan({ rootIssueIds, human, waitForHumanAction });
+  }
   if (humanScript?.id === "reject_plan") {
     return rejectPlan({ rootIssueIds, human, waitForHumanAction });
   }

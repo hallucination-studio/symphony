@@ -23,6 +23,21 @@ test("approve_plan resolves only the discovered Plan Review Action through the e
   assert.deepEqual(calls, [{ human_action_issue_id: "action-a", terminal_status: "approved" }]);
 });
 
+test("deliver_and_review resolves only the discovered Plan Review Action through the external Human Actor", async () => {
+  const calls = [];
+  await executeHumanScript({
+    humanScript: { id: "deliver_and_review" },
+    caseRoots: { root_issue_ids: ["root-a"] },
+    human: { async resolveHumanAction(input) { calls.push(input); } },
+    async waitForHumanAction(input) {
+      assert.deepEqual(input, { root_issue_id: "root-a", action_kind: "plan_review" });
+      return { human_action_issue_id: "action-a" };
+    },
+  });
+
+  assert.deepEqual(calls, [{ human_action_issue_id: "action-a", terminal_status: "approved" }]);
+});
+
 test("reject_plan resolves only the discovered Plan Review Action through the external Human Actor with a required reason", async () => {
   const calls = [];
   await executeHumanScript({
@@ -76,6 +91,16 @@ test("happy-path evidence rejects a second durable delivery path", () => {
   assert.deepEqual(assessApprovedHappyPathEvidence(row).outcome, {
     kind: "violated",
     reason_code: "happy_path_delivery_ambiguous",
+  });
+});
+
+test("happy-path evidence rejects Root In Review when its matching Cycle is not succeeded", () => {
+  const row = happyPathRow({ caseId: "happy-a", conductorId: "conductor-a", repositoryIdentity: "repository-a" });
+  row.snapshot.root_trees[0].issues.find(({ issue_id: issueId }) => issueId === "cycle-happy-a").status.name = "Changes Required";
+
+  assert.deepEqual(assessApprovedHappyPathEvidence(row).outcome, {
+    kind: "violated",
+    reason_code: "happy_path_cycle_outcome_invalid",
   });
 });
 

@@ -193,6 +193,11 @@ function assertCase(value, conductorIds, { startedAt, campaignDeadlineAt }) {
   if (isCycleExhaustionScript !== isCycleSuccessorPredicate || (isCycleExhaustionScript && routes.size !== 1)) {
     throw stableError("parallel_black_box_campaign_case_invalid");
   }
+  const isDeliveryScript = e2eCase.human_script_id === "deliver_and_review";
+  const isDeliveryPredicate = e2eCase.evidence_predicate_id === "delivery_review";
+  if (isDeliveryScript !== isDeliveryPredicate || (isDeliveryScript && routes.size !== 1)) {
+    throw stableError("parallel_black_box_campaign_case_invalid");
+  }
 }
 
 function freezeCommand(command) {

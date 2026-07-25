@@ -84,6 +84,13 @@ test("parallel black-box Campaign accepts only the closed version-one command", 
     }),
     /parallel_black_box_campaign_case_invalid/u,
   );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...deliveryReviewCase(), human_script_id: "approve_plan" }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
 });
 
 test("parallel black-box Campaign begins Case work from an already-ready Conductor pool", async () => {
@@ -103,6 +110,26 @@ test("parallel black-box Campaign begins Case work from an already-ready Conduct
     "linear:root-happy-b:stage_execution:plan-execution-happy-b",
     "linear:root-happy-b:stage_result:plan-result-happy-b",
   ]);
+});
+
+test("parallel black-box Campaign accepts delivery and review only from the final fresh Linear and Git chain", async () => {
+  const command = campaignCommand();
+  command.cases = [deliveryReviewCase()];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ case_id, status, reason_code }) => ({ case_id, status, reason_code })), [{
+    case_id: "delivery-review",
+    status: "passed",
+    reason_code: "delivery_review_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("human:")), ["human:delivery-review"]);
+  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:delivery-review"]);
 });
 
 test("parallel black-box Campaign rejects a Root revision Case without its public reply-wait boundary", async () => {
@@ -703,6 +730,17 @@ function restartCase() {
     deadline_at: deadline,
     human_script_id: "restart_conductor",
     evidence_predicate_id: "restart_isolation",
+  };
+}
+
+function deliveryReviewCase() {
+  return {
+    case_id: "delivery-review",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "deliver_and_review",
+    evidence_predicate_id: "delivery_review",
   };
 }
 

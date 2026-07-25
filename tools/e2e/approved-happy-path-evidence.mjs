@@ -26,6 +26,11 @@ export function assessApprovedHappyPathEvidence(row) {
     if (planContracts.length > 1) return assessment("violated", "happy_path_plan_contract_ambiguous");
     const planContract = exact(planContracts);
     if (!planContract) return assessment("inconclusive", "happy_path_plan_contract_missing");
+    const cycleIssue = issue(tree, planContract.cycleIssueId);
+    if (!cycleIssue) return assessment("inconclusive", "happy_path_cycle_missing");
+    if (cycleIssue.parentIssueId !== rootIssue.issueId || cycleIssue.statusName !== "Succeeded") {
+      return assessment("violated", "happy_path_cycle_outcome_invalid");
+    }
     if (ambiguousStage(facts, "plan", input.root.root_issue_id, planContract.cycleIssueId)) {
       return assessment("violated", "happy_path_plan_stage_ambiguous");
     }
