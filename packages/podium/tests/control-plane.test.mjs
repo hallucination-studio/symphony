@@ -232,7 +232,7 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     getOnlyLinearCredential: () => installation,
     getLinearCredential: (installationId) => installationId === installation.installationId ? installation : undefined,
     getProject: (projectId) => projectId === project.projectId ? project : undefined,
-    getConductorBinding: () => undefined,
+    getConductorBinding: () => binding,
     saveConductorBinding: (value) => { binding = value; },
     setConductorDesiredState: (_bindingId, desiredState) => { binding.desiredState = desiredState; },
   };
@@ -246,7 +246,7 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
         baseBranch: "main",
       };
     },
-    async startConductor() {},
+    async startConductor(input) { events.push(["start", input.conductorId]); },
   };
   const sdk = {
     async initializeTargetTeamWorkflow(input) {
@@ -277,6 +277,14 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     ["team", { projectId: "project-1", authorized: true }],
     ["project", { projectId: "project-1", labelName: `symphony:conductor/${binding.conductorShortHash}` }],
   ]);
+  assert.equal(binding.desiredState, "stopped");
+
+  await services.command({
+    kind: "start_conductor",
+    conductor_id: binding.conductorId,
+  });
+  assert.deepEqual(events.at(-1), ["start", binding.conductorId]);
+  assert.equal(binding.desiredState, "running");
 });
 
 test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {

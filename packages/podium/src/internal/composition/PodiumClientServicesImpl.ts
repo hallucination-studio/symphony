@@ -176,16 +176,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       projectId: requiredString(body.project_id, "project_id_missing"),
       repositoryContext: repository,
     });
-    await this.host.startConductor({
-      bindingId: binding.bindingId,
-      conductorId: binding.conductorId,
-      conductorShortHash: binding.conductorShortHash,
-      linearInstallationId: binding.linearInstallationId,
-      organizationId: binding.organizationId,
-      repositoryHandle,
-      repositoryRoot: binding.repositoryContext.repositoryRoot,
-      baseBranch: binding.repositoryContext.baseBranch,
-    });
+    this.store.setConductorDesiredState(binding.bindingId, "stopped");
     return {
       kind: "conductor_created",
       conductor_id: binding.conductorId,
