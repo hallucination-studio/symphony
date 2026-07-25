@@ -1,5 +1,6 @@
 const INPUT_KEYS = Object.freeze({
   linearDevToken: "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
+  linearHumanToken: "SYMPHONY_E2E_LINEAR_HUMAN_TOKEN",
   linearClientId: "LINEAR_CLIENT_ID",
   projectSlugId: "SYMPHONY_E2E_PROJECT_SLUG_ID",
   linearSetupAuthorized: "SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED",
@@ -14,6 +15,7 @@ const DEFAULT_CHILD_ENVIRONMENT_KEYS = Object.freeze([
 
 const SECRET_ENVIRONMENT_KEYS = new Set([
   INPUT_KEYS.linearDevToken,
+  INPUT_KEYS.linearHumanToken,
   INPUT_KEYS.codexApiKey,
 ]);
 
@@ -25,6 +27,7 @@ export function loadE2EConfig({
 } = {}) {
   const issues = [];
   const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
+  const linearHumanToken = required(environment, INPUT_KEYS.linearHumanToken, "linear_human_token_missing", issues);
   const linearClientId = required(environment, INPUT_KEYS.linearClientId, "linear_client_id_missing", issues);
   const projectSlugId = required(environment, INPUT_KEYS.projectSlugId, "linear_project_slug_id_missing", issues);
   const rawLinearSetupAuthorized = required(
@@ -44,6 +47,9 @@ export function loadE2EConfig({
   validateModel(model, issues);
   validateLinearClientId(linearClientId, issues);
   validateProjectSlugId(projectSlugId, issues);
+  if (linearDevToken !== undefined && linearHumanToken !== undefined && linearDevToken === linearHumanToken) {
+    issues.push("linear_actor_credentials_not_distinct");
+  }
   if (platform !== "darwin" && platform !== "linux") issues.push("platform_not_supported");
   if (issues.length > 0) throw configurationError(issues);
 
@@ -54,7 +60,7 @@ export function loadE2EConfig({
       projectSlugId,
       setupAuthorized: linearSetupAuthorized,
     }),
-    secrets: Object.freeze({ linearDevToken, codexApiKey }),
+    secrets: Object.freeze({ linearDevToken, linearHumanToken, codexApiKey }),
     codex: Object.freeze({ baseUrl, model }),
   });
 }
@@ -68,6 +74,7 @@ export function summarizeConfig(config) {
     codex: Object.freeze({ ...config.codex }),
     secretPresence: Object.freeze({
       linearDevToken: Boolean(config.secrets.linearDevToken),
+      linearHumanToken: Boolean(config.secrets.linearHumanToken),
       codexApiKey: Boolean(config.secrets.codexApiKey),
     }),
   });
