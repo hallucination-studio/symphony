@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type {
@@ -74,6 +75,8 @@ test("writes and reads back the immutable CycleOutcome before terminalizing a Cy
       concludedAt: "2026-07-23T00:00:00Z",
     },
   ]);
+  assert.equal(directiveMaterializationComplete(conclusion, linear.tree), false);
+  addDecisionTimeline(linear, conclusion, "cycle-1");
   assert.equal(directiveMaterializationComplete(conclusion, linear.tree), true);
   linear.tree.comments = linear.tree.comments.filter((comment) => !comment.body.includes("cycle_outcome"));
   assert.equal(directiveMaterializationComplete(conclusion, linear.tree), false);
@@ -229,6 +232,8 @@ test("cancel_root persists a canceled CycleOutcome before canceling the Root", a
   assert.equal(outcome.length, 1);
   assert.equal(outcome[0]?.conclusion, "canceled");
   assert.equal("planContractDigest" in outcome[0]!, false);
+  assert.equal(directiveMaterializationComplete(cancellation, linear.tree), false);
+  addDecisionTimeline(linear, cancellation, "cycle-1");
   assert.equal(directiveMaterializationComplete(cancellation, linear.tree), true);
 });
 
@@ -319,6 +324,8 @@ test("supersede_cycle persists a superseded CycleOutcome before creating its suc
   assert.equal(outcome[0]?.conclusion, "superseded");
   assert.equal(outcome[0]?.successorReason, "root_contract_changed");
   assert.equal("planContractDigest" in outcome[0]!, false);
+  assert.equal(directiveMaterializationComplete(supersession, linear.tree), false);
+  addDecisionTimeline(linear, supersession, "cycle-1");
   assert.equal(directiveMaterializationComplete(supersession, linear.tree), true);
 });
 
@@ -931,6 +938,28 @@ function managedComment(commentId: string, issueId: string, body: string): Linea
     remote_version: `${commentId}:v1`,
     updated_at: "2026-07-23T00:00:00Z",
   };
+}
+
+function addDecisionTimeline(linear: FakeLinear, rootDirective: RootDirective, cycleIssueId: string): void {
+  const timelineEventId = createHash("sha256")
+    .update(["decision_accepted", "root-1", cycleIssueId, rootDirective.rootDirectiveId].join("\0"), "utf8")
+    .digest("hex");
+  linear.tree.comments.push(managedComment(
+    `timeline:${timelineEventId}`,
+    cycleIssueId,
+    serializeManagedRecord({
+      kind: "workflow_timeline",
+      version: 1,
+      timelineEventId,
+      timelineKind: "cycle",
+      targetIssueId: cycleIssueId,
+      sourceRecordIds: [rootDirective.rootDirectiveId],
+      sourceVersions: [rootDirective.basedOnTargetRootDigest],
+      writeId: timelineEventId,
+      renderedSchemaVersion: "1",
+      occurredAt: rootDirective.modelTurn.terminalAt,
+    }),
+  ));
 }
 
 function workflowDescription(

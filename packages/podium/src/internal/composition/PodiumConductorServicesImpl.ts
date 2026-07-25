@@ -1,5 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { ConductorPresence } from "../../public/ConductorPresence.js";
+import type { LinearWorkflowMutationRequestScope } from "../../public/LinearPhysicalRequestGate.js";
 import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
@@ -19,6 +22,7 @@ const MAX_LINEAR_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   readonly #activeInstances = new Map<string, string>();
+  readonly #physicalRequestScope = new AsyncLocalStorage<LinearWorkflowMutationRequestScope | undefined>();
   readonly #linearRequests: LinearRequestBrokerImpl;
   readonly #linearGateways = new Map<InstallationRequestClass, {
     installation: LinearInstallation;
@@ -34,6 +38,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       createLinearSdk(
         installation: LinearInstallation,
         observe: (observation: LinearPhysicalRequestObservation) => void,
+        requestScope: () => LinearWorkflowMutationRequestScope | undefined,
       ): LinearClientInterface;
       linearRequestObserver?: LinearRequestObserverImpl;
     },
@@ -81,7 +86,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     if (!installation) throw new Error("linear_installation_missing");
     const classification = requestClass(body.kind);
     const gateway = this.#linearGateway(installation, classification);
-    return this.#linearRequests.run(classification, async () => {
+    const scopedMutation = workflowMutationScope(body);
+    return this.#linearRequests.run(classification, async () => this.#physicalRequestScope.run(scopedMutation?.scope, async () => {
       switch (body.kind) {
       case "resolve_conductor_project":
         return this.#resolveProject(gateway, body);
@@ -97,12 +103,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       case "set_comment_thread_state":
       case "create_workflow_relation":
         return workflowMutationResult(
-          await gateway.mutateWorkflow(workflowMutationCommand(body)),
+          await gateway.mutateWorkflow(scopedMutation?.command ?? workflowMutationCommand(body)),
         ) as unknown as JsonValue;
       default:
         throw new Error("conductor_request_unsupported");
       }
-    }, {
+    }), {
       deadlineAtMs: Date.now() + MAX_LINEAR_REQUEST_TIMEOUT_MS,
       ...(classification === "mutation" ? {} : {
         coalesceKey: JSON.stringify(body),
@@ -125,7 +131,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const gateway = new LinearGatewayProtocolHandlerImpl(
       this.options.createLinearSdk(installation, (observation) => {
         this.#linearRequests.observe(observation);
-      }),
+      }, () => this.#physicalRequestScope.getStore()),
       {
         maxAttempts: 4,
         baseDelayMs: 250,
@@ -593,6 +599,27 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     };
   }
   throw new Error("linear_workflow_kind_unsupported");
+}
+
+function workflowMutationScope(body: Body): {
+  command: Extract<WorkflowMutationCommand, { kind: "append_workflow_comment" }>;
+  scope: LinearWorkflowMutationRequestScope;
+} | undefined {
+  if (body.kind !== "append_workflow_comment") return undefined;
+  const command = workflowMutationCommand(body);
+  if (command.kind !== "append_workflow_comment") throw new Error("linear_workflow_mutation_invalid");
+  return {
+    command,
+    scope: {
+      root_issue_id: command.rootIssueId,
+      mutation: {
+        command_kind: command.kind,
+        write_id: command.writeId,
+        target_issue_id: command.target.targetIssueId,
+        body: command.body,
+      },
+    },
+  };
 }
 
 function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" | "triggered_by" {

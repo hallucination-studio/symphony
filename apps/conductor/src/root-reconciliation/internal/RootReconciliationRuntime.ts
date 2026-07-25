@@ -933,6 +933,7 @@ function validateRootReconcilerFailure(input: {
 }
 
 export function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
+  if (!directiveTimelineMaterialized(directive, tree)) return false;
   const repliesComplete = directive.commentReplies.every((reply) => {
     const source = tree.comments.find((comment) => comment.comment_id === reply.source.commentId);
     if (!source || !sourceMatchesReply(source, reply)) return false;
@@ -1068,6 +1069,25 @@ export function directiveMaterializationComplete(directive: RootDirective, tree:
   }
   if (action.kind === "revise_root_tree") return treeOperationsComplete(action.operations, tree);
   return false;
+}
+
+function directiveTimelineMaterialized(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
+  const event = timelineEvent(directive, tree.root_issue_id);
+  const targetIssueId = event.timelineKind === "cycle" ? event.cycleIssueId : event.rootIssueId;
+  if (!targetIssueId) return false;
+  const matches = tree.comments.flatMap((comment) => {
+    if (comment.author_kind !== "symphony") return [];
+    const parsed = parseManagedRecord(comment.body);
+    return parsed.ok && parsed.value.kind === "workflow_timeline" && parsed.value.timelineEventId === event.timelineEventId
+      ? [{ comment, record: parsed.value }]
+      : [];
+  });
+  if (matches.length !== 1) return false;
+  const { comment, record } = matches[0]!;
+  return comment.issue_id === targetIssueId && record.timelineKind === event.timelineKind &&
+    record.targetIssueId === targetIssueId && sameIds(record.sourceRecordIds, event.sourceRecordIds) &&
+    sameIds(record.sourceVersions, event.sourceVersions) && record.writeId === event.timelineEventId &&
+    record.renderedSchemaVersion === "1" && record.occurredAt === event.occurredAt;
 }
 
 function cycleOutcomeMaterialized(

@@ -18,6 +18,7 @@ export function createProductionE2EProcessStarter(input, dependencies = {}) {
     const podium = await createPodiumOwner({
       databasePath: input.databasePath,
       log: input.log,
+      linearPhysicalRequestGate: input.linearPhysicalRequestGate,
     });
     try {
       return await startHarness({

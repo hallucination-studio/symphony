@@ -9,6 +9,7 @@ import { LinearRequestObserverImpl } from "../internal/linear-gateway/internal/L
 import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl.js";
 import type { PodiumConductorServices } from "./PodiumConductorProtocolHandler.js";
 import type { ConductorPresence } from "./ConductorPresence.js";
+import type { LinearPhysicalRequestGate } from "./LinearPhysicalRequestGate.js";
 
 export interface PodiumConductorServiceOwner {
   services: PodiumConductorServices;
@@ -21,6 +22,7 @@ export function createPodiumConductorServices(input: {
   sleep?: (delayMs: number) => Promise<void>;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
   linearRequestObserver?: LinearRequestObserverImpl;
+  linearPhysicalRequestGate?: LinearPhysicalRequestGate;
   presence: ConductorPresence;
 }): PodiumConductorServiceOwner {
   const store = new SqlitePodiumStoreImpl(input.databasePath);
@@ -31,7 +33,7 @@ export function createPodiumConductorServices(input: {
       sleep:
         input.sleep ??
         ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
-      createLinearSdk: (installation, observe) => new LinearSdkImpl(
+      createLinearSdk: (installation, observe, requestScope) => new LinearSdkImpl(
         installation.kind === "development_token"
           ? {
               kind: installation.kind,
@@ -48,6 +50,17 @@ export function createPodiumConductorServices(input: {
             observe(observation);
             input.observeLinearRequest?.(observation);
           },
+          ...(input.linearPhysicalRequestGate
+            ? {
+              beforePhysicalRequest: (document) => {
+                const scope = requestScope();
+                return input.linearPhysicalRequestGate?.beforePhysicalRequest({
+                  document,
+                  ...(scope ? { scope } : {}),
+                });
+              },
+            }
+            : {}),
         },
       ),
       ...(observer ? { linearRequestObserver: observer } : {}),

@@ -122,6 +122,7 @@ test("approved managed evidence vocabulary is inside the active boundary", () =>
     ["apps/conductor/src/root-reconciliation/api/ManagedRecords.ts", "interface CheckEvidence {} interface FindingEvidence {} interface EvidenceReference {}"],
     ["apps/conductor/src/root-reconciliation/internal/ManagedRecordCodec.ts", "function decodeEvidenceReference() {} function encodeEvidenceReference() {}"],
     ["apps/conductor/src/root-reconciliation/internal/RootInvariantPolicy.ts", "interface RootSelectionEvidence {}"],
+    ["apps/conductor/src/root-reconciliation/internal/RootInvariantPolicy.ts", "function addCycleEvidence() {} function mergeEvidenceRefs() {} function resultEvidenceRefs() {} function sameEvidenceRefs() {}"],
   ]) {
     assert.deepEqual(inspectAuthoredFile(file, source), []);
   }

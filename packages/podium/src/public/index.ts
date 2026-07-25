@@ -21,6 +21,10 @@ export {
   type PodiumConductorServiceOwner,
 } from "./createPodiumConductorServices.js";
 export type {
+  LinearPhysicalRequestGate,
+  LinearWorkflowMutationRequestScope,
+} from "./LinearPhysicalRequestGate.js";
+export type {
   LinearPhysicalRequestObservation,
   LinearRequestWindowObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";

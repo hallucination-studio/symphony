@@ -13,6 +13,7 @@ import { isMissingInputConfiguration, loadE2EConfig } from "../../tools/e2e/conf
 import { happyPathRow } from "./approved-happy-path-fixture.mjs";
 import { cycleSuccessorRow } from "./cycle-successor-fixture.mjs";
 import { planRejectionSupersessionRow } from "./plan-rejection-supersession-fixture.mjs";
+import { requiredWriteOutageRow } from "./required-write-outage-fixture.mjs";
 import { rootRevisionCommentRow } from "./root-revision-comment-fixture.mjs";
 import { restartIsolationRow } from "./restart-isolation-fixture.mjs";
 import { sameConductorPreemptionRow } from "./same-conductor-preemption-fixture.mjs";
@@ -88,6 +89,13 @@ test("parallel black-box Campaign accepts only the closed version-one command", 
     () => assertParallelBlackBoxE2ECampaignCommand({
       ...command,
       cases: [{ ...deliveryReviewCase(), human_script_id: "approve_plan" }],
+    }),
+    /parallel_black_box_campaign_case_invalid/u,
+  );
+  assert.throws(
+    () => assertParallelBlackBoxE2ECampaignCommand({
+      ...command,
+      cases: [{ ...requiredWriteOutageCase(), evidence_predicate_id: "happy_path" }],
     }),
     /parallel_black_box_campaign_case_invalid/u,
   );
@@ -219,6 +227,69 @@ test("parallel black-box Campaign invokes only the external C restart boundary a
   }]);
   assert.deepEqual(events.filter((event) => event.startsWith("restart:")), ["restart:conductor-c:root-restart-c"]);
   assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), ["fresh:restart-isolation"]);
+});
+
+test("parallel black-box Campaign requires bounded outage control ports only for the required-write Case", async () => {
+  const command = campaignCommand();
+  command.cases = [requiredWriteOutageCase()];
+  const events = [];
+  const campaignPorts = ports(events);
+  delete campaignPorts.waitForRequiredWriteOutage;
+
+  await assert.rejects(
+    runParallelBlackBoxE2ECampaign({ command, ports: campaignPorts, now: () => Date.parse(now) }),
+    (error) => error.code === "parallel_black_box_campaign_ports_invalid",
+  );
+  assert.deepEqual(events, []);
+});
+
+test("parallel black-box Campaign restores the bounded required write before approving Plan and final-reading durable evidence", async () => {
+  const command = campaignCommand();
+  command.cases = [requiredWriteOutageCase()];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: ports(events),
+    now: () => Date.parse(now),
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "passed",
+    reason_code: "required_write_fail_closed_confirmed",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("required-write:") || event.startsWith("human:") || event.startsWith("fresh:")), [
+    "required-write:wait:root-required-write",
+    "required-write:restore:root-required-write",
+    "human:required-write-outage",
+    "fresh:required-write-outage",
+  ]);
+});
+
+test("parallel black-box Campaign marks required-write outage incomplete when its gate rendezvous does not complete", async () => {
+  const startedAt = new Date().toISOString();
+  const deadlineAt = new Date(Date.now() + 20).toISOString();
+  const command = campaignCommand();
+  command.started_at = startedAt;
+  command.deadline_at = new Date(Date.now() + 1_000).toISOString();
+  command.cases = [{ ...requiredWriteOutageCase(), deadline_at: deadlineAt }];
+  const events = [];
+
+  const result = await runParallelBlackBoxE2ECampaign({
+    command,
+    ports: {
+      ...ports(events),
+      async waitForRequiredWriteOutage() {
+        return new Promise(() => {});
+      },
+    },
+  });
+
+  assert.deepEqual(result.cases.map(({ status, reason_code }) => ({ status, reason_code })), [{
+    status: "incomplete",
+    reason_code: "fresh_evidence_incomplete",
+  }]);
+  assert.deepEqual(events.filter((event) => event.startsWith("fresh:")), []);
 });
 
 test("parallel black-box Campaign final-reads after an approved Plan action failure and lets durable facts decide", async () => {
@@ -744,6 +815,17 @@ function deliveryReviewCase() {
   };
 }
 
+function requiredWriteOutageCase() {
+  return {
+    case_id: "required-write-outage",
+    mandatory: true,
+    routed_conductor_ids: ["conductor-a"],
+    deadline_at: deadline,
+    human_script_id: "required_write_outage",
+    evidence_predicate_id: "required_write_fail_closed",
+  };
+}
+
 function conductor(suffix) {
   return {
     binding_id: `binding-${suffix}`,
@@ -774,6 +856,9 @@ function ports(events, {
       }
       if (e2eCase.human_script_id === "restart_conductor") {
         return { root_issue_ids: ["root-restart-c", "root-restart-a", "root-restart-b"] };
+      }
+      if (e2eCase.human_script_id === "required_write_outage") {
+        return { root_issue_ids: ["root-required-write"] };
       }
       return { root_issue_ids: [`root-${e2eCase.case_id}`] };
     },
@@ -808,7 +893,10 @@ function ports(events, {
     },
     async waitForHumanAction({ e2eCase, root_issue_id: rootIssueId, action_kind: actionKind }) {
       events.push(`human:${e2eCase.case_id}`);
-      assert.equal(rootIssueId, `root-${e2eCase.case_id}`);
+      assert.equal(
+        rootIssueId,
+        e2eCase.human_script_id === "required_write_outage" ? "root-required-write" : `root-${e2eCase.case_id}`,
+      );
       assert.equal(actionKind, "plan_review");
       return { human_action_issue_id: `action-${e2eCase.case_id}` };
     },
@@ -828,6 +916,16 @@ function ports(events, {
       ]);
       assert.equal(rootIssueId, "root-restart-c");
       events.push("restart:conductor-c:root-restart-c");
+    },
+    async waitForRequiredWriteOutage({ e2eCase, root_issue_id: rootIssueId }) {
+      assert.equal(e2eCase.human_script_id, "required_write_outage");
+      assert.equal(rootIssueId, "root-required-write");
+      events.push(`required-write:wait:${rootIssueId}`);
+    },
+    async restoreRequiredWriteOutage({ e2eCase, root_issue_id: rootIssueId }) {
+      assert.equal(e2eCase.human_script_id, "required_write_outage");
+      assert.equal(rootIssueId, "root-required-write");
+      events.push(`required-write:restore:${rootIssueId}`);
     },
     async readFreshEvidenceSnapshot({ e2eCase, caseRoots }) {
       events.push(`fresh:${e2eCase.case_id}`);
@@ -860,6 +958,11 @@ function ports(events, {
       }
       if (e2eCase.evidence_predicate_id === "cycle_successor") {
         const fixture = cycleSuccessorRow();
+        assert.deepEqual(caseRoots, fixture.caseRoots);
+        return fixture.snapshot;
+      }
+      if (e2eCase.evidence_predicate_id === "required_write_fail_closed") {
+        const fixture = requiredWriteOutageRow();
         assert.deepEqual(caseRoots, fixture.caseRoots);
         return fixture.snapshot;
       }

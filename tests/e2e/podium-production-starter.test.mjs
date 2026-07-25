@@ -73,6 +73,30 @@ test("production E2E process starter closes its Podium owner when the Conductor 
   assert.equal(closes, 1);
 });
 
+test("production E2E process starter passes a bounded physical request gate only to the Podium owner", async () => {
+  const calls = [];
+  const gate = { async beforePhysicalRequest() {} };
+  const startProcess = createProductionE2EProcessStarter({
+    ...runtimeInput(),
+    linearPhysicalRequestGate: gate,
+  }, {
+    async createPodiumOwner(input) {
+      calls.push({ kind: "owner", input });
+      return { handler: {}, close() {} };
+    },
+    async startHarness(input) {
+      calls.push({ kind: "harness", input });
+      return { request() {}, close() {} };
+    },
+    createInstanceId: () => "instance-1",
+  });
+
+  await startProcess(conductorInput());
+
+  assert.equal(calls[0].input.linearPhysicalRequestGate, gate);
+  assert.equal("linearPhysicalRequestGate" in calls[1].input.environment, false);
+});
+
 function runtimeInput() {
   return {
     databasePath: "/tmp/podium.db",

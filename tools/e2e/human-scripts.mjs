@@ -4,7 +4,17 @@ export const ROOT_REVISION_DESCRIPTION = "Deliver the revised Root requirement a
 export const ROOT_REVISION_COMMENT = "Please use the revised Root requirement when deciding the next step.\n\n```text\nrevision: accepted input must be reconciled\n```";
 const ROOT_REVISION_INITIAL_COMMENT = "Please use the revised Root requirement when deciding the next step.";
 
-export async function executeHumanScript({ humanScript, caseRoots, human, waitForHumanAction, waitForInFlightStage, waitForRootReconcilerReply, restartConductor } = {}) {
+export async function executeHumanScript({
+  humanScript,
+  caseRoots,
+  human,
+  waitForHumanAction,
+  waitForInFlightStage,
+  waitForRootReconcilerReply,
+  restartConductor,
+  waitForRequiredWriteOutage,
+  restoreRequiredWriteOutage,
+} = {}) {
   const rootIssueIds = rootIssueIdsFrom(caseRoots);
   if (!rootIssueIds || !human || typeof human !== "object") {
     throw stableError("parallel_black_box_human_script_input_invalid");
@@ -29,6 +39,15 @@ export async function executeHumanScript({ humanScript, caseRoots, human, waitFo
   }
   if (humanScript?.id === "restart_conductor") {
     return restartConductorDuringStage({ rootIssueIds, waitForInFlightStage, restartConductor });
+  }
+  if (humanScript?.id === "required_write_outage") {
+    return recoverRequiredWriteBeforePlanApproval({
+      rootIssueIds,
+      human,
+      waitForHumanAction,
+      waitForRequiredWriteOutage,
+      restoreRequiredWriteOutage,
+    });
   }
   throw stableError("parallel_black_box_human_script_unavailable");
 }
@@ -120,6 +139,26 @@ async function restartConductorDuringStage({ rootIssueIds, waitForInFlightStage,
     throw stableError("parallel_black_box_human_inflight_stage_invalid");
   }
   await restartConductor({ root_issue_id: rootIssueIds[0] });
+}
+
+async function recoverRequiredWriteBeforePlanApproval({
+  rootIssueIds,
+  human,
+  waitForHumanAction,
+  waitForRequiredWriteOutage,
+  restoreRequiredWriteOutage,
+}) {
+  if (
+    rootIssueIds.length !== 1 ||
+    typeof waitForRequiredWriteOutage !== "function" ||
+    typeof restoreRequiredWriteOutage !== "function"
+  ) {
+    throw stableError("parallel_black_box_human_script_input_invalid");
+  }
+  const rootIssueId = rootIssueIds[0];
+  await waitForRequiredWriteOutage({ root_issue_id: rootIssueId });
+  await restoreRequiredWriteOutage({ root_issue_id: rootIssueId });
+  await approvePlan({ rootIssueIds, human, waitForHumanAction });
 }
 
 function rootIssueIdsFrom(value) {

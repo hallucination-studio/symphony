@@ -12,6 +12,7 @@ import { executeHumanScript } from "./human-scripts.mjs";
 import { analyzePlanRejectionSupersessionCampaignEvidence } from "./plan-rejection-supersession-evidence.mjs";
 import { analyzeRootRevisionCommentCampaignEvidence } from "./root-revision-comment-evidence.mjs";
 import { analyzeRestartIsolationCampaignEvidence } from "./restart-isolation-evidence.mjs";
+import { analyzeRequiredWriteCampaignEvidence } from "./required-write-evidence.mjs";
 import { analyzeSameConductorPreemptionCampaignEvidence } from "./same-conductor-preemption-evidence.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
@@ -56,6 +57,7 @@ export async function runParallelBlackBoxE2ECampaign({
   const preemptionEvidence = analyzeSameConductorPreemptionCampaignEvidence({ rows: evidence });
   const cycleSuccessorEvidence = analyzeCycleSuccessorCampaignEvidence({ rows: evidence });
   const deliveryReviewEvidence = analyzeDeliveryReviewCampaignEvidence({ rows: evidence });
+  const requiredWriteEvidence = analyzeRequiredWriteCampaignEvidence({ rows: evidence });
   const outcomesByCaseId = new Map([
     ...happyPathEvidence.case_outcomes,
     ...planRejectionEvidence.case_outcomes,
@@ -64,6 +66,7 @@ export async function runParallelBlackBoxE2ECampaign({
     ...preemptionEvidence.case_outcomes,
     ...cycleSuccessorEvidence.case_outcomes,
     ...deliveryReviewEvidence.case_outcomes,
+    ...requiredWriteEvidence.case_outcomes,
   ].map((entry) => [entry.case_id, entry.outcome]));
   const results = await Promise.all(evidence.map(({ e2eCase, caseRoots, snapshot }) => createFinalCaseVerdict({
     e2eCase,
@@ -95,7 +98,7 @@ async function runCaseAction({ campaign, e2eCase, ports, actorIds, now, setTimer
   if (caseRoots === null) {
     return null;
   }
-  await settleBeforeDeadline(
+  const humanSettlement = await settleBeforeDeadline(
     () => executeHumanScript({
       humanScript: resolveHumanScript(e2eCase.human_script_id),
       caseRoots,
@@ -104,10 +107,14 @@ async function runCaseAction({ campaign, e2eCase, ports, actorIds, now, setTimer
       waitForInFlightStage: (input) => ports.waitForInFlightStage({ caseContext, e2eCase, ...input }),
       waitForRootReconcilerReply: (input) => ports.waitForRootReconcilerReply({ caseContext, e2eCase, ...input }),
       restartConductor: (input) => ports.restartConductor({ caseContext, e2eCase, ...input }),
+      waitForRequiredWriteOutage: (input) => ports.waitForRequiredWriteOutage({ caseContext, e2eCase, ...input }),
+      restoreRequiredWriteOutage: (input) => ports.restoreRequiredWriteOutage({ caseContext, e2eCase, ...input }),
     }),
     e2eCase.deadline_at,
     { now, setTimer, clearTimer },
   );
+  // A completed gate rendezvous is required to claim this fault was exercised.
+  if (e2eCase.human_script_id === "required_write_outage" && humanSettlement.kind !== "fulfilled") return null;
   return Object.freeze({ caseContext, caseRoots });
 }
 
@@ -216,6 +223,11 @@ function assertPorts(ports, campaign) {
   }
   if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "restart_conductor") &&
       typeof ports.restartConductor !== "function") {
+    throw stableError("parallel_black_box_campaign_ports_invalid");
+  }
+  if (campaign.cases.some((e2eCase) => e2eCase.human_script_id === "required_write_outage") && [
+    "waitForRequiredWriteOutage", "restoreRequiredWriteOutage",
+  ].some((method) => typeof ports[method] !== "function")) {
     throw stableError("parallel_black_box_campaign_ports_invalid");
   }
 }

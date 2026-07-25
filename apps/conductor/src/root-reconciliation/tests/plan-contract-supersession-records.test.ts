@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
@@ -51,7 +52,7 @@ test("Plan Contract supersession identity is stable and bounded", () => {
   }), "13219e90d8c41aa8ff47c59225b7f04d8832868112c6d12919068868b9647a8c");
 });
 
-test("replan completion requires the matching durable supersession record", () => {
+test("replan completion requires matching durable supersession and timeline records", () => {
   const directive = replanDirective();
   const tree = replanTree();
 
@@ -84,6 +85,36 @@ test("replan completion requires the matching durable supersession record", () =
     created_at: "2026-07-25T00:00:03Z",
     remote_version: "supersession-v1",
     updated_at: "2026-07-25T00:00:03Z",
+  });
+
+  assert.equal(directiveMaterializationComplete(directive, tree), false);
+
+  const timelineEventId = createHash("sha256")
+    .update(["decision_accepted", "root-1", "cycle-1", "directive-1"].join("\0"), "utf8")
+    .digest("hex");
+  tree.comments.push({
+    comment_id: "timeline-1",
+    issue_id: "cycle-1",
+    body: serializeManagedRecord({
+      kind: "workflow_timeline" as const,
+      version: 1 as const,
+      timelineEventId,
+      timelineKind: "cycle" as const,
+      targetIssueId: "cycle-1",
+      sourceRecordIds: ["directive-1"],
+      sourceVersions: ["tree-v1"],
+      writeId: timelineEventId,
+      renderedSchemaVersion: "1" as const,
+      occurredAt: "2026-07-25T00:00:03Z",
+    }),
+    author_kind: "symphony",
+    author_id: "symphony",
+    thread_root_comment_id: "timeline-1",
+    thread_state: "unresolved",
+    reactions: [],
+    created_at: "2026-07-25T00:00:04Z",
+    remote_version: "timeline-v1",
+    updated_at: "2026-07-25T00:00:04Z",
   });
 
   assert.equal(directiveMaterializationComplete(directive, tree), true);

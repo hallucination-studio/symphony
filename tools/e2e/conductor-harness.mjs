@@ -10,7 +10,7 @@ const SECRET_KEYS = new Set([
   "SYMPHONY_E2E_CODEX_API_KEY",
 ]);
 
-export async function createProductionPodiumConductorOwner({ databasePath, log, linearRequestObserver }) {
+export async function createProductionPodiumConductorOwner({ databasePath, log, linearRequestObserver, linearPhysicalRequestGate }) {
   const {
     createConductorPresence,
     createPodiumConductorServices,
@@ -20,6 +20,7 @@ export async function createProductionPodiumConductorOwner({ databasePath, log, 
     databasePath,
     presence: createConductorPresence(),
     linearRequestObserver,
+    linearPhysicalRequestGate,
     observeLinearRequest: (observation) => log?.({
       event: "linear_physical_request",
       ...observation,

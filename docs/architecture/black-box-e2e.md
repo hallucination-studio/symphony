@@ -73,6 +73,27 @@ Campaign只能使用以下外部边界：
 测试工具可以在自身进程中使用Linear公开client，但不能从产品包深路径复用Podium内部SDK实现。这个外部测试client
 代表真实human actor，不改变“Podium是产品内唯一Linear SDK和credential owner”的产品边界。
 
+### 3.1 Required Linear write outage transport gate
+
+`required Linear write fail-closed` Case可以在E2E test runtime向Podium的**物理**Linear request wrapper注入一个
+bounded、in-memory request gate。它只用于临时制造真实channel的不可用窗口，不是Conductor、Performer、Root Reconciler
+或Workflow业务模块的接口，也不写入`podium.db`、Linear、Git、日志证据、Profile或任何恢复状态。
+
+gate的匹配范围必须同时满足以下条件：
+
+- matching Case Root的`append_workflow_comment` physical mutation；
+- 已观察到该Root的`plan_completed` Stage Result；
+- 待写入的唯一terminal `symphony` block是Cycle timeline，且其`source_record_ids`包含该Plan Result ID。
+
+gate暂停原始physical request，不伪造Result、timeline、read-back或后续Stage事实；恢复后只能让同一原始request继续。
+Human script必须按`wait until blocked -> restore -> approve real Plan Action`顺序执行。gate的armed/blocked/recovered内存值
+只证明测试是否已经触达故障注入点，不能进入Case snapshot、evidence predicate、verdict、报告或Campaign exit code。若没有
+命中暂停点，Case只能因没有形成足够的Linear/Git事实而`incomplete`，不能以timeout、controller内存或日志判为通过。
+
+被故障窗口阻塞的write本身不会留下durable“outage occurred”记录，所以final fresh evidence不能声称从Linear单独重建该窗口。
+它只验证可持久化的fail-closed结果：唯一Plan Result、其确定性timeline identity及read-back、以及所有后续Stage execution/result
+严格晚于该timeline comment创建时间。任何更早后续Stage事实是`failed`；缺少所需事实是`incomplete`。
+
 ## 4. Actor与credential隔离
 
 一个Campaign至少使用两个可在Linear read-back中区分的actor：
@@ -159,6 +180,10 @@ read-back；只有该边界成立后才能`reopen`。`reopen`后也必须同样�
 该Case的human script。两次等待只决定何时执行下一次真实用户操作，不构成事件历史、checkpoint或verdict输入；最终判定仍只
 使用Case settle后的独立final fresh Linear/Git snapshot。这样Case不要求Conductor重放close/reopen history，而是在两次
 用户操作之间保留可从Linear重建的durable事实。
+
+required Linear write Case同样只把gate作为下一步外部操作的短暂同步边界：Human Actor等待matching physical write已被暂停，
+恢复该**同一**请求后才处理真实Plan Review Action。gate不会生成evidence、不会保留到Case完成后，也不会替代Case结束时的
+fresh Linear/Git read。
 
 Campaign不自动删除、archive、cancel或quiesce测试Roots。Root保留其生产Workflow最终状态和完整active/archived历史。
 重复运行使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels，不复用旧Root作为本次通过
@@ -313,7 +338,7 @@ Linear/Git references，不输出Issue正文、credential、Provider transcript�
 | Conductor restart isolation | `CaseRootSet`按`C,A,B`创建；C Stage in-flight时仅经process controller `SIGKILL`并fresh start C，A/B继续 | C旧failure/cancel、无stale成功Result、同Cycle/Node的新session replacement Result；A/B各一条跨越C恢复的连续成功interval和不变ownership |
 | Cycle exhaustion and successor | 在Root claim前通过公开Conductor配置设置Cycle repair limit，并触发本Cycle预算耗尽 | terminal predecessor、durable Findings/attempts、matching successor Cycle和fresh Plan |
 | delivery and review | 完成可交付Root | matching verified Git revision、delivery read-back和Root `In Review`一致 |
-| required Linear write fail-closed | 在required reply/timeline write边界使真实Linear channel暂时不可用后恢复 | outage期间无后续Stage事实；恢复后同stable identity写入/read-back，且后续Stage `started_at`晚于required write |
+| required Linear write fail-closed | 通过bounded physical request gate暂停matching Plan Result的Cycle timeline write，恢复同一request后批准真实Plan Action | 唯一Plan Result的deterministic timeline identity已read-back，所有后续Stage `started_at`/Result `completed_at`严格晚于timeline comment；gate状态、日志、timeout不参与verdict |
 
 每个Case可以使用多个Root，但每个Root只能属于一个Case。Case不得通过修改managed事实、手工完成Stage或调用内部
 materializer制造证据。Plan approval由happy paths覆盖；rejection、普通comment、resolve/reopen、restart和successor分别由
@@ -346,3 +371,4 @@ materializer制造证据。Plan approval由happy paths覆盖；rejection、普�
 8. 日志、process exit、session、runtime state和synthetic `final`永远不是完成证据。
 9. E2E Roots不被runner清理或改写为测试专用terminal状态。
 10. 旧串行/白盒runner与新Campaign不能并存。
+11. required-write gate只制造临时外部channel故障；final verdict只使用恢复后的fresh Linear/Git事实，不能读取gate内存或把outage本身伪造成durable事实。

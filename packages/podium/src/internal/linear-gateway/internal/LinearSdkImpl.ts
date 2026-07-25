@@ -273,6 +273,7 @@ export interface LinearRequestObservationOptions {
   correlationId(): string;
   now(): number;
   observe?(observation: LinearPhysicalRequestObservation): void;
+  beforePhysicalRequest?(document: string): Promise<void> | void;
 }
 
 interface IssueTreePageInfo {
@@ -2406,6 +2407,7 @@ async function observeRequest<Result>(
   const startedAt = observation.now();
   const correlationId = observation.correlationId();
   try {
+    await observation.beforePhysicalRequest?.(document);
     const result = await request();
     const response = responseMetadata(result);
     observation.observe?.(requestObservation(

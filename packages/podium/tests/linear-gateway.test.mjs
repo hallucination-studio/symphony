@@ -17,6 +17,7 @@ function project() {
 async function createConductorServices(
   linearSdk,
   onLinearObserver = () => undefined,
+  onRequestScope = () => undefined,
 ) {
   const binding = {
     bindingId: "binding-1",
@@ -48,8 +49,9 @@ async function createConductorServices(
     {
       now: () => "2026-07-16T00:00:00Z",
       sleep: async () => undefined,
-      createLinearSdk: (_installation, observe) => {
+      createLinearSdk: (_installation, observe, requestScope) => {
         onLinearObserver(observe);
+        onRequestScope(requestScope);
         return linearSdk;
       },
     },
@@ -108,6 +110,39 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
   await services.handle(body);
 
   assert.equal(sdkCreations, 1);
+});
+
+test("Podium scopes an appended workflow comment at the physical Linear request boundary", async () => {
+  let requestScope;
+  let physicalScope;
+  const services = await createConductorServices({
+    async preflightWorkflowMutation() { return { kind: "ready" }; },
+    async executeWorkflowMutation() {
+      physicalScope = requestScope();
+    },
+    async readWorkflowMutationOutcome() {
+      return { writeId: "write-1", targetIssueId: "cycle-1", remoteVersion: "cycle-version-next" };
+    },
+  }, undefined, (scope) => { requestScope = scope; });
+
+  await services.handle({
+    kind: "append_workflow_comment", binding_id: "binding-1", conductor_short_hash: "abc123",
+    write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
+    expected_root_remote_version: "root-version",
+    target: { target_issue_id: "cycle-1", expected_remote_version: "cycle-version" },
+    body: "## Timeline\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+  });
+
+  assert.deepEqual(physicalScope, {
+    root_issue_id: "root-1",
+    mutation: {
+      command_kind: "append_workflow_comment",
+      write_id: "write-1",
+      target_issue_id: "cycle-1",
+      body: "## Timeline\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+    },
+  });
+  assert.equal(requestScope(), undefined);
 });
 
 test("workflow issue creation rejects a missing label_names field before dispatch", async () => {

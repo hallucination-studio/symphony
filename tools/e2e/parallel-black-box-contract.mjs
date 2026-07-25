@@ -198,6 +198,11 @@ function assertCase(value, conductorIds, { startedAt, campaignDeadlineAt }) {
   if (isDeliveryScript !== isDeliveryPredicate || (isDeliveryScript && routes.size !== 1)) {
     throw stableError("parallel_black_box_campaign_case_invalid");
   }
+  const isRequiredWriteScript = e2eCase.human_script_id === "required_write_outage";
+  const isRequiredWritePredicate = e2eCase.evidence_predicate_id === "required_write_fail_closed";
+  if (isRequiredWriteScript !== isRequiredWritePredicate || (isRequiredWriteScript && routes.size !== 1)) {
+    throw stableError("parallel_black_box_campaign_case_invalid");
+  }
 }
 
 function freezeCommand(command) {

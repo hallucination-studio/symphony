@@ -26,6 +26,9 @@ const linearOwnerPaths = new Set([
   "packages/podium/package.json",
   "packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts",
 ]);
+const externalLinearClientManifests = new Set([
+  "package.json",
+]);
 const providerOwnerPatterns = [
   /^apps\/performer\/pyproject\.toml$/,
   /^apps\/performer\/src\/performer\/backends\/codex\/codex_backend_impl\.py$/,
@@ -73,6 +76,10 @@ const approvedEvidenceNames = new Set([
   "sourceManifest",
   "sourceManifestEntry",
   "workflowSourceManifest",
+  "addCycleEvidence",
+  "mergeEvidenceRefs",
+  "resultEvidenceRefs",
+  "sameEvidenceRefs",
 ]);
 
 function importSpecifiers(source) {
@@ -134,7 +141,8 @@ export function inspectAuthoredFile(file, source) {
     /(?:@linear\/sdk|from\s+["']linear["']|require\(["']@linear\/sdk)/.test(
       source,
     ) &&
-    !linearOwnerPaths.has(normalizedFile)
+    !linearOwnerPaths.has(normalizedFile) &&
+    !externalLinearClientManifests.has(normalizedFile)
   ) {
     violations.push(
       violation(
