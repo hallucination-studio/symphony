@@ -200,7 +200,7 @@ cleanup只删除可证明属于同一Conductor/Root的deterministic worktree，�
 
 并行E2E的process topology、start barrier、restart动作和artifact retention只由
 [并行黑盒端到端验收](black-box-e2e.md)定义。Runtime只提供本节已有的生产start/stop/kill语义；专用E2E Project的
-启动前Issue archive是runner在Runtime创建前经Linear公开API执行的外部测试操作，不是Runtime lifecycle、quiescence或
+启动前baseline reset是runner在Runtime创建前经Linear公开API执行的外部测试操作，不是Runtime lifecycle、quiescence或
 test-only daemon mutation。
 
 ## 10. Failure matrix

@@ -2,6 +2,7 @@ import { LinearClient } from "@linear/sdk";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const CONDUCTOR_SHORT_HASH = /^[a-f0-9]{12}$/u;
+const CONDUCTOR_LABEL_NAME = /^symphony:conductor\/[a-f0-9]{12}$/u;
 const MANAGED_CODE_BLOCK = /(?:^|\r?\n)[ \t]*(?:```|~~~)[ \t]*symphony[ \t]*(?:\r?\n|$)/iu;
 const MAX_ROOT_TITLE_LENGTH = 256;
 const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
@@ -71,24 +72,27 @@ function externalActorClient({ clientOptions, createClient }) {
       return Object.freeze({
         readActorId: this.readActorId,
         async readSymphonyActorId() { return symphonyActorId; },
-        async clearE2EProjectIssues(input) {
-          const cleanup = e2eProjectCleanupInput(input);
-          const project = await sdkCall("external_linear_e2e_project_cleanup_read_failed", () => client.project(
-            cleanup.project_slug_id,
+        async resetE2EProject(input) {
+          const reset = e2eProjectResetInput(input);
+          const project = await sdkCall("external_linear_e2e_project_reset_read_failed", () => client.project(
+            reset.project_slug_id,
           ));
-          const issues = await sdkCall("external_linear_e2e_project_cleanup_read_failed", () => flatActiveProjectIssues(project));
+          const issues = await sdkCall("external_linear_e2e_project_reset_issue_read_failed", () => flatActiveProjectIssues(project));
+          for (const issue of issues) assertArchivableProjectIssue(issue);
           for (const issue of issues) {
-            assertArchivableProjectIssue(issue);
+            const payload = await sdkCall("external_linear_e2e_project_reset_issue_archive_failed", () => issue.archive());
+            assertWriteSuccess(payload, "external_linear_e2e_project_reset_issue_archive_failed");
           }
-          for (const issue of issues) {
-            const payload = await sdkCall("external_linear_e2e_project_cleanup_archive_failed", () => issue.archive());
-            assertWriteSuccess(payload, "external_linear_e2e_project_cleanup_archive_failed");
-          }
-          const readBackProject = await sdkCall("external_linear_e2e_project_cleanup_read_back_failed", () => client.project(
-            cleanup.project_slug_id,
+          const baselineProject = await sdkCall("external_linear_e2e_project_reset_read_failed", () => client.project(
+            reset.project_slug_id,
           ));
-          const remaining = await sdkCall("external_linear_e2e_project_cleanup_read_back_failed", () => flatActiveProjectIssues(readBackProject));
-          if (remaining.length !== 0) throw stableError("external_linear_e2e_project_cleanup_read_back_failed");
+          const remaining = await sdkCall("external_linear_e2e_project_reset_issue_read_back_failed", () => flatActiveProjectIssues(baselineProject));
+          if (remaining.length !== 0) throw stableError("external_linear_e2e_project_reset_issue_read_back_failed");
+          const routingLabels = await resetConductorRoutingLabels({ client, project: baselineProject });
+          const finalProject = await sdkCall("external_linear_e2e_project_reset_read_failed", () => client.project(
+            reset.project_slug_id,
+          ));
+          await assertNoActiveConductorRouting({ client, project: finalProject, routingLabels });
           return Object.freeze({ project_id: project.id });
         },
         async discoverProjectRouting(input) {
@@ -197,24 +201,152 @@ function rootCreateInput(value) {
   return root;
 }
 
-function e2eProjectCleanupInput(value) {
-  const cleanup = record(value, "external_linear_e2e_project_cleanup_input_invalid");
-  assertKeys(cleanup, ["project_slug_id"], [], "external_linear_e2e_project_cleanup_input_invalid");
-  if (!identifier(cleanup.project_slug_id)) throw stableError("external_linear_e2e_project_cleanup_input_invalid");
-  return cleanup;
+function e2eProjectResetInput(value) {
+  const reset = record(value, "external_linear_e2e_project_reset_input_invalid");
+  assertKeys(reset, ["project_slug_id"], [], "external_linear_e2e_project_reset_input_invalid");
+  if (!identifier(reset.project_slug_id)) throw stableError("external_linear_e2e_project_reset_input_invalid");
+  return reset;
 }
 
 async function flatActiveProjectIssues(project) {
   if (!project || typeof project !== "object" || !identifier(project.id) || typeof project.issues !== "function") {
-    throw stableError("external_linear_e2e_project_cleanup_project_invalid");
+    throw stableError("external_linear_e2e_project_reset_project_invalid");
   }
   return readAllNodes(() => project.issues({ first: 250 }));
 }
 
 function assertArchivableProjectIssue(issue) {
   if (!issue || typeof issue !== "object" || !identifier(issue.id) || typeof issue.archive !== "function") {
-    throw stableError("external_linear_e2e_project_cleanup_project_invalid");
+    throw stableError("external_linear_e2e_project_reset_project_invalid");
   }
+}
+
+async function resetConductorRoutingLabels({ client, project }) {
+  const labels = await sdkCall("external_linear_e2e_project_reset_label_read_failed", () => activeConductorProjectLabels(project));
+  if (labels.length === 0) return [];
+  if (new Set(labels.map(({ name }) => name)).size !== labels.length) {
+    throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  }
+  const teamId = await sdkCall("external_linear_e2e_project_reset_label_read_failed", () => soleProjectTeamId(project));
+  const members = [];
+  for (const projectLabel of labels) {
+    await sdkCall("external_linear_e2e_project_reset_label_ownership_invalid", () => assertExclusiveProjectLabel(projectLabel, project.id));
+    const issueLabel = await sdkCall("external_linear_e2e_project_reset_label_read_failed", () => matchingIssueLabel({
+      client,
+      teamId,
+      name: projectLabel.name,
+    }));
+    if (issueLabel !== undefined) {
+      await sdkCall("external_linear_e2e_project_reset_label_ownership_invalid", () => assertNoActiveIssueUsesLabel(issueLabel));
+    }
+    members.push({ projectLabel, issueLabel });
+  }
+  for (const member of members) {
+    // Retiring first makes an interrupted reset leave no active routing surface.
+    if (member.issueLabel && activeLabel(member.issueLabel)) {
+      const payload = await sdkCall("external_linear_e2e_project_reset_label_mutation_failed", () => retireIssueLabel(client, member.issueLabel.id));
+      assertWriteSuccess(payload, "external_linear_e2e_project_reset_label_mutation_failed");
+    }
+    if (activeLabel(member.projectLabel)) {
+      const payload = await sdkCall("external_linear_e2e_project_reset_label_mutation_failed", () => retireProjectLabel(client, member.projectLabel.id));
+      assertWriteSuccess(payload, "external_linear_e2e_project_reset_label_mutation_failed");
+    }
+    const payload = await sdkCall("external_linear_e2e_project_reset_label_mutation_failed", () => removeProjectLabel(
+      client,
+      project.id,
+      member.projectLabel.id,
+    ));
+    assertWriteSuccess(payload, "external_linear_e2e_project_reset_label_mutation_failed");
+  }
+  return members.map(({ projectLabel }) => ({ name: projectLabel.name, teamId }));
+}
+
+async function assertNoActiveConductorRouting({ client, project, routingLabels }) {
+  const labels = await sdkCall("external_linear_e2e_project_reset_label_read_back_failed", () => activeConductorProjectLabels(project));
+  if (labels.length !== 0) throw stableError("external_linear_e2e_project_reset_label_read_back_failed");
+  for (const { name, teamId } of routingLabels) {
+    const issueLabel = await sdkCall("external_linear_e2e_project_reset_label_read_back_failed", () => matchingIssueLabel({
+      client,
+      teamId,
+      name,
+    }));
+    if (activeLabel(issueLabel)) throw stableError("external_linear_e2e_project_reset_label_read_back_failed");
+  }
+}
+
+async function activeConductorProjectLabels(project) {
+  if (!project || typeof project !== "object" || !identifier(project.id) || typeof project.labels !== "function") {
+    throw stableError("external_linear_e2e_project_reset_project_invalid");
+  }
+  const labels = await readAllNodes(() => project.labels({ first: 250 }));
+  return labels.filter((label) => activeLabel(label) && CONDUCTOR_LABEL_NAME.test(label.name));
+}
+
+async function soleProjectTeamId(project) {
+  if (!project || typeof project !== "object" || typeof project.teams !== "function") {
+    throw stableError("external_linear_e2e_project_reset_project_invalid");
+  }
+  const teams = await readAllNodes(() => project.teams({ first: 32 }));
+  if (teams.length !== 1 || !identifier(teams[0]?.id)) {
+    throw stableError("external_linear_e2e_project_reset_project_invalid");
+  }
+  return teams[0].id;
+}
+
+async function assertExclusiveProjectLabel(label, projectId) {
+  if (!activeLabel(label) || typeof label.projects !== "function") {
+    throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  }
+  const projects = await readAllNodes(() => label.projects({ first: 32 }));
+  if (projects.length !== 1 || projects[0]?.id !== projectId) {
+    throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  }
+}
+
+async function matchingIssueLabel({ client, teamId, name }) {
+  if (!client || typeof client.issueLabels !== "function") {
+    throw stableError("external_linear_e2e_project_reset_label_read_failed");
+  }
+  const labels = await readAllNodes(() => client.issueLabels({
+    first: 3,
+    includeArchived: false,
+    filter: { name: { eq: name }, isGroup: { eq: false } },
+  }));
+  const matches = labels.filter((label) => label && typeof label === "object" && identifier(label.id) &&
+    label.name === name && label.isGroup === false && (label.teamId === undefined || label.teamId === teamId));
+  if (matches.length > 1) throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  return matches[0];
+}
+
+async function assertNoActiveIssueUsesLabel(label) {
+  if (!label || typeof label !== "object" || typeof label.issues !== "function") {
+    throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  }
+  const issues = await readAllNodes(() => label.issues({ first: 250 }));
+  if (issues.some((issue) => !issue || typeof issue !== "object" || issue.archivedAt === null || issue.archivedAt === undefined)) {
+    throw stableError("external_linear_e2e_project_reset_label_ownership_invalid");
+  }
+}
+
+function activeLabel(label) {
+  return label && typeof label === "object" && identifier(label.id) && typeof label.name === "string" &&
+    label.isGroup === false && (label.archivedAt === null || label.archivedAt === undefined) &&
+    (label.retiredById === null || label.retiredById === undefined);
+}
+
+function retireProjectLabel(client, labelId) {
+  if (typeof client.projectLabelRetire !== "function") throw stableError("external_linear_e2e_project_reset_label_mutation_failed");
+  return client.projectLabelRetire(labelId);
+}
+
+function retireIssueLabel(client, labelId) {
+  if (typeof client.issueLabelRetire !== "function") throw stableError("external_linear_e2e_project_reset_label_mutation_failed");
+  return client.issueLabelRetire(labelId);
+}
+
+function removeProjectLabel(client, projectId, labelId) {
+  if (typeof client.projectRemoveLabel !== "function") throw stableError("external_linear_e2e_project_reset_label_mutation_failed");
+  return client.projectRemoveLabel(projectId, labelId);
 }
 
 function projectRoutingInput(value) {

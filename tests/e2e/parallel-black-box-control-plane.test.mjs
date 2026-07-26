@@ -124,7 +124,13 @@ test("parallel black-box control plane bootstraps the target Project before rele
   assert.equal(events.includes("restart:conductor-b"), true);
 
   await controlPlane.close();
-  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
+  assert.deepEqual(events.slice(-5), [
+    "stop:conductor-a",
+    "stop:conductor-b",
+    "stop:conductor-c",
+    "client-close",
+    "repositories-close",
+  ]);
 });
 
 test("parallel black-box control plane closes the public client when target Project pool read-back is incomplete", async () => {
@@ -492,6 +498,10 @@ function clientPort(events) {
       }
       if (body.kind === "start_conductor") {
         events.push(`start:${body.conductor_id}`);
+        return { kind: "conductor_command_completed", conductor_id: body.conductor_id, command_kind: body.kind };
+      }
+      if (body.kind === "stop_conductor") {
+        events.push(`stop:${body.conductor_id}`);
         return { kind: "conductor_command_completed", conductor_id: body.conductor_id, command_kind: body.kind };
       }
       if (body.kind === "create_performer_profile") {

@@ -61,16 +61,43 @@ export async function startConductorProcesses({ client, conductors }) {
   if (!Array.isArray(conductors) || conductors.length < 3) {
     throw stableError("e2e_podium_conductors_invalid");
   }
-  await Promise.all(conductors.map(async (conductor) => {
+  const values = conductors.map((conductor) => {
     assertConductor(conductor);
-    const response = await client.command({
-      kind: "start_conductor",
-      conductor_id: conductor.conductor_id,
-    });
-    if (!sameStartResponse(response, conductor.conductor_id)) {
+    return conductor;
+  });
+  const outcomes = await Promise.allSettled(values.map(async (conductor) => {
+    const response = await client.command({ kind: "start_conductor", conductor_id: conductor.conductor_id });
+    if (!sameConductorCommandResponse(response, conductor.conductor_id, "start_conductor")) {
       throw stableError("e2e_podium_conductor_start_invalid");
     }
   }));
+  const started = values.filter((_, index) => outcomes[index]?.status === "fulfilled");
+  if (outcomes.some((outcome) => outcome.status === "rejected")) {
+    try {
+      await stopConductorProcesses({ client, conductors: started });
+    } catch {
+      // Start failure remains authoritative; the caller will close the host next.
+    }
+    throw stableError("e2e_podium_conductor_start_failed");
+  }
+}
+
+export async function stopConductorProcesses({ client, conductors }) {
+  assertClient(client);
+  if (!Array.isArray(conductors)) throw stableError("e2e_podium_conductors_invalid");
+  const values = conductors.map((conductor) => {
+    assertConductor(conductor);
+    return conductor;
+  });
+  const outcomes = await Promise.allSettled(values.map(async (conductor) => {
+    const response = await client.command({ kind: "stop_conductor", conductor_id: conductor.conductor_id });
+    if (!sameConductorCommandResponse(response, conductor.conductor_id, "stop_conductor")) {
+      throw stableError("e2e_podium_conductor_stop_invalid");
+    }
+  }));
+  if (outcomes.some((outcome) => outcome.status === "rejected")) {
+    throw stableError("e2e_podium_conductor_stop_failed");
+  }
 }
 
 export async function provisionApiKeyProfiles({
@@ -188,9 +215,9 @@ function readCreatedConductor(value, repositoryIdentity) {
   };
 }
 
-function sameStartResponse(value, conductorId) {
+function sameConductorCommandResponse(value, conductorId, commandKind) {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
-    value.kind === "conductor_command_completed" && value.command_kind === "start_conductor" &&
+    value.kind === "conductor_command_completed" && value.command_kind === commandKind &&
     value.conductor_id === conductorId;
 }
 

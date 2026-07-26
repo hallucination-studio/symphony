@@ -11,8 +11,8 @@ test("configured Campaign runner assembles verified public boundaries and closes
   const human = {
     async readActorId() { return "human-actor"; },
     async readSymphonyActorId() { return "symphony-actor"; },
-    async clearE2EProjectIssues(input) {
-      events.push({ kind: "cleanup", input });
+    async resetE2EProject(input) {
+      events.push({ kind: "reset", input });
       return { project_id: "project-1" };
     },
     async discoverProjectRouting(input) {
@@ -51,7 +51,7 @@ test("configured Campaign runner assembles verified public boundaries and closes
   });
 
   assert.deepEqual(execution, { command, result });
-  assert.deepEqual(events.map(({ kind }) => kind), ["config", "actors", "cleanup", "runtime", "routing", "ports", "campaign", "close"]);
+  assert.deepEqual(events.map(({ kind }) => kind), ["config", "actors", "reset", "runtime", "routing", "ports", "campaign", "close"]);
   assert.deepEqual(events[1].input, {
     symphonyAccessToken: "symphony-token",
     humanApiKey: "human-token",
@@ -80,7 +80,7 @@ test("configured Campaign runner assembles verified public boundaries and closes
   });
 });
 
-test("configured Campaign runner never creates a runtime when the pre-run Project cleanup fails", async () => {
+test("configured Campaign runner never creates a runtime when the pre-run Project reset fails", async () => {
   const events = [];
 
   await assert.rejects(
@@ -88,9 +88,9 @@ test("configured Campaign runner never creates a runtime when the pre-run Projec
       loadConfig: () => configuration(),
       createVerifiedActors: async () => ({
         human: {
-          async clearE2EProjectIssues() {
-            events.push({ kind: "cleanup" });
-            throw new Error("cleanup unavailable");
+          async resetE2EProject() {
+            events.push({ kind: "reset" });
+            throw new Error("reset unavailable");
           },
         },
       }),
@@ -99,10 +99,10 @@ test("configured Campaign runner never creates a runtime when the pre-run Projec
         return runtimeOwner(campaignCommand(), events);
       },
     }),
-    /cleanup unavailable/u,
+    /reset unavailable/u,
   );
 
-  assert.deepEqual(events, [{ kind: "cleanup" }]);
+  assert.deepEqual(events, [{ kind: "reset" }]);
 });
 
 test("configured Campaign runner closes its runtime when public routing cannot be discovered", async () => {
@@ -113,7 +113,7 @@ test("configured Campaign runner closes its runtime when public routing cannot b
       loadConfig: () => configuration(),
       createVerifiedActors: async () => ({
         human: {
-          async clearE2EProjectIssues() { return { project_id: "project-1" }; },
+          async resetE2EProject() { return { project_id: "project-1" }; },
           async discoverProjectRouting() { throw new Error("routing unavailable"); },
         },
       }),

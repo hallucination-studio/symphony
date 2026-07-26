@@ -26,6 +26,7 @@ const CONTROL_PLANE_FAILURE_CODES = new Set([
   "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
   "parallel_black_box_control_plane_binding_issue_label_failed",
   "parallel_black_box_control_plane_conductor_start_failed",
+  "parallel_black_box_control_plane_conductor_stop_failed",
   "parallel_black_box_control_plane_profile_activate_failed",
   "parallel_black_box_control_plane_profile_create_failed",
   "parallel_black_box_control_plane_profile_not_ready",

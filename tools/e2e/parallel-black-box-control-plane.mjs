@@ -2,6 +2,7 @@ import {
   provisionApiKeyProfiles,
   provisionConductorBindings,
   startConductorProcesses,
+  stopConductorProcesses,
 } from "./podium-control-plane.mjs";
 import { createPublicE2EPodiumClient } from "./podium-client-owner.mjs";
 import { createE2EProcessHost } from "./podium-process-host.mjs";
@@ -154,6 +155,7 @@ async function provisionWithRepositories({
     throw stableError("parallel_black_box_control_plane_process_host_invalid");
   }
   let client;
+  let startedConductors = [];
   try {
     client = await createPodiumClient({
       databasePath: runtime.databasePath,
@@ -191,6 +193,7 @@ async function provisionWithRepositories({
       "parallel_black_box_control_plane_conductor_start_failed",
       () => startConductorProcesses({ client, conductors }),
     );
+    startedConductors = conductors;
     const apiKey = Buffer.from(config.secrets.codexApiKey, "utf8");
     try {
       await controlPlaneOperation(
@@ -226,12 +229,28 @@ async function provisionWithRepositories({
       async close() {
         if (closed) return;
         closed = true;
-        await client.close();
+        let stopFailure;
+        try {
+          await stopConductorProcesses({ client, conductors: startedConductors });
+        } catch {
+          stopFailure = stableError("parallel_black_box_control_plane_conductor_stop_failed");
+        }
+        try {
+          await client.close();
+        } finally {
+          if (stopFailure) throw stopFailure;
+        }
       },
     });
   } catch (error) {
-    if (typeof client?.close === "function") await client.close();
-    else await processHost.close();
+    try {
+      if (startedConductors.length > 0) await stopConductorProcesses({ client, conductors: startedConductors });
+    } catch {
+      // The setup failure remains authoritative; host close is still required.
+    } finally {
+      if (typeof client?.close === "function") await client.close();
+      else await processHost.close();
+    }
     throw error;
   }
 }

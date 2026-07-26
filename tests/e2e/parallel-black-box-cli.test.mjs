@@ -56,6 +56,16 @@ test("real Campaign CLI exposes only allowlisted stable startup failure codes", 
   );
   assert.deepEqual(
     sanitizeParallelBlackBoxCampaignFailure({
+      code: "external_linear_e2e_project_reset_label_ownership_invalid",
+    }),
+    {
+      status: "failed",
+      reason_code: "external_linear_e2e_project_reset_label_ownership_invalid",
+      issues: [],
+    },
+  );
+  assert.deepEqual(
+    sanitizeParallelBlackBoxCampaignFailure({
       code: "remote_error_with_human-api-key",
       issues: ["human-api-key"],
     }),

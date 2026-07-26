@@ -108,13 +108,12 @@ test("external Linear actor depends only on the official public SDK boundary", a
   assert.doesNotMatch(source, /\.(?:createReaction|deleteReaction|archiveIssue|unarchiveIssue|issueAddLabel|issueRemoveLabel|createIssueRelation|deleteIssueRelation|rawRequest)\b/u);
 });
 
-test("verified Human Actor exposes only bounded E2E project cleanup, Root, and ordinary Markdown comment operations", async () => {
+test("verified Human Actor exposes only bounded E2E baseline reset, Root, and ordinary Markdown comment operations", async () => {
   const calls = [];
   const client = humanClient(calls);
   const { human } = await verifiedActors(client);
 
   assert.deepEqual(Object.keys(human).sort(), [
-    "clearE2EProjectIssues",
     "createComment",
     "createRoot",
     "discoverProjectRouting",
@@ -122,6 +121,7 @@ test("verified Human Actor exposes only bounded E2E project cleanup, Root, and o
     "readActorId",
     "readSymphonyActorId",
     "reopenCommentThread",
+    "resetE2EProject",
     "resolveCommentThread",
     "resolveHumanAction",
     "updateRoot",
@@ -173,7 +173,7 @@ test("verified Human Actor exposes only bounded E2E project cleanup, Root, and o
   ]);
 });
 
-test("E2E Human Actor flat-archives every active Project Issue without walking Root children", async () => {
+test("E2E baseline reset flat-archives every active Project Issue without walking Root children", async () => {
   const calls = [];
   const activeIssues = new Map();
   const root = projectIssue({ id: "root-1", parentId: null, stateName: "Canceled", activeIssues, calls });
@@ -189,11 +189,12 @@ test("E2E Human Actor flat-archives every active Project Issue without walking R
         calls.push({ kind: "read_project_issues", input });
         return connection([...activeIssues.values()]);
       },
+      labels: async () => connection([]),
     };
   };
   const { human } = await verifiedActors(client);
 
-  const result = await human.clearE2EProjectIssues({ project_slug_id: "e2e-project" });
+  const result = await human.resetE2EProject({ project_slug_id: "e2e-project" });
 
   assert.deepEqual(result, { project_id: "project-1" });
   assert.deepEqual(calls.filter(({ kind }) => kind === "archive_issue").map(({ issue_id: issueId }) => issueId), [
@@ -205,6 +206,7 @@ test("E2E Human Actor flat-archives every active Project Issue without walking R
   assert.deepEqual(calls.filter(({ kind }) => kind === "read_project"), [
     { kind: "read_project", project_slug_id: "e2e-project" },
     { kind: "read_project", project_slug_id: "e2e-project" },
+    { kind: "read_project", project_slug_id: "e2e-project" },
   ]);
   assert.deepEqual(calls.filter(({ kind }) => kind === "read_project_issues").map(({ input }) => input), [
     { first: 250 },
@@ -212,7 +214,7 @@ test("E2E Human Actor flat-archives every active Project Issue without walking R
   ]);
 });
 
-test("E2E Human Actor fails closed when Project cleanup cannot read back an empty Project", async () => {
+test("E2E baseline reset fails closed when Project Issues cannot read back empty", async () => {
   const calls = [];
   const issue = {
     id: "root-1",
@@ -226,14 +228,202 @@ test("E2E Human Actor fails closed when Project cleanup cannot read back an empt
   client.project = async () => ({
     id: "project-1",
     issues: async () => connection([issue]),
+    labels: async () => connection([]),
   });
   const { human } = await verifiedActors(client);
 
   await assert.rejects(
-    human.clearE2EProjectIssues({ project_slug_id: "e2e-project" }),
-    /external_linear_e2e_project_cleanup_read_back_failed/u,
+    human.resetE2EProject({ project_slug_id: "e2e-project" }),
+    /external_linear_e2e_project_reset_issue_read_back_failed/u,
   );
   assert.deepEqual(calls, [{ kind: "archive_issue", issue_id: "root-1" }]);
+});
+
+test("E2E baseline reset does not retire routing labels before active Issues read back empty", async () => {
+  const calls = [];
+  const issue = {
+    id: "root-1",
+    async archive() {
+      calls.push({ kind: "archive_issue", issue_id: "root-1" });
+      return { success: true };
+    },
+  };
+  const project = {
+    id: "project-1",
+    issues: async () => connection([issue]),
+    labels: async () => connection([{
+      id: "project-label-1",
+      name: "symphony:conductor/abcdef123456",
+      isGroup: false,
+      archivedAt: null,
+      retiredById: null,
+      projects: async () => connection([project]),
+    }]),
+    teams: async () => connection([{ id: "team-1" }]),
+  };
+  const client = humanClient(calls);
+  client.project = async () => project;
+  client.issueLabels = async () => connection([{
+    id: "issue-label-1",
+    name: "symphony:conductor/abcdef123456",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    issues: async () => connection([]),
+  }]);
+  client.issueLabelRetire = async (labelId) => {
+    calls.push({ kind: "retire_issue_label", label_id: labelId });
+    return { success: true };
+  };
+  const { human } = await verifiedActors(client);
+
+  await assert.rejects(
+    human.resetE2EProject({ project_slug_id: "e2e-project" }),
+    /external_linear_e2e_project_reset_issue_read_back_failed/u,
+  );
+  assert.deepEqual(calls, [{ kind: "archive_issue", issue_id: "root-1" }]);
+});
+
+test("E2E baseline reset removes and retires only stale exclusive conductor routing labels idempotently", async () => {
+  const calls = [];
+  const activeIssues = new Map();
+  const projectLabels = new Map();
+  const issueLabels = new Map();
+  const project = {
+    id: "project-1",
+    issues: async () => connection([...activeIssues.values()]),
+    teams: async () => connection([{ id: "team-1" }]),
+    labels: async () => connection([...projectLabels.values()]),
+  };
+  const projectLabel = {
+    id: "project-label-1",
+    name: "symphony:conductor/abcdef123456",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    projects: async () => connection([project]),
+  };
+  const issueLabel = {
+    id: "issue-label-1",
+    name: projectLabel.name,
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    issues: async () => connection([]),
+  };
+  projectLabels.set(projectLabel.id, projectLabel);
+  issueLabels.set(issueLabel.id, issueLabel);
+  const active = projectIssue({ id: "root-1", parentId: null, stateName: "Todo", activeIssues, calls });
+  activeIssues.set(active.id, active);
+  const client = humanClient(calls);
+  client.project = async () => project;
+  client.issueLabels = async (input) => {
+    calls.push({ kind: "read_issue_labels", input });
+    return connection([...issueLabels.values()].filter(({ name, retiredById }) =>
+      name === input.filter?.name?.eq && retiredById === null,
+    ));
+  };
+  client.projectRemoveLabel = async (projectId, labelId) => {
+    calls.push({ kind: "remove_project_label", project_id: projectId, label_id: labelId });
+    projectLabels.delete(labelId);
+    return { success: true };
+  };
+  client.projectLabelRetire = async (labelId) => {
+    calls.push({ kind: "retire_project_label", label_id: labelId });
+    projectLabel.retiredById = "human-actor";
+    return { success: true };
+  };
+  client.issueLabelRetire = async (labelId) => {
+    calls.push({ kind: "retire_issue_label", label_id: labelId });
+    issueLabel.retiredById = "human-actor";
+    return { success: true };
+  };
+  const { human } = await verifiedActors(client);
+
+  assert.deepEqual(await human.resetE2EProject({ project_slug_id: "e2e-project" }), { project_id: "project-1" });
+  assert.deepEqual(calls.filter(({ kind }) => kind === "archive_issue").map(({ issue_id: issueId }) => issueId), ["root-1"]);
+  assert.deepEqual(calls.filter(({ kind }) => kind === "remove_project_label"), [
+    { kind: "remove_project_label", project_id: "project-1", label_id: "project-label-1" },
+  ]);
+  assert.deepEqual(calls.filter(({ kind }) => kind.startsWith("retire_")), [
+    { kind: "retire_issue_label", label_id: "issue-label-1" },
+    { kind: "retire_project_label", label_id: "project-label-1" },
+  ]);
+  assert.equal(projectLabels.size, 0);
+  assert.equal(issueLabel.retiredById, "human-actor");
+
+  const firstMutationCount = calls.filter(({ kind }) => kind === "remove_project_label" || kind.startsWith("retire_")).length;
+  await human.resetE2EProject({ project_slug_id: "e2e-project" });
+  assert.equal(calls.filter(({ kind }) => kind === "remove_project_label" || kind.startsWith("retire_")).length, firstMutationCount);
+});
+
+test("E2E baseline reset fails closed before mutation when active conductor Project labels are ambiguous", async () => {
+  const calls = [];
+  const project = {
+    id: "project-1",
+    issues: async () => connection([]),
+    labels: async () => connection([
+      conductorProjectLabel("project-label-1"),
+      conductorProjectLabel("project-label-2"),
+    ]),
+    teams: async () => connection([{ id: "team-1" }]),
+  };
+  function conductorProjectLabel(id) {
+    return {
+      id,
+      name: "symphony:conductor/abcdef123456",
+      isGroup: false,
+      archivedAt: null,
+      retiredById: null,
+      projects: async () => connection([project]),
+    };
+  }
+  const client = humanClient(calls);
+  client.project = async () => project;
+  const { human } = await verifiedActors(client);
+
+  await assert.rejects(
+    human.resetE2EProject({ project_slug_id: "e2e-project" }),
+    /external_linear_e2e_project_reset_label_ownership_invalid/u,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("E2E baseline reset fails closed before mutation when a routing label has an external Project association", async () => {
+  const calls = [];
+  const project = {
+    id: "project-1",
+    issues: async () => connection([]),
+    teams: async () => connection([{ id: "team-1" }]),
+    labels: async () => connection([{
+      id: "project-label-1",
+      name: "symphony:conductor/abcdef123456",
+      isGroup: false,
+      archivedAt: null,
+      retiredById: null,
+      projects: async () => connection([{ id: "project-1" }, { id: "foreign-project" }]),
+    }]),
+  };
+  const client = humanClient(calls);
+  client.project = async () => project;
+  client.issueLabels = async () => connection([{
+    id: "issue-label-1",
+    name: "symphony:conductor/abcdef123456",
+    isGroup: false,
+    archivedAt: null,
+    retiredById: null,
+    teamId: "team-1",
+    issues: async () => connection([]),
+  }]);
+  const { human } = await verifiedActors(client);
+
+  await assert.rejects(
+    human.resetE2EProject({ project_slug_id: "e2e-project" }),
+    /external_linear_e2e_project_reset_label_ownership_invalid/u,
+  );
+  assert.equal(calls.some(({ kind }) => kind === "remove_project_label" || kind === "retire_project_label"), false);
 });
 
 test("Human Actor discovers the exact Project Team and active routing Labels through the public Linear boundary", async () => {
@@ -489,7 +679,7 @@ function projectIssue({ id, parentId, stateName, activeIssues, calls }) {
     },
     async children() {
       calls.push({ kind: "read_issue_children", issue_id: id });
-      throw new Error("Project cleanup must not traverse Issue children");
+      throw new Error("Project reset must not traverse Issue children");
     },
   };
 }

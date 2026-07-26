@@ -6,6 +6,7 @@ import {
   provisionApiKeyProfiles,
   provisionConductorBindings,
   startConductorProcesses,
+  stopConductorProcesses,
 } from "../../tools/e2e/podium-control-plane.mjs";
 
 test("public control plane provisions and activates one ready API-key Profile per live Conductor", async () => {
@@ -155,6 +156,57 @@ test("public control plane creates every Binding before it starts any Conductor 
   await startConductorProcesses({ client, conductors: bindings });
   assert.deepEqual(events.slice(3), [
     "start:conductor-a", "start:conductor-b", "start:conductor-c",
+  ]);
+});
+
+test("public control plane stops every started Conductor through the closed command contract", async () => {
+  const commands = [];
+  const conductors = [conductor("a"), conductor("b"), conductor("c")];
+
+  await stopConductorProcesses({
+    conductors,
+    client: {
+      async command(body) {
+        commands.push(body);
+        return {
+          kind: "conductor_command_completed",
+          conductor_id: body.conductor_id,
+          command_kind: body.kind,
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(commands, conductors.map(({ conductor_id }) => ({
+    kind: "stop_conductor",
+    conductor_id,
+  })));
+});
+
+test("public control plane stops successful starts when one concurrent start fails", async () => {
+  const commands = [];
+  await assert.rejects(
+    startConductorProcesses({
+      conductors: [conductor("a"), conductor("b"), conductor("c")],
+      client: {
+        async command(body) {
+          commands.push(body);
+          if (body.kind === "start_conductor" && body.conductor_id === "conductor-b") {
+            throw new Error("start unavailable");
+          }
+          return {
+            kind: "conductor_command_completed",
+            conductor_id: body.conductor_id,
+            command_kind: body.kind,
+          };
+        },
+      },
+    }),
+    /e2e_podium_conductor_start_failed/u,
+  );
+  assert.deepEqual(commands.filter(({ kind }) => kind === "stop_conductor"), [
+    { kind: "stop_conductor", conductor_id: "conductor-a" },
+    { kind: "stop_conductor", conductor_id: "conductor-c" },
   ]);
 });
 

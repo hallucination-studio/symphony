@@ -180,17 +180,17 @@ export async function runConfiguredParallelBlackBoxE2ECampaign({
     symphonyAccessToken: config.secrets.linearDevToken,
     humanApiKey: config.secrets.linearHumanApiKey,
   });
-  if (!actors?.human || typeof actors.human.clearE2EProjectIssues !== "function") {
-    throw stableError("parallel_black_box_e2e_project_cleanup_unavailable");
+  if (!actors?.human || typeof actors.human.resetE2EProject !== "function") {
+    throw stableError("parallel_black_box_e2e_project_reset_unavailable");
   }
-  const cleanup = await actors.human.clearE2EProjectIssues({ project_slug_id: config.linear.projectSlugId });
-  if (!cleanup || typeof cleanup !== "object" || Object.keys(cleanup).length !== 1 || !ROOT_ISSUE_ID.test(cleanup.project_id)) {
-    throw stableError("parallel_black_box_e2e_project_cleanup_invalid");
+  const reset = await actors.human.resetE2EProject({ project_slug_id: config.linear.projectSlugId });
+  if (!reset || typeof reset !== "object" || Object.keys(reset).length !== 1 || !ROOT_ISSUE_ID.test(reset.project_id)) {
+    throw stableError("parallel_black_box_e2e_project_reset_invalid");
   }
   const runtime = await createRuntime({ config, sourceRepositoryRoot, environment });
   try {
-    if (runtime.command.project_id !== cleanup.project_id) {
-      throw stableError("parallel_black_box_e2e_project_cleanup_project_mismatch");
+    if (runtime.command.project_id !== reset.project_id) {
+      throw stableError("parallel_black_box_e2e_project_reset_project_mismatch");
     }
     const routing = await actors.human.discoverProjectRouting({
       project_id: runtime.command.project_id,

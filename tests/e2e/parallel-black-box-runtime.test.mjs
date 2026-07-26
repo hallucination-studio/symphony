@@ -63,6 +63,42 @@ test("configured runtime owns only temporary resources and builds the exact Camp
   assert.deepEqual(events.slice(-2), ["control-plane-close", "remove:/temporary/runtime"]);
 });
 
+test("sequential configured runtimes never reuse a prior temporary DB or Conductor data root", async () => {
+  const directories = ["/temporary/runtime-one", "/temporary/runtime-two"];
+  const inputs = [];
+  const removed = [];
+  const createRuntime = () => createConfiguredParallelBlackBoxRuntime({
+    config: configuration(),
+    sourceRepositoryRoot: "/source",
+    resolveTargetTriple: () => "aarch64-apple-darwin",
+    now: () => new Date(now),
+    createCampaignId: () => `campaign-${inputs.length + 1}`,
+    makeTemporaryDirectory: async () => directories.shift(),
+    makeDirectory: async () => {},
+    checkExecutable: async () => {},
+    removeTemporaryDirectory: async (directory) => { removed.push(directory); },
+    provisionControlPlane: async ({ runtime }) => {
+      inputs.push({ databasePath: runtime.databasePath, conductorDataRoot: runtime.conductorDataRoot });
+      return {
+        project_id: "project-1",
+        conductors: [conductor("a"), conductor("b"), conductor("c")],
+        async close() {},
+      };
+    },
+  });
+
+  const first = await createRuntime();
+  await first.close();
+  const second = await createRuntime();
+  await second.close();
+
+  assert.deepEqual(inputs, [
+    { databasePath: "/temporary/runtime-one/podium.db", conductorDataRoot: "/temporary/runtime-one/conductors" },
+    { databasePath: "/temporary/runtime-two/podium.db", conductorDataRoot: "/temporary/runtime-two/conductors" },
+  ]);
+  assert.deepEqual(removed, ["/temporary/runtime-one", "/temporary/runtime-two"]);
+});
+
 test("configured runtime removes its temporary root when public control-plane provisioning fails", async () => {
   const events = [];
   await assert.rejects(

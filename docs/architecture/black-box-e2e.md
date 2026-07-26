@@ -18,7 +18,7 @@ required_consequences
   - 测试不能代替Symphony创建managed records或推进Stage lifecycle
   - Case verdict只属于临时测试报告，不写Linear/Git且不参与恢复
   - mandatory Case非passed时Campaign必须非零退出
-  - 本轮final fresh evidence完成后不再改写Case Root；下一轮Campaign在启动前清空专用E2E Project的活跃Issue
+  - 每轮Campaign从同一专用E2E Project的可验证初始化基线开始；本轮final fresh evidence完成后不再改写Case Root，下一轮只能先完成新的baseline reset
 
 out_of_scope
   - Desktop UI自动化和视觉验收
@@ -73,9 +73,9 @@ Campaign只能使用以下外部边界：
 测试工具可以在自身进程中使用Linear公开client，但不能从产品包深路径复用Podium内部SDK实现。这个外部测试client
 代表真实human actor，不改变“Podium是产品内唯一Linear SDK和credential owner”的产品边界。
 
-唯一的测试项目管理例外是第6.1节定义的启动前清理：它在任何Binding、Conductor、Profile或Case Root创建前，通过Linear
-公开API对配置的专用E2E Project执行原生Issue archive。它不修改本轮Workflow、不生成Symphony-owned事实，也不能在final
-fresh evidence之后执行。
+唯一的测试项目管理例外是第6.1节定义的启动前baseline reset：它在任何Binding、Conductor、Profile、Repository Context
+或Case Root创建前，通过Linear公开API把配置的专用E2E Project收敛到初始化active surface。它不修改本轮Workflow、不生成
+Symphony-owned事实，也不能在final fresh evidence之后执行。
 
 ### 3.1 Required Linear write outage transport gate
 
@@ -114,7 +114,7 @@ Human script必须按`wait until blocked -> restore -> approve real Plan Action`
 SDK `apiKey` 传入；Linear的default API actor就是该认证用户，不能请求、模拟或附加OAuth actor authorization。Symphony
 Actor继续只由生产Podium installation的OAuth access token驱动。
 
-E2E Human Actor只能模拟产品用户：
+E2E Human Actor只能在Case中模拟产品用户：
 
 - 创建带唯一Campaign/Case标识和明确需求的Root Issue；
 - 设置用户可设置的Priority、routing label、description和Root status；
@@ -124,11 +124,10 @@ E2E Human Actor只能模拟产品用户：
 
 reaction、managed reply、timeline、Plan/Work/Verify结果、Cycle创建和所有Symphony-owned mutation必须由生产进程生成。
 
-在Campaign开始前，已验证身份的E2E Human Actor还只可执行一次测试项目管理操作：读取配置Project的**活跃**Issue集合，并对
-集合中每个Issue调用Linear原生archive。它平铺处理Project返回的所有Issue，包含Root、子Issue和任意Workflow状态；`Done`、
-`Canceled`、`Duplicate`等终结状态不构成例外。它不查询或遍历`children`，也不依赖archive的父子级联行为；Project集合中
-出现的每个Issue只archive一次。该操作不读取、restore、archive或修改已归档Issue，也不属于Human script、Case、final evidence
-或产品Workflow。
+在Campaign开始前，同一已验证external Linear identity只可执行第6.1节的test-project reset。它不是Human script、Case、
+final evidence或产品Workflow，也不能代替用户操作。reset平铺读取配置Project的**活跃**Issue集合，并对集合中每个Issue调用
+Linear原生archive；它包含Root、子Issue和任意Workflow状态，`Done`、`Canceled`、`Duplicate`不构成例外。它不查询或遍历
+`children`，也不依赖archive的父子级联行为；Project集合中每个Issue只archive一次。它绝不restore、读取或改写已归档Issue。
 
 ## 5. 最低真实拓扑
 
@@ -168,13 +167,14 @@ Campaign按以下单向阶段执行；这些阶段是测试编排步骤，不是
 ```text
 validate external credentials and production binaries
 -> verify distinct external Linear actor identities
--> archive every active Issue in the configured dedicated E2E Project
--> fresh-read that Project and require zero active Issues
+-> reset the configured dedicated E2E Project to the initialized active baseline
+-> fresh-read that Project and require the exact baseline
 -> provision three or more public Bindings and repositories
 -> reach one process-start barrier
 -> release all production Conductor process starts concurrently
 -> provision and activate isolated Profiles through each live control-plane
 -> reach one Case-readiness barrier
+-> construct the Campaign Command and start its time budget
 -> create every Case Root concurrently with explicit routing
 -> run independent human drivers and observers concurrently
 -> await every Case with all-settled semantics
@@ -183,24 +183,39 @@ validate external credentials and production binaries
 -> derive Case verdicts and one Campaign exit code
 ```
 
-### 6.1 启动前专用Project清理
+### 6.1 启动前专用Project Baseline Reset
 
-启动前清理是Campaign的硬门槛：archive mutation、archive response、Project fresh read-back或“零活跃Issue”条件任一失败时，
-Campaign必须在创建任何Binding、Conductor、Profile、repository context或Case Root前fail closed。清理使用Linear原生archive，
-而非delete；已归档Issue是非调度历史，不参与清理输入、Project pool preflight、Case定位、Human script或final verdict。
-Case的最终Root在本轮final fresh evidence后必须原样保留；禁止为收尾、quiescence或重试而archive、cancel或改写它。下一轮
-Campaign只能从自己的启动前清理重新开始，不能把上一轮final或本地缓存作为输入。
+每次Campaign都必须从同一个初始化active surface开始，不复用上一轮的Binding、repository、process、Profile、Root、pool member、
+routing label、deadline、polling cache或final evidence。reset是任何本地临时资源创建前的硬门槛，严格按以下顺序执行：
 
-Target Workflow Setup在Binding创建前只能初始化目标Team workflow并read-back现有Project pool，不能使用临时Conductor hash
-创建、rebind或重置Project Conductor Label。所有pool写入只来自正式Binding创建；随后fresh read-back必须包含本Campaign的
-新Binding hashes，但可以保留之前Campaign的成员和其可审计Roots。process-start barrier必须在全部Bindings和repositories
-可从公开边界read-back后才释放。Profile属于Conductor，所以只能在matching process online后经正式control-plane创建和激活；
-不能由runner直接写Profile文件。Case-readiness barrier必须等待三个或更多Profile全部fresh read-back为ready，随后并发创建
-Cases，不能用串行`for await`逐个执行。每个Case拥有独立deadline和promise，单Case的failure、timeout或process exit不cancel
-其他Case。
+1. 读取配置的专用E2E Project的活跃Issue集合，平铺archive每个Issue并fresh read-back为零；
+2. fresh-read该Project的active `symphony:conductor/<12-hex>` Project labels。每个label必须是非group、只关联该专用Project，
+   且有同名、同Team或workspace-scoped、唯一的active Issue label；任何歧义、外部Project关联、外部active Issue使用或读取不完整都fail closed；
+3. 对每个已证明只属于本次专用Project的member，先原生retire matching Issue label，再retire Project label，最后调用
+   Linear原生Project-label remove；每个mutation都必须成功并fresh read-back。这个顺序保证中断不会留下active routing surface；
+4. final fresh read必须同时证明零活跃Issue、零active conductor Project label和零active matching conductor Issue label。
+
+archive和retire后的事实是非调度历史，不能成为下一轮Campaign、pool preflight、Case定位、Human script、final evidence或pass
+predicate的输入。reset不使用delete、restore、rebind、递归Issue traversal或本地缓存，也不允许清理已归档Issue。任一mutation、
+read-back或ownership proof失败时Campaign必须在创建Binding、Conductor、Profile、Repository Context或Case Root前fail closed。
+Case的最终Root在本轮final fresh evidence后必须原样保留；禁止为收尾、quiescence或重试而archive、cancel、退役或改写本轮事实。
+下一轮只能从新的baseline reset开始。
+
+Target Workflow Setup在Binding创建前只能初始化目标Team workflow并read-back基线pool；它不能执行reset。baseline成功后，
+正式Binding creation是唯一添加当前Campaign pool member和routing label的路径。process-start barrier必须在全部Bindings和
+repositories可从公开边界read-back后才释放。Profile属于Conductor，所以只能在matching process online后经正式control-plane
+创建和激活，不能由runner直接写Profile文件。Case-readiness barrier必须等待三个或更多Profile全部fresh read-back为ready；
+只有此时才能构造`RunParallelBlackBoxE2ECampaignCommand`，并将其`started_at`和`deadline_at`交给并发Case。
+
+本地运行环境同样是一次性的：每轮新建`podium.db`、repository pool、Conductor data root、process和Profile；关闭时经public
+`stop_conductor`逐个停止所有已start Binding、等待host close，再删除临时目录。close绝不改写Linear/Git最终证据。任何下一轮
+都必须通过第1至4步重新回到baseline，不能假定上轮正常close或依赖其本地残留。
 
 轮询只用于发现何时可以执行下一次真实human action。轮询缓存、webhook、process stdout和本地Case observation在最终
-判定前全部丢弃。全局deadline到达时停止新增human action，但仍对每个Case执行一次bounded final fresh read。
+判定前全部丢弃。Campaign的deadline从readiness barrier后开始，不能包含reset、Binding、process或Profile准备时间；到达后停止
+新增human action，但仍对每个Case执行一次bounded final fresh read。Conductor的Root deadline必须在Root首次admission时由
+configured duration计算并materialize为durable Root convergence policy；进程启动时间、Profile provisioning和Campaign时间都
+不能消耗未admit Root的预算。
 
 Root revision and comment Case必须避免把用户连续的native thread操作压缩为一个不可观察的当前值：Human Actor在`resolve`
 后，必须通过新建外部client的fresh Linear read等待matching `resolved` thread-state input的accepted directive、reply和
@@ -213,8 +228,9 @@ required Linear write Case同样只把gate作为下一步外部操作的短暂�
 恢复该**同一**请求后才处理真实Plan Review Action。gate不会生成evidence、不会保留到Case完成后，也不会替代Case结束时的
 fresh Linear/Git read。
 
-重复运行使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels。启动前清理之后才允许创建本轮
-Root，不能复用旧Root、本地final或上轮polling cache作为本次通过证据。
+重复运行可以使用新的Campaign/Case identity和新的三个或更多Conductor identities/routing labels，但只能在新的baseline
+reset成功后创建。前一轮Root、本地final、polling cache、Binding、Profile、repository context、process、deadline或残留pool
+member永远不能作为本轮输入或通过证据。
 
 ## 7. Command surface
 
@@ -236,8 +252,8 @@ credential、token、provider transcript、原始exception、Root/Issue正文或
 Profile provisioning在Case前失败时，`reason_code`必须区分create、API-key relay、readiness或activation阶段；它只报告该闭合阶段码，
 不能透出Provider或本地process错误文本。
 
-Binding provisioning在Case前失败时，`reason_code`必须保留Project label、Issue label和两者共用的organization mismatch闭合失败
-分类；它不能透出Linear SDK response、原始exception或Project内容。
+Baseline reset或Binding provisioning在Case前失败时，`reason_code`必须保留baseline Issue、Project label、Issue label和各自
+organization/ownership mismatch的闭合失败分类；它不能透出Linear SDK response、原始exception或Project内容。
 
 ## 8. Test-only closed contract
 
@@ -410,6 +426,7 @@ Evidence predicate、路由数量或mandatory标志的任一偏差都是无效Ca
 - runner使用Symphony actor代替human actor批准Human Action；
 - 用process/log/session/local evidence或synthetic `final`宣告完成；
 - final fresh evidence之后的E2E cleanup、quiescence或任何改写Case Root最终事实的mutation。
+- persistent fixture、previous-run Binding/Repository/Profile reuse，或把process-launch absolute timestamp作为本轮Campaign/Root deadline。
 
 新runner只有一条Campaign入口和一套mandatory Case registry。旧代码、旧配置项、旧fixture和旧测试必须在同一原子切换中
 删除，不能声明deprecated后继续存在。
@@ -424,6 +441,6 @@ Evidence predicate、路由数量或mandatory标志的任一偏差都是无效Ca
 6. verdict是transient CI classification，不是产品状态、record或恢复输入。
 7. all-settled不因单Case失败而取消其他Case；mandatory非passed使Campaign失败。
 8. 日志、process exit、session、runtime state和synthetic `final`永远不是完成证据。
-9. 每轮Campaign在任何生产资源创建前archive专用E2E Project的全部活跃Issue，并fresh-read为零；final fresh evidence之后不清理或改写本轮Case Root。
+9. 每轮Campaign在任何生产资源创建前完成专用E2E Project baseline reset并fresh-read零active Issue、零active conductor Project/Issue label；final fresh evidence之后不清理或改写本轮Case Root。
 10. 旧串行/白盒runner与新Campaign不能并存。
 11. required-write gate只制造临时外部channel故障；final verdict只使用恢复后的fresh Linear/Git事实，不能读取gate内存或把outage本身伪造成durable事实。
