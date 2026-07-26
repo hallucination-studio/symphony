@@ -417,13 +417,13 @@ Desktop View不得包含Workflow事实，是可丢弃查询结果而不是数据
 
 | Canonical Term | 代码类型/字段 | 定义 |
 |---|---|---|
-| Parallel Black-Box E2E Campaign | `RunParallelBlackBoxE2ECampaignCommand` / `ParallelBlackBoxE2ECampaignResult` | 在同一真实Linear Project并行驱动至少三个真实Conductor和多个Cases的test-only transient编排 |
-| E2E Case | Campaign Command中的closed Case entry | 一组外部human/operator动作和final evidence predicate；不是Root、Cycle或Workflow lifecycle |
+| Parallel Black-Box E2E Campaign | runner内存中的foreground execution | 创建隔离环境、并行模拟多个真实用户Cases、fresh-read最终证据并有界清理的test-only transient进程；不是产品control plane |
+| E2E Case | runner内存中的immutable Case definition | 一组预声明用户输入、真实Linear交互和正向/负向/coverage predicates；不是Root、Cycle或Workflow lifecycle |
 | E2E Human Actor | test-only actor configuration | 使用独立Linear identity和credential执行真实用户操作的外部测试actor |
-| Final Evidence Snapshot | `FinalEvidenceSnapshot` | Case settle后丢弃缓存并fresh-read的完整Linear/Git事实；不是managed record或completion marker |
-| E2E Case Verdict | `E2ECaseResult` | `passed | failed | incomplete`临时CI分类；不写Linear/Git且不参与恢复 |
+| Final Evidence Snapshot | runner内存中的fresh read value | Case settle后丢弃缓存并fresh-read的完整Linear/Git事实；不是managed record或completion marker |
+| E2E Case Verdict | runner内存中的`passed | failed | incomplete` | 根据Final Evidence Snapshot产生的临时CI分类；不写Linear/Git且不参与恢复 |
 
-完整拓扑、actor边界、closed test contract和判定规则只由
+完整拓扑、actor边界、Case断言和判定规则只由
 [并行黑盒端到端验收](black-box-e2e.md)定义。这些术语不能进入产品cross-process contracts、managed comments或
 Linear status catalog。
 

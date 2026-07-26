@@ -159,7 +159,7 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 - [Human Action交互与恢复](human-actions.md)：Issue层级、labels、专用状态和resolution。
 - [Root Issue工作流](root-issue.md)：Linear status、Cycle Tree、Finding和delivery事实。
 - [Linear端到端流转](linear-flow.md)：Project解析、Root发现、blocker、排序和SDK ownership。
-- [并行黑盒端到端验收](black-box-e2e.md)：真实多Conductor拓扑、human actor、并行Case和最终Linear/Git证据。
+- [并行黑盒端到端验收](black-box-e2e.md)：前台Campaign、真实用户模拟、并行Case断言和最终Linear/Git证据。
 - [Conductor](conductor.md)：Conductor模块和副作用边界。
 - [Performer](performer.md)：Python Agent runtime和Provider边界。
 - [Performer Profile与Codex配置](performer-profiles.md)
@@ -189,7 +189,7 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 | [Performer Profile](performer-profiles.md) | actual model/Turn Usage semantics and Stage/Cycle/Root aggregation scope |
 | [Workflow Timeline](workflow-timeline.md) | typed event publication and one-event/one-comment rendering |
 | [契约与接口](contracts.md) | cross-process schema and strict managed-record wire format |
-| [并行黑盒端到端验收](black-box-e2e.md) | production-boundary parallel E2E topology, actor isolation, final evidence and verdict |
+| [并行黑盒端到端验收](black-box-e2e.md) | foreground parallel E2E, immutable user inputs, Case assertions, final evidence and verdict |
 
 一个事实在两处出现时，非owner必须链接到owner，而不是重新定义。例如`root-issue.md`列出Human Action可用的
 display status，但不定义其迁移；`human-actions.md`才定义用户如何批准、拒绝、补充和取消。
