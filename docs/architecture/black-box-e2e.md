@@ -299,13 +299,20 @@ reason_code: e2e.<case_id>.<assertion_id>
 `<reason_code>.contradicted` or `<reason_code>.coverage_missing`; `satisfied` has no failure reason. The predicate's fact
 scope and correlation are limited to the Case definition: a reader may not widen them by searching another Case's Root,
 repository, polling cache, runtime state, or a new selector discovered while running. The common table below supplies the
-closed condition for common IDs. For each Case-specific ID, the matching Case subsection's user behavior, positive facts,
-verification boundary, prohibited facts, and incomplete rule together are that ID's closed condition; implementation does
-not get to infer an additional one.
+closed condition for common IDs. The Case-specific assertion-condition matrix in section 9.2.1 supplies the closed
+condition for every other ID. The narrative Case subsections explain the scenario but cannot add an implementation-defined
+condition.
 
 运行中的 Human driver 可以轮询 Linear current facts，以等待产品创建的 Human Action 或已预声明的 process-fault
 时机；这种观察只决定是否执行已声明的真实用户操作，永远不改变 catalog，也不构成 assertion evidence。Campaign
 settle 后必须丢弃该观察并重新读取 final evidence。
+
+一个已声明操作可以在有限、冻结的 Root 集合中绑定一个由产品事实决定的 identity，例如已进入 Stage 的 Root、
+该 Root 之外处于 ready 的候选 Root，或某个 Root 创建的 Plan Review Action。绑定规则、候选集合、选择排序、
+后续操作和可验证的 Linear condition 都必须在 Case catalog 中预声明。它只能等待或响应既有产品事实，不能新增
+需求、改写目标、选择产品下一步、扩大候选集合或把 polling observation 作为 final evidence。对有限
+`root_topology` 中每个 matching Human Action 执行一次同一 terminal response 是一个冻结的 quantified 操作；
+它不是运行时生成的新用户操作。
 
 所有 Case 都有以下共同 assertion ID；它们的完整 fact scope 是自己的 `root_topology` 和 matching Git repositories：
 
@@ -329,6 +336,97 @@ settle 后必须丢弃该观察并重新读取 final evidence。
 | `parallel_multi_conductor` | `root_ownership_and_workspace_isolated`; `independent_delivery_chains`; `cross_conductor_stage_overlap`; `boundary_all_roots_delivered` | `cross_conductor_takeover`; `shared_workspace_writer`; `telemetry_substitutes_overlap` | 缺少任何 Root ownership、execution/result interval、timestamp 或 delivery coverage。 |
 | `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 任何 native activity/updatedAt/Stage interval 不能形成严格且无并列的下一调度顺序。 |
 | `conductor_restart_recovery` | `old_execution_terminal_once`; `recovery_uses_fresh_execution`; `ownership_persists`; `unaffected_root_continues`; `boundary_recovered_and_continuous_delivered` | `late_old_session_success`; `checkpoint_or_linear_rewrite`; `unaffected_conductor_reconfigured` | 无法唯一关联被杀旧 execution、其 terminal result、fresh replacement、unchanged ownership 和连续 Root。 |
+
+### 9.2.1 Case-specific assertion-condition matrix
+
+下列 matrix 是每个 Case-specific assertion 的规范条件。每行的所有事实都必须位于该 Case 的 frozen fact
+scope，并具有 section 9.1 的 correlation 和 common assertion 要求。`required` 与 `boundary` 行任一必要事实
+无法完整 fresh-read 时为 `coverage_missing`；`prohibited` 行的禁止 fact scope 无法完整 fresh-read 时也为
+`coverage_missing`。只有已读到与行条件相反的 durable fact 才是 `contradicted`。
+
+#### `approved_happy_path`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `plan_approval_precedes_work` | 唯一 active Plan Contract 与 matching Plan Result 创建一个 Plan Review Action；该 Action 的 `Approved` read-back 必须严格早于每个 matching Work execution 的开始。 |
+| `stage_chain_delivered` | 此 Contract 的 Plan、全部 required Work、唯一 passed Verify、delivery 和 Git revision 形成一条无断链的 matching lineage。 |
+| `turn_usage_aggregated` | Plan、每个 Work 与 Verify Issue 都有 model name 和 usage；Cycle usage 等于该 Cycle 的全部 model turns 之和，Root usage 等于所有 Cycle usage 加 Root Reconciler turns，且每个 turn 只计一次。 |
+| `boundary_in_review_delivery` | Root 为 `In Review`，唯一 passed Verify Result、delivery 与 Git revision 相互 matching。 |
+| `work_before_approval` | 不存在任何开始时间早于 matching `Approved` resolution read-back 的 Work execution。 |
+| `duplicate_or_synthetic_completion` | 不存在多个 competing terminal completion、E2E writer 产生的 completion/managed record/timeline，或用本地 `final` 替代 delivery。 |
+| `usage_missing_or_double_counted` | 不存在缺失 model/usage、负值或不一致 aggregate，且同一 `ModelTurnRecord` 不属于两个 Stage/Cycle/Root aggregate。 |
+
+#### `plan_rejected_and_replanned`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `rejection_consumed_and_replied` | 预声明普通用户 reason 与 matching Plan Review Action 的 `Rejected` resolution 都成为 Root Reconciler input，并各有 matching durable reply。 |
+| `rejected_lineage_retained` | 被拒 Contract、Action、Plan execution 和 Plan Result 保持可 read-back 的历史 identity；需要移除的旧节点使用 native archive。 |
+| `rejected_contract_superseded` | 旧 immutable Contract 有明确 supersession/archive lineage，且同一 Root 产生不同 execution、Contract 与 Action identity 的 fresh replacement。 |
+| `boundary_fresh_plan_review` | fresh Plan execution 形成 fresh immutable Contract，并由产品创建 fresh active Plan Review Action；该 replacement 尚未被本 Case 批准。 |
+| `work_against_rejected_contract` | 不存在引用 rejected Contract 的 Work execution 或 Work Result。 |
+| `contract_overwritten_or_history_deleted` | 不存在原地覆盖旧 Contract、物理删除旧 Contract/Action/Result，或以 replacement 抹去旧 audit identity。 |
+| `test_created_replacement` | fresh Contract、execution 与 Action 的 writer 不是 E2E Human Actor，且没有 E2E-managed replacement fact。 |
+
+#### `information_requested_and_answered`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `information_action_actionable` | 产品创建的 clarification Action 明确写出问题、所需内容、提交位置和收到答案后的下一步。 |
+| `answer_consumed_and_receipted` | 预声明普通用户 answer 与 matching `Answered` resolution 被恰好一次地关联为 accepted input，并各有 matching reply 与协议要求的 reaction disposition。 |
+| `answer_drives_fresh_plan` | fresh Plan execution、Contract 与 Plan Review Action 仅引用该 accepted answer；Contract 记录该 Case answer 所给定的 separator。 |
+| `boundary_fresh_plan_review` | answer consumption 后存在 fresh immutable Contract 和 fresh active Plan Review Action；本 Case 不批准该 Action。 |
+| `missing_answer_assumed` | 在 matching accepted answer 前不存在假定缺失值的 Contract、Plan execution 或继续推进事实。 |
+| `test_unblocks_or_mutates_stage` | E2E Human Actor 没有修改 Plan/Work/Verify、managed record 或任何解除阻塞的产品状态。 |
+
+#### `root_revision_and_comment`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `ordinary_inputs_consumed_once` | 初始 immutable Plan Contract/Plan Review Action 在 destructive revision 前已存在；每个预声明 description version、comment create 与 comment edit 各被恰好一次地记录为 ordinary user input，并有各自 reply/reaction receipt。 |
+| `thread_transitions_receipted` | 每个预声明 native resolve 与 reopen 依序 read-back，且在下一用户操作前已有针对该 transition 的 matching durable reply/reaction。 |
+| `revision_supersedes_cycle` | destructive description revision 使带初始 Contract 的旧 Cycle 成为 `Changes Required` 或 `Canceled`，保留旧 identity，并创建不同 identity 的 successor Cycle、fresh Plan execution 与 fresh Contract。 |
+| `boundary_successor_plan_review` | successor Cycle 的 fresh immutable Contract 有 matching fresh active Plan Review Action；它不能用旧 Cycle 的 Action 或单独 reply 代替。 |
+| `system_comment_treated_as_input` | first system comment、timeline comment 和 strict managed comment 的 identities 不出现在 ordinary user input 集合。 |
+| `thread_history_lost` | comment 的 create/edit version、resolve/reopen activity 与最终 native thread state 全部可读取；当前 body 或最终 state 不能替代历史。 |
+| `undeclared_revision_or_conductor_interpretation` | accepted description/comment input 只来自 frozen declared bodies、versions 和 transitions；Conductor 不得把 timeline、managed comment 或未声明文本解释为 revision。 |
+
+#### `parallel_multi_conductor`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `root_ownership_and_workspace_isolated` | 每个 Root 有唯一且正确的 routing、Conductor ownership、Profile、repository/worktree identity；不同 Conductor 的 Root 不共享 workspace writer。 |
+| `independent_delivery_chains` | 每个 Root 独立具有 Plan approval、全部 required Work、passed Verify、delivery 与 matching Git revision；任何链不能引用另一个 Root 的 fact。 |
+| `cross_conductor_stage_overlap` | 两个不同 Conductor 的 matching Stage execution/result intervals 满足 `max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)`。 |
+| `boundary_all_roots_delivered` | 每个 Root 均为 `In Review`，并有自身 matching passed Verify、delivery 与 Git revision，且存在上述 cross-Conductor overlap。 |
+| `cross_conductor_takeover` | 不存在 Root 在 Case 指定 Conductor 之外被接管或 routing/ownership 改写。 |
+| `shared_workspace_writer` | 不存在两个 Root 或两个 Conductor 对同一 workspace 的并发或共享 writer identity。 |
+| `telemetry_substitutes_overlap` | overlap 结论不依赖 Promise、log、process telemetry 或未 matching 的 timestamp。 |
+
+#### `same_conductor_preemption`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `inflight_stage_completes` | 三个同 Priority Root 并发创建后，唯一已选 in-flight Stage execution 正常 terminal；它不因 touch 被 cancel 或 replace。 |
+| `latest_ready_root_runs_next` | touch 在 in-flight execution terminal 前发生；在该调度边界，touched Root 与 remaining Root 同属该 Conductor、同 Priority 且 ready，touched Root 的 native `updatedAt` 严格最新；随后第一个开始的候选 Root Stage 必须属于 touched Root。 |
+| `remaining_ready_root_progresses` | 在 touched Root 首个后续 Stage 之后，remaining Root 在不改变 ownership 的前提下形成自身终端 delivery chain；不存在 starvation。 |
+| `boundary_all_roots_delivered` | in-flight、touched 和 remaining 三个 Root 都为 `In Review`，各有 matching passed Verify、delivery 与 Git revision。 |
+| `inflight_turn_interrupted` | 不存在被 touch 影响而取消、失败或被 replacement 的原 in-flight execution。 |
+| `test_selects_next_root` | 除 catalog 预声明的 non-semantic touch 外，不存在 E2E scheduler command、priority/status mutation 或 direct Stage/Workflow mutation。 |
+| `semantic_requirement_touch` | touched Root 的目标和 acceptance criteria hash 未变；native activity 只证明预声明 scheduling note 更新。 |
+
+#### `conductor_restart_recovery`
+
+| Assertion ID | Normative durable condition |
+|---|---|
+| `old_execution_terminal_once` | `SIGKILL` 前已 in-flight 的 affected execution 有且仅有一个 `execution_failed` 或 `canceled` terminal Result，且没有 matching success Result。 |
+| `recovery_uses_fresh_execution` | replacement 使用不同 execution 与 role-session identity，从 Linear/Git durable facts 恢复，并产生 matching passed Verify、delivery 与 Git revision。 |
+| `ownership_persists` | affected Root 的 routing、Conductor ownership 和 repository/worktree identity 在旧 execution 与 replacement 间未改变。 |
+| `unaffected_root_continues` | 另一 Conductor 的 Root 没有被 kill、重配或接管，并独立形成完整 passed Verify、delivery 与 Git lineage。 |
+| `boundary_recovered_and_continuous_delivered` | affected replacement 和每个 unaffected Root 均为 `In Review`，并有各自 matching passed Verify、delivery 与 Git revision。 |
+| `late_old_session_success` | 被杀旧 execution 或旧 role-session 不存在迟到 success Result 或贡献 delivery 的事实。 |
+| `checkpoint_or_linear_rewrite` | 不存在 test-owned checkpoint、E2E Linear rewrite 或替代恢复事实。 |
+| `unaffected_conductor_reconfigured` | 不存在对 unaffected Conductor 的 Binding、Profile、routing 或 process configuration 改写。 |
 
 ### 9.3 `approved_happy_path`
 
@@ -392,8 +490,10 @@ Plan/Contract 的“已收到”文本作为 continuation。
 
 ### 9.6 `root_revision_and_comment`
 
-用户行为：按预声明顺序修改 Root description，写入和编辑普通 comment，并对 comment thread 执行
-resolve、等待 durable response、reopen、再次等待 durable response。
+用户行为：先等待初始 immutable Plan Contract 与 Plan Review Human Action 均可 read-back，但不批准该
+Action；随后按预声明顺序执行 destructive Root description revision、普通 comment create、comment edit、
+resolve、等待 durable response、reopen、再次等待 durable response。每个 comment body、version 和 thread
+transition 都在 Campaign 启动前冻结；上一操作没有自己的 receipt 时不得发出下一操作。
 
 正向断言：
 
@@ -436,8 +536,19 @@ Conductor 的 matching Stage Execution/Result interval 满足上述 overlap 公�
 
 ### 9.8 `same_conductor_preemption`
 
-用户行为：以相同 Priority 创建多个路由到同一 Conductor 的 Root；一个 Stage in-flight 时，对另一个 Root
-执行预声明非语义 description touch，使其 `updatedAt` 最新。
+用户行为：以相同 Priority 并发创建三个路由到同一 Conductor 的 Root。driver 只在下列冻结、有限的选择规则
+成立后操作：
+
+1. 等待其中恰好一个 Root 有 in-flight Stage execution，另两个 Root 均仍属于同一 Conductor、同 Priority 且 ready；
+2. 在两个 ready Root 中按 frozen `root_key` 顺序选择第一个，使用其预声明 non-semantic description delta，使其
+   `updatedAt` 严格最新；
+3. 在不批准 in-flight Root 新产生的 Plan Review Action 前，等待该 touched Root 成为 in-flight execution terminal 后
+   的第一个 candidate Stage；
+4. 此顺序已被 durable facts 固定后，对三个 Root 各自产品创建的 Plan Review Action 恰好一次地设为 `Approved`，
+   并等待产品自主完成其余链路。
+
+上述 identity binding 只决定哪个已声明 description delta 和 Action response 应被执行；它不是对 scheduler 的命令。
+若步骤 1--3 不能在 deadline 前形成严格的 Linear 条件，本 Case 为 `incomplete`，不得改选、改 Priority 或重复 touch。
 
 正向断言：
 

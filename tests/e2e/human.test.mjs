@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
+import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { createForegroundE2EHumanActor } from "../../tools/e2e/human.mjs";
 
 test("Human Actor performs only catalog-compatible user mutations with Linear read-back", async () => {
@@ -164,6 +164,34 @@ test("Human Actor accepts Root description changes only when the Case catalog pr
     hasCode("foreground_e2e_human_root_update_not_declared"),
   );
   assert.deepEqual(fixture.calls.updateIssue, []);
+});
+
+test("Human Actor accepts only the predeclared description for a bound preemption Root", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "same_conductor_preemption",
+    rootKey: "remaining-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  const binding = bindSameConductorPreemptionRoles({
+    inflightRootKeys: ["inflight-root"],
+    readyRootKeys: ["remaining-root", "touched-root"],
+  });
+  assert.equal(binding.touchedRootKey, "remaining-root");
+
+  await human.updateRootDescription({ rootIssueId: root.rootIssueId, description: binding.touchDescription });
+  assert.deepEqual(fixture.calls.updateIssue, [{
+    issueId: root.rootIssueId,
+    input: { description: binding.touchDescription },
+  }]);
 });
 
 test("Human Actor creates each frozen Case Root at most once", async () => {

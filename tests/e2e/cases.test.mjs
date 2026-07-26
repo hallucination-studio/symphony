@@ -6,6 +6,7 @@ import {
   FOREGROUND_E2E_CASES,
   FOREGROUND_E2E_CASE_IDS,
   FOREGROUND_E2E_COMMON_ASSERTION_IDS,
+  bindSameConductorPreemptionRoles,
 } from "../../tools/e2e/cases.mjs";
 
 const CASE_ASSERTION_IDS = Object.freeze({
@@ -92,10 +93,7 @@ test("immutable Case catalog contains every architecture assertion exactly once"
     assertRequirementHashes(definition);
     assert.equal(new Set(definition.rootTopology.map(({ rootKey }) => rootKey)).size, definition.rootTopology.length);
     assert.equal(new Set(definition.rootTopology.map(({ repositoryRef }) => repositoryRef)).size, definition.rootTopology.length);
-    const rootKeys = new Set(definition.rootTopology.map(({ rootKey }) => rootKey));
-    for (const interaction of definition.declaredUserInteractions) {
-      assert.equal(rootKeys.has(interaction.rootKey), true, `${definition.caseId}.${interaction.kind}`);
-    }
+    assertInteractionRootsAreFrozen(definition);
 
     for (const assertion of definition.assertions) {
       assert.match(assertion.reasonCode, new RegExp(`^e2e\\.${definition.caseId}\\.${assertion.assertionId}$`, "u"));
@@ -115,13 +113,104 @@ test("Case topology and declared interactions satisfy the mandatory human and co
   assert.equal(byId.get("information_requested_and_answered").declaredUserInteractions.at(-1).terminalStatus, "Answered");
   assert.deepEqual(
     byId.get("root_revision_and_comment").declaredUserInteractions.map(({ kind }) => kind),
-    ["update_root_description", "create_comment", "edit_comment", "resolve_comment_thread", "reopen_comment_thread"],
+    [
+      "wait_for_plan_contract_and_human_action",
+      "update_root_description",
+      "wait_for_input_receipt",
+      "create_comment",
+      "wait_for_input_receipt",
+      "edit_comment",
+      "wait_for_input_receipt",
+      "resolve_comment_thread",
+      "wait_for_input_receipt",
+      "reopen_comment_thread",
+      "wait_for_input_receipt",
+    ],
   );
   assert.equal(byId.get("parallel_multi_conductor").rootTopology.length, 2);
   assert.equal(byId.get("same_conductor_preemption").rootTopology.length, 3);
   assert.equal(new Set(byId.get("same_conductor_preemption").rootTopology.map(({ conductorRef }) => conductorRef)).size, 1);
   assert.equal(byId.get("conductor_restart_recovery").rootTopology.length, 2);
   assert.deepEqual(byId.get("conductor_restart_recovery").allowedProcessFaults, ["kill_and_restart_owning_conductor"]);
+});
+
+test("revision Case freezes its initial Plan gate and every user-input receipt", () => {
+  const definition = findCase("root_revision_and_comment");
+  const interactions = definition.declaredUserInteractions;
+
+  assert.deepEqual(interactions[0], {
+    kind: "wait_for_plan_contract_and_human_action",
+    rootKey: "revision-root",
+    actionKind: "plan_review",
+    actionBinding: "initial_plan_review",
+  });
+  assert.deepEqual(interactions[1], {
+    kind: "update_root_description",
+    rootKey: "revision-root",
+    description: "Replace the uppercase helper with a lowercase identifier helper and focused tests.",
+    inputBinding: "revision_description",
+  });
+  assert.deepEqual(
+    interactions.filter(({ kind }) => kind === "wait_for_input_receipt").map(({ sourceBinding }) => sourceBinding),
+    ["revision_description", "revision_comment_create", "revision_comment_edit", "revision_thread_resolve", "revision_thread_reopen"],
+  );
+  assert.deepEqual(
+    interactions.filter(({ kind }) => kind === "wait_for_input_receipt").map(({ requiredFacts }) => requiredFacts),
+    [
+      ["reply", "reaction"],
+      ["reply", "reaction"],
+      ["reply", "reaction"],
+      ["reply", "reaction", "thread_state"],
+      ["reply", "reaction", "thread_state"],
+    ],
+  );
+});
+
+test("preemption Case binds only frozen roles and waits before its finite approvals", () => {
+  const definition = findCase("same_conductor_preemption");
+  const interactions = definition.declaredUserInteractions;
+  assert.deepEqual(interactions.map(({ kind }) => kind), [
+    "bind_preemption_roles",
+    "touch_bound_root_description",
+    "wait_for_bound_root_stage",
+    "set_each_matching_human_action_status",
+  ]);
+
+  const binding = bindSameConductorPreemptionRoles({
+    inflightRootKeys: ["touched-root"],
+    readyRootKeys: ["remaining-root", "inflight-root"],
+  });
+  assert.deepEqual(binding, {
+    inflightRootKey: "touched-root",
+    touchedRootKey: "inflight-root",
+    remainingRootKey: "remaining-root",
+    touchDescription: "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
+  });
+  assert.equal(Object.isFrozen(binding), true);
+
+  const approvals = interactions.at(-1);
+  assert.deepEqual(approvals, {
+    kind: "set_each_matching_human_action_status",
+    rootKeys: ["inflight-root", "touched-root", "remaining-root"],
+    actionKind: "plan_review",
+    terminalStatus: "Approved",
+    oncePerRoot: true,
+    after: "preemption_ordering_proven",
+  });
+  assert.throws(
+    () => bindSameConductorPreemptionRoles({
+      inflightRootKeys: ["inflight-root", "touched-root"],
+      readyRootKeys: ["remaining-root"],
+    }),
+    hasCode("foreground_e2e_preemption_binding_incomplete"),
+  );
+  assert.throws(
+    () => bindSameConductorPreemptionRoles({
+      inflightRootKeys: ["inflight-root"],
+      readyRootKeys: ["touched-root", "unknown-root"],
+    }),
+    hasCode("foreground_e2e_preemption_binding_incomplete"),
+  );
 });
 
 function assertRequirementHashes(definition) {
@@ -148,6 +237,32 @@ function assertRequirementHashes(definition) {
       assert.match(rootCreationInput.description, new RegExp(`^- ${escapeRegExp(criterion)}$`, "mu"), definition.caseId);
     }
   }
+}
+
+function assertInteractionRootsAreFrozen(definition) {
+  const rootKeys = new Set(definition.rootTopology.map(({ rootKey }) => rootKey));
+  for (const interaction of definition.declaredUserInteractions) {
+    if (interaction.rootKey !== undefined) {
+      assert.equal(rootKeys.has(interaction.rootKey), true, `${definition.caseId}.${interaction.kind}`);
+    }
+    if (interaction.rootKeys !== undefined) {
+      assert.deepEqual([...interaction.rootKeys].sort(), [...new Set(interaction.rootKeys)].sort(), `${definition.caseId}.${interaction.kind}`);
+      for (const rootKey of interaction.rootKeys) assert.equal(rootKeys.has(rootKey), true, `${definition.caseId}.${interaction.kind}`);
+    }
+    if (interaction.descriptionsByRootKey !== undefined) {
+      assert.deepEqual(Object.keys(interaction.descriptionsByRootKey).sort(), [...rootKeys].sort(), `${definition.caseId}.${interaction.kind}`);
+    }
+  }
+}
+
+function findCase(caseId) {
+  const definition = FOREGROUND_E2E_CASES.find((candidate) => candidate.caseId === caseId);
+  assert.ok(definition, caseId);
+  return definition;
+}
+
+function hasCode(code) {
+  return (error) => error?.code === code;
 }
 
 function assertNoFunctions(value, path) {

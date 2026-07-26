@@ -127,11 +127,17 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       ],
     })],
     interactions: [
-      { kind: "update_root_description", rootKey: "revision-root", description: "Replace the uppercase helper with a lowercase identifier helper and focused tests." },
-      { kind: "create_comment", rootKey: "revision-root", body: "The original helper name no longer matches the requirement." },
-      { kind: "edit_comment", rootKey: "revision-root", body: "The original helper name no longer matches the revised requirement." },
-      { kind: "resolve_comment_thread", rootKey: "revision-root" },
-      { kind: "reopen_comment_thread", rootKey: "revision-root" },
+      waitForPlanContractAndAction("revision-root", "plan_review", "initial_plan_review"),
+      rootDescription("revision-root", "Replace the uppercase helper with a lowercase identifier helper and focused tests.", "revision_description"),
+      waitForReceipt("revision-root", "revision_description", ["reply", "reaction"]),
+      comment("revision-root", "The original helper name no longer matches the requirement.", "revision_comment", "revision_comment_create"),
+      waitForReceipt("revision-root", "revision_comment_create", ["reply", "reaction"]),
+      editComment("revision-root", "revision_comment", "The original helper name no longer matches the revised requirement.", "revision_comment_edit"),
+      waitForReceipt("revision-root", "revision_comment_edit", ["reply", "reaction"]),
+      threadTransition("resolve_comment_thread", "revision-root", "revision_comment", "revision_thread_resolve"),
+      waitForReceipt("revision-root", "revision_thread_resolve", ["reply", "reaction", "thread_state"]),
+      threadTransition("reopen_comment_thread", "revision-root", "revision_comment", "revision_thread_reopen"),
+      waitForReceipt("revision-root", "revision_thread_reopen", ["reply", "reaction", "thread_state"]),
     ],
     verificationBoundary: "successor_plan_review",
     assertions: [
@@ -210,8 +216,14 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       }),
     ],
     interactions: [
-      { kind: "wait_for_stage_inflight", rootKey: "inflight-root" },
-      { kind: "update_root_description", rootKey: "touched-root", description: "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged." },
+      bindPreemptionRoles(["inflight-root", "touched-root", "remaining-root"]),
+      touchBoundRootDescription({
+        "inflight-root": "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
+        "touched-root": "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
+        "remaining-root": "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
+      }),
+      waitForBoundRootStage("preemption_touched_root", "preemption_inflight_terminal"),
+      terminalActionForEachRoot(["inflight-root", "touched-root", "remaining-root"], "plan_review", "Approved", "preemption_ordering_proven"),
     ],
     verificationBoundary: "all_roots_delivered",
     assertions: [
@@ -321,12 +333,98 @@ function terminalAction(rootKey, terminalStatus) {
   return { kind: "set_human_action_status", rootKey, terminalStatus };
 }
 
-function comment(rootKey, body) {
-  return { kind: "create_comment", rootKey, body };
+function waitForPlanContractAndAction(rootKey, actionKind, actionBinding) {
+  return { kind: "wait_for_plan_contract_and_human_action", rootKey, actionKind, actionBinding };
+}
+
+function rootDescription(rootKey, description, inputBinding) {
+  return { kind: "update_root_description", rootKey, description, inputBinding };
+}
+
+function waitForReceipt(rootKey, sourceBinding, requiredFacts) {
+  return { kind: "wait_for_input_receipt", rootKey, sourceBinding, requiredFacts };
+}
+
+function comment(rootKey, body, commentBinding, inputBinding) {
+  return {
+    kind: "create_comment",
+    rootKey,
+    body,
+    ...(commentBinding === undefined ? {} : { commentBinding }),
+    ...(inputBinding === undefined ? {} : { inputBinding }),
+  };
+}
+
+function editComment(rootKey, commentBinding, body, inputBinding) {
+  return { kind: "edit_comment", rootKey, commentBinding, body, inputBinding };
+}
+
+function threadTransition(kind, rootKey, commentBinding, inputBinding) {
+  return { kind, rootKey, commentBinding, inputBinding };
+}
+
+function bindPreemptionRoles(rootKeys) {
+  return {
+    kind: "bind_preemption_roles",
+    rootKeys,
+    inflightBinding: "preemption_inflight_root",
+    touchedBinding: "preemption_touched_root",
+    remainingBinding: "preemption_remaining_root",
+    candidateOrder: "root_key_ascending",
+  };
+}
+
+function touchBoundRootDescription(descriptionsByRootKey) {
+  return {
+    kind: "touch_bound_root_description",
+    rootBinding: "preemption_touched_root",
+    descriptionsByRootKey,
+  };
+}
+
+function waitForBoundRootStage(rootBinding, after) {
+  return { kind: "wait_for_bound_root_stage", rootBinding, after };
+}
+
+function terminalActionForEachRoot(rootKeys, actionKind, terminalStatus, after) {
+  return { kind: "set_each_matching_human_action_status", rootKeys, actionKind, terminalStatus, oncePerRoot: true, after };
 }
 
 function assertion(assertionId, kind, predicate, factScope, correlation) {
   return { assertionId, kind, factScope, correlation, predicate };
+}
+
+export function bindSameConductorPreemptionRoles({ inflightRootKeys, readyRootKeys } = {}) {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
+  const binding = definition?.declaredUserInteractions.find(({ kind }) => kind === "bind_preemption_roles");
+  const touch = definition?.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description");
+  if (!binding || !touch || !isDistinctIdentifiers(inflightRootKeys) || !isDistinctIdentifiers(readyRootKeys)) {
+    throw preemptionBindingError();
+  }
+
+  const expected = new Set(binding.rootKeys);
+  const observed = new Set([...inflightRootKeys, ...readyRootKeys]);
+  if (inflightRootKeys.length !== 1 || readyRootKeys.length !== 2 || observed.size !== expected.size ||
+      [...observed].some((rootKey) => !expected.has(rootKey))) {
+    throw preemptionBindingError();
+  }
+
+  const [inflightRootKey] = inflightRootKeys;
+  const [touchedRootKey, remainingRootKey] = [...readyRootKeys].sort();
+  const touchDescription = touch.descriptionsByRootKey[touchedRootKey];
+  if (typeof touchDescription !== "string" || touchDescription.length === 0) throw preemptionBindingError();
+  return Object.freeze({ inflightRootKey, touchedRootKey, remainingRootKey, touchDescription });
+}
+
+function isDistinctIdentifiers(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.length > 0) &&
+    new Set(value).size === value.length;
+}
+
+function preemptionBindingError() {
+  const error = new Error("foreground_e2e_preemption_binding_incomplete");
+  error.code = "foreground_e2e_preemption_binding_incomplete";
+  return error;
 }
 
 function deepFreeze(value) {

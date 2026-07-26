@@ -243,10 +243,11 @@ function rootCatalogByKey() {
   for (const definition of FOREGROUND_E2E_CASES) {
     const descriptionsByRootKey = new Map();
     for (const interaction of definition.declaredUserInteractions) {
-      if (interaction.kind !== "update_root_description") continue;
-      const descriptions = descriptionsByRootKey.get(interaction.rootKey) ?? new Set();
-      descriptions.add(interaction.description);
-      descriptionsByRootKey.set(interaction.rootKey, descriptions);
+      for (const [rootKey, description] of declaredDescriptionUpdates(interaction)) {
+        const descriptions = descriptionsByRootKey.get(rootKey) ?? new Set();
+        descriptions.add(description);
+        descriptionsByRootKey.set(rootKey, descriptions);
+      }
     }
     for (const rootCreationInput of definition.rootCreationInputs) {
       if (byRootKey.has(rootCreationInput.rootKey)) {
@@ -260,6 +261,12 @@ function rootCatalogByKey() {
     }
   }
   return byRootKey;
+}
+
+function declaredDescriptionUpdates(interaction) {
+  if (interaction.kind === "update_root_description") return [[interaction.rootKey, interaction.description]];
+  if (interaction.kind === "touch_bound_root_description") return Object.entries(interaction.descriptionsByRootKey);
+  return [];
 }
 
 function assertKnownComment(comments, { issueId, commentId }) {
