@@ -17,7 +17,10 @@ export interface RootOwnershipClaimDependencies {
   linear: Pick<LinearGatewayInterface, "readWorkflowIssueTree" | "mutateWorkflow">;
   git: GitWorkspaceProvisionerInterface;
   profileFor(input: { ownedProfileId?: string }): Promise<{ profileId: string; ready: boolean } | undefined>;
-  convergencePolicyFor(root: DiscoveredRoot): Promise<RootConvergencePolicyValues>;
+  convergencePolicyFor(
+    root: DiscoveredRoot,
+    persistedPolicy?: RootConvergencePolicyValues,
+  ): Promise<RootConvergencePolicyValues>;
   workspaceFor(root: DiscoveredRoot): GitWorkspace;
   conductorId: string;
   ownerGeneration: string;

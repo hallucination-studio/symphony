@@ -1,41 +1,47 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createChildEnvironment } from "../../../tools/e2e/config.mjs";
-import { startConductorHarness } from "../../../tools/e2e/conductor-harness.mjs";
-
-const EVIDENCE_DEADLINE_MS = 300_000;
+const EVIDENCE_DEADLINE_MS = 10_000;
 
 test("production Conductor completes its closed process boundary before agent admission", {
   timeout: EVIDENCE_DEADLINE_MS,
-}, async () => {
+}, async (context) => {
   assert.equal(existsSync("apps/conductor/dist/main.js"), true, "build Conductor before running process evidence");
   const root = await mkdtemp(path.join(os.tmpdir(), "symphony-agent-boundary-"));
-  const logs = [];
-  const handler = {
-    async handle(message) {
-      if (message.body?.kind === "conductor_handshake") {
-        return {
-          ...message,
-          body: {
-            kind: "conductor_handshake_ack",
-            binding_id: message.body.binding_id,
-            instance_id: message.body.instance_id,
-            observed_at: new Date().toISOString(),
-          },
-        };
-      }
-      if (message.body?.kind === "resolve_conductor_project") {
-        return { ...message, body: { kind: "unbound" } };
-      }
-      throw new Error("unexpected_conductor_request");
-    },
-  };
-  const environment = createChildEnvironment({ additions: {
+  const child = spawn(process.execPath, [path.resolve("apps/conductor/dist/main.js")], {
+    cwd: process.cwd(),
+    env: conductorEnvironment(root),
+    stdio: ["ignore", "ignore", "ignore", "pipe"],
+  });
+  context.after(async () => {
+    child.kill("SIGTERM");
+    await waitForExit(child);
+    await rm(root, { recursive: true, force: true });
+  });
+  const podium = linePeer(child.stdio[3]);
+
+  const handshake = await podium.next();
+  assert.equal(handshake.body.kind, "conductor_handshake");
+  podium.reply(handshake, {
+    kind: "conductor_handshake_ack",
+    binding_id: "agent-boundary-binding",
+    instance_id: "agent-boundary-instance",
+    observed_at: new Date().toISOString(),
+  });
+
+  const projectResolution = await podium.next();
+  assert.equal(projectResolution.body.kind, "resolve_conductor_project");
+  podium.reply(projectResolution, { kind: "unbound" });
+});
+
+function conductorEnvironment(root) {
+  return {
+    ...baseChildEnvironment(),
     SYMPHONY_PRIVATE_IPC_FD: "3",
     SYMPHONY_INSTANCE_ID: "agent-boundary-instance",
     SYMPHONY_BINDING_ID: "agent-boundary-binding",
@@ -47,34 +53,63 @@ test("production Conductor completes its closed process boundary before agent ad
     SYMPHONY_REPOSITORY_ROOT: path.join(root, "repository"),
     SYMPHONY_BASE_BRANCH: "main",
     SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
-    SYMPHONY_ROOT_DEADLINE_AT: new Date(Date.now() + EVIDENCE_DEADLINE_MS).toISOString(),
+    SYMPHONY_ROOT_DEADLINE_DURATION_MS: String(EVIDENCE_DEADLINE_MS),
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
     SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
     SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
     SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
     SYMPHONY_CYCLE_DELAY_MS: "25",
-  } });
-  const harness = await startConductorHarness({
-    podium: { handler, observeExit: () => {}, close: () => {} },
-    executable: process.execPath,
-    arguments: [path.resolve("apps/conductor/dist/main.js")],
-    environment,
-    startupTimeoutMs: 5_000,
-    shutdownTimeoutMs: 2_000,
-    log: (event) => logs.push(event),
-  });
+  };
+}
 
-  try {
-    assert.deepEqual(harness.observations[0], { kind: "conductor_handshake" });
-    assert.deepEqual(
-      await harness.waitForObservation((value) => value.kind === "resolve_conductor_project"),
-      { kind: "resolve_conductor_project" },
-    );
-  } finally {
-    await harness.close();
+function baseChildEnvironment() {
+  return Object.fromEntries(
+    ["HOME", "LANG", "LC_ALL", "PATH", "TMP", "TMPDIR", "TEMP", "USERPROFILE"]
+      .flatMap((key) => typeof process.env[key] === "string" ? [[key, process.env[key]]] : []),
+  );
+}
+
+function linePeer(stream) {
+  let buffer = Buffer.alloc(0);
+  const waiters = [];
+  stream.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    drain();
+  });
+  function drain() {
+    while (waiters.length > 0) {
+      const newline = buffer.indexOf(0x0a);
+      if (newline < 0) return;
+      const message = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
+      buffer = buffer.subarray(newline + 1);
+      waiters.shift().resolve(message);
+    }
   }
-  assert.equal(logs.some(({ event }) => event === "e2e_child_started" && event), true);
-  assert.equal(logs.some(({ event }) => event === "e2e_child_exited"), true);
-  assert.equal(logs.some(({ event }) => event === "e2e_child_failed"), false);
-});
+  return {
+    next() {
+      return new Promise((resolve) => {
+        waiters.push({ resolve });
+        drain();
+      });
+    },
+    reply(message, body) {
+      stream.write(`${JSON.stringify({ protocol_version: "1", request_id: message.request_id, body })}\n`);
+    },
+  };
+}
+
+async function waitForExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await waitForExitSignal(child);
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGKILL");
+  await waitForExitSignal(child);
+}
+
+function waitForExitSignal(child) {
+  return Promise.race([
+    new Promise((resolve) => child.once("exit", resolve)),
+    new Promise((resolve) => setTimeout(resolve, 1_000)),
+  ]);
+}

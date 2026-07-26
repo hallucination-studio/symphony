@@ -45,7 +45,6 @@ const MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export async function runConductor(environment = process.env): Promise<void> {
   const config = runtimeConfig(environment);
-  const rootDeadlineMs = Date.parse(config.rootDeadlineAt);
   const input = createReadStream("", { fd: config.privateIpcFd, autoClose: false });
   const output = createWriteStream("", { fd: config.privateIpcFd, autoClose: false });
   const profiles = new FilePerformerProfileStoreImpl(config.dataRoot);
@@ -106,7 +105,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     protocol,
     {
       bindingId: config.bindingId,
-      timeoutMs: () => remainingRuntimeTimeout(rootDeadlineMs),
+      timeoutMs: () => MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS,
       observeDiscovery(evidence) {
         logs.publish({ level: "info", event: "root_discovery_evidence", fields: {
           root_header_count: String(evidence.rootHeaderCount),
@@ -137,7 +136,10 @@ export async function runConductor(environment = process.env): Promise<void> {
       };
     },
     workspaceFor,
-    convergencePolicyFor: async () => config.rootConvergencePolicy,
+    convergencePolicyFor: async (_root, persistedPolicy) => ({
+      ...config.rootConvergencePolicy,
+      deadlineAt: persistedPolicy?.deadlineAt ?? deadlineAt(config.rootDeadlineDurationMs),
+    }),
     conductorId: config.conductorId,
     ownerGeneration: config.instanceId,
     baseBranch: config.baseBranch,
@@ -145,7 +147,7 @@ export async function runConductor(environment = process.env): Promise<void> {
   const report = async (body: JsonValue) => protocol.request({
     requestId: randomUUID(),
     body,
-    timeoutMs: remainingRuntimeTimeout(rootDeadlineMs),
+    timeoutMs: MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS,
   });
   await report({
     kind: "conductor_handshake",
@@ -210,14 +212,12 @@ export async function runConductor(environment = process.env): Promise<void> {
   const stop = () => { void requestStop().catch(() => undefined); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
-  const deadlineTimer = setTimeout(stop, Math.max(0, rootDeadlineMs - Date.now()));
   try {
     while (!stopping) {
       await runtime.cycle();
-      await delay(Math.min(config.cycleDelayMs, Math.max(0, rootDeadlineMs - Date.now())));
+      await delay(config.cycleDelayMs);
     }
   } finally {
-    clearTimeout(deadlineTimer);
     await requestStop();
   }
 }
@@ -244,10 +244,6 @@ function isKind(value: JsonValue, kind: string): boolean {
 }
 
 function runtimeConfig(environment: NodeJS.ProcessEnv) {
-  const rootDeadlineAt = validTimestamp(
-    required(environment.SYMPHONY_ROOT_DEADLINE_AT, "root_deadline_missing"),
-    "root_deadline_invalid",
-  );
   return {
     privateIpcFd: positiveInteger(environment.SYMPHONY_PRIVATE_IPC_FD, "private_ipc_fd_invalid"),
     instanceId: required(environment.SYMPHONY_INSTANCE_ID, "instance_id_missing"),
@@ -265,29 +261,22 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
       : 1_000,
-    rootDeadlineAt,
+    rootDeadlineDurationMs: rootPolicyPositiveInteger(
+      environment.SYMPHONY_ROOT_DEADLINE_DURATION_MS,
+      "root_deadline_duration_invalid",
+    ),
     rootConvergencePolicy: {
       maxCyclesPerRoot: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT, "root_max_cycles_per_root_invalid"),
       maxSameOpenFindingCycles: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES, "root_max_same_open_finding_cycles_invalid"),
       maxConsecutiveNoProgress: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS, "root_max_consecutive_no_progress_invalid"),
       maxTotalTokens: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_TOTAL_TOKENS, "root_max_total_tokens_invalid"),
       maxCycleRepairAttempts: rootPolicyNonNegativeInteger(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "root_max_cycle_repair_attempts_invalid"),
-      deadlineAt: rootDeadlineAt,
     },
   };
 }
 
-function validTimestamp(value: string, code: string): string {
-  if (!value || value.length > 128 || /[\r\n\0]/.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw new Error(code);
-  }
-  return new Date(value).toISOString();
-}
-
-function remainingRuntimeTimeout(deadlineMs: number): number {
-  const remaining = deadlineMs - Date.now();
-  if (!Number.isFinite(remaining) || remaining < 1) throw new Error("root_deadline_exceeded");
-  return Math.min(MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS, Math.floor(remaining));
+function deadlineAt(durationMs: number): string {
+  return new Date(Date.now() + durationMs).toISOString();
 }
 
 function required(value: string | undefined, code: string): string {

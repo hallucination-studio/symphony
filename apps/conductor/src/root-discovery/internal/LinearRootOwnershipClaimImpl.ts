@@ -29,12 +29,6 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     }
     const persistedPolicy = rootConvergencePolicy(tree, input.root.issueId);
     if (existing && !persistedPolicy) throw new Error("root_convergence_policy_missing");
-    const expectedPolicy = existing
-      ? undefined
-      : convergencePolicy(input.root.issueId, await this.dependencies.convergencePolicyFor(input.root));
-    if (persistedPolicy && expectedPolicy && !sameConvergencePolicy(persistedPolicy, expectedPolicy)) {
-      throw new Error("root_convergence_policy_mismatch");
-    }
 
     if (root.status_name === "Canceled" && existing) {
       const workspace = await this.ensureOwnedWorkspace(input, existing);
@@ -98,6 +92,17 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
     }
     const snapshot = await this.dependencies.git.inspect(workspace);
     if (snapshot.branch !== expectedWorkspace.branch) throw new Error("git_workspace_identity_conflict");
+
+    // A fresh policy is a Root-admission fact, not a process-launch fact.
+    const expectedPolicy = existing
+      ? undefined
+      : convergencePolicy(
+        input.root.issueId,
+        await this.dependencies.convergencePolicyFor(input.root, persistedPolicy),
+      );
+    if (persistedPolicy && expectedPolicy && !sameConvergencePolicy(persistedPolicy, expectedPolicy)) {
+      throw new Error("root_convergence_policy_mismatch");
+    }
 
     if (!persistedPolicy) {
       if (!expectedPolicy) throw new Error("root_convergence_policy_missing");

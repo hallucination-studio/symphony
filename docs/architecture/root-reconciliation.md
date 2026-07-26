@@ -654,10 +654,16 @@ RootConvergencePolicy
 ```
 
 The public configuration is operator configuration for newly claimed Roots,
-not a Desktop workflow control and not a user-editable Root field. Conductor
-strictly validates it before claim, writes one policy comment on the Root, and
-reads it back before it writes the Root ownership record. An unowned Root with
-one matching policy may resume that interrupted claim. Once ownership exists,
+not a Desktop workflow control and not a user-editable Root field. The configured
+Root deadline is a duration, not a launch-time absolute timestamp: only after
+Profile readiness, native `In Progress` read-back, and deterministic workspace
+proof does Conductor calculate `deadline_at` and write the policy. Process launch,
+Profile provisioning, and unadmitted waiting never consume that budget. Conductor
+strictly validates the static limits before claim, writes one policy comment on
+the Root, and reads it back before it writes the Root ownership record. An
+unowned Root with one matching policy may resume that interrupted claim, retaining
+its persisted `deadline_at` while validating the currently configured static
+limits. Once ownership exists,
 the Root must have exactly one policy whose complete content matches the policy
 it was claimed with. Missing, duplicate, foreign, malformed, mismatched, or
 unreadable policies stop the Root; Conductor never rewrites an existing policy

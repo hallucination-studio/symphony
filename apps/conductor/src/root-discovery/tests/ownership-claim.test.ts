@@ -31,6 +31,47 @@ test("claims an unclaimed Root only after profile readiness and persists the wor
   assert.equal(result.ownership.deliveryBranch, "symphony/runs/sym-1");
 });
 
+test("does not read the convergence configuration until Profile readiness, Root admission, and workspace proof", async () => {
+  const fake = new FakeLinear();
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: false }, {
+    convergencePolicyFor: async () => {
+      events.push("policy-factory");
+      throw new Error("convergence_configuration_must_not_be_read");
+    },
+  });
+
+  const result = await claim.claim({ root: discoveredRoot() });
+
+  assert.deepEqual(result, { kind: "profile_not_ready", profileId: "profile-1" });
+  assert.deepEqual(events, ["read", "profile"]);
+});
+
+test("materializes a fresh policy deadline only at Root admission", async () => {
+  const fake = new FakeLinear();
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: true }, {
+    convergencePolicyFor: async () => {
+      events.push("policy-factory");
+      return {
+        maxCyclesPerRoot: 3,
+        maxSameOpenFindingCycles: 2,
+        maxConsecutiveNoProgress: 2,
+        maxTotalTokens: 10_000,
+        maxCycleRepairAttempts: 0,
+        deadlineAt: "2026-07-26T00:05:00.000Z",
+      };
+    },
+  });
+
+  await claim.claim({ root: discoveredRoot() });
+
+  assert.deepEqual(events, [
+    "read", "profile", "state", "read", "ensure", "inspect", "policy-factory", "policy", "read", "ownership", "read",
+  ]);
+  assert.equal(fake.convergencePolicy()?.deadlineAt, "2026-07-26T00:05:00.000Z");
+});
+
 test("snapshots the public convergence configuration once and reads it back with the claim", async () => {
   const fake = new FakeLinear();
   const claim = createClaim(fake, [], { profileId: "profile-1", ready: true });
@@ -64,6 +105,32 @@ test("resumes an interrupted policy-first claim without writing a second policy"
   assert.deepEqual(fake.convergencePolicy(), convergencePolicyRecord());
 });
 
+test("validates an interrupted policy-first claim without replacing its durable deadline", async () => {
+  const original = convergencePolicyRecord({ deadlineAt: "2026-07-24T12:00:00.000Z" });
+  const fake = new FakeLinear(undefined, "In Progress", original);
+  const events: string[] = [];
+  const claim = createClaim(fake, events, { profileId: "profile-1", ready: true }, {
+    convergencePolicyFor: async (_root, persistedPolicy) => {
+      events.push("policy-factory");
+      assert.equal(persistedPolicy?.deadlineAt, original.deadlineAt);
+      return {
+        maxCyclesPerRoot: 3,
+        maxSameOpenFindingCycles: 2,
+        maxConsecutiveNoProgress: 2,
+        maxTotalTokens: 10_000,
+        maxCycleRepairAttempts: 0,
+        deadlineAt: persistedPolicy.deadlineAt,
+      };
+    },
+  });
+
+  const result = await claim.claim({ root: discoveredRoot() });
+
+  assert.equal(result.kind, "claimed");
+  assert.deepEqual(events, ["read", "profile", "ensure", "inspect", "policy-factory", "ownership", "read"]);
+  assert.equal(fake.convergencePolicy()?.deadlineAt, original.deadlineAt);
+});
+
 test("fails closed when an owned Root has no convergence policy", async () => {
   const fake = new FakeLinear(ownershipRecord(), "In Progress", null);
   const events: string[] = [];
@@ -74,13 +141,13 @@ test("fails closed when an owned Root has no convergence policy", async () => {
   assert.equal(fake.mutations.length, 0);
 });
 
-test("fails closed when an unowned Root has a policy from another launch configuration", async () => {
+test("fails closed after admission proof when an interrupted unowned Root has different static limits", async () => {
   const fake = new FakeLinear(undefined, "In Progress", convergencePolicyRecord({ maxCycleRepairAttempts: 1 }));
   const events: string[] = [];
   const claim = createClaim(fake, events, { profileId: "profile-1", ready: true });
 
   await assert.rejects(claim.claim({ root: discoveredRoot() }), /root_convergence_policy_mismatch/u);
-  assert.deepEqual(events, ["read"]);
+  assert.deepEqual(events, ["read", "profile", "ensure", "inspect"]);
   assert.equal(fake.mutations.length, 0);
 });
 
@@ -193,7 +260,14 @@ function createClaim(
   profile: { profileId: string; ready: boolean },
   options: {
     inspectBranch?: string;
-    convergencePolicyFor?: () => Promise<{
+    convergencePolicyFor?: (_root: ReturnType<typeof discoveredRoot>, persistedPolicy?: {
+      maxCyclesPerRoot: number;
+      maxSameOpenFindingCycles: number;
+      maxConsecutiveNoProgress: number;
+      maxTotalTokens: number;
+      maxCycleRepairAttempts: number;
+      deadlineAt: string;
+    }) => Promise<{
       maxCyclesPerRoot: number;
       maxSameOpenFindingCycles: number;
       maxConsecutiveNoProgress: number;
