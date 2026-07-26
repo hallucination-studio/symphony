@@ -39,9 +39,9 @@ import {
   decodeConductorPerformerRootReconcilerFailureRecord,
   type JsonValue,
 } from "@symphony/contracts";
+import { parseSymphonyRecordBlock } from "@symphony/contracts/managed-record";
 import type { RootDirective, UserCommentReplySource } from "../api/RootReconciliationContracts.js";
 
-const symphonyBlock = /^```symphony\r?\n([\s\S]*?)^```[ \t]*(?:\r?\n|$)/gmu;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const maxText = 16_384;
 const maxItems = 128;
@@ -55,28 +55,18 @@ class InvalidRecord extends Error {
 
 export function parseManagedRecord(source: string): ParseResult<ManagedRecord> {
   try {
-    const blocks = [...source.matchAll(symphonyBlock)];
-    if (blocks.length === 0) fail("managed_record_block_missing");
-    if (blocks.length > 1) fail("managed_record_block_ambiguous");
-    const block = blocks[0]!;
-    if (source.slice((block.index ?? 0) + block[0].length).trim()) {
-      fail("managed_record_block_not_terminal");
-    }
-    const json = block[1]!.trim();
-    if (!json) fail("managed_record_block_invalid");
-    const payload: unknown = JSON.parse(json);
-    return { ok: true, value: decodeRecord(payload) };
+    const block = parseSymphonyRecordBlock(source);
+    if (!block.ok) return block;
+    return { ok: true, value: decodeRecord(block.record) };
   } catch (error) {
     return { ok: false, error: error instanceof InvalidRecord ? error.code : "managed_record_payload_invalid" };
   }
 }
 
 export function managedMarkdown(source: string): string {
-  const parsed = parseManagedRecord(source);
-  if (!parsed.ok) throw new Error(parsed.error);
-  const block = [...source.matchAll(symphonyBlock)][0];
-  if (!block || block.index === undefined) throw new Error("managed_record_block_missing");
-  return source.slice(0, block.index).trimEnd();
+  const block = parseSymphonyRecordBlock(source);
+  if (!block.ok) throw new Error(block.error);
+  return block.markdown;
 }
 
 export function serializeManagedRecord(record: unknown, markdown?: string): string {

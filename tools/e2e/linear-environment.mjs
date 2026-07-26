@@ -38,7 +38,7 @@ export async function resetDedicatedE2EProject({ projectId, client } = {}) {
     throw stableError("foreground_e2e_project_reset_input_invalid");
   }
   const project = await readProject(client, projectId);
-  const activeIssues = await allNodes(
+  const activeIssues = await readAllLinearNodes(
     (after) => project.issues({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
     "foreground_e2e_project_issue_read_failed",
   );
@@ -52,7 +52,7 @@ export async function resetDedicatedE2EProject({ projectId, client } = {}) {
     if (result?.success !== true) throw stableError("foreground_e2e_project_issue_archive_failed");
   }
   const baselineProject = await readProject(client, projectId);
-  const remaining = await allNodes(
+  const remaining = await readAllLinearNodes(
     (after) => baselineProject.issues({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
     "foreground_e2e_project_issue_read_back_failed",
   );
@@ -124,7 +124,7 @@ async function resetConductorRoutingLabels({ client, project }) {
 }
 
 async function activeRoutingLabels(project) {
-  const labels = await allNodes(
+  const labels = await readAllLinearNodes(
     (after) => project.labels({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
     "foreground_e2e_project_label_read_failed",
   );
@@ -133,7 +133,7 @@ async function activeRoutingLabels(project) {
 
 async function soleProjectTeamId(project) {
   if (typeof project.teams !== "function") throw stableError("foreground_e2e_project_invalid");
-  const teams = await allNodes(
+  const teams = await readAllLinearNodes(
     (after) => project.teams({ first: 32, ...(after ? { after } : {}) }),
     "foreground_e2e_project_label_read_failed",
   );
@@ -145,7 +145,7 @@ async function soleProjectTeamId(project) {
 
 async function assertExclusiveProjectLabel(label, projectId) {
   if (typeof label.projects !== "function") throw stableError("foreground_e2e_project_label_ownership_invalid");
-  const projects = await allNodes(
+  const projects = await readAllLinearNodes(
     (after) => label.projects({ first: 32, ...(after ? { after } : {}) }),
     "foreground_e2e_project_label_read_failed",
   );
@@ -156,7 +156,7 @@ async function assertExclusiveProjectLabel(label, projectId) {
 
 async function matchingIssueLabel(client, teamId, name) {
   if (typeof client.issueLabels !== "function") throw stableError("foreground_e2e_project_label_read_failed");
-  const labels = await allNodes((after) => client.issueLabels({
+  const labels = await readAllLinearNodes((after) => client.issueLabels({
     first: PAGE_SIZE,
     includeArchived: false,
     filter: { name: { eq: name }, isGroup: { eq: false } },
@@ -170,7 +170,7 @@ async function matchingIssueLabel(client, teamId, name) {
 
 async function assertNoActiveIssueUsesLabel(label) {
   if (typeof label.issues !== "function") throw stableError("foreground_e2e_project_label_ownership_invalid");
-  const issues = await allNodes(
+  const issues = await readAllLinearNodes(
     (after) => label.issues({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
     "foreground_e2e_project_label_read_failed",
   );
@@ -179,7 +179,7 @@ async function assertNoActiveIssueUsesLabel(label) {
   }
 }
 
-async function allNodes(readPage, code) {
+export async function readAllLinearNodes(readPage, code) {
   const nodes = [];
   const cursors = new Set();
   let cursor;

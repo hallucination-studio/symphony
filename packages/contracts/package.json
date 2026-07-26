@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./generated/typescript/contracts.ts"
+    ".": "./generated/typescript/contracts.ts",
+    "./managed-record": {
+      "types": "./managed-record.d.ts",
+      "default": "./managed-record.mjs"
+    }
   }
 }
