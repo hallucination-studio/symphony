@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import { cycleOutcomeId, parseManagedRecord } from "../api/index.js";
+import { rootInputId } from "./RootInputIdentity.js";
 import type {
   FindingRecord,
   ManagedRecord,
@@ -682,22 +683,18 @@ function inputIdFor(change: RootDeltaChange): string {
   if (change.kind === "comment_thread_state_current_value") {
     return threadStateInputId(change.threadState);
   }
-  return inputId(change.sourceId, change.sourceVersion);
+  return rootInputId(change.sourceId, change.sourceVersion);
 }
 
 function commentBodyInputId(commentId: string, commentBodyDigest: string): string {
-  return inputId(`comment_body:${commentId}`, commentBodyDigest);
+  return rootInputId(`comment_body:${commentId}`, commentBodyDigest);
 }
 
 function threadStateInputId(threadState: RootCommentThreadState): string {
-  return inputId(
+  return rootInputId(
     `comment_thread_state:${threadState.commentId}:${threadState.threadRootCommentId}:${threadState.threadState}`,
     threadState.commentRemoteVersion,
   );
-}
-
-function inputId(sourceId: string, sourceVersion: string): string {
-  return `${sourceId}:${sourceVersion}`.slice(0, 128);
 }
 
 function bodyDigest(body: string): string {

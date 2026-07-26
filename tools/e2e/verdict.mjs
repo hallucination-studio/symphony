@@ -853,44 +853,161 @@ function informationAnswerFailureFacts(facts, rootId) {
 
 function revisionFacts(facts) {
   const rootId = onlyRootId(facts);
-  const bindings = Array.isArray(facts.context.inputReferences) ? facts.context.inputReferences : undefined;
-  if (!bindings) return { inputsConsumedOnce: false, threadTransitionsReceipted: false, supersedesCycle: false, freshPlanReview: false, systemCommentConsumed: false, threadHistoryLost: true, undeclaredInputConsumed: false };
+  const input = revisionInput(facts, rootId);
+  if (!input) return revisionFailureFacts();
   const replies = facts.recordsOf("root_reconciler_reply", rootId);
   const directives = facts.recordsOf("root_directive", rootId);
   const consumedIds = directives.flatMap(({ record }) => Array.isArray(record.consumed_input_ids) ? record.consumed_input_ids : []);
-  const inputsConsumedOnce = bindings.every(({ sourceId }) => identifier(sourceId) && consumedIds.filter((id) => id === sourceId).length === 1 &&
-    replies.filter(({ record }) => record.source_input_id === sourceId).length === 1);
-  const threadBindings = bindings.filter(({ kind }) => kind === "thread_transition");
-  const threadTransitionsReceipted = threadBindings.every(({ sourceId, commentId, expectedThreadState, remoteVersion }) => {
-    const comment = facts.comment(commentId);
-    return comment && replies.some(({ record }) => record.source_input_id === sourceId &&
-      record.source?.kind === "comment_thread_state" && record.source.comment_id === commentId &&
-      record.source.comment_remote_version === remoteVersion && record.source.thread_state === expectedThreadState &&
-      record.thread_action === expectedThreadState);
-  });
-  const cycles = facts.recordsOf("workflow_issue", rootId).filter(({ record }) => record.issue_kind === "cycle");
-  const cycleIssues = cycles.map(({ record }) => facts.issue(record.issue_key)).filter(Boolean);
-  const terminal = cycleIssues.filter(({ state }) => ["Changes Required", "Canceled"].includes(state?.name));
-  const successor = cycles.find(({ record }) => !terminal.some(({ id }) => id === record.issue_key));
-  const supersedesCycle = terminal.length > 0 && Boolean(successor) && facts.recordsOf("plan_contract", rootId)
-    .some(({ record }) => record.cycle_issue_id === successor.record.issue_key);
-  const systemCommentConsumed = consumedIds.some((id) => {
-    const comment = facts.comment(id);
-    return comment && !facts.humanActorIds.has(comment.authorId);
-  });
-  const declared = new Set(bindings.map(({ sourceId }) => sourceId));
-  const undeclaredInputConsumed = consumedIds.some((id) => !declared.has(id));
-  const threadHistoryLost = bindings.some(({ sourceId, commentId, kind }) => kind === "comment_edit" && !facts.comment(commentId ?? sourceId)?.editedAt) ||
-    threadBindings.some(({ commentId }) => facts.comment(commentId)?.thread?.state === "unknown");
+  const descriptionConsumed = consumedIds.filter((id) => id === input.description.sourceId).length === 1;
+  const bodyReceipts = input.commentBodies.map((binding) => matchingCommentBodyReply(facts, replies, rootId, binding));
+  const latestBody = input.commentBodies.toSorted((left, right) => parseTime(left.remoteVersion) - parseTime(right.remoteVersion)).at(-1);
+  const latestReply = latestBody && bodyReceipts.find(({ sourceId }) => sourceId === latestBody.sourceId);
+  const inputsConsumedOnce = descriptionConsumed && input.commentBodies.every((binding) =>
+    consumedIds.filter((id) => id === binding.sourceId).length === 1) && bodyReceipts.every(({ valid }) => valid) &&
+    nativeCommentReceipt(facts.comment(latestBody?.commentId), latestReply?.receiptActorId) === latestReply?.reaction;
+  const threadReceipts = input.threadTransitions.map((binding) => matchingThreadReply(replies, rootId, binding));
+  const threadTransitionsReceipted = threadReceipts.every(({ valid }) => valid) &&
+    facts.comment(input.threadTransitions.at(-1)?.commentId)?.thread?.state === "unresolved";
+  const oldGate = planGateFacts(facts, rootId, input.initialPlan, { active: false });
+  const successorGate = planGateFacts(facts, rootId, input.successorPlan, { active: true });
+  const initialGateBeforeRevision = oldGate.complete && parseTime(oldGate.contractObservedAt) < parseTime(input.description.remoteVersion);
+  const successorPlanAfterRevision = successorGate.complete && parseTime(successorGate.executionStartedAt) > parseTime(input.description.remoteVersion);
+  const oldCycle = facts.issue(input.initialPlan.cycleIssueId);
+  const supersedesCycle = initialGateBeforeRevision && successorPlanAfterRevision &&
+    ["Changes Required", "Canceled"].includes(oldCycle?.state?.name) &&
+    input.successorPlan.cycleIssueId !== input.initialPlan.cycleIssueId;
+  const relevantDirectives = directives.filter(({ record }) =>
+    Array.isArray(record.consumed_input_ids) && record.consumed_input_ids.some((id) => input.declaredSourceIds.has(id)));
+  const systemCommentConsumed = consumedIds.some((sourceId) => consumedSystemComment(facts, replies, sourceId));
+  const undeclaredInputConsumed = relevantDirectives.some(({ record }) =>
+    record.consumed_input_ids.some((sourceId) => !input.declaredSourceIds.has(sourceId)));
+  const threadHistoryLost = !facts.comment(input.commentId)?.editedAt ||
+    input.threadTransitions.some(({ commentId }) => facts.comment(commentId)?.thread?.state === "unknown") ||
+    !threadTransitionsRetainDistinctHistory(threadReceipts);
   return {
     inputsConsumedOnce,
     threadTransitionsReceipted,
     supersedesCycle,
-    freshPlanReview: supersedesCycle && freshPlanReviewFacts(facts).active,
+    freshPlanReview: supersedesCycle && successorGate.complete,
     systemCommentConsumed,
     threadHistoryLost,
     undeclaredInputConsumed,
   };
+}
+
+function revisionInput(facts, rootId) {
+  if (!identifier(rootId) || !Array.isArray(facts.context.inputReferences) || facts.context.inputReferences.length !== 5) return undefined;
+  const byKind = new Map();
+  for (const reference of facts.context.inputReferences) {
+    if (!reference || !identifier(reference.sourceId) || byKind.has(reference.sourceId)) return undefined;
+    byKind.set(reference.sourceId, reference);
+  }
+  const description = only([...byKind.values()].filter(({ kind, remoteVersion }) => kind === "description" && timestamp(remoteVersion)));
+  const commentBodies = [...byKind.values()].filter(({ kind, commentId, commentBodyDigest, remoteVersion }) =>
+    kind === "comment_body" && identifier(commentId) && identifier(commentBodyDigest) && timestamp(remoteVersion));
+  const threadTransitions = [...byKind.values()].filter(({ kind, commentId, threadRootCommentId, expectedThreadState, remoteVersion }) =>
+    kind === "comment_thread_state" && identifier(commentId) && commentId === threadRootCommentId &&
+    ["resolved", "unresolved"].includes(expectedThreadState) && timestamp(remoteVersion));
+  const initialPlan = validRevisionPlanGate(facts.context.initialPlan);
+  const successorPlan = validRevisionPlanGate(facts.context.successorPlan);
+  const commentId = only([...new Set(commentBodies.map(({ commentId }) => commentId))]);
+  if (!description || commentBodies.length !== 2 || threadTransitions.length !== 2 || !commentId ||
+      !threadTransitions.every((reference) => reference.commentId === commentId) || !initialPlan || !successorPlan ||
+      initialPlan.cycleIssueId === successorPlan.cycleIssueId || initialPlan.planIssueId === successorPlan.planIssueId ||
+      initialPlan.planContractDigest === successorPlan.planContractDigest ||
+      initialPlan.planReviewActionIssueId === successorPlan.planReviewActionIssueId) return undefined;
+  return {
+    description,
+    commentBodies,
+    threadTransitions,
+    commentId,
+    initialPlan,
+    successorPlan,
+    declaredSourceIds: new Set(byKind.keys()),
+  };
+}
+
+function validRevisionPlanGate(value) {
+  if (!value || !identifier(value.cycleIssueId) || !identifier(value.planIssueId) ||
+      !identifier(value.planContractDigest) || !identifier(value.planContractSourceCommentId) ||
+      !identifier(value.planReviewActionIssueId)) return undefined;
+  return value;
+}
+
+function matchingCommentBodyReply(facts, replies, rootId, binding) {
+  const records = replies.filter(({ record }) => record.source_input_id === binding.sourceId &&
+    record.target_issue_id === rootId && record.source?.kind === "comment_body" &&
+    record.source.comment_id === binding.commentId && record.source.comment_body_digest === binding.commentBodyDigest &&
+    ["check", "cross", "none"].includes(record.reaction) &&
+    ["resolve", "keep_open", "reopen"].includes(record.thread_action));
+  const reply = only(records);
+  const receiptActorId = reply && (reply.sourceAuthorId ?? facts.source(reply)?.authorId);
+  return {
+    sourceId: binding.sourceId,
+    reaction: reply?.record.reaction,
+    receiptActorId,
+    valid: Boolean(reply) && identifier(receiptActorId),
+  };
+}
+
+function matchingThreadReply(replies, rootId, binding) {
+  const action = binding.expectedThreadState === "resolved" ? "resolve" : "reopen";
+  const records = replies.filter(({ record }) => record.source_input_id === binding.sourceId &&
+    record.target_issue_id === rootId && record.source?.kind === "comment_thread_state" &&
+    record.source.comment_id === binding.commentId && record.source.comment_remote_version === binding.remoteVersion &&
+    record.source.thread_root_comment_id === binding.threadRootCommentId &&
+    record.source.thread_state === binding.expectedThreadState && record.reaction === "none" && record.thread_action === action);
+  return { sourceId: binding.sourceId, valid: Boolean(only(records)), state: binding.expectedThreadState, remoteVersion: binding.remoteVersion };
+}
+
+function nativeCommentReceipt(comment, receiptActorId) {
+  if (!comment || !identifier(receiptActorId) || !Array.isArray(comment.reactions)) return undefined;
+  const receipts = new Set(comment.reactions
+    .filter(({ actorId, emoji }) => actorId === receiptActorId && (emoji === "✅" || emoji === "❌"))
+    .map(({ emoji }) => emoji === "✅" ? "check" : "cross"));
+  if (receipts.size > 1) return undefined;
+  return receipts.values().next().value ?? "none";
+}
+
+function planGateFacts(facts, rootId, gate, { active }) {
+  const contract = only(facts.recordsOf("plan_contract", rootId).filter((entry) => entry.issueId === gate.planIssueId &&
+    entry.source?.id === gate.planContractSourceCommentId && entry.record.cycle_issue_id === gate.cycleIssueId &&
+    entry.record.plan_contract_digest === gate.planContractDigest &&
+    !facts.humanActorIds.has(entry.sourceAuthorId ?? facts.source(entry)?.authorId)));
+  const execution = contract && only(facts.recordsOf("stage_execution", rootId).filter(({ record }) => record.stage === "plan" &&
+    record.cycle_issue_id === gate.cycleIssueId && record.node_issue_id === gate.planIssueId));
+  const result = execution && only(facts.recordsOf("stage_result", rootId).filter(({ record }) => record.stage === "plan" &&
+    record.outcome_kind === "plan_completed" && record.cycle_issue_id === gate.cycleIssueId && record.node_issue_id === gate.planIssueId &&
+    record.plan_contract_digest === gate.planContractDigest && record.model_turn?.stage_execution_id === execution.record.stage_execution_id));
+  const action = only(facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "plan_review" &&
+    record.action_issue_id === gate.planReviewActionIssueId && record.cycle_issue_id === gate.cycleIssueId &&
+    exactList(record.related_issue_ids, [gate.planIssueId])));
+  const issue = facts.issue(gate.planReviewActionIssueId);
+  const actionStateMatches = active
+    ? Boolean(issue && issue.archivedAt === null && ["Todo", "In Progress"].includes(issue.state?.name) && !facts.humanActorIds.has(issue.creatorId))
+    : Boolean(issue && issue.archivedAt !== null);
+  return {
+    complete: Boolean(contract && execution && result && action && actionStateMatches),
+    contractObservedAt: facts.source(contract)?.createdAt ?? facts.source(contract)?.updatedAt,
+    executionStartedAt: execution?.record.started_at,
+  };
+}
+
+function consumedSystemComment(facts, replies, sourceId) {
+  const direct = facts.comment(sourceId);
+  if (direct && !facts.humanActorIds.has(direct.authorId)) return true;
+  const reply = facts.recordsOf("root_reconciler_reply").find(({ record }) => record.source_input_id === sourceId);
+  const comment = reply && facts.comment(reply.record.source?.comment_id);
+  return Boolean(comment && !facts.humanActorIds.has(comment.authorId));
+}
+
+function threadTransitionsRetainDistinctHistory(receipts) {
+  return receipts.length === 2 && receipts[0]?.valid && receipts[1]?.valid &&
+    receipts[0].state === "resolved" && receipts[1].state === "unresolved" && receipts[0].remoteVersion !== receipts[1].remoteVersion;
+}
+
+function revisionFailureFacts() {
+  return { inputsConsumedOnce: false, threadTransitionsReceipted: false, supersedesCycle: false, freshPlanReview: false, systemCommentConsumed: false, threadHistoryLost: true, undeclaredInputConsumed: false };
 }
 
 function parallelFacts(facts) {
@@ -1020,7 +1137,8 @@ function requirementsPreserved(definition, issues, comments, context, records) {
   return declaredComments.every((interaction) => {
     if (comments.some((comment) => comment.body === interaction.body)) return true;
     if ((interaction.kind !== "create_comment" && interaction.kind !== "create_action_comment") || !edits.has(interaction.commentBinding)) return false;
-    const binding = bindings.find(({ kind, binding: inputBinding }) => kind === "comment_create" && inputBinding === interaction.commentBinding);
+    const binding = bindings.find(({ kind, binding: inputBinding }) =>
+      ["comment_create", "comment_body"].includes(kind) && inputBinding === interaction.commentBinding);
     return Boolean(binding && records.some(({ record }) => record.kind === "root_reconciler_reply" && record.source_input_id === binding.sourceId));
   });
 }

@@ -157,7 +157,7 @@ test("revision Case freezes its initial Plan gate and every user-input receipt",
   assert.deepEqual(
     interactions.filter(({ kind }) => kind === "wait_for_input_receipt").map(({ requiredFacts }) => requiredFacts),
     [
-      ["reply", "reaction"],
+      ["root_directive"],
       ["reply", "reaction"],
       ["reply", "reaction"],
       ["reply", "reaction", "thread_state"],

@@ -74,7 +74,7 @@ test("bootstrap includes the current native state for each comment thread", () =
 test("initial unresolved states and consumed comment inputs do not re-enter pending work", () => {
   const workflow = tree("Root", "root-v1", "comment-v1");
   const commentBodyDigest = createHash("sha256").update("User input", "utf8").digest("hex");
-  const inputId = `comment_body:comment-1:${commentBodyDigest}`;
+  const inputId = rootInputId("comment_body:comment-1", commentBodyDigest);
   const initial = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
 
   assert.equal(initial.bootstrap.pendingInputIds.some((value) => value.startsWith("comment_thread_state:")), false);
@@ -146,8 +146,29 @@ test("a body edit produces only the comment body current value", () => {
 
   assert.deepEqual(delta.changes.map(({ kind }) => kind), ["comment_current_value"]);
   assert.deepEqual(delta.pendingInputIds, [
-    `comment_body:comment-1:${createHash("sha256").update("Edited user input", "utf8").digest("hex")}`,
+    rootInputId("comment_body:comment-1", createHash("sha256").update("Edited user input", "utf8").digest("hex")),
   ]);
+});
+
+test("comment input identities retain each body version when the Linear comment ID reaches its limit", () => {
+  const commentId = "c".repeat(128);
+  const before = tree("Root", "root-v1", "comment-v1");
+  const after = tree("Root", "root-v1", "comment-v2");
+  const beforeComment = before.comments.find(({ author_kind }) => author_kind === "human");
+  const afterComment = after.comments.find(({ author_kind }) => author_kind === "human");
+  assert.ok(beforeComment && afterComment);
+  beforeComment.comment_id = commentId;
+  beforeComment.thread_root_comment_id = commentId;
+  afterComment.comment_id = commentId;
+  afterComment.thread_root_comment_id = commentId;
+  afterComment.body = "Edited user input";
+
+  const first = commentBodyInputId(buildRootFactSet({ root, tree: before, git: git("head-1"), mechanicalViolations: [] }), commentId);
+  const second = commentBodyInputId(buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] }), commentId);
+
+  assert.match(first, /^input:[a-f0-9]{64}$/u);
+  assert.match(second, /^input:[a-f0-9]{64}$/u);
+  assert.notEqual(first, second);
 });
 
 test("a native thread-state change produces only the thread-state current value", () => {
@@ -275,6 +296,18 @@ test("a Symphony-authored malformed record fails closed instead of becoming an i
 
 function git(head: string) {
   return { head, branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } };
+}
+
+function commentBodyInputId(factSet: ReturnType<typeof buildRootFactSet>, commentId: string): string {
+  const entry = factSet.entries.get(`linear_comment_body:${commentId}`)?.change;
+  if (entry?.kind !== "comment_current_value" || entry.userInput.kind !== "comment_body") {
+    throw new Error("comment_body_input_missing");
+  }
+  return entry.userInput.inputId;
+}
+
+function rootInputId(sourceId: string, sourceVersion: string): string {
+  return `input:${createHash("sha256").update(`${sourceId}\u0000${sourceVersion}`, "utf8").digest("hex")}`;
 }
 
 function tree(title: string, rootVersion: string, commentVersion?: string, includeComment = true): LinearWorkflowTreeSnapshot {

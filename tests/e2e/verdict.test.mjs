@@ -206,6 +206,59 @@ test("a fresh Plan review must link one Plan contract, Plan execution/result, an
   assert.equal(assertion.outcome, "contradicted");
 });
 
+test("revision verdict binds the driver-recorded initial and successor Plan gates instead of borrowing another Cycle", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
+  for (const mutate of [
+    (fixture) => { fixture.context.successorPlan.planReviewActionIssueId = fixture.context.initialPlan.planReviewActionIssueId; },
+    (fixture) => { fixture.context.initialPlan.planContractSourceCommentId = fixture.context.successorPlan.planContractSourceCommentId; },
+    (fixture) => { fixture.context.successorPlan.planIssueId = fixture.context.initialPlan.planIssueId; },
+    (fixture) => {
+      const root = fixture.evidence.roots[0];
+      recordSource(root, findRecord(root, "plan_contract", (record) => record.plan_contract_digest === "revision-new-contract")).authorId = "human";
+    },
+  ]) {
+    const fixture = satisfiedFixture(definition);
+    mutate(fixture);
+    const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+    assert.equal(assertions.find(({ assertionId }) => assertionId === "revision_supersedes_cycle").outcome, "contradicted");
+    assert.equal(assertions.find(({ assertionId }) => assertionId === "boundary_successor_plan_review").outcome, "contradicted");
+  }
+});
+
+test("revision verdict rejects a Symphony timeline or managed comment consumed alongside a frozen input", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  appendHumanComment(root, "revision-timeline", "System timeline", "symphony");
+  findRecord(root, "root_directive").record.consumed_input_ids.push("revision-timeline");
+
+  const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "system_comment_treated_as_input").outcome, "contradicted");
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "undeclared_revision_or_conductor_interpretation").outcome, "contradicted");
+});
+
+test("revision verdict requires each comment-body receipt to retain its closed thread action", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  delete findRecord(root, "root_reconciler_reply", (record) => record.source_input_id === "revision-comment-create").record.thread_action;
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "ordinary_inputs_consumed_once");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
+test("revision verdict rejects a comment receipt reaction not written by its Reconciler reply actor", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  root.comments.find(({ id }) => id === "revision-comment").reactions[0].actorId = "observer";
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "ordinary_inputs_consumed_once");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
 test("rejected Plan verdict cannot borrow a Root comment, another rejection, or a replacement Action", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
   for (const mutate of [
@@ -597,23 +650,42 @@ function revisionFixture(definition) {
   });
   const oldCycle = addIssue(root, "revision-old-cycle", "Changes Required");
   const newCycle = addIssue(root, "revision-new-cycle", "Planning");
-  const plan = addIssue(root, "revision-plan", "Planning");
-  const review = addIssue(root, "revision-review", "Todo");
-  const commentId = addHumanComment(root, "revision-comment", "The original helper name no longer matches the revised requirement.", { editedAt: DATE, thread: { rootCommentId: "revision-comment", state: "unresolved" } });
+  const oldPlan = addIssue(root, "revision-old-plan", "Planning");
+  const oldReview = addIssue(root, "revision-initial-review", "Todo", { archivedAt: DATE });
+  const plan = addIssue(root, "revision-successor-plan", "Planning");
+  const review = addIssue(root, "revision-successor-review", "Todo");
+  const commentId = addHumanComment(root, "revision-comment", "The original helper name no longer matches the revised requirement.", {
+    editedAt: DATE,
+    reactions: [{ id: "revision-comment-receipt", emoji: "❌", actorId: "symphony", archivedAt: null, createdAt: DATE, updatedAt: DATE, remoteVersion: DATE }],
+    thread: { rootCommentId: "revision-comment", state: "unresolved" },
+  });
   addWorkflowIssue(root, oldCycle, "cycle");
   addWorkflowIssue(root, newCycle, "cycle");
+  addWorkflowIssue(root, oldPlan, "plan");
   addWorkflowIssue(root, plan, "plan");
+  addWorkflowIssue(root, oldReview, "human");
   addWorkflowIssue(root, review, "human");
-  addRecord(root, planContract(root.id, oldCycle, "revision-old-contract"), { archived: true, sourceIssueId: plan });
+  addRecord(root, planContract(root.id, oldCycle, "revision-old-contract"), { archived: true, sourceIssueId: oldPlan });
+  addRecord(root, stageExecution(root.id, oldCycle, oldPlan, "revision-old-plan-execution", "plan", undefined, 5));
+  addRecord(root, stageResult(root.id, oldCycle, oldPlan, "revision-old-plan-execution", "plan", "plan_completed", { planContract: "revision-old-contract", at: 6 }));
+  addRecord(root, humanActionRequest(root.id, "revision-initial-review-id", oldReview, "plan_review", oldCycle, [oldPlan]));
   addRecord(root, rootDirective(root.id, ["revision-description", "revision-comment-create", "revision-comment-edit", "revision-thread-resolve", "revision-thread-reopen"], 15));
-  addRecord(root, reply(root.id, "revision-description"));
-  addRecord(root, reply(root.id, "revision-comment-create"));
-  addRecord(root, reply(root.id, "revision-comment-edit"));
+  addRecord(root, reply(root.id, "revision-comment-create", {
+    reaction: "check",
+    source: { kind: "comment_body", comment_id: commentId, comment_body_digest: "revision-create-digest" },
+  }));
+  addRecord(root, reply(root.id, "revision-comment-edit", {
+    reaction: "cross",
+    source: { kind: "comment_body", comment_id: commentId, comment_body_digest: "revision-edit-digest" },
+  }));
   addRecord(root, reply(root.id, "revision-thread-resolve", {
-    threadAction: "resolve", source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(21), thread_root_comment_id: commentId, thread_state: "resolve" },
+    reaction: "none",
+    threadAction: "resolve",
+    source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(21), thread_root_comment_id: commentId, thread_state: "resolved" },
   }));
   addRecord(root, reply(root.id, "revision-thread-reopen", {
-    threadAction: "reopen", source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(22), thread_root_comment_id: commentId, thread_state: "reopen" },
+    reaction: "none",
+    threadAction: "reopen", source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(22), thread_root_comment_id: commentId, thread_state: "unresolved" },
   }));
   addRecord(root, planContract(root.id, newCycle, "revision-new-contract"), { sourceIssueId: plan });
   addRecord(root, stageExecution(root.id, newCycle, plan, "revision-plan-execution", "plan", undefined, 30));
@@ -621,12 +693,26 @@ function revisionFixture(definition) {
   addRecord(root, humanActionRequest(root.id, "revision-review-id", review, "plan_review", newCycle, [plan]));
   return fixture(definition, [root], {
     inputReferences: [
-      { sourceId: "revision-description", kind: "description" },
-      { sourceId: "revision-comment-create", kind: "comment_create", binding: "revision_comment", commentId },
-      { sourceId: "revision-comment-edit", kind: "comment_edit", commentId },
-      { sourceId: "revision-thread-resolve", kind: "thread_transition", commentId, expectedThreadState: "resolve", remoteVersion: at(21) },
-      { sourceId: "revision-thread-reopen", kind: "thread_transition", commentId, expectedThreadState: "reopen", remoteVersion: at(22) },
+      { sourceId: "revision-description", kind: "description", remoteVersion: at(14) },
+      { sourceId: "revision-comment-create", kind: "comment_body", binding: "revision_comment", commentId, commentBodyDigest: "revision-create-digest", remoteVersion: at(16) },
+      { sourceId: "revision-comment-edit", kind: "comment_body", commentId, commentBodyDigest: "revision-edit-digest", remoteVersion: at(17) },
+      { sourceId: "revision-thread-resolve", kind: "comment_thread_state", commentId, threadRootCommentId: commentId, expectedThreadState: "resolved", remoteVersion: at(21) },
+      { sourceId: "revision-thread-reopen", kind: "comment_thread_state", commentId, threadRootCommentId: commentId, expectedThreadState: "unresolved", remoteVersion: at(22) },
     ],
+    initialPlan: {
+      cycleIssueId: oldCycle,
+      planIssueId: oldPlan,
+      planContractDigest: "revision-old-contract",
+      planContractSourceCommentId: "record-7",
+      planReviewActionIssueId: oldReview,
+    },
+    successorPlan: {
+      cycleIssueId: newCycle,
+      planIssueId: plan,
+      planContractDigest: "revision-new-contract",
+      planContractSourceCommentId: "record-16",
+      planReviewActionIssueId: review,
+    },
   });
 }
 
@@ -768,7 +854,7 @@ function addHumanComment(root, id, body, options = {}) {
   root.comments.push({
     id, issueId: options.issueId ?? root.id, parentId: null, authorId: "human", body, archivedAt: null,
     createdAt: DATE, updatedAt: options.updatedAt ?? DATE, remoteVersion: options.remoteVersion ?? DATE,
-    editedAt: options.editedAt ?? null, resolvedAt: null, reactions: [], thread: options.thread ?? { rootCommentId: id, state: "unresolved" },
+    editedAt: options.editedAt ?? null, resolvedAt: null, reactions: options.reactions ?? [], thread: options.thread ?? { rootCommentId: id, state: "unresolved" },
   });
   return id;
 }

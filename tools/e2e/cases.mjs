@@ -129,7 +129,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
     interactions: [
       waitForPlanContractAndAction("revision-root", "plan_review", "initial_plan_review"),
       rootDescription("revision-root", "Replace the uppercase helper with a lowercase identifier helper and focused tests.", "revision_description"),
-      waitForReceipt("revision-root", "revision_description", ["reply", "reaction"]),
+      waitForReceipt("revision-root", "revision_description", ["root_directive"]),
       comment("revision-root", "The original helper name no longer matches the requirement.", "revision_comment", "revision_comment_create"),
       waitForReceipt("revision-root", "revision_comment_create", ["reply", "reaction"]),
       editComment("revision-root", "revision_comment", "The original helper name no longer matches the revised requirement.", "revision_comment_edit"),
@@ -141,7 +141,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
     ],
     verificationBoundary: "successor_plan_review",
     assertions: [
-      assertion("ordinary_inputs_consumed_once", "required", "unique", ["root_description", "comments", "reconciler_inputs", "replies", "reactions"], ["root_id", "input_ids", "reply_ids"]),
+      assertion("ordinary_inputs_consumed_once", "required", "unique", ["root_description", "comments", "root_directive", "reconciler_inputs", "replies", "reactions"], ["root_id", "input_ids", "reply_ids"]),
       assertion("thread_transitions_receipted", "required", "thread-state", ["comments", "thread_state", "replies", "reactions"], ["root_id", "thread_root_comment_id", "reply_ids"]),
       assertion("revision_supersedes_cycle", "required", "archived", ["cycle", "plan_execution", "plan_contract", "human_action"], ["root_id", "old_cycle_id", "new_cycle_id", "new_execution_id", "new_contract_id"]),
       assertion("boundary_successor_plan_review", "boundary", "linked", ["cycle", "plan_execution", "plan_contract", "human_action"], ["root_id", "new_cycle_id", "new_execution_id", "new_contract_id", "new_action_id"]),

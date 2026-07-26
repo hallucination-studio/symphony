@@ -46,7 +46,9 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
     issueId: root.rootIssueId,
     body: "Please keep the public API focused.",
   });
-  assert.deepEqual(comment, { commentId: "comment-1", issueId: "root-1" });
+  assert.equal(comment.commentId, "comment-1");
+  assert.equal(comment.issueId, "root-1");
+  assert.equal(comment.inputReference.kind, "comment_body");
 
   await human.editComment({
     issueId: root.rootIssueId,
@@ -161,6 +163,114 @@ test("Human Actor ignores terminal Clarification history and waits for the fresh
   assert.deepEqual(action, { actionIssueId: "fresh-clarification", terminalStatusId: "answered-state" });
 });
 
+test("Human Actor fresh-reads the revision Plan gate and waits only for matching durable input receipts", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "root_revision_and_comment",
+    rootKey: "revision-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addRevisionPlanGate(root.rootIssueId, {
+    cycleId: "initial-cycle",
+    planId: "initial-plan",
+    planContractCommentId: "initial-contract-comment",
+    planContractDigest: "initial-contract",
+    actionId: "initial-review",
+  });
+
+  const initial = await human.waitForPlanContractAndPlanReviewAction({ rootIssueId: root.rootIssueId });
+  assert.deepEqual(initial, {
+    cycleIssueId: "initial-cycle",
+    planIssueId: "initial-plan",
+    planContractDigest: "initial-contract",
+    planContractSourceCommentId: "initial-contract-comment",
+    planReviewActionIssueId: "initial-review",
+  });
+
+  const description = await human.updateRootDescription({
+    rootIssueId: root.rootIssueId,
+    description: caseInteraction("root_revision_and_comment", "update_root_description").description,
+  });
+  fixture.addRootDescriptionDirectiveReceipt(root.rootIssueId, description);
+  await human.waitForRootDescriptionReceipt({ rootIssueId: root.rootIssueId, inputReference: description });
+
+  const created = await human.createComment({
+    issueId: root.rootIssueId,
+    body: "The original helper name no longer matches the requirement.",
+  });
+  fixture.addCommentReceipt(created.commentId, created.inputReference, { reaction: "check" });
+  await human.waitForCommentReceipt({ issueId: root.rootIssueId, inputReference: created.inputReference });
+
+  const edited = await human.editComment({
+    issueId: root.rootIssueId,
+    commentId: created.commentId,
+    body: "The original helper name no longer matches the revised requirement.",
+  });
+  fixture.addCommentReceipt(edited.commentId, edited.inputReference, { reaction: "cross" });
+  await human.waitForCommentReceipt({ issueId: root.rootIssueId, inputReference: edited.inputReference });
+
+  const resolved = await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
+  fixture.addCommentReceipt(created.commentId, resolved, { threadAction: "resolve" });
+  await human.waitForCommentThreadReceipt({ issueId: root.rootIssueId, inputReference: resolved });
+
+  const reopened = await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
+  fixture.addCommentReceipt(created.commentId, reopened, { threadAction: "reopen" });
+  await human.waitForCommentThreadReceipt({ issueId: root.rootIssueId, inputReference: reopened });
+
+  fixture.addRevisionPlanGate(root.rootIssueId, {
+    cycleId: "successor-cycle",
+    planId: "successor-plan",
+    planContractCommentId: "successor-contract-comment",
+    planContractDigest: "successor-contract",
+    actionId: "successor-review",
+  });
+  const successor = await human.waitForSuccessorPlanContractAndPlanReviewAction({
+    rootIssueId: root.rootIssueId,
+    priorCycleIssueId: initial.cycleIssueId,
+    priorPlanReviewActionIssueId: initial.planReviewActionIssueId,
+  });
+  assert.deepEqual(successor, {
+    cycleIssueId: "successor-cycle",
+    planIssueId: "successor-plan",
+    planContractDigest: "successor-contract",
+    planContractSourceCommentId: "successor-contract-comment",
+    planReviewActionIssueId: "successor-review",
+  });
+});
+
+test("Human Actor derives distinct bounded receipt identities for full-length comment IDs", async () => {
+  const fixture = createLinearFixture();
+  fixture.commentId = "c".repeat(128);
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+
+  const created = await human.createComment({ issueId: root.rootIssueId, body: "Keep the helper focused." });
+  const edited = await human.editComment({ issueId: root.rootIssueId, commentId: created.commentId, body: "Keep the helper focused and tested." });
+
+  assert.match(created.inputReference.sourceId, /^input:[a-f0-9]{64}$/u);
+  assert.match(edited.inputReference.sourceId, /^input:[a-f0-9]{64}$/u);
+  assert.notEqual(created.inputReference.sourceId, edited.inputReference.sourceId);
+});
+
 test("Human Actor rejects a Plan Review Action created by the Human actor", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -226,7 +336,12 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
     "setHumanActionTerminalStatus",
     "updateRootDescription",
     "waitForClarificationAction",
+    "waitForCommentReceipt",
+    "waitForCommentThreadReceipt",
+    "waitForPlanContractAndPlanReviewAction",
     "waitForPlanReviewAction",
+    "waitForRootDescriptionReceipt",
+    "waitForSuccessorPlanContractAndPlanReviewAction",
   ]);
   assert.equal("createHumanAction" in human, false);
   assert.equal("writeManagedRecord" in human, false);
@@ -357,6 +472,7 @@ test("Human Actor creates each frozen Case Root at most once", async () => {
 function createLinearFixture() {
   const calls = { createIssue: [], updateIssue: [], createComment: [], updateComment: [], resolve: [], reopen: [], reactions: [] };
   const productCycles = [];
+  let sequence = 0;
   const comments = new Map([
     ["unmanaged-comment", comment({ id: "unmanaged-comment", issueId: "human-action-1", body: "Managed reply", userId: "symphony-1" })],
   ]);
@@ -385,8 +501,110 @@ function createLinearFixture() {
   const fixture = {
     calls,
     comments,
+    commentId: "comment-1",
     createIssuePayload: undefined,
     client: undefined,
+    addRevisionPlanGate(rootIssueId, {
+      cycleId,
+      planId,
+      planContractCommentId,
+      planContractDigest,
+      actionId,
+    }) {
+      const root = issues.get(rootIssueId);
+      const cycle = issue({
+        id: cycleId,
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "planning-state",
+        title: "Cycle",
+        description: "Product-created Cycle.",
+        priority: 2,
+        creatorId: "symphony-1",
+        labels: [{ id: "cycle-label", name: "Cycle" }],
+      });
+      const plan = issue({
+        id: planId,
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "planning-state",
+        title: "Plan",
+        description: "Product-created Plan.",
+        priority: 2,
+        creatorId: "symphony-1",
+        labels: [{ id: "plan-label", name: "Plan" }],
+      });
+      const action = issue({
+        id: actionId,
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "todo-state",
+        title: "Approve the Plan Contract",
+        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.\nRejected: add a fresh comment explaining why.",
+        priority: 2,
+        creatorId: "symphony-1",
+        labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
+      });
+      cycle.parentId = rootIssueId;
+      plan.parentId = cycleId;
+      action.parentId = cycleId;
+      cycle.children = async () => ({ nodes: [plan, action], pageInfo: { hasNextPage: false } });
+      productCycles.push(cycle);
+      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
+      issues.set(cycleId, cycle);
+      issues.set(planId, plan);
+      issues.set(actionId, action);
+      bindIssueComments(plan);
+      const contract = comment({
+        id: planContractCommentId,
+        issueId: planId,
+        body: record({ kind: "plan_contract", root_issue_id: rootIssueId, cycle_issue_id: cycleId, plan_contract_digest: planContractDigest }),
+        userId: "symphony-1",
+      });
+      comments.set(contract.id, contract);
+      bindCommentChildren(contract);
+    },
+    addRootDescriptionDirectiveReceipt(rootIssueId, inputReference) {
+      const directive = comment({
+        id: `directive-${comments.size + 1}`,
+        issueId: rootIssueId,
+        body: record({ kind: "root_directive", root_issue_id: rootIssueId, consumed_input_ids: [inputReference.sourceId] }),
+        userId: "symphony-1",
+      });
+      comments.set(directive.id, directive);
+      bindCommentChildren(directive);
+    },
+    addCommentReceipt(commentId, inputReference, { reaction = "none", threadAction = "keep_open" } = {}) {
+      const source = comments.get(commentId);
+      source.reactions = source.reactions.filter((candidate) =>
+        candidate.userId !== "symphony-1" || (candidate.emoji !== "✅" && candidate.emoji !== "❌"));
+      if (reaction === "check") source.reactions.push({ id: `receipt-${comments.size + 1}`, emoji: "✅", userId: "symphony-1" });
+      if (reaction === "cross") source.reactions.push({ id: `receipt-${comments.size + 1}`, emoji: "❌", userId: "symphony-1" });
+      const reply = comment({
+        id: `reply-${comments.size + 1}`,
+        issueId: source.issueId,
+        parentId: source.id,
+        body: record({
+          kind: "root_reconciler_reply",
+          source_input_id: inputReference.sourceId,
+          target_issue_id: source.issueId,
+          source: inputReference.kind === "comment_body"
+            ? { kind: "comment_body", comment_id: inputReference.commentId, comment_body_digest: inputReference.commentBodyDigest }
+            : {
+              kind: "comment_thread_state",
+              comment_id: inputReference.commentId,
+              comment_remote_version: inputReference.remoteVersion,
+              thread_root_comment_id: inputReference.threadRootCommentId,
+              thread_state: inputReference.expectedThreadState,
+            },
+          reaction,
+          thread_action: threadAction,
+        }),
+        userId: "symphony-1",
+      });
+      comments.set(reply.id, reply);
+      bindCommentChildren(reply);
+    },
     addPlanReviewAction(rootIssueId, {
       actionCreatorId = "symphony-1",
       actionId = `plan-review-action-${productCycles.length + 1}`,
@@ -478,6 +696,7 @@ function createLinearFixture() {
         priority: input.priority,
         labels: [{ id: input.labelIds[0], name: "symphony:conductor/abc123def456" }],
       }));
+      bindIssueComments(issues.get("root-1"));
       return { success: true, issueId: "root-1" };
     },
     async updateIssue(issueId, input) {
@@ -485,6 +704,7 @@ function createLinearFixture() {
       const target = issues.get(issueId);
       if (!target) return { success: false };
       Object.assign(target, input);
+      target.updatedAt = nextTimestamp();
       return { success: true, issueId };
     },
     async issue(issueId) {
@@ -516,8 +736,9 @@ function createLinearFixture() {
     },
     async createComment(input) {
       calls.createComment.push(input);
-      const created = comment({ id: "comment-1", issueId: input.issueId, body: input.body, userId: "human-1" });
+      const created = comment({ id: fixture.commentId, issueId: input.issueId, body: input.body, userId: "human-1" });
       comments.set(created.id, created);
+      bindCommentChildren(created);
       return { success: true, commentId: created.id, comment: Promise.resolve(created) };
     },
     async updateComment(commentId, input) {
@@ -525,18 +746,22 @@ function createLinearFixture() {
       const target = comments.get(commentId);
       if (!target) return { success: false };
       target.body = input.body;
+      target.editedAt = nextTimestamp();
+      target.updatedAt = nextTimestamp();
       return { success: true, commentId, comment: Promise.resolve(target) };
     },
     async commentResolve(commentId) {
       calls.resolve.push(commentId);
       const target = comments.get(commentId);
-      target.resolvedAt = new Date("2026-07-26T00:00:00.000Z");
+      target.resolvedAt = nextTimestamp();
+      target.updatedAt = nextTimestamp();
       return { success: true, commentId, comment: Promise.resolve(target) };
     },
     async commentUnresolve(commentId) {
       calls.reopen.push(commentId);
       const target = comments.get(commentId);
       target.resolvedAt = undefined;
+      target.updatedAt = nextTimestamp();
       return { success: true, commentId, comment: Promise.resolve(target) };
     },
     async createReaction(input) {
@@ -546,6 +771,22 @@ function createLinearFixture() {
       return { success: true, reactionId: "reaction-1" };
     },
   };
+  function nextTimestamp() {
+    sequence += 1;
+    return new Date(`2026-07-26T00:00:${String(sequence).padStart(2, "0")}.000Z`);
+  }
+  function bindIssueComments(target) {
+    target.comments = async () => ({
+      nodes: [...comments.values()].filter((candidate) => candidate.issueId === target.id && !candidate.parentId),
+      pageInfo: { hasNextPage: false },
+    });
+  }
+  function bindCommentChildren(target) {
+    target.children = async () => ({
+      nodes: [...comments.values()].filter((candidate) => candidate.parentId === target.id),
+      pageInfo: { hasNextPage: false },
+    });
+  }
   return fixture;
 }
 
@@ -561,6 +802,7 @@ function issue({ id, identifier, teamId, projectId, stateId, title, description,
     priority,
     creatorId,
     parentId: undefined,
+    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
     async labels() {
       return { nodes: labels, pageInfo: { hasNextPage: false } };
     },
@@ -570,8 +812,22 @@ function issue({ id, identifier, teamId, projectId, stateId, title, description,
   };
 }
 
-function comment({ id, issueId, body, userId }) {
-  return { id, issueId, body, userId, parentId: undefined, resolvedAt: undefined, reactions: [] };
+function comment({ id, issueId, body, userId, parentId = undefined }) {
+  return {
+    id,
+    issueId,
+    body,
+    userId,
+    parentId,
+    createdAt: new Date("2026-07-26T00:00:00.000Z"),
+    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
+    resolvedAt: undefined,
+    reactions: [],
+  };
+}
+
+function record(value) {
+  return `\`\`\`symphony\n${JSON.stringify({ version: 1, ...value })}\n\`\`\``;
 }
 
 function hasCode(code) {

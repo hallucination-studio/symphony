@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+
 import { LinearClient } from "@linear/sdk";
+import { parseSymphonyRecordBlock } from "@symphony/contracts/managed-record";
 
 import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 
@@ -36,6 +39,7 @@ export async function createForegroundE2EHumanActor({
   const roots = new Map();
   const createdRootKeys = new Set();
   const comments = new Map();
+  const receiptInputs = new Map();
   return Object.freeze({
     actorId,
     async createRootIssue(input) {
@@ -95,6 +99,36 @@ export async function createForegroundE2EHumanActor({
       }
     },
 
+    async waitForPlanContractAndPlanReviewAction({ rootIssueId, signal } = {}) {
+      const known = assertKnownRoot(roots, rootIssueId);
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const gate = await activePlanGate({ client, rootIssueId, known, actorId });
+        if (gate) return Object.freeze(gate);
+        await waitForRevisionChange(signal);
+      }
+    },
+
+    async waitForSuccessorPlanContractAndPlanReviewAction({ rootIssueId, priorCycleIssueId, priorPlanReviewActionIssueId, signal } = {}) {
+      const known = assertKnownRoot(roots, rootIssueId);
+      if (!identifier(priorCycleIssueId) || !identifier(priorPlanReviewActionIssueId)) {
+        throw stableError("foreground_e2e_human_successor_plan_input_invalid");
+      }
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const gate = await activePlanGate({
+          client,
+          rootIssueId,
+          known,
+          actorId,
+          excludedCycleIssueId: priorCycleIssueId,
+          excludedPlanReviewActionIssueId: priorPlanReviewActionIssueId,
+        });
+        if (gate) return Object.freeze(gate);
+        await waitForRevisionChange(signal);
+      }
+    },
+
     async updateRootDescription({ rootIssueId, description } = {}) {
       if (!identifier(rootIssueId) || !text(description)) {
         throw stableError("foreground_e2e_human_root_update_input_invalid");
@@ -121,6 +155,7 @@ export async function createForegroundE2EHumanActor({
       if (!matchesKnownRoot(after, afterLabels, known) || after.description !== description) {
         throw stableError("foreground_e2e_human_root_read_back_failed");
       }
+      return rememberReceipt(receiptInputs, descriptionInputReference({ rootIssueId, remoteVersion: remoteVersion(after) }));
     },
 
     async createComment({ issueId, body } = {}) {
@@ -139,7 +174,11 @@ export async function createForegroundE2EHumanActor({
         throw stableError("foreground_e2e_human_comment_read_back_failed");
       }
       comments.set(created.id, Object.freeze({ issueId: created.issueId }));
-      return Object.freeze({ commentId: created.id, issueId: created.issueId });
+      return Object.freeze({
+        commentId: created.id,
+        issueId: created.issueId,
+        inputReference: rememberReceipt(receiptInputs, commentBodyInputReference(created)),
+      });
     },
 
     async editComment({ issueId, commentId, body } = {}) {
@@ -160,28 +199,77 @@ export async function createForegroundE2EHumanActor({
       if (!matchesOwnedRootComment(after, { issueId: known.issueId, body, actorId })) {
         throw stableError("foreground_e2e_human_comment_read_back_failed");
       }
+      return Object.freeze({
+        commentId: after.id,
+        issueId: after.issueId,
+        inputReference: rememberReceipt(receiptInputs, commentBodyInputReference(after)),
+      });
     },
 
     async resolveCommentThread({ issueId, threadRootCommentId } = {}) {
-      await setCommentThreadState({
+      return setCommentThreadState({
         client,
         comments,
         actorId,
         issueId,
         commentId: threadRootCommentId,
         resolved: true,
+        receiptInputs,
       });
     },
 
     async reopenCommentThread({ issueId, threadRootCommentId } = {}) {
-      await setCommentThreadState({
+      return setCommentThreadState({
         client,
         comments,
         actorId,
         issueId,
         commentId: threadRootCommentId,
         resolved: false,
+        receiptInputs,
       });
+    },
+
+    async waitForRootDescriptionReceipt({ rootIssueId, inputReference, signal } = {}) {
+      const known = assertKnownRoot(roots, rootIssueId);
+      const expected = assertRegisteredReceipt(receiptInputs, inputReference, "description", "foreground_e2e_human_description_receipt_input_invalid");
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const root = await readIssue(client, rootIssueId, "foreground_e2e_human_description_receipt_read_failed");
+        const labels = await readLabels(root, "foreground_e2e_human_description_receipt_read_failed");
+        if (!matchesKnownRoot(root, labels, known)) throw stableError("foreground_e2e_human_description_receipt_target_invalid");
+        const directives = await readIssueComments(root, "foreground_e2e_human_description_receipt_read_failed");
+        if (hasDescriptionDirectiveReceipt(directives, rootIssueId, expected.sourceId, actorId)) return;
+        await waitForRevisionChange(signal);
+      }
+    },
+
+    async waitForCommentReceipt({ issueId, inputReference, signal } = {}) {
+      const expected = assertRegisteredReceipt(receiptInputs, inputReference, "comment_body", "foreground_e2e_human_comment_receipt_input_invalid");
+      if (!identifier(issueId) || expected.issueId !== issueId) throw stableError("foreground_e2e_human_comment_receipt_input_invalid");
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const source = await readComment(client, expected.commentId, "foreground_e2e_human_comment_receipt_read_failed");
+        if (!matchesOwnedRootComment(source, { issueId, actorId })) throw stableError("foreground_e2e_human_comment_receipt_target_invalid");
+        if (await hasCommentReceipt({ source, expected, actorId, threadAction: undefined })) return;
+        await waitForRevisionChange(signal);
+      }
+    },
+
+    async waitForCommentThreadReceipt({ issueId, inputReference, signal } = {}) {
+      const expected = assertRegisteredReceipt(receiptInputs, inputReference, "comment_thread_state", "foreground_e2e_human_thread_receipt_input_invalid");
+      if (!identifier(issueId) || expected.issueId !== issueId) throw stableError("foreground_e2e_human_thread_receipt_input_invalid");
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const source = await readComment(client, expected.commentId, "foreground_e2e_human_thread_receipt_read_failed");
+        if (!matchesOwnedRootComment(source, { issueId, actorId }) || threadState(source) !== expected.expectedThreadState ||
+            remoteVersion(source) !== expected.remoteVersion) {
+          throw stableError("foreground_e2e_human_thread_receipt_target_invalid");
+        }
+        const action = expected.expectedThreadState === "resolved" ? "resolve" : "reopen";
+        if (await hasCommentReceipt({ source, expected, actorId, threadAction: action })) return;
+        await waitForRevisionChange(signal);
+      }
     },
 
     async addReaction({ issueId, commentId, emoji } = {}) {
@@ -230,7 +318,7 @@ export async function createForegroundE2EHumanActor({
   });
 }
 
-async function setCommentThreadState({ client, comments, actorId, issueId, commentId, resolved }) {
+async function setCommentThreadState({ client, comments, actorId, issueId, commentId, resolved, receiptInputs }) {
   const known = assertKnownComment(comments, { issueId, commentId });
   const before = await readComment(client, commentId, "foreground_e2e_human_comment_target_invalid");
   if (!matchesOwnedRootComment(before, { issueId: known.issueId, actorId })) {
@@ -248,6 +336,7 @@ async function setCommentThreadState({ client, comments, actorId, issueId, comme
       (resolved ? !after.resolvedAt : after.resolvedAt !== null && after.resolvedAt !== undefined)) {
     throw stableError("foreground_e2e_human_comment_read_back_failed");
   }
+  return rememberReceipt(receiptInputs, commentThreadStateInputReference(after));
 }
 
 function assertRootCreateInput(input, rootCatalog) {
@@ -398,6 +487,77 @@ async function activeClarificationAction({ client, rootIssueId, known, actorId, 
   return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
 }
 
+async function activePlanGate({
+  client,
+  rootIssueId,
+  known,
+  actorId,
+  excludedCycleIssueId = undefined,
+  excludedPlanReviewActionIssueId = undefined,
+}) {
+  const root = await readIssue(client, rootIssueId, "foreground_e2e_human_plan_gate_target_invalid");
+  const rootLabels = await readLabels(root, "foreground_e2e_human_plan_gate_target_invalid");
+  if (!matchesKnownRoot(root, rootLabels, known)) throw stableError("foreground_e2e_human_plan_gate_target_invalid");
+  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_plan_gate_read_failed");
+  const cycles = await readChildren(root, "foreground_e2e_human_plan_gate_read_failed");
+  const gates = [];
+  for (const cycle of cycles) {
+    if (!matchesChildScope(cycle, { parentId: rootIssueId, known }) || cycle.id === excludedCycleIssueId) continue;
+    const children = await readChildren(cycle, "foreground_e2e_human_plan_gate_read_failed");
+    const plans = [];
+    const actions = [];
+    for (const child of children) {
+      if (!matchesChildScope(child, { parentId: cycle.id, known })) continue;
+      const labels = await readLabels(child, "foreground_e2e_human_plan_gate_read_failed");
+      if (isPlanIssue(labels)) plans.push(child);
+      if (isPlanReviewAction(labels)) actions.push(child);
+    }
+    if (plans.length > 1 || actions.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
+    const plan = plans[0];
+    const action = actions[0];
+    if (!plan || !action || action.id === excludedPlanReviewActionIssueId) continue;
+    if (!identifier(action.creatorId) || action.creatorId === actorId || !isProductPlanReviewAction(action) ||
+        !isPendingPlanReviewAction(action, statuses)) continue;
+    const contract = await matchingPlanContract({ plan, rootIssueId, cycleIssueId: cycle.id, actorId });
+    if (!contract) continue;
+    gates.push({
+      cycleIssueId: cycle.id,
+      planIssueId: plan.id,
+      planContractDigest: contract.planContractDigest,
+      planContractSourceCommentId: contract.sourceCommentId,
+      planReviewActionIssueId: action.id,
+    });
+  }
+  if (gates.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
+  return gates[0];
+}
+
+function isPendingPlanReviewAction(action, statuses) {
+  const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
+  if (current.length !== 1) throw stableError("foreground_e2e_human_plan_gate_status_invalid");
+  if (["Todo", "In Progress"].includes(current[0].name)) return true;
+  if (["Approved", "Rejected", "Canceled"].includes(current[0].name)) return false;
+  throw stableError("foreground_e2e_human_plan_gate_status_invalid");
+}
+
+async function matchingPlanContract({ plan, rootIssueId, cycleIssueId, actorId }) {
+  const comments = await readIssueComments(plan, "foreground_e2e_human_plan_gate_read_failed");
+  const matches = comments.flatMap((comment) => {
+    const record = parseRecord(comment.body);
+    return identifier(comment?.userId) && comment.userId !== actorId && record?.kind === "plan_contract" && record.root_issue_id === rootIssueId &&
+      record.cycle_issue_id === cycleIssueId && identifier(record.plan_contract_digest)
+      ? [{ sourceCommentId: comment.id, planContractDigest: record.plan_contract_digest }]
+      : [];
+  });
+  if (matches.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
+  return matches[0];
+}
+
+function isPlanIssue(labels) {
+  const names = labels.map(({ name }) => name);
+  return names.includes("Plan") && !names.includes("Human Action");
+}
+
 function matchesChildScope(issue, { parentId, known }) {
   return issue && identifier(issue.id) && issue.parentId === parentId && issue.teamId === known.teamId &&
     issue.projectId === known.projectId && identifier(issue.stateId) &&
@@ -470,6 +630,139 @@ async function readComment(client, commentId, code) {
   return comment;
 }
 
+async function readIssueComments(issue, code) {
+  if (!issue || typeof issue.comments !== "function") throw stableError(code);
+  return readAllNodes((after) => issue.comments({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
+}
+
+function hasDescriptionDirectiveReceipt(comments, rootIssueId, sourceId, actorId) {
+  const matches = comments.filter((comment) => {
+    const record = parseRecord(comment?.body);
+    return identifier(comment?.userId) && comment.userId !== actorId && record?.kind === "root_directive" && record.root_issue_id === rootIssueId &&
+      Array.isArray(record.consumed_input_ids) && record.consumed_input_ids.filter((id) => id === sourceId).length === 1;
+  });
+  if (matches.length > 1) throw stableError("foreground_e2e_human_description_receipt_ambiguous");
+  return matches.length === 1;
+}
+
+async function hasCommentReceipt({ source, expected, actorId, threadAction }) {
+  if (!source || typeof source.children !== "function") throw stableError("foreground_e2e_human_comment_receipt_read_failed");
+  const comments = await readAllNodes(
+    (after) => source.children({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
+    "foreground_e2e_human_comment_receipt_read_failed",
+  );
+  const replies = comments.filter((comment) => matchingReplyRecord({ comment, source, expected, threadAction, actorId }));
+  if (replies.length > 1) throw stableError("foreground_e2e_human_comment_receipt_ambiguous");
+  if (replies.length !== 1) return false;
+  const reply = replies[0];
+  const record = parseRecord(reply.body);
+  if (!record) throw stableError("foreground_e2e_human_comment_receipt_read_failed");
+  return expected.kind === "comment_body"
+    ? nativeReceipt(source, reply.userId) === record.reaction
+    : record.reaction === "none";
+}
+
+function matchingReplyRecord({ comment, source, expected, threadAction, actorId }) {
+  const record = parseRecord(comment?.body);
+  if (!record || record.kind !== "root_reconciler_reply" || record.source_input_id !== expected.sourceId ||
+      comment.parentId !== source.id || record.target_issue_id !== source.issueId ||
+      !identifier(comment.userId) || comment.userId === actorId || !record.source || typeof record.source !== "object") return false;
+  if (expected.kind === "comment_body") {
+    return record.source.kind === "comment_body" && record.source.comment_id === expected.commentId &&
+      record.source.comment_body_digest === expected.commentBodyDigest &&
+      ["check", "cross", "none"].includes(record.reaction) && ["resolve", "keep_open", "reopen"].includes(record.thread_action);
+  }
+  return record.source.kind === "comment_thread_state" && record.source.comment_id === expected.commentId &&
+    record.source.comment_remote_version === expected.remoteVersion &&
+    record.source.thread_root_comment_id === expected.threadRootCommentId &&
+    record.source.thread_state === expected.expectedThreadState && record.reaction === "none" &&
+    record.thread_action === threadAction;
+}
+
+function nativeReceipt(comment, receiptActorId) {
+  if (!Array.isArray(comment.reactions)) throw stableError("foreground_e2e_human_comment_receipt_read_failed");
+  const receipts = new Set(comment.reactions
+    .filter((reaction) => reaction?.userId === receiptActorId && (reaction?.emoji === "✅" || reaction?.emoji === "❌"))
+    .map((reaction) => reaction.emoji === "✅" ? "check" : "cross"));
+  if (receipts.size > 1) return undefined;
+  return receipts.values().next().value ?? "none";
+}
+
+function parseRecord(body) {
+  const parsed = parseSymphonyRecordBlock(body);
+  return parsed.ok ? parsed.record : undefined;
+}
+
+function rememberReceipt(receipts, input) {
+  const remembered = Object.freeze(input);
+  if (receipts.has(remembered.sourceId)) throw stableError("foreground_e2e_human_receipt_ambiguous");
+  receipts.set(remembered.sourceId, remembered);
+  return remembered;
+}
+
+function assertRegisteredReceipt(receipts, input, kind, code) {
+  if (!input || input.kind !== kind || !identifier(input.sourceId) || receipts.get(input.sourceId) !== input) {
+    throw stableError(code);
+  }
+  return input;
+}
+
+function descriptionInputReference({ rootIssueId, remoteVersion: version }) {
+  if (!identifier(rootIssueId) || !timestampValue(version)) throw stableError("foreground_e2e_human_root_read_back_failed");
+  return { sourceId: inputId(rootIssueId, version), kind: "description", issueId: rootIssueId, remoteVersion: version };
+}
+
+function commentBodyInputReference(comment) {
+  const version = remoteVersion(comment);
+  if (!identifier(comment?.id) || !identifier(comment?.issueId) || !text(comment?.body) || !timestampValue(version)) {
+    throw stableError("foreground_e2e_human_comment_read_back_failed");
+  }
+  const commentBodyDigest = createHash("sha256").update(comment.body, "utf8").digest("hex");
+  return {
+    sourceId: inputId(`comment_body:${comment.id}`, commentBodyDigest),
+    kind: "comment_body",
+    issueId: comment.issueId,
+    commentId: comment.id,
+    commentBodyDigest,
+    remoteVersion: version,
+  };
+}
+
+function commentThreadStateInputReference(comment) {
+  const version = remoteVersion(comment);
+  const expectedThreadState = threadState(comment);
+  if (!identifier(comment?.id) || !identifier(comment?.issueId) || !timestampValue(version)) {
+    throw stableError("foreground_e2e_human_comment_read_back_failed");
+  }
+  return {
+    sourceId: inputId(`comment_thread_state:${comment.id}:${comment.id}:${expectedThreadState}`, version),
+    kind: "comment_thread_state",
+    issueId: comment.issueId,
+    commentId: comment.id,
+    threadRootCommentId: comment.id,
+    expectedThreadState,
+    remoteVersion: version,
+  };
+}
+
+function inputId(sourceId, sourceVersion) {
+  return `input:${createHash("sha256").update(`${sourceId}\u0000${sourceVersion}`, "utf8").digest("hex")}`;
+}
+
+function remoteVersion(value) {
+  const updatedAt = value?.updatedAt;
+  if (updatedAt instanceof Date) return updatedAt.toISOString();
+  return typeof updatedAt === "string" ? updatedAt : undefined;
+}
+
+function threadState(comment) {
+  return comment?.resolvedAt ? "resolved" : "unresolved";
+}
+
+function timestampValue(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
 async function readLabels(issue, code) {
   if (!issue || typeof issue.labels !== "function") throw stableError(code);
   let page;
@@ -533,6 +826,12 @@ function assertPlanReviewWaitInput({ terminalStatus, signal }) {
   }
 }
 
+function assertRevisionWaitInput({ signal }) {
+  if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
+    throw stableError("foreground_e2e_human_revision_wait_input_invalid");
+  }
+}
+
 function assertClarificationWaitInput({ terminalStatus, signal }) {
   if (!CLARIFICATION_TERMINAL_STATUSES.has(terminalStatus)) {
     throw stableError("foreground_e2e_human_clarification_input_invalid");
@@ -567,6 +866,23 @@ function waitForClarificationChange(signal) {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       reject(stableError("foreground_e2e_human_clarification_aborted"));
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function waitForRevisionChange(signal) {
+  if (signal?.aborted) throw stableError("foreground_e2e_human_revision_wait_aborted");
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, PLAN_REVIEW_WAIT_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(stableError("foreground_e2e_human_revision_wait_aborted"));
     };
     function done() {
       signal?.removeEventListener("abort", onAbort);

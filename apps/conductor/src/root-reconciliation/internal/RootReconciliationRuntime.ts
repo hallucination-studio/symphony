@@ -52,6 +52,7 @@ import type {
 } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
+import { rootInputId } from "./RootInputIdentity.js";
 import {
   deriveIssueUsageAggregate,
   type UsageAggregate,
@@ -1309,15 +1310,21 @@ function currentCommentInputIds(tree: RootReconciliationView["tree"]): string[] 
   return tree.comments.flatMap((comment) => [
     ...(comment.author_kind === "symphony" || comment.author_kind === "linear_integration"
       ? []
-      : [`comment_body:${comment.comment_id}:${commentBodyDigest(comment.body)}`]),
-    `comment_thread_state:${comment.comment_id}:${comment.thread_root_comment_id}:${comment.thread_state}:${comment.remote_version}`,
+      : [rootInputId(`comment_body:${comment.comment_id}`, commentBodyDigest(comment.body))]),
+    rootInputId(
+      `comment_thread_state:${comment.comment_id}:${comment.thread_root_comment_id}:${comment.thread_state}`,
+      comment.remote_version,
+    ),
   ]);
 }
 
 function sourceInputId(reply: UserCommentReply): string {
   return reply.source.kind === "comment_body"
-    ? `comment_body:${reply.source.commentId}:${reply.source.commentBodyDigest}`
-    : `comment_thread_state:${reply.source.commentId}:${reply.source.threadRootCommentId}:${reply.source.threadState}:${reply.source.commentRemoteVersion}`;
+    ? rootInputId(`comment_body:${reply.source.commentId}`, reply.source.commentBodyDigest)
+    : rootInputId(
+      `comment_thread_state:${reply.source.commentId}:${reply.source.threadRootCommentId}:${reply.source.threadState}`,
+      reply.source.commentRemoteVersion,
+    );
 }
 
 function sourceMatchesReply(

@@ -12,6 +12,7 @@ import {
   type UserCommentReply,
 } from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
+import { rootInputId } from "../internal/RootInputIdentity.js";
 import {
   directiveMaterializationComplete,
   RootReconciliationRuntime,
@@ -289,7 +290,10 @@ test("native thread-state inputs require their matching reply without relying on
     }),
     threadState: "resolved",
   });
-  const sourceInputId = `comment_thread_state:${source.comment_id}:${source.thread_root_comment_id}:${source.thread_state}:${source.remote_version}`;
+  const sourceInputId = rootInputId(
+    `comment_thread_state:${source.comment_id}:${source.thread_root_comment_id}:${source.thread_state}`,
+    source.remote_version,
+  );
   const candidate: UserCommentReply = {
     replyId: "reply-state-1",
     sourceInputId,
@@ -316,6 +320,28 @@ test("native thread-state inputs require their matching reply without relying on
       directive("tree-v1", [sourceInputId], [candidate]),
       tree,
       [sourceInputId],
+    ),
+    undefined,
+  );
+});
+
+test("comment body inputs use the canonical hashed identity in directive validation", () => {
+  const source = workflowComment({
+    commentId: "comment-1",
+    authorKind: "human",
+    authorId: "user-1",
+    authorUserId: "user-1",
+    body: "Please rerun this check.",
+  });
+  const candidate = commentBodyReply(source);
+  const tree = workflowTree();
+  tree.comments = [source];
+
+  assert.equal(
+    validateDirectiveInputs(
+      directive("tree-v1", [candidate.sourceInputId], [candidate]),
+      tree,
+      [candidate.sourceInputId],
     ),
     undefined,
   );
@@ -636,7 +662,7 @@ function workflowTree(): LinearWorkflowTreeSnapshot {
 
 function commentBodyReply(source: LinearWorkflowTreeSnapshot["comments"][number]): UserCommentReply {
   const commentBodyDigest = createHash("sha256").update(source.body, "utf8").digest("hex");
-  const sourceInputId = `comment_body:${source.comment_id}:${commentBodyDigest}`;
+  const sourceInputId = rootInputId(`comment_body:${source.comment_id}`, commentBodyDigest);
   return {
     replyId: "reply-body-1",
     sourceInputId,
