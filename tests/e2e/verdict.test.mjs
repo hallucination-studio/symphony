@@ -232,6 +232,88 @@ test("rejected Plan retains its historical lineage independently from the supers
   assert.equal(assertions.find(({ assertionId }) => assertionId === "rejected_contract_superseded").outcome, "contradicted");
 });
 
+test("information-answer verdict binds the frozen Action, answer, reply, and replacement Action to the driver context", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
+  for (const { mutate, assertionIds } of [
+    {
+      mutate: (fixture) => { fixture.evidence.roots[0].comments.find(({ id }) => id === "separator-answer").issueId = fixture.evidence.rootIssueIds[0]; },
+      assertionIds: ["answer_consumed_and_receipted"],
+    },
+    {
+      mutate: (fixture) => { fixture.evidence.roots[0].managedRecords.find(({ record }) => record.kind === "root_reconciler_reply").record.target_issue_id = fixture.evidence.rootIssueIds[0]; },
+      assertionIds: ["answer_consumed_and_receipted"],
+    },
+    {
+      mutate: (fixture) => { fixture.context.replacementActionIssueId = fixture.context.answeredActionIssueId; },
+      assertionIds: ["answer_consumed_and_receipted", "boundary_fresh_plan_review"],
+    },
+    {
+      mutate: (fixture) => { fixture.context.inputReferences = []; },
+      assertionIds: ["answer_consumed_and_receipted", "boundary_fresh_plan_review"],
+    },
+  ]) {
+    const fixture = satisfiedFixture(definition);
+    mutate(fixture);
+    const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+    for (const assertionId of assertionIds) {
+      assert.equal(assertions.find((candidate) => candidate.assertionId === assertionId).outcome, "contradicted", assertionId);
+    }
+  }
+});
+
+test("information-answer verdict requires a matching Answer before any Plan continuation", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  root.managedRecords = root.managedRecords.filter(({ record }) => record.kind !== "human_action_resolution");
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "missing_answer_assumed");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
+test("information-answer verdict rejects an ambiguous replacement Plan Review lineage", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  addRecord(root, humanActionRequest(root.rootIssueId, "duplicate-information-review", "information-review", "plan_review", "information-cycle", ["information-plan"]), {
+    sourceIssueId: "information-review",
+  });
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "boundary_fresh_plan_review");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
+test("information-answer verdict rejects a Human-created continuation fact", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
+  for (const mutate of [
+    (fixture) => { fixture.evidence.roots[0].issues.find(({ id }) => id === fixture.context.replacementActionIssueId).creatorId = "human"; },
+    (fixture) => {
+      const root = fixture.evidence.roots[0];
+      appendRecord(root, stageExecution(root.rootIssueId, "information-cycle", "human-work", "human-work-execution", "work", "information-contract", 50));
+      recordSource(root, root.managedRecords.at(-1)).authorId = "human";
+    },
+  ]) {
+    const fixture = satisfiedFixture(definition);
+    mutate(fixture);
+    const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+      .find(({ assertionId }) => assertionId === "test_unblocks_or_mutates_stage");
+    assert.equal(assertion.outcome, "contradicted");
+  }
+});
+
+test("information-answer verdict reconstructs a unique final Linear lineage only when T10 driver context is absent", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
+  const fixture = satisfiedFixture(definition);
+  delete fixture.context.inputReferences;
+  delete fixture.context.answeredActionIssueId;
+  delete fixture.context.replacementActionIssueId;
+
+  const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+  assert.ok(assertions.every(({ outcome }) => outcome === "satisfied"));
+});
+
 test("approved happy path rejects unrendered Stage, Cycle, or Root usage aggregates", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
   const fixture = approvedFixture(definition);
@@ -484,7 +566,7 @@ function informationFixture(definition) {
   const root = rootFacts(definition, "information-root", "information-root-id", { rootStatus: "Planning" });
   const cycle = addIssue(root, "information-cycle", "Planning");
   const plan = addIssue(root, "information-plan", "Planning");
-  const clarification = addIssue(root, "information-action", "Needs Info", {
+  const clarification = addIssue(root, "information-action", "Answered", {
     description: "## Question\nWhich separator should be used?\n\n## Required\nProvide the separator.\n\n## Submit\nReply on this Action.\n\n## Next\nA fresh Plan Review will be created.",
   });
   const review = addIssue(root, "information-review", "Todo");
@@ -498,10 +580,14 @@ function informationFixture(definition) {
   addRecord(root, rootDirective(root.id, ["separator-answer"], 20));
   addRecord(root, reply(root.id, "separator-answer", { reaction: "check", targetIssueId: clarification }), { sourceIssueId: clarification });
   addRecord(root, planContract(root.id, cycle, "information-contract", { constraints: ["Use a colon separator."] }), { sourceIssueId: plan });
-  addRecord(root, stageExecution(root.id, cycle, plan, "information-plan-execution", "plan", undefined, 30));
-  addRecord(root, stageResult(root.id, cycle, plan, "information-plan-execution", "plan", "plan_completed", { planContract: "information-contract", at: 40 }));
+  addRecord(root, stageExecution(root.id, cycle, plan, "information-plan-execution", "plan", undefined, 30), { sourceIssueId: plan });
+  addRecord(root, stageResult(root.id, cycle, plan, "information-plan-execution", "plan", "plan_completed", { planContract: "information-contract", at: 40 }), { sourceIssueId: plan });
   addRecord(root, humanActionRequest(root.id, "information-review-id", review, "plan_review", cycle, [plan]));
-  return fixture(definition, [root]);
+  return fixture(definition, [root], {
+    inputReferences: [{ sourceId: "separator-answer", kind: "comment_create", binding: "separator_answer", commentId: "separator-answer" }],
+    answeredActionIssueId: clarification,
+    replacementActionIssueId: review,
+  });
 }
 
 function revisionFixture(definition) {

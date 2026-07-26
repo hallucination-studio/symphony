@@ -116,6 +116,51 @@ test("Human Actor ignores terminal Plan Review history and waits for the fresh r
   assert.deepEqual(action, { actionIssueId: "replacement-plan-review", terminalStatusId: "rejected-state" });
 });
 
+test("Human Actor waits for exactly one product-created Clarification Action beneath its declared Root", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "information_requested_and_answered",
+    rootKey: "information-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addClarificationAction(root.rootIssueId);
+
+  const action = await human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" });
+
+  assert.deepEqual(action, { actionIssueId: "clarification-action-1", terminalStatusId: "answered-state" });
+});
+
+test("Human Actor ignores terminal Clarification history and waits for the fresh requested Action", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "information_requested_and_answered",
+    rootKey: "information-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addClarificationAction(root.rootIssueId, { actionId: "answered-clarification", stateId: "answered-state" });
+  fixture.addClarificationAction(root.rootIssueId, { actionId: "fresh-clarification" });
+
+  const action = await human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" });
+
+  assert.deepEqual(action, { actionIssueId: "fresh-clarification", terminalStatusId: "answered-state" });
+});
+
 test("Human Actor rejects a Plan Review Action created by the Human actor", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -139,6 +184,29 @@ test("Human Actor rejects a Plan Review Action created by the Human actor", asyn
   );
 });
 
+test("Human Actor rejects a Clarification Action created by the Human actor", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "information_requested_and_answered",
+    rootKey: "information-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addClarificationAction(root.rootIssueId, { actionCreatorId: "human-1" });
+
+  await assert.rejects(
+    human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" }),
+    hasCode("foreground_e2e_human_clarification_creator_invalid"),
+  );
+});
+
 test("Human Actor cannot expose or perform non-user workflow mutations", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -157,6 +225,7 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
     "resolveCommentThread",
     "setHumanActionTerminalStatus",
     "updateRootDescription",
+    "waitForClarificationAction",
     "waitForPlanReviewAction",
   ]);
   assert.equal("createHumanAction" in human, false);
@@ -355,6 +424,43 @@ function createLinearFixture() {
       issues.set(cycle.id, cycle);
       issues.set(action.id, action);
     },
+    addClarificationAction(rootIssueId, {
+      actionCreatorId = "symphony-1",
+      actionId = `clarification-action-${productCycles.length + 1}`,
+      stateId = "todo-state",
+    } = {}) {
+      const root = issues.get(rootIssueId);
+      const cycleId = `cycle-${productCycles.length + 1}`;
+      const cycle = issue({
+        id: cycleId,
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "planning-state",
+        title: "Cycle",
+        description: "Product-created Cycle.",
+        priority: 2,
+        creatorId: "symphony-1",
+        labels: [{ id: "cycle-label", name: "Cycle" }],
+      });
+      const action = issue({
+        id: actionId,
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId,
+        title: "Provide the separator",
+        description: "## Symphony Human Action\n\n## Requested action\nProvide the separator.\n\n## What is being reviewed or requested\nWhich separator should be used?\n\n## Available outcomes\n- Answered: provide the requested information in a fresh comment, then set this Action to Answered.\n\n## Comment requirement\nA fresh comment is required before resolving this Action.\n\n## What happens next\nAfter any terminal status, the durable Action result is sent to the Root Reconciler.",
+        priority: 2,
+        creatorId: actionCreatorId,
+        labels: [{ id: "human-label", name: "Human Action" }, { id: "clarification-label", name: "Clarification" }],
+      });
+      cycle.parentId = rootIssueId;
+      action.parentId = cycle.id;
+      productCycles.push(cycle);
+      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
+      cycle.children = async () => ({ nodes: [action], pageInfo: { hasNextPage: false } });
+      issues.set(cycle.id, cycle);
+      issues.set(action.id, action);
+    },
   };
   fixture.client = {
     viewer: Promise.resolve({ id: "human-1" }),
@@ -396,6 +502,7 @@ function createLinearFixture() {
               { id: "todo-state", name: "Todo", archivedAt: null },
               { id: "approved-state", name: "Approved", archivedAt: null },
               { id: "rejected-state", name: "Rejected", archivedAt: null },
+              { id: "answered-state", name: "Answered", archivedAt: null },
             ],
             pageInfo: { hasNextPage: false },
           };

@@ -243,9 +243,9 @@ const CASE_HANDLERS = Object.freeze({
     information_action_actionable: (facts) => facts.informationAnswer().actionable ? "satisfied" : "contradicted",
     answer_consumed_and_receipted: (facts) => facts.informationAnswer().consumedAndReceipted ? "satisfied" : "contradicted",
     answer_drives_fresh_plan: (facts) => facts.informationAnswer().drivesFreshPlan ? "satisfied" : "contradicted",
-    boundary_fresh_plan_review: (facts) => facts.freshPlanReview().active ? "satisfied" : "contradicted",
+    boundary_fresh_plan_review: (facts) => facts.informationAnswer().freshPlanReviewActive ? "satisfied" : "contradicted",
     missing_answer_assumed: (facts) => facts.informationAnswer().assumedBeforeAnswer ? "contradicted" : "satisfied",
-    test_unblocks_or_mutates_stage: (facts) => facts.hasHumanManagedWrite() ? "contradicted" : "satisfied",
+    test_unblocks_or_mutates_stage: (facts) => facts.informationAnswer().humanCreatedContinuation ? "contradicted" : "satisfied",
   }),
   root_revision_and_comment: Object.freeze({
     ordinary_inputs_consumed_once: (facts) => facts.revision().inputsConsumedOnce ? "satisfied" : "contradicted",
@@ -679,25 +679,175 @@ function planReviewLineages(facts, rootIssueId) {
 
 function informationAnswerFacts(facts) {
   const rootId = onlyRootId(facts);
-  const requests = facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "clarification");
-  const request = requests[0];
-  const issue = request && facts.issue(request.record.action_issue_id);
-  const actionable = Boolean(issue && actionableActionDescription(issue.description));
-  const answered = facts.recordsOf("human_action_resolution", rootId).find(({ record }) => record.action_id === request?.record.action_id && record.outcome === "answered" && record.terminal_status === "Answered");
-  const sourceCommentId = answered?.record.source_comment_ids?.[0];
-  const answer = sourceCommentId && facts.comment(sourceCommentId);
-  const replies = facts.recordsOf("root_reconciler_reply", rootId).filter(({ record }) => record.source_input_id === sourceCommentId);
-  const consumed = facts.recordsOf("root_directive", rootId).some(({ record }) => Array.isArray(record.consumed_input_ids) && record.consumed_input_ids.includes(sourceCommentId));
-  const contract = facts.recordsOf("plan_contract", rootId).find(({ record }) => JSON.stringify(record).toLowerCase().includes("colon"));
-  const answerAt = parseTime(answered?.record.resolved_at);
-  const assumedBeforeAnswer = answerAt !== undefined && facts.recordsOf("stage_execution", rootId)
-    .some(({ record }) => record.stage === "plan" && parseTime(record.started_at) < answerAt);
+  const input = informationAnswerInput(facts, rootId);
+  if (!identifier(rootId) || !input) {
+    return informationAnswerFailureFacts(facts, rootId);
+  }
+  const requests = facts.recordsOf("human_action_request", rootId).filter(({ record }) =>
+    record.action_kind === "clarification" && record.action_issue_id === input.answeredActionIssueId,
+  );
+  const request = only(requests);
+  const issue = facts.issue(input.answeredActionIssueId);
+  const resolutions = facts.recordsOf("human_action_resolution", rootId).filter(({ record }) =>
+    record.action_id === request?.record.action_id && record.action_issue_id === input.answeredActionIssueId &&
+    record.outcome === "answered" && record.terminal_status === "Answered" && exactList(record.source_comment_ids, [input.sourceId]),
+  );
+  const resolution = only(resolutions);
+  const answer = facts.comment(input.commentId);
+  const answerAt = parseTime(resolution?.record.resolved_at);
+  const actionable = Boolean(request && issue && actionableActionDescription(issue.description) && issue.state?.name === "Answered" &&
+    !facts.humanActorIds.has(issue.creatorId) && !facts.humanActorIds.has(facts.source(request)?.authorId));
+  const answerMatches = Boolean(request && resolution && answer && answer.issueId === input.answeredActionIssueId &&
+    answer.body === frozenActionCommentBody(facts.definition, "separator_answer") && facts.humanActorIds.has(answer.authorId));
+  const directives = facts.recordsOf("root_directive", rootId).filter(({ record }) =>
+    exactList(record.consumed_input_ids, [input.sourceId]),
+  );
+  const directive = only(directives);
+  const consumed = Boolean(directive && answerAt !== undefined && parseTime(directive.record.accepted_at) > answerAt);
+  const replies = facts.recordsOf("root_reconciler_reply", rootId).filter(({ record }) => record.source_input_id === input.sourceId);
+  const reply = only(replies);
+  const receipted = Boolean(reply && reply.record.target_issue_id === input.answeredActionIssueId &&
+    reply.record.disposition === "accepted" && reply.record.reaction === "check");
+  const lineage = informationPlanLineage(facts, rootId, input, answerAt);
+  const humanCreatedContinuation = informationContinuationWrittenByHuman(facts, rootId);
+  const assumedBeforeAnswer = informationAssumedBeforeAnswer(facts, rootId, answerAt);
   return {
     actionable,
-    consumedAndReceipted: Boolean(answer && answered && answer.issueId === request?.record.action_issue_id && consumed &&
-      replies.length === 1 && replies[0].record.target_issue_id === request?.record.action_issue_id && replies[0].record.reaction !== "none"),
-    drivesFreshPlan: Boolean(contract && facts.recordsOf("stage_execution", rootId).some(({ record }) => record.stage === "plan" && parseTime(record.started_at) > answerAt)),
+    consumedAndReceipted: answerMatches && consumed && receipted,
+    drivesFreshPlan: Boolean(answerMatches && consumed && lineage && contractRecordsAnswer(lineage.contract)),
+    freshPlanReviewActive: Boolean(answerMatches && consumed && lineage),
     assumedBeforeAnswer,
+    humanCreatedContinuation,
+  };
+}
+
+function informationAnswerInput(facts, rootId) {
+  const context = facts.context ?? {};
+  const hasDriverContext = context.inputReferences !== undefined || context.answeredActionIssueId !== undefined ||
+    context.replacementActionIssueId !== undefined;
+  if (hasDriverContext) {
+    if (!Array.isArray(context.inputReferences) || context.inputReferences.length !== 1 ||
+        !identifier(context.answeredActionIssueId) || !identifier(context.replacementActionIssueId) ||
+        context.answeredActionIssueId === context.replacementActionIssueId) {
+      return undefined;
+    }
+    const answer = only(context.inputReferences.filter(({ sourceId, kind, binding, commentId }) =>
+      kind === "comment_create" && binding === "separator_answer" && identifier(sourceId) && sourceId === commentId,
+    ));
+    return answer ? {
+      ...answer,
+      answeredActionIssueId: context.answeredActionIssueId,
+      replacementActionIssueId: context.replacementActionIssueId,
+    } : undefined;
+  }
+  return reconstructInformationAnswerInput(facts, rootId);
+}
+
+function reconstructInformationAnswerInput(facts, rootId) {
+  const requests = facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "clarification");
+  const resolutions = facts.recordsOf("human_action_resolution", rootId).filter(({ record }) =>
+    record.outcome === "answered" && record.terminal_status === "Answered" && Array.isArray(record.source_comment_ids) &&
+    record.source_comment_ids.length === 1,
+  );
+  const candidates = [];
+  for (const request of requests) {
+    for (const resolution of resolutions) {
+      const sourceId = resolution.record.source_comment_ids[0];
+      const answer = facts.comment(sourceId);
+      if (resolution.record.action_id !== request.record.action_id || resolution.record.action_issue_id !== request.record.action_issue_id ||
+          !identifier(sourceId) || !answer || answer.issueId !== request.record.action_issue_id ||
+          answer.body !== frozenActionCommentBody(facts.definition, "separator_answer") || !facts.humanActorIds.has(answer.authorId)) continue;
+      const answerAt = parseTime(resolution.record.resolved_at);
+      const lineages = planReviewLineages(facts, rootId).filter((lineage) =>
+        lineage.execution.record.stage === "plan" && parseTime(lineage.execution.record.started_at) > answerAt &&
+        activeHumanAction(facts, lineage.action) && contractRecordsAnswer(lineage.contract),
+      );
+      const replacement = only(lineages);
+      if (!replacement || replacement.action.record.action_issue_id === request.record.action_issue_id) continue;
+      candidates.push({
+        sourceId,
+        kind: "comment_create",
+        binding: "separator_answer",
+        commentId: sourceId,
+        answeredActionIssueId: request.record.action_issue_id,
+        replacementActionIssueId: replacement.action.record.action_issue_id,
+      });
+    }
+  }
+  return only(candidates);
+}
+
+function informationPlanLineage(facts, rootId, input, answerAt) {
+  if (answerAt === undefined) return undefined;
+  const lineage = only(planReviewLineages(facts, rootId).filter(({ contractEntry, contract, execution, result, action }) =>
+    action.record.action_issue_id === input.replacementActionIssueId && action.record.action_issue_id !== input.answeredActionIssueId &&
+    only(action.record.related_issue_ids) === contractEntry.issueId && parseTime(execution.record.started_at) > answerAt &&
+    parseTime(result.record.completed_at) > answerAt && activeHumanAction(facts, action) && contractRecordsAnswer(contract),
+  ));
+  if (!lineage) return undefined;
+
+  const executions = facts.recordsOf("stage_execution", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === lineage.contract.cycle_issue_id &&
+    record.node_issue_id === lineage.contractEntry.issueId,
+  );
+  const results = facts.recordsOf("stage_result", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === lineage.contract.cycle_issue_id &&
+    record.node_issue_id === lineage.contractEntry.issueId && record.plan_contract_digest === lineage.contract.plan_contract_digest &&
+    record.model_turn?.stage_execution_id === lineage.execution.record.stage_execution_id,
+  );
+  const actions = facts.recordsOf("human_action_request", rootId).filter(({ record }) =>
+    record.action_kind === "plan_review" && record.action_issue_id === input.replacementActionIssueId &&
+    record.cycle_issue_id === lineage.contract.cycle_issue_id && only(record.related_issue_ids) === lineage.contractEntry.issueId,
+  );
+  return only(executions) === lineage.execution && only(results) === lineage.result && only(actions) === lineage.action
+    ? lineage
+    : undefined;
+}
+
+function contractRecordsAnswer(contract) {
+  return Array.isArray(contract?.constraints) && contract.constraints.some((constraint) =>
+    typeof constraint === "string" && constraint.toLowerCase().includes("colon"),
+  );
+}
+
+function informationAssumedBeforeAnswer(facts, rootId, answerAt) {
+  const continuation = facts.recordsOf("stage_execution", rootId).filter(({ record }) =>
+    ["plan", "work", "verify"].includes(record.stage),
+  );
+  if (answerAt === undefined) {
+    return continuation.length > 0 || facts.recordsOf("plan_contract", rootId).length > 0;
+  }
+  return continuation.some(({ record }) => parseTime(record.started_at) === undefined || parseTime(record.started_at) < answerAt);
+}
+
+function informationContinuationWrittenByHuman(facts, rootId) {
+  const stageRecord = ({ record }) => ["stage_execution", "stage_result"].includes(record.kind) &&
+    ["plan", "work", "verify"].includes(record.stage);
+  const continuationRecords = facts.recordsOf("plan_contract", rootId)
+    .concat(facts.recordsOf("stage_execution", rootId).filter(stageRecord))
+    .concat(facts.recordsOf("stage_result", rootId).filter(stageRecord))
+    .concat(facts.recordsOf("verify_result", rootId))
+    .concat(facts.recordsOf("delivery", rootId))
+    .concat(facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "plan_review"))
+    .concat(facts.recordsOf("workflow_issue", rootId).filter(({ record }) => ["plan", "work", "verify"].includes(record.issue_kind)));
+  if (continuationRecords.some((entry) => facts.humanActorIds.has(facts.source(entry)?.authorId))) return true;
+
+  const continuationIssueIds = new Set(continuationRecords.flatMap(({ record }) => [
+    record.node_issue_id,
+    record.action_issue_id,
+    record.issue_key,
+  ]).filter(identifier));
+  return [...continuationIssueIds].some((issueId) => facts.humanActorIds.has(facts.issue(issueId)?.creatorId));
+}
+
+function informationAnswerFailureFacts(facts, rootId) {
+  return {
+    actionable: false,
+    consumedAndReceipted: false,
+    drivesFreshPlan: false,
+    freshPlanReviewActive: false,
+    assumedBeforeAnswer: informationAssumedBeforeAnswer(facts, rootId, undefined),
+    humanCreatedContinuation: informationContinuationWrittenByHuman(facts, rootId),
   };
 }
 

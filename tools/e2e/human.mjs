@@ -5,6 +5,7 @@ import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const TERMINAL_HUMAN_ACTION_STATUSES = new Set(["Approved", "Rejected", "Answered", "Canceled"]);
 const PLAN_REVIEW_TERMINAL_STATUSES = new Set(["Approved", "Rejected"]);
+const CLARIFICATION_TERMINAL_STATUSES = new Set(["Answered"]);
 const HUMAN_ACTION_KIND_LABELS = new Set([
   "Plan Review",
   "Clarification",
@@ -81,6 +82,16 @@ export async function createForegroundE2EHumanActor({
         const action = await activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus });
         if (action) return Object.freeze(action);
         await waitForPlanReviewChange(signal);
+      }
+    },
+
+    async waitForClarificationAction({ rootIssueId, terminalStatus, signal } = {}) {
+      const known = assertKnownClarificationRoot(roots, rootIssueId);
+      assertClarificationWaitInput({ terminalStatus, signal });
+      while (true) {
+        const action = await activeClarificationAction({ client, rootIssueId, known, actorId, terminalStatus });
+        if (action) return Object.freeze(action);
+        await waitForClarificationChange(signal);
       }
     },
 
@@ -298,6 +309,13 @@ function assertKnownRoot(roots, rootIssueId) {
   return known;
 }
 
+function assertKnownClarificationRoot(roots, rootIssueId) {
+  if (!identifier(rootIssueId)) throw stableError("foreground_e2e_human_clarification_input_invalid");
+  const known = roots.get(rootIssueId);
+  if (!known) throw stableError("foreground_e2e_human_clarification_target_invalid");
+  return known;
+}
+
 async function activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus }) {
   const root = await readIssue(client, rootIssueId, "foreground_e2e_human_plan_review_target_invalid");
   const rootLabels = await readLabels(root, "foreground_e2e_human_plan_review_target_invalid");
@@ -339,6 +357,47 @@ async function activePlanReviewAction({ client, rootIssueId, known, actorId, ter
   return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
 }
 
+async function activeClarificationAction({ client, rootIssueId, known, actorId, terminalStatus }) {
+  const root = await readIssue(client, rootIssueId, "foreground_e2e_human_clarification_target_invalid");
+  const rootLabels = await readLabels(root, "foreground_e2e_human_clarification_target_invalid");
+  if (!matchesKnownRoot(root, rootLabels, known)) {
+    throw stableError("foreground_e2e_human_clarification_target_invalid");
+  }
+  const cycles = await readChildren(root, "foreground_e2e_human_clarification_read_failed");
+  const candidates = [];
+  for (const cycle of cycles) {
+    if (!matchesChildScope(cycle, { parentId: rootIssueId, known })) continue;
+    const children = await readChildren(cycle, "foreground_e2e_human_clarification_read_failed");
+    for (const child of children) {
+      if (!matchesChildScope(child, { parentId: cycle.id, known })) continue;
+      const labels = await readLabels(child, "foreground_e2e_human_clarification_read_failed");
+      if (!isClarificationAction(labels)) continue;
+      if (!identifier(child.creatorId) || child.creatorId === actorId) {
+        throw stableError("foreground_e2e_human_clarification_creator_invalid");
+      }
+      if (!isProductClarificationAction(child)) {
+        throw stableError("foreground_e2e_human_clarification_content_invalid");
+      }
+      candidates.push(child);
+    }
+  }
+  if (candidates.length === 0) return undefined;
+  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_clarification_read_failed");
+  const terminal = statuses.filter(({ name, archivedAt }) => name === terminalStatus && !archivedAt);
+  if (terminal.length !== 1) throw stableError("foreground_e2e_human_clarification_status_invalid");
+
+  const pending = candidates.filter((action) => {
+    const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
+    if (current.length !== 1) throw stableError("foreground_e2e_human_clarification_status_invalid");
+    if (["Todo", "In Progress"].includes(current[0].name)) return true;
+    if (["Answered", "Canceled"].includes(current[0].name)) return false;
+    throw stableError("foreground_e2e_human_clarification_status_invalid");
+  });
+  if (pending.length > 1) throw stableError("foreground_e2e_human_clarification_ambiguous");
+  const action = pending[0];
+  return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
+}
+
 function matchesChildScope(issue, { parentId, known }) {
   return issue && identifier(issue.id) && issue.parentId === parentId && issue.teamId === known.teamId &&
     issue.projectId === known.projectId && identifier(issue.stateId) &&
@@ -350,9 +409,27 @@ function isPlanReviewAction(labels) {
   return names.length === 2 && names.includes("Human Action") && names.includes("Plan Review");
 }
 
+function isClarificationAction(labels) {
+  const names = labels.map(({ name }) => name);
+  return names.length === 2 && names.includes("Human Action") && names.includes("Clarification");
+}
+
 function isProductPlanReviewAction(issue) {
   return typeof issue.description === "string" && issue.description.includes("## Plan Contract") &&
     issue.description.includes("Approved:") && issue.description.includes("Rejected:");
+}
+
+function isProductClarificationAction(issue) {
+  return typeof issue.description === "string" && [
+    "## Symphony Human Action",
+    "## Requested action",
+    "## What is being reviewed or requested",
+    "## Available outcomes",
+    "- Answered:",
+    "## Comment requirement",
+    "fresh comment",
+    "## What happens next",
+  ].every((required) => issue.description.includes(required));
 }
 
 async function readActorId(client) {
@@ -456,6 +533,15 @@ function assertPlanReviewWaitInput({ terminalStatus, signal }) {
   }
 }
 
+function assertClarificationWaitInput({ terminalStatus, signal }) {
+  if (!CLARIFICATION_TERMINAL_STATUSES.has(terminalStatus)) {
+    throw stableError("foreground_e2e_human_clarification_input_invalid");
+  }
+  if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
+    throw stableError("foreground_e2e_human_clarification_input_invalid");
+  }
+}
+
 function waitForPlanReviewChange(signal) {
   if (signal?.aborted) throw stableError("foreground_e2e_human_plan_review_aborted");
   return new Promise((resolve, reject) => {
@@ -464,6 +550,23 @@ function waitForPlanReviewChange(signal) {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       reject(stableError("foreground_e2e_human_plan_review_aborted"));
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function waitForClarificationChange(signal) {
+  if (signal?.aborted) throw stableError("foreground_e2e_human_clarification_aborted");
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, PLAN_REVIEW_WAIT_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(stableError("foreground_e2e_human_clarification_aborted"));
     };
     function done() {
       signal?.removeEventListener("abort", onAbort);
