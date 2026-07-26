@@ -21,7 +21,10 @@ const TARGET_TRIPLE = /^[A-Za-z0-9][A-Za-z0-9_-]{2,120}$/u;
 const CONTROL_PLANE_FAILURE_CODES = new Set([
   "parallel_black_box_control_plane_binding_provision_failed",
   "parallel_black_box_control_plane_binding_project_invalid",
+  "parallel_black_box_control_plane_binding_label_organization_mismatch",
+  "parallel_black_box_control_plane_binding_project_label_failed",
   "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
+  "parallel_black_box_control_plane_binding_issue_label_failed",
   "parallel_black_box_control_plane_conductor_start_failed",
   "parallel_black_box_control_plane_profile_activate_failed",
   "parallel_black_box_control_plane_profile_create_failed",

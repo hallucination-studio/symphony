@@ -292,6 +292,66 @@ test("parallel black-box control plane preserves a closed Project pool routing f
   assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
 });
 
+test("parallel black-box control plane preserves a closed Project label creation failure", async () => {
+  const events = [];
+  await assert.rejects(
+    provisionParallelBlackBoxE2EControlPlane({
+      config: configuration(),
+      runtime: runtime(),
+      sourceRepositoryRoot: "/source",
+      provisionRepositories: repositoryPool(events),
+      podium: podium(events),
+      createProcessHost() {
+        return { host: {}, async close() { events.push("host-close"); } };
+      },
+      createProcessStarter: () => async () => ({ request() {}, close() {} }),
+      async createPodiumClient() {
+        return {
+          async command() {
+            const error = new Error("untrusted provider detail");
+            error.code = "e2e_podium_client_linear_project_label_create_failed";
+            throw error;
+          },
+          async close() { events.push("client-close"); },
+        };
+      },
+    }),
+    (error) => error.code === "parallel_black_box_control_plane_binding_project_label_failed" &&
+      !error.message.includes("untrusted provider detail"),
+  );
+  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
+});
+
+test("parallel black-box control plane preserves a shared label organization mismatch", async () => {
+  const events = [];
+  await assert.rejects(
+    provisionParallelBlackBoxE2EControlPlane({
+      config: configuration(),
+      runtime: runtime(),
+      sourceRepositoryRoot: "/source",
+      provisionRepositories: repositoryPool(events),
+      podium: podium(events),
+      createProcessHost() {
+        return { host: {}, async close() { events.push("host-close"); } };
+      },
+      createProcessStarter: () => async () => ({ request() {}, close() {} }),
+      async createPodiumClient() {
+        return {
+          async command() {
+            const error = new Error("untrusted provider detail");
+            error.code = "e2e_podium_client_linear_label_organization_mismatch";
+            throw error;
+          },
+          async close() { events.push("client-close"); },
+        };
+      },
+    }),
+    (error) => error.code === "parallel_black_box_control_plane_binding_label_organization_mismatch" &&
+      !error.message.includes("untrusted provider detail"),
+  );
+  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
+});
+
 function configuration() {
   return {
     linear: {

@@ -49,7 +49,12 @@ const queryKinds = new Set([
   "get_performer_profile_status",
 ]);
 
-const safeProjectPoolFailureCodes = new Set([
+const safeControlPlaneFailureCodes = new Set([
+  "linear_issue_label_ambiguous",
+  "linear_issue_label_create_failed",
+  "linear_label_organization_mismatch",
+  "linear_project_label_ambiguous",
+  "linear_project_label_create_failed",
   "linear_project_pool_project_invalid",
   "linear_project_pool_organization_mismatch",
   "linear_project_pool_plan_invalid",
@@ -131,7 +136,7 @@ function protocolFailure(error: unknown) {
     };
   }
   const code = error instanceof Error &&
-    (safeProjectPoolFailureCodes.has(error.message) || /^podium_[a-z0-9_]{1,120}$/.test(error.message))
+    (safeControlPlaneFailureCodes.has(error.message) || /^podium_[a-z0-9_]{1,120}$/.test(error.message))
     ? error.message
     : "podium_client_request_failed";
   return {

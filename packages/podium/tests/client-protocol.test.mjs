@@ -249,3 +249,16 @@ test("Podium Client preserves a closed Project pool failure code", async () => {
   assert.equal(response.body.code, "linear_project_pool_root_routing_conflict");
   assert.equal(response.body.sanitized_reason, "linear_project_pool_root_routing_conflict");
 });
+
+test("Podium Client preserves a closed Project label creation failure code", async () => {
+  const handler = new PodiumClientProtocolHandler({
+    async query() { throw new Error("linear_project_label_create_failed"); },
+    async command() { throw new Error("unused"); },
+    async setApiKey() { throw new Error("unused"); },
+  });
+
+  const response = await handler.handle(envelope({ kind: "get_desktop_overview" }));
+
+  assert.equal(response.body.code, "linear_project_label_create_failed");
+  assert.equal(response.body.sanitized_reason, "linear_project_label_create_failed");
+});

@@ -20,6 +20,26 @@ const CONTROL_PLANE_PODIUM_FAILURES = new Map([
     "e2e_podium_client_linear_project_pool_root_routing_conflict",
     "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
   ],
+  [
+    "e2e_podium_client_linear_project_label_create_failed",
+    "parallel_black_box_control_plane_binding_project_label_failed",
+  ],
+  [
+    "e2e_podium_client_linear_project_label_ambiguous",
+    "parallel_black_box_control_plane_binding_project_label_failed",
+  ],
+  [
+    "e2e_podium_client_linear_label_organization_mismatch",
+    "parallel_black_box_control_plane_binding_label_organization_mismatch",
+  ],
+  [
+    "e2e_podium_client_linear_issue_label_create_failed",
+    "parallel_black_box_control_plane_binding_issue_label_failed",
+  ],
+  [
+    "e2e_podium_client_linear_issue_label_ambiguous",
+    "parallel_black_box_control_plane_binding_issue_label_failed",
+  ],
 ]);
 const PROFILE_PROVISION_FAILURES = new Map([
   ["e2e_podium_profile_create_request_failed", "parallel_black_box_control_plane_profile_create_failed"],

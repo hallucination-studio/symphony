@@ -236,6 +236,9 @@ credential、token、provider transcript、原始exception、Root/Issue正文或
 Profile provisioning在Case前失败时，`reason_code`必须区分create、API-key relay、readiness或activation阶段；它只报告该闭合阶段码，
 不能透出Provider或本地process错误文本。
 
+Binding provisioning在Case前失败时，`reason_code`必须保留Project label、Issue label和两者共用的organization mismatch闭合失败
+分类；它不能透出Linear SDK response、原始exception或Project内容。
+
 ## 8. Test-only closed contract
 
 runner内部使用versioned、closed的test-only Command/Result，禁止任意metadata：
