@@ -206,6 +206,18 @@ test("a fresh Plan review must link one Plan contract, Plan execution/result, an
   assert.equal(assertion.outcome, "contradicted");
 });
 
+test("approved happy path rejects unrendered Stage, Cycle, or Root usage aggregates", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
+  const fixture = approvedFixture(definition);
+  for (const entry of fixture.evidence.roots[0].managedRecords) {
+    if (entry.record.kind === "stage_result" || entry.record.kind === "workflow_timeline") delete entry.markdown;
+  }
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "turn_usage_aggregated");
+
+  assert.equal(assertion.outcome, "contradicted");
+});
+
 function incompleteEvidence(caseId, rootIssueIds) {
   return {
     caseId,
@@ -572,16 +584,23 @@ function deliveredRoot(definition, rootKey, rootId, {
   addRecord(root, rootDirective(root.id, [], 5));
   addRecord(root, planContract(root.id, cycle, "contract-id"), { sourceIssueId: plan });
   addRecord(root, stageExecution(root.id, cycle, plan, "plan-execution", "plan", undefined, started));
-  addRecord(root, stageResult(root.id, cycle, plan, "plan-execution", "plan", "plan_completed", { planContract: "contract-id", at: started + 1 }));
+  addRecord(root, stageResult(root.id, cycle, plan, "plan-execution", "plan", "plan_completed", { planContract: "contract-id", at: started + 1 }), { sourceIssueId: plan });
   addRecord(root, humanActionRequest(root.id, "plan-action", action, "plan_review", cycle, [plan]));
   addRecord(root, humanActionResolution(root.id, "plan-action", action, "approved", "Approved", []));
   addRecord(root, stageExecution(root.id, cycle, work, "work-execution", "work", "contract-id", started + 2));
-  addRecord(root, stageResult(root.id, cycle, work, "work-execution", "work", "work_completed", { planContract: "contract-id", at: completed - 3 }));
+  addRecord(root, stageResult(root.id, cycle, work, "work-execution", "work", "work_completed", { planContract: "contract-id", at: completed - 3 }), { sourceIssueId: work });
   addRecord(root, stageExecution(root.id, cycle, verify, "verify-execution", "verify", "contract-id", completed - 2));
-  addRecord(root, stageResult(root.id, cycle, verify, "verify-execution", "verify", "verify_passed", { planContract: "contract-id", revision: "git-revision", at: completed }));
+  addRecord(root, stageResult(root.id, cycle, verify, "verify-execution", "verify", "verify_passed", { planContract: "contract-id", revision: "git-revision", at: completed }), { sourceIssueId: verify });
   addRecord(root, verifyResult(root.id, cycle, verify, "verify-execution"));
   addRecord(root, delivery(root.id, cycle, "verify-execution", "git-revision"));
   addRecord(root, cycleOutcome(root.id, cycle, 30));
+  addRecord(root, workflowTimeline(root.id, cycle, "cycle"), {
+    sourceIssueId: cycle,
+    markdown: "Usage\n- Cycle cumulative (complete): Plan · gpt-5 · 10 tokens; Work · gpt-5 · 10 tokens; Verify · gpt-5 · 10 tokens",
+  });
+  addRecord(root, workflowTimeline(root.id, root.id, "root"), {
+    markdown: "Usage\n- Root cumulative (complete): Root Reconciler · gpt-5 · 10 tokens; Plan · gpt-5 · 10 tokens; Work · gpt-5 · 10 tokens; Verify · gpt-5 · 10 tokens",
+  });
   return root;
 }
 
@@ -638,13 +657,18 @@ function addHumanComment(root, id, body, options = {}) {
   return id;
 }
 
-function addRecord(root, record, { archived = false, sourceIssueId = root.id } = {}) {
+function addRecord(root, record, { archived = false, sourceIssueId = root.id, markdown = undefined } = {}) {
   const sourceId = `record-${root.managedRecords.length + 1}`;
   root.comments.push({
     id: sourceId, issueId: sourceIssueId, parentId: null, authorId: "symphony", body: "managed", archivedAt: archived ? DATE : null,
     createdAt: DATE, updatedAt: DATE, remoteVersion: DATE, editedAt: null, resolvedAt: null, reactions: [], thread: { rootCommentId: sourceId, state: "unresolved" },
   });
-  root.managedRecords.push({ issueId: sourceIssueId, source: { kind: "comment", id: sourceId, remoteVersion: DATE }, record });
+  root.managedRecords.push({
+    issueId: sourceIssueId,
+    source: { kind: "comment", id: sourceId, remoteVersion: DATE },
+    ...(markdown === undefined && record.kind === "stage_result" ? { markdown: stageUsageMarkdown(record) } : markdown === undefined ? {} : { markdown }),
+    record,
+  });
 }
 
 function issue(id, rootIssueId, stateName, { depth, description = "", archivedAt = null, updatedAt = DATE } = {}) {
@@ -700,7 +724,15 @@ function delivery(rootIssueId, cycleIssueId, verifyResultId, revision) {
 }
 
 function cycleOutcome(rootIssueId, cycleIssueId, totalTokens) {
-  return { kind: "cycle_outcome", version: 1, cycle_outcome_id: `outcome-${cycleIssueId}`, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, source_root_directive_id: "directive-1", conclusion: "succeeded", completed_work_ids: [], unresolved_finding_ids: [], attempted_approach_refs: [], verification_evidence_refs: [], git_revision: "git-revision", budget_usage: { scope: "cycle", source_record_count: 3, source_digest: "digest", is_complete: true, unknown_turn_count: 0, groups: [{ cycle_issue_id: cycleIssueId, role: "plan", model: "gpt-5", input_tokens: 15, cached_input_tokens: 0, output_tokens: 15, reasoning_output_tokens: 0, total_tokens: totalTokens, unavailable_turn_count: 0 }] }, concluded_at: DATE };
+  return { kind: "cycle_outcome", version: 1, cycle_outcome_id: `outcome-${cycleIssueId}`, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, source_root_directive_id: "directive-1", conclusion: "succeeded", completed_work_ids: [], unresolved_finding_ids: [], attempted_approach_refs: [], verification_evidence_refs: [], git_revision: "git-revision", budget_usage: { scope: "cycle", source_record_count: 3, source_digest: "digest", is_complete: true, unknown_turn_count: 0, groups: ["plan", "work", "verify"].map((role) => ({ cycle_issue_id: cycleIssueId, role, model: "gpt-5", input_tokens: 5, cached_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0, total_tokens: totalTokens / 3, unavailable_turn_count: 0 })) }, concluded_at: DATE };
+}
+
+function workflowTimeline(rootIssueId, targetIssueId, timelineKind) {
+  return { kind: "workflow_timeline", version: 1, timeline_event_id: `${timelineKind}-${targetIssueId}-timeline`, timeline_kind: timelineKind, root_issue_id: rootIssueId, target_issue_id: targetIssueId, source_record_ids: ["source-record"], source_versions: [DATE], write_id: `${timelineKind}-${targetIssueId}-timeline`, rendered_schema_version: "1", occurred_at: DATE };
+}
+
+function stageUsageMarkdown(record) {
+  return `**Usage**\n- Model: \`${record.model_turn.model}\`\n- This turn: ${record.model_turn.usage.total_tokens} tokens\n- This Issue:`;
 }
 
 function activity(id, issueId, actorId, moment, extra = {}) {

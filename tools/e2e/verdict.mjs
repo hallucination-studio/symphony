@@ -374,24 +374,141 @@ function deliveryChainFacts(facts, rootIssueId = onlyRootId(facts)) {
 }
 
 function usageFacts(facts) {
-  const stageResults = facts.recordsOf("stage_result");
+  const rootId = onlyRootId(facts);
+  const stageResults = facts.recordsOf("stage_result", rootId);
   const stageTurns = stageResults.map(({ record }) => record.model_turn);
   const rootTurns = [
-    ...facts.recordsOf("root_directive").map(({ record }) => record.model_turn),
-    ...facts.recordsOf("root_reconciler_failure").map(({ record }) => record.model_turn),
+    ...facts.recordsOf("root_directive", rootId).map(({ record }) => record.model_turn),
+    ...facts.recordsOf("root_reconciler_failure", rootId).map(({ record }) => record.model_turn),
   ];
   const allTurns = [...stageTurns, ...rootTurns];
   const malformed = allTurns.some((turn) => !turn || typeof turn.model !== "string" || !measuredUsage(turn.usage));
   const turnIds = allTurns.map((turn) => turn?.turn_record_id).filter(identifier);
   const duplicateTurn = new Set(turnIds).size !== turnIds.length;
-  const outcomes = facts.recordsOf("cycle_outcome").map(({ record }) => record);
-  const groups = outcomes.flatMap(({ budget_usage: usage }) => Array.isArray(usage?.groups) ? usage.groups : []);
-  const groupedTotal = groups.reduce((total, group) => total + numeric(group.total_tokens), 0);
-  const measuredTotal = stageTurns.reduce((total, turn) => total + numeric(turn?.usage?.total_tokens), 0);
-  const complete = !malformed && !duplicateTurn && outcomes.length > 0 && groupedTotal === measuredTotal &&
-    outcomes.every(({ budget_usage: usage }) => usage?.is_complete === true && numeric(usage?.unknown_turn_count) === 0) &&
-    rootTurns.length > 0 && allTurns.every((turn) => identifier(turn?.turn_record_id));
-  return { complete, invalid: malformed || duplicateTurn || (outcomes.length > 0 && groupedTotal !== measuredTotal) };
+  const outcomes = facts.recordsOf("cycle_outcome", rootId).map(({ record }) => record);
+  const stageUsageRendered = stageResults.every(stageUsageReadBack);
+  const expectedByCycle = expectedCycleUsage(stageTurns);
+  const cycleUsageMatches = expectedByCycle.size > 0 && expectedByCycle.size === outcomes.length &&
+    [...expectedByCycle.entries()].every(([cycleIssueId, expected]) => {
+      const outcome = outcomes.find(({ cycle_issue_id }) => cycle_issue_id === cycleIssueId);
+      return outcome && cycleOutcomeMatches(outcome, expected) && timelineUsageMatches(
+        facts.recordsOf("workflow_timeline", rootId),
+        { timelineKind: "cycle", targetIssueId: cycleIssueId, label: "Cycle cumulative", expected },
+      );
+    });
+  const rootExpected = aggregateUsageGroups(allTurns);
+  const rootUsageMatches = rootTurns.length > 0 && timelineUsageMatches(
+    facts.recordsOf("workflow_timeline", rootId),
+    { timelineKind: "root", targetIssueId: rootId, label: "Root cumulative", expected: rootExpected },
+  );
+  const complete = !malformed && !duplicateTurn && stageUsageRendered && cycleUsageMatches && rootUsageMatches &&
+    allTurns.every((turn) => identifier(turn?.turn_record_id));
+  return { complete, invalid: !complete };
+}
+
+function stageUsageReadBack(entry) {
+  const turn = entry.record.model_turn;
+  return entry.issueId === entry.record.node_issue_id && typeof entry.markdown === "string" &&
+    entry.markdown.includes("**Usage**") && entry.markdown.includes(`- Model: \`${turn?.model}\``) &&
+    entry.markdown.includes(`- This turn: ${turn?.usage?.total_tokens} tokens`) && entry.markdown.includes("- This Issue:");
+}
+
+function expectedCycleUsage(stageTurns) {
+  const byCycle = new Map();
+  for (const turn of stageTurns) {
+    if (!identifier(turn?.cycle_issue_id)) return new Map();
+    const turns = byCycle.get(turn.cycle_issue_id) ?? [];
+    turns.push(turn);
+    byCycle.set(turn.cycle_issue_id, turns);
+  }
+  return new Map([...byCycle.entries()].map(([cycleIssueId, turns]) => [cycleIssueId, aggregateUsageGroups(turns)]));
+}
+
+function aggregateUsageGroups(turns) {
+  const groups = new Map();
+  for (const turn of turns) {
+    const usage = turn?.usage;
+    if (!turn || !measuredUsage(usage)) return new Map();
+    const key = `${turn.role}\u0000${turn.model}`;
+    const group = groups.get(key) ?? {
+      role: turn.role,
+      model: turn.model,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    };
+    group.inputTokens += usage.input_tokens;
+    group.cachedInputTokens += usage.cached_input_tokens;
+    group.outputTokens += usage.output_tokens;
+    group.reasoningOutputTokens += usage.reasoning_output_tokens;
+    group.totalTokens += usage.total_tokens;
+    groups.set(key, group);
+  }
+  return groups;
+}
+
+function cycleOutcomeMatches(outcome, expected) {
+  const usage = outcome?.budget_usage;
+  if (usage?.is_complete !== true || numeric(usage.unknown_turn_count) !== 0 || !Array.isArray(usage.groups)) return false;
+  const actual = new Map();
+  for (const group of usage.groups) {
+    if (!group || typeof group.role !== "string" || typeof group.model !== "string" || numeric(group.unavailable_turn_count) !== 0) return false;
+    const key = `${group.role}\u0000${group.model}`;
+    if (actual.has(key)) return false;
+    actual.set(key, {
+      inputTokens: numeric(group.input_tokens),
+      cachedInputTokens: numeric(group.cached_input_tokens),
+      outputTokens: numeric(group.output_tokens),
+      reasoningOutputTokens: numeric(group.reasoning_output_tokens),
+      totalTokens: numeric(group.total_tokens),
+    });
+  }
+  return sameUsageGroups(actual, expected);
+}
+
+function timelineUsageMatches(entries, { timelineKind, targetIssueId, label, expected }) {
+  return entries.some((entry) => entry.issueId === targetIssueId && entry.record.timeline_kind === timelineKind &&
+    entry.record.target_issue_id === targetIssueId && renderedUsageGroups(entry.markdown, label, expected));
+}
+
+function renderedUsageGroups(markdown, label, expected) {
+  if (typeof markdown !== "string" || expected.size === 0) return false;
+  const match = markdown.match(new RegExp(`(?:^|\\n)- ${escapeRegExp(label)} \\(complete\\): ([^\\n]+)`, "u"));
+  if (!match) return false;
+  const actual = new Map();
+  for (const group of match[1].split("; ")) {
+    const parsed = group.match(/^(.+) · ([^·]+) · (\d+) tokens$/u);
+    if (!parsed) return false;
+    const role = parsed[1];
+    const model = parsed[2];
+    const key = `${role}\u0000${model}`;
+    if (actual.has(key)) return false;
+    actual.set(key, Number.parseInt(parsed[3], 10));
+  }
+  if (actual.size !== expected.size) return false;
+  return [...expected.values()].every(({ role, model, totalTokens }) => actual.get(`${displayRole(role)}\u0000${model}`) === totalTokens);
+}
+
+function sameUsageGroups(actual, expected) {
+  if (actual.size !== expected.size) return false;
+  return [...expected.entries()].every(([key, expectedGroup]) => {
+    const actualGroup = actual.get(key);
+    return actualGroup && actualGroup.inputTokens === expectedGroup.inputTokens &&
+      actualGroup.cachedInputTokens === expectedGroup.cachedInputTokens &&
+      actualGroup.outputTokens === expectedGroup.outputTokens &&
+      actualGroup.reasoningOutputTokens === expectedGroup.reasoningOutputTokens &&
+      actualGroup.totalTokens === expectedGroup.totalTokens;
+  });
+}
+
+function displayRole(role) {
+  return role === "root_reconciler" ? "Root Reconciler" : role[0]?.toUpperCase() + role.slice(1);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function duplicateOrSyntheticCompletion(facts) {

@@ -71,6 +71,51 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
   assert.deepEqual(fixture.comments.get("comment-1").reactions, [{ id: "reaction-1", emoji: "+1", userId: "human-1" }]);
 });
 
+test("Human Actor waits for exactly one product-created Plan Review Action beneath its declared Root", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addPlanReviewAction(root.rootIssueId);
+
+  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId });
+
+  assert.deepEqual(action, { actionIssueId: "plan-review-action-1", approvedStatusId: "approved-state" });
+});
+
+test("Human Actor rejects a Plan Review Action created by the Human actor", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addPlanReviewAction(root.rootIssueId, { actionCreatorId: "human-1" });
+
+  await assert.rejects(
+    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId }),
+    hasCode("foreground_e2e_human_plan_review_creator_invalid"),
+  );
+});
+
 test("Human Actor cannot expose or perform non-user workflow mutations", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -80,6 +125,7 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
   });
 
   assert.deepEqual(Object.keys(human).sort(), [
+    "actorId",
     "addReaction",
     "createComment",
     "createRootIssue",
@@ -88,6 +134,7 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
     "resolveCommentThread",
     "setHumanActionTerminalStatus",
     "updateRootDescription",
+    "waitForPlanReviewAction",
   ]);
   assert.equal("createHumanAction" in human, false);
   assert.equal("writeManagedRecord" in human, false);
@@ -247,6 +294,37 @@ function createLinearFixture() {
     comments,
     createIssuePayload: undefined,
     client: undefined,
+    addPlanReviewAction(rootIssueId, { actionCreatorId = "symphony-1" } = {}) {
+      const root = issues.get(rootIssueId);
+      const cycle = issue({
+        id: "cycle-1",
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "planning-state",
+        title: "Cycle",
+        description: "Product-created Cycle.",
+        priority: 2,
+        creatorId: "symphony-1",
+        labels: [{ id: "cycle-label", name: "Cycle" }],
+      });
+      const action = issue({
+        id: "plan-review-action-1",
+        teamId: "team-1",
+        projectId: "project-1",
+        stateId: "todo-state",
+        title: "Approve the Plan Contract",
+        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.",
+        priority: 2,
+        creatorId: actionCreatorId,
+        labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
+      });
+      cycle.parentId = rootIssueId;
+      action.parentId = cycle.id;
+      root.children = async () => ({ nodes: [cycle], pageInfo: { hasNextPage: false } });
+      cycle.children = async () => ({ nodes: [action], pageInfo: { hasNextPage: false } });
+      issues.set(cycle.id, cycle);
+      issues.set(action.id, action);
+    },
   };
   fixture.client = {
     viewer: Promise.resolve({ id: "human-1" }),
@@ -277,6 +355,21 @@ function createLinearFixture() {
       const target = issues.get(issueId);
       if (!target) throw new Error("missing issue");
       return target;
+    },
+    async team(teamId) {
+      if (teamId !== "team-1") throw new Error("missing team");
+      return {
+        id: "team-1",
+        async states() {
+          return {
+            nodes: [
+              { id: "todo-state", name: "Todo", archivedAt: null },
+              { id: "approved-state", name: "Approved", archivedAt: null },
+            ],
+            pageInfo: { hasNextPage: false },
+          };
+        },
+      };
     },
     async comment({ id }) {
       const target = comments.get(id);
@@ -318,7 +411,7 @@ function createLinearFixture() {
   return fixture;
 }
 
-function issue({ id, identifier, teamId, projectId, stateId, title, description, priority, labels }) {
+function issue({ id, identifier, teamId, projectId, stateId, title, description, priority, creatorId, labels }) {
   return {
     id,
     identifier,
@@ -328,9 +421,13 @@ function issue({ id, identifier, teamId, projectId, stateId, title, description,
     title,
     description,
     priority,
+    creatorId,
     parentId: undefined,
     async labels() {
       return { nodes: labels, pageInfo: { hasNextPage: false } };
+    },
+    async children() {
+      return { nodes: [], pageInfo: { hasNextPage: false } };
     },
   };
 }
