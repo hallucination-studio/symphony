@@ -341,7 +341,7 @@ comment requirement。
 | `information_requested_and_answered` | `information_action_actionable`; `answer_consumed_and_receipted`; `answer_drives_fresh_plan`; `boundary_fresh_plan_review` | `missing_answer_assumed`; `test_unblocks_or_mutates_stage` | 已提交 Answer 但无法关联 accepted input、reply/reaction 或 fresh Plan/Contract/Action。 |
 | `root_revision_and_comment` | `ordinary_inputs_consumed_once`; `thread_transitions_receipted`; `revision_supersedes_cycle`; `boundary_successor_plan_review` | `system_comment_treated_as_input`; `thread_history_lost`; `undeclared_revision_or_conductor_interpretation` | 任一预声明 description/comment/edit/resolve/reopen delta 没有独立 accepted input；description 缺少 matching RootDirective consumption，或 comment/thread 缺少 reply/reaction/thread action，或缺少 successor/continue evidence。 |
 | `parallel_multi_conductor` | `root_ownership_and_workspace_isolated`; `independent_delivery_chains`; `cross_conductor_stage_overlap`; `boundary_all_roots_delivered` | `cross_conductor_takeover`; `shared_workspace_writer`; `telemetry_substitutes_overlap` | 缺少任何 Root ownership、execution/result interval、timestamp 或 delivery coverage。 |
-| `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 任何 native activity/updatedAt/Stage interval 不能形成严格且无并列的下一调度顺序。 |
+| `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 缺少任何 Root header Priority、唯一 ownership、native activity 或 Stage execution/result interval，或它们不能形成严格且无并列的下一调度顺序。 |
 | `conductor_restart_recovery` | `old_execution_terminal_once`; `recovery_uses_fresh_execution`; `ownership_persists`; `unaffected_root_continues`; `boundary_recovered_and_continuous_delivered` | `late_old_session_success`; `checkpoint_or_linear_rewrite`; `unaffected_conductor_reconfigured` | 无法唯一关联被杀旧 execution、其 terminal result、fresh replacement、unchanged ownership 和连续 Root。 |
 
 ### 9.2.1 Case-specific assertion-condition matrix
@@ -419,7 +419,7 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 | Assertion ID | Normative durable condition |
 |---|---|
 | `inflight_stage_completes` | 三个同 Priority Root 并发创建后，唯一已选 in-flight Stage execution 正常 terminal；它不因 touch 被 cancel 或 replace。 |
-| `latest_ready_root_runs_next` | touch 在 in-flight execution terminal 前发生；在该调度边界，touched Root 与 remaining Root 同属该 Conductor、同 Priority 且 ready，touched Root 的 native `updatedAt` 严格最新；随后第一个开始的候选 Root Stage 必须属于 touched Root。 |
+| `latest_ready_root_runs_next` | touch 在 in-flight execution terminal 前发生；在该调度边界，touched Root 与 remaining Root 有唯一且相同的 Conductor ownership、同 Priority 且 ready，二者在该 terminal 前均不得开始 Stage execution。native activity 必须证明 touch 是 touched Root 当时严格最新的 Root update；不能用后续 delivery 改写后的 Root header `updatedAt` 倒推该顺序。随后第一个开始的候选 Root Stage 必须属于 touched Root，且 execution/result interval 不得并列。 |
 | `remaining_ready_root_progresses` | 在 touched Root 首个后续 Stage 之后，remaining Root 在不改变 ownership 的前提下形成自身终端 delivery chain；不存在 starvation。 |
 | `boundary_all_roots_delivered` | in-flight、touched 和 remaining 三个 Root 都为 `In Review`，各有 matching passed Verify、delivery 与 Git revision。 |
 | `inflight_turn_interrupted` | 不存在被 touch 影响而取消、失败或被 replacement 的原 in-flight execution。 |

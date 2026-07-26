@@ -315,7 +315,8 @@ function createFacts(definition, evidence, context) {
       return assertion.assertionId !== "final_evidence_complete" &&
         (!assertionCoverageComplete(assertion, evidence, scopeRootIds) ||
           definition.caseId === "parallel_multi_conductor" && PARALLEL_ASSERTION_IDS.has(assertion.assertionId) &&
-            !parallelFacts(base).coverageComplete);
+            !parallelFacts(base).coverageComplete ||
+          definition.caseId === "same_conductor_preemption" && !preemptionFacts(base).coverageComplete);
     },
     references(assertion) { return referencesFor(assertion, records, issues, comments, scopeRootIds); },
     scopeIsolated() { return scopeIsolated(definition, evidence, roots, rootIssueIds, scopeRootIds); },
@@ -1123,32 +1124,105 @@ function validGitFact(value) {
 
 function preemptionFacts(facts) {
   const binding = facts.context.preemption;
-  if (!binding || !identifier(binding.inflightRootId) || !identifier(binding.touchedRootId) || !identifier(binding.remainingRootId) || !identifier(binding.inflightExecutionId)) {
-    return { inflightCompletes: false, latestRunsNext: false, remainingProgresses: false, allDelivered: false, inflightInterrupted: false, testSelectedNext: false, semanticTouch: false };
-  }
+  if (!validPreemptionBinding(binding)) return preemptionFailureFacts();
   const rootIds = [binding.inflightRootId, binding.touchedRootId, binding.remainingRootId];
-  const inflightResult = facts.recordsOf("stage_result", binding.inflightRootId)
-    .find(({ record }) => record.model_turn?.stage_execution_id === binding.inflightExecutionId || record.result_id === binding.inflightExecutionId);
+  if (new Set(rootIds).size !== rootIds.length) return preemptionFailureFacts();
+  const rootIssues = rootIds.map((rootIssueId) => facts.rootIssue(rootIssueId));
+  const executions = facts.recordsOf("stage_execution").filter(({ record }) => rootIds.includes(record.root_issue_id));
+  const results = facts.recordsOf("stage_result").filter(({ record }) => rootIds.includes(record.root_issue_id));
+  const inflightExecutions = executions.filter(({ record }) => record.stage_execution_id === binding.inflightExecutionId &&
+    record.root_issue_id === binding.inflightRootId);
+  const inflightResults = matchingStageResults(results, binding.inflightExecutionId, binding.inflightRootId);
+  const inflightResult = only(inflightResults);
   const terminalAt = parseTime(inflightResult?.record.completed_at);
   const touchedRoot = facts.rootIssue(binding.touchedRootId);
   const remainingRoot = facts.rootIssue(binding.remainingRootId);
   const touchActivity = facts.activity.find(({ id }) => id === binding.touchActivityId);
-  const candidates = facts.recordsOf("stage_execution").filter(({ record }) => [binding.touchedRootId, binding.remainingRootId].includes(record.root_issue_id) && parseTime(record.started_at) > terminalAt)
-    .sort((left, right) => parseTime(left.record.started_at) - parseTime(right.record.started_at));
+  const touchAt = parseTime(touchActivity?.createdAt);
+  const candidates = executions.filter(({ record }) => [binding.touchedRootId, binding.remainingRootId].includes(record.root_issue_id) &&
+    parseTime(record.started_at) > terminalAt).sort(compareStageStarts);
   const firstCandidate = candidates[0];
+  const earliestCandidateStart = parseTime(firstCandidate?.record.started_at);
+  const candidateStartTie = candidates.filter(({ record }) => parseTime(record.started_at) === earliestCandidateStart).length !== 1;
+  const touchedExecution = only(executions.filter(({ record }) => record.stage_execution_id === binding.touchedExecutionId &&
+    record.root_issue_id === binding.touchedRootId));
+  const owners = rootIds.map((rootIssueId) => facts.recordsOf("root_ownership", rootIssueId).map(({ record }) => record));
+  const ownerCoverageComplete = owners.every((records) => records.length === 1 && validRootOwnership(records[0]));
+  const sameOwner = owners.every((records) => records.length === 1 && records[0].conductor_id === binding.conductorId);
+  const samePriority = rootIssues.every((root) => Number.isFinite(root?.priority)) &&
+    new Set(rootIssues.map(({ priority }) => priority)).size === 1;
+  const activeAtTouch = executions.filter(({ record }) => {
+    const startedAt = parseTime(record.started_at);
+    const result = only(matchingStageResults(results, record.stage_execution_id, record.root_issue_id));
+    const completedAt = parseTime(result?.record.completed_at);
+    return startedAt !== undefined && touchAt !== undefined && startedAt < touchAt &&
+      (completedAt === undefined || completedAt > touchAt);
+  });
+  const readyBeforeTouch = [binding.touchedRootId, binding.remainingRootId].every((rootIssueId) =>
+    executions.every(({ record }) => record.root_issue_id !== rootIssueId || parseTime(record.started_at) > touchAt));
+  const readyAtTerminal = [binding.touchedRootId, binding.remainingRootId].every((rootIssueId) =>
+    executions.every(({ record }) => record.root_issue_id !== rootIssueId || parseTime(record.started_at) > terminalAt));
+  const latestTouchedActivity = latestActivityAtOrBefore(facts.activity, binding.touchedRootId, touchAt);
+  const latestRemainingActivity = latestActivityAtOrBefore(facts.activity, binding.remainingRootId, touchAt);
+  const touchIsLatest = Boolean(touchActivity && touchActivity.issueId === binding.touchedRootId &&
+    touchActivity.actorId === facts.context.humanActorId && touchActivity.updatedDescription === true &&
+    latestTouchedActivity?.id === binding.touchActivityId && parseTime(latestRemainingActivity?.createdAt) < touchAt);
   const original = facts.definition.initialRequirements.find(({ rootKey }) => rootKey === binding.touchedRootKey);
   const declaredTouch = facts.definition.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description")?.descriptionsByRootKey?.[binding.touchedRootKey];
+  const coverageComplete = rootIssues.every((root) => root && Number.isFinite(root.priority)) && ownerCoverageComplete &&
+    inflightExecutions.length === 1 && inflightResults.length === 1 && terminalAt !== undefined && touchAt !== undefined &&
+    parseTime(inflightExecutions[0]?.record.started_at) !== undefined && executions
+      .filter(({ record }) => [binding.touchedRootId, binding.remainingRootId].includes(record.root_issue_id))
+      .every(({ record }) => parseTime(record.started_at) !== undefined) &&
+    Boolean(touchActivity && touchedExecution && firstCandidate && earliestCandidateStart !== undefined && latestRemainingActivity);
   return {
-    inflightCompletes: Boolean(inflightResult && !TERMINAL_STAGE_OUTCOMES.has(inflightResult.record.outcome_kind)),
-    latestRunsNext: Boolean(touchActivity && terminalAt !== undefined && parseTime(touchActivity.createdAt) < terminalAt &&
-      parseTime(touchedRoot?.updatedAt) > parseTime(remainingRoot?.updatedAt) && firstCandidate?.record.root_issue_id === binding.touchedRootId),
-    remainingProgresses: deliveryChainFacts(facts, binding.remainingRootId).complete,
+    coverageComplete,
+    inflightCompletes: inflightResults.length === 1 && !TERMINAL_STAGE_OUTCOMES.has(inflightResult?.record.outcome_kind),
+    latestRunsNext: Boolean(sameOwner && samePriority && touchIsLatest && touchAt < terminalAt &&
+      activeAtTouch.length === 1 && activeAtTouch[0].record.stage_execution_id === binding.inflightExecutionId && readyBeforeTouch && readyAtTerminal &&
+      !candidateStartTie && firstCandidate?.record.stage_execution_id === binding.touchedExecutionId &&
+      touchedExecution?.record.stage_execution_id === binding.touchedExecutionId && touchedRoot && remainingRoot),
+    remainingProgresses: sameOwner && deliveryChainFacts(facts, binding.remainingRootId).complete,
     allDelivered: rootIds.every((rootId) => deliveryChainFacts(facts, rootId).rootInReview),
-    inflightInterrupted: Boolean(inflightResult && TERMINAL_STAGE_OUTCOMES.has(inflightResult.record.outcome_kind)),
-    testSelectedNext: facts.activity.some(({ actorId, issueId, toPriority, toStateId, updatedDescription }) => facts.humanActorIds.has(actorId) &&
-      rootIds.includes(issueId) && (toPriority !== null || toStateId !== null || (updatedDescription && issueId !== binding.touchedRootId))),
+    inflightInterrupted: inflightResults.some(({ record }) => TERMINAL_STAGE_OUTCOMES.has(record.outcome_kind)),
+    testSelectedNext: facts.activity.some(({ actorId, issueId, createdAt, toPriority, toStateId, updatedDescription }) => facts.humanActorIds.has(actorId) &&
+      rootIds.includes(issueId) && parseTime(createdAt) >= touchAt &&
+      (toPriority !== null || toStateId !== null || (updatedDescription && issueId !== binding.touchedRootId))),
     semanticTouch: Boolean(original && declaredTouch && touchedRoot?.description !== declaredTouch),
   };
+}
+
+function validPreemptionBinding(value) {
+  return value && identifier(value.inflightRootId) && identifier(value.touchedRootId) && identifier(value.remainingRootId) &&
+    identifier(value.inflightExecutionId) && identifier(value.touchedExecutionId) && identifier(value.touchedRootKey) &&
+    identifier(value.touchActivityId) && identifier(value.conductorId);
+}
+
+function preemptionFailureFacts() {
+  return {
+    coverageComplete: false,
+    inflightCompletes: false,
+    latestRunsNext: false,
+    remainingProgresses: false,
+    allDelivered: false,
+    inflightInterrupted: false,
+    testSelectedNext: false,
+    semanticTouch: false,
+  };
+}
+
+function matchingStageResults(results, stageExecutionId, rootIssueId = undefined) {
+  return results.filter(({ record }) => (rootIssueId === undefined || record.root_issue_id === rootIssueId) &&
+    (record.model_turn?.stage_execution_id === stageExecutionId || record.result_id === stageExecutionId));
+}
+
+function compareStageStarts(left, right) {
+  return parseTime(left.record.started_at) - parseTime(right.record.started_at);
+}
+
+function latestActivityAtOrBefore(activity, rootIssueId, at) {
+  return activity.filter((entry) => entry.issueId === rootIssueId && parseTime(entry.createdAt) <= at)
+    .sort((left, right) => parseTime(right.createdAt) - parseTime(left.createdAt))[0];
 }
 
 function recoveryFacts(facts) {

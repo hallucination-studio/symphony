@@ -377,6 +377,28 @@ test("parallel verdict treats a missing durable Stage completion timestamp as co
   assert.equal(assertions.find(({ assertionId }) => assertionId === "telemetry_substitutes_overlap").outcome, "coverage_missing");
 });
 
+test("preemption verdict requires one owner, equal priority, and a strictly ordered native boundary", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
+  for (const mutate of [
+    (fixture) => { findRecord(fixture.evidence.roots[1], "root_ownership").record.conductor_id = "other-conductor"; },
+    (fixture) => { fixture.evidence.roots[1].issues.find(({ depth }) => depth === 0).priority = 1; },
+    (fixture) => {
+      const remaining = fixture.evidence.roots.find(({ rootIssueId }) => rootIssueId === fixture.context.preemption.remainingRootId);
+      findRecord(remaining, "stage_execution", (record) => record.stage === "plan").record.started_at = at(30);
+    },
+    (fixture) => {
+      const remaining = fixture.evidence.roots.find(({ rootIssueId }) => rootIssueId === fixture.context.preemption.remainingRootId);
+      findRecord(remaining, "stage_execution", (record) => record.stage === "plan").record.started_at = at(16);
+    },
+  ]) {
+    const fixture = satisfiedFixture(definition);
+    mutate(fixture);
+    const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+      .find(({ assertionId }) => assertionId === "latest_ready_root_runs_next");
+    assert.equal(assertion.outcome, "contradicted");
+  }
+});
+
 test("information-answer verdict reconstructs a unique final Linear lineage only when T10 driver context is absent", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
   const fixture = satisfiedFixture(definition);
@@ -529,9 +551,22 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
       appendRecord(root, result);
       return value;
     }
-    case "inflight_turn_interrupted":
-      findRecord(root, "stage_result", (record) => record.result_id === "work-execution").record.outcome_kind = "canceled";
+    case "inflight_stage_completes":
+      findRecord(root, "stage_result", (record) => record.result_id === value.context.preemption?.inflightExecutionId).record.outcome_kind = "canceled";
       return value;
+    case "inflight_turn_interrupted":
+      findRecord(root, "stage_result", (record) => record.result_id === value.context.preemption?.inflightExecutionId).record.outcome_kind = "canceled";
+      return value;
+    case "latest_ready_root_runs_next": {
+      const remaining = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.preemption?.remainingRootId);
+      findRecord(remaining, "stage_execution", (record) => record.stage === "plan").record.started_at = at(30);
+      return value;
+    }
+    case "remaining_ready_root_progresses": {
+      const remaining = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.preemption?.remainingRootId);
+      remaining.managedRecords = remaining.managedRecords.filter(({ record }) => record.kind !== "delivery");
+      return value;
+    }
     case "test_selects_next_root":
       root.activity.push(activity("test-schedule-mutation", root.rootIssueId, "human", 16, { toPriority: 1 }));
       return value;
@@ -799,24 +834,34 @@ function bindParallelContext(value, definition) {
 
 function preemptionFixture(definition) {
   const byKey = Object.fromEntries(definition.rootTopology.map(({ rootKey }, index) => [rootKey, `preemption-root-${index + 1}`]));
-  const roots = definition.rootTopology.map(({ rootKey }, index) => deliveredRoot(definition, rootKey, byKey[rootKey], {
+  const roots = definition.rootTopology.map(({ rootKey }) => deliveredRoot(definition, rootKey, byKey[rootKey], {
     conductorId: "shared-conductor",
-    started: index === 0 ? 1 : index === 1 ? 30 : 60,
-    completed: index === 0 ? 20 : index === 1 ? 50 : 80,
-    rootUpdatedAt: at(index === 1 ? 25 : index === 2 ? 24 : 22),
+    started: rootKey === "inflight-root" ? 1 : rootKey === "remaining-root" ? 30 : 60,
+    completed: rootKey === "inflight-root" ? 20 : rootKey === "remaining-root" ? 50 : 80,
+    rootUpdatedAt: at(rootKey === "remaining-root" ? 25 : rootKey === "touched-root" ? 24 : 22),
   }));
-  const [inflight, touched, remaining] = roots;
-  const touchDescription = definition.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description").descriptionsByRootKey["touched-root"];
+  const inflight = roots.find(({ id }) => id === byKey["inflight-root"]);
+  const touched = roots.find(({ id }) => id === byKey["remaining-root"]);
+  const remaining = roots.find(({ id }) => id === byKey["touched-root"]);
+  findRecord(inflight, "stage_result", (record) => record.stage === "plan").record.completed_at = at(20);
+  findRecord(inflight, "stage_execution", (record) => record.stage === "work").record.started_at = at(21);
+  findRecord(inflight, "stage_result", (record) => record.stage === "work").record.completed_at = at(22);
+  findRecord(inflight, "stage_execution", (record) => record.stage === "verify").record.started_at = at(23);
+  findRecord(inflight, "stage_result", (record) => record.stage === "verify").record.completed_at = at(24);
+  const touchDescription = definition.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description").descriptionsByRootKey["remaining-root"];
   touched.issues.find(({ id }) => id === touched.id).description = touchDescription;
   touched.activity.push(activity("touch-activity", touched.id, "human", 15, { updatedDescription: true }));
+  remaining.activity.push(activity("remaining-ready-activity", remaining.id, "human", 14));
   return fixture(definition, roots, {
     preemption: {
       inflightRootId: inflight.id,
       touchedRootId: touched.id,
       remainingRootId: remaining.id,
-      inflightExecutionId: "work-execution",
-      touchedRootKey: "touched-root",
+      inflightExecutionId: "plan-execution",
+      touchedExecutionId: "plan-execution",
+      touchedRootKey: "remaining-root",
       touchActivityId: "touch-activity",
+      conductorId: "shared-conductor",
     },
   });
 }
@@ -945,8 +990,8 @@ function addRecord(root, record, { archived = false, sourceIssueId = root.id, ma
   });
 }
 
-function issue(id, rootIssueId, stateName, { depth, description = "", archivedAt = null, updatedAt = DATE } = {}) {
-  return { id, identifier: id, rootIssueId, parentId: depth === 0 ? null : rootIssueId, projectId: "project", teamId: "team", creatorId: depth === 0 ? "human" : "symphony", title: id, description, state: { id: `state-${stateName}`, name: stateName, type: "started" }, archivedAt, createdAt: DATE, updatedAt, remoteVersion: updatedAt, depth };
+function issue(id, rootIssueId, stateName, { depth, description = "", archivedAt = null, updatedAt = DATE, priority = 2 } = {}) {
+  return { id, identifier: id, rootIssueId, parentId: depth === 0 ? null : rootIssueId, projectId: "project", teamId: "team", creatorId: depth === 0 ? "human" : "symphony", title: id, description, priority, state: { id: `state-${stateName}`, name: stateName, type: "started" }, archivedAt, createdAt: DATE, updatedAt, remoteVersion: updatedAt, depth };
 }
 
 function rootOwnership(rootIssueId, conductorId) {
@@ -1013,6 +1058,6 @@ function activity(id, issueId, actorId, moment, extra = {}) {
   return { id, issueId, actorId, createdAt: at(moment), updatedAt: at(moment), remoteVersion: at(moment), archived: false, fromStateId: null, toStateId: null, fromPriority: null, toPriority: null, updatedDescription: false, ...extra };
 }
 
-function at(seconds) { return `2026-07-26T00:00:${String(seconds).padStart(2, "0")}.000Z`; }
+function at(seconds) { return new Date(Date.parse("2026-07-26T00:00:00.000Z") + seconds * 1_000).toISOString(); }
 
 const DATE = at(0);

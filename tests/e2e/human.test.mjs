@@ -341,6 +341,8 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
     "waitForPlanContractAndPlanReviewAction",
     "waitForPlanReviewAction",
     "waitForRootDescriptionReceipt",
+    "waitForSameConductorPreemptionAdmission",
+    "waitForSameConductorPreemptionCandidate",
     "waitForSuccessorPlanContractAndPlanReviewAction",
   ]);
   assert.equal("createHumanAction" in human, false);
@@ -448,6 +450,83 @@ test("Human Actor accepts only the predeclared description for a bound preemptio
   }]);
 });
 
+test("Human Actor observes same-Conductor preemption from native facts despite system-owned activity", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
+  const rootsByKey = Object.fromEntries(await Promise.all(definition.rootTopology.map(async ({ rootKey }) => [rootKey, await human.createRootIssue({
+    caseId: definition.caseId,
+    rootKey,
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  })])));
+  for (const { rootIssueId } of Object.values(rootsByKey)) {
+    fixture.addManagedRecord(rootIssueId, {
+      kind: "root_ownership",
+      version: 1,
+      root_issue_id: rootIssueId,
+      conductor_id: "conductor-1",
+    });
+  }
+  fixture.addManagedRecord(rootsByKey["inflight-root"].rootIssueId, {
+    kind: "stage_execution",
+    version: 1,
+    root_issue_id: rootsByKey["inflight-root"].rootIssueId,
+    stage_execution_id: "inflight-execution",
+    started_at: "2026-07-26T00:00:00.000Z",
+  });
+  fixture.issues.get(rootsByKey["inflight-root"].rootIssueId).historyEntries.push({
+    id: "system-activity",
+    issueId: rootsByKey["inflight-root"].rootIssueId,
+    actorId: null,
+    createdAt: new Date("2026-07-26T00:00:00.000Z"),
+    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
+  });
+
+  const admission = await human.waitForSameConductorPreemptionAdmission({
+    rootIssueIds: definition.rootTopology.map(({ rootKey }) => rootsByKey[rootKey].rootIssueId),
+  });
+  assert.equal(admission.inflightRootIssueId, rootsByKey["inflight-root"].rootIssueId);
+  const roles = bindSameConductorPreemptionRoles({
+    inflightRootKeys: ["inflight-root"],
+    readyRootKeys: ["touched-root", "remaining-root"],
+  });
+  const touchedRootIssueId = rootsByKey[roles.touchedRootKey].rootIssueId;
+  const remainingRootIssueId = rootsByKey[roles.remainingRootKey].rootIssueId;
+  await human.updateRootDescription({ rootIssueId: touchedRootIssueId, description: roles.touchDescription });
+  fixture.addManagedRecord(rootsByKey["inflight-root"].rootIssueId, {
+    kind: "stage_result",
+    version: 1,
+    root_issue_id: rootsByKey["inflight-root"].rootIssueId,
+    result_id: admission.inflightStageExecutionId,
+    completed_at: "2026-07-26T00:00:02.000Z",
+  });
+  fixture.addManagedRecord(touchedRootIssueId, {
+    kind: "stage_execution",
+    version: 1,
+    root_issue_id: touchedRootIssueId,
+    stage_execution_id: "touched-execution",
+    started_at: "2026-07-26T00:00:03.000Z",
+  });
+
+  const candidate = await human.waitForSameConductorPreemptionCandidate({
+    inflightStageExecutionId: admission.inflightStageExecutionId,
+    touchedRootIssueId,
+    remainingRootIssueId,
+  });
+  assert.deepEqual(candidate, {
+    rootIssueId: touchedRootIssueId,
+    stageExecutionId: "touched-execution",
+    touchActivityId: "history-1",
+  });
+});
+
 test("Human Actor creates each frozen Case Root at most once", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -473,6 +552,8 @@ function createLinearFixture() {
   const calls = { createIssue: [], updateIssue: [], createComment: [], updateComment: [], resolve: [], reopen: [], reactions: [] };
   const productCycles = [];
   let sequence = 0;
+  let rootSequence = 0;
+  let managedRecordSequence = 0;
   const comments = new Map([
     ["unmanaged-comment", comment({ id: "unmanaged-comment", issueId: "human-action-1", body: "Managed reply", userId: "symphony-1" })],
   ]);
@@ -501,9 +582,21 @@ function createLinearFixture() {
   const fixture = {
     calls,
     comments,
+    issues,
     commentId: "comment-1",
     createIssuePayload: undefined,
     client: undefined,
+    addManagedRecord(issueId, value) {
+      managedRecordSequence += 1;
+      const created = comment({
+        id: `managed-record-${managedRecordSequence}`,
+        issueId,
+        body: record(value),
+        userId: "symphony-1",
+      });
+      comments.set(created.id, created);
+      bindCommentChildren(created);
+    },
     addRevisionPlanGate(rootIssueId, {
       cycleId,
       planId,
@@ -685,9 +778,11 @@ function createLinearFixture() {
     async createIssue(input) {
       calls.createIssue.push(input);
       if (fixture.createIssuePayload) return fixture.createIssuePayload;
-      issues.set("root-1", issue({
-        id: "root-1",
-        identifier: "ENG-1",
+      rootSequence += 1;
+      const rootId = `root-${rootSequence}`;
+      issues.set(rootId, issue({
+        id: rootId,
+        identifier: `ENG-${rootSequence}`,
         teamId: input.teamId,
         projectId: input.projectId,
         stateId: input.stateId,
@@ -696,8 +791,8 @@ function createLinearFixture() {
         priority: input.priority,
         labels: [{ id: input.labelIds[0], name: "symphony:conductor/abc123def456" }],
       }));
-      bindIssueComments(issues.get("root-1"));
-      return { success: true, issueId: "root-1" };
+      bindIssueComments(issues.get(rootId));
+      return { success: true, issueId: rootId };
     },
     async updateIssue(issueId, input) {
       calls.updateIssue.push({ issueId, input });
@@ -705,6 +800,16 @@ function createLinearFixture() {
       if (!target) return { success: false };
       Object.assign(target, input);
       target.updatedAt = nextTimestamp();
+      if (input.description !== undefined) {
+        target.historyEntries.push({
+          id: `history-${target.historyEntries.length + 1}`,
+          issueId,
+          actorId: "human-1",
+          createdAt: target.updatedAt,
+          updatedAt: target.updatedAt,
+          updatedDescription: true,
+        });
+      }
       return { success: true, issueId };
     },
     async issue(issueId) {
@@ -803,11 +908,15 @@ function issue({ id, identifier, teamId, projectId, stateId, title, description,
     creatorId,
     parentId: undefined,
     updatedAt: new Date("2026-07-26T00:00:00.000Z"),
+    historyEntries: [],
     async labels() {
       return { nodes: labels, pageInfo: { hasNextPage: false } };
     },
     async children() {
       return { nodes: [], pageInfo: { hasNextPage: false } };
+    },
+    async history() {
+      return { nodes: this.historyEntries, pageInfo: { hasNextPage: false } };
     },
   };
 }

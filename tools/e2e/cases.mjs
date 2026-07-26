@@ -228,7 +228,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
     verificationBoundary: "all_roots_delivered",
     assertions: [
       assertion("inflight_stage_completes", "required", "ordered", ["stage_executions", "stage_results"], ["root_id", "inflight_execution_id"]),
-      assertion("latest_ready_root_runs_next", "required", "ordered", ["activity", "root_updated_at", "stage_executions"], ["root_ids", "conductor_id", "touched_root_id", "execution_ids"]),
+      assertion("latest_ready_root_runs_next", "required", "ordered", ["root_headers", "root_ownership", "activity", "stage_executions", "stage_results"], ["root_ids", "conductor_id", "touched_root_id", "execution_ids"]),
       assertion("remaining_ready_root_progresses", "required", "ordered", ["stage_executions", "stage_results"], ["root_ids", "conductor_id", "execution_ids"]),
       assertion("boundary_all_roots_delivered", "boundary", "aggregate", ["root_status", "verify_results", "deliveries", "git"], ["root_ids", "verify_result_ids", "delivery_ids", "git_revisions"]),
       assertion("inflight_turn_interrupted", "prohibited", "equals", ["stage_executions", "stage_results"], ["root_id", "inflight_execution_id"]),

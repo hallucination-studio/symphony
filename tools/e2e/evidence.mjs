@@ -168,6 +168,7 @@ async function issueFact({ issue, rootIssueId, depth, coverage, statusCatalog, s
       creatorId: nullableIdentifier(issue.creatorId),
       title: text(issue.title),
       description: nullableText(issue.description),
+      priority: finiteNumberOrNull(issue.priority),
       labels: labels.map(labelFact).sort((left, right) => left.id.localeCompare(right.id)),
       state: statusFact(state),
       archivedAt: timestampOrNull(issue.archivedAt),

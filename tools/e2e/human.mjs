@@ -70,6 +70,7 @@ export async function createForegroundE2EHumanActor({
       roots.set(issue.id, Object.freeze({
         rootIssueId: issue.id,
         rootKey: input.rootKey,
+        caseId: input.caseId,
         declaredDescriptionUpdates: rootSpec.declaredDescriptionUpdates,
         projectId: input.projectId,
         teamId: input.teamId,
@@ -86,6 +87,38 @@ export async function createForegroundE2EHumanActor({
         const action = await activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus });
         if (action) return Object.freeze(action);
         await waitForPlanReviewChange(signal);
+      }
+    },
+
+    async waitForSameConductorPreemptionAdmission({ rootIssueIds, signal } = {}) {
+      const known = assertPreemptionRoots(roots, rootIssueIds, "foreground_e2e_human_preemption_admission_input_invalid");
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const snapshots = await Promise.all([...known.values()].map((root) => readPreemptionRootSnapshot({ client, root })));
+        const admission = preemptionAdmission(snapshots);
+        if (admission) return Object.freeze(admission);
+        await waitForPreemptionChange(signal);
+      }
+    },
+
+    async waitForSameConductorPreemptionCandidate({ inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId, signal } = {}) {
+      const known = assertPreemptionCandidateRoots(roots, {
+        inflightStageExecutionId,
+        touchedRootIssueId,
+        remainingRootIssueId,
+      });
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const snapshots = await Promise.all([...known.values()].map((root) => readPreemptionRootSnapshot({ client, root })));
+        const candidate = preemptionCandidate({
+          snapshots,
+          actorId,
+          inflightStageExecutionId,
+          touchedRootIssueId,
+          remainingRootIssueId,
+        });
+        if (candidate) return Object.freeze(candidate);
+        await waitForPreemptionChange(signal);
       }
     },
 
@@ -403,6 +436,126 @@ function assertKnownClarificationRoot(roots, rootIssueId) {
   const known = roots.get(rootIssueId);
   if (!known) throw stableError("foreground_e2e_human_clarification_target_invalid");
   return known;
+}
+
+function assertPreemptionRoots(roots, rootIssueIds, code) {
+  if (!Array.isArray(rootIssueIds) || rootIssueIds.length !== 3 || new Set(rootIssueIds).size !== 3 ||
+      rootIssueIds.some((rootIssueId) => !identifier(rootIssueId))) {
+    throw stableError(code);
+  }
+  const known = new Map(rootIssueIds.map((rootIssueId) => [rootIssueId, roots.get(rootIssueId)]));
+  if ([...known.values()].some((root) => !root || root.caseId !== "same_conductor_preemption") ||
+      new Set([...known.values()].map(({ rootKey }) => rootKey)).size !== 3) {
+    throw stableError(code);
+  }
+  return known;
+}
+
+function assertPreemptionCandidateRoots(roots, { inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId }) {
+  if (!identifier(inflightStageExecutionId) || !identifier(touchedRootIssueId) || !identifier(remainingRootIssueId) ||
+      touchedRootIssueId === remainingRootIssueId) {
+    throw stableError("foreground_e2e_human_preemption_candidate_input_invalid");
+  }
+  const known = [...roots.values()].filter(({ caseId }) => caseId === "same_conductor_preemption");
+  const byId = new Map(known.map((root) => [root.rootIssueId, root]));
+  if (known.length !== 3 || !byId.has(touchedRootIssueId) || !byId.has(remainingRootIssueId)) {
+    throw stableError("foreground_e2e_human_preemption_candidate_input_invalid");
+  }
+  return byId;
+}
+
+async function readPreemptionRootSnapshot({ client, root }) {
+  const code = "foreground_e2e_human_preemption_read_failed";
+  const issue = await readIssue(client, root.rootIssueId, code);
+  const labels = await readLabels(issue, code);
+  if (!matchesKnownRoot(issue, labels, root) || !Number.isFinite(issue.priority)) {
+    throw stableError(code);
+  }
+  const tree = await readPreemptionIssueTree(issue, code, new Set());
+  const records = [];
+  for (const node of tree) {
+    const comments = await readIssueComments(node, code);
+    for (const comment of comments) {
+      const record = parseRecord(comment?.body);
+      if (record) records.push(record);
+    }
+  }
+  const history = await readAllNodes(
+    (after) => issue.history({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
+    code,
+  );
+  if (history.some((entry) => !validPreemptionActivity(entry, root.rootIssueId))) throw stableError(code);
+  return {
+    rootIssueId: root.rootIssueId,
+    priority: issue.priority,
+    owners: records.filter((record) => record.kind === "root_ownership" && record.root_issue_id === root.rootIssueId),
+    executions: records.filter((record) => record.kind === "stage_execution" && record.root_issue_id === root.rootIssueId),
+    results: records.filter((record) => record.kind === "stage_result" && record.root_issue_id === root.rootIssueId),
+    history,
+  };
+}
+
+async function readPreemptionIssueTree(issue, code, seen) {
+  if (!issue || !identifier(issue.id) || seen.has(issue.id)) throw stableError(code);
+  seen.add(issue.id);
+  const result = [issue];
+  for (const child of await readChildren(issue, code)) {
+    result.push(...await readPreemptionIssueTree(child, code, seen));
+  }
+  return result;
+}
+
+function preemptionAdmission(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length !== 3 || !samePreemptionOwner(snapshots) ||
+      new Set(snapshots.map(({ priority }) => priority)).size !== 1) return undefined;
+  const active = snapshots.flatMap((snapshot) => snapshot.executions.filter((record) => !stageResultFor(snapshot.results, record.stage_execution_id))
+    .map((record) => ({ rootIssueId: snapshot.rootIssueId, stageExecutionId: record.stage_execution_id })));
+  const ready = snapshots.filter(({ executions }) => executions.length === 0).map(({ rootIssueId }) => rootIssueId);
+  if (active.length !== 1 || ready.length !== 2 || !active.every(({ rootIssueId, stageExecutionId }) => identifier(rootIssueId) && identifier(stageExecutionId))) {
+    return undefined;
+  }
+  return { inflightRootIssueId: active[0].rootIssueId, inflightStageExecutionId: active[0].stageExecutionId, readyRootIssueIds: ready };
+}
+
+function preemptionCandidate({ snapshots, actorId, inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId }) {
+  const inflight = snapshots.find(({ rootIssueId }) => rootIssueId !== touchedRootIssueId && rootIssueId !== remainingRootIssueId);
+  const touched = snapshots.find(({ rootIssueId }) => rootIssueId === touchedRootIssueId);
+  const remaining = snapshots.find(({ rootIssueId }) => rootIssueId === remainingRootIssueId);
+  if (!inflight || !touched || !remaining || !samePreemptionOwner(snapshots)) return undefined;
+  const result = stageResultFor(inflight.results, inflightStageExecutionId);
+  const terminalAt = Date.parse(result?.completed_at);
+  if (!Number.isFinite(terminalAt)) return undefined;
+  const readyAtTerminal = [touched, remaining].every((snapshot) => snapshot.executions
+    .every(({ started_at }) => Date.parse(started_at) > terminalAt));
+  if (!readyAtTerminal) return undefined;
+  const touch = touched.history.filter((entry) => entry.actorId === actorId && entry.updatedDescription === true)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  if (touch.length !== 1 || !identifier(touch[0].id) || Date.parse(touch[0].createdAt) >= terminalAt) return undefined;
+  const candidates = [touched, remaining].flatMap((snapshot) => snapshot.executions
+    .filter(({ started_at }) => Date.parse(started_at) > terminalAt)
+    .map((record) => ({ rootIssueId: snapshot.rootIssueId, record })))
+    .sort((left, right) => Date.parse(left.record.started_at) - Date.parse(right.record.started_at));
+  const first = candidates[0];
+  if (!first || candidates.filter(({ record }) => record.started_at === first.record.started_at).length !== 1 ||
+      first.rootIssueId !== touchedRootIssueId || !identifier(first.record.stage_execution_id)) return undefined;
+  return { rootIssueId: touchedRootIssueId, stageExecutionId: first.record.stage_execution_id, touchActivityId: touch[0].id };
+}
+
+function samePreemptionOwner(snapshots) {
+  const owners = snapshots.map(({ owners }) => owners);
+  return owners.every((records) => records.length === 1 && identifier(records[0]?.conductor_id)) &&
+    new Set(owners.map(([record]) => record.conductor_id)).size === 1;
+}
+
+function stageResultFor(results, stageExecutionId) {
+  const matches = results.filter((record) => record.model_turn?.stage_execution_id === stageExecutionId || record.result_id === stageExecutionId);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function validPreemptionActivity(entry, rootIssueId) {
+  return entry && identifier(entry.id) && entry.issueId === rootIssueId &&
+    (entry.actorId === null || entry.actorId === undefined || identifier(entry.actorId)) &&
+    timestampValue(entry.createdAt) && timestampValue(entry.updatedAt);
 }
 
 async function activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus }) {
@@ -760,7 +913,7 @@ function threadState(comment) {
 }
 
 function timestampValue(value) {
-  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+  return value instanceof Date ? !Number.isNaN(value.valueOf()) : typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
 async function readLabels(issue, code) {
@@ -883,6 +1036,23 @@ function waitForRevisionChange(signal) {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
       reject(stableError("foreground_e2e_human_revision_wait_aborted"));
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function waitForPreemptionChange(signal) {
+  if (signal?.aborted) throw stableError("foreground_e2e_human_preemption_wait_aborted");
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, PLAN_REVIEW_WAIT_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(stableError("foreground_e2e_human_preemption_wait_aborted"));
     };
     function done() {
       signal?.removeEventListener("abort", onAbort);

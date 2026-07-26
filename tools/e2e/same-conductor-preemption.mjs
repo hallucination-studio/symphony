@@ -1,0 +1,198 @@
+import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "./cases.mjs";
+
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+
+export async function runSameConductorPreemptionCase({ definition, human, rootCreationsByRootKey, signal } = {}) {
+  assertDefinition(definition);
+  const rootCreations = assertInput({ definition, human, rootCreationsByRootKey, signal });
+
+  const roots = await Promise.all(definition.rootTopology.map(async (topology) => {
+    const creation = rootCreations.get(topology.rootKey);
+    const root = await human.createRootIssue({
+      caseId: definition.caseId,
+      rootKey: topology.rootKey,
+      teamId: creation.teamId,
+      projectId: creation.projectId,
+      routingLabelId: creation.routingLabelId,
+      rootStatusId: creation.rootStatusId,
+    });
+    if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
+      throw stableError("foreground_e2e_preemption_root_create_invalid");
+    }
+    return Object.freeze({ topology, root });
+  }));
+
+  const rootIssueIdsByKey = Object.freeze(Object.fromEntries(roots.map(({ topology, root }) => [topology.rootKey, root.rootIssueId])));
+  const admission = assertAdmission(
+    await human.waitForSameConductorPreemptionAdmission(waitInput({ rootIssueIds: roots.map(({ root }) => root.rootIssueId), signal })),
+    rootIssueIdsByKey,
+  );
+  const roles = bindSameConductorPreemptionRoles({
+    inflightRootKeys: [rootKeyFor(rootIssueIdsByKey, admission.inflightRootIssueId)],
+    readyRootKeys: admission.readyRootIssueIds.map((rootIssueId) => rootKeyFor(rootIssueIdsByKey, rootIssueId)),
+  });
+  const touch = await human.updateRootDescription({
+    rootIssueId: rootIssueIdsByKey[roles.touchedRootKey],
+    description: roles.touchDescription,
+  });
+  assertTouch(touch);
+
+  const candidate = assertCandidate(
+    await human.waitForSameConductorPreemptionCandidate(waitInput({
+      inflightStageExecutionId: admission.inflightStageExecutionId,
+      touchedRootIssueId: rootIssueIdsByKey[roles.touchedRootKey],
+      remainingRootIssueId: rootIssueIdsByKey[roles.remainingRootKey],
+      signal,
+    })),
+    rootIssueIdsByKey[roles.touchedRootKey],
+  );
+
+  const actions = await Promise.all(roots.map(async ({ root }) => {
+    const action = await human.waitForPlanReviewAction({
+      rootIssueId: root.rootIssueId,
+      terminalStatus: "Approved",
+      ...(signal ? { signal } : {}),
+    });
+    if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+      throw stableError("foreground_e2e_preemption_plan_review_invalid");
+    }
+    return Object.freeze(action);
+  }));
+  if (new Set(actions.map(({ actionIssueId }) => actionIssueId)).size !== actions.length) {
+    throw stableError("foreground_e2e_preemption_plan_review_invalid");
+  }
+  await Promise.all(actions.map((action) => human.setHumanActionTerminalStatus({
+    issueId: action.actionIssueId,
+    terminalStatus: "Approved",
+    stateId: action.terminalStatusId,
+  })));
+
+  return deepFreeze({
+    context: {
+      humanActorId: human.actorId,
+      rootIssueIdsByKey,
+      preemption: {
+        inflightRootId: admission.inflightRootIssueId,
+        touchedRootId: rootIssueIdsByKey[roles.touchedRootKey],
+        remainingRootId: rootIssueIdsByKey[roles.remainingRootKey],
+        inflightExecutionId: admission.inflightStageExecutionId,
+        touchedExecutionId: candidate.stageExecutionId,
+        touchedRootKey: roles.touchedRootKey,
+        touchActivityId: candidate.touchActivityId,
+        conductorId: rootCreations.get(roles.inflightRootKey).conductorId,
+      },
+    },
+  });
+}
+
+function assertDefinition(definition) {
+  const canonical = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
+  if (definition !== canonical || definition.rootTopology.length !== 3 ||
+      new Set(definition.rootTopology.map(({ conductorRef }) => conductorRef)).size !== 1 ||
+      new Set(definition.rootTopology.map(({ repositoryRef }) => repositoryRef)).size !== definition.rootTopology.length) {
+    throw stableError("foreground_e2e_preemption_case_definition_invalid");
+  }
+}
+
+function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
+  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.waitForSameConductorPreemptionAdmission !== "function" || typeof human.updateRootDescription !== "function" ||
+      typeof human.waitForSameConductorPreemptionCandidate !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
+      typeof human.setHumanActionTerminalStatus !== "function" || !rootCreationsByRootKey ||
+      typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
+      signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
+    throw stableError("foreground_e2e_preemption_case_input_invalid");
+  }
+  const rootKeys = definition.rootTopology.map(({ rootKey }) => rootKey);
+  if (Object.keys(rootCreationsByRootKey).length !== rootKeys.length ||
+      rootKeys.some((rootKey) => !Object.hasOwn(rootCreationsByRootKey, rootKey))) {
+    throw stableError("foreground_e2e_preemption_case_input_invalid");
+  }
+  const creations = new Map(rootKeys.map((rootKey) => [rootKey, validRootCreation(rootCreationsByRootKey[rootKey]) ]));
+  if ([...creations.values()].some((creation) => !creation)) {
+    throw stableError("foreground_e2e_preemption_case_input_invalid");
+  }
+  const unique = (field) => new Set([...creations.values()].map((creation) => creation[field])).size === 1;
+  if (!unique("teamId") || !unique("projectId") || !unique("routingLabelId") || !unique("rootStatusId") || !unique("conductorId")) {
+    throw stableError("foreground_e2e_preemption_case_input_invalid");
+  }
+  return creations;
+}
+
+function validRootCreation(value) {
+  if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.routingLabelId) ||
+      !identifier(value.rootStatusId) || !identifier(value.conductorId)) {
+    return undefined;
+  }
+  return Object.freeze({
+    teamId: value.teamId,
+    projectId: value.projectId,
+    routingLabelId: value.routingLabelId,
+    rootStatusId: value.rootStatusId,
+    conductorId: value.conductorId,
+  });
+}
+
+function assertAdmission(value, rootIssueIdsByKey) {
+  if (!value || !identifier(value.inflightRootIssueId) || !identifier(value.inflightStageExecutionId) ||
+      !distinctIdentifiers(value.readyRootIssueIds) || value.readyRootIssueIds.length !== 2) {
+    throw stableError("foreground_e2e_preemption_admission_invalid");
+  }
+  const knownRootIds = new Set(Object.values(rootIssueIdsByKey));
+  const observedRootIds = new Set([value.inflightRootIssueId, ...value.readyRootIssueIds]);
+  if (observedRootIds.size !== knownRootIds.size || [...observedRootIds].some((rootIssueId) => !knownRootIds.has(rootIssueId))) {
+    throw stableError("foreground_e2e_preemption_admission_invalid");
+  }
+  return Object.freeze({
+    inflightRootIssueId: value.inflightRootIssueId,
+    inflightStageExecutionId: value.inflightStageExecutionId,
+    readyRootIssueIds: Object.freeze([...value.readyRootIssueIds]),
+  });
+}
+
+function assertTouch(value) {
+  if (!value || value.kind !== "description" || !identifier(value.sourceId)) {
+    throw stableError("foreground_e2e_preemption_touch_invalid");
+  }
+}
+
+function assertCandidate(value, touchedRootIssueId) {
+  if (!value || value.rootIssueId !== touchedRootIssueId || !identifier(value.stageExecutionId) || !identifier(value.touchActivityId)) {
+    throw stableError("foreground_e2e_preemption_candidate_invalid");
+  }
+  return Object.freeze({
+    rootIssueId: value.rootIssueId,
+    stageExecutionId: value.stageExecutionId,
+    touchActivityId: value.touchActivityId,
+  });
+}
+
+function rootKeyFor(rootIssueIdsByKey, rootIssueId) {
+  const entry = Object.entries(rootIssueIdsByKey).find(([, issueId]) => issueId === rootIssueId);
+  if (!entry) throw stableError("foreground_e2e_preemption_admission_invalid");
+  return entry[0];
+}
+
+function waitInput({ signal, ...input }) {
+  return { ...input, ...(signal ? { signal } : {}) };
+}
+
+function distinctIdentifiers(value) {
+  return Array.isArray(value) && value.every(identifier) && new Set(value).size === value.length;
+}
+
+function identifier(value) {
+  return typeof value === "string" && IDENTIFIER.test(value);
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function stableError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
