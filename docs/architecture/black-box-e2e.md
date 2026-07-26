@@ -167,6 +167,8 @@ Campaign 结束时只清理自己拥有的本地临时目录和 process tree，�
 E2E Human Actor 只能执行真实 Linear 用户可执行的操作：
 
 - 创建 Root Issue，并设置 title、description、Priority、Root status 和 routing label；
+- 仅对本 Case 已创建的 Root 写入 catalog 预声明的 description delta；它只能用于 business revision 或不改变
+  目标和验收标准的 scheduling touch，不能修改 title、status、routing、relation、dependency 或任何 descendant；
 - 写入或编辑普通 Markdown comment，包括 fenced code block；
 - 处理产品创建的 Human Action Issue；
 - 设置 Human Action 的正式 terminal status；
