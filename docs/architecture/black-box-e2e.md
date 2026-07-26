@@ -182,8 +182,10 @@ case_id
 initial_requirement
 initial_requirement_hash
 root_creation_input
+root_topology
 declared_user_interactions
 allowed_process_faults
+verification_boundary
 positive_assertions
 negative_assertions
 incomplete_conditions
@@ -220,7 +222,50 @@ repository context 和 routing label。至少两个不同 Conductor 的 Stage in
 以下七个 Case 必须全部存在且均为 mandatory。Case 可以复用共享 fixture 和 evidence reader，但不能复用
 可变 Root 状态或把另一个 Case 的成功当作自己的证据。
 
-### 9.1 `approved_happy_path`
+### 9.1 固定断言契约
+
+Case definition 不是运行时脚本，而是 Campaign 启动前冻结的验收契约。它必须为每个 Case 固定：
+
+- `root_topology`：精确的 Root 数量、每个 Root 的 routing、repository/worktree 归属，以及 Case 内需要
+  相同或不同 Conductor 的关系；
+- `verification_boundary`：这个 Case 在哪个可从 Linear/Git read-back 的稳定业务边界停止等待。它可以是
+  Root `In Review` 与 delivery，也可以是一个明确的 fresh Human Action 等待；不能用 process ready、日志、
+  local cache、timeout 或 test-owned `final` 表示；
+- 命名的 `positive_assertions`、`negative_assertions` 和 `incomplete_conditions`。每条 assertion 必须声明
+  需要的 Linear/Git fact scope、identity correlation 和顺序/唯一性规则，不能在运行中临时追加；
+- predeclared Human operation 只作为等待到产品事实后的用户响应，不能选择 workflow 的下一步或生成替代事实。
+
+断言评估只消费 Case final evidence snapshot。正向 assertion 只有在全部 required durable facts、correlation 和
+顺序都成立时才满足；已读到与之矛盾的 durable fact 时为 `failed`，其他缺失或无法完整读取的情况为
+`incomplete`。禁止 assertion 一旦在 fresh final evidence 中成立即为 `failed`。所有 assertion 都必须由
+同一个 closed Case assertion vocabulary 实现其 `equals`、`unique`、`ordered`、`linked`、`aggregate`、
+`archived`、`thread-state` 或 `interval-overlap` predicate；Case 不得注册任意代码、查询产品运行时或把
+polling observation 变成 predicate。
+
+除 Case 专有断言外，每个 Case 都必须通过下列共同断言：
+
+1. 只读取自己 `root_topology` 中 Root 的 active/archived Tree 与匹配 Git repository；没有跨 Case 事实泄漏；
+2. 最终 description、acceptance criteria 和普通用户输入与冻结的 hash/预声明 delta 一致；
+3. 所有被 assertion 引用的 Issue、comment、thread state、reaction、managed record、execution/result、usage、
+   ownership、delivery 与 Git fact 均具有可 read-back 的 source identity、version/digest 和 Root/Cycle correlation；
+4. 完整分页、active/archived coverage、status catalog 和 Git coverage 均可证明；任何 coverage 缺口均不能 pass；
+5. 没有 E2E 写入的 Human Action、Stage/managed record、DAG mutation、timeline/reply、usage 或 synthetic
+   completion 参与 Case 成功链。
+
+每个 Case 的 `verification_boundary` 与最小 Root 拓扑如下。这里的“完成”仅表示 Case 的验收边界已经成立；它不
+创建第二套产品 terminal state，也不要求所有 Case 都将 Root 推到同一种状态。
+
+| Case | 最小 Root 拓扑 | 固定验证边界 |
+|---|---|---|
+| `approved_happy_path` | 1 个 Root，1 个独占 repository | Root `In Review`、matching delivery 与唯一 passed Verify Result |
+| `plan_rejected_and_replanned` | 1 个 Root，1 个独占 repository | 同一 Root 上 fresh Plan execution/Contract 与 fresh active Plan Review Human Action；它仍等待用户审批 |
+| `information_requested_and_answered` | 1 个 Root，1 个独占 repository | Answered Action 之后的 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
+| `root_revision_and_comment` | 1 个 Root，1 个独占 repository | 旧 Cycle 已 terminal，successor Cycle 有 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
+| `parallel_multi_conductor` | 至少 2 个 Root，分别路由到不同 Conductor 与独占 repository | 每个 Root 都 `In Review` 且交付；至少一对跨 Conductor durable Stage interval overlap |
+| `same_conductor_preemption` | 3 个同 Priority Root，路由到同一 Conductor、各自独占 repository | 三个 Root 都 `In Review` 且交付；被 touch 的 ready Root 在下一调度边界首先进入 Stage |
+| `conductor_restart_recovery` | 至少 2 个 Root：1 个受影响 Root 与至少 1 个运行在另一 Conductor 的连续 Root | 受影响 Root 从 fresh execution 恢复至 `In Review`/delivery；连续 Root 也完成交付 |
+
+### 9.2 `approved_happy_path`
 
 用户行为：创建一个明确、可在测试 repository 中完成的 Root，等待真实 Plan Review Human Action，按其说明
 将状态流转为 `Approved`。
@@ -234,11 +279,14 @@ repository context 和 routing label。至少两个不同 Conductor 的 Stage in
 - Root usage 聚合全部 Cycles 和 Root Reconciler model turns；
 - required timeline、reply 和 managed records 均存在且可 read-back。
 
+验证边界：唯一目标 Root 为 `In Review`，其 delivery、passed Verify Result 和 Git revision 彼此 matching。该
+boundary 不能由 Root `Done`、local `final` 或单独的 Plan approval 代替。
+
 禁止事实：approval 前开始 Work、多个 completion path、缺少 delivery、用本地 `final` 补完成、usage 重复或漏算。
 
 `incomplete`：任一 required page、record、Git fact 或 read-back 缺失，且没有 durable 相反事实。
 
-### 9.2 `plan_rejected_and_replanned`
+### 9.3 `plan_rejected_and_replanned`
 
 用户行为：创建 Root，等待真实 Plan Review Human Action，以预声明普通用户 reason 将其流转为 `Rejected`。
 
@@ -250,11 +298,14 @@ repository context 和 routing label。至少两个不同 Conductor 的 Stage in
 - 产生 fresh Plan execution、fresh Contract 和 fresh Human Action；
 - replacement 使用新的 execution/session identity，并保留同一 Root 目标。
 
+验证边界：replacement Plan 已形成 immutable fresh Contract，并由产品创建 fresh active Plan Review Human Action。
+Case 不批准 replacement Action；该等待状态本身连同旧 Contract 的 supersession 是本 Case 的完整验收边界。
+
 禁止事实：对 rejected Contract 执行 Work、原地覆盖旧 Contract、物理删除历史、E2E 创建 replacement Plan。
 
 `incomplete`：rejection 已存在但尚无足够 durable facts 证明 supersession 或明确错误推进。
 
-### 9.3 `information_requested_and_answered`
+### 9.4 `information_requested_and_answered`
 
 用户行为：等待产品创建需要补充信息的 Human Action，按 Action 描述提交预声明答案，并将 Action 流转到
 正式 answered terminal status。
@@ -266,11 +317,15 @@ repository context 和 routing label。至少两个不同 Conductor 的 Stage in
 - Root Reconciler 消费该输入并产生 matching durable reply；
 - 用户输入得到协议规定的 reaction disposition，Workflow 随后由产品自主继续。
 
+验证边界：Answer 已被 consumption/reply 关联到初始缺失信息，随后出现只引用该 Answer 的 fresh Plan execution、
+fresh Contract 和 fresh active Plan Review Human Action。Case 不替产品批准该 replacement Action，也不接受没有后续
+Plan/Contract 的“已收到”文本作为 continuation。
+
 禁止事实：缺失答案时自动假设、E2E 修改 Plan/Work/Verify、测试直接解除 Workflow 阻塞。
 
 `incomplete`：答案已提交但尚无 matching accepted input、reply 或后续 durable decision。
 
-### 9.4 `root_revision_and_comment`
+### 9.5 `root_revision_and_comment`
 
 用户行为：按预声明顺序修改 Root description，写入和编辑普通 comment，并对 comment thread 执行
 resolve、等待 durable response、reopen、再次等待 durable response。
@@ -283,11 +338,15 @@ resolve、等待 durable response、reopen、再次等待 durable response。
 - destructive business revision 使当前 Cycle terminal，并创建 successor Cycle 和 fresh Plan；
 - 若 Case 中包含预声明 non-destructive comment，产品可继续时必须有明确 directive 和审计链。
 
+验证边界：被 revision 取代的 Cycle 为 `Changes Required` 或 `Canceled`，successor Cycle 与旧 Cycle identity 不同，
+并有 fresh Plan execution、fresh Contract 和 fresh active Plan Review Human Action。每次 comment body、edit、resolve
+和 reopen 都必须在此之前已有自身 matching reply/reaction durable facts，不能被 successor 的存在掩盖。
+
 禁止事实：丢失 resolve/reopen、把当前 comment 值伪造成历史、E2E 临时改写 revision、Conductor 自行解释 revision。
 
 `incomplete`：任一预声明增量缺少 accepted input、reply、thread action 或 successor/continue decision。
 
-### 9.5 `parallel_multi_conductor`
+### 9.6 `parallel_multi_conductor`
 
 用户行为：并发创建至少两个分别路由到不同 Conductor 的独立 Root，并处理各自真实 Plan approval。
 
@@ -303,11 +362,14 @@ max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
 
 - overlap 只由 matching Stage Execution 和 Result timestamps 证明。
 
+验证边界：每个 Case Root 都达到 `In Review`，且各自 delivery 与 passed Verify Result matching；至少一对不同
+Conductor 的 matching Stage Execution/Result interval 满足上述 overlap 公式。
+
 禁止事实：跨 Conductor 接管、共享 workspace writer、以 Promise 并发、日志交错或进程在线代替 durable overlap。
 
 `incomplete`：Root 均可成功但缺少完整 interval、ownership 或 timestamp coverage。
 
-### 9.6 `same_conductor_preemption`
+### 9.7 `same_conductor_preemption`
 
 用户行为：以相同 Priority 创建多个路由到同一 Conductor 的 Root；一个 Stage in-flight 时，对另一个 Root
 执行预声明非语义 description touch，使其 `updatedAt` 最新。
@@ -319,11 +381,15 @@ max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
 - native activity 证明 touch 的 actor、时间和顺序；
 - 其他 ready Root 后续仍被调度，没有 starvation 或 ownership 变化。
 
+验证边界：in-flight Root、被 touch Root 与另一 ready Root 均达到 `In Review` 并有 matching delivery。由 native
+activity、Stage Execution 和 Result 建立严格顺序：in-flight Stage 先完成；随后被 touch Root 先开始 Stage；最后一个
+ready Root 随后完成。三者必须保持同一 Conductor ownership。
+
 禁止事实：中断当前 turn、并发写同一 workspace、测试指定 next Root、改变目标或验收要求来制造更新时间。
 
 `incomplete`：时间戳并列、activity coverage 不完整，或未形成可比较的下一调度边界。
 
-### 9.7 `conductor_restart_recovery`
+### 9.8 `conductor_restart_recovery`
 
 用户行为：创建专属 coordination group；观察到一个真实 Stage in-flight 后，只对 owning Conductor 发送
 `SIGKILL`，再从同一正式 Binding 启动 fresh production process。其他 Conductor 继续运行。
@@ -334,6 +400,10 @@ max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
 - replacement execution 使用新的 execution 和 role-session identity；
 - Root ownership 保持不变，replacement 从 Linear/Git durable facts 恢复；
 - coordination group 中其他 Conductor 的 Roots 保持连续执行并完成。
+
+验证边界：受影响 Root 的 replacement execution 与 delivery matching 且 Root 为 `In Review`；每个连续 Root 也有
+matching passed Verify Result、delivery 和 `In Review`。被杀进程的旧 execution 只能有唯一 terminal failure/cancel
+Result，不能以迟到 success 或现存 session identity 贡献新的 delivery。
 
 禁止事实：接受旧 session 的迟到成功结果、测试恢复 checkpoint、重写 Linear 状态、停止或重配其他 Conductor。
 
@@ -349,6 +419,11 @@ max(A.started_at, B.started_at) < min(A.completed_at, B.completed_at)
 4. Root Reconciler inputs/directives/replies、Stage Executions/Results、Plan Contracts、Human resolutions、Findings、
    attempts、timeline、usage 和 model turns；
 5. matching Git branch、commit、diff、checks 和 delivery facts。
+
+final reader 必须为每个 assertion 返回独立的 evidence coverage，而不是只返回一个 Case 级布尔值。一个 fact 只能在
+它的 source identity、Root/Cycle/Stage correlation、native archive/status 和 remote version/digest 都可读取时被 assertion
+引用。Case assertion 之间可以引用同一 snapshot fact，但不得共享另一个 Case 的 assertion result、polling cache 或
+runtime observation。`verification_boundary` 只是 assertion group 的目标事实，不能绕过共同断言或 Case 专有禁止事实。
 
 最终分类只有：
 
