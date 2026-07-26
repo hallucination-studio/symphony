@@ -4,7 +4,8 @@ import {
 } from "./foreground-campaign.mjs";
 
 try {
-  process.exitCode = await runForegroundE2ECampaign();
+  const result = await runForegroundE2ECampaign();
+  process.exitCode = typeof result?.exitCode === "number" ? result.exitCode : 0;
 } catch (error) {
   process.stderr.write(`${JSON.stringify(sanitizeForegroundE2ECampaignFailure(error))}\n`);
   process.exitCode = 1;

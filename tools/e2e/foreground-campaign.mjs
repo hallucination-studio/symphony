@@ -9,9 +9,19 @@ const publicReasonCodes = new Set([
 export async function runForegroundE2ECampaign({
   environment = process.env,
   runEnvironment = unavailableEnvironment,
+  runCases,
 } = {}) {
-  if (typeof runEnvironment !== "function") throw stableError("foreground_e2e_campaign_input_invalid");
-  return runEnvironment(loadForegroundE2EConfig({ environment }));
+  if (typeof runEnvironment !== "function" || runCases !== undefined && typeof runCases !== "function") {
+    throw stableError("foreground_e2e_campaign_input_invalid");
+  }
+  const config = loadForegroundE2EConfig({ environment });
+  const runtime = await runEnvironment({ config });
+  if (runCases === undefined) return runtime;
+  try {
+    return await runCases({ config, runtime });
+  } finally {
+    await runtime?.close?.();
+  }
 }
 
 export function sanitizeForegroundE2ECampaignFailure(error) {

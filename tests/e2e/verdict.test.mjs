@@ -1,0 +1,712 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { FOREGROUND_E2E_CASE_IDS, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
+import {
+  evaluateForegroundE2EAssertions,
+  runForegroundE2ECases,
+  validateForegroundE2EAssertionCatalog,
+} from "../../tools/e2e/verdict.mjs";
+
+test("the closed assertion evaluator accepts the frozen catalog and rejects unknown or duplicate records", () => {
+  assert.doesNotThrow(() => validateForegroundE2EAssertionCatalog(FOREGROUND_E2E_CASES));
+
+  const duplicate = structuredClone(FOREGROUND_E2E_CASES);
+  duplicate[0].assertions.push(structuredClone(duplicate[0].assertions[0]));
+  assert.throws(
+    () => validateForegroundE2EAssertionCatalog(duplicate),
+    hasCode("foreground_e2e_assertion_catalog_invalid"),
+  );
+
+  const unknown = structuredClone(FOREGROUND_E2E_CASES);
+  unknown[0].assertions[0].assertionId = "unknown_assertion";
+  assert.throws(
+    () => validateForegroundE2EAssertionCatalog(unknown),
+    hasCode("foreground_e2e_assertion_catalog_invalid"),
+  );
+
+  const widenedScope = structuredClone(FOREGROUND_E2E_CASES);
+  widenedScope[0].assertions[0].factScope.push("foreign_case_root");
+  assert.throws(
+    () => validateForegroundE2EAssertionCatalog(widenedScope),
+    hasCode("foreground_e2e_assertion_catalog_invalid"),
+  );
+
+  const replacementOperation = structuredClone(FOREGROUND_E2E_CASES);
+  replacementOperation[0].declaredUserInteractions[0].kind = "select_workflow_next_step";
+  assert.throws(
+    () => validateForegroundE2EAssertionCatalog(replacementOperation),
+    hasCode("foreground_e2e_assertion_catalog_invalid"),
+  );
+});
+
+test("the evaluator emits only frozen contradiction or coverage reason codes", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
+  const results = evaluateForegroundE2EAssertions({
+    definition,
+    evidence: incompleteEvidence("approved_happy_path", ["root-approved"]),
+  });
+
+  assert.equal(results.length, definition.assertions.length);
+  for (const result of results) {
+    assert.ok(["satisfied", "contradicted", "coverage_missing"].includes(result.outcome));
+    if (result.outcome === "satisfied") {
+      assert.equal(result.reasonCode, undefined);
+    } else {
+      assert.equal(
+        result.reasonCode,
+        `${result.reasonCodePrefix}.${result.outcome}`,
+      );
+    }
+  }
+});
+
+test("every frozen condition has a final-evidence satisfied fixture and an independent coverage-missing fixture", () => {
+  for (const definition of FOREGROUND_E2E_CASES) {
+    const fixture = satisfiedFixture(definition);
+    const satisfied = evaluateForegroundE2EAssertions({ definition, ...fixture });
+    assert.deepEqual(
+      satisfied.map(({ assertionId, outcome }) => `${assertionId}:${outcome}`),
+      definition.assertions.map(({ assertionId }) => `${assertionId}:satisfied`),
+      `${definition.caseId}: satisfied`,
+    );
+
+    const incomplete = evaluateForegroundE2EAssertions({
+      definition,
+      ...fixture,
+      evidence: {
+        ...fixture.evidence,
+        coverage: {
+          isComplete: false,
+          omissions: [{
+            rootIssueId: fixture.evidence.rootIssueIds[0],
+            sourceId: fixture.evidence.rootIssueIds[0],
+            scope: "tree",
+            code: "foreground_e2e_evidence_pagination_failed",
+          }],
+        },
+      },
+    });
+    assert.deepEqual(
+      incomplete.map(({ assertionId, outcome }) => `${assertionId}:${outcome}`),
+      definition.assertions.map(({ assertionId }) => `${assertionId}:coverage_missing`),
+      `${definition.caseId}: coverage_missing`,
+    );
+  }
+});
+
+test("every frozen condition has a durable contradictory fixture", () => {
+  for (const definition of FOREGROUND_E2E_CASES) {
+    for (const assertion of definition.assertions) {
+      const input = satisfiedFixture(definition);
+      const contrary = contradictoryFixture(definition, assertion.assertionId, input);
+      const result = evaluateForegroundE2EAssertions({ definition, ...contrary })
+        .find((candidate) => candidate.assertionId === assertion.assertionId);
+      assert.equal(result.outcome, "contradicted", `${definition.caseId}.${assertion.assertionId}`);
+      assert.equal(result.reasonCode, `${assertion.reasonCode}.contradicted`);
+    }
+  }
+});
+
+test("the scheduler starts every Case, preserves all settlements, and final-reads failed Cases", async () => {
+  const started = [];
+  const finalReads = [];
+  const scopes = new Map();
+  const definitionById = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, definition]));
+
+  const summary = await runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    runCase: async ({ definition, scope }) => {
+      started.push(definition.caseId);
+      scopes.set(definition.caseId, scope);
+      if (definition.caseId === "plan_rejected_and_replanned") throw stableError("driver_failed");
+      return { deadlineExceeded: false };
+    },
+    readFinalEvidence: async ({ definition, scope }) => {
+      finalReads.push(definition.caseId);
+      assert.equal(scope, scopes.get(definition.caseId));
+      return incompleteEvidence(definition.caseId, [`root-${definition.caseId}`]);
+    },
+    now: sequencedClock(),
+  });
+
+  assert.deepEqual(started.sort(), FOREGROUND_E2E_CASES.map(({ caseId }) => caseId).sort());
+  assert.deepEqual(finalReads.sort(), started.sort());
+  assert.equal(summary.exitCode, 1);
+  assert.equal(summary.cases.length, FOREGROUND_E2E_CASES.length);
+  assert.equal(summary.cases.find(({ caseId }) => caseId === "plan_rejected_and_replanned").verdict, "incomplete");
+  assert.equal(new Set(scopes.values()).size, FOREGROUND_E2E_CASES.length);
+  assert.ok([...scopes.values()].every(({ signal }) => signal.aborted === false));
+  for (const item of summary.cases) {
+    assert.equal(item.caseId, definitionById.get(item.caseId).caseId);
+    assert.ok(["passed", "failed", "incomplete"].includes(item.verdict));
+    assert.equal(Array.isArray(item.assertions), true);
+  }
+});
+
+test("a Case deadline cannot turn complete evidence into success", async () => {
+  const fixtures = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, satisfiedFixture(definition)]));
+  const summary = await runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    runCase: async ({ definition }) => ({
+      deadlineExceeded: definition.caseId === "approved_happy_path",
+      context: fixtures.get(definition.caseId).context,
+    }),
+    readFinalEvidence: async ({ definition }) => fixtures.get(definition.caseId).evidence,
+    now: sequencedClock(),
+  });
+
+  assert.equal(summary.exitCode, 1);
+  const approved = summary.cases.find(({ caseId }) => caseId === "approved_happy_path");
+  assert.equal(approved.verdict, "incomplete");
+  assert.deepEqual(approved.reasonCodes, []);
+});
+
+test("driver and reporter failures cannot suppress final reads or override final Linear and Git evidence", async () => {
+  const fixtures = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, satisfiedFixture(definition)]));
+  const finalReads = [];
+  const summary = await runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    runCase: async ({ definition }) => {
+      if (definition.caseId === "plan_rejected_and_replanned") throw stableError("driver_failed");
+      return { context: fixtures.get(definition.caseId).context };
+    },
+    readFinalEvidence: async ({ definition }) => {
+      finalReads.push(definition.caseId);
+      return fixtures.get(definition.caseId).evidence;
+    },
+    reporter: { caseObservation() { throw stableError("reporter_failed"); } },
+    now: sequencedClock(),
+  });
+
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASE_IDS.slice().sort());
+  assert.equal(summary.exitCode, 0);
+  assert.ok(summary.cases.every(({ verdict }) => verdict === "passed"));
+});
+
+test("an incomplete child-tree read is coverage-missing for every dependent assertion", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
+  const fixture = satisfiedFixture(definition);
+  fixture.evidence.coverage = {
+    isComplete: false,
+    omissions: [{ rootIssueId: fixture.evidence.rootIssueIds[0], sourceId: "plan-issue", scope: "children", code: "foreground_e2e_evidence_pagination_failed" }],
+  };
+
+  assert.ok(evaluateForegroundE2EAssertions({ definition, ...fixture }).every(({ outcome }) => outcome === "coverage_missing"));
+});
+
+test("a fresh Plan review must link one Plan contract, Plan execution/result, and Action", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  findRecord(root, "human_action_request", (record) => record.action_id === "new-action-id").record.related_issue_ids = [];
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "boundary_fresh_plan_review");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
+function incompleteEvidence(caseId, rootIssueIds) {
+  return {
+    caseId,
+    observedAt: "2026-07-26T00:00:00.000Z",
+    rootIssueIds,
+    roots: rootIssueIds.map((rootIssueId) => ({
+      rootIssueId,
+      issues: [],
+      comments: [],
+      relations: [],
+      activity: [],
+      managedRecords: [],
+    })),
+    statusCatalog: [],
+    git: [],
+    coverage: {
+      isComplete: false,
+      omissions: [{
+        rootIssueId: rootIssueIds[0],
+        sourceId: rootIssueIds[0],
+        scope: "root",
+        code: "foreground_e2e_evidence_linear_read_failed",
+      }],
+    },
+  };
+}
+
+function sequencedClock() {
+  let tick = 0;
+  return () => `2026-07-26T00:00:${String(tick += 1).padStart(2, "0")}.000Z`;
+}
+
+function hasCode(code) {
+  return (error) => error?.code === code;
+}
+
+function stableError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function contradictoryFixture(definition, assertionId, fixtureInput) {
+  const value = structuredClone(fixtureInput);
+  const { evidence } = value;
+  const root = evidence.roots[0];
+  switch (assertionId) {
+    case "case_scope_isolated":
+      evidence.git.pop();
+      return value;
+    case "requirement_input_preserved":
+      root.issues.find(({ id }) => id === root.rootIssueId).description = "Unrelated requirement.";
+      return value;
+    case "durable_facts_correlated":
+      root.managedRecords[0].record.root_issue_id = "foreign-root";
+      return value;
+    case "final_evidence_complete":
+      evidence.statusCatalog = [];
+      return value;
+    case "no_e2e_control_facts":
+      appendRecord(root, structuredClone(findRecord(root, "plan_contract").record));
+      recordSource(root, root.managedRecords.at(-1)).authorId = "human";
+      return value;
+    case "work_before_approval":
+      findRecord(root, "stage_execution", (record) => record.stage === "work").record.started_at = at(1);
+      return value;
+    case "duplicate_or_synthetic_completion":
+      appendRecord(root, structuredClone(findRecord(root, "delivery").record));
+      return value;
+    case "usage_missing_or_double_counted":
+      appendRecord(root, structuredClone(findRecord(root, "stage_result", (record) => record.stage === "work").record));
+      return value;
+    case "work_against_rejected_contract":
+      appendRecord(root, stageExecution(root.rootIssueId, "old-cycle", "forbidden-work", "forbidden-execution", "work", "old-contract", 50));
+      return value;
+    case "contract_overwritten_or_history_deleted": {
+      const old = findRecord(root, "plan_contract", (record) => record.plan_contract_digest === "old-contract");
+      removeSource(root, old.source.id);
+      return value;
+    }
+    case "test_created_replacement":
+      recordSource(root, findRecord(root, "plan_contract", (record) => record.plan_contract_digest === "new-contract")).authorId = "human";
+      return value;
+    case "missing_answer_assumed":
+      appendRecord(root, stageExecution(root.rootIssueId, "information-cycle", "assumed-plan", "assumed-execution", "plan", undefined, 1));
+      return value;
+    case "test_unblocks_or_mutates_stage":
+      recordSource(root, findRecord(root, "plan_contract")).authorId = "human";
+      return value;
+    case "system_comment_treated_as_input": {
+      appendHumanComment(root, "system-comment", "System timeline comment", "symphony");
+      findRecord(root, "root_directive").record.consumed_input_ids.push("system-comment");
+      return value;
+    }
+    case "thread_history_lost":
+      root.comments.find(({ id }) => id === "revision-comment").editedAt = null;
+      return value;
+    case "undeclared_revision_or_conductor_interpretation":
+      findRecord(root, "root_directive").record.consumed_input_ids.push("undeclared-input");
+      return value;
+    case "cross_conductor_takeover":
+      appendRecord(root, rootOwnership(root.rootIssueId, "wrong-conductor"));
+      return value;
+    case "shared_workspace_writer": {
+      const second = evidence.roots[1];
+      findRecord(second, "root_ownership").record.delivery_branch = findRecord(root, "root_ownership").record.delivery_branch;
+      return value;
+    }
+    case "telemetry_substitutes_overlap":
+      for (const rootValue of evidence.roots) {
+        rootValue.managedRecords = rootValue.managedRecords.filter(({ record }) => record.kind !== "stage_execution" && record.kind !== "stage_result");
+      }
+      return value;
+    case "inflight_turn_interrupted":
+      findRecord(root, "stage_result", (record) => record.result_id === "work-execution").record.outcome_kind = "canceled";
+      return value;
+    case "test_selects_next_root":
+      root.activity.push(activity("test-schedule-mutation", root.rootIssueId, "human", 16, { toPriority: 1 }));
+      return value;
+    case "semantic_requirement_touch": {
+      const touched = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.preemption?.touchedRootId);
+      touched.issues.find(({ id }) => id === touched.rootIssueId).description = "A different business requirement.";
+      return value;
+    }
+    case "late_old_session_success":
+      appendRecord(root, stageResult(root.rootIssueId, "cycle-id", "plan-issue", "old-success", "verify", "verify_passed", { session: "old-session", revision: "git-revision", at: 60 }));
+      return value;
+    case "checkpoint_or_linear_rewrite":
+      appendRecord(root, structuredClone(findRecord(root, "plan_contract").record));
+      recordSource(root, root.managedRecords.at(-1)).authorId = "human";
+      return value;
+    case "unaffected_conductor_reconfigured": {
+      const continuous = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.recovery?.continuousRootId);
+      appendRecord(continuous, rootOwnership(continuous.rootIssueId, "replacement-conductor"));
+      return value;
+    }
+    default:
+      if (["plan_approval_precedes_work", "stage_chain_delivered", "turn_usage_aggregated", "boundary_in_review_delivery",
+        "rejection_consumed_and_replied", "rejected_lineage_retained", "rejected_contract_superseded", "boundary_fresh_plan_review",
+        "information_action_actionable", "answer_consumed_and_receipted", "answer_drives_fresh_plan", "ordinary_inputs_consumed_once",
+        "thread_transitions_receipted", "revision_supersedes_cycle", "boundary_successor_plan_review",
+        "root_ownership_and_workspace_isolated", "independent_delivery_chains", "cross_conductor_stage_overlap", "boundary_all_roots_delivered",
+        "inflight_stage_completes", "latest_ready_root_runs_next", "remaining_ready_root_progresses", "old_execution_terminal_once",
+        "recovery_uses_fresh_execution", "ownership_persists", "unaffected_root_continues", "boundary_recovered_and_continuous_delivered"].includes(assertionId)) {
+        for (const rootValue of evidence.roots) rootValue.managedRecords = [];
+        return value;
+      }
+      throw new Error(`missing contradictory fixture: ${definition.caseId}.${assertionId}`);
+  }
+}
+
+function findRecord(root, kind, predicate = () => true) {
+  const entry = root.managedRecords.find((candidate) => candidate.record.kind === kind && predicate(candidate.record));
+  assert.ok(entry, `${root.rootIssueId}.${kind}`);
+  return entry;
+}
+
+function recordSource(root, entry) {
+  const source = root.comments.find(({ id }) => id === entry.source.id);
+  assert.ok(source, entry.source.id);
+  return source;
+}
+
+function removeSource(root, sourceId) {
+  root.comments = root.comments.filter(({ id }) => id !== sourceId);
+}
+
+function appendRecord(root, record) {
+  const sourceId = `contradiction-${root.managedRecords.length + 1}`;
+  root.comments.push({
+    id: sourceId, issueId: root.rootIssueId, parentId: null, authorId: "symphony", body: "managed", archivedAt: null,
+    createdAt: DATE, updatedAt: DATE, remoteVersion: DATE, editedAt: null, resolvedAt: null, reactions: [], thread: { rootCommentId: sourceId, state: "unresolved" },
+  });
+  root.managedRecords.push({ issueId: root.rootIssueId, source: { kind: "comment", id: sourceId, remoteVersion: DATE }, record });
+}
+
+function appendHumanComment(root, id, body, authorId) {
+  root.comments.push({ id, issueId: root.rootIssueId, parentId: null, authorId, body, archivedAt: null, createdAt: DATE, updatedAt: DATE, remoteVersion: DATE, editedAt: null, resolvedAt: null, reactions: [], thread: { rootCommentId: id, state: "unresolved" } });
+}
+
+function satisfiedFixture(definition) {
+  switch (definition.caseId) {
+    case "approved_happy_path": return approvedFixture(definition);
+    case "plan_rejected_and_replanned": return rejectedFixture(definition);
+    case "information_requested_and_answered": return informationFixture(definition);
+    case "root_revision_and_comment": return revisionFixture(definition);
+    case "parallel_multi_conductor": return parallelFixture(definition);
+    case "same_conductor_preemption": return preemptionFixture(definition);
+    case "conductor_restart_recovery": return recoveryFixture(definition);
+    default: throw new Error(`unknown fixture: ${definition.caseId}`);
+  }
+}
+
+function approvedFixture(definition) {
+  const root = deliveredRoot(definition, definition.rootTopology[0].rootKey, "approved-root-id");
+  return fixture(definition, [root]);
+}
+
+function rejectedFixture(definition) {
+  const root = rootFacts(definition, "rejected-plan-root", "rejected-root-id", { rootStatus: "Planning" });
+  const oldCycle = addIssue(root, "old-cycle", "Changes Required");
+  const oldPlan = addIssue(root, "old-plan", "Succeeded");
+  const oldAction = addIssue(root, "old-action", "Rejected", { archivedAt: DATE });
+  const newCycle = addIssue(root, "new-cycle", "Planning");
+  const newPlan = addIssue(root, "new-plan", "Planning");
+  const newAction = addIssue(root, "new-action", "Todo");
+  addWorkflowIssue(root, oldCycle, "cycle");
+  addWorkflowIssue(root, oldPlan, "plan");
+  addWorkflowIssue(root, oldAction, "human");
+  addWorkflowIssue(root, newCycle, "cycle");
+  addWorkflowIssue(root, newPlan, "plan");
+  addWorkflowIssue(root, newAction, "human");
+  addRecord(root, planContract(root.id, oldCycle, "old-contract"), { archived: true, sourceIssueId: oldPlan });
+  addRecord(root, stageExecution(root.id, oldCycle, oldPlan, "plan-old", "plan", undefined, 10));
+  addRecord(root, stageResult(root.id, oldCycle, oldPlan, "plan-old", "plan", "plan_completed", { planContract: "old-contract", at: 20 }));
+  addRecord(root, humanActionRequest(root.id, "old-action-id", oldAction, "plan_review", oldCycle, [oldPlan]));
+  addRecord(root, humanActionResolution(root.id, "old-action-id", oldAction, "rejected", "Rejected", ["rejection-reason"]));
+  addHumanComment(root, "rejection-reason", "The plan should preserve the existing utility contract before adding the new behavior.");
+  addRecord(root, rootDirective(root.id, ["rejection-reason"], 25));
+  addRecord(root, reply(root.id, "rejection-reason"));
+  addRecord(root, {
+    kind: "plan_contract_supersession", version: 1, supersession_id: "supersession-1", root_issue_id: root.id,
+    cycle_issue_id: oldCycle, superseded_plan_contract_digest: "old-contract", source_root_directive_id: "directive-1",
+    fresh_plan_issue_id: newPlan, superseded_at: at(26),
+  });
+  addRecord(root, planContract(root.id, newCycle, "new-contract"), { sourceIssueId: newPlan });
+  addRecord(root, stageExecution(root.id, newCycle, newPlan, "plan-new", "plan", undefined, 30));
+  addRecord(root, stageResult(root.id, newCycle, newPlan, "plan-new", "plan", "plan_completed", { planContract: "new-contract", at: 40 }));
+  addRecord(root, humanActionRequest(root.id, "new-action-id", newAction, "plan_review", newCycle, [newPlan]));
+  return fixture(definition, [root]);
+}
+
+function informationFixture(definition) {
+  const root = rootFacts(definition, "information-root", "information-root-id", { rootStatus: "Planning" });
+  const cycle = addIssue(root, "information-cycle", "Planning");
+  const plan = addIssue(root, "information-plan", "Planning");
+  const clarification = addIssue(root, "information-action", "Needs Info", {
+    description: "## Question\nWhich separator should be used?\n\n## Required\nProvide the separator.\n\n## Submit\nReply on this Action.\n\n## Next\nA fresh Plan Review will be created.",
+  });
+  const review = addIssue(root, "information-review", "Todo");
+  addWorkflowIssue(root, cycle, "cycle");
+  addWorkflowIssue(root, plan, "plan");
+  addWorkflowIssue(root, clarification, "human");
+  addWorkflowIssue(root, review, "human");
+  addRecord(root, humanActionRequest(root.id, "clarification-id", clarification, "clarification", cycle));
+  addHumanComment(root, "separator-answer", "Use a colon as the identifier separator.");
+  addRecord(root, humanActionResolution(root.id, "clarification-id", clarification, "answered", "Answered", ["separator-answer"]));
+  addRecord(root, rootDirective(root.id, ["separator-answer"], 20));
+  addRecord(root, reply(root.id, "separator-answer", { reaction: "check" }));
+  addRecord(root, planContract(root.id, cycle, "information-contract", { constraints: ["Use a colon separator."] }), { sourceIssueId: plan });
+  addRecord(root, stageExecution(root.id, cycle, plan, "information-plan-execution", "plan", undefined, 30));
+  addRecord(root, stageResult(root.id, cycle, plan, "information-plan-execution", "plan", "plan_completed", { planContract: "information-contract", at: 40 }));
+  addRecord(root, humanActionRequest(root.id, "information-review-id", review, "plan_review", cycle, [plan]));
+  return fixture(definition, [root]);
+}
+
+function revisionFixture(definition) {
+  const root = rootFacts(definition, "revision-root", "revision-root-id", {
+    rootStatus: "Planning",
+    description: "Replace the uppercase helper with a lowercase identifier helper and focused tests.\n\n## Acceptance Criteria\n- The initial requirement is planned before the revision.\n- The revised requirement starts a successor Cycle with a fresh Plan review.",
+  });
+  const oldCycle = addIssue(root, "revision-old-cycle", "Changes Required");
+  const newCycle = addIssue(root, "revision-new-cycle", "Planning");
+  const plan = addIssue(root, "revision-plan", "Planning");
+  const review = addIssue(root, "revision-review", "Todo");
+  const commentId = addHumanComment(root, "revision-comment", "The original helper name no longer matches the revised requirement.", { editedAt: DATE, thread: { rootCommentId: "revision-comment", state: "unresolved" } });
+  addWorkflowIssue(root, oldCycle, "cycle");
+  addWorkflowIssue(root, newCycle, "cycle");
+  addWorkflowIssue(root, plan, "plan");
+  addWorkflowIssue(root, review, "human");
+  addRecord(root, planContract(root.id, oldCycle, "revision-old-contract"), { archived: true, sourceIssueId: plan });
+  addRecord(root, rootDirective(root.id, ["revision-description", "revision-comment-create", "revision-comment-edit", "revision-thread-resolve", "revision-thread-reopen"], 15));
+  addRecord(root, reply(root.id, "revision-description"));
+  addRecord(root, reply(root.id, "revision-comment-create"));
+  addRecord(root, reply(root.id, "revision-comment-edit"));
+  addRecord(root, reply(root.id, "revision-thread-resolve", {
+    threadAction: "resolve", source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(21), thread_root_comment_id: commentId, thread_state: "resolve" },
+  }));
+  addRecord(root, reply(root.id, "revision-thread-reopen", {
+    threadAction: "reopen", source: { kind: "comment_thread_state", comment_id: commentId, comment_remote_version: at(22), thread_root_comment_id: commentId, thread_state: "reopen" },
+  }));
+  addRecord(root, planContract(root.id, newCycle, "revision-new-contract"), { sourceIssueId: plan });
+  addRecord(root, stageExecution(root.id, newCycle, plan, "revision-plan-execution", "plan", undefined, 30));
+  addRecord(root, stageResult(root.id, newCycle, plan, "revision-plan-execution", "plan", "plan_completed", { planContract: "revision-new-contract", at: 40 }));
+  addRecord(root, humanActionRequest(root.id, "revision-review-id", review, "plan_review", newCycle, [plan]));
+  return fixture(definition, [root], {
+    inputReferences: [
+      { sourceId: "revision-description", kind: "description" },
+      { sourceId: "revision-comment-create", kind: "comment_create", binding: "revision_comment", commentId },
+      { sourceId: "revision-comment-edit", kind: "comment_edit", commentId },
+      { sourceId: "revision-thread-resolve", kind: "thread_transition", commentId, expectedThreadState: "resolve", remoteVersion: at(21) },
+      { sourceId: "revision-thread-reopen", kind: "thread_transition", commentId, expectedThreadState: "reopen", remoteVersion: at(22) },
+    ],
+  });
+}
+
+function parallelFixture(definition) {
+  const roots = definition.rootTopology.map(({ rootKey }, index) => deliveredRoot(definition, rootKey, `parallel-root-${index + 1}`, {
+    conductorId: `conductor-${index + 1}`,
+    started: 10 + index,
+    completed: 50 + index,
+  }));
+  return fixture(definition, roots);
+}
+
+function preemptionFixture(definition) {
+  const byKey = Object.fromEntries(definition.rootTopology.map(({ rootKey }, index) => [rootKey, `preemption-root-${index + 1}`]));
+  const roots = definition.rootTopology.map(({ rootKey }, index) => deliveredRoot(definition, rootKey, byKey[rootKey], {
+    conductorId: "shared-conductor",
+    started: index === 0 ? 1 : index === 1 ? 30 : 60,
+    completed: index === 0 ? 20 : index === 1 ? 50 : 80,
+    rootUpdatedAt: at(index === 1 ? 25 : index === 2 ? 24 : 22),
+  }));
+  const [inflight, touched, remaining] = roots;
+  const touchDescription = definition.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description").descriptionsByRootKey["touched-root"];
+  touched.issues.find(({ id }) => id === touched.id).description = touchDescription;
+  touched.activity.push(activity("touch-activity", touched.id, "human", 15, { updatedDescription: true }));
+  return fixture(definition, roots, {
+    preemption: {
+      inflightRootId: inflight.id,
+      touchedRootId: touched.id,
+      remainingRootId: remaining.id,
+      inflightExecutionId: "work-execution",
+      touchedRootKey: "touched-root",
+      touchActivityId: "touch-activity",
+    },
+  });
+}
+
+function recoveryFixture(definition) {
+  const affected = deliveredRoot(definition, "affected-root", "affected-root-id", { conductorId: "affected-conductor" });
+  const continuous = deliveredRoot(definition, "continuous-root", "continuous-root-id", { conductorId: "continuous-conductor" });
+  addRecord(affected, stageResult(affected.id, "cycle-id", "plan-issue", "old-execution", "plan", "execution_failed", {
+    session: "old-session", at: 5,
+  }));
+  return fixture(definition, [affected, continuous], {
+    recovery: {
+      affectedRootId: affected.id,
+      continuousRootId: continuous.id,
+      oldExecutionId: "old-execution",
+      oldRoleSessionId: "old-session",
+    },
+  });
+}
+
+function deliveredRoot(definition, rootKey, rootId, {
+  conductorId = "conductor-1",
+  started = 10,
+  completed = 50,
+  rootUpdatedAt = at(50),
+} = {}) {
+  const root = rootFacts(definition, rootKey, rootId, { rootStatus: "In Review", rootUpdatedAt });
+  const cycle = addIssue(root, "cycle-id", "Succeeded");
+  const plan = addIssue(root, "plan-issue", "Succeeded");
+  const work = addIssue(root, "work-issue", "Succeeded");
+  const verify = addIssue(root, "verify-issue", "Succeeded");
+  const action = addIssue(root, "plan-review", "Approved");
+  addWorkflowIssue(root, cycle, "cycle");
+  addWorkflowIssue(root, plan, "plan");
+  addWorkflowIssue(root, work, "work");
+  addWorkflowIssue(root, verify, "verify");
+  addWorkflowIssue(root, action, "human");
+  addRecord(root, rootOwnership(root.id, conductorId));
+  addRecord(root, rootDirective(root.id, [], 5));
+  addRecord(root, planContract(root.id, cycle, "contract-id"), { sourceIssueId: plan });
+  addRecord(root, stageExecution(root.id, cycle, plan, "plan-execution", "plan", undefined, started));
+  addRecord(root, stageResult(root.id, cycle, plan, "plan-execution", "plan", "plan_completed", { planContract: "contract-id", at: started + 1 }));
+  addRecord(root, humanActionRequest(root.id, "plan-action", action, "plan_review", cycle, [plan]));
+  addRecord(root, humanActionResolution(root.id, "plan-action", action, "approved", "Approved", []));
+  addRecord(root, stageExecution(root.id, cycle, work, "work-execution", "work", "contract-id", started + 2));
+  addRecord(root, stageResult(root.id, cycle, work, "work-execution", "work", "work_completed", { planContract: "contract-id", at: completed - 3 }));
+  addRecord(root, stageExecution(root.id, cycle, verify, "verify-execution", "verify", "contract-id", completed - 2));
+  addRecord(root, stageResult(root.id, cycle, verify, "verify-execution", "verify", "verify_passed", { planContract: "contract-id", revision: "git-revision", at: completed }));
+  addRecord(root, verifyResult(root.id, cycle, verify, "verify-execution"));
+  addRecord(root, delivery(root.id, cycle, "verify-execution", "git-revision"));
+  addRecord(root, cycleOutcome(root.id, cycle, 30));
+  return root;
+}
+
+function rootFacts(definition, rootKey, id, {
+  rootStatus = "In Review",
+  description,
+  rootUpdatedAt = at(50),
+} = {}) {
+  const input = definition.rootCreationInputs.find((candidate) => candidate.rootKey === rootKey);
+  const root = {
+    id,
+    rootIssueId: id,
+    issues: [issue(id, id, rootStatus, { depth: 0, description: description ?? input.description, updatedAt: rootUpdatedAt })],
+    comments: [], relations: [], activity: [], managedRecords: [],
+  };
+  return root;
+}
+
+function fixture(definition, roots, extraContext = {}) {
+  const rootIssueIds = roots.map(({ id }) => id);
+  return {
+    context: {
+      humanActorId: "human",
+      rootIssueIdsByKey: Object.fromEntries(definition.rootTopology.map(({ rootKey }, index) => [rootKey, rootIssueIds[index]])),
+      ...extraContext,
+    },
+    evidence: {
+      caseId: definition.caseId,
+      observedAt: DATE,
+      rootIssueIds,
+      roots: roots.map(({ id, ...root }) => ({ rootIssueId: id, ...root })),
+      statusCatalog: [{ id: "status-review", name: "In Review", type: "started", position: 1, archivedAt: null, createdAt: DATE, updatedAt: DATE, remoteVersion: DATE }],
+      git: rootIssueIds.map((rootIssueId) => ({ rootIssueId, repositoryRoot: `/repository/${rootIssueId}`, repositoryRootCanonical: `/repository/${rootIssueId}`, branch: "main", headRevision: "git-revision", status: "", headChangedPaths: ["src/helper.ts"] })),
+      coverage: { isComplete: true, omissions: [] },
+    },
+  };
+}
+
+function addIssue(root, id, stateName, options = {}) {
+  root.issues.push(issue(id, root.id, stateName, { depth: 1, ...options }));
+  return id;
+}
+
+function addWorkflowIssue(root, issueKey, issueKind) {
+  addRecord(root, { kind: "workflow_issue", version: 1, issue_key: issueKey, root_issue_id: root.id, parent_issue_id: root.id, issue_kind: issueKind });
+}
+
+function addHumanComment(root, id, body, options = {}) {
+  root.comments.push({
+    id, issueId: root.id, parentId: null, authorId: "human", body, archivedAt: null,
+    createdAt: DATE, updatedAt: options.updatedAt ?? DATE, remoteVersion: options.remoteVersion ?? DATE,
+    editedAt: options.editedAt ?? null, resolvedAt: null, reactions: [], thread: options.thread ?? { rootCommentId: id, state: "unresolved" },
+  });
+  return id;
+}
+
+function addRecord(root, record, { archived = false, sourceIssueId = root.id } = {}) {
+  const sourceId = `record-${root.managedRecords.length + 1}`;
+  root.comments.push({
+    id: sourceId, issueId: sourceIssueId, parentId: null, authorId: "symphony", body: "managed", archivedAt: archived ? DATE : null,
+    createdAt: DATE, updatedAt: DATE, remoteVersion: DATE, editedAt: null, resolvedAt: null, reactions: [], thread: { rootCommentId: sourceId, state: "unresolved" },
+  });
+  root.managedRecords.push({ issueId: sourceIssueId, source: { kind: "comment", id: sourceId, remoteVersion: DATE }, record });
+}
+
+function issue(id, rootIssueId, stateName, { depth, description = "", archivedAt = null, updatedAt = DATE } = {}) {
+  return { id, identifier: id, rootIssueId, parentId: depth === 0 ? null : rootIssueId, projectId: "project", teamId: "team", creatorId: depth === 0 ? "human" : "symphony", title: id, description, state: { id: `state-${stateName}`, name: stateName, type: "started" }, archivedAt, createdAt: DATE, updatedAt, remoteVersion: updatedAt, depth };
+}
+
+function rootOwnership(rootIssueId, conductorId) {
+  return { kind: "root_ownership", version: 1, root_issue_id: rootIssueId, conductor_id: conductorId, performer_profile_id: `${conductorId}-profile`, delivery_branch: `branch-${conductorId}-${rootIssueId}`, owner_generation: "generation" };
+}
+
+function rootDirective(rootIssueId, consumedInputIds, moment) {
+  return {
+    kind: "root_directive", version: 1, root_directive_id: `directive-${moment}`, root_issue_id: rootIssueId, reconciler_session_id: "root-session", reconciler_turn_id: `root-turn-${moment}`,
+    based_on_target_root_digest: "digest", consumed_input_ids: consumedInputIds, directive: { kind: "acknowledge" }, accepted_at: at(moment),
+    model_turn: modelTurn(rootIssueId, "root_reconciler", `root-turn-record-${moment}`, moment),
+  };
+}
+
+function planContract(rootIssueId, cycleIssueId, digest, { constraints = [] } = {}) {
+  return { kind: "plan_contract", version: 1, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, plan_contract_digest: digest, objective: "Objective", included_scope: ["scope"], excluded_scope: [], assumptions: [], constraints, acceptance_criteria: [], verification_requirements: [], proposed_work_dag: { work_nodes: [], dependency_edges: [], verify_node: {} } };
+}
+
+function stageExecution(rootIssueId, cycleIssueId, nodeIssueId, executionId, stage, planContractDigest, moment) {
+  return { kind: "stage_execution", version: 1, stage_execution_id: executionId, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, node_issue_id: nodeIssueId, stage, ...(planContractDigest ? { plan_contract_digest: planContractDigest } : {}), context_digest: `context-${executionId}`, source_manifest: [], coverage: { is_complete: true, omissions: [] }, instruction_set_id: "instruction", execution_policy_id: "policy", limits: {}, repository_revision: "git-base", started_at: at(moment), deadline_at: at(moment + 100) };
+}
+
+function stageResult(rootIssueId, cycleIssueId, nodeIssueId, executionId, stage, outcome, { planContract, revision, session = `${stage}-session`, at: moment } = {}) {
+  return { kind: "stage_result", version: 1, result_id: executionId, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, node_issue_id: nodeIssueId, stage, role_session_id: session, role_turn_id: `${executionId}-turn`, observed_tree_digest: "tree", context_digest: `context-${executionId}`, outcome_kind: outcome, summary: "result", source_manifest: [], completed_at: at(moment), model_turn: modelTurn(rootIssueId, stage, `${executionId}-turn-record`, moment, { cycleIssueId, nodeIssueId, executionId, outcome, session }), ...(planContract ? { plan_contract_digest: planContract } : {}), ...(stage === "plan" && planContract ? { plan_contract: {}, proposed_work_dag: {} } : {}), ...(stage === "verify" && revision ? { verify_conclusion: "passed", verified_revision: revision } : {}) };
+}
+
+function modelTurn(rootIssueId, role, turnRecordId, moment, { cycleIssueId = undefined, nodeIssueId = undefined, executionId = undefined, outcome = "directive_accepted", session = "root-session" } = {}) {
+  return { turn_record_id: turnRecordId, role, root_issue_id: rootIssueId, ...(cycleIssueId ? { cycle_issue_id: cycleIssueId, target_issue_id: nodeIssueId, stage_execution_id: executionId, role_session_id: session, role_turn_id: `${turnRecordId}-role` } : { reconciler_session_id: session, reconciler_turn_id: `${turnRecordId}-role` }), invocation_state: "confirmed", model: "gpt-5", outcome, usage: { status: "measured", input_tokens: 5, cached_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0, total_tokens: 10 }, terminal_at: at(moment) };
+}
+
+function humanActionRequest(rootIssueId, actionId, actionIssueId, actionKind, cycleIssueId, relatedIssueIds = []) {
+  return { kind: "human_action_request", version: 1, action_id: actionId, action_issue_id: actionIssueId, action_kind: actionKind, parent_scope: "cycle", root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, related_issue_ids: relatedIssueIds, proposal_digest: "proposal", expected_parent_remote_version: DATE, created_at: DATE };
+}
+
+function humanActionResolution(rootIssueId, actionId, actionIssueId, outcome, terminalStatus, sourceCommentIds, moment = 11) {
+  return { kind: "human_action_resolution", version: 1, resolution_id: `${actionId}-resolution`, root_issue_id: rootIssueId, action_id: actionId, action_issue_id: actionIssueId, action_kind: actionId.includes("clarification") ? "clarification" : "plan_review", outcome, terminal_status: terminalStatus, terminal_remote_version: DATE, source_comment_ids: sourceCommentIds, source_comment_versions: sourceCommentIds.map(() => DATE), actor_kind: "human", proposal_digest: "proposal", resolved_at: at(moment) };
+}
+
+function reply(rootIssueId, sourceInputId, { reaction = "check", threadAction = "keep_open", source = { kind: "comment_body", comment_id: sourceInputId, comment_body_digest: "digest" } } = {}) {
+  return { kind: "root_reconciler_reply", version: 1, reply_id: `reply-${sourceInputId}`, reply_write_id: `write-${sourceInputId}`, root_directive_id: "directive-1", source_input_id: sourceInputId, source, target_issue_id: rootIssueId, disposition: "accepted", reaction, thread_action: threadAction, materialized_outcome_refs: [], rendered_schema_version: "1", replied_at: DATE };
+}
+
+function verifyResult(rootIssueId, cycleIssueId, nodeIssueId, stageExecutionId) {
+  return { kind: "verify_result", version: 1, stage_execution_id: stageExecutionId, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, node_issue_id: nodeIssueId, conclusion: "passed", criteria_results: [], checks: [], verified_revision: "git-revision" };
+}
+
+function delivery(rootIssueId, cycleIssueId, verifyResultId, revision) {
+  return { kind: "delivery", version: 1, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, verify_result_id: verifyResultId, verified_revision: revision, delivery_kind: "local_branch", delivery_branch: `delivery-${rootIssueId}`, delivered_at: DATE };
+}
+
+function cycleOutcome(rootIssueId, cycleIssueId, totalTokens) {
+  return { kind: "cycle_outcome", version: 1, cycle_outcome_id: `outcome-${cycleIssueId}`, root_issue_id: rootIssueId, cycle_issue_id: cycleIssueId, source_root_directive_id: "directive-1", conclusion: "succeeded", completed_work_ids: [], unresolved_finding_ids: [], attempted_approach_refs: [], verification_evidence_refs: [], git_revision: "git-revision", budget_usage: { scope: "cycle", source_record_count: 3, source_digest: "digest", is_complete: true, unknown_turn_count: 0, groups: [{ cycle_issue_id: cycleIssueId, role: "plan", model: "gpt-5", input_tokens: 15, cached_input_tokens: 0, output_tokens: 15, reasoning_output_tokens: 0, total_tokens: totalTokens, unavailable_turn_count: 0 }] }, concluded_at: DATE };
+}
+
+function activity(id, issueId, actorId, moment, extra = {}) {
+  return { id, issueId, actorId, createdAt: at(moment), updatedAt: at(moment), remoteVersion: at(moment), archived: false, fromStateId: null, toStateId: null, fromPriority: null, toPriority: null, updatedDescription: false, ...extra };
+}
+
+function at(seconds) { return `2026-07-26T00:00:${String(seconds).padStart(2, "0")}.000Z`; }
+
+const DATE = at(0);

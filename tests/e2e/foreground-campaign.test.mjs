@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import { FOREGROUND_E2E_CASE_IDS } from "../../tools/e2e/cases.mjs";
+import { runForegroundE2ECampaign } from "../../tools/e2e/foreground-campaign.mjs";
 
 const campaignCli = "tools/e2e/run-foreground-campaign.mjs";
 
@@ -72,6 +73,27 @@ test("foreground E2E skeleton never converts complete configuration into synthet
     issues: [],
   });
   assert.doesNotMatch(result.stderr, /symphony-token|human-token|client-secret|codex-key/u);
+});
+
+test("Campaign enters the Case scheduler only after its environment is ready and closes it after the summary", async () => {
+  const events = [];
+  const summary = await runForegroundE2ECampaign({
+    environment: validEnvironment(),
+    runEnvironment: async ({ config }) => {
+      events.push(`ready:${config.codex.model}`);
+      return {
+        environmentId: "foreground-runtime",
+        async close() { events.push("closed"); },
+      };
+    },
+    runCases: async ({ config, runtime }) => {
+      events.push(`running:${runtime.environmentId}:${config.linear.projectSlugId}`);
+      return { exitCode: 1, cases: [] };
+    },
+  });
+
+  assert.deepEqual(events, ["ready:gpt-5-codex", "running:foreground-runtime:project-slug", "closed"]);
+  assert.deepEqual(summary, { exitCode: 1, cases: [] });
 });
 
 function runCampaignCli(environment) {
