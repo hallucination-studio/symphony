@@ -4,6 +4,7 @@ import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const TERMINAL_HUMAN_ACTION_STATUSES = new Set(["Approved", "Rejected", "Answered", "Canceled"]);
+const PLAN_REVIEW_TERMINAL_STATUSES = new Set(["Approved", "Rejected"]);
 const HUMAN_ACTION_KIND_LABELS = new Set([
   "Plan Review",
   "Clarification",
@@ -73,11 +74,11 @@ export async function createForegroundE2EHumanActor({
       return Object.freeze({ rootIssueId: issue.id, identifier: issue.identifier });
     },
 
-    async waitForPlanReviewAction({ rootIssueId, signal } = {}) {
+    async waitForPlanReviewAction({ rootIssueId, terminalStatus, signal } = {}) {
       const known = assertKnownRoot(roots, rootIssueId);
-      assertSignal(signal);
+      assertPlanReviewWaitInput({ terminalStatus, signal });
       while (true) {
-        const action = await activePlanReviewAction({ client, rootIssueId, known, actorId });
+        const action = await activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus });
         if (action) return Object.freeze(action);
         await waitForPlanReviewChange(signal);
       }
@@ -297,7 +298,7 @@ function assertKnownRoot(roots, rootIssueId) {
   return known;
 }
 
-async function activePlanReviewAction({ client, rootIssueId, known, actorId }) {
+async function activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus }) {
   const root = await readIssue(client, rootIssueId, "foreground_e2e_human_plan_review_target_invalid");
   const rootLabels = await readLabels(root, "foreground_e2e_human_plan_review_target_invalid");
   if (!matchesKnownRoot(root, rootLabels, known)) {
@@ -321,16 +322,21 @@ async function activePlanReviewAction({ client, rootIssueId, known, actorId }) {
       candidates.push(child);
     }
   }
-  if (candidates.length > 1) throw stableError("foreground_e2e_human_plan_review_ambiguous");
-  const action = candidates[0];
-  if (!action) return undefined;
-  const statuses = await readTeamStatuses(client, action.teamId, "foreground_e2e_human_plan_review_read_failed");
-  const approved = statuses.filter(({ name, archivedAt }) => name === "Approved" && !archivedAt);
-  const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
-  if (approved.length !== 1 || current.length !== 1 || !["Todo", "In Progress"].includes(current[0].name)) {
+  if (candidates.length === 0) return undefined;
+  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_plan_review_read_failed");
+  const terminal = statuses.filter(({ name, archivedAt }) => name === terminalStatus && !archivedAt);
+  if (terminal.length !== 1) throw stableError("foreground_e2e_human_plan_review_status_invalid");
+
+  const pending = candidates.filter((action) => {
+    const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
+    if (current.length !== 1) throw stableError("foreground_e2e_human_plan_review_status_invalid");
+    if (["Todo", "In Progress"].includes(current[0].name)) return true;
+    if (["Approved", "Rejected", "Canceled"].includes(current[0].name)) return false;
     throw stableError("foreground_e2e_human_plan_review_status_invalid");
-  }
-  return { actionIssueId: action.id, approvedStatusId: approved[0].id };
+  });
+  if (pending.length > 1) throw stableError("foreground_e2e_human_plan_review_ambiguous");
+  const action = pending[0];
+  return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
 }
 
 function matchesChildScope(issue, { parentId, known }) {
@@ -345,7 +351,8 @@ function isPlanReviewAction(labels) {
 }
 
 function isProductPlanReviewAction(issue) {
-  return typeof issue.description === "string" && issue.description.includes("## Plan Contract") && issue.description.includes("Approved:");
+  return typeof issue.description === "string" && issue.description.includes("## Plan Contract") &&
+    issue.description.includes("Approved:") && issue.description.includes("Rejected:");
 }
 
 async function readActorId(client) {
@@ -440,7 +447,10 @@ async function readAllNodes(readPage, code) {
   throw stableError(code);
 }
 
-function assertSignal(signal) {
+function assertPlanReviewWaitInput({ terminalStatus, signal }) {
+  if (!PLAN_REVIEW_TERMINAL_STATUSES.has(terminalStatus)) {
+    throw stableError("foreground_e2e_human_plan_review_input_invalid");
+  }
   if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_human_plan_review_input_invalid");
   }

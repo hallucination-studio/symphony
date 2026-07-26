@@ -88,9 +88,32 @@ test("Human Actor waits for exactly one product-created Plan Review Action benea
   });
   fixture.addPlanReviewAction(root.rootIssueId);
 
-  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId });
+  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" });
 
-  assert.deepEqual(action, { actionIssueId: "plan-review-action-1", approvedStatusId: "approved-state" });
+  assert.deepEqual(action, { actionIssueId: "plan-review-action-1", terminalStatusId: "approved-state" });
+});
+
+test("Human Actor ignores terminal Plan Review history and waits for the fresh requested Action", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "plan_rejected_and_replanned",
+    rootKey: "rejected-plan-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addPlanReviewAction(root.rootIssueId, { actionId: "rejected-plan-review", stateId: "rejected-state" });
+  fixture.addPlanReviewAction(root.rootIssueId, { actionId: "replacement-plan-review" });
+
+  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Rejected" });
+
+  assert.deepEqual(action, { actionIssueId: "replacement-plan-review", terminalStatusId: "rejected-state" });
 });
 
 test("Human Actor rejects a Plan Review Action created by the Human actor", async () => {
@@ -111,7 +134,7 @@ test("Human Actor rejects a Plan Review Action created by the Human actor", asyn
   fixture.addPlanReviewAction(root.rootIssueId, { actionCreatorId: "human-1" });
 
   await assert.rejects(
-    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId }),
+    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" }),
     hasCode("foreground_e2e_human_plan_review_creator_invalid"),
   );
 });
@@ -264,6 +287,7 @@ test("Human Actor creates each frozen Case Root at most once", async () => {
 
 function createLinearFixture() {
   const calls = { createIssue: [], updateIssue: [], createComment: [], updateComment: [], resolve: [], reopen: [], reactions: [] };
+  const productCycles = [];
   const comments = new Map([
     ["unmanaged-comment", comment({ id: "unmanaged-comment", issueId: "human-action-1", body: "Managed reply", userId: "symphony-1" })],
   ]);
@@ -294,10 +318,15 @@ function createLinearFixture() {
     comments,
     createIssuePayload: undefined,
     client: undefined,
-    addPlanReviewAction(rootIssueId, { actionCreatorId = "symphony-1" } = {}) {
+    addPlanReviewAction(rootIssueId, {
+      actionCreatorId = "symphony-1",
+      actionId = `plan-review-action-${productCycles.length + 1}`,
+      stateId = "todo-state",
+    } = {}) {
       const root = issues.get(rootIssueId);
+      const cycleId = `cycle-${productCycles.length + 1}`;
       const cycle = issue({
-        id: "cycle-1",
+        id: cycleId,
         teamId: "team-1",
         projectId: "project-1",
         stateId: "planning-state",
@@ -308,19 +337,20 @@ function createLinearFixture() {
         labels: [{ id: "cycle-label", name: "Cycle" }],
       });
       const action = issue({
-        id: "plan-review-action-1",
+        id: actionId,
         teamId: "team-1",
         projectId: "project-1",
-        stateId: "todo-state",
+        stateId,
         title: "Approve the Plan Contract",
-        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.",
+        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.\nRejected: add a fresh comment explaining why.",
         priority: 2,
         creatorId: actionCreatorId,
         labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
       });
       cycle.parentId = rootIssueId;
       action.parentId = cycle.id;
-      root.children = async () => ({ nodes: [cycle], pageInfo: { hasNextPage: false } });
+      productCycles.push(cycle);
+      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
       cycle.children = async () => ({ nodes: [action], pageInfo: { hasNextPage: false } });
       issues.set(cycle.id, cycle);
       issues.set(action.id, action);
@@ -365,6 +395,7 @@ function createLinearFixture() {
             nodes: [
               { id: "todo-state", name: "Todo", archivedAt: null },
               { id: "approved-state", name: "Approved", archivedAt: null },
+              { id: "rejected-state", name: "Rejected", archivedAt: null },
             ],
             pageInfo: { hasNextPage: false },
           };

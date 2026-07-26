@@ -16,15 +16,16 @@ export async function runApprovedHappyPathCase({ definition, human, rootCreation
   }
   const action = await human.waitForPlanReviewAction({
     rootIssueId: root.rootIssueId,
+    terminalStatus: "Approved",
     ...(signal ? { signal } : {}),
   });
-  if (!identifier(action?.actionIssueId) || !identifier(action?.approvedStatusId)) {
+  if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
     throw stableError("foreground_e2e_approved_plan_review_invalid");
   }
   await human.setHumanActionTerminalStatus({
     issueId: action.actionIssueId,
     terminalStatus: "Approved",
-    stateId: action.approvedStatusId,
+    stateId: action.terminalStatusId,
   });
 
   return Object.freeze({

@@ -234,7 +234,7 @@ const CASE_HANDLERS = Object.freeze({
     rejection_consumed_and_replied: (facts) => facts.rejectedPlan().consumedAndReplied ? "satisfied" : "contradicted",
     rejected_lineage_retained: (facts) => facts.rejectedPlan().lineageRetained ? "satisfied" : "contradicted",
     rejected_contract_superseded: (facts) => facts.rejectedPlan().superseded ? "satisfied" : "contradicted",
-    boundary_fresh_plan_review: (facts) => facts.freshPlanReview().active ? "satisfied" : "contradicted",
+    boundary_fresh_plan_review: (facts) => facts.rejectedPlan().freshPlanReviewActive ? "satisfied" : "contradicted",
     work_against_rejected_contract: (facts) => facts.rejectedPlan().workAgainstRejected ? "contradicted" : "satisfied",
     contract_overwritten_or_history_deleted: (facts) => facts.rejectedPlan().historyOverwritten ? "contradicted" : "satisfied",
     test_created_replacement: (facts) => facts.rejectedPlan().humanCreatedReplacement ? "contradicted" : "satisfied",
@@ -519,31 +519,131 @@ function duplicateOrSyntheticCompletion(facts) {
 
 function rejectedPlanFacts(facts) {
   const rootId = onlyRootId(facts);
+  const input = rejectedPlanInput(facts, rootId);
+  if (!identifier(rootId) || !input) return rejectedPlanFailureFacts();
   const requests = facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "plan_review");
-  const rejected = facts.recordsOf("human_action_resolution", rootId).filter(({ record }) => record.outcome === "rejected" && record.terminal_status === "Rejected");
-  const rejection = rejected.find(({ record }) => requests.some(({ record: request }) => request.action_id === record.action_id));
-  const oldContract = facts.recordsOf("plan_contract", rootId).find((entry) => facts.recordsOf("plan_contract_supersession", rootId)
-    .some(({ record }) => record.superseded_plan_contract_digest === entry.record.plan_contract_digest));
-  const supersession = oldContract && facts.recordsOf("plan_contract_supersession", rootId)
-    .find(({ record }) => record.superseded_plan_contract_digest === oldContract.record.plan_contract_digest);
-  const replacement = supersession && facts.recordsOf("plan_contract", rootId)
-    .find(({ record }) => record.plan_contract_digest !== oldContract.record.plan_contract_digest);
+  const oldRequest = only(requests.filter(({ record }) => record.action_issue_id === input.rejectedActionIssueId));
+  const rejected = facts.recordsOf("human_action_resolution", rootId).filter(({ record }) =>
+    record.action_issue_id === input.rejectedActionIssueId && record.outcome === "rejected" && record.terminal_status === "Rejected",
+  );
+  const rejection = only(rejected);
+  const oldPlanIssueId = only(oldRequest?.record.related_issue_ids ?? []);
+  const oldAction = facts.issue(input.rejectedActionIssueId);
+  const reason = facts.comment(input.commentId);
   const replies = facts.recordsOf("root_reconciler_reply", rootId);
-  const consumed = facts.recordsOf("root_directive", rootId).some(({ record }) => Array.isArray(record.consumed_input_ids) &&
-    rejection?.record.source_comment_ids?.every((id) => record.consumed_input_ids.includes(id)));
-  const oldAction = rejection && requests.find(({ record }) => record.action_id === rejection.record.action_id);
-  const lineageRetained = Boolean(oldContract && oldAction && rejection && oldContract.source && oldAction.source && rejection.source);
+  const consumedIds = facts.recordsOf("root_directive", rootId).flatMap(({ record }) =>
+    Array.isArray(record.consumed_input_ids) ? record.consumed_input_ids : [],
+  );
+  const consumed = consumedIds.filter((id) => id === input.sourceId).length === 1;
+  const replied = replies.filter(({ record }) => record.source_input_id === input.sourceId &&
+    record.target_issue_id === input.rejectedActionIssueId).length === 1;
+  const rejectionMatchesInput = Boolean(rejection && oldRequest && reason && reason.issueId === input.rejectedActionIssueId &&
+    reason.body === frozenActionCommentBody(facts.definition, "rejection_reason") && facts.humanActorIds.has(reason.authorId) &&
+    exactList(rejection.record.source_comment_ids, [input.sourceId]));
+
+  const contracts = facts.recordsOf("plan_contract", rootId);
+  const supersessions = facts.recordsOf("plan_contract_supersession", rootId);
+  const oldContract = only(contracts.filter((entry) =>
+    entry.record.cycle_issue_id === oldRequest?.record.cycle_issue_id && entry.issueId === oldPlanIssueId,
+  ));
+  const supersession = oldContract && only(supersessions.filter(({ record }) =>
+    record.superseded_plan_contract_digest === oldContract.record.plan_contract_digest,
+  ));
+  const oldExecution = oldContract && only(facts.recordsOf("stage_execution", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === oldContract.record.cycle_issue_id &&
+    record.node_issue_id === oldPlanIssueId,
+  ));
+  const oldResult = oldContract && oldExecution && only(facts.recordsOf("stage_result", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === oldContract.record.cycle_issue_id &&
+    record.node_issue_id === oldPlanIssueId && record.plan_contract_digest === oldContract.record.plan_contract_digest &&
+    record.model_turn?.stage_execution_id === oldExecution.record.stage_execution_id,
+  ));
+  const lineageRetained = Boolean(oldContract && oldRequest && rejection && oldAction && oldExecution && oldResult &&
+    facts.source(oldContract) && facts.source(oldRequest) && facts.source(rejection) && facts.source(oldExecution) && facts.source(oldResult));
+
+  const replacement = supersession && only(contracts.filter((entry) =>
+    entry.record.plan_contract_digest !== oldContract.record.plan_contract_digest &&
+    entry.issueId === supersession.record.fresh_plan_issue_id,
+  ));
+  const replacementExecution = replacement && only(facts.recordsOf("stage_execution", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === replacement.record.cycle_issue_id &&
+    record.node_issue_id === supersession.record.fresh_plan_issue_id && record.stage_execution_id !== oldExecution?.record.stage_execution_id,
+  ));
+  const replacementResult = replacement && replacementExecution && only(facts.recordsOf("stage_result", rootId).filter(({ record }) =>
+    record.stage === "plan" && record.cycle_issue_id === replacement.record.cycle_issue_id &&
+    record.node_issue_id === supersession.record.fresh_plan_issue_id &&
+    record.plan_contract_digest === replacement.record.plan_contract_digest &&
+    record.model_turn?.stage_execution_id === replacementExecution.record.stage_execution_id,
+  ));
+  const replacementAction = replacement && only(requests.filter(({ record }) =>
+    record.action_issue_id === input.replacementActionIssueId && record.cycle_issue_id === replacement.record.cycle_issue_id &&
+    Array.isArray(record.related_issue_ids) && record.related_issue_ids.includes(supersession.record.fresh_plan_issue_id),
+  ));
+  const replacementActionIssue = facts.issue(input.replacementActionIssueId);
+  const replacementFacts = [replacement, replacementExecution, replacementResult, replacementAction];
+  const replacementWrittenByHuman = replacementFacts.some((entry) => entry && facts.humanActorIds.has(facts.source(entry)?.authorId)) ||
+    facts.humanActorIds.has(replacementActionIssue?.creatorId);
+  const superseded = Boolean(lineageRetained && replacement && replacementExecution && replacementResult && replacementAction &&
+    replacement.record.plan_contract_digest !== oldContract.record.plan_contract_digest &&
+    input.rejectedActionIssueId !== input.replacementActionIssueId && !replacementWrittenByHuman);
   const workAgainstRejected = Boolean(oldContract && facts.recordsOf("stage_execution", rootId)
     .some(({ record }) => record.stage === "work" && record.plan_contract_digest === oldContract.record.plan_contract_digest));
-  const historyOverwritten = Boolean(oldContract && !facts.source(oldContract));
-  const humanCreatedReplacement = Boolean(replacement && facts.humanActorIds.has(facts.source(replacement)?.authorId));
+  const historyOverwritten = !lineageRetained;
   return {
-    consumedAndReplied: Boolean(rejection && consumed && rejection.record.source_comment_ids?.every((id) => replies.some(({ record }) => record.source_input_id === id))),
+    consumedAndReplied: rejectionMatchesInput && consumed && replied,
     lineageRetained,
-    superseded: Boolean(oldContract && supersession && replacement && replacement.record.plan_contract_digest !== oldContract.record.plan_contract_digest),
+    superseded,
+    freshPlanReviewActive: Boolean(superseded && replacementAction && activeHumanAction(facts, replacementAction)),
     workAgainstRejected,
     historyOverwritten,
-    humanCreatedReplacement,
+    humanCreatedReplacement: replacementWrittenByHuman,
+  };
+}
+
+function rejectedPlanInput(facts, rootId) {
+  const context = facts.context;
+  const bindings = Array.isArray(context?.inputReferences) ? context.inputReferences : [];
+  const reason = only(bindings.filter(({ sourceId, kind, binding, commentId }) =>
+    kind === "comment_create" && binding === "rejection_reason" && identifier(sourceId) && sourceId === commentId,
+  ));
+  if (reason && identifier(context?.rejectedActionIssueId) && identifier(context?.replacementActionIssueId) &&
+      context.rejectedActionIssueId !== context.replacementActionIssueId) {
+    return { ...reason, rejectedActionIssueId: context.rejectedActionIssueId, replacementActionIssueId: context.replacementActionIssueId };
+  }
+  if (Array.isArray(context?.inputReferences) || context?.rejectedActionIssueId !== undefined ||
+      context?.replacementActionIssueId !== undefined) return undefined;
+
+  const rejected = facts.recordsOf("human_action_resolution", rootId).filter(({ record }) =>
+    record.outcome === "rejected" && record.terminal_status === "Rejected" && exactList(record.source_comment_ids, [record.source_comment_ids?.[0]]),
+  );
+  const resolution = only(rejected);
+  const sourceId = resolution?.record.source_comment_ids?.[0];
+  const requests = facts.recordsOf("human_action_request", rootId).filter(({ record }) => record.action_kind === "plan_review");
+  const oldRequest = only(requests.filter(({ record }) => record.action_issue_id === resolution?.record.action_issue_id));
+  const replacement = only(requests.filter(({ record }) => record.action_issue_id !== resolution?.record.action_issue_id &&
+    activeHumanAction(facts, { record }),
+  ));
+  if (!resolution || !oldRequest || !replacement || !identifier(sourceId) ||
+      facts.comment(sourceId)?.body !== frozenActionCommentBody(facts.definition, "rejection_reason")) return undefined;
+  return {
+    sourceId,
+    kind: "comment_create",
+    binding: "rejection_reason",
+    commentId: sourceId,
+    rejectedActionIssueId: resolution.record.action_issue_id,
+    replacementActionIssueId: replacement.record.action_issue_id,
+  };
+}
+
+function rejectedPlanFailureFacts() {
+  return {
+    consumedAndReplied: false,
+    lineageRetained: false,
+    superseded: false,
+    freshPlanReviewActive: false,
+    workAgainstRejected: false,
+    historyOverwritten: true,
+    humanCreatedReplacement: false,
   };
 }
 
@@ -594,7 +694,8 @@ function informationAnswerFacts(facts) {
     .some(({ record }) => record.stage === "plan" && parseTime(record.started_at) < answerAt);
   return {
     actionable,
-    consumedAndReceipted: Boolean(answer && answered && consumed && replies.length === 1 && replies[0].record.reaction !== "none"),
+    consumedAndReceipted: Boolean(answer && answered && answer.issueId === request?.record.action_issue_id && consumed &&
+      replies.length === 1 && replies[0].record.target_issue_id === request?.record.action_issue_id && replies[0].record.reaction !== "none"),
     drivesFreshPlan: Boolean(contract && facts.recordsOf("stage_execution", rootId).some(({ record }) => record.stage === "plan" && parseTime(record.started_at) > answerAt)),
     assumedBeforeAnswer,
   };
@@ -763,10 +864,12 @@ function requirementsPreserved(definition, issues, comments, context, records) {
   const edits = new Set((definition.declaredUserInteractions ?? [])
     .filter(({ kind }) => kind === "edit_comment").map(({ commentBinding }) => commentBinding));
   const bindings = Array.isArray(context?.inputReferences) ? context.inputReferences : [];
-  const declaredComments = definition.declaredUserInteractions?.filter(({ kind }) => kind === "create_comment" || kind === "edit_comment") ?? [];
+  const declaredComments = definition.declaredUserInteractions?.filter(({ kind }) =>
+    kind === "create_comment" || kind === "create_action_comment" || kind === "edit_comment",
+  ) ?? [];
   return declaredComments.every((interaction) => {
     if (comments.some((comment) => comment.body === interaction.body)) return true;
-    if (interaction.kind !== "create_comment" || !edits.has(interaction.commentBinding)) return false;
+    if ((interaction.kind !== "create_comment" && interaction.kind !== "create_action_comment") || !edits.has(interaction.commentBinding)) return false;
     const binding = bindings.find(({ kind, binding: inputBinding }) => kind === "comment_create" && inputBinding === interaction.commentBinding);
     return Boolean(binding && records.some(({ record }) => record.kind === "root_reconciler_reply" && record.source_input_id === binding.sourceId));
   });
@@ -791,6 +894,21 @@ function activeSource(facts, entry) {
 function activeHumanAction(facts, entry) {
   const issue = facts.issue(entry.record.action_issue_id);
   return Boolean(issue && issue.archivedAt === null && !TERMINAL_HUMAN_STATUSES.has(issue.state?.name));
+}
+
+function only(values) {
+  return Array.isArray(values) && values.length === 1 ? values[0] : undefined;
+}
+
+function exactList(value, expected) {
+  return Array.isArray(value) && value.length === expected.length && value.every((item, index) => item === expected[index]);
+}
+
+function frozenActionCommentBody(definition, inputBinding) {
+  const interaction = definition?.declaredUserInteractions?.find(({ kind, inputBinding: binding }) =>
+    kind === "create_action_comment" && binding === inputBinding,
+  );
+  return typeof interaction?.body === "string" ? interaction.body : undefined;
 }
 
 function actionableActionDescription(description) {

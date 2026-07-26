@@ -309,6 +309,10 @@ condition.
 时机；这种观察只决定是否执行已声明的真实用户操作，永远不改变 catalog，也不构成 assertion evidence。Campaign
 settle 后必须丢弃该观察并重新读取 final evidence。
 
+当冻结操作需要为 Human Action 的 terminal resolution 提供 reason 或 answer 时，driver 必须将普通用户 comment
+写在该次已观察并绑定的 Action Issue 下；Root Issue comment 不能代替 Action comment，也不能解除 Action 的
+comment requirement。
+
 一个已声明操作可以在有限、冻结的 Root 集合中绑定一个由产品事实决定的 identity，例如已进入 Stage 的 Root、
 该 Root 之外处于 ready 的候选 Root，或某个 Root 创建的 Plan Review Action。绑定规则、候选集合、选择排序、
 后续操作和可验证的 Linear condition 都必须在 Case catalog 中预声明。它只能等待或响应既有产品事实，不能新增
@@ -367,7 +371,7 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 
 | Assertion ID | Normative durable condition |
 |---|---|
-| `rejection_consumed_and_replied` | 预声明普通用户 reason 与 matching Plan Review Action 的 `Rejected` resolution 都成为 Root Reconciler input，并各有 matching durable reply。 |
+| `rejection_consumed_and_replied` | 预声明普通用户 reason 必须作为 matching Plan Review Action 下的 comment，与该 Action 的 `Rejected` resolution 一同成为 Root Reconciler input，并各有 matching durable reply。 |
 | `rejected_lineage_retained` | 被拒 Contract、Action、Plan execution 和 Plan Result 保持可 read-back 的历史 identity；需要移除的旧节点使用 native archive。 |
 | `rejected_contract_superseded` | 旧 immutable Contract 有明确 supersession/archive lineage，且同一 Root 产生不同 execution、Contract 与 Action identity 的 fresh replacement。 |
 | `boundary_fresh_plan_review` | fresh Plan execution 形成 fresh immutable Contract，并由产品创建 fresh active Plan Review Action；该 replacement 尚未被本 Case 批准。 |
@@ -380,7 +384,7 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 | Assertion ID | Normative durable condition |
 |---|---|
 | `information_action_actionable` | 产品创建的 clarification Action 明确写出问题、所需内容、提交位置和收到答案后的下一步。 |
-| `answer_consumed_and_receipted` | 预声明普通用户 answer 与 matching `Answered` resolution 被恰好一次地关联为 accepted input，并各有 matching reply 与协议要求的 reaction disposition。 |
+| `answer_consumed_and_receipted` | 预声明普通用户 answer 必须作为 matching clarification Action 下的 comment，与该 Action 的 `Answered` resolution 被恰好一次地关联为 accepted input，并各有 matching reply 与协议要求的 reaction disposition。 |
 | `answer_drives_fresh_plan` | fresh Plan execution、Contract 与 Plan Review Action 仅引用该 accepted answer；Contract 记录该 Case answer 所给定的 separator。 |
 | `boundary_fresh_plan_review` | answer consumption 后存在 fresh immutable Contract 和 fresh active Plan Review Action；本 Case 不批准该 Action。 |
 | `missing_answer_assumed` | 在 matching accepted answer 前不存在假定缺失值的 Contract、Plan execution 或继续推进事实。 |
@@ -462,7 +466,8 @@ boundary 不能由 Root `Done`、local `final` 或单独的 Plan approval 代替
 
 ### 9.4 `plan_rejected_and_replanned`
 
-用户行为：创建 Root，等待真实 Plan Review Human Action，以预声明普通用户 reason 将其流转为 `Rejected`。
+用户行为：创建 Root，等待真实 Plan Review Human Action；先在该 Action 下写入预声明普通用户 reason，再将同一
+Action 流转为 `Rejected`。
 
 正向断言：
 
@@ -487,7 +492,7 @@ Case 不批准 replacement Action；该等待状态本身连同旧 Contract 的 
 正向断言：
 
 - Human Action 明确说明问题、需要的内容、提交位置和下一步；
-- 用户答案以普通 comment 或 Human Action 约定字段存在，Action lifecycle 完整；
+- 用户答案以该 Human Action 下的普通 comment 存在，Action lifecycle 完整；
 - Root Reconciler 消费该输入并产生 matching durable reply；
 - 用户输入得到协议规定的 reaction disposition，Workflow 随后由产品自主继续。
 

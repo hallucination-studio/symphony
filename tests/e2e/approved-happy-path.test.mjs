@@ -15,7 +15,7 @@ test("approved happy path creates its declared Root and approves only the produc
     },
     async waitForPlanReviewAction(input) {
       calls.push({ kind: "wait_for_plan_review", input });
-      return { actionIssueId: "action-1", approvedStatusId: "approved-state" };
+      return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
     },
     async setHumanActionTerminalStatus(input) {
       calls.push({ kind: "approve_plan_review", input });
@@ -47,7 +47,7 @@ test("approved happy path creates its declared Root and approves only the produc
     },
     {
       kind: "wait_for_plan_review",
-      input: { rootIssueId: "root-1" },
+      input: { rootIssueId: "root-1", terminalStatus: "Approved" },
     },
     {
       kind: "approve_plan_review",
@@ -71,7 +71,7 @@ test("approved happy path rejects a Case definition or Human boundary outside th
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async waitForPlanReviewAction() { return { actionIssueId: "action-1", approvedStatusId: "approved-state" }; },
+    async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
     async setHumanActionTerminalStatus() {},
   };
 
@@ -102,7 +102,7 @@ test("approved happy path forwards Case cancellation only to the Plan Review wai
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async waitForPlanReviewAction(input) {
       waitInput = input;
-      return { actionIssueId: "action-1", approvedStatusId: "approved-state" };
+      return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
     },
     async setHumanActionTerminalStatus() {},
   };
@@ -114,7 +114,7 @@ test("approved happy path forwards Case cancellation only to the Plan Review wai
     rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
   });
 
-  assert.deepEqual(waitInput, { rootIssueId: "root-1", signal: abortController.signal });
+  assert.deepEqual(waitInput, { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal });
 });
 
 function hasCode(code) {

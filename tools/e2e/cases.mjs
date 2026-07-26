@@ -42,8 +42,8 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       ],
     })],
     interactions: [
-      waitForAction("approved-root", "plan_review"),
-      terminalAction("approved-root", "Approved"),
+      waitForAction("approved-root", "plan_review", "approved_plan_review"),
+      terminalAction("approved-root", "approved_plan_review", "Approved"),
     ],
     verificationBoundary: "in_review_delivery",
     assertions: [
@@ -70,9 +70,9 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       ],
     })],
     interactions: [
-      waitForAction("rejected-plan-root", "plan_review"),
-      comment("rejected-plan-root", "The plan should preserve the existing utility contract before adding the new behavior."),
-      terminalAction("rejected-plan-root", "Rejected"),
+      waitForAction("rejected-plan-root", "plan_review", "rejected_plan_review"),
+      actionComment("rejected-plan-root", "rejected_plan_review", "The plan should preserve the existing utility contract before adding the new behavior.", "rejection_reason", "rejection_reason"),
+      terminalAction("rejected-plan-root", "rejected_plan_review", "Rejected"),
     ],
     verificationBoundary: "fresh_plan_review",
     assertions: [
@@ -99,9 +99,9 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       ],
     })],
     interactions: [
-      waitForAction("information-root", "clarification"),
-      comment("information-root", "Use a colon as the identifier separator."),
-      terminalAction("information-root", "Answered"),
+      waitForAction("information-root", "clarification", "separator_clarification"),
+      actionComment("information-root", "separator_clarification", "Use a colon as the identifier separator.", "separator_answer", "separator_answer"),
+      terminalAction("information-root", "separator_clarification", "Answered"),
     ],
     verificationBoundary: "fresh_plan_review",
     assertions: [
@@ -171,10 +171,10 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       }),
     ],
     interactions: [
-      waitForAction("parallel-a-root", "plan_review"),
-      terminalAction("parallel-a-root", "Approved"),
-      waitForAction("parallel-b-root", "plan_review"),
-      terminalAction("parallel-b-root", "Approved"),
+      waitForAction("parallel-a-root", "plan_review", "parallel_a_plan_review"),
+      terminalAction("parallel-a-root", "parallel_a_plan_review", "Approved"),
+      waitForAction("parallel-b-root", "plan_review", "parallel_b_plan_review"),
+      terminalAction("parallel-b-root", "parallel_b_plan_review", "Approved"),
     ],
     verificationBoundary: "all_roots_delivered",
     assertions: [
@@ -325,12 +325,12 @@ function rootCreationDescription(description, acceptanceCriteria) {
   return `${description}\n\n## Acceptance Criteria\n${acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")}`;
 }
 
-function waitForAction(rootKey, actionKind) {
-  return { kind: "wait_for_human_action", rootKey, actionKind };
+function waitForAction(rootKey, actionKind, actionBinding) {
+  return { kind: "wait_for_human_action", rootKey, actionKind, actionBinding };
 }
 
-function terminalAction(rootKey, terminalStatus) {
-  return { kind: "set_human_action_status", rootKey, terminalStatus };
+function terminalAction(rootKey, actionBinding, terminalStatus) {
+  return { kind: "set_human_action_status", rootKey, actionBinding, terminalStatus };
 }
 
 function waitForPlanContractAndAction(rootKey, actionKind, actionBinding) {
@@ -352,6 +352,17 @@ function comment(rootKey, body, commentBinding, inputBinding) {
     body,
     ...(commentBinding === undefined ? {} : { commentBinding }),
     ...(inputBinding === undefined ? {} : { inputBinding }),
+  };
+}
+
+function actionComment(rootKey, actionBinding, body, commentBinding, inputBinding) {
+  return {
+    kind: "create_action_comment",
+    rootKey,
+    actionBinding,
+    body,
+    commentBinding,
+    inputBinding,
   };
 }
 

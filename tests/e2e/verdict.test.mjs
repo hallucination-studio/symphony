@@ -206,6 +206,32 @@ test("a fresh Plan review must link one Plan contract, Plan execution/result, an
   assert.equal(assertion.outcome, "contradicted");
 });
 
+test("rejected Plan verdict cannot borrow a Root comment, another rejection, or a replacement Action", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
+  for (const mutate of [
+    (fixture) => { fixture.evidence.roots[0].comments.find(({ id }) => id === "rejection-reason").issueId = fixture.evidence.rootIssueIds[0]; },
+    (fixture) => { fixture.evidence.roots[0].managedRecords.find(({ record }) => record.kind === "root_directive").record.consumed_input_ids = ["unrelated-comment"]; },
+    (fixture) => { fixture.context.replacementActionIssueId = fixture.context.rejectedActionIssueId; },
+  ]) {
+    const fixture = satisfiedFixture(definition);
+    mutate(fixture);
+    const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+      .find(({ assertionId }) => assertionId === "rejection_consumed_and_replied");
+    assert.equal(assertion.outcome, "contradicted");
+  }
+});
+
+test("rejected Plan retains its historical lineage independently from the supersession requirement", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
+  const fixture = satisfiedFixture(definition);
+  const root = fixture.evidence.roots[0];
+  root.managedRecords = root.managedRecords.filter(({ record }) => record.kind !== "plan_contract_supersession");
+
+  const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "rejected_lineage_retained").outcome, "satisfied");
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "rejected_contract_superseded").outcome, "contradicted");
+});
+
 test("approved happy path rejects unrendered Stage, Cycle, or Root usage aggregates", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
   const fixture = approvedFixture(definition);
@@ -431,23 +457,27 @@ function rejectedFixture(definition) {
   addWorkflowIssue(root, newPlan, "plan");
   addWorkflowIssue(root, newAction, "human");
   addRecord(root, planContract(root.id, oldCycle, "old-contract"), { archived: true, sourceIssueId: oldPlan });
-  addRecord(root, stageExecution(root.id, oldCycle, oldPlan, "plan-old", "plan", undefined, 10));
-  addRecord(root, stageResult(root.id, oldCycle, oldPlan, "plan-old", "plan", "plan_completed", { planContract: "old-contract", at: 20 }));
-  addRecord(root, humanActionRequest(root.id, "old-action-id", oldAction, "plan_review", oldCycle, [oldPlan]));
-  addRecord(root, humanActionResolution(root.id, "old-action-id", oldAction, "rejected", "Rejected", ["rejection-reason"]));
-  addHumanComment(root, "rejection-reason", "The plan should preserve the existing utility contract before adding the new behavior.");
+  addRecord(root, stageExecution(root.id, oldCycle, oldPlan, "plan-old", "plan", undefined, 10), { sourceIssueId: oldPlan });
+  addRecord(root, stageResult(root.id, oldCycle, oldPlan, "plan-old", "plan", "plan_completed", { planContract: "old-contract", at: 20 }), { sourceIssueId: oldPlan });
+  addRecord(root, humanActionRequest(root.id, "old-action-id", oldAction, "plan_review", oldCycle, [oldPlan]), { sourceIssueId: oldAction });
+  addRecord(root, humanActionResolution(root.id, "old-action-id", oldAction, "rejected", "Rejected", ["rejection-reason"]), { sourceIssueId: oldAction });
+  addHumanComment(root, "rejection-reason", "The plan should preserve the existing utility contract before adding the new behavior.", { issueId: oldAction });
   addRecord(root, rootDirective(root.id, ["rejection-reason"], 25));
-  addRecord(root, reply(root.id, "rejection-reason"));
+  addRecord(root, reply(root.id, "rejection-reason", { targetIssueId: oldAction }), { sourceIssueId: oldAction });
   addRecord(root, {
     kind: "plan_contract_supersession", version: 1, supersession_id: "supersession-1", root_issue_id: root.id,
     cycle_issue_id: oldCycle, superseded_plan_contract_digest: "old-contract", source_root_directive_id: "directive-1",
     fresh_plan_issue_id: newPlan, superseded_at: at(26),
   });
   addRecord(root, planContract(root.id, newCycle, "new-contract"), { sourceIssueId: newPlan });
-  addRecord(root, stageExecution(root.id, newCycle, newPlan, "plan-new", "plan", undefined, 30));
-  addRecord(root, stageResult(root.id, newCycle, newPlan, "plan-new", "plan", "plan_completed", { planContract: "new-contract", at: 40 }));
-  addRecord(root, humanActionRequest(root.id, "new-action-id", newAction, "plan_review", newCycle, [newPlan]));
-  return fixture(definition, [root]);
+  addRecord(root, stageExecution(root.id, newCycle, newPlan, "plan-new", "plan", undefined, 30), { sourceIssueId: newPlan });
+  addRecord(root, stageResult(root.id, newCycle, newPlan, "plan-new", "plan", "plan_completed", { planContract: "new-contract", at: 40 }), { sourceIssueId: newPlan });
+  addRecord(root, humanActionRequest(root.id, "new-action-id", newAction, "plan_review", newCycle, [newPlan]), { sourceIssueId: newAction });
+  return fixture(definition, [root], {
+    inputReferences: [{ sourceId: "rejection-reason", kind: "comment_create", binding: "rejection_reason", commentId: "rejection-reason" }],
+    rejectedActionIssueId: oldAction,
+    replacementActionIssueId: newAction,
+  });
 }
 
 function informationFixture(definition) {
@@ -462,11 +492,11 @@ function informationFixture(definition) {
   addWorkflowIssue(root, plan, "plan");
   addWorkflowIssue(root, clarification, "human");
   addWorkflowIssue(root, review, "human");
-  addRecord(root, humanActionRequest(root.id, "clarification-id", clarification, "clarification", cycle));
-  addHumanComment(root, "separator-answer", "Use a colon as the identifier separator.");
-  addRecord(root, humanActionResolution(root.id, "clarification-id", clarification, "answered", "Answered", ["separator-answer"]));
+  addRecord(root, humanActionRequest(root.id, "clarification-id", clarification, "clarification", cycle), { sourceIssueId: clarification });
+  addHumanComment(root, "separator-answer", "Use a colon as the identifier separator.", { issueId: clarification });
+  addRecord(root, humanActionResolution(root.id, "clarification-id", clarification, "answered", "Answered", ["separator-answer"]), { sourceIssueId: clarification });
   addRecord(root, rootDirective(root.id, ["separator-answer"], 20));
-  addRecord(root, reply(root.id, "separator-answer", { reaction: "check" }));
+  addRecord(root, reply(root.id, "separator-answer", { reaction: "check", targetIssueId: clarification }), { sourceIssueId: clarification });
   addRecord(root, planContract(root.id, cycle, "information-contract", { constraints: ["Use a colon separator."] }), { sourceIssueId: plan });
   addRecord(root, stageExecution(root.id, cycle, plan, "information-plan-execution", "plan", undefined, 30));
   addRecord(root, stageResult(root.id, cycle, plan, "information-plan-execution", "plan", "plan_completed", { planContract: "information-contract", at: 40 }));
@@ -650,7 +680,7 @@ function addWorkflowIssue(root, issueKey, issueKind) {
 
 function addHumanComment(root, id, body, options = {}) {
   root.comments.push({
-    id, issueId: root.id, parentId: null, authorId: "human", body, archivedAt: null,
+    id, issueId: options.issueId ?? root.id, parentId: null, authorId: "human", body, archivedAt: null,
     createdAt: DATE, updatedAt: options.updatedAt ?? DATE, remoteVersion: options.remoteVersion ?? DATE,
     editedAt: options.editedAt ?? null, resolvedAt: null, reactions: [], thread: options.thread ?? { rootCommentId: id, state: "unresolved" },
   });
@@ -711,8 +741,8 @@ function humanActionResolution(rootIssueId, actionId, actionIssueId, outcome, te
   return { kind: "human_action_resolution", version: 1, resolution_id: `${actionId}-resolution`, root_issue_id: rootIssueId, action_id: actionId, action_issue_id: actionIssueId, action_kind: actionId.includes("clarification") ? "clarification" : "plan_review", outcome, terminal_status: terminalStatus, terminal_remote_version: DATE, source_comment_ids: sourceCommentIds, source_comment_versions: sourceCommentIds.map(() => DATE), actor_kind: "human", proposal_digest: "proposal", resolved_at: at(moment) };
 }
 
-function reply(rootIssueId, sourceInputId, { reaction = "check", threadAction = "keep_open", source = { kind: "comment_body", comment_id: sourceInputId, comment_body_digest: "digest" } } = {}) {
-  return { kind: "root_reconciler_reply", version: 1, reply_id: `reply-${sourceInputId}`, reply_write_id: `write-${sourceInputId}`, root_directive_id: "directive-1", source_input_id: sourceInputId, source, target_issue_id: rootIssueId, disposition: "accepted", reaction, thread_action: threadAction, materialized_outcome_refs: [], rendered_schema_version: "1", replied_at: DATE };
+function reply(rootIssueId, sourceInputId, { reaction = "check", threadAction = "keep_open", targetIssueId = rootIssueId, source = { kind: "comment_body", comment_id: sourceInputId, comment_body_digest: "digest" } } = {}) {
+  return { kind: "root_reconciler_reply", version: 1, reply_id: `reply-${sourceInputId}`, reply_write_id: `write-${sourceInputId}`, root_directive_id: "directive-1", source_input_id: sourceInputId, source, target_issue_id: targetIssueId, disposition: "accepted", reaction, thread_action: threadAction, materialized_outcome_refs: [], rendered_schema_version: "1", replied_at: DATE };
 }
 
 function verifyResult(rootIssueId, cycleIssueId, nodeIssueId, stageExecutionId) {
