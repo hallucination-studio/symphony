@@ -95,6 +95,11 @@ const retiredCaseIds = [
   "delivery_and_review",
   "required_linear_write_fail_closed",
 ];
+const syntheticCompletionMarkers = [
+  ["target_e2e", "synthetic_final"].join("_"),
+  "synthetic" + "_final",
+  "synthetic" + " final",
+];
 
 export function inspectForegroundE2EHardCut(trackedSources) {
   const findings = [];
@@ -145,5 +150,5 @@ function mutatesManagedRecords(source) {
 }
 
 function syntheticCompletion(source) {
-  return /\b(?:target_e2e_synthetic_final|synthetic[_ ]final)\b/u.test(source);
+  return syntheticCompletionMarkers.some((marker) => source.includes(marker));
 }

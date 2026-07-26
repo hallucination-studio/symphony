@@ -6,18 +6,18 @@ test("Desktop shell smoke uses production entrypoints without workflow credentia
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(
     manifest.scripts["desktop-shell-smoke:build"],
-    "node tools/e2e/desktop-shell-build.mjs",
+    "node tools/desktop-smoke/build.mjs",
   );
   assert.equal(
     manifest.scripts["desktop-shell-smoke"],
-    "npm run desktop-shell-smoke:build && node tools/e2e/desktop-shell-smoke.mjs",
+    "npm run desktop-shell-smoke:build && node tools/desktop-smoke/smoke.mjs",
   );
 
   const sources = await Promise.all([
     readFile("apps/podium-desktop/tools/build-sidecars.mjs", "utf8"),
     readFile("apps/podium-desktop/src-tauri/src/main.rs", "utf8"),
-    readFile("tools/e2e/desktop-shell-build.mjs", "utf8"),
-    readFile("tools/e2e/desktop-shell-smoke.mjs", "utf8"),
+    readFile("tools/desktop-smoke/build.mjs", "utf8"),
+    readFile("tools/desktop-smoke/smoke.mjs", "utf8"),
     readFile("Makefile", "utf8"),
   ]);
   const combined = sources.slice(0, 4).join("\n");
@@ -69,6 +69,7 @@ test("quality workflow keeps Desktop shell evidence separate from target workflo
     "npm run build -w @symphony/podium",
     "npm run build -w @symphony/conductor",
     "npm run test:e2e:runner",
+    "npm run test:desktop-shell-smoke",
     "npm run desktop-shell-smoke",
   ];
   const offsets = commands.map((command) => smokeJob.indexOf(command));

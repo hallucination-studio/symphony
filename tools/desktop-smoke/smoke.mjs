@@ -7,8 +7,8 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
 
-import { createDesktopShellEnvironment } from "./desktop-shell-environment.mjs";
-import { createDesktopShellVerdict } from "./desktop-shell-verdict.mjs";
+import { createDesktopShellEnvironment } from "./environment.mjs";
+import { createDesktopShellVerdict } from "./verdict.mjs";
 
 const STARTUP_EVENT_KEYS = Object.freeze([
   "component",

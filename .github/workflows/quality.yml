@@ -53,6 +53,8 @@ jobs:
           npm run build -w @symphony/conductor
       - name: Verify secret-free runner contracts
         run: npm run test:e2e:runner
+      - name: Verify Desktop shell smoke contracts
+        run: npm run test:desktop-shell-smoke
       - name: Run production Desktop shell smoke
         run: npm run desktop-shell-smoke
       - name: Upload Desktop shell evidence

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile as execFileCallback } from "node:child_process";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
-import { promisify } from "node:util";
 
 import {
   MANDATORY_FOREGROUND_CASE_IDS,
@@ -9,7 +8,7 @@ import {
   inspectForegroundE2EHardCut,
 } from "./foreground-e2e-hard-cut.mjs";
 
-const execFile = promisify(execFileCallback);
+const syntheticCompletion = "target_e2e_" + "synthetic_final";
 
 test("foreground E2E guard fixes the seven mandatory Case IDs", () => {
   assert.deepEqual(MANDATORY_FOREGROUND_CASE_IDS, [
@@ -23,14 +22,14 @@ test("foreground E2E guard fixes the seven mandatory Case IDs", () => {
   ]);
 });
 
-test("retired E2E inventory names every current workflow E2E file", async () => {
-  const { stdout } = await execFile("git", ["ls-files", "tools/e2e", "tests/e2e"], {
-    encoding: "utf8",
-  });
-  const tracked = stdout.split("\n").filter(Boolean).sort();
-
-  assert.deepEqual(RETIRED_WORKFLOW_E2E_INVENTORY.map(({ path }) => path).sort(), tracked);
+test("retired E2E inventory remains a complete classified hard-cut baseline", () => {
+  assert.equal(RETIRED_WORKFLOW_E2E_INVENTORY.length, 67);
+  assert.equal(new Set(RETIRED_WORKFLOW_E2E_INVENTORY.map(({ path }) => path)).size, 67);
   assert.ok(RETIRED_WORKFLOW_E2E_INVENTORY.every(({ replacement }) => typeof replacement === "string"));
+});
+
+test("current workflow E2E tree contains none of the retired paths or control symbols", async () => {
+  assert.deepEqual(await readWorkflowE2ESources(), new Map());
 });
 
 test("foreground E2E guard rejects retired control-plane paths and symbols", () => {
@@ -41,7 +40,7 @@ test("foreground E2E guard rejects retired control-plane paths and symbols", () 
       "const outage = createRequiredWriteOutageController();",
       'await readFile("podium.db");',
       "await writeManagedRecord({});",
-      "const completion = target_e2e_synthetic_final;",
+      `const completion = ${syntheticCompletion};`,
       'const caseId = "required_linear_write_fail_closed";',
     ].join("\n")],
   ]));
@@ -84,3 +83,24 @@ test("foreground E2E guard rejects retired control-plane paths and symbols", () 
     },
   ]);
 });
+
+async function readWorkflowE2ESources() {
+  const paths = await filesUnder(["tools/e2e", "tests/e2e"]);
+  const sources = await Promise.all(paths.map(async (path) => [path, await readFile(path, "utf8")]));
+  const findings = inspectForegroundE2EHardCut(new Map(sources));
+  return new Map(findings.map((finding, index) => [`${index}:${finding.path}`, finding]));
+}
+
+async function filesUnder(directories) {
+  const paths = [];
+  for (const directory of directories) await collect(directory, paths);
+  return paths.sort();
+}
+
+async function collect(directory, paths) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = `${directory}/${entry.name}`;
+    if (entry.isDirectory()) await collect(path, paths);
+    else if (entry.isFile() && path.endsWith(".mjs")) paths.push(path);
+  }
+}

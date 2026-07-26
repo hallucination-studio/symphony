@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-import { createDesktopShellEnvironment } from "./desktop-shell-environment.mjs";
+import { createDesktopShellEnvironment } from "./environment.mjs";
 
 const environment = createDesktopShellEnvironment();
 run(
