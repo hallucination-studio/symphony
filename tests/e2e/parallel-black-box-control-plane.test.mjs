@@ -223,6 +223,45 @@ test("parallel black-box control plane reports a closed Binding provisioning fai
   assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
 });
 
+test("parallel black-box control plane preserves the API-key Profile phase without provider detail", async () => {
+  const events = [];
+  await assert.rejects(
+    provisionParallelBlackBoxE2EControlPlane({
+      config: configuration(),
+      runtime: runtime(),
+      sourceRepositoryRoot: "/source",
+      provisionRepositories: repositoryPool(events),
+      podium: podium(events),
+      createProcessHost() {
+        return { host: {}, async close() { events.push("host-close"); } };
+      },
+      createProcessStarter: () => async () => ({ request() {}, close() {} }),
+      async createPodiumClient() {
+        return {
+          async command(body) {
+            if (body.kind === "create_conductor") return {
+              kind: "conductor_created",
+              ...conductor(body.repository.repository_handle.slice(-1)),
+            };
+            if (body.kind === "start_conductor") {
+              return { kind: "conductor_command_completed", conductor_id: body.conductor_id, command_kind: body.kind };
+            }
+            if (body.kind === "create_performer_profile") return profile(body.conductor_id, "login-required", false);
+            if (body.kind === "set_codex_api_key") {
+              throw new Error("provider rejected private API-key material");
+            }
+            throw new Error(`unexpected_command:${body.kind}`);
+          },
+          async close() { events.push("client-close"); },
+        };
+      },
+    }),
+    (error) => error.code === "parallel_black_box_control_plane_profile_set_api_key_failed" &&
+      !error.message.includes("private API-key material"),
+  );
+  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
+});
+
 test("parallel black-box control plane preserves a closed Project pool routing failure", async () => {
   const events = [];
   await assert.rejects(

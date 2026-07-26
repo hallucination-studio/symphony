@@ -233,6 +233,9 @@ command、Campaign证据或Workflow E2E的替代；它不属于上表的任一�
 credential、token、provider transcript、原始exception、Root/Issue正文或任意环境变量值。不存在`doctor`、环境测试alias、成功占位
 或配置不足时的synthetic Campaign result。
 
+Profile provisioning在Case前失败时，`reason_code`必须区分create、API-key relay、readiness或activation阶段；它只报告该闭合阶段码，
+不能透出Provider或本地process错误文本。
+
 ## 8. Test-only closed contract
 
 runner内部使用versioned、closed的test-only Command/Result，禁止任意metadata：

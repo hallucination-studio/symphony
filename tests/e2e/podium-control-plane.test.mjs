@@ -113,7 +113,7 @@ test("public control plane waits for concurrent Profile commands before clearing
     wait: async () => {},
   });
 
-  await assert.rejects(provision, /profile_relay_failed/u);
+  await assert.rejects(provision, /e2e_podium_profile_set_api_key_request_failed/u);
   assert.equal(await lateProfileObserved, "codex-secret");
   assert.equal(secret.every((value) => value === 0), true);
 });

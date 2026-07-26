@@ -93,44 +93,61 @@ export async function provisionApiKeyProfiles({
   try {
     const outcomes = await Promise.allSettled(conductors.map(async (conductor, index) => {
       assertConductor(conductor);
-      const created = profile(await client.command({
-        kind: "create_performer_profile",
-        conductor_id: conductor.conductor_id,
-        display_name: "Parallel Black-Box E2E",
-        backend_kind: "codex",
-        authentication_method: "api_key",
-        codex_turn_settings: {
-          model,
-          reasoning_effort: "minimal",
-          is_fast_mode_enabled: false,
-        },
-        execution_policy: {
-          sandbox_mode: "workspace_write",
-          command_allowlist: [],
-          command_denylist: [],
+      const created = profile(await profileCommand({
+        client,
+        requestFailureCode: "e2e_podium_profile_create_request_failed",
+        body: {
+          kind: "create_performer_profile",
+          conductor_id: conductor.conductor_id,
+          display_name: "Parallel Black-Box E2E",
+          backend_kind: "codex",
+          authentication_method: "api_key",
+          codex_turn_settings: {
+            model,
+            reasoning_effort: "minimal",
+            is_fast_mode_enabled: false,
+          },
+          execution_policy: {
+            sandbox_mode: "workspace_write",
+            command_allowlist: [],
+            command_denylist: [],
+          },
         },
       }), "e2e_podium_profile_create_invalid");
       const frame = frames[index];
       if (!frame) throw stableError("e2e_podium_profile_secret_invalid");
-      let current = profile(await client.command({
-        kind: "set_codex_api_key",
-        conductor_id: conductor.conductor_id,
-        profile_id: created.profile_id,
-        secret_frame_length: frame.byteLength,
-      }, frame), "e2e_podium_profile_secret_invalid");
-      for (let attempt = 1; current.readiness !== "ready" && attempt < PROFILE_READINESS_ATTEMPTS; attempt += 1) {
-        await wait(250);
-        current = profile(await client.command({
-          kind: "get_performer_profile_status",
+      let current = profile(await profileCommand({
+        client,
+        requestFailureCode: "e2e_podium_profile_set_api_key_request_failed",
+        frame,
+        body: {
+          kind: "set_codex_api_key",
           conductor_id: conductor.conductor_id,
           profile_id: created.profile_id,
+          secret_frame_length: frame.byteLength,
+        },
+      }), "e2e_podium_profile_secret_invalid");
+      for (let attempt = 1; current.readiness !== "ready" && attempt < PROFILE_READINESS_ATTEMPTS; attempt += 1) {
+        await wait(250);
+        current = profile(await profileCommand({
+          client,
+          requestFailureCode: "e2e_podium_profile_status_request_failed",
+          body: {
+            kind: "get_performer_profile_status",
+            conductor_id: conductor.conductor_id,
+            profile_id: created.profile_id,
+          },
         }), "e2e_podium_profile_status_invalid");
       }
       if (current.readiness !== "ready") throw stableError("e2e_podium_profile_not_ready");
-      const activated = profile(await client.command({
-        kind: "activate_performer_profile",
-        conductor_id: conductor.conductor_id,
-        profile_id: created.profile_id,
+      const activated = profile(await profileCommand({
+        client,
+        requestFailureCode: "e2e_podium_profile_activate_request_failed",
+        body: {
+          kind: "activate_performer_profile",
+          conductor_id: conductor.conductor_id,
+          profile_id: created.profile_id,
+        },
       }), "e2e_podium_profile_activate_invalid");
       if (activated.profile_id !== created.profile_id || activated.readiness !== "ready" || !activated.is_active) {
         throw stableError("e2e_podium_profile_activate_invalid");
@@ -145,6 +162,14 @@ export async function provisionApiKeyProfiles({
     return Object.freeze(outcomes.map((outcome) => outcome.value));
   } finally {
     for (const frame of frames) frame.fill(0);
+  }
+}
+
+async function profileCommand({ client, body, frame, requestFailureCode }) {
+  try {
+    return await client.command(body, frame);
+  } catch {
+    throw stableError(requestFailureCode);
   }
 }
 

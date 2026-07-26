@@ -21,6 +21,17 @@ const CONTROL_PLANE_PODIUM_FAILURES = new Map([
     "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
   ],
 ]);
+const PROFILE_PROVISION_FAILURES = new Map([
+  ["e2e_podium_profile_create_request_failed", "parallel_black_box_control_plane_profile_create_failed"],
+  ["e2e_podium_profile_create_invalid", "parallel_black_box_control_plane_profile_create_failed"],
+  ["e2e_podium_profile_set_api_key_request_failed", "parallel_black_box_control_plane_profile_set_api_key_failed"],
+  ["e2e_podium_profile_secret_invalid", "parallel_black_box_control_plane_profile_set_api_key_failed"],
+  ["e2e_podium_profile_status_request_failed", "parallel_black_box_control_plane_profile_status_failed"],
+  ["e2e_podium_profile_status_invalid", "parallel_black_box_control_plane_profile_status_failed"],
+  ["e2e_podium_profile_not_ready", "parallel_black_box_control_plane_profile_not_ready"],
+  ["e2e_podium_profile_activate_request_failed", "parallel_black_box_control_plane_profile_activate_failed"],
+  ["e2e_podium_profile_activate_invalid", "parallel_black_box_control_plane_profile_activate_failed"],
+]);
 
 export async function provisionParallelBlackBoxE2EControlPlane({
   config,
@@ -212,6 +223,10 @@ async function controlPlaneOperation(code, operation) {
     const specificCode = CONTROL_PLANE_PODIUM_FAILURES.get(error?.code);
     if (specificCode !== undefined && code === "parallel_black_box_control_plane_binding_provision_failed") {
       throw stableError(specificCode);
+    }
+    const profileCode = PROFILE_PROVISION_FAILURES.get(error?.code);
+    if (profileCode !== undefined && code === "parallel_black_box_control_plane_profile_provision_failed") {
+      throw stableError(profileCode);
     }
     throw stableError(code);
   }

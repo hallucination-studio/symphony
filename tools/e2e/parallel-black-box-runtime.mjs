@@ -23,7 +23,12 @@ const CONTROL_PLANE_FAILURE_CODES = new Set([
   "parallel_black_box_control_plane_binding_project_invalid",
   "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
   "parallel_black_box_control_plane_conductor_start_failed",
+  "parallel_black_box_control_plane_profile_activate_failed",
+  "parallel_black_box_control_plane_profile_create_failed",
+  "parallel_black_box_control_plane_profile_not_ready",
   "parallel_black_box_control_plane_profile_provision_failed",
+  "parallel_black_box_control_plane_profile_set_api_key_failed",
+  "parallel_black_box_control_plane_profile_status_failed",
 ]);
 
 export async function createConfiguredParallelBlackBoxRuntime({
