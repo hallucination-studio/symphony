@@ -188,10 +188,12 @@ root_topology
 declared_user_interactions
 allowed_process_faults
 verification_boundary
-positive_assertions
-negative_assertions
-incomplete_conditions
+assertions
 ```
+
+`assertions` 是包含共同与 Case-specific immutable assertion records 的完整闭合集合；每个 record 的
+`kind`、`fact_scope`、`correlation`、`predicate` 和 `reason_code` 遵循 section 9.2。它不是三组由 runner
+自行解释的正向、反向或 timeout 条件。
 
 Root 创建后，除 `root_revision_and_comment` 的预声明 revision，以及
 `same_conductor_preemption` 的预声明非语义 touch 外，description 和验收需求必须与初始 hash 一致。
@@ -233,8 +235,8 @@ Case definition 不是运行时脚本，而是 Campaign 启动前冻结的验收
 - `verification_boundary`：这个 Case 在哪个可从 Linear/Git read-back 的稳定业务边界停止等待。它可以是
   Root `In Review` 与 delivery，也可以是一个明确的 fresh Human Action 等待；不能用 process ready、日志、
   local cache、timeout 或 test-owned `final` 表示；
-- 命名的 `positive_assertions`、`negative_assertions` 和 `incomplete_conditions`。每条 assertion 必须声明
-  需要的 Linear/Git fact scope、identity correlation 和顺序/唯一性规则，不能在运行中临时追加；
+- 完整、命名的 assertion catalog：它列出 `required`、`prohibited` 与 `boundary` assertion，及每条所需的
+  Linear/Git fact scope、identity correlation 和顺序/唯一性规则；catalog 不得在运行中临时追加、删除或替换；
 - predeclared Human operation 只作为等待到产品事实后的用户响应，不能选择 workflow 的下一步或生成替代事实。
 
 断言评估只消费 Case final evidence snapshot。正向 assertion 只有在全部 required durable facts、correlation 和
@@ -324,8 +326,9 @@ settle 后必须丢弃该观察并重新读取 final evidence。
 | `final_evidence_complete` | required | active/archived pagination、status catalog、relations、comments、activity、managed records 和 Git coverage 均完整；无 coverage omission。 |
 | `no_e2e_control_facts` | prohibited | 成功链中没有 E2E 创建的 Human Action、Stage/managed record、DAG mutation、timeline/reply、usage 或 synthetic completion。 |
 
-下表是每个 Case 除共同 assertion 外不可省略的最小 catalog。表中 ID 的精确定义由各 Case 小节的用户行为、正向
-断言、验证边界、禁止事实和 `incomplete` 规则共同限定；实现只能用 closed assertion vocabulary 表达这些条件。
+下表是每个 Case 除共同 assertion 外不可省略的 ID/kind index。它不定义 predicate；每个 Case-specific ID 的
+唯一规范条件由 section 9.2.1 的同名 matrix 行定义。section 9.3--9.9 仅定义用户交互场景和 driver wait 语境，
+不得新增、收窄、放宽或覆盖 matrix condition。实现只能用 closed assertion vocabulary 表达 matrix 条件。
 
 | Case | `required` / `boundary` assertions | `prohibited` assertions | `coverage_missing` condition |
 |---|---|---|---|
@@ -339,10 +342,13 @@ settle 后必须丢弃该观察并重新读取 final evidence。
 
 ### 9.2.1 Case-specific assertion-condition matrix
 
-下列 matrix 是每个 Case-specific assertion 的规范条件。每行的所有事实都必须位于该 Case 的 frozen fact
-scope，并具有 section 9.1 的 correlation 和 common assertion 要求。`required` 与 `boundary` 行任一必要事实
-无法完整 fresh-read 时为 `coverage_missing`；`prohibited` 行的禁止 fact scope 无法完整 fresh-read 时也为
-`coverage_missing`。只有已读到与行条件相反的 durable fact 才是 `contradicted`。
+下列 matrix 是每个 Case-specific assertion 的唯一规范条件。每行的所有事实都必须位于该 Case 的 frozen fact
+scope，并具有 section 9.1 的 correlation 和 common assertion 要求；其 `kind` 由紧邻的 ID/kind index 固定。
+`required` 与 `boundary` 行任一必要事实无法完整 fresh-read 时为 `coverage_missing`；`prohibited` 行的禁止 fact
+scope 无法完整 fresh-read 时也为 `coverage_missing`。只有已读到与行条件相反的 durable fact 才是 `contradicted`。
+因此每个 matrix ID 必须恰好有三种可验证 fixture：满足该行的 `satisfied`、读取到相反 durable fact 的
+`contradicted`，以及无法证明本行完整 fact coverage 的 `coverage_missing`；没有第四种 fallback、timeout 或
+叙述性解释路径。
 
 #### `approved_happy_path`
 
@@ -429,6 +435,10 @@ scope，并具有 section 9.1 的 correlation 和 common assertion 要求。`req
 | `unaffected_conductor_reconfigured` | 不存在对 unaffected Conductor 的 Binding、Profile、routing 或 process configuration 改写。 |
 
 ### 9.3 `approved_happy_path`
+
+下列 section 9.3--9.9 的“正向断言”“验证边界”“禁止事实”和 `incomplete` 文字仅供理解用户场景、Human
+operation 顺序及 driver wait。它们不是额外 predicate，也不覆盖 section 9.2.1；最终 verdict 只按对应 matrix
+ID 的 `kind`、condition 和 coverage rule 计算。
 
 用户行为：创建一个明确、可在测试 repository 中完成的 Root，等待真实 Plan Review Human Action，按其说明
 将状态流转为 `Approved`。
@@ -603,7 +613,8 @@ runtime observation。`verification_boundary` 只是 assertion group 的目标�
 
 最终分类只有：
 
-- `passed`：该 Case 全部正向断言成立、全部禁止事实不存在、coverage 完整；
+- `passed`：该 Case 全部 `required`/`boundary` assertion 成立、全部 `prohibited` assertion 满足不存在条件、
+  coverage 完整；
 - `failed`：fresh durable facts 已证明任一禁止事实、错误 terminal outcome、错误 ownership、错误顺序或需求被篡改；
 - `incomplete`：deadline 或外部读取结束后证据仍不足以证明 passed 或 failed。
 
