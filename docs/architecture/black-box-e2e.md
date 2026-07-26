@@ -346,9 +346,10 @@ settle 后必须丢弃该观察并重新读取 final evidence。
 scope，并具有 section 9.1 的 correlation 和 common assertion 要求；其 `kind` 由紧邻的 ID/kind index 固定。
 `required` 与 `boundary` 行任一必要事实无法完整 fresh-read 时为 `coverage_missing`；`prohibited` 行的禁止 fact
 scope 无法完整 fresh-read 时也为 `coverage_missing`。只有已读到与行条件相反的 durable fact 才是 `contradicted`。
-因此每个 matrix ID 必须恰好有三种可验证 fixture：满足该行的 `satisfied`、读取到相反 durable fact 的
-`contradicted`，以及无法证明本行完整 fact coverage 的 `coverage_missing`；没有第四种 fallback、timeout 或
-叙述性解释路径。
+因此 section 9.2 的共同断言表和本 matrix 的每个 assertion condition 都必须恰好有三种可验证 fixture：满足
+该 condition 的 `satisfied`、读取到相反 durable fact 的 `contradicted`，以及无法证明该 condition 完整 fact
+coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 Case reason code 上参数化复用，但不得改变
+各 Case 的 fact scope、correlation 或 predicate；没有第四种 fallback、timeout 或叙述性解释路径。
 
 #### `approved_happy_path`
 
