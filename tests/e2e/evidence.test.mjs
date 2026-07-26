@@ -22,11 +22,13 @@ test("fresh evidence reader reads only exact Roots with active and archived fact
   assert.deepEqual(evidence.statusCatalog.map(({ id }) => id), ["state-review", "state-todo"]);
   assert.equal(evidence.statusCatalog[0].remoteVersion, "2026-07-26T00:00:02.000Z");
   assert.ok(fixture.readOptions.length > 0);
-  assert.ok(fixture.readOptions.every(({ includeArchived }) => includeArchived === true));
+  assert.ok(fixture.readOptions.filter((options) => Object.hasOwn(options, "includeArchived"))
+    .every(({ includeArchived }) => includeArchived === true));
 
   const root = evidence.roots[0];
   assert.equal(root.issues.length, 2);
   assert.equal(Object.hasOwn(root.issues[0], "source"), false);
+  assert.deepEqual(root.issues.find(({ id }) => id === "root-1").labels, [{ id: "route-root", name: "symphony:conductor/root" }]);
   assert.equal(root.issues.find(({ id }) => id === "work-1").archivedAt, "2026-07-26T00:00:02.000Z");
   assert.equal(root.comments.length, 2);
   assert.equal(Object.hasOwn(root.comments[0], "source"), false);
@@ -112,10 +114,30 @@ test("evidence reader marks an incomplete native comment thread as missing cover
   assert.deepEqual(evidence.coverage.omissions.map(({ code }) => code), ["foreground_e2e_evidence_thread_incomplete"]);
 });
 
+test("evidence reader records native label pagination failures as coverage omissions", async () => {
+  const fixture = createLinearFixture({ labelsPageInfo: { hasNextPage: true, endCursor: "again" } });
+  const evidence = await readForegroundE2EFinalEvidence({
+    accessToken: "linear-development-token",
+    caseId: "approved_happy_path",
+    rootIssueIds: ["root-1"],
+    repositories: [{ rootIssueId: "root-1", repositoryRoot: "/repositories/root-1" }],
+    createClient: fixture.createClient,
+    runGit: fixture.runGit,
+  });
+
+  assert.deepEqual(evidence.coverage.omissions, [{
+    rootIssueId: "root-1",
+    sourceId: "root-1",
+    scope: "labels",
+    code: "foreground_e2e_evidence_pagination_failed",
+  }]);
+});
+
 function createLinearFixture({
   childrenPageInfo = { hasNextPage: false },
   commentBody = `Stage result\n\n\`\`\`symphony\n${JSON.stringify({ kind: "stage_result", version: 1, result_id: "result-1" })}\n\`\`\``,
   gitFailure = false,
+  labelsPageInfo = { hasNextPage: false },
   rootCommentParentId = null,
 } = {}) {
   const readOptions = [];
@@ -201,6 +223,10 @@ function createLinearFixture({
     updatedAt,
     state: Promise.resolve(stateTodo),
     team: Promise.resolve(team),
+    labels: async (options) => {
+      readOptions.push(options);
+      return page([]);
+    },
     children: async (options) => {
       readOptions.push(options);
       return page([]);
@@ -236,6 +262,10 @@ function createLinearFixture({
     updatedAt,
     state: Promise.resolve(stateReview),
     team: Promise.resolve(team),
+    labels: async (options) => {
+      readOptions.push(options);
+      return page([{ id: "route-root", name: "symphony:conductor/root" }], labelsPageInfo);
+    },
     children: async (options) => {
       readOptions.push(options);
       return page([archivedWork], childrenPageInfo);

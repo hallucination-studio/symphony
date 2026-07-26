@@ -82,6 +82,7 @@ const RECORD_KINDS = new Set([
   "stage_execution", "stage_result", "human_action_request", "human_action_resolution", "finding",
   "finding_disposition", "verify_result", "progress_assessment", "cycle_outcome", "convergence",
 ]);
+const PARALLEL_ASSERTION_IDS = new Set(CASE_ASSERTION_INDEX.parallel_multi_conductor.map(([assertionId]) => assertionId));
 
 /**
  * The index mirrors only IDs, kinds and vocabulary selectors from architecture
@@ -310,7 +311,12 @@ function createFacts(definition, evidence, context) {
     comment(id) { return comments.find((item) => item.id === id); },
     rootIssue(rootIssueId) { return issues.find((item) => item.id === rootIssueId && item.depth === 0); },
     source(entry) { return sourceById.get(entry?.source?.id); },
-    coverageMissing(assertion) { return assertion.assertionId !== "final_evidence_complete" && !assertionCoverageComplete(assertion, evidence, scopeRootIds); },
+    coverageMissing(assertion) {
+      return assertion.assertionId !== "final_evidence_complete" &&
+        (!assertionCoverageComplete(assertion, evidence, scopeRootIds) ||
+          definition.caseId === "parallel_multi_conductor" && PARALLEL_ASSERTION_IDS.has(assertion.assertionId) &&
+            !parallelFacts(base).coverageComplete);
+    },
     references(assertion) { return referencesFor(assertion, records, issues, comments, scopeRootIds); },
     scopeIsolated() { return scopeIsolated(definition, evidence, roots, rootIssueIds, scopeRootIds); },
     finalEvidenceComplete() {
@@ -326,7 +332,7 @@ function createFacts(definition, evidence, context) {
   };
   return Object.freeze({
     ...base,
-    approvedPlan: () => approvedPlanFacts(base),
+    approvedPlan: (rootIssueId) => approvedPlanFacts(base, rootIssueId),
     deliveryChain: () => deliveryChainFacts(base),
     usage: () => usageFacts(base),
     hasDuplicateOrSyntheticCompletion: () => duplicateOrSyntheticCompletion(base),
@@ -340,8 +346,7 @@ function createFacts(definition, evidence, context) {
   });
 }
 
-function approvedPlanFacts(facts) {
-  const rootId = onlyRootId(facts);
+function approvedPlanFacts(facts, rootId = onlyRootId(facts)) {
   const lineages = planReviewLineages(facts, rootId);
   const contracts = lineages.map(({ contract }) => contract);
   const actions = lineages.map(({ action }) => action);
@@ -354,7 +359,7 @@ function approvedPlanFacts(facts) {
   const everyWorkStartsAfterApproval = lineages.length === 1 &&
     matching.length === 1 && approvalAt !== undefined && work.length > 0 && !workBeforeApproval &&
     work.every(({ record }) => record.plan_contract_digest === contracts[0].plan_contract_digest && parseTime(record.started_at) > approvalAt);
-  return { contracts, work, approval, workBeforeApproval, everyWorkStartsAfterApproval };
+  return { contracts, actions, work, approval, workBeforeApproval, everyWorkStartsAfterApproval };
 }
 
 function deliveryChainFacts(facts, rootIssueId = onlyRootId(facts)) {
@@ -1011,26 +1016,109 @@ function revisionFailureFacts() {
 }
 
 function parallelFacts(facts) {
-  const rootIds = facts.rootIssueIds;
-  const ownership = rootIds.map((rootId) => facts.recordsOf("root_ownership", rootId));
+  const binding = parallelBinding(facts);
+  if (!binding) return parallelFailureFacts();
+  const ownership = binding.roots.map(({ rootIssueId }) => facts.recordsOf("root_ownership", rootIssueId));
   const ownerRecords = ownership.map((entries) => entries[0]?.record);
-  const ownershipIsolated = ownership.every((entries) => entries.length === 1) &&
-    new Set(ownerRecords.map((record) => record?.delivery_branch)).size === rootIds.length &&
-    new Set(ownerRecords.map((record) => record?.conductor_id)).size === rootIds.length;
-  const chains = rootIds.map((rootId) => deliveryChainFacts(facts, rootId));
-  const intervals = stageIntervals(facts, rootIds);
-  const hasOverlap = intervals.some((left, index) => intervals.slice(index + 1).some((right) =>
+  const gitByRoot = new Map((facts.evidence.git ?? []).map((entry) => [entry.rootIssueId, entry]));
+  const intervalFacts = stageIntervalFacts(facts, binding.roots.map(({ rootIssueId }) => rootIssueId));
+  const rootsHaveCoverage = binding.roots.every(({ rootIssueId }) => {
+    const root = facts.rootIssue(rootIssueId);
+    const owners = facts.recordsOf("root_ownership", rootIssueId).map(({ record }) => record);
+    const git = gitByRoot.get(rootIssueId);
+    return root && Array.isArray(root.labels) && root.labels.length > 0 && owners.length > 0 &&
+      owners.every(validRootOwnership) && validGitFact(git);
+  });
+  const coverageComplete = rootsHaveCoverage && intervalFacts.coverageComplete;
+  const ownershipIsolated = ownership.every((entries, index) => {
+    const expected = binding.roots[index];
+    const root = facts.rootIssue(expected.rootIssueId);
+    const owner = only(entries)?.record;
+    const git = gitByRoot.get(expected.rootIssueId);
+    return entries.length === 1 && root?.labels.length === 1 && root.labels[0]?.id === expected.routingLabelId &&
+      owner?.conductor_id === expected.conductorId && owner?.performer_profile_id === expected.performerProfileId &&
+      git?.repositoryRootCanonical === expected.repositoryRoot;
+  }) &&
+    new Set(ownerRecords.map((record) => record?.delivery_branch)).size === binding.roots.length &&
+    new Set(binding.roots.map(({ rootIssueId }) => gitByRoot.get(rootIssueId)?.repositoryRootCanonical)).size === binding.roots.length;
+  const chains = binding.roots.map((expected) => independentDeliveryChainFacts(facts, expected));
+  const hasOverlap = intervalFacts.intervals.some((left, index) => intervalFacts.intervals.slice(index + 1).some((right) =>
     left.conductorId !== right.conductorId && Math.max(left.startedAt, right.startedAt) < Math.min(left.completedAt, right.completedAt)));
-  const takeover = ownerRecords.some((owner, index) => facts.recordsOf("root_ownership", rootIds[index]).some(({ record }) => record.conductor_id !== owner.conductor_id));
+  const takeover = ownership.some((entries, index) => entries.length !== 1 || entries.some(({ record }) =>
+    record.conductor_id !== binding.roots[index].conductorId));
   return {
+    coverageComplete,
     ownershipIsolated,
     independentDeliveries: chains.every(({ complete }) => complete),
     hasOverlap,
-    allDelivered: chains.every(({ rootInReview }) => rootInReview) && hasOverlap,
+    allDelivered: chains.every(({ rootInReview, complete }) => rootInReview && complete) && hasOverlap,
     takeover,
-    sharedWorkspace: new Set(ownerRecords.map((record) => record?.delivery_branch)).size !== rootIds.length,
-    telemetrySubstitution: !hasOverlap,
+    sharedWorkspace: new Set(ownerRecords.map((record) => record?.delivery_branch)).size !== binding.roots.length ||
+      new Set(binding.roots.map(({ rootIssueId }) => gitByRoot.get(rootIssueId)?.repositoryRootCanonical)).size !== binding.roots.length,
+    telemetrySubstitution: intervalFacts.unmatched || Object.hasOwn(facts.evidence, "telemetry"),
   };
+}
+
+function parallelBinding(facts) {
+  const roots = facts.context.parallel?.roots;
+  const topologyByKey = new Map(facts.definition.rootTopology.map((topology) => [topology.rootKey, topology]));
+  if (!Array.isArray(roots) || roots.length !== topologyByKey.size ||
+      new Set(roots.map(({ rootKey }) => rootKey)).size !== roots.length) return undefined;
+  const normalized = [];
+  for (const value of roots) {
+    const topology = topologyByKey.get(value?.rootKey);
+    if (!topology || !identifier(value.rootIssueId) || !identifier(value.planReviewActionIssueId) ||
+        !identifier(value.routingLabelId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
+        !repositoryRoot(value.repositoryRoot) || value.conductorRef !== topology.conductorRef ||
+        value.repositoryRef !== topology.repositoryRef || facts.context.rootIssueIdsByKey?.[value.rootKey] !== value.rootIssueId) {
+      return undefined;
+    }
+    normalized.push(Object.freeze({ ...value }));
+  }
+  if (new Set(normalized.map(({ rootIssueId }) => rootIssueId)).size !== normalized.length ||
+      new Set(normalized.map(({ planReviewActionIssueId }) => planReviewActionIssueId)).size !== normalized.length ||
+      new Set(normalized.map(({ routingLabelId }) => routingLabelId)).size !== normalized.length ||
+      new Set(normalized.map(({ conductorId }) => conductorId)).size !== normalized.length ||
+      new Set(normalized.map(({ performerProfileId }) => performerProfileId)).size !== normalized.length ||
+      new Set(normalized.map(({ repositoryRoot }) => repositoryRoot)).size !== normalized.length ||
+      normalized.some(({ rootIssueId }) => !facts.rootIssueIds.includes(rootIssueId))) return undefined;
+  return Object.freeze({ roots: Object.freeze(normalized) });
+}
+
+function parallelFailureFacts() {
+  return {
+    coverageComplete: false,
+    ownershipIsolated: false,
+    independentDeliveries: false,
+    hasOverlap: false,
+    allDelivered: false,
+    takeover: false,
+    sharedWorkspace: false,
+    telemetrySubstitution: false,
+  };
+}
+
+function independentDeliveryChainFacts(facts, expected) {
+  const chain = deliveryChainFacts(facts, expected.rootIssueId);
+  const approval = approvedPlanFacts(facts, expected.rootIssueId);
+  const action = only(approval.actions.filter(({ record }) => record.action_issue_id === expected.planReviewActionIssueId));
+  const resolution = only(facts.recordsOf("human_action_resolution", expected.rootIssueId).filter(({ record }) =>
+    record.action_issue_id === expected.planReviewActionIssueId && record.outcome === "approved" && record.terminal_status === "Approved"));
+  const actionIssue = facts.issue(expected.planReviewActionIssueId);
+  return {
+    ...chain,
+    complete: chain.complete && approval.everyWorkStartsAfterApproval && Boolean(action && resolution) &&
+      approval.approval?.action_issue_id === expected.planReviewActionIssueId && actionIssue?.state?.name === "Approved",
+  };
+}
+
+function validRootOwnership(record) {
+  return record && identifier(record.conductor_id) && identifier(record.performer_profile_id) && identifier(record.delivery_branch);
+}
+
+function validGitFact(value) {
+  return value && typeof value.repositoryRootCanonical === "string" && value.repositoryRootCanonical.length > 0 &&
+    typeof value.headRevision === "string" && value.headRevision.length > 0;
 }
 
 function preemptionFacts(facts) {
@@ -1184,17 +1272,34 @@ function actionableActionDescription(description) {
   return ["question", "required", "submit", "next"].every((word) => description.toLowerCase().includes(word));
 }
 
-function stageIntervals(facts, rootIssueIds) {
+function stageIntervalFacts(facts, rootIssueIds) {
   const ownershipByRoot = new Map(rootIssueIds.map((rootId) => [rootId, facts.recordsOf("root_ownership", rootId)[0]?.record?.conductor_id]));
-  return facts.recordsOf("stage_execution").flatMap(({ record }) => {
-    const result = facts.recordsOf("stage_result", record.root_issue_id).find(({ record: candidate }) =>
+  let coverageComplete = true;
+  let unmatched = false;
+  const intervals = [];
+  for (const { record } of facts.recordsOf("stage_execution")) {
+    if (!rootIssueIds.includes(record.root_issue_id)) continue;
+    const candidates = facts.recordsOf("stage_result", record.root_issue_id).filter(({ record: candidate }) =>
       candidate.node_issue_id === record.node_issue_id && candidate.stage === record.stage && candidate.context_digest === record.context_digest);
+    const result = only(candidates.filter(({ record: candidate }) => candidate.model_turn?.stage_execution_id === record.stage_execution_id));
+    if (candidates.some(({ record: candidate }) => candidate.model_turn?.stage_execution_id !== record.stage_execution_id)) {
+      unmatched = true;
+    }
+    if (!result) {
+      if (candidates.length === 0) coverageComplete = false;
+      else unmatched = true;
+      continue;
+    }
     const startedAt = parseTime(record.started_at);
     const completedAt = parseTime(result?.record.completed_at);
-    return startedAt !== undefined && completedAt !== undefined
-      ? [{ rootIssueId: record.root_issue_id, conductorId: ownershipByRoot.get(record.root_issue_id), startedAt, completedAt }]
-      : [];
-  });
+    if (startedAt === undefined || completedAt === undefined) {
+      coverageComplete = false;
+      continue;
+    }
+    intervals.push({ rootIssueId: record.root_issue_id, conductorId: ownershipByRoot.get(record.root_issue_id), startedAt, completedAt });
+  }
+  if (intervals.length === 0) coverageComplete = false;
+  return { intervals, coverageComplete, unmatched };
 }
 
 function referencesFor(assertion, records, issues, comments, rootIds) {
@@ -1271,6 +1376,7 @@ function recordRootIssueId(entry) { return entry?.record?.root_issue_id ?? entry
 function validAssertionOutcome(item) { return item && ["satisfied", "contradicted", "coverage_missing"].includes(item.outcome) && typeof item.reasonCodePrefix === "string"; }
 function stringList(value) { return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.length > 0); }
 function identifier(value) { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value); }
+function repositoryRoot(value) { return typeof value === "string" && value.length > 0 && value.length <= 4_096 && !value.includes("\u0000"); }
 function timestamp(value) { return typeof value === "string" && !Number.isNaN(Date.parse(value)); }
 function parseTime(value) { return timestamp(value) ? Date.parse(value) : undefined; }
 function numeric(value) { return Number.isFinite(value) ? value : Number.NaN; }

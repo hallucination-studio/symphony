@@ -356,6 +356,27 @@ test("information-answer verdict rejects a Human-created continuation fact", () 
   }
 });
 
+test("parallel verdict binds durable ownership to the driver-recorded frozen routing, Profile, and repository topology", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "parallel_multi_conductor");
+  const fixture = satisfiedFixture(definition);
+  bindParallelContext(fixture, definition);
+  findRecord(fixture.evidence.roots[0], "root_ownership").record.conductor_id = "unexpected-conductor";
+
+  const assertion = evaluateForegroundE2EAssertions({ definition, ...fixture })
+    .find(({ assertionId }) => assertionId === "root_ownership_and_workspace_isolated");
+  assert.equal(assertion.outcome, "contradicted");
+});
+
+test("parallel verdict treats a missing durable Stage completion timestamp as coverage-missing, never as inferred overlap", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "parallel_multi_conductor");
+  const fixture = satisfiedFixture(definition);
+  delete findRecord(fixture.evidence.roots[0], "stage_result", (record) => record.stage === "work").record.completed_at;
+
+  const assertions = evaluateForegroundE2EAssertions({ definition, ...fixture });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "cross_conductor_stage_overlap").outcome, "coverage_missing");
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "telemetry_substitutes_overlap").outcome, "coverage_missing");
+});
+
 test("information-answer verdict reconstructs a unique final Linear lineage only when T10 driver context is absent", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
   const fixture = satisfiedFixture(definition);
@@ -479,6 +500,18 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
     case "undeclared_revision_or_conductor_interpretation":
       findRecord(root, "root_directive").record.consumed_input_ids.push("undeclared-input");
       return value;
+    case "root_ownership_and_workspace_isolated":
+      findRecord(root, "root_ownership").record.conductor_id = "wrong-conductor";
+      return value;
+    case "independent_delivery_chains":
+      root.managedRecords = root.managedRecords.filter(({ record }) => record.kind !== "human_action_resolution");
+      return value;
+    case "cross_conductor_stage_overlap":
+      separateParallelStageIntervals(evidence.roots);
+      return value;
+    case "boundary_all_roots_delivered":
+      root.issues.find(({ id }) => id === root.rootIssueId).state.name = "Todo";
+      return value;
     case "cross_conductor_takeover":
       appendRecord(root, rootOwnership(root.rootIssueId, "wrong-conductor"));
       return value;
@@ -487,11 +520,15 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
       findRecord(second, "root_ownership").record.delivery_branch = findRecord(root, "root_ownership").record.delivery_branch;
       return value;
     }
-    case "telemetry_substitutes_overlap":
-      for (const rootValue of evidence.roots) {
-        rootValue.managedRecords = rootValue.managedRecords.filter(({ record }) => record.kind !== "stage_execution" && record.kind !== "stage_result");
-      }
+    case "telemetry_substitutes_overlap": {
+      const execution = findRecord(root, "stage_execution", (record) => record.stage === "plan").record;
+      const result = structuredClone(findRecord(root, "stage_result", (record) => record.stage === "plan").record);
+      result.result_id = "unmatched-plan-result";
+      result.model_turn.stage_execution_id = "unmatched-plan-execution";
+      result.context_digest = execution.context_digest;
+      appendRecord(root, result);
       return value;
+    }
     case "inflight_turn_interrupted":
       findRecord(root, "stage_result", (record) => record.result_id === "work-execution").record.outcome_kind = "canceled";
       return value;
@@ -520,13 +557,24 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
         "rejection_consumed_and_replied", "rejected_lineage_retained", "rejected_contract_superseded", "boundary_fresh_plan_review",
         "information_action_actionable", "answer_consumed_and_receipted", "answer_drives_fresh_plan", "ordinary_inputs_consumed_once",
         "thread_transitions_receipted", "revision_supersedes_cycle", "boundary_successor_plan_review",
-        "root_ownership_and_workspace_isolated", "independent_delivery_chains", "cross_conductor_stage_overlap", "boundary_all_roots_delivered",
         "inflight_stage_completes", "latest_ready_root_runs_next", "remaining_ready_root_progresses", "old_execution_terminal_once",
         "recovery_uses_fresh_execution", "ownership_persists", "unaffected_root_continues", "boundary_recovered_and_continuous_delivered"].includes(assertionId)) {
         for (const rootValue of evidence.roots) rootValue.managedRecords = [];
         return value;
       }
       throw new Error(`missing contradictory fixture: ${definition.caseId}.${assertionId}`);
+  }
+}
+
+function separateParallelStageIntervals(roots) {
+  for (const [rootIndex, root] of roots.entries()) {
+    const base = rootIndex === 0 ? 1 : 30;
+    const executions = root.managedRecords.filter(({ record }) => record.kind === "stage_execution");
+    for (const [index, { record: execution }] of executions.entries()) {
+      execution.started_at = at(base + index * 2);
+      findRecord(root, "stage_result", ({ model_turn }) => model_turn?.stage_execution_id === execution.stage_execution_id)
+        .record.completed_at = at(base + index * 2 + 1);
+    }
   }
 }
 
@@ -722,7 +770,31 @@ function parallelFixture(definition) {
     started: 10 + index,
     completed: 50 + index,
   }));
-  return fixture(definition, roots);
+  const value = fixture(definition, roots);
+  bindParallelContext(value, definition);
+  return value;
+}
+
+function bindParallelContext(value, definition) {
+  value.context.parallel = {
+    roots: definition.rootTopology.map((topology, index) => {
+      const root = value.evidence.roots[index];
+      const ownership = findRecord(root, "root_ownership").record;
+      const git = value.evidence.git.find(({ rootIssueId }) => rootIssueId === root.rootIssueId);
+      root.issues.find(({ id }) => id === root.rootIssueId).labels = [{ id: `route-${index + 1}` }];
+      return {
+        rootKey: topology.rootKey,
+        conductorRef: topology.conductorRef,
+        repositoryRef: topology.repositoryRef,
+        rootIssueId: root.rootIssueId,
+        planReviewActionIssueId: `plan-review-${root.rootIssueId}`,
+        routingLabelId: `route-${index + 1}`,
+        conductorId: ownership.conductor_id,
+        performerProfileId: ownership.performer_profile_id,
+        repositoryRoot: git.repositoryRootCanonical,
+      };
+    }),
+  };
 }
 
 function preemptionFixture(definition) {
@@ -776,7 +848,7 @@ function deliveredRoot(definition, rootKey, rootId, {
   const plan = addIssue(root, "plan-issue", "Succeeded");
   const work = addIssue(root, "work-issue", "Succeeded");
   const verify = addIssue(root, "verify-issue", "Succeeded");
-  const action = addIssue(root, "plan-review", "Approved");
+  const action = addIssue(root, `plan-review-${rootId}`, "Approved");
   addWorkflowIssue(root, cycle, "cycle");
   addWorkflowIssue(root, plan, "plan");
   addWorkflowIssue(root, work, "work");

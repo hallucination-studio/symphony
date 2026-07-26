@@ -137,6 +137,27 @@ async function issueFact({ issue, rootIssueId, depth, coverage, statusCatalog, s
       }
       statusCatalogTeams.add(team.id);
     }
+    let labels;
+    try {
+      labels = await readAllLinearNodes(
+        (after) => issue.labels({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
+        "foreground_e2e_evidence_pagination_failed",
+      );
+    } catch (error) {
+      coverage.add({
+        rootIssueId,
+        sourceId: issue.id,
+        scope: "labels",
+        code: error?.code === "foreground_e2e_evidence_pagination_failed"
+          ? error.code
+          : "foreground_e2e_evidence_linear_read_failed",
+      });
+      return undefined;
+    }
+    if (labels.some((label) => !validLabel(label))) {
+      coverage.add({ rootIssueId, sourceId: issue.id, scope: "labels", code: "foreground_e2e_evidence_issue_invalid" });
+      return undefined;
+    }
     return {
       id: issue.id,
       identifier: text(issue.identifier),
@@ -147,6 +168,7 @@ async function issueFact({ issue, rootIssueId, depth, coverage, statusCatalog, s
       creatorId: nullableIdentifier(issue.creatorId),
       title: text(issue.title),
       description: nullableText(issue.description),
+      labels: labels.map(labelFact).sort((left, right) => left.id.localeCompare(right.id)),
       state: statusFact(state),
       archivedAt: timestampOrNull(issue.archivedAt),
       createdAt: timestamp(issue.createdAt),
@@ -477,6 +499,10 @@ function validState(state) {
     timestampValue(state.createdAt) && timestampValue(state.updatedAt);
 }
 
+function validLabel(label) {
+  return label && IDENTIFIER.test(label.id) && typeof label.name === "string";
+}
+
 function validComment(comment, issueId) {
   return comment && IDENTIFIER.test(comment.id) && comment.issueId === issueId && typeof comment.body === "string" &&
     timestampValue(comment.createdAt) && timestampValue(comment.updatedAt) && typeof comment.children === "function";
@@ -504,6 +530,10 @@ function statusFact(state) {
     updatedAt: timestamp(state.updatedAt),
     remoteVersion: timestamp(state.updatedAt),
   };
+}
+
+function labelFact(label) {
+  return { id: label.id, name: label.name };
 }
 
 function reactionFact(reaction) {
