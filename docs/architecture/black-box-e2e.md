@@ -280,6 +280,27 @@ Case-local fact scope、required correlation、closed predicate 和 stable reaso
 - `boundary`：是一个 `required` assertion，表达 Case 可以停止等待用户交互的稳定 Linear/Git 事实；它不能缩减
   共同断言或同 Case 的其他 assertion。
 
+每条冻结 record 使用下列闭合 shape；Case definition 只能填入本文已经列出的值，不能携带 callback、query、
+function name、runtime object 或未列出的操作符：
+
+```text
+assertion_id: one catalog ID in this section
+kind: required | prohibited | boundary
+fact_scope: exact Case root_topology plus its matching repositories
+correlation: immutable Case/root identity plus the documented Root/Cycle/Stage,
+             Issue/comment/reaction, execution/result, delivery, or Git identities
+predicate: closed vocabulary selector and the documented Case condition
+reason_code: e2e.<case_id>.<assertion_id>
+```
+
+`reason_code` is a frozen diagnostic prefix, not an implementation-defined message. An assertion evaluator reports only
+`<reason_code>.contradicted` or `<reason_code>.coverage_missing`; `satisfied` has no failure reason. The predicate's fact
+scope and correlation are limited to the Case definition: a reader may not widen them by searching another Case's Root,
+repository, polling cache, runtime state, or a new selector discovered while running. The common table below supplies the
+closed condition for common IDs. For each Case-specific ID, the matching Case subsection's user behavior, positive facts,
+verification boundary, prohibited facts, and incomplete rule together are that ID's closed condition; implementation does
+not get to infer an additional one.
+
 运行中的 Human driver 可以轮询 Linear current facts，以等待产品创建的 Human Action 或已预声明的 process-fault
 时机；这种观察只决定是否执行已声明的真实用户操作，永远不改变 catalog，也不构成 assertion evidence。Campaign
 settle 后必须丢弃该观察并重新读取 final evidence。
