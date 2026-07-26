@@ -149,6 +149,11 @@ precondition。加入第二个member前，所有非终态Root必须已有一个�
 Conductor Label；移除member前，不得存在route或Root Control Record ownership仍指向它的非终态Root。
 任一条件不满足都fail closed，不做partial pool mutation。
 
+Target Workflow Setup只初始化并read-back目标Team的workflow catalog、Project配置和当前Project Conductor Pool；它绝不
+创建、rebind、加入或移除任何Conductor Project Label。Conductor Binding是Project Conductor Pool唯一的写入者。这样workflow
+初始化不能借由临时Conductor identity改变已有Root的routing；Binding创建后的pool read-back只要求包含新Binding，不要求或允许
+重置既有成员集合。
+
 Conductor runtime必须遍历全部Binding。Desktop只显示每个Binding的resolved Project安全名称；Project pool、
 Root routing、ownership和conflict细节只在Linear和Conductor日志中存在，不进入Desktop View。
 
@@ -173,6 +178,10 @@ Root创建边界失败。Project Conductor Label是Project membership，Root Con
 
 不保存权威project_id、Conductor online/offline、heartbeat、log、Root、Issue Tree、polling checkpoint、dispatch、
 Stage Result、Performer Profile、active Profile、Codex credential、usage、Verify或delivery。
+
+`podium.db`只接受本架构定义的target schema。既有数据库的table或column shape不匹配时，Podium以封闭的
+`podium_database_schema_incompatible`停止启动；不迁移旧schema、不回退到singleton Binding读取，也不保留旧的
+Conductor Project Label rebind接口。
 
 ## 7. 接口
 

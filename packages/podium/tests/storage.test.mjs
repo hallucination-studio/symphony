@@ -70,7 +70,7 @@ test("podium.db excludes transient Conductor presence and workflow observations"
   );
   assert.equal(store.listProjects("installation-1").length, 1);
   assert.equal(
-    store.getConductorBinding()?.repositoryContext.baseBranch,
+    store.listConductorBindings()[0]?.repositoryContext.baseBranch,
     "main",
   );
   assert.equal(presence.snapshot("binding-1")?.presence, "online");
@@ -289,7 +289,7 @@ test("development-token bootstrap rejects an invalid target Project before it co
   );
 });
 
-test("legacy OAuth installation schema migrates without losing credentials", async () => {
+test("legacy Podium database schemas are rejected instead of migrated", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-migration-"));
   const databasePath = path.join(directory, "podium.db");
   const database = new Database(databasePath);
@@ -308,23 +308,17 @@ test("legacy OAuth installation schema migrates without losing credentials", asy
   `);
   database.close();
 
-  const store = new SqlitePodiumStoreImpl(databasePath);
-  assert.deepEqual(store.getLinearInstallation("installation-1"), {
-    kind: "oauth",
-    installationId: "installation-1",
-    organizationId: "organization-1",
-    accessToken: "access-secret",
-    refreshToken: "refresh-secret",
-    expiresAt: "2026-07-17T00:00:00Z",
-  });
-  store.saveLinearInstallation({
-    kind: "development_token",
-    installationId: "development-token:organization-1",
-    organizationId: "organization-1",
-    delegateActorId: "app-user-1",
-    accessToken: "development-secret",
-  });
-  store.close();
+  assert.throws(
+    () => new SqlitePodiumStoreImpl(databasePath),
+    /podium_database_schema_incompatible/u,
+  );
+
+  const unchanged = new Database(databasePath, { readonly: true });
+  assert.deepEqual(
+    unchanged.prepare("PRAGMA table_info(linear_installations)").all().map(({ name }) => name),
+    ["installation_id", "organization_id", "access_token", "refresh_token", "expires_at"],
+  );
+  unchanged.close();
 });
 
 test("development-token bootstrap fails closed with sanitized errors", async () => {

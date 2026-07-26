@@ -1,14 +1,74 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { provisionConductorBindings } from "../../tools/e2e/podium-control-plane.mjs";
 import { provisionParallelBlackBoxE2EControlPlane } from "../../tools/e2e/parallel-black-box-control-plane.mjs";
+
+test("public control-plane Binding creation sends the complete RepositorySelection contract", async () => {
+  const requests = [];
+  const values = repositories();
+
+  await provisionConductorBindings({
+    projectId: "project-1",
+    repositories: values,
+    client: {
+      async command(body) {
+        requests.push(body);
+        return {
+          kind: "conductor_created",
+          ...conductor(body.repository.repository_handle.slice(-1)),
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(requests.map((request) => request.repository), values.map((repository) => ({
+    repository_handle: repository.repository_handle,
+    display_name: repository.repository_display_name,
+    base_branch: repository.base_branch,
+  })));
+});
+
+test("public control-plane serializes Binding creation against the shared Project pool", async () => {
+  const calls = [];
+  let releaseFirst;
+  let firstStartedResolve;
+  const firstStarted = new Promise((resolve) => { firstStartedResolve = resolve; });
+  const firstReleased = new Promise((resolve) => { releaseFirst = resolve; });
+
+  const provisioning = provisionConductorBindings({
+    projectId: "project-1",
+    repositories: repositories(),
+    client: {
+      async command(body) {
+        calls.push(body);
+        if (calls.length === 1) {
+          firstStartedResolve();
+          await firstReleased;
+        }
+        return {
+          kind: "conductor_created",
+          ...conductor(body.repository.repository_handle.slice(-1)),
+        };
+      },
+    },
+  });
+
+  await firstStarted;
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+  releaseFirst();
+  await provisioning;
+  assert.equal(calls.length, 3);
+});
 
 test("parallel black-box control plane bootstraps the target Project before releasing all starts", async () => {
   const events = [];
   const client = clientPort(events);
+  const physicalRequestGate = { async beforePhysicalRequest() {} };
   const controlPlane = await provisionParallelBlackBoxE2EControlPlane({
     config: configuration(),
-    runtime: runtime(),
+    runtime: { ...runtime(), linearPhysicalRequestGate: physicalRequestGate },
     sourceRepositoryRoot: "/source",
     provisionRepositories: repositoryPool(events),
     podium: podium(events, { finalUpdatedAt: "2026-07-25T00:00:01.000Z" }),
@@ -16,12 +76,19 @@ test("parallel black-box control plane bootstraps the target Project before rele
       events.push("process-host");
       assert.deepEqual(receivedRepositories, repositories());
       assert.equal(typeof startProcess, "function");
-      return { host: { kind: "host" }, async close() { events.push("host-close"); } };
+      return {
+        host: {
+          kind: "host",
+          async restartConductor(conductorId) { events.push(`restart:${conductorId}`); },
+        },
+        async close() { events.push("host-close"); },
+      };
     },
     createProcessStarter(input) {
       events.push("process-starter");
       assert.equal(input.codexBaseUrl, "https://codex.example.test");
       assert.deepEqual(input.convergencePolicy, convergencePolicy());
+      assert.equal(input.linearPhysicalRequestGate, physicalRequestGate);
       return async () => ({ request() {}, close() {} });
     },
     async createPodiumClient(input) {
@@ -30,7 +97,6 @@ test("parallel black-box control plane bootstraps the target Project before rele
       assert.equal(input.linearClientSecret, "client-secret");
       return { command: client.command, async close() { events.push("client-close"); } };
     },
-    createSetupShortHash: () => "012345abcdef",
   });
 
   assert.deepEqual(controlPlane, {
@@ -40,12 +106,22 @@ test("parallel black-box control plane bootstraps the target Project before rele
       conductor("b"),
       conductor("c"),
     ],
+    repository_contexts: repositories().map(({ repository_identity, repository_root, base_branch }) => ({
+      repository_identity,
+      repository_root,
+      base_branch,
+    })),
+    restartConductor: controlPlane.restartConductor,
     close: controlPlane.close,
   });
-  assert.deepEqual(events.slice(0, 3), ["repositories", "setup:temporary", "bootstrap"]);
-  assert.equal(events.indexOf("setup:pool") > events.indexOf("create:repo-c"), true);
-  assert.equal(events.indexOf("start:conductor-a") > events.indexOf("setup:pool"), true);
+  assert.deepEqual(events.slice(0, 3), ["repositories", "setup:workflow", "bootstrap"]);
+  assert.equal(events.indexOf("setup:workflow:2") > events.indexOf("create:repo-c"), true);
+  assert.equal(events.indexOf("start:conductor-a") > events.indexOf("setup:workflow:2"), true);
   assert.equal(events.indexOf("profile:conductor-a") > events.indexOf("start:conductor-c"), true);
+
+  await controlPlane.restartConductor("conductor-b");
+  await assert.rejects(controlPlane.restartConductor("conductor-foreign"), /parallel_black_box_control_plane_restart_invalid/u);
+  assert.equal(events.includes("restart:conductor-b"), true);
 
   await controlPlane.close();
   assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
@@ -68,7 +144,6 @@ test("parallel black-box control plane closes the public client when target Proj
         const client = clientPort(events);
         return { command: client.command, async close() { events.push("client-close"); } };
       },
-      createSetupShortHash: () => "012345abcdef",
     }),
     /parallel_black_box_control_plane_pool_read_back_invalid/u,
   );
@@ -92,37 +167,10 @@ test("parallel black-box control plane rejects invalid repository contexts befor
         },
         async bootstrapDevelopmentTokenInstallation() { throw new Error("not_called"); },
       },
-      createSetupShortHash: () => "012345abcdef",
     }),
     /parallel_black_box_control_plane_repositories_invalid/u,
   );
   assert.equal(setupCalls, 0);
-});
-
-test("parallel black-box control plane rejects a temporary setup hash that collides with a Binding", async () => {
-  const events = [];
-  await assert.rejects(
-    provisionParallelBlackBoxE2EControlPlane({
-      config: configuration(),
-      runtime: runtime(),
-      sourceRepositoryRoot: "/source",
-      provisionRepositories: repositoryPool(events),
-      podium: podium(events, { temporaryHash: "a".repeat(12) }),
-      createProcessHost() {
-        return { host: {}, async close() { events.push("host-close"); } };
-      },
-      createProcessStarter: () => async () => ({ request() {}, close() {} }),
-      async createPodiumClient() {
-        const client = clientPort(events);
-        return { command: client.command, async close() { events.push("client-close"); } };
-      },
-      createSetupShortHash: () => "a".repeat(12),
-    }),
-    /parallel_black_box_control_plane_setup_hash_collision/u,
-  );
-  assert.equal(events.includes("setup:pool"), false);
-  assert.equal(events.includes("start:conductor-a"), false);
-  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
 });
 
 test("parallel black-box control plane closes its process host when public client construction fails", async () => {
@@ -139,11 +187,70 @@ test("parallel black-box control plane closes its process host when public clien
       },
       createProcessStarter: () => async () => ({ request() {}, close() {} }),
       async createPodiumClient() { throw new Error("podium_client_create_failed"); },
-      createSetupShortHash: () => "012345abcdef",
     }),
     /podium_client_create_failed/u,
   );
   assert.deepEqual(events.slice(-2), ["host-close", "repositories-close"]);
+});
+
+test("parallel black-box control plane reports a closed Binding provisioning failure", async () => {
+  const events = [];
+  await assert.rejects(
+    provisionParallelBlackBoxE2EControlPlane({
+      config: configuration(),
+      runtime: runtime(),
+      sourceRepositoryRoot: "/source",
+      provisionRepositories: repositoryPool(events),
+      podium: podium(events),
+      createProcessHost() {
+        return { host: {}, async close() { events.push("host-close"); } };
+      },
+      createProcessStarter: () => async () => ({ request() {}, close() {} }),
+      async createPodiumClient() {
+        return {
+          async command() {
+            const error = new Error("remote failure with private input");
+            error.code = "e2e_podium_client_conductor_project_invalid";
+            throw error;
+          },
+          async close() { events.push("client-close"); },
+        };
+      },
+    }),
+    (error) => error.code === "parallel_black_box_control_plane_binding_project_invalid" &&
+      !error.message.includes("private input"),
+  );
+  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
+});
+
+test("parallel black-box control plane preserves a closed Project pool routing failure", async () => {
+  const events = [];
+  await assert.rejects(
+    provisionParallelBlackBoxE2EControlPlane({
+      config: configuration(),
+      runtime: runtime(),
+      sourceRepositoryRoot: "/source",
+      provisionRepositories: repositoryPool(events),
+      podium: podium(events),
+      createProcessHost() {
+        return { host: {}, async close() { events.push("host-close"); } };
+      },
+      createProcessStarter: () => async () => ({ request() {}, close() {} }),
+      async createPodiumClient() {
+        return {
+          async command() {
+            const error = new Error("untrusted detail");
+            error.code = "e2e_podium_client_linear_project_pool_root_routing_conflict";
+            throw error;
+          },
+          async close() { events.push("client-close"); },
+        };
+      },
+    }),
+    (error) => error.code === "parallel_black_box_control_plane_binding_project_pool_routing_conflict" &&
+      !error.message.includes("untrusted detail"),
+  );
+  assert.deepEqual(events.slice(-2), ["client-close", "repositories-close"]);
 });
 
 function configuration() {
@@ -155,7 +262,7 @@ function configuration() {
     },
     secrets: {
       linearDevToken: "linear-token",
-      linearHumanToken: "human-token",
+      linearHumanApiKey: "human-token",
       linearClientSecret: "client-secret",
       codexApiKey: "codex-secret",
     },
@@ -219,24 +326,26 @@ function conductor(suffix) {
 
 function podium(events, {
   incompletePool = false,
-  temporaryHash = "012345abcdef",
   finalUpdatedAt,
 } = {}) {
   return {
     createTargetWorkflowSetup() {
+      let calls = 0;
       return {
         async initialize(input) {
-          if (input.conductorShortHashes === undefined) {
-            events.push("setup:temporary");
-            assert.equal(input.conductorShortHash, temporaryHash);
-            return setupResult();
-          }
-          events.push("setup:pool");
-          assert.deepEqual(input.conductorShortHashes, ["a".repeat(12), "b".repeat(12), "c".repeat(12)]);
-          assert.equal(input.conductorShortHash, "a".repeat(12));
+          calls += 1;
+          events.push(`setup:workflow${calls === 1 ? "" : `:${calls}`}`);
+          assert.deepEqual(Object.keys(input).sort(), [
+            "authorized",
+            "clientId",
+            "developmentToken",
+            "projectSlugId",
+          ]);
           return setupResult({
-            members: incompletePool ? ["a".repeat(12)] : input.conductorShortHashes,
-            updatedAt: finalUpdatedAt,
+            members: calls === 1 || incompletePool
+              ? ["abcdef000001"]
+              : ["abcdef000001", "a".repeat(12), "b".repeat(12), "c".repeat(12)],
+            updatedAt: calls === 1 ? undefined : finalUpdatedAt,
           });
         },
       };
@@ -267,9 +376,7 @@ function setupResult({ members, updatedAt = "2026-07-25T00:00:00.000Z" } = {}) {
     teamId: "team-1",
     todoStateId: "todo-1",
     workflow: "already_applied",
-    projectLabel: "applied",
     projectPool: { members: members ?? [] },
-    resolution: { kind: "resolved", projectId: "project-1", updatedAt },
     identityDigest: "digest-1",
   };
 }

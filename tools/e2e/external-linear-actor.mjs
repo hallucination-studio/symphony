@@ -1,6 +1,7 @@
 import { LinearClient } from "@linear/sdk";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const CONDUCTOR_SHORT_HASH = /^[a-f0-9]{12}$/u;
 const MANAGED_CODE_BLOCK = /(?:^|\r?\n)[ \t]*(?:```|~~~)[ \t]*symphony[ \t]*(?:\r?\n|$)/iu;
 const MAX_ROOT_TITLE_LENGTH = 256;
 const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
@@ -15,18 +16,18 @@ const TERMINAL_ACTION_STATUSES = Object.freeze({
 
 export async function createVerifiedExternalLinearActors({
   symphonyAccessToken,
-  humanAccessToken,
+  humanApiKey,
   createClient = createLinearClient,
 }) {
-  if (!token(symphonyAccessToken) || !token(humanAccessToken) || typeof createClient !== "function") {
+  if (!token(symphonyAccessToken) || !token(humanApiKey) || typeof createClient !== "function") {
     throw stableError("external_linear_actor_input_invalid");
   }
-  if (symphonyAccessToken === humanAccessToken) {
+  if (symphonyAccessToken === humanApiKey) {
     throw stableError("external_linear_actor_credentials_not_distinct");
   }
 
-  const symphony = externalActorClient({ accessToken: symphonyAccessToken, createClient });
-  const human = externalActorClient({ accessToken: humanAccessToken, createClient });
+  const symphony = externalActorClient({ clientOptions: { accessToken: symphonyAccessToken }, createClient });
+  const human = externalActorClient({ clientOptions: { apiKey: humanApiKey }, createClient });
   const [symphonyActorId, humanActorId] = await Promise.all([
     symphony.readActorId(),
     human.readActorId(),
@@ -38,14 +39,14 @@ export async function createVerifiedExternalLinearActors({
   return Object.freeze({
     symphony_actor_id: symphonyActorId,
     human_actor_id: humanActorId,
-    human: human.operations({ actorId: humanActorId, symphonyActorId }),
+    human: human.operations({ humanAuthorId: humanActorId, symphonyActorId }),
   });
 }
 
-function externalActorClient({ accessToken, createClient }) {
+function externalActorClient({ clientOptions, createClient }) {
   let client;
   try {
-    client = createClient({ accessToken });
+    client = createClient(clientOptions);
   } catch {
     throw stableError("external_linear_actor_client_invalid");
   }
@@ -65,11 +66,38 @@ function externalActorClient({ accessToken, createClient }) {
       }
       return viewer.id;
     },
-    operations({ actorId, symphonyActorId }) {
+    operations({ humanAuthorId, symphonyActorId }) {
       const createdRootIds = new Set();
       return Object.freeze({
         readActorId: this.readActorId,
         async readSymphonyActorId() { return symphonyActorId; },
+        async clearE2EProjectIssues(input) {
+          const cleanup = e2eProjectCleanupInput(input);
+          const project = await sdkCall("external_linear_e2e_project_cleanup_read_failed", () => client.project(
+            cleanup.project_slug_id,
+          ));
+          const issues = await sdkCall("external_linear_e2e_project_cleanup_read_failed", () => flatActiveProjectIssues(project));
+          for (const issue of issues) {
+            assertArchivableProjectIssue(issue);
+          }
+          for (const issue of issues) {
+            const payload = await sdkCall("external_linear_e2e_project_cleanup_archive_failed", () => issue.archive());
+            assertWriteSuccess(payload, "external_linear_e2e_project_cleanup_archive_failed");
+          }
+          const readBackProject = await sdkCall("external_linear_e2e_project_cleanup_read_back_failed", () => client.project(
+            cleanup.project_slug_id,
+          ));
+          const remaining = await sdkCall("external_linear_e2e_project_cleanup_read_back_failed", () => flatActiveProjectIssues(readBackProject));
+          if (remaining.length !== 0) throw stableError("external_linear_e2e_project_cleanup_read_back_failed");
+          return Object.freeze({ project_id: project.id });
+        },
+        async discoverProjectRouting(input) {
+          const routing = projectRoutingInput(input);
+          const project = await sdkCall("external_linear_human_project_routing_read_failed", () => client.project(
+            routing.project_id,
+          ));
+          return projectRouting(project, routing);
+        },
         async createRoot(input) {
           const root = rootCreateInput(input);
           const payload = await sdkCall("external_linear_human_root_create_failed", () => client.createIssue({
@@ -114,7 +142,7 @@ function externalActorClient({ accessToken, createClient }) {
           const existing = await sdkCall("external_linear_human_comment_read_failed", () => client.comment({
             id: comment.comment_id,
           }));
-          await assertHumanEditableComment(existing, actorId);
+          await assertHumanEditableComment(existing, humanAuthorId);
           const payload = await sdkCall("external_linear_human_comment_update_failed", () => client.updateComment(
             comment.comment_id,
             { body: comment.body },
@@ -167,6 +195,71 @@ function rootCreateInput(value) {
     throw stableError("external_linear_human_root_input_invalid");
   }
   return root;
+}
+
+function e2eProjectCleanupInput(value) {
+  const cleanup = record(value, "external_linear_e2e_project_cleanup_input_invalid");
+  assertKeys(cleanup, ["project_slug_id"], [], "external_linear_e2e_project_cleanup_input_invalid");
+  if (!identifier(cleanup.project_slug_id)) throw stableError("external_linear_e2e_project_cleanup_input_invalid");
+  return cleanup;
+}
+
+async function flatActiveProjectIssues(project) {
+  if (!project || typeof project !== "object" || !identifier(project.id) || typeof project.issues !== "function") {
+    throw stableError("external_linear_e2e_project_cleanup_project_invalid");
+  }
+  return readAllNodes(() => project.issues({ first: 250 }));
+}
+
+function assertArchivableProjectIssue(issue) {
+  if (!issue || typeof issue !== "object" || !identifier(issue.id) || typeof issue.archive !== "function") {
+    throw stableError("external_linear_e2e_project_cleanup_project_invalid");
+  }
+}
+
+function projectRoutingInput(value) {
+  const routing = record(value, "external_linear_human_project_routing_input_invalid");
+  assertKeys(routing, ["project_id", "conductor_short_hashes"], [], "external_linear_human_project_routing_input_invalid");
+  if (!identifier(routing.project_id) || !Array.isArray(routing.conductor_short_hashes) ||
+      routing.conductor_short_hashes.length < 3 || routing.conductor_short_hashes.length > 32 ||
+      !routing.conductor_short_hashes.every((hash) => CONDUCTOR_SHORT_HASH.test(hash)) ||
+      new Set(routing.conductor_short_hashes).size !== routing.conductor_short_hashes.length) {
+    throw stableError("external_linear_human_project_routing_input_invalid");
+  }
+  return routing;
+}
+
+async function projectRouting(project, routing) {
+  if (!project || typeof project !== "object" || project.id !== routing.project_id ||
+      typeof project.teams !== "function" || typeof project.labels !== "function") {
+    throw stableError("external_linear_human_project_routing_invalid");
+  }
+  let teams;
+  let labels;
+  try {
+    [teams, labels] = await Promise.all([
+      readAllNodes(() => project.teams({ first: 32 })),
+      readAllNodes(() => project.labels({ first: 250 })),
+    ]);
+  } catch {
+    throw stableError("external_linear_human_project_routing_read_failed");
+  }
+  if (teams.length !== 1 || !identifier(teams[0]?.id)) {
+    throw stableError("external_linear_human_project_routing_invalid");
+  }
+  const routingLabels = routing.conductor_short_hashes.map((conductorShortHash) => {
+    const labelName = `symphony:conductor/${conductorShortHash}`;
+    const matches = labels.filter((label) => label && typeof label === "object" &&
+      identifier(label.id) && label.name === labelName && label.isGroup === false &&
+      (label.archivedAt === null || label.archivedAt === undefined) &&
+      (label.retiredById === null || label.retiredById === undefined));
+    if (matches.length !== 1) throw stableError("external_linear_human_project_routing_invalid");
+    return Object.freeze({ conductor_short_hash: conductorShortHash, label_id: matches[0].id });
+  });
+  return Object.freeze({
+    team_id: teams[0].id,
+    routing_labels: Object.freeze(routingLabels),
+  });
 }
 
 function rootUpdateInput(value) {
@@ -223,7 +316,7 @@ function threadInput(value) {
   return comment;
 }
 
-async function assertHumanEditableComment(comment, actorId) {
+async function assertHumanEditableComment(comment, humanAuthorId) {
   if (!comment || typeof comment !== "object" || typeof comment.body !== "string" || MANAGED_CODE_BLOCK.test(comment.body)) {
     throw stableError("external_linear_human_comment_target_invalid");
   }
@@ -233,7 +326,7 @@ async function assertHumanEditableComment(comment, actorId) {
   } catch {
     throw stableError("external_linear_human_comment_target_invalid");
   }
-  if (!author || typeof author !== "object" || author.id !== actorId) {
+  if (!author || typeof author !== "object" || author.id !== humanAuthorId) {
     throw stableError("external_linear_human_comment_target_invalid");
   }
 }
@@ -330,8 +423,8 @@ function record(value, code) {
   return value;
 }
 
-function createLinearClient({ accessToken }) {
-  return new LinearClient({ accessToken });
+function createLinearClient(options) {
+  return new LinearClient(options);
 }
 
 function token(value) {

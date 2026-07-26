@@ -9,7 +9,7 @@ test("external Linear actors use independent clients and return only the verifie
   const humanClient = viewerClient("human-actor");
   const actors = await createVerifiedExternalLinearActors({
     symphonyAccessToken: "symphony-token",
-    humanAccessToken: "human-token",
+    humanApiKey: "human-api-key",
     createClient(input) {
       clientInputs.push(input);
       return input.accessToken === "symphony-token" ? viewerClient("symphony-actor") : humanClient;
@@ -18,7 +18,7 @@ test("external Linear actors use independent clients and return only the verifie
 
   assert.deepEqual(clientInputs, [
     { accessToken: "symphony-token" },
-    { accessToken: "human-token" },
+    { apiKey: "human-api-key" },
   ]);
   assert.equal(actors.symphony_actor_id, "symphony-actor");
   assert.equal(actors.human_actor_id, "human-actor");
@@ -34,7 +34,7 @@ test("external Linear actor verification rejects equal credentials before creati
   await assert.rejects(
     createVerifiedExternalLinearActors({
       symphonyAccessToken: "same-token",
-      humanAccessToken: "same-token",
+      humanApiKey: "same-token",
       createClient() {
         calls += 1;
         return viewerClient("not-called");
@@ -49,7 +49,7 @@ test("external Linear actor verification rejects equal public identities", async
   await assert.rejects(
     createVerifiedExternalLinearActors({
       symphonyAccessToken: "symphony-token",
-      humanAccessToken: "human-token",
+      humanApiKey: "human-api-key",
       createClient: () => viewerClient("same-actor"),
     }),
     /external_linear_actor_identities_not_distinct/u,
@@ -60,11 +60,11 @@ test("external Linear actor verification rejects an invalid viewer response with
   await assert.rejects(
     createVerifiedExternalLinearActors({
       symphonyAccessToken: "symphony-token",
-      humanAccessToken: "human-token",
+      humanApiKey: "human-api-key",
       createClient: () => ({ viewer: Promise.resolve({ id: "" }) }),
     }),
     (error) => error.code === "external_linear_actor_identity_invalid" &&
-      !error.message.includes("symphony-token") && !error.message.includes("human-token"),
+      !error.message.includes("symphony-token") && !error.message.includes("human-api-key"),
   );
 });
 
@@ -72,29 +72,29 @@ test("external Linear actor verification redacts a failed public identity read",
   await assert.rejects(
     createVerifiedExternalLinearActors({
       symphonyAccessToken: "symphony-token",
-      humanAccessToken: "human-token",
-      createClient: () => ({ viewer: Promise.reject(new Error("remote failure: human-token")) }),
+      humanApiKey: "human-api-key",
+      createClient: () => ({ viewer: Promise.reject(new Error("remote failure: human-api-key")) }),
     }),
     (error) => error.code === "external_linear_actor_identity_read_failed" &&
-      !error.message.includes("symphony-token") && !error.message.includes("human-token"),
+      !error.message.includes("symphony-token") && !error.message.includes("human-api-key"),
   );
 });
 
 test("external Linear actor verification creates fresh public clients on every verification", async () => {
   let calls = 0;
-  const createClient = ({ accessToken }) => {
+  const createClient = (input) => {
     calls += 1;
-    return viewerClient(accessToken === "symphony-token" ? "symphony-actor" : "human-actor");
+    return viewerClient(input.accessToken === "symphony-token" ? "symphony-actor" : "human-actor");
   };
 
   await createVerifiedExternalLinearActors({
     symphonyAccessToken: "symphony-token",
-    humanAccessToken: "human-token",
+    humanApiKey: "human-api-key",
     createClient,
   });
   await createVerifiedExternalLinearActors({
     symphonyAccessToken: "symphony-token",
-    humanAccessToken: "human-token",
+    humanApiKey: "human-api-key",
     createClient,
   });
 
@@ -108,14 +108,16 @@ test("external Linear actor depends only on the official public SDK boundary", a
   assert.doesNotMatch(source, /\.(?:createReaction|deleteReaction|archiveIssue|unarchiveIssue|issueAddLabel|issueRemoveLabel|createIssueRelation|deleteIssueRelation|rawRequest)\b/u);
 });
 
-test("verified Human Actor exposes only bounded Root and ordinary Markdown comment operations", async () => {
+test("verified Human Actor exposes only bounded E2E project cleanup, Root, and ordinary Markdown comment operations", async () => {
   const calls = [];
   const client = humanClient(calls);
   const { human } = await verifiedActors(client);
 
   assert.deepEqual(Object.keys(human).sort(), [
+    "clearE2EProjectIssues",
     "createComment",
     "createRoot",
+    "discoverProjectRouting",
     "editComment",
     "readActorId",
     "readSymphonyActorId",
@@ -169,6 +171,102 @@ test("verified Human Actor exposes only bounded Root and ordinary Markdown comme
     { kind: "read_comment", comment_id: "human-comment-1" },
     { kind: "update_comment", comment_id: "human-comment-1", input: { body: "Edited \ud83d\udd0d\n\n```text\nverified\n```" } },
   ]);
+});
+
+test("E2E Human Actor flat-archives every active Project Issue without walking Root children", async () => {
+  const calls = [];
+  const activeIssues = new Map();
+  const root = projectIssue({ id: "root-1", parentId: null, stateName: "Canceled", activeIssues, calls });
+  const child = projectIssue({ id: "child-1", parentId: "root-1", stateName: "Done", activeIssues, calls });
+  activeIssues.set(root.id, root);
+  activeIssues.set(child.id, child);
+  const client = humanClient(calls);
+  client.project = async (projectSlugId) => {
+    calls.push({ kind: "read_project", project_slug_id: projectSlugId });
+    return {
+      id: "project-1",
+      issues: async (input) => {
+        calls.push({ kind: "read_project_issues", input });
+        return connection([...activeIssues.values()]);
+      },
+    };
+  };
+  const { human } = await verifiedActors(client);
+
+  const result = await human.clearE2EProjectIssues({ project_slug_id: "e2e-project" });
+
+  assert.deepEqual(result, { project_id: "project-1" });
+  assert.deepEqual(calls.filter(({ kind }) => kind === "archive_issue").map(({ issue_id: issueId }) => issueId), [
+    "root-1",
+    "child-1",
+  ]);
+  assert.equal(calls.some(({ kind }) => kind === "read_issue_children"), false);
+  assert.equal(activeIssues.size, 0);
+  assert.deepEqual(calls.filter(({ kind }) => kind === "read_project"), [
+    { kind: "read_project", project_slug_id: "e2e-project" },
+    { kind: "read_project", project_slug_id: "e2e-project" },
+  ]);
+  assert.deepEqual(calls.filter(({ kind }) => kind === "read_project_issues").map(({ input }) => input), [
+    { first: 250 },
+    { first: 250 },
+  ]);
+});
+
+test("E2E Human Actor fails closed when Project cleanup cannot read back an empty Project", async () => {
+  const calls = [];
+  const issue = {
+    id: "root-1",
+    parentId: null,
+    async archive() {
+      calls.push({ kind: "archive_issue", issue_id: "root-1" });
+      return { success: true };
+    },
+  };
+  const client = humanClient(calls);
+  client.project = async () => ({
+    id: "project-1",
+    issues: async () => connection([issue]),
+  });
+  const { human } = await verifiedActors(client);
+
+  await assert.rejects(
+    human.clearE2EProjectIssues({ project_slug_id: "e2e-project" }),
+    /external_linear_e2e_project_cleanup_read_back_failed/u,
+  );
+  assert.deepEqual(calls, [{ kind: "archive_issue", issue_id: "root-1" }]);
+});
+
+test("Human Actor discovers the exact Project Team and active routing Labels through the public Linear boundary", async () => {
+  const calls = [];
+  const client = humanClient(calls);
+  client.project = async (projectId) => {
+    calls.push({ kind: "read_project", project_id: projectId });
+    return {
+      id: projectId,
+      teams: async () => connection([{ id: "team-1" }]),
+      labels: async () => connection([
+        { id: "label-a", name: "symphony:conductor/abcdef123456", isGroup: false, archivedAt: null, retiredById: null },
+        { id: "label-b", name: "symphony:conductor/abcdef123457", isGroup: false, archivedAt: null, retiredById: null },
+        { id: "label-c", name: "symphony:conductor/abcdef123458", isGroup: false, archivedAt: null, retiredById: null },
+      ]),
+    };
+  };
+  const { human } = await verifiedActors(client);
+
+  const routing = await human.discoverProjectRouting({
+    project_id: "project-1",
+    conductor_short_hashes: ["abcdef123456", "abcdef123457", "abcdef123458"],
+  });
+
+  assert.deepEqual(routing, {
+    team_id: "team-1",
+    routing_labels: [
+      { conductor_short_hash: "abcdef123456", label_id: "label-a" },
+      { conductor_short_hash: "abcdef123457", label_id: "label-b" },
+      { conductor_short_hash: "abcdef123458", label_id: "label-c" },
+    ],
+  });
+  assert.deepEqual(calls, [{ kind: "read_project", project_id: "project-1" }]);
 });
 
 test("Human Actor resolves only verified Human Actions and writes required reason before terminal status", async () => {
@@ -309,9 +407,9 @@ function viewerClient(id) {
 async function verifiedActors(humanClientValue) {
   return createVerifiedExternalLinearActors({
     symphonyAccessToken: "symphony-token",
-    humanAccessToken: "human-token",
-    createClient({ accessToken }) {
-      return accessToken === "symphony-token" ? viewerClient("symphony-actor") : humanClientValue;
+    humanApiKey: "human-api-key",
+    createClient(input) {
+      return input.accessToken === "symphony-token" ? viewerClient("symphony-actor") : humanClientValue;
     },
   });
 }
@@ -376,5 +474,22 @@ function connection(nodes) {
     nodes,
     pageInfo: { hasNextPage: false },
     async fetchNext() {},
+  };
+}
+
+function projectIssue({ id, parentId, stateName, activeIssues, calls }) {
+  return {
+    id,
+    parentId,
+    state: Promise.resolve({ name: stateName }),
+    async archive() {
+      calls.push({ kind: "archive_issue", issue_id: id });
+      activeIssues.delete(id);
+      return { success: true };
+    },
+    async children() {
+      calls.push({ kind: "read_issue_children", issue_id: id });
+      throw new Error("Project cleanup must not traverse Issue children");
+    },
   };
 }

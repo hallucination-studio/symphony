@@ -1,5 +1,5 @@
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
-const IDENTIFIER = /^[a-z][a-z0-9_-]{2,120}$/u;
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const CONDUCTOR_HASH = /^[a-z0-9][a-z0-9-]{2,120}$/u;
 const HUMAN_SCRIPT_REGISTRY = registry([
   "approve_plan",

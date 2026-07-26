@@ -11,8 +11,6 @@ import type {
 } from "./TargetWorkflowSetupInterface.js";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const CONDUCTOR_SHORT_HASH = /^[a-f0-9]{12}$/u;
-const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const SETUP_REQUEST_TIMEOUT_MS = 30_000;
 
 export function createTargetWorkflowSetup(input: {
@@ -63,12 +61,6 @@ async function initializeTargetWorkflowSetup(
       : undefined,
   );
   const sdk = createSdk("setup");
-  const desiredConductorShortHashes = input.conductorShortHashes ?? [input.conductorShortHash];
-  if (desiredConductorShortHashes.length === 0 ||
-      desiredConductorShortHashes.some((hash) => !CONDUCTOR_SHORT_HASH.test(hash)) ||
-      !desiredConductorShortHashes.includes(input.conductorShortHash)) {
-    throw new Error("linear_target_setup_pool_invalid");
-  }
   const initial = await sdk.readTargetProjectConfiguration({
     clientId: input.clientId,
     projectSlugId: input.projectSlugId,
@@ -77,37 +69,9 @@ async function initializeTargetWorkflowSetup(
     projectId: initial.project.projectId,
     authorized: input.authorized,
   });
-  const usePool = input.conductorShortHashes !== undefined;
-  const labelName = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
-  let projectLabel: { kind: "dry_run" | "applied" | "already_applied" };
-  let projectPool: { members: readonly string[] } | undefined;
-  if (usePool) {
-    const poolPlan = await sdk.preflightConductorProjectPool({
-      projectId: initial.project.projectId,
-      desiredMembers: desiredConductorShortHashes,
-    });
-    if (poolPlan.kind !== "ready") throw new Error(`linear_target_setup_${poolPlan.reason}`);
-    const poolResult = await sdk.reconcileConductorProjectPool({
-      plan: poolPlan,
-      authorized: input.authorized,
-    });
-    projectLabel = { kind: poolResult.kind };
-    projectPool = {
-      members: poolResult.kind === "dry_run" ? poolPlan.desiredMembers : poolResult.members,
-    };
-  } else {
-    const labelPlan = await sdk.preflightConductorProjectLabel({
-      projectId: initial.project.projectId,
-      labelName,
-    });
-    if (labelPlan.kind !== "ready") throw new Error(`linear_target_setup_${labelPlan.reason}`);
-    projectLabel = await sdk.rebindConductorProjectLabel({
-      plan: labelPlan,
-      authorized: input.authorized,
-    });
-  }
+  const initialPool = await sdk.readConductorProjectPool({ projectId: initial.project.projectId });
   if (!input.authorized) {
-    if (workflow.kind !== "dry_run" || projectLabel.kind !== "dry_run") {
+    if (workflow.kind !== "dry_run") {
       throw new Error("linear_target_setup_dry_run_invalid");
     }
     return Object.freeze({
@@ -118,17 +82,15 @@ async function initializeTargetWorkflowSetup(
       teamId: initial.teamId,
       ...(initial.todoStateId ? { todoStateId: initial.todoStateId } : {}),
       workflow: "dry_run",
-      projectLabel: "dry_run",
-      ...(projectPool ? { projectPool } : {}),
+      projectPool: { members: initialPool.members },
       identityDigest: setupIdentityDigest({
         organizationId,
         projectId: initial.project.projectId,
         teamId: initial.teamId,
-        labelName: desiredConductorShortHashes.slice().sort().join(","),
       }),
     });
   }
-  if (workflow.kind === "dry_run" || projectLabel.kind === "dry_run") {
+  if (workflow.kind === "dry_run") {
     throw new Error("linear_target_setup_authorization_invalid");
   }
   const final = await sdk.readTargetProjectConfiguration({
@@ -138,14 +100,7 @@ async function initializeTargetWorkflowSetup(
   if (!final.todoStateId || final.teamId !== initial.teamId || final.project.projectId !== initial.project.projectId) {
     throw new Error("linear_target_setup_workflow_read_back_failed");
   }
-  const resolution = await sdk.readProjectResolution({
-    conductorShortHash: input.conductorShortHash,
-  });
-  if (resolution.kind !== "resolved" || resolution.projectId !== final.project.projectId ||
-      desiredConductorShortHashes.some((hash) => !resolution.conductorPool.some((member) => member.conductorShortHash === hash)) ||
-      resolution.updatedAt !== final.project.updatedAt) {
-    throw new Error("linear_target_setup_project_resolution_failed");
-  }
+  const finalPool = await sdk.readConductorProjectPool({ projectId: final.project.projectId });
   return Object.freeze({
     kind: "ready",
     organizationId,
@@ -154,14 +109,11 @@ async function initializeTargetWorkflowSetup(
     teamId: final.teamId,
     todoStateId: final.todoStateId,
     workflow: workflow.kind,
-    projectLabel: projectLabel.kind,
-    ...(projectPool ? { projectPool: { members: resolution.conductorPool.map(({ conductorShortHash }) => conductorShortHash) } } : {}),
-    resolution,
+    projectPool: { members: finalPool.members },
     identityDigest: setupIdentityDigest({
       organizationId,
       projectId: final.project.projectId,
       teamId: final.teamId,
-      labelName: desiredConductorShortHashes.slice().sort().join(","),
     }),
   });
 }
@@ -169,9 +121,6 @@ async function initializeTargetWorkflowSetup(
 function validateInput(input: Parameters<TargetWorkflowSetupInterface["initialize"]>[0]): void {
   if (typeof input.developmentToken !== "string" || input.developmentToken.length === 0 ||
       !SAFE_ID.test(input.clientId) || !SAFE_ID.test(input.projectSlugId) ||
-      !CONDUCTOR_SHORT_HASH.test(input.conductorShortHash) ||
-      (input.conductorShortHashes !== undefined && (!Array.isArray(input.conductorShortHashes) ||
-        input.conductorShortHashes.some((hash) => !CONDUCTOR_SHORT_HASH.test(hash)))) ||
       typeof input.authorized !== "boolean") {
     throw new Error("linear_target_setup_input_invalid");
   }
@@ -189,10 +138,9 @@ function setupIdentityDigest(input: {
   organizationId: string;
   projectId: string;
   teamId: string;
-  labelName: string;
 }): string {
   return createHash("sha256")
-    .update(`${input.organizationId}\n${input.projectId}\n${input.teamId}\n${input.labelName}`)
+    .update(`${input.organizationId}\n${input.projectId}\n${input.teamId}`)
     .digest("hex")
     .slice(0, 16);
 }

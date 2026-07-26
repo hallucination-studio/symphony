@@ -150,6 +150,20 @@ test("Project catalog consumes every SDK page", async () => {
   store.close();
 });
 
+test("Binding creation rejects a legacy label-only client", async () => {
+  const store = await createStore();
+  assert.throws(
+    () => new ConductorBindingUseCase(store, {
+      async assignConductorProjectLabel() {},
+    }, {
+      createBindingId: () => "binding-1",
+      createConductorId: () => "conductor-1",
+    }),
+    /linear_project_pool_client_invalid/u,
+  );
+  store.close();
+});
+
 test("Binding creation allows multiple Conductors to join one Project pool", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
@@ -167,11 +181,36 @@ test("Binding creation allows multiple Conductors to join one Project pool", asy
     name: "One",
     updatedAt: "2026-07-16T00:00:00Z",
   });
-  const labels = [];
+  const desiredMemberSets = [];
+  let members = [];
   let sequence = 0;
   const client = {
-    async assignConductorProjectLabel(input) {
-      labels.push(input);
+    async readConductorProjectPool({ projectId }) {
+      return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [...members] };
+    },
+    async preflightConductorProjectPool({ projectId, desiredMembers }) {
+      desiredMemberSets.push([...desiredMembers]);
+      return {
+        kind: "ready",
+        projectId,
+        expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+        fingerprint: `pool-${desiredMemberSets.length}`,
+        currentMembers: [...members],
+        desiredMembers: [...desiredMembers],
+        addMembers: desiredMembers.filter((member) => !members.includes(member)),
+        removeMembers: [],
+        routeRoots: [],
+      };
+    },
+    async reconcileConductorProjectPool({ plan, authorized }) {
+      assert.equal(authorized, true);
+      members = [...plan.desiredMembers];
+      return {
+        kind: "applied",
+        projectId: plan.projectId,
+        fingerprint: plan.fingerprint,
+        members: [...members],
+      };
     },
   };
   const useCase = new ConductorBindingUseCase(store, client, {
@@ -192,12 +231,7 @@ test("Binding creation allows multiple Conductors to join one Project pool", asy
     repositoryContext,
   });
   assert.equal(binding.conductorShortHash.length, 12);
-  assert.deepEqual(labels, [
-    {
-      projectId: "project-1",
-      labelName: `symphony:conductor/${binding.conductorShortHash}`,
-    },
-  ]);
+  assert.deepEqual(desiredMemberSets, [[binding.conductorShortHash]]);
 
   const second = await useCase.create({
     installationId: "installation-1",
@@ -206,11 +240,15 @@ test("Binding creation allows multiple Conductors to join one Project pool", asy
   });
   assert.notEqual(second.conductorShortHash, binding.conductorShortHash);
   assert.equal(store.listConductorBindings().length, 2);
-  assert.equal(labels.length, 2);
+  assert.deepEqual(desiredMemberSets, [
+    [binding.conductorShortHash],
+    [binding.conductorShortHash, second.conductorShortHash],
+  ]);
+  assert.deepEqual(members, desiredMemberSets.at(-1));
   store.close();
 });
 
-test("creating a Conductor initializes the Team before rebinding its Project label", async () => {
+test("creating a Conductor initializes the Team before extending its Project pool", async () => {
   const events = [];
   const installation = {
     kind: "oauth",
@@ -232,7 +270,8 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
     getOnlyLinearCredential: () => installation,
     getLinearCredential: (installationId) => installationId === installation.installationId ? installation : undefined,
     getProject: (projectId) => projectId === project.projectId ? project : undefined,
-    getConductorBinding: () => binding,
+    listConductorBindings: () => binding ? [binding] : [],
+    getConductorBindingById: (bindingId) => binding?.bindingId === bindingId ? binding : undefined,
     saveConductorBinding: (value) => { binding = value; },
     setConductorDesiredState: (_bindingId, desiredState) => { binding.desiredState = desiredState; },
   };
@@ -253,8 +292,32 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
       events.push(["team", input]);
       return { kind: "already_applied", projectId: input.projectId, teamId: "team-1", canonicalStatuses: [], nativeDuplicate: {} };
     },
-    async assignConductorProjectLabel(input) {
-      events.push(["project", input]);
+    async readConductorProjectPool(input) {
+      events.push(["pool-read", input]);
+      return { projectId: input.projectId, updatedAt: "2026-07-16T00:00:00Z", members: [] };
+    },
+    async preflightConductorProjectPool(input) {
+      events.push(["pool-preflight", input]);
+      return {
+        kind: "ready",
+        projectId: input.projectId,
+        expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+        fingerprint: "pool-1",
+        currentMembers: [],
+        desiredMembers: [...input.desiredMembers],
+        addMembers: [...input.desiredMembers],
+        removeMembers: [],
+        routeRoots: [],
+      };
+    },
+    async reconcileConductorProjectPool(input) {
+      events.push(["pool-reconcile", input]);
+      return {
+        kind: "applied",
+        projectId: input.plan.projectId,
+        fingerprint: input.plan.fingerprint,
+        members: [...input.plan.desiredMembers],
+      };
     },
   };
   const services = new PodiumClientServicesImpl(
@@ -275,7 +338,22 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
 
   assert.deepEqual(events, [
     ["team", { projectId: "project-1", authorized: true }],
-    ["project", { projectId: "project-1", labelName: `symphony:conductor/${binding.conductorShortHash}` }],
+    ["pool-read", { projectId: "project-1" }],
+    ["pool-preflight", { projectId: "project-1", desiredMembers: [binding.conductorShortHash] }],
+    ["pool-reconcile", {
+      plan: {
+        kind: "ready",
+        projectId: "project-1",
+        expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+        fingerprint: "pool-1",
+        currentMembers: [],
+        desiredMembers: [binding.conductorShortHash],
+        addMembers: [binding.conductorShortHash],
+        removeMembers: [],
+        routeRoots: [],
+      },
+      authorized: true,
+    }],
   ]);
   assert.deepEqual(created, {
     kind: "conductor_created",
@@ -294,7 +372,7 @@ test("creating a Conductor initializes the Team before rebinding its Project lab
   assert.equal(binding.desiredState, "running");
 });
 
-test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {
+test("Binding creation persists one stopped intent and safely resumes Pool reconciliation", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
     kind: "oauth",
@@ -315,9 +393,31 @@ test("Binding creation persists one stopped intent and safely resumes label assi
   const useCase = new ConductorBindingUseCase(
     store,
     {
-      async assignConductorProjectLabel() {
+      async readConductorProjectPool({ projectId }) {
+        return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [] };
+      },
+      async preflightConductorProjectPool({ projectId, desiredMembers }) {
         attempts += 1;
         if (attempts === 1) throw new Error("ambiguous remote failure");
+        return {
+          kind: "ready",
+          projectId,
+          expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+          fingerprint: "pool-1",
+          currentMembers: [],
+          desiredMembers: [...desiredMembers],
+          addMembers: [...desiredMembers],
+          removeMembers: [],
+          routeRoots: [],
+        };
+      },
+      async reconcileConductorProjectPool({ plan }) {
+        return {
+          kind: "applied",
+          projectId: plan.projectId,
+          fingerprint: plan.fingerprint,
+          members: [...plan.desiredMembers],
+        };
       },
     },
     {
@@ -341,7 +441,7 @@ test("Binding creation persists one stopped intent and safely resumes label assi
     }),
     /ambiguous remote failure/,
   );
-  assert.equal(store.getConductorBinding()?.desiredState, "stopped");
+  assert.equal(store.listConductorBindings()[0]?.desiredState, "stopped");
 
   const recovered = await useCase.create({
     installationId: "installation-1",
@@ -351,60 +451,5 @@ test("Binding creation persists one stopped intent and safely resumes label assi
   assert.equal(recovered.bindingId, "binding-1");
   assert.equal(recovered.desiredState, "running");
   assert.equal(attempts, 2);
-  store.close();
-});
-
-test("Binding label assignment retries official network errors with bounded backoff", async () => {
-  class NetworkLinearError extends Error {}
-  const store = await createStore();
-  store.saveLinearInstallation({
-    kind: "oauth",
-    installationId: "installation-1",
-    organizationId: "organization-1",
-    accessToken: "access-secret",
-    refreshToken: "refresh-secret",
-    expiresAt: "2026-07-17T00:00:00Z",
-  });
-  store.saveProject({
-    projectId: "project-1",
-    installationId: "installation-1",
-    organizationId: "organization-1",
-    name: "Project",
-    updatedAt: "2026-07-16T00:00:00Z",
-  });
-  let attempts = 0;
-  const delays = [];
-  const useCase = new ConductorBindingUseCase(
-    store,
-    {
-      async assignConductorProjectLabel() {
-        attempts += 1;
-        if (attempts < 3) throw new NetworkLinearError("connection reset");
-      },
-    },
-    {
-      createBindingId: () => "binding-1",
-      createConductorId: () => "conductor-1",
-      sleep: async (delay) => delays.push(delay),
-      maxAttempts: 3,
-      baseDelayMs: 10,
-    },
-  );
-
-  const binding = await useCase.create({
-    installationId: "installation-1",
-    projectId: "project-1",
-    repositoryContext: {
-      repositoryHandle: "repo-handle-1",
-      repositoryIdentity: "repository-1",
-      repositoryDisplayName: "Repository",
-      repositoryRoot: "/private/repository",
-      baseBranch: "main",
-    },
-  });
-
-  assert.equal(binding.desiredState, "running");
-  assert.equal(attempts, 3);
-  assert.deepEqual(delays, [10, 20]);
   store.close();
 });

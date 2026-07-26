@@ -28,7 +28,7 @@ export async function readFreshE2EEvidenceSnapshot({
   root_issue_ids: rootIssueIds,
   repository_contexts: repositoryContexts,
   createLinearClient,
-  linear_access_token: linearAccessToken,
+  linear_api_key: linearApiKey,
   readGitEvidence = readFreshGitEvidence,
   observedAt = () => new Date().toISOString(),
 } = {}) {
@@ -36,7 +36,7 @@ export async function readFreshE2EEvidenceSnapshot({
     rootIssueIds,
     repositoryContexts,
     createLinearClient,
-    linearAccessToken,
+    linearApiKey,
     readGitEvidence,
     observedAt,
   });
@@ -44,7 +44,7 @@ export async function readFreshE2EEvidenceSnapshot({
 
   let client;
   try {
-    client = await input.createLinearClient();
+    client = await input.createLinearClient(input.linearClientOptions);
     if (!client || typeof client.issue !== "function") throw new Error("invalid client");
   } catch {
     return incomplete(observedAtValue, input.rootIssueIds[0], "fresh_linear_coverage_incomplete");
@@ -463,7 +463,7 @@ async function readAllNodes(readPage, maximum) {
   return connection.nodes;
 }
 
-function snapshotInput({ rootIssueIds, repositoryContexts, createLinearClient, linearAccessToken, readGitEvidence, observedAt }) {
+function snapshotInput({ rootIssueIds, repositoryContexts, createLinearClient, linearApiKey, readGitEvidence, observedAt }) {
   if (!uniqueIdentifiers(rootIssueIds, MAX_ROOTS) || !Array.isArray(repositoryContexts) || repositoryContexts.length === 0 ||
       repositoryContexts.length > MAX_REPOSITORIES || new Set(repositoryContexts.map((context) => context?.repository_identity)).size !== repositoryContexts.length ||
       !repositoryContexts.every((context) => validRepositoryContext(context)) || typeof readGitEvidence !== "function" ||
@@ -471,11 +471,12 @@ function snapshotInput({ rootIssueIds, repositoryContexts, createLinearClient, l
     throw stableError("fresh_evidence_input_invalid");
   }
   if (createLinearClient !== undefined && typeof createLinearClient !== "function") throw stableError("fresh_evidence_input_invalid");
-  if (createLinearClient === undefined && !token(linearAccessToken)) throw stableError("fresh_evidence_input_invalid");
+  if (createLinearClient === undefined && !token(linearApiKey)) throw stableError("fresh_evidence_input_invalid");
   return {
     rootIssueIds: [...rootIssueIds],
     repositoryContexts: repositoryContexts.map(repositoryContext),
-    createLinearClient: createLinearClient ?? (() => new LinearClient({ accessToken: linearAccessToken })),
+    createLinearClient: createLinearClient ?? ((options) => new LinearClient(options)),
+    linearClientOptions: linearApiKey === undefined ? undefined : Object.freeze({ apiKey: linearApiKey }),
     readGitEvidence,
     observedAt,
   };

@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 import {
   provisionApiKeyProfiles,
   provisionConductorBindings,
@@ -13,6 +11,16 @@ import { provisionParallelE2ERepositories } from "./parallel-repository-pool.mjs
 const CONDUCTOR_SHORT_HASH = /^[a-f0-9]{12}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const E2E_LINEAR_REDIRECT_URI = "http://127.0.0.1/e2e";
+const CONTROL_PLANE_PODIUM_FAILURES = new Map([
+  [
+    "e2e_podium_client_conductor_project_invalid",
+    "parallel_black_box_control_plane_binding_project_invalid",
+  ],
+  [
+    "e2e_podium_client_linear_project_pool_root_routing_conflict",
+    "parallel_black_box_control_plane_binding_project_pool_routing_conflict",
+  ],
+]);
 
 export async function provisionParallelBlackBoxE2EControlPlane({
   config,
@@ -23,9 +31,8 @@ export async function provisionParallelBlackBoxE2EControlPlane({
   createProcessHost = createE2EProcessHost,
   createProcessStarter = createProductionE2EProcessStarter,
   createPodiumClient = createPublicE2EPodiumClient,
-  createSetupShortHash = () => randomBytes(6).toString("hex"),
 }) {
-  assertInput({ config, runtime, sourceRepositoryRoot, provisionRepositories, createProcessHost, createProcessStarter, createPodiumClient, createSetupShortHash });
+  assertInput({ config, runtime, sourceRepositoryRoot, provisionRepositories, createProcessHost, createProcessStarter, createPodiumClient });
   const repositoryOwner = await provisionRepositories({ sourceRepositoryRoot });
   if (!repositoryOwner || !validRepositories(repositoryOwner.repositories) || typeof repositoryOwner.close !== "function") {
     await repositoryOwner?.close?.();
@@ -40,12 +47,13 @@ export async function provisionParallelBlackBoxE2EControlPlane({
       createProcessHost,
       createProcessStarter,
       createPodiumClient,
-      createSetupShortHash,
     });
     let closed = false;
     return Object.freeze({
       project_id: controlPlane.project_id,
       conductors: controlPlane.conductors,
+      repository_contexts: repositoryContexts(repositoryOwner.repositories),
+      restartConductor: controlPlane.restartConductor,
       async close() {
         if (closed) return;
         closed = true;
@@ -70,7 +78,6 @@ async function provisionWithRepositories({
   createProcessHost,
   createProcessStarter,
   createPodiumClient,
-  createSetupShortHash,
 }) {
   const podium = suppliedPodium ?? await import("@symphony/podium");
   if (typeof podium?.createTargetWorkflowSetup !== "function" ||
@@ -78,10 +85,6 @@ async function provisionWithRepositories({
     throw stableError("parallel_black_box_control_plane_podium_invalid");
   }
 
-  const temporarySetupShortHash = createSetupShortHash();
-  if (!CONDUCTOR_SHORT_HASH.test(temporarySetupShortHash)) {
-    throw stableError("parallel_black_box_control_plane_setup_hash_invalid");
-  }
   const setup = podium.createTargetWorkflowSetup();
   if (!setup || typeof setup.initialize !== "function") {
     throw stableError("parallel_black_box_control_plane_setup_invalid");
@@ -90,7 +93,6 @@ async function provisionWithRepositories({
     developmentToken: config.secrets.linearDevToken,
     clientId: config.linear.clientId,
     projectSlugId: config.linear.projectSlugId,
-    conductorShortHash: temporarySetupShortHash,
     authorized: true,
   });
   const initialProject = readyProject(initialSetup, "parallel_black_box_control_plane_initial_setup_invalid");
@@ -114,6 +116,7 @@ async function provisionWithRepositories({
       rootDeadlineAt: runtime.rootDeadlineAt,
       convergencePolicy: runtime.convergencePolicy,
       environment: runtime.environment,
+      linearPhysicalRequestGate: runtime.linearPhysicalRequestGate,
     }),
   });
   if (!processHost || !processHost.host || typeof processHost.close !== "function") {
@@ -131,39 +134,43 @@ async function provisionWithRepositories({
     if (!client || typeof client.command !== "function" || typeof client.close !== "function") {
       throw stableError("parallel_black_box_control_plane_client_invalid");
     }
-    const conductors = await provisionConductorBindings({
-      client,
-      projectId: initialProject.projectId,
-      repositories,
-    });
+    const conductors = await controlPlaneOperation(
+      "parallel_black_box_control_plane_binding_provision_failed",
+      () => provisionConductorBindings({
+        client,
+        projectId: initialProject.projectId,
+        repositories,
+      }),
+    );
     const conductorShortHashes = conductors.map(({ conductor_short_hash }) => conductor_short_hash);
     if (conductorShortHashes.some((hash) => !CONDUCTOR_SHORT_HASH.test(hash))) {
       throw stableError("parallel_black_box_control_plane_binding_hash_invalid");
-    }
-    if (conductorShortHashes.includes(temporarySetupShortHash)) {
-      throw stableError("parallel_black_box_control_plane_setup_hash_collision");
     }
     const finalSetup = await setup.initialize({
       developmentToken: config.secrets.linearDevToken,
       clientId: config.linear.clientId,
       projectSlugId: config.linear.projectSlugId,
-      conductorShortHash: conductorShortHashes[0],
-      conductorShortHashes,
       authorized: true,
     });
-    if (!sameReadyProject(finalSetup, initialProject) || !sameMembers(finalSetup.projectPool?.members, conductorShortHashes)) {
+    if (!sameReadyProject(finalSetup, initialProject) || !containsMembers(finalSetup.projectPool?.members, conductorShortHashes)) {
       throw stableError("parallel_black_box_control_plane_pool_read_back_invalid");
     }
 
-    await startConductorProcesses({ client, conductors });
+    await controlPlaneOperation(
+      "parallel_black_box_control_plane_conductor_start_failed",
+      () => startConductorProcesses({ client, conductors }),
+    );
     const apiKey = Buffer.from(config.secrets.codexApiKey, "utf8");
     try {
-      await provisionApiKeyProfiles({
-        client,
-        conductors,
-        model: config.codex.model,
-        apiKey,
-      });
+      await controlPlaneOperation(
+        "parallel_black_box_control_plane_profile_provision_failed",
+        () => provisionApiKeyProfiles({
+          client,
+          conductors,
+          model: config.codex.model,
+          apiKey,
+        }),
+      );
     } finally {
       apiKey.fill(0);
     }
@@ -172,6 +179,19 @@ async function provisionWithRepositories({
     return Object.freeze({
       project_id: initialProject.projectId,
       conductors,
+      async restartConductor(conductorId) {
+        if (!identifier(conductorId) || !conductors.some((conductor) => conductor.conductor_id === conductorId)) {
+          throw stableError("parallel_black_box_control_plane_restart_invalid");
+        }
+        if (typeof processHost.host.restartConductor !== "function") {
+          throw stableError("parallel_black_box_control_plane_restart_unavailable");
+        }
+        try {
+          await processHost.host.restartConductor(conductorId);
+        } catch {
+          throw stableError("parallel_black_box_control_plane_restart_failed");
+        }
+      },
       async close() {
         if (closed) return;
         closed = true;
@@ -185,6 +205,18 @@ async function provisionWithRepositories({
   }
 }
 
+async function controlPlaneOperation(code, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    const specificCode = CONTROL_PLANE_PODIUM_FAILURES.get(error?.code);
+    if (specificCode !== undefined && code === "parallel_black_box_control_plane_binding_provision_failed") {
+      throw stableError(specificCode);
+    }
+    throw stableError(code);
+  }
+}
+
 function assertInput({
   config,
   runtime,
@@ -193,13 +225,12 @@ function assertInput({
   createProcessHost,
   createProcessStarter,
   createPodiumClient,
-  createSetupShortHash,
 }) {
   if (!config || typeof config !== "object" || !runtime || typeof runtime !== "object" ||
       typeof sourceRepositoryRoot !== "string" || sourceRepositoryRoot.length === 0 ||
       typeof provisionRepositories !== "function" ||
       typeof createProcessHost !== "function" || typeof createProcessStarter !== "function" ||
-      typeof createPodiumClient !== "function" || typeof createSetupShortHash !== "function" ||
+      typeof createPodiumClient !== "function" ||
       config.linear?.setupAuthorized !== true || !identifier(config.linear?.clientId) ||
       !identifier(config.linear?.projectSlugId) || !secret(config.secrets?.linearDevToken) ||
       !secret(config.secrets?.linearClientSecret) || !secret(config.secrets?.codexApiKey) ||
@@ -207,7 +238,9 @@ function assertInput({
       !pathValue(runtime.databasePath) || !pathValue(runtime.conductorDataRoot) ||
       !pathValue(runtime.performerExecutable) || !validTimestamp(runtime.rootDeadlineAt) ||
       !convergencePolicy(runtime.convergencePolicy) ||
-      !runtime.environment || typeof runtime.environment !== "object") {
+      !runtime.environment || typeof runtime.environment !== "object" ||
+      runtime.linearPhysicalRequestGate !== undefined &&
+      (!runtime.linearPhysicalRequestGate || typeof runtime.linearPhysicalRequestGate.beforePhysicalRequest !== "function")) {
     throw stableError("parallel_black_box_control_plane_input_invalid");
   }
 }
@@ -246,6 +279,14 @@ function validRepositories(repositories) {
   return true;
 }
 
+function repositoryContexts(repositories) {
+  return Object.freeze(repositories.map((repository) => Object.freeze({
+    repository_identity: repository.repository_identity,
+    repository_root: repository.repository_root,
+    base_branch: repository.base_branch,
+  })));
+}
+
 function readyProject(value, code) {
   if (!value || typeof value !== "object" || value.kind !== "ready" || !identifier(value.organizationId) ||
       !identifier(value.delegateActorId) || !project(value.project)) {
@@ -263,10 +304,10 @@ function sameReadyProject(value, expectedProject) {
     value.project.projectId === expectedProject.projectId;
 }
 
-function sameMembers(actual, expected) {
-  return Array.isArray(actual) && actual.length === expected.length &&
-    new Set(actual).size === actual.length && actual.every((member) => CONDUCTOR_SHORT_HASH.test(member)) &&
-    actual.every((member) => expected.includes(member));
+function containsMembers(actual, expected) {
+  return Array.isArray(actual) && new Set(actual).size === actual.length &&
+    actual.every((member) => CONDUCTOR_SHORT_HASH.test(member)) &&
+    expected.every((member) => actual.includes(member));
 }
 
 function project(value) {

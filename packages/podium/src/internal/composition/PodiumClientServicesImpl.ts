@@ -13,7 +13,7 @@ import { LinearOAuthHttpClientImpl } from "../linear-auth/LinearOAuthHttpClientI
 import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
 import { ProjectCatalogUseCase } from "../project-catalog/ProjectCatalogUseCase.js";
 import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
-import type { LinearInstallation } from "../models.js";
+import type { ConductorBinding, LinearInstallation } from "../models.js";
 import type { PodiumClientStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
@@ -275,17 +275,13 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   }
 
   #bindings() {
-    const store = this.store as PodiumClientStoreInterface & {
-      listConductorBindings?: () => ReturnType<PodiumClientStoreInterface["getConductorBinding"]>[];
-    };
-    const listed = store.listConductorBindings?.();
-    return listed ?? (store.getConductorBinding() ? [store.getConductorBinding()!] : []);
+    return this.store.listConductorBindings();
   }
 
 }
 
 function conductorSummary(
-  binding: NonNullable<ReturnType<PodiumClientStoreInterface["getConductorBinding"]>>,
+  binding: ConductorBinding,
   observation: ReturnType<ConductorPresence["snapshot"]>,
   now: string,
 ): ConductorSummaryView {

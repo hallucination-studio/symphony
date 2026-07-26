@@ -10,7 +10,6 @@ export interface ConductorBindingStoreInterface {
   saveConductorBinding(binding: ConductorBinding): void;
   listConductorBindings(): ConductorBinding[];
   getConductorBindingById(bindingId: string): ConductorBinding | undefined;
-  getConductorBinding(): ConductorBinding | undefined;
   setConductorDesiredState(
     bindingId: string,
     desiredState: ConductorBinding["desiredState"],

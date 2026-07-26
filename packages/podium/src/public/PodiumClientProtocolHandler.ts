@@ -1,5 +1,6 @@
 import { decodePodiumClientPodiumClientMessage } from "@symphony/contracts";
 
+import { PodiumError } from "../internal/errors.js";
 import type { JsonValue } from "./DesktopViewInterface.js";
 
 type ClientMessage = {
@@ -46,6 +47,17 @@ const queryKinds = new Set([
   "get_conductor_detail",
   "get_performer_profiles",
   "get_performer_profile_status",
+]);
+
+const safeProjectPoolFailureCodes = new Set([
+  "linear_project_pool_project_invalid",
+  "linear_project_pool_organization_mismatch",
+  "linear_project_pool_plan_invalid",
+  "linear_project_pool_precondition_conflict",
+  "linear_project_pool_member_label_missing",
+  "linear_project_pool_read_back_failed",
+  "linear_project_pool_member_in_use",
+  "linear_project_pool_root_routing_conflict",
 ]);
 
 export class PodiumClientProtocolHandler {
@@ -108,10 +120,20 @@ export class PodiumClientProtocolHandler {
 }
 
 function protocolFailure(error: unknown) {
-  const code =
-    error instanceof Error && /^podium_[a-z0-9_]{1,120}$/.test(error.message)
-      ? error.message
-      : "podium_client_request_failed";
+  if (error instanceof PodiumError) {
+    return {
+      code: error.protocolError.code,
+      category: "podium_client" as const,
+      sanitized_reason: error.protocolError.sanitizedReason,
+      retryable: error.protocolError.retryable,
+      action_required: error.protocolError.actionRequired,
+      next_action: error.protocolError.nextAction,
+    };
+  }
+  const code = error instanceof Error &&
+    (safeProjectPoolFailureCodes.has(error.message) || /^podium_[a-z0-9_]{1,120}$/.test(error.message))
+    ? error.message
+    : "podium_client_request_failed";
   return {
     code,
     category: "podium_client" as const,

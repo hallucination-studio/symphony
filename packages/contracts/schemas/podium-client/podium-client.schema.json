@@ -153,29 +153,17 @@
     "StartConductorCommand": {
       "type": "object",
       "additionalProperties": false,
-                        "required": [
-                          "kind",
-                          "conductor_id",
-                          "binding_id",
-                          "conductor_short_hash",
-                          "repository_identity"
+      "required": [
+        "kind",
+        "conductor_id"
       ],
       "properties": {
         "kind": {
           "const": "start_conductor"
         },
-                          "conductor_id": {
-                            "$ref": "common.schema.json#/$defs/Identifier"
-                          },
-                          "binding_id": {
-                            "$ref": "common.schema.json#/$defs/Identifier"
-                          },
-                          "conductor_short_hash": {
-                            "$ref": "common.schema.json#/$defs/Identifier"
-                          },
-                          "repository_identity": {
-                            "$ref": "common.schema.json#/$defs/Identifier"
-                          }
+        "conductor_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        }
       }
     },
     "StopConductorCommand": {
@@ -770,13 +758,25 @@
       "additionalProperties": false,
       "required": [
         "kind",
-        "conductor_id"
+        "conductor_id",
+        "binding_id",
+        "conductor_short_hash",
+        "repository_identity"
       ],
       "properties": {
         "kind": {
           "const": "conductor_created"
         },
         "conductor_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "binding_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "conductor_short_hash": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "repository_identity": {
           "$ref": "common.schema.json#/$defs/Identifier"
         }
       }

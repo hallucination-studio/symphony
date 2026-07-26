@@ -8,8 +8,6 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 
 import type {
-  ConductorProjectLabelRebindPlan,
-  ConductorProjectLabelRebindResult,
   LinearClientInterface,
   PageInfo,
   LinearWorkflowStateValue,
@@ -494,15 +492,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
   }
 
-  async assignConductorProjectLabel(input: {
-    projectId: string;
-    labelName: string;
-  }): Promise<void> {
-    const plan = await this.preflightConductorProjectLabel(input);
-    if (plan.kind !== "ready") throw new Error(`linear_${plan.reason}`);
-    await this.rebindConductorProjectLabel({ plan, authorized: true });
-  }
-
   async readConductorProjectPool(input: { projectId: string }) {
     if (!SAFE_ID.test(input.projectId)) throw new Error("linear_project_pool_project_invalid");
     const organization = await this.#client.organization;
@@ -633,138 +622,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     return {
       ...plan,
       fingerprint: createHash("sha256").update(JSON.stringify(plan)).digest("hex"),
-    };
-  }
-
-  async preflightConductorProjectLabel(input: {
-    projectId: string;
-    labelName: string;
-  }): Promise<ConductorProjectLabelRebindPlan> {
-    if (!SAFE_ID.test(input.projectId)) {
-      return { kind: "blocked", ...input, reason: "project_invalid" };
-    }
-    if (
-      !input.labelName.startsWith(CONDUCTOR_LABEL_PREFIX) ||
-      !SAFE_ID.test(input.labelName.slice(CONDUCTOR_LABEL_PREFIX.length))
-    ) {
-      return { kind: "blocked", ...input, reason: "label_invalid" };
-    }
-    const organization = await this.#client.organization;
-    if (organization.id !== this.organizationId) {
-      return { kind: "blocked", ...input, reason: "project_invalid" };
-    }
-    const project = await this.#client.project(input.projectId);
-    if (!project || project.id !== input.projectId) {
-      return { kind: "blocked", ...input, reason: "project_invalid" };
-    }
-    const currentLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
-    const conductorLabels = currentLabels.filter(({ name, isGroup, archivedAt, retiredById }) =>
-      typeof name === "string" &&
-      name.startsWith(CONDUCTOR_LABEL_PREFIX) &&
-      !isGroup &&
-      !archivedAt &&
-      !retiredById,
-    );
-    if (conductorLabels.some(({ id, name }) => !SAFE_ID.test(id) || !SAFE_ID.test(name))) {
-      return { kind: "blocked", ...input, reason: "project_labels_invalid" };
-    }
-    const desiredLabels = await this.#projectLabelsNamed(input.labelName);
-    if (desiredLabels.length > 1) {
-      return { kind: "blocked", ...input, reason: "label_ambiguous" };
-    }
-    const desiredLabel = desiredLabels[0];
-    const assignedProjects = desiredLabel
-      ? await allNodes(desiredLabel.projects({ first: PAGE_LIMIT }), 64)
-      : [];
-    if (assignedProjects.some(({ id }) => !SAFE_ID.test(id))) {
-      return { kind: "blocked", ...input, reason: "label_ownership_invalid" };
-    }
-    const detachAssignments = [
-      ...conductorLabels
-        .filter(({ id }) => id !== desiredLabel?.id)
-        .map(({ id }) => ({ projectId: input.projectId, labelId: id })),
-      ...(desiredLabel
-        ? assignedProjects
-            .filter(({ id }) => id !== input.projectId)
-            .map(({ id }) => ({ projectId: id, labelId: desiredLabel.id }))
-        : []),
-    ];
-    const plan = {
-      kind: "ready" as const,
-      projectId: input.projectId,
-      labelName: input.labelName,
-      fingerprint: "",
-      currentConductorLabels: conductorLabels.map(({ id, name }) => ({
-        labelId: id,
-        name,
-      })),
-      ...(desiredLabel
-        ? {
-            desiredLabel: {
-              labelId: desiredLabel.id,
-              name: desiredLabel.name,
-              assignedProjectIds: assignedProjects.map(({ id }) => id),
-            },
-          }
-        : {}),
-      detachAssignments,
-    } satisfies Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>;
-    return { ...plan, fingerprint: projectLabelRebindFingerprint(plan) };
-  }
-
-  async rebindConductorProjectLabel(input: {
-    plan: Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>;
-    authorized: boolean;
-  }): Promise<ConductorProjectLabelRebindResult> {
-    this.#projectResolutionCache.clear();
-    const plan = input.plan;
-    if (plan.fingerprint !== projectLabelRebindFingerprint(plan)) {
-      throw new Error("linear_project_label_plan_invalid");
-    }
-    if (input.authorized !== true) return { kind: "dry_run", plan };
-    const freshPlan = await this.preflightConductorProjectLabel(plan);
-    if (freshPlan.kind !== "ready" || freshPlan.fingerprint !== plan.fingerprint) {
-      throw new Error("linear_project_label_precondition_conflict");
-    }
-    let desiredLabelId = plan.desiredLabel?.labelId;
-    let targetAlreadyAttached = freshPlan.desiredLabel?.assignedProjectIds.includes(plan.projectId) === true;
-    let mutationError: unknown;
-    try {
-      if (!desiredLabelId) {
-        const label = await this.#createProjectLabelWithReadBack(plan.labelName);
-        desiredLabelId = label.id;
-      }
-      for (const assignment of plan.detachAssignments) {
-        await this.#client.projectRemoveLabel(assignment.projectId, assignment.labelId);
-      }
-      // The compact final preflight is the single semantic read-back for the
-      // complete detach/create/attach delta.
-      if (!targetAlreadyAttached) {
-        await this.#client.projectAddLabel(plan.projectId, desiredLabelId);
-        targetAlreadyAttached = true;
-      }
-      await this.#uniqueIssueLabel(plan.labelName);
-    } catch (error) {
-      mutationError = error;
-    }
-    const finalPlan = await this.preflightConductorProjectLabel(plan).catch(() => undefined);
-    if (
-      finalPlan?.kind !== "ready" ||
-      finalPlan.currentConductorLabels.length !== 1 ||
-      finalPlan.currentConductorLabels[0]!.labelId !== desiredLabelId ||
-      finalPlan.desiredLabel?.assignedProjectIds.length !== 1 ||
-      finalPlan.desiredLabel.assignedProjectIds[0] !== plan.projectId
-    ) {
-      if (mutationError) throw mutationError;
-      throw ambiguousError("linear_project_label_read_back_failed");
-    }
-    return {
-      kind: plan.detachAssignments.length === 0 && plan.desiredLabel?.labelId === desiredLabelId
-        ? "already_applied"
-        : "applied",
-      projectId: plan.projectId,
-      labelName: plan.labelName,
-      fingerprint: finalPlan.fingerprint,
     };
   }
 
@@ -2219,27 +2076,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     });
   }
 
-  async #createProjectLabelWithReadBack(labelName: string): Promise<ProjectLabel> {
-    try {
-      const payload = await this.#client.createProjectLabel({
-        name: labelName,
-        color: "#5E6AD2",
-        isGroup: false,
-      });
-      const label = payload.projectLabel ? await payload.projectLabel : undefined;
-      if (!payload.success || !label) throw new Error("linear_project_label_create_failed");
-      const organization = await label.organization;
-      if (organization.id !== this.organizationId) {
-        throw new Error("linear_label_organization_mismatch");
-      }
-      return label;
-    } catch (error) {
-      const matches = await this.#projectLabelsNamed(labelName).catch(() => []);
-      if (matches.length === 1) return matches[0]!;
-      throw error;
-    }
-  }
-
   async #projectLabelsNamed(name: string): Promise<ProjectLabel[]> {
     const labels = await allNodes(
       this.#client.projectLabels({
@@ -3311,27 +3147,6 @@ function linearWorkflowStateValueFromRaw(value: {
       : workflowStatusCategory(value.type),
     position: value.position,
   };
-}
-
-function projectLabelRebindFingerprint(
-  plan: Extract<ConductorProjectLabelRebindPlan, { kind: "ready" }>,
-): string {
-  const canonical = {
-    projectId: plan.projectId,
-    labelName: plan.labelName,
-    currentConductorLabels: [...plan.currentConductorLabels].sort((left, right) =>
-      left.labelId.localeCompare(right.labelId)),
-    desiredLabel: plan.desiredLabel
-      ? {
-          labelId: plan.desiredLabel.labelId,
-          name: plan.desiredLabel.name,
-          assignedProjectIds: [...plan.desiredLabel.assignedProjectIds].sort(),
-        }
-      : undefined,
-    detachAssignments: [...plan.detachAssignments].sort((left, right) =>
-      `${left.projectId}:${left.labelId}`.localeCompare(`${right.projectId}:${right.labelId}`)),
-  };
-  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 function assertTargetWorkflowPreconditions(

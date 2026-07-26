@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -18,11 +18,14 @@ export async function provisionParallelE2ERepositories({ sourceRepositoryRoot })
   if (!BRANCH.test(baseBranch)) throw stableError("parallel_e2e_repository_branch_invalid");
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-repositories-"));
   try {
+    const remoteDirectory = path.join(temporaryDirectory, "remotes");
+    await mkdir(remoteDirectory, { recursive: true });
     const repositories = await Promise.all(
       Array.from({ length: CLONE_COUNT }, (_, index) => cloneRepository({
         sourceRoot,
         baseBranch,
         destination: path.join(temporaryDirectory, `repository-${index + 1}`),
+        remoteDestination: path.join(remoteDirectory, `repository-${index + 1}.git`),
         index,
       })),
     );
@@ -41,9 +44,12 @@ export async function provisionParallelE2ERepositories({ sourceRepositoryRoot })
   }
 }
 
-async function cloneRepository({ sourceRoot, baseBranch, destination, index }) {
+async function cloneRepository({ sourceRoot, baseBranch, destination, remoteDestination, index }) {
+  await git(["init", "--bare", remoteDestination]);
   await git(["clone", "--local", "--no-hardlinks", "--branch", baseBranch, sourceRoot, destination]);
   const repositoryRoot = await canonicalGitRoot(destination);
+  await git(["-C", repositoryRoot, "remote", "set-url", "origin", remoteDestination]);
+  await git(["-C", repositoryRoot, "push", "--set-upstream", "origin", baseBranch]);
   const commonDirectory = await realpath(await git([
     "-C", repositoryRoot,
     "rev-parse",

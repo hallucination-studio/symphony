@@ -11,6 +11,7 @@ install:
 
 build: install
 	npm run build
+	npm run build:sidecars -w @symphony/podium-desktop
 	cd apps/podium-desktop/src-tauri && cargo build
 
 lint: install

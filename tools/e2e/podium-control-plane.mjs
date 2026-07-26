@@ -34,18 +34,20 @@ export async function provisionConductorBindings({ client, projectId, repositori
     throw stableError("e2e_podium_repositories_invalid");
   }
   const repositoryIdentities = new Set();
-  const bindings = await Promise.all(repositories.map(async (repository) => {
+  const bindings = [];
+  for (const repository of repositories) {
     assertRepository(repository, repositoryIdentities);
     const response = await client.command({
       kind: "create_conductor",
       project_id: projectId,
       repository: {
         repository_handle: repository.repository_handle,
+        display_name: repository.repository_display_name,
         base_branch: repository.base_branch,
       },
     });
-    return readCreatedConductor(response, repository.repository_identity);
-  }));
+    bindings.push(readCreatedConductor(response, repository.repository_identity));
+  }
   if (new Set(bindings.map(({ conductor_id }) => conductor_id)).size !== bindings.length ||
       new Set(bindings.map(({ binding_id }) => binding_id)).size !== bindings.length ||
       new Set(bindings.map(({ conductor_short_hash }) => conductor_short_hash)).size !== bindings.length) {
@@ -178,6 +180,8 @@ function profile(value, code) {
 function assertRepository(repository, identities) {
   if (!repository || typeof repository !== "object" || Array.isArray(repository) ||
       !identifier(repository.repository_handle) || !identifier(repository.repository_identity) ||
+      typeof repository.repository_display_name !== "string" || repository.repository_display_name.length === 0 ||
+      repository.repository_display_name.length > 256 ||
       typeof repository.base_branch !== "string" || repository.base_branch.length === 0 ||
       identities.has(repository.repository_identity)) {
     throw stableError("e2e_podium_repositories_invalid");

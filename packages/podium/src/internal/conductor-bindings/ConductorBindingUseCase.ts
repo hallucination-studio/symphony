@@ -11,9 +11,6 @@ import type { ConductorBindingStoreInterface } from "./api/ConductorBindingStore
 interface BindingDependencies {
   createBindingId(): string;
   createConductorId(): string;
-  sleep?(delayMs: number): Promise<void>;
-  maxAttempts?: number;
-  baseDelayMs?: number;
 }
 
 export class ConductorBindingUseCase {
@@ -23,24 +20,14 @@ export class ConductorBindingUseCase {
     private readonly store: ConductorBindingStoreInterface,
     private readonly client: Pick<
       LinearClientInterface,
-      "assignConductorProjectLabel"
-    > & Partial<Pick<
-      LinearClientInterface,
       "readConductorProjectPool" | "preflightConductorProjectPool" | "reconcileConductorProjectPool"
-    >>,
+    >,
     private readonly dependencies: BindingDependencies,
   ) {
-    const maximum = dependencies.maxAttempts ?? 4;
-    const baseDelayMs = dependencies.baseDelayMs ?? 250;
-    if (
-      !Number.isInteger(maximum) ||
-      maximum < 1 ||
-      maximum > 10 ||
-      !Number.isFinite(baseDelayMs) ||
-      baseDelayMs < 1 ||
-      baseDelayMs > 60_000
-    ) {
-      throw new Error("linear_retry_policy_invalid");
+    if (typeof client.readConductorProjectPool !== "function" ||
+        typeof client.preflightConductorProjectPool !== "function" ||
+        typeof client.reconcileConductorProjectPool !== "function") {
+      throw new Error("linear_project_pool_client_invalid");
     }
   }
 
@@ -62,9 +49,7 @@ export class ConductorBindingUseCase {
     projectId: string;
     repositoryContext: RepositoryContext;
   }): Promise<ConductorBinding> {
-    const existingBindings = this.store.listConductorBindings
-      ? this.store.listConductorBindings()
-      : (this.store.getConductorBinding() ? [this.store.getConductorBinding()!] : []);
+    const existingBindings = this.store.listConductorBindings();
     const existing = existingBindings.find((binding) =>
       binding.desiredState === "stopped" &&
       binding.linearInstallationId === input.installationId &&
@@ -111,17 +96,6 @@ export class ConductorBindingUseCase {
   }
 
   async #ensureProjectPool(projectId: string, conductorShortHash: string): Promise<void> {
-    if (
-      typeof this.client.readConductorProjectPool !== "function" ||
-      typeof this.client.preflightConductorProjectPool !== "function" ||
-      typeof this.client.reconcileConductorProjectPool !== "function"
-    ) {
-      await this.#assignLabel({
-        projectId,
-        labelName: `symphony:conductor/${conductorShortHash}`,
-      });
-      return;
-    }
     const current = await this.client.readConductorProjectPool({ projectId });
     const desiredMembers = [...new Set([...current.members, conductorShortHash])];
     const plan = await this.client.preflightConductorProjectPool({ projectId, desiredMembers });
@@ -129,22 +103,6 @@ export class ConductorBindingUseCase {
     const result = await this.client.reconcileConductorProjectPool({ plan, authorized: true });
     if (result.kind === "dry_run" || !result.members.includes(conductorShortHash)) {
       throw new Error("linear_project_pool_read_back_failed");
-    }
-  }
-
-  async #assignLabel(input: { projectId: string; labelName: string }) {
-    const maximum = this.dependencies.maxAttempts ?? 4;
-    const baseDelayMs = this.dependencies.baseDelayMs ?? 250;
-    for (let attempt = 1; attempt <= maximum; attempt += 1) {
-      try {
-        await this.client.assignConductorProjectLabel(input);
-        return;
-      } catch (error) {
-        if (!retryableLinearError(error) || attempt === maximum) throw error;
-        await (this.dependencies.sleep ?? defaultSleep)(
-          baseDelayMs * 2 ** (attempt - 1),
-        );
-      }
     }
   }
 }
@@ -155,19 +113,4 @@ function sameRepository(left: RepositoryContext, right: RepositoryContext): bool
     left.repositoryRoot === right.repositoryRoot &&
     left.baseBranch === right.baseBranch
   );
-}
-
-function retryableLinearError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    [
-      "RatelimitedLinearError",
-      "NetworkLinearError",
-      "InternalLinearError",
-    ].includes(error.constructor.name)
-  );
-}
-
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }

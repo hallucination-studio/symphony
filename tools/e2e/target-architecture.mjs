@@ -1,4 +1,6 @@
 import { loadE2EConfig } from "./config.mjs";
+import { createVerifiedExternalLinearActors } from "./external-linear-actor.mjs";
+import { readFreshE2EEvidenceSnapshot } from "./fresh-evidence-reader.mjs";
 import {
   assertParallelBlackBoxE2ECampaignCommand,
   assertParallelBlackBoxE2ECampaignResult,
@@ -14,6 +16,8 @@ import { analyzeRootRevisionCommentCampaignEvidence } from "./root-revision-comm
 import { analyzeRestartIsolationCampaignEvidence } from "./restart-isolation-evidence.mjs";
 import { analyzeRequiredWriteCampaignEvidence } from "./required-write-evidence.mjs";
 import { analyzeSameConductorPreemptionCampaignEvidence } from "./same-conductor-preemption-evidence.mjs";
+import { createPublicParallelBlackBoxCampaignPorts } from "./public-campaign-ports.mjs";
+import { createConfiguredParallelBlackBoxRuntime } from "./parallel-black-box-runtime.mjs";
 
 export const TARGET_E2E_DEADLINE_MS = 300_000;
 const ROOT_ISSUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -163,9 +167,52 @@ function normalizeCaseRoots(value) {
 
 export async function runConfiguredParallelBlackBoxE2ECampaign({
   environment = process.env,
+  sourceRepositoryRoot = process.cwd(),
+  loadConfig = loadE2EConfig,
+  createVerifiedActors = createVerifiedExternalLinearActors,
+  createRuntime = createConfiguredParallelBlackBoxRuntime,
+  createCampaignPorts = createPublicParallelBlackBoxCampaignPorts,
+  readFreshEvidenceSnapshot = readFreshE2EEvidenceSnapshot,
+  runCampaign = runParallelBlackBoxE2ECampaign,
 } = {}) {
-  loadE2EConfig({ environment });
-  throw stableError("parallel_black_box_campaign_runtime_unavailable");
+  const config = loadConfig({ environment });
+  const actors = await createVerifiedActors({
+    symphonyAccessToken: config.secrets.linearDevToken,
+    humanApiKey: config.secrets.linearHumanApiKey,
+  });
+  if (!actors?.human || typeof actors.human.clearE2EProjectIssues !== "function") {
+    throw stableError("parallel_black_box_e2e_project_cleanup_unavailable");
+  }
+  const cleanup = await actors.human.clearE2EProjectIssues({ project_slug_id: config.linear.projectSlugId });
+  if (!cleanup || typeof cleanup !== "object" || Object.keys(cleanup).length !== 1 || !ROOT_ISSUE_ID.test(cleanup.project_id)) {
+    throw stableError("parallel_black_box_e2e_project_cleanup_invalid");
+  }
+  const runtime = await createRuntime({ config, sourceRepositoryRoot, environment });
+  try {
+    if (runtime.command.project_id !== cleanup.project_id) {
+      throw stableError("parallel_black_box_e2e_project_cleanup_project_mismatch");
+    }
+    const routing = await actors.human.discoverProjectRouting({
+      project_id: runtime.command.project_id,
+      conductor_short_hashes: runtime.command.conductors.map(({ conductor_short_hash: conductorShortHash }) => conductorShortHash),
+    });
+    const ports = createCampaignPorts({
+      human: actors.human,
+      project_id: runtime.command.project_id,
+      routing,
+      repository_contexts: runtime.control_plane.repository_contexts,
+      required_write_outage: runtime.required_write_outage,
+      restart_conductor: runtime.control_plane.restartConductor,
+      readFreshEvidenceSnapshot: (input) => readFreshEvidenceSnapshot({
+        ...input,
+        linear_api_key: config.secrets.linearHumanApiKey,
+      }),
+    });
+    const result = await runCampaign({ command: runtime.command, ports });
+    return Object.freeze({ command: runtime.command, result });
+  } finally {
+    await runtime.close();
+  }
 }
 
 async function readFinalEvidenceSnapshot({ ports, caseContext, e2eCase, caseRoots, observedAt }) {

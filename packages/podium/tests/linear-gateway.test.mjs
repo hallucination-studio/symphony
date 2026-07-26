@@ -36,7 +36,8 @@ async function createConductorServices(
   };
   const services = new PodiumConductorServicesImpl(
     {
-      getConductorBinding: () => binding,
+      getConductorBindingById: (bindingId) => bindingId === binding.bindingId ? binding : undefined,
+      listConductorBindings: () => [binding],
       getLinearCredential: () => ({
         kind: "development_token",
         installationId: "installation-1",

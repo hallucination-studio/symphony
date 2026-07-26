@@ -180,6 +180,7 @@ function repositories() {
   return ["a", "b", "c"].map((suffix) => ({
     repository_handle: `repo-${suffix}`,
     repository_identity: `repository-${suffix}`,
+    repository_display_name: `Repository ${suffix}`,
     base_branch: "main",
   }));
 }

@@ -135,6 +135,24 @@ test("fresh evidence uses a new public Linear client for each exact Root snapsho
   assert.ok(calls.some(({ kind, input }) => kind === "history" && input.includeArchived === true));
 });
 
+test("fresh evidence passes the Human Personal API key to every public Linear client", async () => {
+  const clientOptions = [];
+  const snapshot = await readFreshE2EEvidenceSnapshot({
+    root_issue_ids: ["root-1"],
+    repository_contexts: [repositoryContext("repository-1")],
+    linear_api_key: "human-api-key",
+    createLinearClient(options) {
+      clientOptions.push(options);
+      return { issue: async () => rootIssue() };
+    },
+    readGitEvidence: async (context) => gitEvidence(context),
+    observedAt: () => "2026-07-25T00:00:00.000Z",
+  });
+
+  assert.equal(snapshot.kind, "complete");
+  assert.deepEqual(clientOptions, [{ apiKey: "human-api-key" }]);
+});
+
 test("fresh evidence returns an explicit redacted incomplete result instead of partial or cached facts", async () => {
   const partialRoot = rootIssue({
     children: () => ({ nodes: [], pageInfo: { hasNextPage: true } }),

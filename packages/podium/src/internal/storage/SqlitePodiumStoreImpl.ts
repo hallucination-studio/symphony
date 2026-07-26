@@ -12,6 +12,39 @@ import type {
   RepositoryContext,
 } from "../models.js";
 
+const TARGET_SCHEMA_COLUMNS = {
+  linear_installations: [
+    "installation_id",
+    "organization_id",
+    "credential_kind",
+    "access_token",
+    "delegate_actor_id",
+    "refresh_token",
+    "expires_at",
+  ],
+  project_catalog: [
+    "project_id",
+    "installation_id",
+    "organization_id",
+    "name",
+    "updated_at",
+  ],
+  conductor_bindings: [
+    "binding_id",
+    "conductor_id",
+    "conductor_short_hash",
+    "linear_installation_id",
+    "organization_id",
+    "repository_handle",
+    "repository_identity",
+    "repository_display_name",
+    "repository_root",
+    "base_branch",
+    "desired_state",
+  ],
+  oauth_attempts: ["attempt_id", "code_verifier", "state", "created_at"],
+} as const;
+
 export class SqlitePodiumStoreImpl
   implements
     LinearInstallationStoreInterface,
@@ -21,9 +54,15 @@ export class SqlitePodiumStoreImpl
 
   constructor(databasePath: string) {
     this.#database = openDatabase(databasePath);
-    this.#database.exec("PRAGMA journal_mode = WAL");
-    this.#database.exec("PRAGMA foreign_keys = ON");
-    this.#createSchema();
+    try {
+      this.#database.exec("PRAGMA journal_mode = WAL");
+      this.#database.exec("PRAGMA foreign_keys = ON");
+      this.#assertExistingTargetSchema();
+      this.#createSchema();
+    } catch (error) {
+      this.#database.close();
+      throw error;
+    }
   }
 
   #createSchema(): void {
@@ -70,14 +109,6 @@ export class SqlitePodiumStoreImpl
         created_at TEXT NOT NULL
       );
     `);
-    this.#migrateLinearInstallations();
-    this.#ensureColumn("linear_installations", "delegate_actor_id", "TEXT");
-    this.#ensureColumn(
-      "conductor_bindings",
-      "repository_handle",
-      "TEXT NOT NULL DEFAULT 'legacy-repository-handle'",
-    );
-    this.#migrateConductorBindingSingleton();
   }
 
   saveLinearInstallation(installation: LinearInstallation): void {
@@ -290,13 +321,6 @@ export class SqlitePodiumStoreImpl
     return row ? bindingFromRow(row) : undefined;
   }
 
-  getConductorBinding(): ConductorBinding | undefined {
-    const row = this.#database
-      .prepare("SELECT * FROM conductor_bindings ORDER BY conductor_id LIMIT 1")
-      .get() as BindingRow | undefined;
-    return row ? bindingFromRow(row) : undefined;
-  }
-
   setConductorDesiredState(
     bindingId: string,
     desiredState: ConductorBinding["desiredState"],
@@ -359,103 +383,30 @@ export class SqlitePodiumStoreImpl
     return names.map(({ name }) => name);
   }
 
-  #migrateLinearInstallations(): void {
-    const columns = this.#database
-      .prepare("PRAGMA table_info(linear_installations)")
-      .all() as Array<{ name: string; notnull: 0 | 1 }>;
-    const credentialKind = columns.find(({ name }) => name === "credential_kind");
-    const refreshToken = columns.find(({ name }) => name === "refresh_token");
-    const expiresAt = columns.find(({ name }) => name === "expires_at");
-    if (credentialKind && refreshToken?.notnull === 0 && expiresAt?.notnull === 0) return;
-
-    this.#database.pragma("foreign_keys = OFF");
-    try {
-      this.#database.exec(`
-        BEGIN;
-        CREATE TABLE linear_installations_next (
-          installation_id TEXT PRIMARY KEY,
-          organization_id TEXT NOT NULL,
-          credential_kind TEXT NOT NULL CHECK (credential_kind IN ('oauth', 'development_token')),
-          access_token TEXT NOT NULL,
-          refresh_token TEXT,
-          expires_at TEXT,
-          CHECK (
-            (credential_kind = 'oauth' AND refresh_token IS NOT NULL AND expires_at IS NOT NULL)
-            OR (credential_kind = 'development_token' AND refresh_token IS NULL AND expires_at IS NULL)
-          )
-        );
-        INSERT INTO linear_installations_next (
-          installation_id, organization_id, credential_kind, access_token,
-          refresh_token, expires_at
-        )
-        SELECT installation_id, organization_id, 'oauth', access_token,
-               refresh_token, expires_at
-        FROM linear_installations;
-        DROP TABLE linear_installations;
-        ALTER TABLE linear_installations_next RENAME TO linear_installations;
-        COMMIT;
-      `);
-    } catch (error) {
-      if (this.#database.inTransaction) this.#database.exec("ROLLBACK");
-      throw error;
-    } finally {
-      this.#database.pragma("foreign_keys = ON");
-    }
-  }
-
-  #ensureColumn(table: string, column: string, definition: string): void {
-    const columns = this.#database
-      .prepare(`PRAGMA table_info(${table})`)
+  #assertExistingTargetSchema(): void {
+    const tables = this.#database
+      .prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+      `)
       .all() as Array<{ name: string }>;
-    if (!columns.some(({ name }) => name === column)) {
-      this.#database.exec(
-        `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
-      );
+    if (tables.length === 0) return;
+
+    const expectedTables = Object.keys(TARGET_SCHEMA_COLUMNS).sort();
+    if (tables.length !== expectedTables.length ||
+        tables.some(({ name }, index) => name !== expectedTables[index])) {
+      throw new Error("podium_database_schema_incompatible");
     }
-  }
-
-  #migrateConductorBindingSingleton(): void {
-    const columns = this.#database
-      .prepare("PRAGMA table_info(conductor_bindings)")
-      .all() as Array<{ name: string }>;
-    if (!columns.some(({ name }) => name === "singleton")) return;
-
-    this.#database.pragma("foreign_keys = OFF");
-    try {
-      this.#database.exec(`
-        BEGIN;
-        ALTER TABLE conductor_bindings RENAME TO conductor_bindings_legacy;
-        CREATE TABLE conductor_bindings (
-          binding_id TEXT PRIMARY KEY,
-          conductor_id TEXT NOT NULL UNIQUE,
-          conductor_short_hash TEXT NOT NULL UNIQUE,
-          linear_installation_id TEXT NOT NULL,
-          organization_id TEXT NOT NULL,
-          repository_handle TEXT NOT NULL,
-          repository_identity TEXT NOT NULL,
-          repository_display_name TEXT NOT NULL,
-          repository_root TEXT NOT NULL,
-          base_branch TEXT NOT NULL,
-          desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped')),
-          FOREIGN KEY (linear_installation_id) REFERENCES linear_installations(installation_id)
-        );
-        INSERT INTO conductor_bindings (
-          binding_id, conductor_id, conductor_short_hash, linear_installation_id,
-          organization_id, repository_handle, repository_identity, repository_display_name,
-          repository_root, base_branch, desired_state
-        )
-        SELECT binding_id, conductor_id, conductor_short_hash, linear_installation_id,
-               organization_id, repository_handle, repository_identity, repository_display_name,
-               repository_root, base_branch, desired_state
-        FROM conductor_bindings_legacy;
-        DROP TABLE conductor_bindings_legacy;
-        COMMIT;
-      `);
-    } catch (error) {
-      if (this.#database.inTransaction) this.#database.exec("ROLLBACK");
-      throw error;
-    } finally {
-      this.#database.pragma("foreign_keys = ON");
+    for (const table of expectedTables) {
+      const columns = this.#database
+        .prepare(`PRAGMA table_info(${table})`)
+        .all() as Array<{ name: string }>;
+      const expectedColumns = TARGET_SCHEMA_COLUMNS[table as keyof typeof TARGET_SCHEMA_COLUMNS];
+      if (columns.length !== expectedColumns.length ||
+          columns.some(({ name }, index) => name !== expectedColumns[index])) {
+        throw new Error("podium_database_schema_incompatible");
+      }
     }
   }
 

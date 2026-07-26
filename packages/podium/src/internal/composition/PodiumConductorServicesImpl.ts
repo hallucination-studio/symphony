@@ -392,24 +392,11 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
   }
 
   #bindingForId(bindingId: string) {
-    const store = this.store as PodiumConductorStoreInterface & {
-      getConductorBindingById?: (id: string) => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>;
-      listConductorBindings?: () => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>[];
-    };
-    const byId = store.getConductorBindingById?.(bindingId);
-    if (byId) return byId;
-    const listed = store.listConductorBindings?.().find(({ bindingId: id }) => id === bindingId);
-    if (listed) return listed;
-    const legacy = store.getConductorBinding();
-    return legacy?.bindingId === bindingId ? legacy : undefined;
+    return this.store.getConductorBindingById(bindingId);
   }
 
   #allBindings() {
-    const store = this.store as PodiumConductorStoreInterface & {
-      listConductorBindings?: () => ReturnType<PodiumConductorStoreInterface["getConductorBinding"]>[];
-    };
-    const listed = store.listConductorBindings?.();
-    return listed ?? (store.getConductorBinding() ? [store.getConductorBinding()!] : []);
+    return this.store.listConductorBindings();
   }
 
 }

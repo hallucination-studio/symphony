@@ -48,29 +48,6 @@ test("real Campaign CLI fails closed with sanitized structured output when crede
   assert.doesNotMatch(result.stderr, /must-not-appear/u);
 });
 
-test("real Campaign CLI does not claim success before the P06 runtime exists", () => {
-  const result = runCampaignCli({
-    SYMPHONY_E2E_LINEAR_DEV_TOKEN: "symphony-token",
-    SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-token",
-    LINEAR_CLIENT_ID: "client-id",
-    LINEAR_CLIENT_SECRET: "client-secret",
-    SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
-    SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
-    SYMPHONY_E2E_CODEX_API_KEY: "codex-key",
-    SYMPHONY_E2E_CODEX_BASE_URL: "https://example.test",
-    SYMPHONY_E2E_CODEX_MODEL: "gpt-5-codex",
-  });
-
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, "");
-  assert.deepEqual(JSON.parse(result.stderr), {
-    status: "failed",
-    reason_code: "parallel_black_box_campaign_runtime_unavailable",
-    issues: [],
-  });
-  assert.doesNotMatch(result.stderr, /symphony-token|human-token|client-secret|codex-key/u);
-});
-
 test("real Campaign CLI retains a stable invalid-configuration issue without exposing its input", () => {
   const result = runCampaignCli({
     SYMPHONY_E2E_LINEAR_DEV_TOKEN: "same-token",
