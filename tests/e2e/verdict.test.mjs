@@ -399,6 +399,41 @@ test("preemption verdict requires one owner, equal priority, and a strictly orde
   }
 });
 
+test("recovery verdict derives the old role session from its terminal Result and binds both Roots to their declared ownership", () => {
+  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "conductor_restart_recovery");
+  const staleSession = satisfiedFixture(definition);
+  const affected = staleSession.evidence.roots.find(({ rootIssueId }) => rootIssueId === staleSession.context.recovery.affectedRootId);
+  findRecord(affected, "stage_result", ({ result_id }) => result_id === "verify-execution").record.role_session_id = "old-session";
+  let assertions = evaluateForegroundE2EAssertions({ definition, ...staleSession });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "recovery_uses_fresh_execution").outcome, "contradicted");
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "late_old_session_success").outcome, "contradicted");
+
+  const changedOwnership = satisfiedFixture(definition);
+  const changedAffected = changedOwnership.evidence.roots.find(({ rootIssueId }) => rootIssueId === changedOwnership.context.recovery.affectedRootId);
+  findRecord(changedAffected, "root_ownership").record.conductor_id = "replacement-conductor";
+  assertions = evaluateForegroundE2EAssertions({ definition, ...changedOwnership });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "ownership_persists").outcome, "contradicted");
+
+  const interruptedContinuous = satisfiedFixture(definition);
+  const continuous = interruptedContinuous.evidence.roots.find(({ rootIssueId }) => rootIssueId === interruptedContinuous.context.recovery.continuousRootId);
+  continuous.managedRecords = continuous.managedRecords.filter(({ record }) => record.kind !== "delivery");
+  assertions = evaluateForegroundE2EAssertions({ definition, ...interruptedContinuous });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "unaffected_root_continues").outcome, "contradicted");
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "boundary_recovered_and_continuous_delivered").outcome, "contradicted");
+
+  const unrelatedDelivery = satisfiedFixture(definition);
+  const unrelatedAffected = unrelatedDelivery.evidence.roots.find(({ rootIssueId }) => rootIssueId === unrelatedDelivery.context.recovery.affectedRootId);
+  appendRecord(unrelatedAffected, stageExecution(unrelatedAffected.rootIssueId, "cycle-id", "verify-issue", "unrelated-execution", "verify", "contract-id", 60));
+  appendRecord(unrelatedAffected, stageResult(unrelatedAffected.rootIssueId, "cycle-id", "verify-issue", "unrelated-execution", "verify", "verify_passed", {
+    session: "old-session", revision: "unrelated-revision", at: 61,
+  }));
+  appendRecord(unrelatedAffected, verifyResult(unrelatedAffected.rootIssueId, "cycle-id", "verify-issue", "unrelated-execution"));
+  appendRecord(unrelatedAffected, delivery(unrelatedAffected.rootIssueId, "cycle-id", "unrelated-execution", "unrelated-revision"));
+  unrelatedDelivery.evidence.git.find(({ rootIssueId }) => rootIssueId === unrelatedAffected.rootIssueId).headRevision = "unrelated-revision";
+  assertions = evaluateForegroundE2EAssertions({ definition, ...unrelatedDelivery });
+  assert.equal(assertions.find(({ assertionId }) => assertionId === "recovery_uses_fresh_execution").outcome, "contradicted");
+});
+
 test("information-answer verdict reconstructs a unique final Linear lineage only when T10 driver context is absent", () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
   const fixture = satisfiedFixture(definition);
@@ -869,6 +904,8 @@ function preemptionFixture(definition) {
 function recoveryFixture(definition) {
   const affected = deliveredRoot(definition, "affected-root", "affected-root-id", { conductorId: "affected-conductor" });
   const continuous = deliveredRoot(definition, "continuous-root", "continuous-root-id", { conductorId: "continuous-conductor" });
+  affected.issues.find(({ id }) => id === affected.id).labels = [{ id: "affected-route" }];
+  continuous.issues.find(({ id }) => id === continuous.id).labels = [{ id: "continuous-route" }];
   addRecord(affected, stageResult(affected.id, "cycle-id", "plan-issue", "old-execution", "plan", "execution_failed", {
     session: "old-session", at: 5,
   }));
@@ -877,7 +914,14 @@ function recoveryFixture(definition) {
       affectedRootId: affected.id,
       continuousRootId: continuous.id,
       oldExecutionId: "old-execution",
-      oldRoleSessionId: "old-session",
+      affectedConductorId: "affected-conductor",
+      continuousConductorId: "continuous-conductor",
+      affectedRoutingLabelId: "affected-route",
+      continuousRoutingLabelId: "continuous-route",
+      affectedPerformerProfileId: "affected-conductor-profile",
+      continuousPerformerProfileId: "continuous-conductor-profile",
+      affectedRepositoryRoot: `/repository/${affected.id}`,
+      continuousRepositoryRoot: `/repository/${continuous.id}`,
     },
   });
 }

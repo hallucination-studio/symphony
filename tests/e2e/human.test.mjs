@@ -118,6 +118,39 @@ test("Human Actor ignores terminal Plan Review history and waits for the fresh r
   assert.deepEqual(action, { actionIssueId: "replacement-plan-review", terminalStatusId: "rejected-state" });
 });
 
+test("Human Actor admits recovery only after it can read one affected in-flight Stage from the two declared Roots", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const affected = await human.createRootIssue({
+    caseId: "conductor_restart_recovery",
+    rootKey: "affected-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  const continuous = await human.createRootIssue({
+    caseId: "conductor_restart_recovery",
+    rootKey: "continuous-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addRestartRecoveryExecution(affected.rootIssueId, "old-execution");
+
+  const admission = await human.waitForRestartRecoveryAdmission({
+    affectedRootIssueId: affected.rootIssueId,
+    continuousRootIssueId: continuous.rootIssueId,
+  });
+
+  assert.deepEqual(admission, { affectedRootIssueId: affected.rootIssueId, oldStageExecutionId: "old-execution" });
+});
+
 test("Human Actor waits for exactly one product-created Clarification Action beneath its declared Root", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({
@@ -340,6 +373,7 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
     "waitForCommentThreadReceipt",
     "waitForPlanContractAndPlanReviewAction",
     "waitForPlanReviewAction",
+    "waitForRestartRecoveryAdmission",
     "waitForRootDescriptionReceipt",
     "waitForSameConductorPreemptionAdmission",
     "waitForSameConductorPreemptionCandidate",
@@ -666,6 +700,20 @@ function createLinearFixture() {
       });
       comments.set(directive.id, directive);
       bindCommentChildren(directive);
+    },
+    addRestartRecoveryExecution(rootIssueId, stageExecutionId) {
+      const execution = comment({
+        id: `execution-${comments.size + 1}`,
+        issueId: rootIssueId,
+        body: record({
+          kind: "stage_execution",
+          root_issue_id: rootIssueId,
+          stage_execution_id: stageExecutionId,
+        }),
+        userId: "symphony-1",
+      });
+      comments.set(execution.id, execution);
+      bindCommentChildren(execution);
     },
     addCommentReceipt(commentId, inputReference, { reaction = "none", threadAction = "keep_open" } = {}) {
       const source = comments.get(commentId);

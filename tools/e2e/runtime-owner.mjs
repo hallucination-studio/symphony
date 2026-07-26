@@ -123,6 +123,15 @@ export async function startForegroundProductionRuntime({
     }
     return Object.freeze({
       conductors: Object.freeze(conductors),
+      async killAndRestartConductor({ conductorId } = {}) {
+        if (!identifier(conductorId)) throw stableError("foreground_e2e_recovery_restart_input_invalid");
+        await host.killAndObserveConductor({ conductorId });
+        const result = await podium.client.command({ kind: "start_conductor", conductor_id: conductorId });
+        if (result?.kind !== "conductor_command_completed" || result.conductor_id !== conductorId || result.command_kind !== "start_conductor") {
+          throw stableError("foreground_e2e_recovery_restart_failed");
+        }
+        return Object.freeze({ conductorId });
+      },
       async close() {
         if (closed) return;
         closed = true;
@@ -146,6 +155,14 @@ export async function closeOwnedProcess(child, { timeoutMs = 5_000 } = {}) {
   if (!await exited(child, timeoutMs)) {
     throw stableError("foreground_e2e_process_cleanup_failed");
   }
+}
+
+export async function forceKillOwnedProcess(child, { timeoutMs = 5_000 } = {}) {
+  if (!child || typeof child !== "object" || child.pid === undefined || child.pid === null) return;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw stableError("foreground_e2e_process_timeout_invalid");
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  terminate(child, "SIGKILL");
+  if (!await exited(child, timeoutMs)) throw stableError("foreground_e2e_process_kill_failed");
 }
 
 export async function createForegroundLocalResources({
@@ -250,9 +267,11 @@ function createDesktopHost({
     });
   };
   const reportExit = async (active, reasonCode) => {
-    if (active.exitReported) return;
-    active.exitReported = true;
-    await sendExit({ conductor: active.conductor, instanceId: active.instanceId, reasonCode });
+    if (!active.exitReportPromise) {
+      active.exitReported = true;
+      active.exitReportPromise = sendExit({ conductor: active.conductor, instanceId: active.instanceId, reasonCode });
+    }
+    await active.exitReportPromise;
   };
   const handle = async (body) => {
       if (!body || typeof body !== "object" || Array.isArray(body)) return protocolFailure("host_command_invalid");
@@ -296,7 +315,7 @@ function createDesktopHost({
           }
           drain(child.stdout);
           drain(child.stderr);
-          const active = { conductor, instanceId, child, channel, exitReported: false, exitReason: undefined };
+          const active = { conductor, instanceId, child, channel, exitReported: false, exitReportPromise: undefined, exitReason: undefined };
           conductors.set(conductor.conductorId, active);
           podiumChannel.add(active);
           child.once("exit", () => {
@@ -345,13 +364,24 @@ function createDesktopHost({
     conductors.clear();
     await Promise.allSettled(active.map((entry) => stop(entry, "conductor_process_cleanup")));
   };
-  return Object.freeze({ handle, close });
+  return Object.freeze({ handle, close, killAndObserveConductor });
 
   async function stop(active, reasonCode) {
     podiumChannel.remove(active);
     conductors.delete(active.conductor.conductorId);
     active.exitReason ??= reasonCode;
     await closeOwnedProcess(active.child);
+    await reportExit(active, active.exitReason);
+  }
+
+  async function killAndObserveConductor({ conductorId } = {}) {
+    if (!identifier(conductorId)) throw stableError("foreground_e2e_recovery_restart_input_invalid");
+    const active = conductors.get(conductorId);
+    if (!active) throw stableError("foreground_e2e_recovery_restart_unavailable");
+    podiumChannel.remove(active);
+    conductors.delete(conductorId);
+    active.exitReason ??= "conductor_process_sigkill";
+    await forceKillOwnedProcess(active.child);
     await reportExit(active, active.exitReason);
   }
 }

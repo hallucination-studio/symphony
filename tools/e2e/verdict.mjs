@@ -1227,28 +1227,82 @@ function latestActivityAtOrBefore(activity, rootIssueId, at) {
 
 function recoveryFacts(facts) {
   const binding = facts.context.recovery;
-  if (!binding || !identifier(binding.affectedRootId) || !identifier(binding.continuousRootId) || !identifier(binding.oldExecutionId) || !identifier(binding.oldRoleSessionId)) {
-    return { oldTerminalOnce: false, freshExecution: false, ownershipPersists: false, unaffectedContinues: false, allDelivered: false, lateOldSuccess: false, checkpointOrRewrite: false, unaffectedReconfigured: false };
-  }
+  if (!validRecoveryBinding(binding)) return recoveryFailureFacts();
   const oldResults = facts.recordsOf("stage_result", binding.affectedRootId).filter(({ record }) =>
     record.model_turn?.stage_execution_id === binding.oldExecutionId || record.result_id === binding.oldExecutionId);
-  const oldSessionResults = facts.recordsOf("stage_result", binding.affectedRootId)
-    .filter(({ record }) => record.role_session_id === binding.oldRoleSessionId);
-  const oldTerminal = oldResults.filter(({ record }) => ["execution_failed", "canceled"].includes(record.outcome_kind));
-  const replacement = facts.recordsOf("stage_result", binding.affectedRootId).find(({ record }) =>
-    record.role_session_id !== binding.oldRoleSessionId && record.outcome_kind === "verify_passed");
+  const oldTerminal = only(oldResults);
+  const oldRoleSessionId = oldTerminal?.record.role_session_id;
+  const oldSessionResults = identifier(oldRoleSessionId)
+    ? facts.recordsOf("stage_result", binding.affectedRootId).filter(({ record }) => record.role_session_id === oldRoleSessionId)
+    : [];
+  const replacement = only(facts.recordsOf("stage_result", binding.affectedRootId).filter(({ record }) =>
+    record.stage === "verify" && record.outcome_kind === "verify_passed" && record.result_id !== binding.oldExecutionId &&
+    record.model_turn?.stage_execution_id !== binding.oldExecutionId && record.role_session_id !== oldRoleSessionId,
+  ));
+  const replacementExecutionId = replacement?.record.model_turn?.stage_execution_id ?? replacement?.record.result_id;
+  const replacementExecution = identifier(replacementExecutionId) && only(facts.recordsOf("stage_execution", binding.affectedRootId)
+    .filter(({ record }) => record.stage_execution_id === replacementExecutionId && record.stage === "verify"));
+  const replacementVerify = replacementExecution && only(facts.recordsOf("verify_result", binding.affectedRootId)
+    .filter(({ record }) => record.stage_execution_id === replacementExecutionId && record.conclusion === "passed"));
+  const replacementDelivery = replacementVerify && only(facts.recordsOf("delivery", binding.affectedRootId).filter(({ record }) =>
+    record.verify_result_id === replacementExecutionId && record.verified_revision === replacement.record.verified_revision));
+  const replacementGitMatches = Boolean(replacementDelivery && (facts.evidence.git ?? []).some(({ rootIssueId, headRevision }) =>
+    rootIssueId === binding.affectedRootId && headRevision === replacementDelivery.record.verified_revision));
+  const affectedChain = deliveryChainFacts(facts, binding.affectedRootId);
+  const continuousChain = deliveryChainFacts(facts, binding.continuousRootId);
   const affectedOwnership = facts.recordsOf("root_ownership", binding.affectedRootId).map(({ record }) => record);
   const continuousOwnership = facts.recordsOf("root_ownership", binding.continuousRootId).map(({ record }) => record);
+  const affectedOwned = matchesRecoveryOwnership(facts, binding.affectedRootId, affectedOwnership, {
+    conductorId: binding.affectedConductorId,
+    routingLabelId: binding.affectedRoutingLabelId,
+    performerProfileId: binding.affectedPerformerProfileId,
+    repositoryRoot: binding.affectedRepositoryRoot,
+  });
+  const continuousOwned = matchesRecoveryOwnership(facts, binding.continuousRootId, continuousOwnership, {
+    conductorId: binding.continuousConductorId,
+    routingLabelId: binding.continuousRoutingLabelId,
+    performerProfileId: binding.continuousPerformerProfileId,
+    repositoryRoot: binding.continuousRepositoryRoot,
+  });
+  const oldSessionExecutionIds = new Set(oldSessionResults.map(({ record }) => record.model_turn?.stage_execution_id ?? record.result_id).filter(identifier));
+  const oldSessionDelivery = facts.recordsOf("delivery", binding.affectedRootId)
+    .some(({ record }) => oldSessionExecutionIds.has(record.verify_result_id));
   return {
-    oldTerminalOnce: oldTerminal.length === 1 && !oldResults.some(({ record }) => record.outcome_kind === "verify_passed"),
-    freshExecution: Boolean(replacement && deliveryChainFacts(facts, binding.affectedRootId).complete),
-    ownershipPersists: affectedOwnership.length === 1,
-    unaffectedContinues: deliveryChainFacts(facts, binding.continuousRootId).complete,
-    allDelivered: deliveryChainFacts(facts, binding.affectedRootId).rootInReview && deliveryChainFacts(facts, binding.continuousRootId).rootInReview,
-    lateOldSuccess: oldSessionResults.some(({ record }) => record.outcome_kind === "verify_passed"),
+    oldTerminalOnce: oldResults.length === 1 && Boolean(oldTerminal) && TERMINAL_STAGE_OUTCOMES.has(oldTerminal.record.outcome_kind) && identifier(oldRoleSessionId),
+    freshExecution: Boolean(replacement && replacementExecution && replacementVerify && replacementDelivery && replacementGitMatches &&
+      replacementExecutionId !== binding.oldExecutionId && affectedChain.complete),
+    ownershipPersists: affectedOwned,
+    unaffectedContinues: continuousOwned && continuousChain.complete,
+    allDelivered: affectedChain.rootInReview && continuousChain.rootInReview && affectedChain.complete && continuousChain.complete,
+    lateOldSuccess: oldResults.some(({ record }) => !TERMINAL_STAGE_OUTCOMES.has(record.outcome_kind)) ||
+      oldSessionResults.some(({ record }) => !TERMINAL_STAGE_OUTCOMES.has(record.outcome_kind)) || oldSessionDelivery,
     checkpointOrRewrite: facts.records.some(({ record }) => String(record.kind).includes("checkpoint")) || facts.hasHumanManagedWrite(),
-    unaffectedReconfigured: continuousOwnership.length !== 1,
+    unaffectedReconfigured: !continuousOwned,
   };
+}
+
+function validRecoveryBinding(value) {
+  return value && identifier(value.affectedRootId) && identifier(value.continuousRootId) &&
+    value.affectedRootId !== value.continuousRootId && identifier(value.oldExecutionId) &&
+    identifier(value.affectedConductorId) && identifier(value.continuousConductorId) &&
+    value.affectedConductorId !== value.continuousConductorId && identifier(value.affectedRoutingLabelId) &&
+    identifier(value.continuousRoutingLabelId) && value.affectedRoutingLabelId !== value.continuousRoutingLabelId &&
+    identifier(value.affectedPerformerProfileId) && identifier(value.continuousPerformerProfileId) &&
+    value.affectedPerformerProfileId !== value.continuousPerformerProfileId && repositoryRoot(value.affectedRepositoryRoot) &&
+    repositoryRoot(value.continuousRepositoryRoot) && value.affectedRepositoryRoot !== value.continuousRepositoryRoot;
+}
+
+function matchesRecoveryOwnership(facts, rootIssueId, owners, expected) {
+  const owner = only(owners);
+  const root = facts.rootIssue(rootIssueId);
+  const git = only((facts.evidence.git ?? []).filter(({ rootIssueId: value }) => value === rootIssueId));
+  return Boolean(owner && validRootOwnership(owner) && owner.conductor_id === expected.conductorId &&
+    owner.performer_profile_id === expected.performerProfileId && root?.labels?.length === 1 &&
+    root.labels[0]?.id === expected.routingLabelId && git?.repositoryRootCanonical === expected.repositoryRoot);
+}
+
+function recoveryFailureFacts() {
+  return { oldTerminalOnce: false, freshExecution: false, ownershipPersists: false, unaffectedContinues: false, allDelivered: false, lateOldSuccess: false, checkpointOrRewrite: false, unaffectedReconfigured: false };
 }
 
 function assertionCoverageComplete(assertion, evidence, rootIds) {

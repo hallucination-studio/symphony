@@ -122,6 +122,17 @@ export async function createForegroundE2EHumanActor({
       }
     },
 
+    async waitForRestartRecoveryAdmission({ affectedRootIssueId, continuousRootIssueId, signal } = {}) {
+      const known = assertRestartRecoveryRoots(roots, { affectedRootIssueId, continuousRootIssueId });
+      assertRevisionWaitInput({ signal });
+      while (true) {
+        const snapshots = await Promise.all([...known.values()].map((root) => readRestartRecoveryRootSnapshot({ client, root })));
+        const admission = restartRecoveryAdmission(snapshots, affectedRootIssueId);
+        if (admission) return Object.freeze(admission);
+        await waitForRevisionChange(signal);
+      }
+    },
+
     async waitForClarificationAction({ rootIssueId, terminalStatus, signal } = {}) {
       const known = assertKnownClarificationRoot(roots, rootIssueId);
       assertClarificationWaitInput({ terminalStatus, signal });
@@ -464,6 +475,20 @@ function assertPreemptionCandidateRoots(roots, { inflightStageExecutionId, touch
   return byId;
 }
 
+function assertRestartRecoveryRoots(roots, { affectedRootIssueId, continuousRootIssueId }) {
+  if (!identifier(affectedRootIssueId) || !identifier(continuousRootIssueId) || affectedRootIssueId === continuousRootIssueId) {
+    throw stableError("foreground_e2e_human_recovery_admission_input_invalid");
+  }
+  const affected = roots.get(affectedRootIssueId);
+  const continuous = roots.get(continuousRootIssueId);
+  if (!affected || !continuous || affected.caseId !== "conductor_restart_recovery" ||
+      continuous.caseId !== "conductor_restart_recovery" || affected.rootKey !== "affected-root" ||
+      continuous.rootKey !== "continuous-root") {
+    throw stableError("foreground_e2e_human_recovery_admission_input_invalid");
+  }
+  return new Map([[affectedRootIssueId, affected], [continuousRootIssueId, continuous]]);
+}
+
 async function readPreemptionRootSnapshot({ client, root }) {
   const code = "foreground_e2e_human_preemption_read_failed";
   const issue = await readIssue(client, root.rootIssueId, code);
@@ -495,6 +520,25 @@ async function readPreemptionRootSnapshot({ client, root }) {
   };
 }
 
+async function readRestartRecoveryRootSnapshot({ client, root }) {
+  const code = "foreground_e2e_human_recovery_read_failed";
+  const issue = await readIssue(client, root.rootIssueId, code);
+  const labels = await readLabels(issue, code);
+  if (!matchesKnownRoot(issue, labels, root)) throw stableError(code);
+  const records = [];
+  for (const node of await readPreemptionIssueTree(issue, code, new Set())) {
+    for (const comment of await readIssueComments(node, code)) {
+      const record = parseRecord(comment?.body);
+      if (record) records.push(record);
+    }
+  }
+  return {
+    rootIssueId: root.rootIssueId,
+    executions: records.filter((record) => record.kind === "stage_execution" && record.root_issue_id === root.rootIssueId),
+    results: records.filter((record) => record.kind === "stage_result" && record.root_issue_id === root.rootIssueId),
+  };
+}
+
 async function readPreemptionIssueTree(issue, code, seen) {
   if (!issue || !identifier(issue.id) || seen.has(issue.id)) throw stableError(code);
   seen.add(issue.id);
@@ -515,6 +559,15 @@ function preemptionAdmission(snapshots) {
     return undefined;
   }
   return { inflightRootIssueId: active[0].rootIssueId, inflightStageExecutionId: active[0].stageExecutionId, readyRootIssueIds: ready };
+}
+
+function restartRecoveryAdmission(snapshots, affectedRootIssueId) {
+  if (!Array.isArray(snapshots) || snapshots.length !== 2) return undefined;
+  const affected = snapshots.find(({ rootIssueId }) => rootIssueId === affectedRootIssueId);
+  if (!affected) return undefined;
+  const active = affected.executions.filter((record) => !stageResultFor(affected.results, record.stage_execution_id));
+  if (active.length !== 1 || !identifier(active[0]?.stage_execution_id)) return undefined;
+  return { affectedRootIssueId, oldStageExecutionId: active[0].stage_execution_id };
 }
 
 function preemptionCandidate({ snapshots, actorId, inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId }) {

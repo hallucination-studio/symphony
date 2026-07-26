@@ -31,7 +31,10 @@ export async function createForegroundE2EEnvironment({
     return Object.freeze({
       project: Object.freeze({ ...project }),
       resources: Object.freeze({ directory: resources.directory }),
-      runtime: Object.freeze({ conductors: Object.freeze([...(runtime.conductors ?? [])]) }),
+      runtime: Object.freeze({
+        conductors: Object.freeze([...(runtime.conductors ?? [])]),
+        killAndRestartConductor: runtime.killAndRestartConductor,
+      }),
       async close() {
         if (closed) return;
         closed = true;
