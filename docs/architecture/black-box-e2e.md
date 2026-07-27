@@ -88,8 +88,9 @@ validate tools and credentials
 Campaign使用all-settled语义：一个Case失败不能取消其他Case的evidence collection。cleanup失败单独报告，不能覆盖Case verdict。
 
 Project reset是test-resource lifecycle，不是产品workflow mutation。只有`.env`精确选择、target setup明确授权且setup read-back返回的
-隔离E2E Project可以进入reset；runner必须使用只读取Issue ID和pageInfo的compact query分页读取该Project的全部active和archived
-Issues，以每次最多25个`issueDelete(permanentlyDelete: true)` alias的bounded mutation batches逐一移除，并验证每个alias都返回
+隔离E2E Project可以进入reset。reset writer必须是已完成独立身份read-back的E2E Human Actor API credential；Symphony OAuth actor只服务
+Podium产品边界，不能尝试永久删除，也不能作为fallback。runner必须使用只读取Issue ID和pageInfo的compact query分页读取该Project的全部
+active和archived Issues，以每次最多25个`issueDelete(permanentlyDelete: true)` alias的bounded mutation batches逐一移除，并验证每个alias都返回
 `success = true`。然后以相同`includeArchived = true` compact query fresh-read零Issues，之后才能启动Podium和Conductor。只archive旧Issues不构成reset，因为Project Root
 Index必须读取archived authority facts；按title、label、creator、时间或本次Campaign namespace过滤旧Issues同样禁止。任一delete或
 read-back不完整都fail closed，不能用新的Root掩盖历史测试资源。
