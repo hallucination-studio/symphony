@@ -27,7 +27,7 @@ const PREEMPTION_CORE_ROOT_KEYS = new Set(
     ?.declaredUserInteractions.find(({ kind }) => kind === "bind_preemption_roles")?.rootKeys ?? [],
 );
 export const HUMAN_ACTION_POLL_INTERVAL_MS = 5_000;
-export const HUMAN_LINEAR_REQUEST_INTERVAL_MS = 250;
+export const HUMAN_LINEAR_REQUEST_INTERVAL_MS = 1_500;
 
 export function createHumanLinearRequestBudget({
   now = () => Date.now(),
@@ -94,11 +94,12 @@ export async function createForegroundE2EHumanActor({
   expectedActorId,
   delegateActorId,
   createClient = (options) => new LinearClient(options),
+  requestBudget = createHumanLinearRequestBudget(),
 } = {}) {
-  if (!token(apiKey) || !identifier(expectedActorId) || typeof createClient !== "function") {
+  if (!token(apiKey) || !identifier(expectedActorId) || typeof createClient !== "function" ||
+      !requestBudget || typeof requestBudget.execute !== "function") {
     throw stableError("foreground_e2e_human_actor_input_invalid");
   }
-  const requestBudget = createHumanLinearRequestBudget();
   let rawClient;
   try {
     rawClient = createClient({ apiKey });

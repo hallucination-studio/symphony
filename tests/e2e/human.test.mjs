@@ -6,16 +6,22 @@ import { RatelimitedLinearError } from "@linear/sdk";
 import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import {
   createHumanLinearRequestBudget,
-  createForegroundE2EHumanActor,
+  createForegroundE2EHumanActor as createForegroundE2EHumanActorImplementation,
   HUMAN_ACTION_POLL_INTERVAL_MS,
   HUMAN_LINEAR_REQUEST_INTERVAL_MS,
 } from "../../tools/e2e/human.mjs";
+
+const createForegroundE2EHumanActor = (input) => createForegroundE2EHumanActorImplementation({
+  ...input,
+  requestBudget: immediateHumanRequestBudget(),
+});
 
 test("Human Actor uses a stable polling interval", () => {
   assert.equal(HUMAN_ACTION_POLL_INTERVAL_MS, 5_000);
 });
 
 test("Human Actor globally serializes concurrent Case Linear requests at a bounded cadence", async () => {
+  assert.equal(HUMAN_LINEAR_REQUEST_INTERVAL_MS, 1_500);
   let now = 0;
   let inFlight = 0;
   let maximumInFlight = 0;
@@ -79,7 +85,7 @@ test("Human Actor applies the shared request budget to concurrent Case Linear mu
     inFlight -= 1;
     return originalCreateIssue(input);
   };
-  const human = await createForegroundE2EHumanActor({
+  const human = await createForegroundE2EHumanActorImplementation({
     apiKey: "human-api-key",
     expectedActorId: "human-1",
     createClient: () => fixture.client,
@@ -1282,6 +1288,16 @@ function hasCode(code) {
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function immediateHumanRequestBudget() {
+  let now = 0;
+  return createHumanLinearRequestBudget({
+    now: () => now,
+    wait: async (milliseconds) => {
+      now += milliseconds;
+    },
+  });
 }
 
 function conductorBinding(conductorRef, suffix) {
