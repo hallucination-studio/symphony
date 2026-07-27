@@ -40,6 +40,23 @@ test("Human Actor uses stable polling and globally serialized Linear request bud
   assert.deepEqual(starts, [0, HUMAN_LINEAR_REQUEST_INTERVAL_MS]);
 });
 
+test("Human Actor resolves one Root kind label into every Case creation binding", async () => {
+  const human = await actor(linearFixture());
+  const bindings = await human.resolveRootCreationBindings({
+    teamId: "team-1",
+    projectId: "project-1",
+    conductors: [
+      conductorBinding("conductor-a", "aaa111aaa111"),
+      conductorBinding("conductor-b", "bbb222bbb222"),
+      conductorBinding("conductor-c", "ccc333ccc333"),
+    ],
+  });
+
+  assert.equal(Object.values(bindings).length > 8, true);
+  assert.equal(Object.values(bindings).every(({ rootLabelId }) => rootLabelId === "root-label"), true);
+  assert.equal(bindings["approved-root"].routingLabelId, "route-aaa111aaa111");
+});
+
 test("Human Actor creates, verifies, and delegates only declared Root Issues", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture, { delegateActorId: "symphony-1" });
@@ -49,6 +66,7 @@ test("Human Actor creates, verifies, and delegates only declared Root Issues", a
   await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId });
   await human.delegateRootIssue({ rootIssueId: root.rootIssueId });
 
+  assert.deepEqual(fixture.calls.createIssue[0].labelIds, ["root-label", "route-label"]);
   assert.deepEqual(fixture.calls.updateIssue, [{ issueId: root.rootIssueId, input: { delegateId: "symphony-1" } }]);
 });
 
@@ -196,6 +214,7 @@ async function createRoot(human, caseId, rootKey) {
     rootKey,
     teamId: "team-1",
     projectId: "project-1",
+    rootLabelId: "root-label",
     routingLabelId: "route-label",
     rootStatusId: "todo-state",
   });
@@ -265,7 +284,7 @@ function linearFixture() {
       issues.set(id, makeIssue({
         id,
         identifier: `ENG-${rootSequence}`,
-        labels: ["symphony:conductor/abc123def456"],
+        labels: input.labelIds.map((labelId) => labelId === "root-label" ? "Root" : "symphony:conductor/abc123def456"),
         stateId: input.stateId,
         title: input.title,
         description: input.description,
@@ -320,7 +339,9 @@ function linearFixture() {
       };
     },
     async issueLabels({ filter }) {
-      return { nodes: [{ id: "route-label", name: filter.name.eq, isGroup: false, archivedAt: null, teamId: "team-1" }], pageInfo: { hasNextPage: false } };
+      const name = filter.name.eq;
+      const routeHash = name.match(/^symphony:conductor\/([a-f0-9]{12})$/u)?.[1];
+      return { nodes: [{ id: name === "Root" ? "root-label" : routeHash ? `route-${routeHash}` : "route-label", name, isGroup: false, archivedAt: null, teamId: "team-1" }], pageInfo: { hasNextPage: false } };
     },
   };
 
@@ -337,6 +358,16 @@ function linearFixture() {
     return issue;
   }
   return fixture;
+}
+
+function conductorBinding(conductorRef, conductorShortHash) {
+  return {
+    conductorRef,
+    conductorShortHash,
+    conductorId: `${conductorRef}-id`,
+    performerProfileId: `${conductorRef}-profile`,
+    worktreeDirectory: `/tmp/${conductorRef}`,
+  };
 }
 
 function makeComment({ id, issueId, body, userId, parentId, resolved = false, updatedAt = "2026-07-26T00:00:00.000Z" }) {

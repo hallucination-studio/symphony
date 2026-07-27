@@ -126,9 +126,10 @@ export async function createForegroundE2EHumanActor({
       const statuses = await readTeamStatuses(client, teamId, "foreground_e2e_human_root_binding_read_failed");
       const todo = statuses.filter((state) => state.name === "Todo" && state.type === "unstarted");
       if (todo.length !== 1) throw stableError("foreground_e2e_human_root_binding_read_failed");
+      const rootLabel = await readIssueLabel({ client, teamId, name: "Root" });
       const labels = new Map();
       for (const conductor of resolvedConductors.values()) {
-        labels.set(conductor.conductorRef, await readRoutingLabel({
+        labels.set(conductor.conductorRef, await readIssueLabel({
           client,
           teamId,
           name: `symphony:conductor/${conductor.conductorShortHash}`,
@@ -143,6 +144,7 @@ export async function createForegroundE2EHumanActor({
           bindings[topology.rootKey] = Object.freeze({
             teamId,
             projectId,
+            rootLabelId: rootLabel.id,
             routingLabelId: label.id,
             rootStatusId: todo[0].id,
             conductorId: conductor.conductorId,
@@ -180,7 +182,7 @@ export async function createForegroundE2EHumanActor({
           teamId: input.teamId,
           projectId: input.projectId,
           stateId: input.rootStatusId,
-          labelIds: [input.routingLabelId],
+          labelIds: [input.rootLabelId, input.routingLabelId],
           title: rootSpec.rootCreationInput.title,
           description: rootSpec.rootCreationInput.description,
           priority: linearPriorityValue(rootSpec.rootCreationInput.priority),
@@ -203,6 +205,7 @@ export async function createForegroundE2EHumanActor({
         declaredDescriptionUpdates: rootSpec.declaredDescriptionUpdates,
         projectId: input.projectId,
         teamId: input.teamId,
+        rootLabelId: input.rootLabelId,
         routingLabelId: input.routingLabelId,
         rootStatusId: input.rootStatusId,
         title: rootSpec.rootCreationInput.title,
@@ -602,7 +605,8 @@ async function setCommentThreadState({ client, comments, actorId, issueId, comme
 }
 
 function assertRootCreateInput(input, rootCatalog) {
-  if (!input || !identifier(input.rootKey) || !identifier(input.teamId) || !identifier(input.projectId) || !identifier(input.routingLabelId) ||
+  if (!input || !identifier(input.rootKey) || !identifier(input.teamId) || !identifier(input.projectId) ||
+      !identifier(input.rootLabelId) || !identifier(input.routingLabelId) || input.rootLabelId === input.routingLabelId ||
       !identifier(input.rootStatusId) || !identifier(input.caseId)) {
     throw stableError("foreground_e2e_human_root_create_input_invalid");
   }
@@ -664,7 +668,7 @@ function assertConductorBindings({ teamId, projectId, conductors }) {
   return byRef;
 }
 
-async function readRoutingLabel({ client, teamId, name }) {
+async function readIssueLabel({ client, teamId, name }) {
   if (!client || typeof client.issueLabels !== "function" || !identifier(teamId) || !text(name)) {
     throw stableError("foreground_e2e_human_root_binding_read_failed");
   }
@@ -1191,13 +1195,17 @@ function matchesCreatedRoot(issue, labels, input, rootCreationInput) {
   return issue.id !== undefined && issue.teamId === input.teamId && issue.projectId === input.projectId &&
     (issue.parentId === null || issue.parentId === undefined) && issue.title === rootCreationInput.title &&
     issue.description === rootCreationInput.description && issue.priority === linearPriorityValue(rootCreationInput.priority) && issue.stateId === input.rootStatusId &&
-    (issue.delegateId === null || issue.delegateId === undefined) && labels.length === 1 && labels[0]?.id === input.routingLabelId;
+    (issue.delegateId === null || issue.delegateId === undefined) && matchesRootLabels(labels, input);
 }
 
 function matchesKnownRoot(issue, labels, known) {
   return issue.id === known.rootIssueId && issue.teamId === known.teamId && issue.projectId === known.projectId &&
-    (issue.parentId === null || issue.parentId === undefined) && labels.length === 1 &&
-    labels[0]?.id === known.routingLabelId;
+    (issue.parentId === null || issue.parentId === undefined) && matchesRootLabels(labels, known);
+}
+
+function matchesRootLabels(labels, root) {
+  return labels.length === 2 && new Set(labels.map(({ id }) => id)).size === 2 &&
+    labels.some(({ id }) => id === root.rootLabelId) && labels.some(({ id }) => id === root.routingLabelId);
 }
 
 async function verifyUndelegatedRoot({ client, known, delegateActorId, signal }) {
