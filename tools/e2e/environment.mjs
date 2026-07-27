@@ -23,7 +23,7 @@ export async function createForegroundE2EEnvironment({
     assertProject(project);
     await operations.resetProject({
       projectId: project.projectId,
-      operator: actors.client,
+      operator: actors.resetClient,
       authorized: config.linear.setupAuthorized,
       signal,
     });

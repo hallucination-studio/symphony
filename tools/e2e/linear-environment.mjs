@@ -93,7 +93,7 @@ export async function verifyDistinctLinearActors({
   if (symphonyActorId === humanActorId) {
     throw stableError("foreground_e2e_actor_identities_not_distinct");
   }
-  return Object.freeze({ symphonyActorId, humanActorId, client: symphony });
+  return Object.freeze({ symphonyActorId, humanActorId, resetClient: human });
 }
 
 export async function resetDedicatedE2EProject({ projectId, client, authorized } = {}) {

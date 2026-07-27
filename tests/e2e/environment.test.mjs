@@ -12,7 +12,10 @@ import {
   createForegroundE2EEnvironment,
   installForegroundE2ESignalCleanup,
 } from "../../tools/e2e/environment.mjs";
-import { resetDedicatedE2EProject } from "../../tools/e2e/linear-environment.mjs";
+import {
+  resetDedicatedE2EProject,
+  verifyDistinctLinearActors,
+} from "../../tools/e2e/linear-environment.mjs";
 import { createForegroundReporter } from "../../tools/e2e/reporter.mjs";
 import {
   acquireForegroundBindingProcessFence,
@@ -42,6 +45,26 @@ const config = Object.freeze({
   codex: Object.freeze({ baseUrl: "https://example.test", model: "gpt-5-codex" }),
 });
 
+test("actor verification assigns Project reset exclusively to the Human Actor client", async () => {
+  const symphonyClient = { viewer: Promise.resolve({ id: "symphony-actor" }) };
+  const humanClient = { viewer: Promise.resolve({ id: "human-actor" }) };
+
+  const actors = await verifyDistinctLinearActors({
+    symphonyAccessToken: "symphony-secret",
+    humanApiKey: "human-secret",
+    createClient(options) {
+      return "accessToken" in options ? symphonyClient : humanClient;
+    },
+  });
+
+  assert.deepEqual(actors, {
+    symphonyActorId: "symphony-actor",
+    humanActorId: "human-actor",
+    resetClient: humanClient,
+  });
+  assert.equal("client" in actors, false);
+});
+
 test("environment permanently deletes every Project Issue and fresh-reads an empty archived-inclusive baseline before local creation", async () => {
   const events = [];
   const active = new Map([
@@ -53,7 +76,7 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
   let localCreated = false;
   let budgetAssertions = 0;
   let runtimeFaultListener;
-  const client = {
+  const resetClient = {
     client: {
       async rawRequest(query, variables) {
         if (query.includes("SymphonyE2EProjectIssues")) {
@@ -102,13 +125,14 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
       reporter: eventReporter(events),
       operations: {
         async verifyActors() {
-          return { symphonyActorId: "symphony-actor", humanActorId: "human-actor", client };
+          return { symphonyActorId: "symphony-actor", humanActorId: "human-actor", resetClient };
         },
         async initializeProject() {
           return { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" };
         },
         resetProject: ({ projectId, operator, authorized }) => {
           assert.equal(authorized, true);
+          assert.equal(operator, resetClient);
           return resetDedicatedE2EProject({ projectId, client: operator, authorized });
         },
         async createLocalResources() {
