@@ -320,7 +320,8 @@ Shared managed-record parser只搜索唯一terminal strict `json` fenced block�
 `managed_record_block_legacy_format`专用结果。调用方因此只区分“普通Linear文本中没有managed record”和“当前`json`
 block存在但无效”；旧格式不是可识别输入类别。tracked生产代码和role测试不得保留旧格式literal、regex、fixture、拒绝分支或
 通过简单字符串拼接重建的marker；architecture audit的隔离negative control仅验证该禁止规则，不能成为workflow兼容行为。
-retired inventory只作为零残留guard，不能把兼容测试登记成允许baseline。
+retired inventory只作为final-only零残留guard：它没有baseline、允许路径、写入命令或`no-expansion`模式；任一
+tracked code或role test出现retired surface都必须失败，不能把兼容测试或历史文件登记为例外。
 
 ## 9. Interface ownership
 

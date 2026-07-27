@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const inventoryPath = "tools/architecture/retired-inventory.json";
-const auditModes = new Set(["baseline", "no-expansion", "final"]);
+const auditModes = new Set(["final"]);
 const textExtensions = new Set([
   ".cjs", ".js", ".json", ".mjs", ".mts", ".py", ".rs", ".toml", ".ts", ".tsx",
 ]);
@@ -22,13 +22,6 @@ function matchingPaths(tracked, patterns) {
   const expressions = patterns.map((pattern) => new RegExp(pattern, "u"));
   return [...tracked.keys()].filter((file) =>
     expressions.some((expression) => expression.test(file))).sort();
-}
-
-function addDifference(violations, actual, expected, createViolation) {
-  const allowed = new Set(expected);
-  for (const value of actual) {
-    if (!allowed.has(value)) violations.push(createViolation(value));
-  }
 }
 
 export function inspectRetiredInventory(inventory, tracked, options) {
@@ -48,29 +41,6 @@ export function inspectRetiredInventory(inventory, tracked, options) {
 
   for (const [scopeName, scope] of selected) {
     const paths = matchingPaths(tracked, scope.path_patterns);
-    if (options.mode === "baseline" || options.mode === "no-expansion") {
-      addDifference(violations, paths, scope.paths, (file) => ({
-        code: "retired_path_untracked_by_baseline", file, scope: scopeName,
-      }));
-      if (options.mode === "baseline") {
-        addDifference(violations, scope.paths, paths, (file) => ({
-          code: "retired_baseline_path_missing", file, scope: scopeName,
-        }));
-      }
-      for (const [symbol, expectedFiles] of Object.entries(scope.symbols)) {
-        const actualFiles = occurrenceFiles(tracked, symbol);
-        addDifference(violations, actualFiles, expectedFiles, (file) => ({
-          code: "retired_symbol_untracked_by_baseline", file, scope: scopeName, symbol,
-        }));
-        if (options.mode === "baseline") {
-          addDifference(violations, expectedFiles, actualFiles, (file) => ({
-            code: "retired_baseline_symbol_missing", file, scope: scopeName, symbol,
-          }));
-        }
-      }
-      continue;
-    }
-
     for (const file of paths) {
       violations.push({ code: "retired_path_remaining", file, scope: scopeName });
     }
@@ -113,37 +83,16 @@ export async function auditRetiredInventory(root, options) {
   return inspectRetiredInventory(inventory, await trackedSources(root), options);
 }
 
-export async function currentBaseline(root) {
-  const inventory = JSON.parse(await readFile(path.join(root, inventoryPath), "utf8"));
-  const tracked = await trackedSources(root);
-  for (const scope of Object.values(inventory.scopes)) {
-    scope.paths = matchingPaths(tracked, scope.path_patterns);
-    for (const symbol of Object.keys(scope.symbols)) {
-      scope.symbols[symbol] = occurrenceFiles(tracked, symbol);
-    }
-  }
-  return inventory;
-}
-
 function option(name) {
   const prefix = `--${name}=`;
   return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  if (process.argv.includes("--print-baseline") || process.argv.includes("--write-baseline")) {
-    const content = `${JSON.stringify(await currentBaseline(process.cwd()), null, 2)}\n`;
-    if (process.argv.includes("--write-baseline")) {
-      await writeFile(path.join(process.cwd(), inventoryPath), content, "utf8");
-    } else {
-      process.stdout.write(content);
-    }
-  } else {
-    const options = { mode: option("mode"), scope: option("scope") };
-    const violations = await auditRetiredInventory(process.cwd(), options);
-    if (violations.length > 0) {
-      for (const violation of violations) process.stderr.write(`${JSON.stringify(violation)}\n`);
-      process.exitCode = 1;
-    }
+  const options = { mode: option("mode"), scope: option("scope") };
+  const violations = await auditRetiredInventory(process.cwd(), options);
+  if (violations.length > 0) {
+    for (const violation of violations) process.stderr.write(`${JSON.stringify(violation)}\n`);
+    process.exitCode = 1;
   }
 }

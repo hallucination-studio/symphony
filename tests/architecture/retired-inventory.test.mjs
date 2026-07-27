@@ -67,6 +67,15 @@ test("hard-cut inventory names every retired comment, timeline, usage, and E2E s
   );
 });
 
+test("hard-cut inventory retains no retired baseline allowlist", async () => {
+  const inventory = JSON.parse(await readFile("tools/architecture/retired-inventory.json", "utf8"));
+
+  for (const scope of Object.values(inventory.scopes)) {
+    assert.deepEqual(scope.paths, []);
+    for (const files of Object.values(scope.symbols)) assert.deepEqual(files, []);
+  }
+});
+
 test("final inventory contains no reachable hard-cut timeline projection surface", async () => {
   const findings = await auditRetiredInventory(process.cwd(), { mode: "final" });
 
@@ -74,11 +83,11 @@ test("final inventory contains no reachable hard-cut timeline projection surface
   assert.ok(!findings.some((finding) => finding.scope === retiredTimelineScope));
 });
 
-test("tracked code cannot expand beyond the retired baseline", async () => {
-  assert.deepEqual(await auditRetiredInventory(process.cwd(), { mode: "no-expansion" }), []);
+test("final inventory contains no retired hard-cut surface", async () => {
+  assert.deepEqual(await auditRetiredInventory(process.cwd(), { mode: "final" }), []);
 });
 
-test("retired inventory rejects new legacy paths and symbol occurrences", () => {
+test("retired inventory rejects every legacy path and symbol occurrence", () => {
   const inventory = {
     version: 1,
     scopes: {
@@ -97,15 +106,28 @@ test("retired inventory rejects new legacy paths and symbol occurrences", () => 
     ["src/new.ts", "OldRuntime"],
   ]);
 
-  assert.deepEqual(inspectRetiredInventory(inventory, tracked, { mode: "no-expansion" }), [
+  assert.deepEqual(inspectRetiredInventory(inventory, tracked, { mode: "final" }), [
     {
-      code: "retired_path_untracked_by_baseline",
+      code: "retired_path_remaining",
+      file: "legacy/known.ts",
+      scope: "sample",
+      source: "docs/architecture/contracts.md#managed-records",
+    },
+    {
+      code: "retired_path_remaining",
       file: "legacy/new.ts",
       scope: "sample",
       source: "docs/architecture/contracts.md#managed-records",
     },
     {
-      code: "retired_symbol_untracked_by_baseline",
+      code: "retired_symbol_remaining",
+      file: "src/known.ts",
+      scope: "sample",
+      source: "docs/architecture/contracts.md#managed-records",
+      symbol: "OldRuntime",
+    },
+    {
+      code: "retired_symbol_remaining",
       file: "src/new.ts",
       scope: "sample",
       source: "docs/architecture/contracts.md#managed-records",
@@ -147,7 +169,7 @@ test("audit intent must be explicit", () => {
     /retired_inventory_mode_required/u,
   );
   assert.throws(
-    () => inspectRetiredInventory(inventory, tracked, { mode: "migration" }),
+    () => inspectRetiredInventory(inventory, tracked, { mode: "no-expansion" }),
     /retired_inventory_mode_unknown/u,
   );
 });
