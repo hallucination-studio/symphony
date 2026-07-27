@@ -546,13 +546,14 @@
     "RootReconcilerFailure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "category", "sanitized_reason", "continuity", "failed_at"],
+      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "code", "category", "sanitized_reason", "continuity", "failed_at"],
       "properties": {
         "failure_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "target_root_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "attempted_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
+        "code": { "$ref": "common.schema.json#/$defs/Identifier" },
         "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"] },
         "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "continuity": { "$ref": "#/$defs/ProviderTurnContinuity" },

@@ -945,6 +945,7 @@ function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
           : { status: "unavailable", reason: enumValue(usage, "reason", ["provider_omitted", "transport_lost", "process_lost", "invalid_provider_usage"]) },
         terminalAt: textValue(modelTurn, "terminal_at"),
       },
+      code: textValue(failure, "code"),
       category: enumValue(failure, "category", ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"]),
       sanitizedReason: textValue(failure, "sanitized_reason"),
       continuity: continuityKind === "retained"

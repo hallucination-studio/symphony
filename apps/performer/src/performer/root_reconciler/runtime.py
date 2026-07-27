@@ -278,6 +278,7 @@ def _failure_from_invalid_directive(
             "target_root_digest": expected_digest,
             "attempted_input_ids": _attempted_input_ids(request),
             "model_turn": failed_turn,
+            "code": error.code,
             "category": category,
             "sanitized_reason": error.sanitized_reason,
             "continuity": {

@@ -154,6 +154,7 @@ function failureRecord(
       usage: { status: "unavailable", reason: "provider_omitted" },
       terminalAt: "2026-07-23T00:00:01Z",
     },
+    code: "provider_output_invalid",
     category: "schema_invalid",
     sanitizedReason: "The Root Reconciler response was invalid.",
     continuity,

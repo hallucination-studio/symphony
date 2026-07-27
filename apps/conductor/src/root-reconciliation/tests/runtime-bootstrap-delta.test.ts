@@ -485,7 +485,7 @@ test("Root runtime reports each fresh Reconciler failure without writing machine
   const failureLog = logs.at(-1)?.fields ?? {};
   const failureId = failureLog.failure_id;
   assert.equal(failureLog.root_issue_id, "root-1");
-  assert.equal(failureLog.failure_code, "schema_invalid");
+  assert.equal(failureLog.failure_code, "root_directive_contract_invalid");
   assert.ok(typeof failureId === "string");
   assert.match(failureId, /^root-1:.+:failure$/u);
   assert.equal("category" in failureLog, false);
@@ -718,6 +718,7 @@ function failureFor(input: Parameters<RootReconciliationRuntimeDependencies["rec
       usage: { status: "unavailable", reason: "provider_omitted" },
       terminalAt: "2026-07-23T00:00:01Z",
     },
+    code: "root_directive_contract_invalid",
     category: "schema_invalid",
     sanitizedReason: "The Root Reconciler output was invalid.",
     continuity: { kind: "closed", appendOutcome: "session_lost" },

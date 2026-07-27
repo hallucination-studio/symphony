@@ -433,6 +433,11 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   assert.deepEqual(schema.$defs.ClosedProviderTurnContinuity.properties.append_outcome.enum, [
     "acceptance_unknown", "session_lost",
   ]);
+  assert.ok(schema.$defs.RootReconcilerFailure.required.includes("code"));
+  assert.equal(
+    schema.$defs.RootReconcilerFailure.properties.code.$ref,
+    "common.schema.json#/$defs/Identifier",
+  );
   assert.ok(schema.$defs.RootReconcilerFailure.required.includes("continuity"));
   assert.ok(schema.$defs.StageExecutionFailedResult.required.includes("continuity"));
   for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {

@@ -496,6 +496,7 @@ export interface RootReconcilerFailure {
   targetRootDigest: string;
   attemptedInputIds: string[];
   modelTurn: RootReconcilerModelTurnRecord;
+  code: string;
   category: "transport_failed" | "timed_out" | "schema_invalid" | "stale_output" | "canceled";
   sanitizedReason: string;
   continuity: ProviderTurnContinuity;

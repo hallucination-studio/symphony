@@ -601,6 +601,7 @@ def test_host_persists_root_provider_failure_as_a_typed_model_turn_result():
     failure = result["initial_result"]
     assert failure["kind"] == "root_reconciler_failed"
     assert failure["root_issue_id"] == "root-1"
+    assert failure["failure"]["code"] == "provider_append_acceptance_unknown"
     assert failure["failure"]["category"] == "transport_failed"
     assert failure["failure"]["attempted_input_ids"] == []
     assert failure["failure"]["continuity"] == {
@@ -629,6 +630,7 @@ def test_host_reports_root_directive_contract_failure():
     assert result["kind"] == "root_reconciler_opened"
     failure = result["initial_result"]
     assert failure["kind"] == "root_reconciler_failed"
+    assert failure["failure"]["code"] == "root_directive_wait_missing_blocking_fact_refs"
     assert failure["failure"]["category"] == "schema_invalid"
     assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
     assert failure["failure"]["continuity"] == {
@@ -753,6 +755,7 @@ def test_host_rejects_unexpected_comment_replies_when_no_comment_input_is_pendin
     assert result["kind"] == "root_reconciler_opened"
     failure = result["initial_result"]
     assert failure["kind"] == "root_reconciler_failed"
+    assert failure["failure"]["code"] == "root_directive_comment_replies_invalid"
     assert failure["failure"]["category"] == "schema_invalid"
 
 

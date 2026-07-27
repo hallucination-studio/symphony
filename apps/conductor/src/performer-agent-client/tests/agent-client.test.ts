@@ -425,6 +425,7 @@ function rootFailure(requestId: string, turnId: string, targetRootDigest: string
         ...rootModelTurn(turnId),
         outcome: "schema_invalid",
       },
+      code: "root_directive_contract_invalid",
       category: "schema_invalid",
       sanitized_reason: "The Root Reconciler response was invalid.",
       continuity: { kind: "closed", append_outcome: "session_lost" },
@@ -535,6 +536,7 @@ test("agent client decodes a closed Root Reconciler failure without retaining a 
   assert.equal(opened.initialResult.kind, "failed");
   if (opened.initialResult.kind === "failed") {
     assert.equal(opened.initialResult.failure.failureId, "root-1:turn-1:failure");
+    assert.equal(opened.initialResult.failure.code, "root_directive_contract_invalid");
     assert.equal(opened.initialResult.failure.modelTurn.outcome, "schema_invalid");
   }
   await assert.rejects(
@@ -577,6 +579,9 @@ test("agent client discards a session after an advance returns a closed Root fai
   });
 
   assert.equal(result.kind, "failed");
+  if (result.kind === "failed") {
+    assert.equal(result.failure.code, "root_directive_contract_invalid");
+  }
   await assert.rejects(
     () => client.advanceRootReconciler({
       requestId: "advance-request-2",

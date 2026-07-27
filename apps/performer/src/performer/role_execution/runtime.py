@@ -208,6 +208,7 @@ def _terminal(
                     "target_root_digest": _root_target_digest(request),
                     "attempted_input_ids": _root_attempted_input_ids(request),
                     "model_turn": model_turn,
+                    "code": result["error_code"] if result.get("kind") == "execution_failed" else "provider_turn_canceled",
                     "category": category,
                     "sanitized_reason": result["sanitized_reason"],
                     "continuity": result.get("continuity") or _retained_continuity(session_record, request, accepted=False),
