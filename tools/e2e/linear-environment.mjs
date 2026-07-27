@@ -2,7 +2,18 @@ import { LinearClient } from "@linear/sdk";
 
 const CONDUCTOR_LABEL_NAME = /^symphony:conductor\/[a-f0-9]{12}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const PAGE_SIZE = 250;
+const ISSUE_DELETE_BATCH_SIZE = 25;
+const PROJECT_ISSUES_QUERY = `
+  query SymphonyE2EProjectIssues($projectId: String!, $after: String) {
+    project(id: $projectId) {
+      id
+      issues(first: 250, after: $after, includeArchived: true) {
+        nodes { id }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
 const PROJECT_ROUTING_LABELS_QUERY = `
   query SymphonyE2EProjectRoutingLabels($projectId: String!, $after: String) {
     project(id: $projectId) {
@@ -87,38 +98,73 @@ export async function verifyDistinctLinearActors({
 
 export async function resetDedicatedE2EProject({ projectId, client, authorized } = {}) {
   if (authorized !== true) throw stableError("foreground_e2e_project_reset_unauthorized");
-  if (!identifier(projectId) || !client || typeof client.project !== "function" ||
-      typeof client.deleteIssue !== "function") {
+  if (!identifier(projectId) || typeof client?.client?.rawRequest !== "function") {
     throw stableError("foreground_e2e_project_reset_input_invalid");
   }
-  const project = await readProject(client, projectId);
-  const issues = await readAllLinearNodes(
-    (after) => project.issues({ first: PAGE_SIZE, includeArchived: true, ...(after ? { after } : {}) }),
-    "foreground_e2e_project_issue_read_failed",
-  );
-  for (const issue of issues) {
-    if (!issue || !identifier(issue.id)) {
-      throw stableError("foreground_e2e_project_issue_invalid");
-    }
+  const issueIds = await readDedicatedProjectIssueIds(client, projectId);
+  for (let index = 0; index < issueIds.length; index += ISSUE_DELETE_BATCH_SIZE) {
+    await permanentlyDeleteIssueBatch(client, issueIds.slice(index, index + ISSUE_DELETE_BATCH_SIZE));
   }
-  for (const issue of issues) {
-    const result = await write(
-      () => client.deleteIssue(issue.id, { permanentlyDelete: true }),
-      "foreground_e2e_project_issue_delete_failed",
-    );
-    if (result?.success !== true) throw stableError("foreground_e2e_project_issue_delete_failed");
-  }
-  const baselineProject = await readProject(client, projectId);
-  const remaining = await readAllLinearNodes(
-    (after) => baselineProject.issues({ first: PAGE_SIZE, includeArchived: true, ...(after ? { after } : {}) }),
-    "foreground_e2e_project_issue_read_back_failed",
-  );
-  if (remaining.length !== 0) throw stableError("foreground_e2e_project_issue_read_back_failed");
-  await resetConductorRoutingLabels({ client, projectId: baselineProject.id });
-  const finalProject = await readProject(client, projectId);
-  const remainingLabels = await activeRoutingLabels(client, finalProject.id);
+  const remainingIssueIds = await readDedicatedProjectIssueIds(client, projectId);
+  if (remainingIssueIds.length !== 0) throw stableError("foreground_e2e_project_issue_read_back_failed");
+  await resetConductorRoutingLabels({ client, projectId });
+  const remainingLabels = await activeRoutingLabels(client, projectId);
   if (remainingLabels.length !== 0) throw stableError("foreground_e2e_project_label_read_back_failed");
   return Object.freeze({ projectId });
+}
+
+async function readDedicatedProjectIssueIds(client, projectId) {
+  const issueIds = [];
+  const seenIssueIds = new Set();
+  const cursors = new Set();
+  let after;
+  do {
+    const data = await compactRawRequest(
+      client,
+      PROJECT_ISSUES_QUERY,
+      { projectId, after },
+      "foreground_e2e_project_issue_read_failed",
+    );
+    const issues = data.project?.id === projectId ? data.project.issues : undefined;
+    if (!pageConnection(issues)) throw stableError("foreground_e2e_project_issue_read_failed");
+    for (const issue of issues.nodes) {
+      if (!identifier(issue?.id) || seenIssueIds.has(issue.id)) {
+        throw stableError("foreground_e2e_project_issue_invalid");
+      }
+      seenIssueIds.add(issue.id);
+      issueIds.push(issue.id);
+    }
+    if (!issues.pageInfo.hasNextPage) return issueIds;
+    after = issues.pageInfo.endCursor;
+    if (typeof after !== "string" || after.length === 0 || cursors.has(after)) {
+      throw stableError("foreground_e2e_project_issue_read_failed");
+    }
+    cursors.add(after);
+  } while (after);
+  throw stableError("foreground_e2e_project_issue_read_failed");
+}
+
+async function permanentlyDeleteIssueBatch(client, issueIds) {
+  if (issueIds.length < 1 || issueIds.length > ISSUE_DELETE_BATCH_SIZE ||
+      issueIds.some((issueId) => !identifier(issueId))) {
+    throw stableError("foreground_e2e_project_issue_delete_failed");
+  }
+  const variables = Object.fromEntries(issueIds.map((issueId, index) => [`id${index}`, issueId]));
+  const variableDefinitions = issueIds.map((_issueId, index) => `$id${index}: String!`).join(", ");
+  const mutations = issueIds.map((_issueId, index) =>
+    `delete${index}: issueDelete(id: $id${index}, permanentlyDelete: true) { success }`
+  ).join("\n    ");
+  const data = await compactRawRequest(
+    client,
+    `mutation SymphonyE2EDeleteIssues(${variableDefinitions}) {\n    ${mutations}\n  }`,
+    variables,
+    "foreground_e2e_project_issue_delete_failed",
+  );
+  for (let index = 0; index < issueIds.length; index += 1) {
+    if (data[`delete${index}`]?.success !== true) {
+      throw stableError("foreground_e2e_project_issue_delete_failed");
+    }
+  }
 }
 
 async function readActorId(client) {
@@ -133,19 +179,6 @@ async function readActorId(client) {
   }
   if (!viewer || !identifier(viewer.id)) throw stableError("foreground_e2e_actor_identity_invalid");
   return viewer.id;
-}
-
-async function readProject(client, projectId) {
-  let project;
-  try {
-    project = await client.project(projectId);
-  } catch {
-    throw stableError("foreground_e2e_project_read_failed");
-  }
-  if (!project || project.id !== projectId || typeof project.issues !== "function") {
-    throw stableError("foreground_e2e_project_invalid");
-  }
-  return project;
 }
 
 async function resetConductorRoutingLabels({ client, projectId }) {

@@ -56,6 +56,27 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
   const client = {
     client: {
       async rawRequest(query, variables) {
+        if (query.includes("SymphonyE2EProjectIssues")) {
+          assert.equal(variables.projectId, "project-1");
+          return {
+            data: {
+              project: {
+                id: "project-1",
+                issues: {
+                  nodes: [...active.entries()].filter(([, present]) => present).map(([id]) => ({ id })),
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          };
+        }
+        if (query.includes("SymphonyE2EDeleteIssues")) {
+          const issueIds = Object.values(variables);
+          assert.equal(issueIds.length <= 25, true);
+          assert.match(query, /permanentlyDelete: true/u);
+          for (const issueId of issueIds) active.set(issueId, false);
+          return { data: Object.fromEntries(issueIds.map((_issueId, index) => [`delete${index}`, { success: true }])) };
+        }
         assert.match(query, /SymphonyE2EProjectRoutingLabels/u);
         assert.deepEqual(variables, { projectId: "project-1", after: undefined });
         return {
@@ -68,30 +89,9 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
         };
       },
     },
-    async project(projectId) {
-      assert.equal(projectId, "project-1");
+    async project() {
       projectReads += 1;
-      return {
-        id: "project-1",
-        async issues({ includeArchived }) {
-          assert.equal(includeArchived, true);
-          return {
-            nodes: [...active.entries()]
-              .filter(([, isActive]) => isActive)
-              .map(([id]) => ({ id })),
-            pageInfo: { hasNextPage: false },
-          };
-        },
-        async labels() {
-          return { nodes: [], pageInfo: { hasNextPage: false } };
-        },
-      };
-    },
-    async deleteIssue(issueId, { permanentlyDelete }) {
-      assert.equal(localCreated, false);
-      assert.equal(permanentlyDelete, true);
-      active.set(issueId, false);
-      return { success: true };
+      throw new Error("SDK Project fragment must not be read during reset");
     },
   };
 
@@ -132,7 +132,7 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
       },
     });
 
-    assert.equal(projectReads, 3);
+    assert.equal(projectReads, 0);
     assert.deepEqual([...active.values()], [false, false, false]);
     assert.deepEqual(environment.actors, { humanActorId: "human-actor" });
     assert.deepEqual(environment.runtime.assertProjectRootIndexRequestBudget(), {
@@ -183,12 +183,38 @@ test("environment rejects matching actor identities before resetting a Project o
 });
 
 test("Project reset paginates active and archived Issues before permanent deletion and reads the final baseline afresh", async () => {
-  const issues = new Set(["root-1", "done-1"]);
+  const issues = new Set(Array.from({ length: 251 }, (_unused, index) => `issue-${index + 1}`));
   const seenCursors = [];
-  const deletions = [];
+  const deletionBatchSizes = [];
   const client = {
     client: {
       async rawRequest(query, variables) {
+        if (query.includes("SymphonyE2EProjectIssues")) {
+          seenCursors.push(variables.after ?? "initial");
+          const all = [...issues];
+          const nodes = variables.after === "page-2"
+            ? all.slice(250)
+            : all.slice(0, 250);
+          return {
+            data: {
+              project: {
+                id: "project-1",
+                issues: {
+                  nodes: nodes.map((id) => ({ id })),
+                  pageInfo: nodes.length === 250
+                    ? { hasNextPage: true, endCursor: "page-2" }
+                    : { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          };
+        }
+        if (query.includes("SymphonyE2EDeleteIssues")) {
+          const issueIds = Object.values(variables);
+          deletionBatchSizes.push(issueIds.length);
+          for (const issueId of issueIds) issues.delete(issueId);
+          return { data: Object.fromEntries(issueIds.map((_issueId, index) => [`delete${index}`, { success: true }])) };
+        }
         assert.match(query, /SymphonyE2EProjectRoutingLabels/u);
         assert.deepEqual(variables, { projectId: "project-1", after: undefined });
         return {
@@ -201,40 +227,14 @@ test("Project reset paginates active and archived Issues before permanent deleti
         };
       },
     },
-    async project() {
-      return {
-        id: "project-1",
-        async issues({ after, includeArchived }) {
-          assert.equal(includeArchived, true);
-          seenCursors.push(after ?? "initial");
-          const ids = after === undefined ? ["root-1"] : after === "page-2" ? ["done-1"] : [];
-          return {
-            nodes: ids.filter((id) => issues.has(id)).map((id) => ({ id })),
-            pageInfo: after === undefined
-              ? { hasNextPage: true, endCursor: "page-2" }
-              : { hasNextPage: false },
-          };
-        },
-        async labels() {
-          return { nodes: [], pageInfo: { hasNextPage: false } };
-        },
-      };
-    },
-    async deleteIssue(issueId, options) {
-      deletions.push({ issueId, options });
-      issues.delete(issueId);
-      return { success: true };
-    },
+    async project() { throw new Error("SDK Project fragment must not be read during reset"); },
   };
 
   await resetDedicatedE2EProject({ projectId: "project-1", client, authorized: true });
 
   assert.deepEqual([...issues], []);
-  assert.deepEqual(deletions, [
-    { issueId: "root-1", options: { permanentlyDelete: true } },
-    { issueId: "done-1", options: { permanentlyDelete: true } },
-  ]);
-  assert.deepEqual(seenCursors, ["initial", "page-2", "initial", "page-2"]);
+  assert.deepEqual(deletionBatchSizes, [...Array(10).fill(25), 1]);
+  assert.deepEqual(seenCursors, ["initial", "page-2", "initial"]);
 });
 
 test("Project reset rejects permanent deletion without explicit setup authorization", async () => {
@@ -248,6 +248,40 @@ test("Project reset rejects permanent deletion without explicit setup authorizat
     /foreground_e2e_project_reset_unauthorized/u,
   );
   assert.equal(projectReads, 0);
+});
+
+test("Project reset fails closed when any permanent-delete alias lacks success read-back", async () => {
+  let issueRead = false;
+  const client = {
+    client: {
+      async rawRequest(query) {
+        if (query.includes("SymphonyE2EProjectIssues")) {
+          if (issueRead) throw new Error("read-back must not run after a failed delete batch");
+          issueRead = true;
+          return {
+            data: {
+              project: {
+                id: "project-1",
+                issues: {
+                  nodes: [{ id: "issue-1" }, { id: "issue-2" }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          };
+        }
+        if (query.includes("SymphonyE2EDeleteIssues")) {
+          return { data: { delete0: { success: true }, delete1: { success: false } } };
+        }
+        throw new Error("unexpected query");
+      },
+    },
+  };
+
+  await assert.rejects(
+    resetDedicatedE2EProject({ projectId: "project-1", client, authorized: true }),
+    /foreground_e2e_project_issue_delete_failed/u,
+  );
 });
 
 test("Project reset paginates routing labels before retiring only the dedicated Project labels", async () => {
@@ -273,6 +307,16 @@ test("Project reset paginates routing labels before retiring only the dedicated 
     client: {
       async rawRequest(query, variables) {
         rawRequests.push({ query, variables });
+        if (query.includes("SymphonyE2EProjectIssues")) {
+          return {
+            data: {
+              project: {
+                id: "project-1",
+                issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              },
+            },
+          };
+        }
         if (query.includes("SymphonyE2EProjectRoutingLabels")) {
           labelCursors.push(variables.after ?? "initial");
           return {
