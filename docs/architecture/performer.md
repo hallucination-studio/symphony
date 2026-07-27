@@ -121,6 +121,45 @@ correlation或Conductor gate仍必须拒绝。
 必须分别实现[Performer Stage Contracts](stage-orchestration.md)定义的role边界和Mermaid分支流程。Mermaid只表达
 既有closed directive或Result之间的判断顺序，不能成为第二套状态机；prompt不得复制或重新定义wire schema。
 
+### 5.1 Provider注入分层
+
+Performer必须把Provider session输入分为五层，不能把它们每turn重新拼成一份完整prompt：
+
+| 层 | 注入时机 | Provider conversation语义 |
+|---|---|---|
+| stable base instructions | 仅fresh role session创建时 | matching role Markdown定义的workflow与authority |
+| role-scoped initial context | 仅fresh session首个turn | Root完整bootstrap，或Stage的matching role/Cycle最小投影 |
+| current turn command | 每个turn | 当前trigger、target、pending input identity和本轮要求 |
+| model-visible context update | initial之后按需 | 仅该role baseline之后新增、replacement或tombstone fragments |
+| Provider request metadata | 每个Provider调用 | model、tools、sandbox、limits、correlation和structured-output schema |
+
+前四层中只有current command和本轮新增context update可以在已有session的后续conversation中出现。base instructions
+和initial context已经进入matching Provider history后不得重新注入、摘要后替换或作为“安全上下文”再次展开。backend必须
+使用Provider支持的opaque thread/response continuation提交strictly incremental items；不能从已有transcript重建一份
+完整messages数组交给下一turn。Provider不支持可证明的增量continuation时，该backend不满足session contract，必须fail
+closed，不能静默退化为每轮重放完整prompt。
+
+structured-output schema始终是每次调用的机械Provider参数，因为它约束该次返回值；它不属于conversation history，
+不得展开成field-by-field自然语言、示例JSON或重复的output instructions塞进current turn command。Provider可能如何计算
+schema参数自身的用量由Provider负责，本架构只保证Symphony不把schema再复制成model-visible prompt内容。
+
+Root delta和Stage role-context delta中的每个change都是有独立identity/version/correlation的逻辑context fragment，
+但不要求一个fragment对应一个Provider SDK item，更不要求一个comment单独触发一个turn。backend可以把同一冻结观察批次
+编码成一个bounded item或多个items，只要不丢失每个fragment的identity、消费与reply coverage，且不把整份baseline重新
+序列化。turn执行期间到达的新事实只进入下一次context update。
+
+每个role session独立维护Provider-visible baseline和opaque continuation；Root、Plan、Work、Verify之间不得共享或fork
+conversation。Root Reconciler的完整bootstrap不能成为Stage startup context，Stage也不能继承另一个Stage role或前一Cycle
+的history。fresh Stage session只能从Conductor提供的matching role-scoped initial projection开始。
+
+Provider history只append current-value、replacement和tombstone fragments，不修改旧item。已经确认append但业务Result或
+directive尚未被接受的事实不在同一live thread重复发送；消费、materialization和workflow推进仍由durable records独立
+决定。append是否成功或continuation baseline无法证明时关闭session，并由Conductor从Linear/Git durable facts重建fresh
+initial context；Performer不持久化transcript、fragment log或context checkpoint。
+
+本节优化的是每个turn新增的model-visible输入，不定义总conversation token上限、compaction、旧history裁剪或摘要替换
+策略。资源limits仍用于拒绝单次过大的initial/delta/result，但不能作为重复注入完整上下文的理由。
+
 ## 6. Agent行为
 
 ### 6.1 Root Reconciler
@@ -193,3 +232,6 @@ Profile control仍是独立closed protocol，负责SDK login/status和受支持�
 10. Markdown定义稳定role行为，validated request提供本轮事实，generated schema和Conductor gate始终拥有机械执行边界。
 11. 四个prompt都明确trigger、分步workflow、anti-rationalization、red flags、evidence exit criteria和output contract；
     Mermaid只解释既有closed flow，不新增schema或状态。
+12. 已有session的Provider输入只追加current turn command和该role的new/replacement/tombstone fragments；base instructions、
+    initial context、完整Root/Cycle snapshot和其他role transcript不得重复注入。
+13. structured-output schema是每次调用的独立机械参数，不得复制成自然语言turn prompt。

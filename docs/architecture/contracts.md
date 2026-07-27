@@ -192,13 +192,15 @@ human_action_resolutions[]
 边界的Root turn只能通过这个failure variant结束，不能被通用Protocol error、throw、null或partial result替代。
 `RootReconcilerFailureRecordWriterInterface`只负责把这个failure record写入matching Root的managed comment并fresh
 read-back、strict decode；它不渲染timeline、不选择retry或下一步，写入失败由Root Reconciliation host fail closed。
-`AdvanceRootReconcilerRequest`只允许携带`base_root_digest`、`target_root_digest`和`RootDeltaChange[]`；schema不提供
-full snapshot、before/after diff或兼容union。baseline不匹配返回closed failure并要求fresh session bootstrap。
+`AdvanceRootReconcilerRequest`的closed字段由[Root Reconciliation](root-reconciliation.md)唯一列出；它只携带
+Provider-visible `base_root_digest`、`target_root_digest`、`RootDeltaChange[]`和本轮需要处理的`pending_input_ids[]`，
+schema不提供full snapshot、before/after diff或兼容union。baseline不匹配返回closed failure并要求fresh session bootstrap。
 Conductor可以为了计算delta在自己的单轮内存视图中读取完整active和archived Tree，但不得把该视图、完整source manifest
 或历史activity复制到advance message。只有新建session、session丢失或baseline无法证明时，才允许再次发送完整bootstrap。
 `RootDelta`没有独立的Linear revision/event lifecycle，也不进入任何durable queue、checkpoint或本地镜像；它只表示
 本轮从已确认baseline到fresh target的当前值/tombstone传输。传输失败或不连续时必须丢弃session并重新bootstrap，不能
-重放、补猜或兼容旧delta。
+重放、补猜或兼容旧delta。Provider能够证明matching append已经进入history时推进的只是runtime fact baseline；
+用户输入是否已处理只由accepted directive的`consumed_input_ids[]`决定，二者不能合并为durable checkpoint。
 
 这也是唯一的传输矩阵：新建、丢失或无法证明baseline的session使用一次`OpenRootReconcilerRequest`完整bootstrap；可证明
 连续的session使用`AdvanceRootReconcilerRequest`增量。普通用户修改不会单独触发bootstrap，Conductor也不能因为计算

@@ -197,7 +197,10 @@ Human Action或有证据地wait。Conductor不从comment keyword、status或自�
 - Root Reconciler thread只提供runtime continuity，不是durable authority；丢失后从Linear/Git打开fresh session；
 - fresh session只在open时接收一次完整`RootBootstrapSnapshot`；fresh只指新建session、session丢失或baseline无法证明；
   已打开且baseline可证明的session后续只接收严格连续的`RootDelta`；
-- Provider thread中的既有上下文不能覆盖新delta；baseline digest无法证明时必须丢弃session并重新bootstrap。
+- Provider thread中的既有上下文不能覆盖新delta，也不能为了构造下一turn而重写、替换或重新展开；
+- session分别维护Provider已经确认看过的Root fact baseline，以及accepted directive已经消费的`input_id`集合。
+  前者只决定下一次注入哪些新事实，后者只决定哪些用户输入仍待处理；二者不得合并成一个checkpoint；
+- Provider上下文连续性或fact baseline digest无法证明时必须丢弃session并重新bootstrap。
 
 ## 4. Bootstrap与Delta contract
 
@@ -298,6 +301,28 @@ RootDeltaChange =
   MechanicalViolationsCurrentValue
 ```
 
+#### 4.2.1 Provider可见的冻结观察批次
+
+`RootDeltaChange`是可独立关联的model-visible context fragment，不天然等于一次Provider turn。Conductor在开始
+reconciliation时冻结一份完整fresh observation，计算从该session已确认Provider-visible fact baseline到该观察结果的
+一组changes，并用一个turn提交整组变化。一次扫描中新增的多个comment、Issue修改、Result或Git事实可以共享同一turn，
+但每个change和matching Root input仍保留自己的source identity、version、`input_id`、correlation以及必需的消费和
+reply/disposition覆盖；批处理不能把它们合成一个无独立identity的摘要。
+
+Provider turn执行期间到达的comment或其他变化不修改当前请求，也不追加到正在执行的turn；它们等待下一次fresh
+observation，并只作为下一批新changes注入。这样turn是冻结的执行边界，而comment/change是边界内的独立输入片段。
+
+Provider-visible Root history只允许append：
+
+- 新增的immutable fact追加一个current-value fragment；
+- 已知source发生更新时追加一个显式replacement fragment，携带新current value和被替换的source identity/version；
+- source被删除、archive后脱离matching范围或relation消失时追加一个显式tombstone；
+- 不修改已经进入Provider conversation的旧fragment，也不在后续turn重新序列化完整Root baseline。
+
+replacement和tombstone用于让角色解释最新事实，不创建可恢复revision log。Performer可以在runtime内维护“Provider已经
+看过什么”的baseline以构造下一次增量调用，但Linear/Git当前事实和accepted managed records仍是唯一durable authority。
+session丢失后不重放这些fragments；Conductor从durable facts建立一个fresh role-scoped bootstrap。
+
 每个change只携带该source的当前bounded值或明确tombstone，不携带旧值、自然语言diff、业务影响或建议动作。
 description变化发送新的完整description；comment新增、编辑或close/reopen发送新的完整body与current native thread state；
 reaction-only变化不进入Root delta；status、archive、parent和relation
@@ -313,12 +338,16 @@ source manifest。
 必须具有相同source identity/version。comment消失时，两个Plan tombstone按各自identity删除对应baseline facts。
 
 Conductor每轮仍完整读取Linear/Git，但完整Tree只在Conductor内存中用于coverage、按source version/hash计算diff和
-precondition校验；正常
-advance只把`RootDelta`发送给Performer。session baseline snapshot和source manifest只存在于runtime memory，不写
-workflow DB、checkpoint或Linear镜像。只有合法directive返回后baseline才推进到target digest。已进入Provider的failure
-result不推进baseline；下一次被durable retry barrier允许的turn仍以最后确认baseline为基准，携带此前失败turn已观察到的
-当前事实以及至少一个新的pending user input。若无法证明这个baseline，关闭旧session并从fresh完整事实重新bootstrap。
-directive invalid、session丢失或delta不连续同样关闭旧session，不尝试兼容或猜测缺失delta。
+precondition校验；正常advance只把`RootDelta`发送给Performer。Provider-visible fact baseline snapshot和source manifest
+只存在于runtime memory，不写workflow DB、checkpoint或Linear镜像。Performer能够证明matching request已经作为
+Provider history的严格append被接受后，该fact baseline推进到`target_root_digest`；这只表示模型已经看过这些事实，不表示
+任何用户输入已消费、directive已接受或workflow已经推进。只有合法directive中的`consumed_input_ids[]`才推进输入消费事实。
+
+因此，已进入Provider并返回closed failure的turn不会在同一live thread中重新注入同一批current values；未消费的
+`input_id`继续列在后续turn command中，模型从既有conversation读取其内容。Provider transport、schema或continuation
+failure导致“该append是否进入history”无法证明时，关闭旧session并从fresh完整事实重新bootstrap，不猜测、不在同一
+thread补发，也不尝试改写Provider history。directive invalid但Provider append可证明时，事实baseline仍可推进，
+输入保持未消费，并由durable retry barrier决定何时允许下一turn。
 
 因此，完整读取和完整传输是两个不同的边界：Conductor可以每轮从Linear重建完整事实来保证diff正确，但Performer
 已有session永远只看到从已确认baseline到新target的当前值/tombstone增量。任何把完整Tree塞入advance request的实现都
@@ -334,7 +363,8 @@ version/hash只用于证明基线、去重和连续性，不拥有用户可见�
 `RootDelta`是一次Root Reconciler turn的传输输入，不是Linear revision、change event或独立的业务状态对象。它没有
 自己的创建、确认、重试、完成、失效或恢复生命周期；Conductor不得把delta写入Linear、Workflow DB、queue、checkpoint
 或本地revision store。Conductor只在本轮内存中将fresh Linear/Git facts与当前session baseline比较，生成一份delta；
-Performer在成功消费并返回directive后，仅推进自己的runtime baseline。
+Performer在能够证明matching append已经进入Provider history后，仅推进自己的Provider-visible runtime baseline；
+accepted directive中的`consumed_input_ids[]`独立推进业务输入消费，两者都不成为durable checkpoint。
 
 delta传输失败、过期、不连续、schema无效或session丢失时，不补发旧delta、不猜测缺失变化、不引入revision事件状态机。
 Conductor关闭不可证明的session，从新的完整Linear/Git事实发送一次`RootBootstrapSnapshot`。Linear中实际存在的Issue、
@@ -342,8 +372,10 @@ comment、relation、managed record和accepted directive仍是唯一durable事�
 Reconciler session的增量边界。
 
 `RootBootstrapSnapshot.pending_input_ids[]`从全部fresh、未被accepted directive消费的当前输入派生；已有session的
-`RootDelta.pending_input_ids[]`只能列出该delta实际携带且仍未消费的current-value input。单独body edit导致的remote
-version变化不能伪造thread-state input；对应state current value未进入delta时，它也不得进入delta pending list。
+`RootDelta.pending_input_ids[]`列出本轮必须处理的全部未消费input identity，其中新identity必须有matching delta
+current-value/tombstone fragment，先前turn已经注入但因closed failure或invalid directive尚未消费的identity可以只按ID
+再次列出，不能重复其正文或完整source value。单独body edit导致的remote version变化不能伪造thread-state input；
+对应state current value未进入Provider-visible baseline时，它也不得进入pending list。
 
 `root_digest`只覆盖canonical Root Reconciler Fact Set：业务Issue当前值、relations、业务managed records、普通human
 comment body versions、non-Symphony comment thread-state revisions、Git/delivery事实和mechanical violations。Timeline/Reconciler

@@ -52,6 +52,12 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
   `RootReconcilerFailureRecord`，不拥有下一步语义；
 - fresh Root Reconciler session接收一次完整active和archived Root bootstrap；后续turn只接收严格连续的Root delta；
 - Conductor可以在内存中完整读取Linear以计算source diff和校验digest，但已有session的advance request绝不携带完整Tree；session新建、丢失或baseline无法证明时才重新发送一次`RootBootstrapSnapshot`；
+- 每个role的stable workflow prompt和role-scoped initial context只在fresh Provider session注入一次；已有session每turn只追加
+  current command和该role的new/replacement/tombstone facts。structured-output schema保持独立机械参数，不展开进turn prompt；
+- Root comment/change是保留独立identity与reply coverage的context fragment，不天然等于一个turn；同一fresh frozen
+  observation中的多个变化可以共享一个turn，执行期间到达的变化等待下一turn；
+- Plan、Work和Verify都从空conversation开始，不继承Root或其他role history。Cycle是其context最大范围，实际输入仍是
+  matching role所需的最小投影；必要Root事实只能以minimal explicit Root Contract进入Stage init；
 - 所有用户status、content、archive、parent、relation和comment修改都由Root Reconciler解释，Conductor不主动纠正；
 - Plan、Work、Verify通过强类型request/result contract报告事实，不决定下一步或创建Human Action；
 - Conductor始终是Performer caller；Performer只响应closed command，不反向调用Conductor；

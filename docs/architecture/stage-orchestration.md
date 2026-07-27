@@ -135,8 +135,8 @@ StageTurnRequestEnvelope
   source_manifest[]
   coverage
   instruction_bundle
-  workflow_context:
-    PlanTurnContext | WorkTurnContext | VerifyTurnContext
+  role_context_update:
+    StageRoleContextInitial | StageRoleContextDelta
   repository_context
   execution_policy
   limits
@@ -165,8 +165,9 @@ StageTurnResultEnvelope
 `role`是discriminator；context和result variant必须matching。未知字段、未知variant、role/session不匹配、
 source coverage不完整、digest错误或超出bound均fail closed。所有schema使用`additionalProperties: false`，由
 JSON Schema生成各语言的generated codecs；生成语言集合由[契约与接口边界](contracts.md)统一定义。
-`instruction_bundle`携带本轮目标和output contract identity，是validated Stage request data；它不选择、替换或修改
-Performer随应用打包的role Markdown prompt。base prompt resource与本轮request必须同时matching `role`，否则fail closed。
+`instruction_bundle`携带本轮命令、target identity和output contract identity，是validated Stage request data；它不选择、
+替换或修改Performer随应用打包的role Markdown prompt，也不得重新嵌入stable role workflow、完整role context或
+structured-output schema文本。base prompt resource与本轮request必须同时matching `role`，否则fail closed。
 `model_turn`由Performer根据实际Provider调用填充，不属于模型structured output；它在每个terminal outcome都
 required，且其中的`model`和`usage`是该turn唯一的用量事实，不能在envelope顶层复制。`TurnUsage`及聚合语义只由
 [Performer Profile](performer-profiles.md)定义。
@@ -183,6 +184,69 @@ required，且其中的`model`和`usage`是该turn唯一的用量事实，不能
 
 同一thread不会放宽每个turn的target和capability。历史conversation只能帮助执行，不能授权当前request未授予
 的scope、workspace access或workflow mutation。
+
+### 3.1 Role context初始化与增量
+
+Plan、Work和Verify都从fresh、空Provider conversation创建，不继承Root Reconciler、另一个Stage role或前一Cycle的
+conversation。创建session时，Performer先注入一次matching stable role base instructions，再注入一次role-scoped
+initial context；后续turn只追加当前`instruction_bundle`和从该role已确认Provider-visible baseline计算出的context delta。
+这等价于不fork任何其他role history，而不是从完整Root conversation复制后再过滤。
+
+```text
+StageRoleContextInitial
+  kind: initial
+  target_context_digest
+  context:
+    PlanTurnContext | WorkTurnContext | VerifyTurnContext
+
+StageRoleContextDelta
+  kind: delta
+  base_context_digest
+  target_context_digest
+  changes[]
+
+StageRoleContextChange
+  source_identity
+  source_version_or_digest
+  value: current_value | replacement | tombstone
+```
+
+Conductor从fresh Linear/Git/repository facts构造本role允许的完整当前投影，并与该session上一次确认的
+`target_context_digest`比较生成initial或delta；Performer校验base/target连续性，并只把matching initial或changes编码为
+Provider incremental items。matching Result的`context_digest`确认本次Provider-visible target，二者的baseline都只存在于
+runtime session state。
+
+initial与delta是Provider可见事实的两种互斥输入。`initial`只允许出现在fresh role session的首个turn；已有且连续的
+session只允许`delta`。新增immutable fact追加current-value fragment；更新追加带被替换source identity/version的
+replacement；删除或不再属于matching role projection的fact追加tombstone。已进入conversation的旧fragment永不改写，
+后续turn也不得把`PlanTurnContext`、`WorkTurnContext`或`VerifyTurnContext`重新完整序列化。
+
+Cycle是Stage事实可见范围的硬上限，不是默认把完整Cycle全部注入。每个role只能接收完成当前命令所需的最小投影：
+
+- Plan：minimal explicit Root Contract、当前Cycle trigger、current Plan target、相关prior Plan attempts/contracts、
+  unresolved findings/resolutions和planning所需Git/repository facts；
+- Work：approved Plan Contract、当前selected Work、其dependency evidence、相关prior Work results、当前Cycle内必要DAG
+  facts、有效human resolutions以及worktree/Git facts；
+- Verify：approved Plan Contract、required Work results和checks、当前Cycle findings/resolutions、verification requirements
+  以及immutable target revision和matching repository snapshot。
+
+这里的minimal Root Contract是从Root requirement显式投影的objective、requested scope、constraints、acceptance
+criteria和verification requirements；它不是Root Tree、Root Reconciler transcript或其他Cycles历史的别名。除该contract
+外，Root级事实只有在matching role contract明确要求且能证明相关性时才可进入Stage initial/delta。
+
+Stage request不得携带完整Root Tree、完整active/archived Root history、Root Reconciler conversation、另一个role的
+conversation或其他Cycle context。`observed_tree_digest`、coverage、correlation、limits和Provider structured-output schema
+是机械request metadata，不因存在于transport envelope就自动成为model-visible conversation item。Performer只能把
+`instruction_bundle`与`role_context_update`中的允许内容追加给model。
+
+`repository_context.workspace_root_capability`只授予matching tool boundary，不进入prompt；其中baseline revision、diff、
+repository instructions或其他需要模型理解的值必须作为versioned sources进入matching role initial/delta，不能再从
+`repository_context`每turn重复注入一份。transport可以为precondition validation携带这些字段的identity/digest，但不能
+借此绕过Provider-visible baseline。
+
+Performer为每个role session在runtime内独立维护Provider-visible context digest。已确认进入Provider history但尚未产生
+可接受Result的facts不在同一live thread重复注入；无法证明append或baseline连续性时关闭该role session，并从Linear/Git
+durable facts重建一次fresh role-scoped initial context。该baseline不持久化，不是workflow checkpoint或authority。
 
 ## 4. 公共source、repository与limits
 
@@ -214,8 +278,9 @@ StageLimits
   deadline_at
 ```
 
-Root objective、current Plan Contract、target Node、dependencies、Human resolutions和Git revision是matching
-turn的required input。非必要历史可以省略，但必须在coverage中列出source identity和原因；不能静默截断。
+matching role所需的Root Contract projection、current Plan Contract、target Node、dependencies、Human resolutions和Git
+revision是matching turn的required facts。coverage证明该role projection完整，不要求把整个Root或Cycle搬进请求；被
+role-scope明确排除的无关历史不属于omission。required fact缺失或静默截断必须fail closed。
 
 ## 5. Plan contract
 
@@ -228,6 +293,7 @@ PlanTurnContext
     requested_scope
     constraints[]
     acceptance_criteria[]
+    verification_requirements[]
   cycle
     cycle_issue_id
     trigger
@@ -240,6 +306,8 @@ PlanTurnContext
   current_git_facts
   required_output
 ```
+
+该结构定义Plan role initial projection及后续delta可更新的最大事实集合，不表示每个Plan turn都重新发送完整结构。
 
 Plan is read-only. It may inspect repository and history but cannot edit files, mutateLinear, createIssues or execute
 delivery. A Plan turn returns a proposal; only Root Reconciler can request materialization/review.
@@ -314,6 +382,8 @@ WorkTurnContext
   workspace_capability
 ```
 
+该结构定义Work role initial projection及后续delta可更新的最大事实集合，不表示每个Work turn都重新发送完整结构。
+
 一个Cycle只有一个Work thread。Conductor在不同turn中把Root Reconciler选择且机械ready的Work Issue依次交给
 它。Work thread可以在当前turn内部执行Claude Code式tool loop：读取代码、修改、运行命令、观察普通错误、
 修复和重试，直到完成、需要外部输入或达到turn预算。
@@ -381,6 +451,8 @@ VerifyTurnContext
   immutable_target_revision
   repository_snapshot
 ```
+
+该结构定义Verify role initial projection及后续delta可更新的最大事实集合，不表示每个Verify turn都重新发送完整结构。
 
 Verify使用独立、read-only thread，不继承Plan、Work或Root Reconciler conversation。它不能修改文件、补做Work、
 修改DAG、创建Human Action或改变Finding状态。每个Result绑定immutable target revision。
