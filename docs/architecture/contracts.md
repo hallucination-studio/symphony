@@ -137,10 +137,17 @@ preconditions，不能仅凭digest写入。
 
 live session使用initial/delta transport。fresh role session只接收一次initial；之后只追加current command以及current value、
 replacement或tombstone fragments。Conductor按turn冻结fresh observation，多个changes可共享turn但保留独立identity。
+Root的closed initial/delta shape由[Root Reconciliation](root-reconciliation.md#33-root-initialdelta-transient-contract)拥有；
+Stage的closed role projection与fragment union由
+[Performer Stage Contracts](stage-orchestration.md#31-role-context初始化与增量)拥有。cross-process schema必须直接表达这些互斥
+variants，不能用arbitrary object、可选字段组合或完整context字段兼容旧request shape。
 
 Provider-visible fact baseline只在live session memory中，决定哪些fragments无需重复注入。human input是否已处理则从native
 Linear receipt/reply和materialized target facts推导；两者不能合并成checkpoint。append/continuation不连续或无法证明时关闭
-session并fresh-open。restart不能从Linear寻找delta cursor、Provider memory或private consumed-input ID。
+session并fresh-open。Provider acceptance的三态证据与恢复规则只由
+[Performer](performer.md#52-provider-append确认与失败)定义；transport failure不能暗示baseline已推进或未推进。restart不能从
+Linear寻找delta cursor、Provider memory或private consumed-input ID。没有validated业务output的Root/Stage failure必须显式携带
+该节定义的closed `ProviderTurnContinuity`；调用方不得从error category猜测session或baseline disposition。
 
 ## 7. Linear source与actor
 

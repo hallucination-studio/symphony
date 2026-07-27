@@ -198,19 +198,43 @@ initial context；后续turn只追加当前`instruction_bundle`和从该role已�
 StageRoleContextInitial
   kind: initial
   target_context_digest
-  context:
-    PlanTurnContext | WorkTurnContext | VerifyTurnContext
+  sources[]: StageRoleContextCurrentValue
 
 StageRoleContextDelta
   kind: delta
   base_context_digest
   target_context_digest
-  changes[]
+  changes[]: StageRoleContextChange
+
+StageRoleContextCurrentValue
+  source_kind: linear_issue | linear_comment | linear_relation | git | repository_instruction
+  source_id
+  source_version_or_digest
+  actor_kind
+  observed_at
+  value: PlanContextSourceValue | WorkContextSourceValue | VerifyContextSourceValue
 
 StageRoleContextChange
-  source_identity
+  source_kind: linear_issue | linear_comment | linear_relation | git | repository_instruction
+  source_id
   source_version_or_digest
-  value: current_value | replacement | tombstone
+  actor_kind
+  observed_at
+  operation:
+    StageRoleContextCurrentValue {
+      kind: current_value,
+      value: PlanContextSourceValue | WorkContextSourceValue | VerifyContextSourceValue
+    } |
+    StageRoleContextReplacement {
+      kind: replacement,
+      replaces_source_version_or_digest,
+      value: PlanContextSourceValue | WorkContextSourceValue | VerifyContextSourceValue
+    } |
+    StageRoleContextTombstone {
+      kind: tombstone,
+      removes_source_version_or_digest,
+      reason: deleted | left_role_scope
+    }
 ```
 
 Conductor从fresh Linear/Git/repository facts构造本role允许的完整当前投影，并与该session上一次确认的
@@ -222,6 +246,25 @@ initial与delta是Provider可见事实的两种互斥输入。`initial`只允许
 session只允许`delta`。新增immutable fact追加current-value fragment；更新追加带被替换source identity/version的
 replacement；删除或不再属于matching role projection的fact追加tombstone。已进入conversation的旧fragment永不改写，
 后续turn也不得把`PlanTurnContext`、`WorkTurnContext`或`VerifyTurnContext`重新完整序列化。
+
+`source_kind + source_id`是fragment identity；version/digest只标识该identity的current value。`initial.sources[]`必须完整
+列出matching role当前投影中的每个source，全部使用`current_value`，并按`source_kind, source_id` canonical排序。delta的一个
+冻结批次内每个identity最多一个change：new identity使用`current_value`；existing identity只能使用且必须使用
+`replacement`，其`replaces_source_version_or_digest`精确匹配base；删除或离开role projection只能使用`tombstone`，其
+`removes_source_version_or_digest`精确匹配base。source kind、actor、observed time与typed value必须来自fresh事实；value union
+必须同时匹配request `role`和下文该role最大事实集合。重复identity、错误variant、version不连续、cross-role value或digest
+无法由canonical projection重算时，整个turn fail closed并关闭matching role session。
+
+三个`*ContextSourceValue`都是由request `role`判别的closed union，不是arbitrary object：Plan只允许组成
+`PlanTurnContext`的Root Contract、Cycle/Plan/Finding/Human Action和planning Git/repository facts；Work只允许组成
+`WorkTurnContext`的approved Plan、selected/dependency/prior Work、Cycle DAG、Human Action和worktree/Git facts；Verify只允许
+组成`VerifyTurnContext`的approved Plan、active/archived DAG、Work/Finding/Human Action、verification requirement、immutable
+revision和repository snapshot facts。每个value variant还必须用业务含义作discriminator并引用matching closed fact schema；
+不得以字段全可选的单一object、generic JSON、完整Root/Cycle blob或cross-role superset表达。
+
+Conductor在构造Stage turn时冻结current command、matching role完整fresh projection、coverage、source manifest和
+`target_context_digest`。冻结后发生的Linear/Git/repository变化只进入下一turn。projection不变时允许空`changes[]`且
+base/target digest相等，只append当前`instruction_bundle`；fresh session仍必须发送非增量的完整initial，不能用空delta启动。
 
 Cycle是Stage事实可见范围的硬上限，不是默认把完整Cycle全部注入。每个role只能接收完成当前命令所需的最小投影：
 
@@ -257,6 +300,8 @@ StageContextSource
   source_kind: linear_issue | linear_comment | linear_relation | git | repository_instruction
   source_id
   version_or_digest
+  actor_kind
+  observed_at
 
 StageContextCoverage
   is_complete
@@ -283,6 +328,11 @@ StageLimits
 matching role所需的Root Contract projection、current Plan facts、target Node、dependencies、Human Action thread facts和
 Git revision是matching turn的required facts。coverage证明该role projection完整，不要求把整个Root或Cycle搬进请求；被
 role-scope明确排除的无关历史不属于omission。required fact缺失或静默截断必须fail closed。
+
+下文`PlanTurnContext`、`WorkTurnContext`和`VerifyTurnContext`定义各role允许的逻辑投影；wire initial把该投影规范化为
+`sources[]`，wire delta只携带这些source的typed current/replacement/tombstone。一个组合字段若来源于多个native/Git事实，
+必须拆为可独立version的sources；一个source value可以包含由同一native object或同一Git observation原子读取的多个字段，
+但不能把不同生命周期的source合并成无法单独replacement的聚合blob。
 
 ## 5. Plan contract
 

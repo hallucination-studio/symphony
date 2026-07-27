@@ -160,6 +160,50 @@ RootNextAction尚未materialize的事实不在同一live thread重复发送；hu
 本节优化的是每个turn新增的model-visible输入，不定义总conversation token上限、compaction、旧history裁剪或摘要替换
 策略。资源limits仍用于拒绝单次过大的initial/delta/result，但不能作为重复注入完整上下文的理由。
 
+### 5.2 Provider append确认与失败
+
+Performer backend对每次Provider turn必须归一化为以下三种互斥事实；HTTP状态、SDK exception或本地进程退出本身不能被猜成
+其中任一种：
+
+| Provider事实 | baseline与session consequence | 当前业务turn consequence |
+|---|---|---|
+| `not_accepted`：Provider明确证明本次items未进入thread | baseline保持base；session只有在continuation仍被明确证明有效时才可保留 | 返回typed turn failure；不得自动重放command |
+| `accepted`：Provider明确返回matching thread/response continuation，证明本次items已进入history | baseline原子推进到target，即使后续structured output缺失、schema-invalid或业务Result被Conductor拒绝 | 返回matching valid Result，或typed output/turn failure；失败不撤回baseline |
+| `acceptance_unknown`：提交后timeout、断连、cancel race或任何无法证明是否进入history的结果 | 立即使continuation和baseline失效并关闭/丢弃session | 返回typed ambiguous-continuation failure；不得在旧thread重试或补发 |
+
+`accepted`证据必须绑定matching local role session、Provider continuation、turn attempt和本次完整append batch；仅有request已发送、
+stream收到部分token、usage、日志文本或可重试错误不足以推进baseline。baseline推进与validated model output是两个顺序独立的
+判定：先根据Provider acceptance更新runtime continuity，再验证structured output。baseline更新不是Human input disposition、
+RootNextAction接受、Stage Result materialization或workflow进度。
+
+没有validated业务output时，Root与Stage matching failure envelope都必须包含以下closed union；Conductor不得从通用
+`retryable`、timeout或transport category反推continuity：
+
+```text
+ProviderTurnContinuity =
+  | {
+      kind: retained,
+      append_outcome: not_accepted | accepted,
+      provider_visible_context_digest
+    }
+  | {
+      kind: closed,
+      append_outcome: acceptance_unknown | session_lost
+    }
+```
+
+`retained + not_accepted`中的digest是本次base；`retained + accepted`中的digest是本次target；二者之外的组合无效。
+`closed`不携带digest，因为旧baseline不再可引用。matching failure同时使用closed error code区分
+`provider_append_not_accepted`、`provider_output_invalid`、`provider_append_acceptance_unknown`和`provider_session_lost`；
+`retryable`只说明是否可以从fresh facts发起后续业务尝试，不授权重放本次request。成功Result隐含`retained + accepted`且其
+matching context digest必须是target，因此不重复携带该union。
+
+`not_accepted`不授权Performer内部重试；Conductor下一次fresh observation可以针对仍连续的session发出一个新的turn。
+`acceptance_unknown`后的唯一恢复是使用新Symphony session/turn identity，从fresh Linear/Git/repository facts生成matching role
+完整initial和新current command。旧request body、旧command、旧delta、partial response或本地transcript都不重放；仍pending的
+human input从native receipt/reply/target facts重新推导，并随新command引用。此fresh-open是丢失runtime continuity后的唯一
+恢复语义，不是兼容fallback，也不允许持久化fragment log、transcript、cursor或context checkpoint。
+
 ## 6. Agent行为
 
 ### 6.1 Root Reconciler

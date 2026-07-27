@@ -145,13 +145,32 @@ AdvanceRootReconcilerRequest
 
 RootContextChange
   source_kind: issue | comment | comment_thread | activity | relation | attachment | git | mechanical_violation
-  source_identity
+  source_id
   source_version_or_digest
   actor_kind
-  value:
-    RootContextCurrentValue |
-    RootContextReplacement { replaces_source_version_or_digest, current_value } |
-    RootContextTombstone
+  observed_at
+  operation:
+    RootContextCurrentValue { kind: current_value, value: RootContextSourceValue } |
+    RootContextReplacement {
+      kind: replacement,
+      replaces_source_version_or_digest,
+      value: RootContextSourceValue
+    } |
+    RootContextTombstone {
+      kind: tombstone,
+      removes_source_version_or_digest,
+      reason: deleted | left_role_scope
+    }
+
+RootContextSourceValue =
+  issue -> matching WorkflowIssueSnapshot |
+  comment -> matching WorkflowCommentSnapshot |
+  comment_thread -> matching native thread state plus current reactions/replies |
+  activity -> matching WorkflowActivitySnapshot |
+  relation -> matching WorkflowRelationSnapshot |
+  attachment -> matching WorkflowAttachmentSnapshot |
+  git -> matching closed Git/worktree/check/SCM fact |
+  mechanical_violation -> matching closed MechanicalViolation
 
 PendingRootInputRef
   source_kind: comment_body | comment_thread_state | issue_activity
@@ -166,6 +185,23 @@ target consequence和native Activity现算，不是私有consumed-input ID，也
 `base_root_digest`必须等于该session已确认的Provider-visible baseline；`target_root_digest`覆盖本轮完整fresh observation。
 每个change只携带matching source的current value、带被替换source version的replacement或明确tombstone，不携带人为生成的
 before/after diff。advance不得包含完整Root projection、完整source manifest、旧transcript或另一个role context。
+
+`source_kind + source_id`是fragment identity；version/digest只标识该identity的某个current value。一个冻结批次内每个
+identity最多出现一次，并按`source_kind, source_id` canonical排序。`current_value`要求该identity不在base manifest；
+`replacement.replaces_source_version_or_digest`和`tombstone.removes_source_version_or_digest`必须精确匹配base manifest中的
+current version。operation的payload必须与`source_kind`匹配；actor、observed time和native value都来自fresh observation，
+不能由模型或delta builder补造。任一重复identity、version前置条件不匹配、payload kind不匹配或target digest无法由
+`base + changes`重算得到时，整个request fail closed并关闭session。
+
+上面的`RootContextSourceValue`是按`source_kind`判别的closed union，不是arbitrary object。Linear variants直接复用
+Podium-Conductor native graph的closed snapshot字段；Git、worktree、check、SCM和mechanical violation复用各自架构契约中的
+closed fact，不复制SDK object、command output或metadata map。一个change只能有matching discriminator对应的一个value；
+tombstone没有value。后续wire schema不得额外提供`unknown`、generic JSON或兼容旧delta的variant。
+
+Conductor在开始一次reconciliation turn前冻结`command`、完整fresh projection、source manifest、coverage和
+`target_root_digest`。冻结后到达的Linear/Git事实只进入下一批；不能修改已发送request，也不能把一个source的多个中间版本
+塞进同一批。若projection未变化，允许`changes[]`为空且`base_root_digest == target_root_digest`，此时只有fresh command会被
+append；空delta不能用来打开session或补取首轮Result。
 
 Conductor可以每轮完整读取Linear/Git来证明coverage、计算diff和验证precondition，但完整读取不等于完整传输。只有fresh
 session、session丢失或continuation/baseline无法证明时，才关闭旧session并重新发送一次`OpenRootReconcilerRequest`。
