@@ -46,10 +46,15 @@ delegate/assignee
 priority + updated_at
 archive flag
 parent identity
+blocking relations
 ```
 
 禁止page返回后逐Root触发SDK lazy reads。header discovery不读取全部comments或descendants，也不推断workflow next step。
 duplicate route labels、invalid kind、unknown status或coverage缺口fail closed。
+
+Project Root Index compact query固定每页最多8个Root header，并为每个header保留完整bounded blocker字段；Conductor必须沿
+`page_info.end_cursor`读取到`has_next_page = false`，最多接收512个Root。8是Linear GraphQL complexity约束下的physical
+query边界，不是调度容量、业务批次或缓存窗口；不得通过提高page size、减少blocker coverage或逐Root lazy read绕过该边界。
 
 ## 4. 完整Root object graph
 

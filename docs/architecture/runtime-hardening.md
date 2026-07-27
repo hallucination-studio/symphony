@@ -126,8 +126,8 @@ failure，不能降级为Project、Root或routing业务事实无效。
 
 Root discovery同样必须使用[Linear端到端流转](linear-flow.md)定义的Project Root Index显式query和physical request
 budget。protocol logical request与physical request分别计数；一个共享Index page被多个Conductor消费时仍只记一次physical
-request。broker必须提供按operation、installation和Project关联的计数，使单页12 Roots/3 Conductors fixture可以证明
-常态1次、bounded fallback最多2次，而不是只证明logical request成功。
+request。broker必须提供按operation、installation和Project关联的计数，使单页8 Roots/3 Conductors fixture可以证明
+常态1次，而14 Roots/3 Conductors fixture必须证明1次首page加1次continuation；不得只证明logical request成功。
 
 broker按installation在内存中分配physical request和GraphQL complexity permits。unchanged background
 runtime在当前两个窗口中最多消耗25%，至少保留50%给control、mutation和ambiguous-write read-back；
