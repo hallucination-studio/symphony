@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,7 +18,6 @@ import {
   acquireForegroundBindingProcessFence,
   closeOwnedProcess,
   closeForegroundProductionRuntime,
-  createConductorMultiplexer,
   createConductorEnvironment,
   createFramedChannel,
   createForegroundLocalResources,
@@ -25,6 +25,7 @@ import {
   createPodiumEnvironment,
   createConductorRuntimeLogForwarder,
   removeExactRootWorktreesAndRestart,
+  spawnFencedConductor,
   startConfiguredConductors,
 } from "../../tools/e2e/runtime-owner.mjs";
 
@@ -509,6 +510,7 @@ test("foreground local resources create isolated repositories and remove the ent
     assert.equal(new Set(resources.repositories.map(({ repositoryRoot }) => repositoryRoot)).size, 3);
     assert.equal(new Set(resources.repositories.map(({ repositoryIdentity }) => repositoryIdentity)).size, 3);
     await access(resources.podiumDataRoot);
+    assert.equal(resources.conductorSocketPath, path.join(resources.directory, "conductor.sock"));
     await Promise.all(resources.repositories.map(({ repositoryRoot }) => access(repositoryRoot)));
   } finally {
     await resources.close();
@@ -894,72 +896,65 @@ test("framed host channel fails pending requests immediately when its transport 
   channel.close();
 });
 
-test("Conductor multiplexer keeps identical per-Conductor request IDs independently correlated", async () => {
-  const podium = new FakeDuplex();
-  const first = new FakeDuplex();
-  const second = new FakeDuplex();
-  const multiplexer = createConductorMultiplexer({ stream: podium });
-  multiplexer.add(activeConductor("conductor-a", first));
-  multiplexer.add(activeConductor("conductor-b", second));
-
-  first.receive(frame("conductor-1", { kind: "resolve_conductor_project" }));
-  second.receive(frame("conductor-1", { kind: "resolve_conductor_project" }));
-  await turn();
-
-  const [firstRequest, secondRequest] = podium.writes.map(parseFrame);
-  assert.notEqual(firstRequest.request_id, secondRequest.request_id);
-  assert.match(firstRequest.request_id, /^e2e-route-/u);
-  assert.match(secondRequest.request_id, /^e2e-route-/u);
-
-  podium.receive(frame(firstRequest.request_id, { kind: "resolved", source: "first" }));
-  podium.receive(frame(secondRequest.request_id, { kind: "resolved", source: "second" }));
-  await turn();
-
-  assert.deepEqual(first.writes.map(parseFrame), [frame("conductor-1", { kind: "resolved", source: "first" })]);
-  assert.deepEqual(second.writes.map(parseFrame), [frame("conductor-1", { kind: "resolved", source: "second" })]);
-  multiplexer.close();
-});
-
-test("Conductor multiplexer preserves Podium-initiated Profile request IDs", async () => {
-  const podium = new FakeDuplex();
-  const conductor = new FakeDuplex();
-  const multiplexer = createConductorMultiplexer({ stream: podium });
-  multiplexer.add(activeConductor("conductor-a", conductor));
-
-  podium.receive(frame("profile-1", {
-    kind: "create_profile",
-    conductor_id: "conductor-a",
-  }));
-  await turn();
-  assert.deepEqual(conductor.writes.map(parseFrame), [frame("profile-1", {
-    kind: "create_profile",
-    conductor_id: "conductor-a",
-  })]);
-
-  conductor.receive(frame("profile-1", { kind: "profile_saved" }));
-  await turn();
-  assert.deepEqual(podium.writes.map(parseFrame), [frame("profile-1", { kind: "profile_saved" })]);
-  multiplexer.close();
-});
-
-test("Conductor multiplexer reports malformed transport frames instead of leaving Podium requests to time out", async () => {
-  const podium = new FakeDuplex();
-  const failures = [];
-  const multiplexer = createConductorMultiplexer({
-    stream: podium,
-    onFailure: (reasonCode) => failures.push(reasonCode),
+test("fenced E2E child registers one production socket channel before inheriting it", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-socket-test-"));
+  const socketPath = path.join(directory, "conductor.sock");
+  const registrations = [];
+  const server = net.createServer((socket) => {
+    socket.once("data", (bytes) => {
+      const message = JSON.parse(bytes.toString("utf8").trim());
+      registrations.push(message.body);
+      socket.write(`${JSON.stringify({
+        protocol_version: "1",
+        request_id: message.request_id,
+        body: {
+          kind: "conductor_channel_registered",
+          binding_id: message.body.binding_id,
+          conductor_id: message.body.conductor_id,
+          instance_id: message.body.instance_id,
+        },
+      })}\n`);
+    });
   });
-
-  podium.receive(Buffer.from("not-json\n", "utf8"));
-  await turn();
-
-  assert.deepEqual(failures, ["foreground_e2e_frame_invalid"]);
-  multiplexer.close();
+  let child;
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  try {
+    child = await spawnFencedConductor({
+      runtimeRoot: path.join(directory, "runtime"),
+      bindingId: "binding-1",
+      conductorId: "conductor-1",
+      instanceId: "instance-1",
+      socketPath,
+      executable: process.execPath,
+      arguments_: ["-e", [
+        "const fs = require('node:fs')",
+        "fs.fstatSync(Number(process.env.SYMPHONY_PRIVATE_IPC_FD))",
+        "process.stdout.write('ready\\n')",
+      ].join(";")],
+      cwd: directory,
+      environment: process.env,
+    });
+    await childReady(child);
+    assert.deepEqual(registrations, [{
+      kind: "conductor_channel_registration",
+      binding_id: "binding-1",
+      conductor_id: "conductor-1",
+      instance_id: "instance-1",
+    }]);
+  } finally {
+    await closeOwnedProcess(child);
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("production child environments keep development and Codex API secrets outside child process environments", () => {
   const resources = {
     podiumDataRoot: "/tmp/podium",
+    conductorSocketPath: "/tmp/conductor.sock",
     podiumBackend: "/repo/apps/podium-desktop/dist-backend/main.js",
     conductor: "/repo/apps/conductor/dist/main.js",
     performer: "/repo/.venv/bin/performer",
@@ -984,12 +979,15 @@ test("production child environments keep development and Codex API secrets outsi
   });
 
   assert.equal(podium.SYMPHONY_LINEAR_CLIENT_SECRET, "client-secret");
+  assert.equal(podium.SYMPHONY_CONDUCTOR_SOCKET_PATH, "/tmp/conductor.sock");
+  assert.equal(podium.SYMPHONY_CONDUCTOR_IPC_FD, undefined);
   assert.equal(podium.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
   assert.equal(podium.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(podium.SYMPHONY_E2E_CODEX_API_KEY, undefined);
   assert.equal(conductor.SYMPHONY_E2E_LINEAR_DEV_TOKEN, undefined);
   assert.equal(conductor.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(conductor.SYMPHONY_E2E_CODEX_API_KEY, undefined);
+  assert.equal(conductor.SYMPHONY_PRIVATE_IPC_FD, undefined);
   assert.equal(conductor.SYMPHONY_CODEX_BASE_URL, "https://example.test");
   assert.equal(conductor.SYMPHONY_REPOSITORY_IDENTITY, "repository-identity-1");
 });
@@ -1019,41 +1017,4 @@ function childReady(child) {
       else reject(new Error("child_ready_output_invalid"));
     });
   });
-}
-
-class FakeDuplex extends EventEmitter {
-  constructor() {
-    super();
-    this.writes = [];
-  }
-
-  write(payload, callback) {
-    this.writes.push(Buffer.from(payload));
-    callback?.();
-    return true;
-  }
-
-  receive(message) {
-    this.emit("data", Buffer.from(`${JSON.stringify(message)}\n`, "utf8"));
-  }
-}
-
-function activeConductor(conductorId, channel) {
-  return {
-    conductor: { conductorId },
-    channel,
-    child: { pid: 1 },
-  };
-}
-
-function frame(requestId, body) {
-  return { protocol_version: "1", request_id: requestId, body };
-}
-
-function parseFrame(bytes) {
-  return JSON.parse(bytes.toString("utf8"));
-}
-
-function turn() {
-  return new Promise((resolve) => setImmediate(resolve));
 }

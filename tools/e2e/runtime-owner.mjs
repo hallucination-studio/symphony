@@ -36,8 +36,8 @@ while os.read(0, 1):
     pass
 `;
 const BINDING_FENCE_EXEC = String.raw`
-import fcntl, os, sys
-lock_path, ready_fd_text, executable, *arguments = sys.argv[1:]
+import fcntl, json, os, socket, sys
+lock_path, ready_fd_text, socket_path, binding_id, conductor_id, instance_id, executable, *arguments = sys.argv[1:]
 ready_fd = int(ready_fd_text)
 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
 try:
@@ -45,8 +45,39 @@ try:
 except BlockingIOError:
     os.write(ready_fd, b"locked\n")
     sys.exit(73)
+channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    channel.connect(socket_path)
+    request_id = f"e2e-register-{instance_id}"
+    body = {
+        "kind": "conductor_channel_registration",
+        "binding_id": binding_id,
+        "conductor_id": conductor_id,
+        "instance_id": instance_id,
+    }
+    channel.sendall((json.dumps({"protocol_version": "1", "request_id": request_id, "body": body}) + "\n").encode())
+    response_bytes = b""
+    while b"\n" not in response_bytes and len(response_bytes) <= 1048576:
+        chunk = channel.recv(65536)
+        if not chunk:
+            break
+        response_bytes += chunk
+    response = json.loads(response_bytes.split(b"\n", 1)[0])
+    expected = {
+        "kind": "conductor_channel_registered",
+        "binding_id": binding_id,
+        "conductor_id": conductor_id,
+        "instance_id": instance_id,
+    }
+    if response != {"protocol_version": "1", "request_id": request_id, "body": expected}:
+        raise ValueError("registration read-back mismatch")
+except Exception:
+    os.write(ready_fd, b"registration_failed\n")
+    sys.exit(74)
 os.set_inheritable(lock_fd, True)
+os.set_inheritable(channel.fileno(), True)
 os.environ["SYMPHONY_BINDING_FENCE_FD"] = str(lock_fd)
+os.environ["SYMPHONY_PRIVATE_IPC_FD"] = str(channel.fileno())
 os.write(ready_fd, b"ready\n")
 os.close(ready_fd)
 os.execvpe(executable, [executable, *arguments], os.environ)
@@ -97,7 +128,7 @@ export function createPodiumEnvironment({ config, resources, environment = proce
   return Object.freeze({
     ...baseChildEnvironment(environment),
     SYMPHONY_PODIUM_DATA_ROOT: resources.podiumDataRoot,
-    SYMPHONY_CONDUCTOR_IPC_FD: "3",
+    SYMPHONY_CONDUCTOR_SOCKET_PATH: resources.conductorSocketPath,
     SYMPHONY_HOST_IPC_FD: "4",
     SYMPHONY_LINEAR_CLIENT_ID: config.linear.clientId,
     SYMPHONY_LINEAR_CLIENT_SECRET: config.secrets.linearClientSecret,
@@ -116,7 +147,6 @@ export function createConductorEnvironment({ config, resources, conductor, envir
   }
   return Object.freeze({
     ...baseChildEnvironment(environment),
-    SYMPHONY_PRIVATE_IPC_FD: "3",
     SYMPHONY_INSTANCE_ID: conductor.instanceId,
     SYMPHONY_BINDING_ID: conductor.bindingId,
     SYMPHONY_CONDUCTOR_ID: conductor.conductorId,
@@ -186,7 +216,6 @@ export async function startForegroundProductionRuntime({
       onUnexpectedExit: unexpectedExits.report,
     });
     host = createDesktopHost({
-      podiumChannel: podium.conductorChannel,
       hostChannel: podium.hostChannel,
       config,
       resources,
@@ -535,6 +564,7 @@ export async function createForegroundLocalResources({
   try {
     const podiumDataRoot = path.join(directory, "podium");
     await mkdir(podiumDataRoot, { recursive: true });
+    const conductorSocketPath = path.join(directory, "conductor.sock");
     const remotes = path.join(directory, "remotes");
     await mkdir(remotes, { recursive: true });
     const repositories = [];
@@ -553,6 +583,7 @@ export async function createForegroundLocalResources({
     return Object.freeze({
       directory,
       podiumDataRoot,
+      conductorSocketPath,
       repositories: Object.freeze(repositories),
       ...runtimePaths,
       async close() {
@@ -581,9 +612,9 @@ async function startPodiumBackend({
     cwd: resources.sourceRoot,
     env: createPodiumEnvironment({ config, resources, environment }),
     detached: process.platform !== "win32",
-    stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe", "ignore", "pipe"],
   });
-  if (!child.stdin || !child.stdout || !child.stdio?.[3] || !child.stdio?.[4]) {
+  if (!child.stdin || !child.stdout || !child.stdio?.[4]) {
     await closeOwnedProcess(child);
     throw stableError("foreground_e2e_podium_process_invalid");
   }
@@ -601,15 +632,10 @@ async function startPodiumBackend({
     closing = true;
     client.close();
     hostChannel.close();
-    conductorChannel.close();
     await closeOwnedProcess(child);
   };
   const client = createPodiumClient({ input: child.stdout, output: child.stdin });
   const hostChannel = createFramedChannel({ stream: child.stdio[4] });
-  const conductorChannel = createConductorMultiplexer({
-    stream: child.stdio[3],
-    onFailure: (reasonCode) => reporter?.failure({ component: "conductor-multiplexer", reasonCode }),
-  });
   child.once("exit", () => {
     const reasonCode = stderrReason();
     reporter?.childExit({ component: "podium", reasonCode });
@@ -619,11 +645,10 @@ async function startPodiumBackend({
     reporter?.childExit({ component: "podium", reasonCode: "process_start_failed" });
     if (!closing) onUnexpectedExit?.({ component: "podium", reasonCode: "process_start_failed" });
   });
-  return Object.freeze({ child, client, hostChannel, conductorChannel, requestBudget, close });
+  return Object.freeze({ child, client, hostChannel, requestBudget, close });
 }
 
 function createDesktopHost({
-  podiumChannel,
   hostChannel,
   config,
   resources,
@@ -691,13 +716,17 @@ function createDesktopHost({
               },
               environment,
             }),
+              socketPath: resources.conductorSocketPath,
+              conductorId: conductor.conductorId,
+              instanceId,
               spawn,
             });
-          } catch {
-            return protocolFailure("conductor_fence_unavailable");
+          } catch (error) {
+            return protocolFailure(error?.code === "foreground_e2e_conductor_channel_registration_failed"
+              ? "conductor_channel_registration_failed"
+              : "conductor_fence_unavailable");
           }
-          const channel = child.stdio?.[3];
-          if (!channel || !child.stdout || !child.stderr) {
+          if (!child.stdout || !child.stderr) {
             await closeOwnedProcess(child);
             return protocolFailure("conductor_start_invalid");
           }
@@ -712,7 +741,6 @@ function createDesktopHost({
             conductor,
             instanceId,
             child,
-            channel,
             runtimeLogs,
             expectedExit: false,
             exitReported: false,
@@ -720,9 +748,7 @@ function createDesktopHost({
             exitReason: undefined,
           };
           conductors.set(conductor.conductorId, active);
-          podiumChannel.add(active);
           child.once("exit", () => {
-            podiumChannel.remove(active);
             conductors.delete(conductor.conductorId);
             reporter?.childExit({ component: "conductor", reasonCode: "process_exited" });
             if (!active.expectedExit) {
@@ -785,7 +811,6 @@ function createDesktopHost({
   }
 
   async function stop(active, reasonCode) {
-    podiumChannel.remove(active);
     conductors.delete(active.conductor.conductorId);
     active.exitReason ??= reasonCode;
     active.expectedExit = true;
@@ -797,7 +822,6 @@ function createDesktopHost({
     if (!identifier(conductorId)) throw stableError("foreground_e2e_recovery_restart_input_invalid");
     const active = conductors.get(conductorId);
     if (!active) throw stableError("foreground_e2e_recovery_restart_unavailable");
-    podiumChannel.remove(active);
     conductors.delete(conductorId);
     active.exitReason ??= "conductor_process_sigkill";
     active.expectedExit = true;
@@ -807,8 +831,20 @@ function createDesktopHost({
   }
 }
 
-async function spawnFencedConductor({ runtimeRoot, bindingId, executable, arguments_, cwd, environment, spawn }) {
+export async function spawnFencedConductor({
+  runtimeRoot,
+  bindingId,
+  conductorId,
+  instanceId,
+  socketPath,
+  executable,
+  arguments_,
+  cwd,
+  environment,
+  spawn = spawnProcess,
+} = {}) {
   if (process.platform === "win32" || !boundedPath(runtimeRoot) || !identifier(bindingId) ||
+      !identifier(conductorId) || !identifier(instanceId) || !boundedPath(socketPath) ||
       !boundedPath(executable) || !Array.isArray(arguments_) || !arguments_.every((value) => typeof value === "string") ||
       !boundedPath(cwd) || !environment || typeof environment !== "object" || typeof spawn !== "function") {
     throw stableError("foreground_e2e_binding_process_fence_input_invalid");
@@ -819,13 +855,17 @@ async function spawnFencedConductor({ runtimeRoot, bindingId, executable, argume
     BINDING_FENCE_EXEC,
     lockPath,
     String(BINDING_FENCE_READY_FD),
+    socketPath,
+    bindingId,
+    conductorId,
+    instanceId,
     executable,
     ...arguments_,
   ], {
     cwd,
     env: environment,
     detached: true,
-    stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ignore", "pipe"],
   });
   try {
     await bindingFenceReady(child, child.stdio?.[BINDING_FENCE_READY_FD]);
@@ -851,6 +891,9 @@ function bindingFenceReady(child, stream) {
     const onData = (chunk) => {
       const result = Buffer.from(chunk).toString("utf8");
       if (result.includes("ready\n")) finish(resolve);
+      else if (result.includes("registration_failed\n")) {
+        finish(reject, "foreground_e2e_conductor_channel_registration_failed");
+      }
       else if (result.includes("locked\n")) finish(reject, "foreground_e2e_binding_process_fence_unavailable");
     };
     const onExit = () => finish(reject, "foreground_e2e_binding_process_fence_unavailable");
@@ -984,92 +1027,6 @@ export function createFramedChannel({ stream }) {
   }
 }
 
-export function createConductorMultiplexer({ stream, onFailure } = {}) {
-  const byConductorId = new Map();
-  const pendingConductorRequests = new Map();
-  const pendingPodiumRequests = new Map();
-  const serial = createSerialWriter(stream);
-  let closed = false;
-  let podiumReader;
-  const fail = (error) => {
-    if (closed) return;
-    closed = true;
-    onFailure?.(multiplexerFailureReason(error));
-    podiumReader?.close();
-    for (const active of byConductorId.values()) active.reader.close();
-    byConductorId.clear();
-    pendingConductorRequests.clear();
-    pendingPodiumRequests.clear();
-  };
-  podiumReader = createFrameReader(stream, async (frame) => {
-    const pending = pendingConductorRequests.get(frame.message.request_id);
-    const target = pending?.active ??
-      (typeof frame.message.body?.conductor_id === "string"
-        ? byConductorId.get(frame.message.body.conductor_id)
-        : undefined);
-    if (!target) throw stableError("foreground_e2e_conductor_route_missing");
-    if (pending) {
-      pendingConductorRequests.delete(frame.message.request_id);
-      await writeFrame(target.channel, {
-        ...frame.message,
-        request_id: pending.conductorRequestId,
-      }, frame.secret);
-      return;
-    }
-    pendingPodiumRequests.set(conductorRouteKey(target.conductor.conductorId, frame.message.request_id), target);
-    await writeFrame(target.channel, frame.message, frame.secret);
-  }, fail);
-  return Object.freeze({
-    add(active) {
-      if (closed || !active || !identifier(active.conductor.conductorId) || !active.channel ||
-          byConductorId.has(active.conductor.conductorId)) {
-        throw stableError("foreground_e2e_conductor_route_invalid");
-      }
-      const reader = createFrameReader(active.channel, async (frame) => {
-        const responseRoute = conductorRouteKey(active.conductor.conductorId, frame.message.request_id);
-        if (pendingPodiumRequests.delete(responseRoute)) {
-          await serial.write(frame.message, frame.secret);
-          return;
-        }
-        const transportRequestId = `e2e-route-${randomUUID()}`;
-        pendingConductorRequests.set(transportRequestId, {
-          active,
-          conductorRequestId: frame.message.request_id,
-        });
-        await serial.write({ ...frame.message, request_id: transportRequestId }, frame.secret);
-      }, fail);
-      byConductorId.set(active.conductor.conductorId, { ...active, reader });
-    },
-    remove(active) {
-      const current = byConductorId.get(active?.conductor?.conductorId);
-      if (!current) return;
-      current.reader.close();
-      byConductorId.delete(active.conductor.conductorId);
-      for (const [requestId, pending] of pendingConductorRequests) {
-        if (pending.active === active || pending.active.child === active.child) {
-          pendingConductorRequests.delete(requestId);
-        }
-      }
-      for (const [route, target] of pendingPodiumRequests) {
-        if (target === active || target.child === active.child) pendingPodiumRequests.delete(route);
-      }
-    },
-    close() {
-      fail();
-    },
-  });
-}
-
-function conductorRouteKey(conductorId, requestId) {
-  return `${conductorId}\u0000${requestId}`;
-}
-
-function multiplexerFailureReason(error) {
-  return error?.code?.startsWith("foreground_e2e_")
-    ? error.code
-    : "foreground_e2e_conductor_multiplexer_failed";
-}
-
 function createFrameReader(stream, onFrame, onFailure = () => {}) {
   if (!stream || typeof stream.on !== "function" || typeof onFrame !== "function" ||
       typeof onFailure !== "function") {
@@ -1144,16 +1101,6 @@ function createFrameReader(stream, onFrame, onFailure = () => {}) {
       ? error
       : stableError("foreground_e2e_frame_read_failed"));
   }
-}
-
-function createSerialWriter(stream) {
-  let pending = Promise.resolve();
-  return Object.freeze({
-    write(message, secret) {
-      pending = pending.then(() => writeFrame(stream, message, secret));
-      return pending;
-    },
-  });
 }
 
 export async function closeForegroundProductionRuntime({
@@ -1538,7 +1485,8 @@ function assertRuntimeInput({ config, resources }) {
   if (!config || !identifier(config.linear?.clientId) || typeof config.secrets?.linearDevToken !== "string" ||
       typeof config.secrets?.linearClientSecret !== "string" || typeof config.secrets?.codexApiKey !== "string" ||
       !url(config.codex?.baseUrl) || typeof config.codex?.model !== "string" || !resources ||
-      !boundedPath(resources.podiumDataRoot) || !boundedPath(resources.podiumBackend) ||
+      !boundedPath(resources.podiumDataRoot) || !boundedPath(resources.conductorSocketPath) ||
+      !boundedPath(resources.podiumBackend) ||
       !boundedPath(resources.conductor) || !boundedPath(resources.performer)) {
     throw stableError("foreground_e2e_runtime_input_invalid");
   }
