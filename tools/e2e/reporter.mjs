@@ -21,6 +21,8 @@ const RUNTIME_DIAGNOSTIC_LEVELS = new Set(["info", "warning", "error"]);
 const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
   "private_ipc_failed",
   "root_project_unavailable",
+  "root_discovery_blocked",
+  "root_discovery_degraded",
   "root_profile_missing",
   "root_safety_blocked",
   "root_reconciliation_failed",

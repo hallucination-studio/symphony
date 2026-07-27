@@ -847,6 +847,14 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
     phase: "open_reconciler",
     raw_error: "symphony-secret",
   })}\n`, "utf8"));
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "error",
+    event: "root_discovery_blocked",
+    failure_code: "linear_root_index_invalid",
+    phase: "root_index",
+    category: "schema",
+    retryable: "false",
+  })}\n`, "utf8"));
   stdout.emit("data", Buffer.from('{"level":"info","event":"untrusted_event"}\n', "utf8"));
   stderr.emit("data", Buffer.from("not-json\n", "utf8"));
 
@@ -860,6 +868,14 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
       reason: "performer_timeout",
       failureCode: "performer_timeout",
       phase: "open_reconciler",
+    },
+    {
+      component: "conductor",
+      conductorId: "conductor-1",
+      level: "error",
+      runtimeEvent: "root_discovery_blocked",
+      failureCode: "linear_root_index_invalid",
+      phase: "root_index",
     },
     {
       component: "conductor",
@@ -879,7 +895,7 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
 
   forwarder.close();
   stdout.emit("data", Buffer.from('{"level":"error","event":"root_profile_missing"}\n', "utf8"));
-  assert.equal(diagnostics.length, 3);
+  assert.equal(diagnostics.length, 4);
 });
 
 test("production Root Index transport observations enforce the one-request normal budget and one-request fallback budget", () => {
