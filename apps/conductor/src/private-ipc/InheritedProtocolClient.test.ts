@@ -237,6 +237,43 @@ test("private protocol accepts the shutdown acknowledgement result", async () =>
   );
 });
 
+test("private protocol dispatches a payload-free Conductor wake", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const frames: Buffer[] = [];
+  output.on("data", (chunk: Buffer) => frames.push(chunk));
+  new InheritedProtocolClient(input, output, {
+    async handleRequest(body) {
+      assert.deepEqual(body, {
+        kind: "wake_conductor",
+        binding_id: "binding-1",
+        instance_id: "instance-1",
+      });
+      return {
+        kind: "wake_conductor_ack",
+        binding_id: "binding-1",
+        instance_id: "instance-1",
+      };
+    },
+  });
+
+  input.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "wake-request-1",
+    body: { kind: "wake_conductor", binding_id: "binding-1", instance_id: "instance-1" },
+  })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    JSON.parse(Buffer.concat(frames).toString("utf8")),
+    {
+      protocol_version: "1",
+      request_id: "wake-request-1",
+      body: { kind: "wake_conductor_ack", binding_id: "binding-1", instance_id: "instance-1" },
+    },
+  );
+});
+
 test("private protocol reads one length-delimited API Key frame and clears it after dispatch", async () => {
   const input = new PassThrough();
   const output = new PassThrough();

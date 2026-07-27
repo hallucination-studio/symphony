@@ -435,7 +435,9 @@ function dependencies(input: {
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] }; },
-      async listRoots() { return [root]; },
+      async readProjectRootIndexPage() {
+        return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
+      },
       async readWorkflowIssueTree() { return input.linear.readWorkflowIssueTree(); },
       mutateWorkflow: input.linear.mutateWorkflow.bind(input.linear),
     },

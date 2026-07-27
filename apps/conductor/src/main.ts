@@ -5,6 +5,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 
 import { RootReconciliationRuntime } from "./root-reconciliation/internal/RootReconciliationRuntime.js";
+import type { RootRuntimeDisposition } from "./root-reconciliation/api/RootRuntimeLoop.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
 import { LinearRootOwnershipClaimImpl } from "./root-discovery/internal/LinearRootOwnershipClaimImpl.js";
@@ -28,6 +29,7 @@ import { LinearRootTimelineCommentSubscriberImpl } from "./timeline-comments/int
 import { InProcessWorkflowTimelinePublisherImpl } from "./workflow-events/internal/InProcessWorkflowTimelinePublisherImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
+import { RootWakeController } from "./root-scheduling/internal/RootWakeController.js";
 import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
 import { LinearRootConvergencePolicyImpl } from "./root-reconciliation/internal/LinearRootConvergencePolicyImpl.js";
 import { PodiumRuntimeLogPublisherImpl } from "./runtime-logs/internal/PodiumRuntimeLogPublisherImpl.js";
@@ -70,10 +72,12 @@ export async function runConductor(environment = process.env): Promise<void> {
   });
   const reconciler = new PerformerRootReconcilerClientImpl(performer);
   const logs = new PodiumRuntimeLogPublisherImpl();
+  const wakes = new RootWakeController();
   let stopping = false;
   let shutdown: Promise<void> | undefined;
   const requestStop = () => {
     stopping = true;
+    wakes.wake();
     shutdown ??= Promise.all([
       performer.cancelAndReap(),
       processRunner.cancelAndReap(1_000),
@@ -85,6 +89,17 @@ export async function runConductor(environment = process.env): Promise<void> {
       if (isKind(body, "shutdown_conductor")) {
         await requestStop();
         return { kind: "shutdown_conductor_ack" };
+      }
+      if (isKind(body, "wake_conductor")) {
+        if (body.binding_id !== config.bindingId || body.instance_id !== config.instanceId) {
+          throw new Error("conductor_wake_mismatch");
+        }
+        wakes.wake();
+        return {
+          kind: "wake_conductor_ack",
+          binding_id: config.bindingId,
+          instance_id: config.instanceId,
+        };
       }
       return new ConductorProfileRelayHandler(
         config.conductorId,
@@ -213,9 +228,16 @@ export async function runConductor(environment = process.env): Promise<void> {
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
+    let nextWake: { disposition: RootRuntimeDisposition; deadlineAtMs?: number } = { disposition: "empty" };
     while (!stopping) {
-      await runtime.cycle();
-      await delay(config.cycleDelayMs);
+      await wakes.wait(nextWake);
+      if (stopping) break;
+      const disposition = await runtime.cycle();
+      const deadlineAtMs = runtime.nextWakeAt();
+      nextWake = {
+        disposition,
+        ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
+      };
     }
   } finally {
     await requestStop();
@@ -238,7 +260,7 @@ function stageReasoningEffort(value: string): "low" | "medium" | "high" {
   return "low";
 }
 
-function isKind(value: JsonValue, kind: string): boolean {
+function isKind(value: JsonValue, kind: string): value is { [key: string]: JsonValue } & { kind: string } {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && value.kind === kind;
 }
@@ -258,9 +280,6 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     dataRoot: required(environment.SYMPHONY_CONDUCTOR_DATA_ROOT, "conductor_data_root_missing"),
     performerExecutable: environment.SYMPHONY_PERFORMER_EXECUTABLE ?? "performer",
     codexBaseUrl: validateCodexBaseUrl(environment.SYMPHONY_CODEX_BASE_URL),
-    cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
-      ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
-      : 1_000,
     rootDeadlineDurationMs: rootPolicyPositiveInteger(
       environment.SYMPHONY_ROOT_DEADLINE_DURATION_MS,
       "root_deadline_duration_invalid",
@@ -302,10 +321,6 @@ function rootPolicyNonNegativeInteger(value: string | undefined, code: string): 
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed > 1_000_000_000) throw new Error(code);
   return parsed;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -9,6 +9,10 @@ import type {
   RootConvergencePolicyInterface,
 } from "../api/RootConvergencePolicyInterface.js";
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type {
+  ProjectRootIndexFailure,
+  ProjectRootIndexPageResult,
+} from "../../root-discovery/api/ProjectRootIndexInterface.js";
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
@@ -51,6 +55,7 @@ import type {
   TurnUsage,
 } from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
+import type { RootRuntimeDisposition } from "../api/RootRuntimeLoop.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 import { rootInputId } from "./RootInputIdentity.js";
 import {
@@ -68,7 +73,11 @@ export interface RootReconciliationRuntimeDependencies {
       | { kind: "resolved"; projectId: string; conductorPool: Array<{ conductorShortHash: string }> }
       | { kind: "unbound" | "ambiguous" | "label_conflict" }
     >;
-    listRoots(projectId: string): Promise<DiscoveredRoot[]>;
+    readProjectRootIndexPage(input: {
+      projectId: string;
+      limit: number;
+      cursor?: string;
+    }): Promise<ProjectRootIndexPageResult>;
     readWorkflowIssueTree(rootIssueId: string): ReturnType<LinearGatewayInterface["readWorkflowIssueTree"]>;
     mutateWorkflow: LinearGatewayInterface["mutateWorkflow"];
   };
@@ -95,7 +104,7 @@ export interface RootReconciliationRuntimeDependencies {
   log(event: string, fields: Record<string, string>): void;
 }
 
-export type RootRuntimeDisposition = "progress" | "waiting-human" | "needs-attention" | "empty";
+export type { RootRuntimeDisposition } from "../api/RootRuntimeLoop.js";
 
 interface RootSessionState {
   sessionId: string;
@@ -105,19 +114,28 @@ interface RootSessionState {
 
 export class RootReconciliationRuntime {
   private readonly sessions = new Map<string, RootSessionState>();
+  private nextDeadlineAtMs: number | undefined;
 
   constructor(private readonly dependencies: RootReconciliationRuntimeDependencies) {}
 
   async cycle(): Promise<RootRuntimeDisposition> {
-    const project = await this.dependencies.linear.resolveProject();
+    this.nextDeadlineAtMs = undefined;
+    let project: Awaited<ReturnType<RootReconciliationRuntimeDependencies["linear"]["resolveProject"]>>;
+    try {
+      project = await this.dependencies.linear.resolveProject();
+    } catch (error) {
+      return this.discoveryFailure(discoveryFailureFrom(error), "resolve_project");
+    }
     if (project.kind !== "resolved") {
       this.dependencies.log("root_project_unavailable", { reason: project.kind });
       return "needs-attention";
     }
 
+    const index = await this.readProjectRootIndex(project.projectId);
+    if (index.kind === "failed") return this.discoveryFailure(index.failure, "root_index");
     const roots = discoverCurrentRoots({
       projectId: project.projectId,
-      roots: await this.dependencies.linear.listRoots(project.projectId),
+      roots: index.roots,
       conductorId: this.dependencies.conductorId,
       conductorShortHash: this.dependencies.conductorShortHash,
       conductorPool: project.conductorPool,
@@ -147,6 +165,73 @@ export class RootReconciliationRuntime {
     return "needs-attention";
   }
 
+  nextWakeAt(): number | undefined {
+    return this.nextDeadlineAtMs;
+  }
+
+  private async readProjectRootIndex(projectId: string): Promise<
+    | { kind: "complete"; roots: DiscoveredRoot[] }
+    | { kind: "failed"; failure: ProjectRootIndexFailure }
+  > {
+    const roots: DiscoveredRoot[] = [];
+    const rootIds = new Set<string>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      let result: ProjectRootIndexPageResult;
+      try {
+        result = await this.dependencies.linear.readProjectRootIndexPage({
+          projectId,
+          limit: 250,
+          ...(cursor ? { cursor } : {}),
+        });
+      } catch (error) {
+        return { kind: "failed", failure: discoveryFailureFrom(error) };
+      }
+      if (result.kind === "failed") return result;
+      for (const root of result.page.roots) {
+        if (rootIds.has(root.issueId) || roots.length >= 512) {
+          return { kind: "failed", failure: { code: "linear_root_index_invalid", category: "schema", retryable: false } };
+        }
+        rootIds.add(root.issueId);
+        roots.push(root);
+      }
+      if (!result.page.hasNextPage) return { kind: "complete", roots };
+      if (!result.page.endCursor || cursors.has(result.page.endCursor)) {
+        return { kind: "failed", failure: { code: "linear_root_index_cursor_invalid", category: "schema", retryable: false } };
+      }
+      cursor = result.page.endCursor;
+      cursors.add(cursor);
+    } while (cursor);
+    return { kind: "failed", failure: { code: "linear_root_index_cursor_invalid", category: "schema", retryable: false } };
+  }
+
+  private discoveryFailure(failure: ProjectRootIndexFailure, phase: "resolve_project" | "root_index"): RootRuntimeDisposition {
+    this.dependencies.log(failure.retryable ? "root_discovery_degraded" : "root_discovery_blocked", {
+      phase,
+      failure_code: failure.code,
+      category: failure.category,
+      retryable: String(failure.retryable),
+    });
+    return failure.retryable ? "discovery-degraded" : "needs-attention";
+  }
+
+  private async readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot> {
+    const tree = await this.dependencies.linear.readWorkflowIssueTree(rootIssueId);
+    for (const comment of tree.comments) {
+      const parsed = parseManagedRecord(comment.body);
+      if (!parsed.ok || (parsed.value.kind !== "root_convergence_policy" && parsed.value.kind !== "stage_execution")) {
+        continue;
+      }
+      const deadlineAtMs = Date.parse(parsed.value.deadlineAt);
+      if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= Date.now()) continue;
+      this.nextDeadlineAtMs = this.nextDeadlineAtMs === undefined
+        ? deadlineAtMs
+        : Math.min(this.nextDeadlineAtMs, deadlineAtMs);
+    }
+    return tree;
+  }
+
   private async reconcileRoot(root: DiscoveredRoot): Promise<RootRuntimeDisposition> {
     let phase = "admission";
     try {
@@ -173,7 +258,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     setPhase("read_tree");
-    let tree = await this.dependencies.linear.readWorkflowIssueTree(root.issueId);
+    let tree = await this.readWorkflowIssueTree(root.issueId);
     setPhase("validate_tree");
     const safety = this.dependencies.safety.validate({ root, tree });
     if (safety.kind === "blocked") {
@@ -228,7 +313,7 @@ export class RootReconciliationRuntime {
       if (materialization.kind === "failed") return "needs-attention";
       const resumedSession = this.sessions.get(root.issueId);
       if (resumedSession) await this.closeSessionsAfterDirective(resumable.directive, root, resumedSession.sessionId);
-      return dispositionAfterDirective(resumable.directive, await this.dependencies.linear.readWorkflowIssueTree(root.issueId));
+      return dispositionAfterDirective(resumable.directive, await this.readWorkflowIssueTree(root.issueId));
     }
     const unresolvedFailure = latestUnresolvedRootReconcilerFailure(tree, root.issueId);
     if (
@@ -354,7 +439,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     await this.closeSessionsAfterDirective(result.directive, root, sessionId);
-    return dispositionAfterDirective(result.directive, await this.dependencies.linear.readWorkflowIssueTree(root.issueId));
+    return dispositionAfterDirective(result.directive, await this.readWorkflowIssueTree(root.issueId));
   }
 
   private async finishDirective(
@@ -427,7 +512,7 @@ export class RootReconciliationRuntime {
   }
 
   private async refreshViewPreservingDigest(view: RootReconciliationView, treeDigest: string): Promise<RootReconciliationView> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    const tree = await this.readWorkflowIssueTree(view.root.issueId);
     return { ...view, tree, observedAt: tree.observed_at, treeDigest };
   }
 
@@ -500,7 +585,7 @@ export class RootReconciliationRuntime {
     const target = stageTarget(view, role, targetIssueId);
     if (target.status_name === "In Progress") {
       setPhase(`persist_${role}_in_progress_linear_read_back`);
-      const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+      const readBack = await this.readWorkflowIssueTree(view.root.issueId);
       const updated = readBack.issues.find(({ issue_id }) => issue_id === targetIssueId);
       if (!updated || updated.status_name !== "In Progress") throw new Error("stage_in_progress_read_back_invalid");
       return { ...view, tree: readBack, observedAt: readBack.observed_at };
@@ -569,7 +654,7 @@ export class RootReconciliationRuntime {
       throw new Error(`stage_status_${statusCode(statusName)}_write_${outcome.kind}`);
     }
     setPhase(`persist_${role}_${phaseSuffix}_linear_read_back`);
-    const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    const readBack = await this.readWorkflowIssueTree(view.root.issueId);
     const updated = readBack.issues.find(({ issue_id }) => issue_id === targetIssueId);
     if (!updated || updated.status_id !== status.status_id || updated.status_name !== statusName || updated.is_archived) {
       throw new Error(`stage_status_${statusCode(statusName)}_read_back_invalid`);
@@ -670,7 +755,7 @@ export class RootReconciliationRuntime {
       throw error;
     }
     setPhase(`persist_${result.role}_linear_read_back`);
-    const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    const readBack = await this.readWorkflowIssueTree(view.root.issueId);
     const readBackComment = readBack.comments.find((comment) => comment.body === body);
     if (!readBackComment) {
       throw new Error("role_result_read_back_missing");
@@ -754,7 +839,7 @@ export class RootReconciliationRuntime {
       throw new Error(`plan_contract_write_${outcome.kind}`);
     }
     setPhase("persist_plan_contract_linear_read_back");
-    const readBack = await this.dependencies.linear.readWorkflowIssueTree(view.root.issueId);
+    const readBack = await this.readWorkflowIssueTree(view.root.issueId);
     const comment = readBack.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
     if (!comment) throw new Error("plan_contract_read_back_missing");
     const parsed = parseManagedRecord(comment.body);
@@ -1817,4 +1902,37 @@ function sanitizedFailureReason(error: unknown): string {
     current = current.cause;
   }
   return "root_reconciliation_failed";
+}
+
+function discoveryFailureFrom(error: unknown): ProjectRootIndexFailure {
+  const value = error !== null && typeof error === "object"
+    ? error as { code?: unknown; category?: unknown; retryable?: unknown; message?: unknown }
+    : {};
+  const rawCode = typeof value.code === "string"
+    ? value.code
+    : typeof value.message === "string"
+      ? value.message
+      : "linear_discovery_failed";
+  const code = safeFailureCode(rawCode);
+  const category = projectRootIndexFailureCategory(value.category);
+  const malformedCategory = value.category !== undefined && category === undefined;
+  const retryable = !malformedCategory && (value.retryable === true || new Set([
+    "private_ipc_closed",
+    "private_ipc_request_timeout",
+    "private_ipc_write_failed",
+  ]).has(code));
+  return {
+    code,
+    category: malformedCategory ? "protocol" : category ?? (retryable ? "transport" : "schema"),
+    retryable,
+  };
+}
+
+function projectRootIndexFailureCategory(
+  value: unknown,
+): ProjectRootIndexFailure["category"] | undefined {
+  if (value === "linear" || value === "protocol" || value === "schema" || value === "transport") {
+    return value;
+  }
+  return undefined;
 }

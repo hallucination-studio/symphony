@@ -54,7 +54,6 @@ export function createConductorEnvironment({ config, resources, conductor, envir
     SYMPHONY_CONDUCTOR_DATA_ROOT: conductor.dataRoot,
     SYMPHONY_PERFORMER_EXECUTABLE: resources.performer,
     SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
-    SYMPHONY_CYCLE_DELAY_MS: "250",
     SYMPHONY_ROOT_DEADLINE_DURATION_MS: "300000",
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",

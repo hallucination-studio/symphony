@@ -5,7 +5,7 @@ import { PodiumLinearGatewayClientImpl } from "../internal/PodiumLinearGatewayCl
 
 const now = "2026-07-21T09:00:00Z";
 
-test("gateway resolves the project and discovers routed Roots", async () => {
+test("gateway resolves the project and reads one closed Root Index page", async () => {
   const requests: Record<string, unknown>[] = [];
   const gateway = createGateway(async (body) => {
     requests.push(body);
@@ -23,13 +23,22 @@ test("gateway resolves the project and discovers routed Roots", async () => {
     kind: "resolved", projectId: "project-1",
     conductorPool: [{ conductorShortHash: "abc123" }, { conductorShortHash: "def456" }],
   });
-  assert.deepEqual(await gateway.listRoots("project-1"), [{
-    issueId: "root-1", identifier: "SYM-1", state: "In Progress",
-    updatedAt: now, projectId: "project-1",
-    isDelegatedToSymphony: true, isArchived: false,
-    priority: "high", blockers: [],
-    rootConductorLabels: [{ conductorShortHash: "abc123" }],
-  }]);
+  assert.deepEqual(await gateway.readProjectRootIndexPage({
+    projectId: "project-1",
+    limit: 250,
+  }), {
+    kind: "page",
+    page: {
+      roots: [{
+        issueId: "root-1", identifier: "SYM-1", state: "In Progress",
+        updatedAt: now, projectId: "project-1",
+        isDelegatedToSymphony: true, isArchived: false,
+        priority: "high", blockers: [],
+        rootConductorLabels: [{ conductorShortHash: "abc123" }],
+      }],
+      hasNextPage: false,
+    },
+  });
   assert.deepEqual(requests.map(({ kind }) => kind), ["resolve_conductor_project", "list_project_root_index_page"]);
   assert.deepEqual(requests[1], {
     kind: "list_project_root_index_page",
@@ -58,7 +67,9 @@ test("root discovery projects the Conductor identity from a target managed recor
   });
   await gateway.resolveProject();
 
-  assert.equal((await gateway.listRoots("project-1"))[0]?.managedConductorId, "conductor-1");
+  const result = await gateway.readProjectRootIndexPage({ projectId: "project-1", limit: 250 });
+  assert.equal(result.kind, "page");
+  if (result.kind === "page") assert.equal(result.page.roots[0]?.managedConductorId, "conductor-1");
 });
 
 test("gateway evaluates the IPC timeout for each request", async () => {
@@ -76,9 +87,49 @@ test("gateway evaluates the IPC timeout for each request", async () => {
 
   await gateway.resolveProject();
   remaining = 1_000;
-  await gateway.listRoots("project-1");
+  await gateway.readProjectRootIndexPage({ projectId: "project-1", limit: 250 });
 
   assert.deepEqual(timeouts, [2_000, 1_000]);
+});
+
+test("gateway returns a closed retryable failure for a rejected Root Index page", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return {
+      code: "linear_rate_limited",
+      category: "linear",
+      sanitized_reason: "Linear request was rate limited.",
+      retryable: true,
+      action_required: "retry",
+      next_action: "Retry the request later.",
+    };
+  });
+  await gateway.resolveProject();
+
+  assert.deepEqual(await gateway.readProjectRootIndexPage({ projectId: "project-1", limit: 250 }), {
+    kind: "failed",
+    failure: { code: "linear_rate_limited", category: "linear", retryable: true },
+  });
+});
+
+test("gateway treats an unknown Root Index failure category as a non-retryable protocol failure", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return {
+      code: "linear_rate_limited",
+      category: "unexpected_category",
+      sanitized_reason: "Linear request was rate limited.",
+      retryable: true,
+      action_required: "retry",
+      next_action: "Retry the request later.",
+    };
+  });
+  await gateway.resolveProject();
+
+  assert.deepEqual(await gateway.readProjectRootIndexPage({ projectId: "project-1", limit: 250 }), {
+    kind: "failed",
+    failure: { code: "linear_rate_limited", category: "protocol", retryable: false },
+  });
 });
 
 test("workflow gateway serializes a closed mutation and validates its read-back", async () => {

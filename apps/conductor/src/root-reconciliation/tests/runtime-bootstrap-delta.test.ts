@@ -21,6 +21,251 @@ import {
   validateDirectiveInputs,
 } from "../internal/RootReconciliationRuntime.js";
 
+test("Root runtime consumes every Index page before scheduling and reads only the selected candidate Tree", async () => {
+  const scheduledRoots: string[][] = [];
+  const treeReads: string[] = [];
+  const root = (issueId: string, priority: "normal" | "high") => ({
+    issueId,
+    identifier: issueId === "root-high" ? "SYM-2" : "SYM-1",
+    state: "Todo" as const,
+    updatedAt: "2026-07-27T00:00:00.000Z",
+    projectId: "project-1",
+    priority,
+    blockers: [],
+    rootConductorLabels: [{ conductorShortHash: "abc123" }],
+    isDelegatedToSymphony: true,
+    isArchived: false,
+  });
+  const runtime = new RootReconciliationRuntime({
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    baseBranch: "main",
+    linear: {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
+      },
+      async readProjectRootIndexPage({ cursor }) {
+        if (!cursor) {
+          return {
+            kind: "page" as const,
+            page: { roots: [root("root-normal", "normal")], hasNextPage: true, endCursor: "page-2" },
+          };
+        }
+        assert.equal(cursor, "page-2");
+        return { kind: "page" as const, page: { roots: [root("root-high", "high")], hasNextPage: false } };
+      },
+      async readWorkflowIssueTree(rootIssueId) {
+        treeReads.push(rootIssueId);
+        throw new Error("tree_read_failed");
+      },
+      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+    },
+    ownership: {
+      async claim() {
+        return {
+          kind: "already_owned" as const,
+          ownership: {} as never,
+          workspace: { branch: "symphony/runs/sym-2", worktreePath: "/tmp/symphony-root-high" },
+        };
+      },
+    },
+    scheduling: {
+      evaluate(roots) {
+        scheduledRoots.push(roots.map(({ issueId }) => issueId));
+        return { orderedEligible: [roots.find(({ issueId }) => issueId === "root-high")!], blocked: [] };
+      },
+    },
+    profileIdFor: async () => "profile-1",
+    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
+    log() {},
+    git: {} as never,
+    safety: {} as never,
+    convergence: {} as never,
+    reconciler: {} as never,
+    performer: {} as never,
+    materializer: {} as never,
+    directiveRecordWriter: {} as never,
+    failureRecordWriter: {} as never,
+    replyWriter: {} as never,
+    humanActionResolutionValidator: {} as never,
+    humanActionResolutionMaterializer: {} as never,
+    timeline: {} as never,
+  } satisfies RootReconciliationRuntimeDependencies);
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.deepEqual(scheduledRoots, [["root-normal", "root-high"]]);
+  assert.deepEqual(treeReads, ["root-high"]);
+});
+
+test("Root runtime contains a transient Index failure inside the Binding cycle", async () => {
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const runtime = new RootReconciliationRuntime({
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    baseBranch: "main",
+    linear: {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
+      },
+      async readProjectRootIndexPage() {
+        return {
+          kind: "failed" as const,
+          failure: { code: "linear_rate_limited", category: "linear", retryable: true },
+        };
+      },
+      async readWorkflowIssueTree() { throw new Error("tree_should_not_be_read"); },
+      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+    },
+    log(event, fields) { logs.push({ event, fields }); },
+    git: {} as never,
+    ownership: {} as never,
+    scheduling: {} as never,
+    safety: {} as never,
+    convergence: {} as never,
+    reconciler: {} as never,
+    performer: {} as never,
+    materializer: {} as never,
+    directiveRecordWriter: {} as never,
+    failureRecordWriter: {} as never,
+    replyWriter: {} as never,
+    humanActionResolutionValidator: {} as never,
+    humanActionResolutionMaterializer: {} as never,
+    timeline: {} as never,
+    profileIdFor: async () => undefined,
+    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
+  } satisfies RootReconciliationRuntimeDependencies);
+
+  assert.equal(await runtime.cycle(), "discovery-degraded");
+  assert.deepEqual(logs, [{
+    event: "root_discovery_degraded",
+    fields: {
+      phase: "root_index",
+      failure_code: "linear_rate_limited",
+      category: "linear",
+      retryable: "true",
+    },
+  }]);
+});
+
+test("Root runtime exposes the nearest observed durable convergence deadline to the wake scheduler", async () => {
+  const tree = workflowTree();
+  tree.comments.push(workflowComment({
+    commentId: "convergence-policy",
+    authorKind: "symphony",
+    authorId: "symphony-bot",
+    body: serializeManagedRecord({
+      kind: "root_convergence_policy",
+      version: 1,
+      policyId: "root-convergence-policy-1",
+      rootIssueId: "root-1",
+      maxCyclesPerRoot: 3,
+      maxSameOpenFindingCycles: 2,
+      maxConsecutiveNoProgress: 2,
+      maxTotalTokens: 10_000,
+      maxCycleRepairAttempts: 0,
+      deadlineAt: "2099-07-27T00:01:00.000Z",
+    }),
+  }));
+  const root = {
+    issueId: "root-1",
+    identifier: "SYM-1",
+    state: "Todo" as const,
+    updatedAt: "2026-07-27T00:00:00.000Z",
+    projectId: "project-1",
+    priority: "normal" as const,
+    blockers: [],
+    rootConductorLabels: [{ conductorShortHash: "abc123" }],
+    isDelegatedToSymphony: true,
+    isArchived: false,
+  };
+  const runtime = new RootReconciliationRuntime({
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    baseBranch: "main",
+    linear: {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
+      },
+      async readProjectRootIndexPage() {
+        return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
+      },
+      async readWorkflowIssueTree() { return tree; },
+      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+    },
+    ownership: {
+      async claim() {
+        return {
+          kind: "already_owned" as const,
+          ownership: {} as never,
+          workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" },
+        };
+      },
+    },
+    scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
+    safety: { validate() { return { kind: "blocked" as const, reason: "test_blocked", mechanicalViolations: [] }; } },
+    convergence: {} as never,
+    git: {} as never,
+    reconciler: {} as never,
+    performer: {} as never,
+    materializer: {} as never,
+    directiveRecordWriter: {} as never,
+    failureRecordWriter: {} as never,
+    replyWriter: {} as never,
+    humanActionResolutionValidator: {} as never,
+    humanActionResolutionMaterializer: {} as never,
+    timeline: {} as never,
+    profileIdFor: async () => "profile-1",
+    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
+    log() {},
+  } satisfies RootReconciliationRuntimeDependencies);
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(runtime.nextWakeAt(), Date.parse("2099-07-27T00:01:00.000Z"));
+});
+
+test("Root runtime fails closed for a non-retryable Index failure without escaping its cycle", async () => {
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const runtime = new RootReconciliationRuntime({
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    baseBranch: "main",
+    linear: {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
+      },
+      async readProjectRootIndexPage() {
+        return {
+          kind: "failed" as const,
+          failure: { code: "linear_root_header_invalid", category: "schema", retryable: false },
+        };
+      },
+      async readWorkflowIssueTree() { throw new Error("tree_should_not_be_read"); },
+      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+    },
+    log(event, fields) { logs.push({ event, fields }); },
+    git: {} as never,
+    ownership: {} as never,
+    scheduling: {} as never,
+    safety: {} as never,
+    convergence: {} as never,
+    reconciler: {} as never,
+    performer: {} as never,
+    materializer: {} as never,
+    directiveRecordWriter: {} as never,
+    failureRecordWriter: {} as never,
+    replyWriter: {} as never,
+    humanActionResolutionValidator: {} as never,
+    humanActionResolutionMaterializer: {} as never,
+    timeline: {} as never,
+    profileIdFor: async () => undefined,
+    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
+  } satisfies RootReconciliationRuntimeDependencies);
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(logs[0]?.event, "root_discovery_blocked");
+  assert.equal(logs[0]?.fields.failure_code, "linear_root_header_invalid");
+});
+
 test("Root runtime opens with bootstrap and advances with only a delta", async () => {
   const root = {
     issueId: "root-1", identifier: "SYM-1", state: "Todo" as const, title: "Root",
@@ -35,7 +280,9 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [] }; },
-      async listRoots() { return [root]; },
+      async readProjectRootIndexPage() {
+        return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
+      },
       async readWorkflowIssueTree() { return tree; },
       async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
     },
@@ -376,7 +623,9 @@ function failureDependencies(input: {
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [] }; },
-      async listRoots() { return [root]; },
+      async readProjectRootIndexPage() {
+        return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
+      },
       async readWorkflowIssueTree() { return input.tree; },
       async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
     },

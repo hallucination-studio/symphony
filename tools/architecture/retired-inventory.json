@@ -146,7 +146,9 @@
         "listAllRootIssues": [],
         "list_root_issues": [],
         "root_issues_page": [],
-        "root_managed_comments": []
+        "root_managed_comments": [],
+        "listRoots": [],
+        "listRootPages": []
       }
     },
     "legacy-turn-usage": {

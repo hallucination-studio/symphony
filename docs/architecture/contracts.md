@@ -44,6 +44,13 @@ Query携带`binding_id`、`expected_project_id`和bounded page request；respons
 [Linear端到端流转](linear-flow.md)定义的discovery facts，不允许完整Issue description、descendants、普通comments、
 SDK对象或arbitrary metadata。
 
+`WakeConductorCommand`是Host到已运行Conductor的closed、payload-free private message，只包含
+`binding_id`和`instance_id`，matching `WakeConductorResult`只确认本次delivery。receiver必须精确匹配当前
+Binding和generation；wake只促使一次fresh Project Root Index读取，绝不携带Root ID、Linear payload、状态、comment、
+directive或其他Workflow事实，也不写入checkpoint、queue或timeline。该消息定义受控Host delivery boundary，
+不定义也不暗示任何公网Linear webhook receiver、webhook验证或外部event持久化；这些能力必须先有独立、经授权的
+Podium ingress设计，才能成为它的producer。
+
 完整Tree查询必须支持：
 
 ```text

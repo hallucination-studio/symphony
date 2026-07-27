@@ -30,6 +30,8 @@ const retiredRootListSymbols = [
   "list_root_" + "issues",
   "root_issues_" + "page",
   "root_managed_" + "comments",
+  ["list", "Roots"].join(""),
+  ["list", "Root", "Pages"].join(""),
 ];
 
 test("hard-cut inventory names every retired comment, timeline, usage, and E2E surface", async () => {

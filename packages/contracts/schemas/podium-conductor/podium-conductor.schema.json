@@ -110,6 +110,26 @@
         }
       }
     },
+    "WakeConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id"],
+      "properties": {
+        "kind": { "const": "wake_conductor" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "WakeConductorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id"],
+      "properties": {
+        "kind": { "const": "wake_conductor_ack" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
     "LinearIssueNodeSnapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -1751,6 +1771,12 @@
         },
         {
           "$ref": "#/$defs/ShutdownConductorResult"
+        },
+        {
+          "$ref": "#/$defs/WakeConductorCommand"
+        },
+        {
+          "$ref": "#/$defs/WakeConductorResult"
         },
         {
           "$ref": "#/$defs/ResolveConductorProjectQuery"

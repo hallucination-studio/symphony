@@ -7,6 +7,10 @@ import type {
   LinearIssueState,
   LinearPriority,
 } from "../../root-reconciliation/api/RootModels.js";
+import type {
+  ProjectRootIndexFailure,
+  ProjectRootIndexPageResult,
+} from "../../root-discovery/api/ProjectRootIndexInterface.js";
 import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
 import { parseManagedRecord } from "../../root-reconciliation/api/index.js";
 import type { WorkflowIssueRecord } from "../../root-reconciliation/api/ManagedRecords.js";
@@ -76,62 +80,55 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     return { kind: "resolved", projectId, conductorPool };
   }
 
-  async listRoots(projectId: string) {
-    const roots: DiscoveredRoot[] = [];
-    for await (const page of this.listRootPages(projectId)) roots.push(...page.roots);
-    return roots;
-  }
-
-  async *listRootPages(projectId: string): AsyncGenerator<{
-    roots: DiscoveredRoot[];
-    hasNextPage: boolean;
-    ordering: "unsupported";
-  }> {
-    this.#assertProject(projectId);
-    if (this.#activeDiscovery) throw new Error("linear_discovery_overlap");
+  async readProjectRootIndexPage(input: {
+    projectId: string;
+    limit: number;
+    cursor?: string;
+  }): Promise<ProjectRootIndexPageResult> {
+    const { projectId, limit, cursor } = input;
     const discovery = { rootHeaderCount: 0, listPageCount: 0, workflowTreeCount: 0 };
-    let rootCount = 0;
     this.#activeDiscovery = discovery;
     try {
-    const cursors = new Set<string>();
-    let cursor: string | undefined;
-    do {
+      this.#assertProject(projectId);
       const response = record(
         await this.#request({
           kind: "list_project_root_index_page",
           binding_id: this.#bindingId(),
           expected_project_id: projectId,
           page: {
-            limit: 250,
+            limit,
             ...(cursor ? { cursor } : {}),
           },
         }),
       );
-      if (response.kind !== "project_root_index_page") throw protocolError(response);
+      if (response.kind !== "project_root_index_page") {
+        return { kind: "failed", failure: discoveryFailure(protocolError(response)) };
+      }
       const headers = array(record(response.page).headers, "linear_roots_invalid");
+      if (headers.length > limit) {
+        return { kind: "failed", failure: schemaDiscoveryFailure("linear_roots_invalid") };
+      }
       const roots: DiscoveredRoot[] = [];
       for (const value of headers) {
         const discovered = rootHeader(value);
         roots.push(discovered);
-        rootCount += 1;
-        if (rootCount > 512) throw new Error("linear_roots_too_many");
       }
       const pageInfo = record(record(response.page).page_info);
       const hasNextPage = boolean(
         pageInfo.has_next_page,
         "linear_page_info_invalid",
       );
-      cursor = hasNextPage
+      const endCursor = hasNextPage
         ? string(pageInfo.end_cursor, "linear_page_cursor_missing")
         : undefined;
-      if (cursor) {
-        if (cursors.has(cursor)) throw new Error("linear_page_cursor_repeated");
-        cursors.add(cursor);
-      }
-      yield { roots, hasNextPage, ordering: "unsupported" };
-    } while (cursor);
+      discovery.rootHeaderCount = roots.length;
+      return {
+        kind: "page",
+        page: { roots, hasNextPage, ...(endCursor ? { endCursor } : {}) },
+      };
+    } catch (error) {
+      return { kind: "failed", failure: discoveryFailure(error) };
     } finally {
-      discovery.rootHeaderCount = rootCount;
       this.options.observeDiscovery?.({ ...discovery });
       this.#activeDiscovery = undefined;
     }
@@ -581,7 +578,47 @@ function workflowSourceKind(value: JsonValue | undefined): LinearWorkflowTreeSna
 
 function protocolError(response: Record<string, JsonValue>): Error {
   const code = typeof response.code === "string" ? response.code : "private_protocol_unexpected_result";
-  return new Error(code);
+  const category = projectRootIndexFailureCategory(response.category);
+  const error = new Error(code);
+  Object.assign(error, {
+    category: category ?? "protocol",
+    retryable: category !== undefined && response.retryable === true,
+  });
+  return error;
+}
+
+function discoveryFailure(error: unknown): ProjectRootIndexFailure {
+  const details = error instanceof Error
+    ? error as Error & { category?: unknown; retryable?: unknown }
+    : undefined;
+  const code = details && /^[a-z][a-z0-9_:-]{1,120}$/u.test(details.message)
+    ? details.message
+    : "linear_discovery_failed";
+  const category = projectRootIndexFailureCategory(details?.category);
+  const malformedCategory = details?.category !== undefined && category === undefined;
+  const retryable = !malformedCategory && (details?.retryable === true || new Set([
+    "private_ipc_closed",
+    "private_ipc_request_timeout",
+    "private_ipc_write_failed",
+  ]).has(code));
+  return {
+    code,
+    category: malformedCategory ? "protocol" : category ?? (retryable ? "transport" : "schema"),
+    retryable,
+  };
+}
+
+function schemaDiscoveryFailure(code: string): ProjectRootIndexFailure {
+  return { code, category: "schema", retryable: false };
+}
+
+function projectRootIndexFailureCategory(
+  value: unknown,
+): ProjectRootIndexFailure["category"] | undefined {
+  if (value === "linear" || value === "protocol" || value === "schema" || value === "transport") {
+    return value;
+  }
+  return undefined;
 }
 
 function workflowMutationBody(

@@ -44,6 +44,7 @@ const PROFILE_REQUEST_KINDS = new Set([
   "create_profile",
   "update_profile",
   "shutdown_conductor",
+  "wake_conductor",
 ]);
 
 export class InheritedProtocolClient {
