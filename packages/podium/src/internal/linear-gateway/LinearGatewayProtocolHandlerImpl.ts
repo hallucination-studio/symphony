@@ -6,8 +6,7 @@ import type {
   WorkflowMutationCommand,
   WorkflowMutationResult,
   WorkflowCommentValue,
-  RootIssueValue,
-  LinearIssueValue,
+  RootHeaderValue,
 } from "./types.js";
 
 interface RetryOptions {
@@ -18,7 +17,6 @@ interface RetryOptions {
   random?: () => number;
 }
 
-const MAX_ROOTS = 512;
 const MAX_TREE_NODES = 512;
 
 function errorRecord(error: unknown): Record<string, unknown> {
@@ -84,39 +82,18 @@ export class LinearGatewayProtocolHandlerImpl {
     return this.readProjectResolution(conductorShortHash);
   }
 
-  async listAllRootIssues(projectId: string): Promise<RootIssueValue[]> {
-    const items: RootIssueValue[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.listRootIssuesPage({
-        projectId,
-        ...(cursor ? { cursor } : {}),
-        limit: 250,
-      });
-      items.push(...page.items);
-      if (items.length > MAX_ROOTS) {
-        throw new Error("linear_root_collection_too_large");
-      }
-      cursor = nextCursor(page.pageInfo);
-    } while (cursor);
-    return items;
-  }
-
-  async listRootIssuesPage(input: {
+  async listProjectRootIndexPage(input: {
     projectId: string;
     cursor?: string;
     limit: number;
   }) {
-    const page = await this.client.listRootIssues(input);
-    if (page.items.length > input.limit) {
-      throw new Error("linear_root_page_too_large");
+    const page = await this.client.listProjectRootIndexPage(input);
+    if (page.headers.length > input.limit) {
+      throw new Error("linear_project_root_index_page_too_large");
     }
-    for (const item of page.items) {
-      validateIssue(item.issue, input.projectId);
-      if (item.issue.parentIssueId !== undefined || item.issue.depth !== 0) {
-        throw new Error("linear_root_shape_invalid");
-      }
-      validateRootScheduling(item);
+    const rootIssueIds = new Set<string>();
+    for (const header of page.headers) {
+      validateRootHeader(header, input.projectId, rootIssueIds);
     }
     nextCursor(page.pageInfo);
     return page;
@@ -514,80 +491,60 @@ function nextCursor(pageInfo: { hasNextPage: boolean; endCursor?: string }): str
   return pageInfo.endCursor;
 }
 
-function validateIssue(issue: LinearIssueValue, projectId: string): void {
-  if (issue.projectId !== projectId) throw new Error("linear_project_mismatch");
+function validateRootHeader(
+  root: RootHeaderValue,
+  projectId: string,
+  rootIssueIds: Set<string>,
+): void {
   if (
-    !identifier(issue.issueId, 128) ||
-    !identifier(issue.identifier, 256) ||
-    !linearIssueState(issue.state) ||
-    (issue.parentIssueId !== undefined &&
-      !identifier(issue.parentIssueId, 128)) ||
-    !Number.isFinite(issue.order) ||
-    issue.order! < -1_000_000_000 ||
-    issue.order! > 1_000_000_000 ||
-    issue.depth === undefined ||
-    !Number.isInteger(issue.depth) ||
-    issue.depth < 0 ||
-    issue.depth > 32 ||
-    typeof issue.title !== "string" ||
-    codePointLength(issue.title) > 16_384 ||
-    typeof issue.description !== "string" ||
-    codePointLength(issue.description) > 16_384 ||
-    typeof issue.isArchived !== "boolean" ||
-    !timestamp(issue.updatedAt)
-  ) throw new Error("linear_issue_invalid");
-}
-
-function validateRootScheduling(root: RootIssueValue): void {
-  if (
+    !identifier(root.rootIssueId, 128) ||
+    rootIssueIds.has(root.rootIssueId) ||
+    !shortText(root.identifier) ||
+    root.projectId !== projectId ||
+    !linearIssueState(root.state) ||
+    typeof root.isArchived !== "boolean" ||
+    !timestamp(root.updatedAt) ||
     typeof root.isDelegatedToSymphony !== "boolean" ||
     !linearPriority(root.priority) ||
     !Array.isArray(root.blockers) ||
-    root.blockers.length > MAX_TREE_NODES ||
+    root.blockers.length > 250 ||
     !Array.isArray(root.rootConductorLabels) ||
-    root.rootConductorLabels.length > 1 ||
-    !Array.isArray(root.rootManagedComments) ||
-    root.rootManagedComments.length > 2 ||
-    typeof root.issue.isArchived !== "boolean"
+    root.rootConductorLabels.length > 1
   ) {
-    throw new Error("linear_root_scheduling_invalid");
+    throw new Error("linear_project_root_index_invalid");
   }
+  rootIssueIds.add(root.rootIssueId);
   const rootConductorHashes = new Set<string>();
   for (const entry of root.rootConductorLabels) {
     if (
       !identifier(entry.conductorShortHash, 128) ||
       rootConductorHashes.has(entry.conductorShortHash)
     ) {
-      throw new Error("linear_root_scheduling_invalid");
+      throw new Error("linear_project_root_index_invalid");
     }
     rootConductorHashes.add(entry.conductorShortHash);
   }
   for (const blocker of root.blockers) {
     const value = errorRecord(blocker);
     if (
-      value.sourceIssueId !== root.issue.issueId ||
+      value.sourceIssueId !== root.rootIssueId ||
       typeof value.targetIssueId !== "string" ||
       !identifier(value.targetIssueId, 128) ||
-      value.targetIssueId === root.issue.issueId ||
+      value.targetIssueId === root.rootIssueId ||
       typeof value.targetState !== "string" ||
       !linearIssueState(value.targetState)
     ) {
-      throw new Error("linear_root_scheduling_invalid");
+      throw new Error("linear_project_root_index_invalid");
     }
   }
-  for (const comment of root.rootManagedComments) {
+  if (root.rootOwnership) {
+    const ownership = root.rootOwnership;
     if (
-      comment.issueId !== root.issue.issueId ||
-      !identifier(comment.commentId, 128) ||
-      typeof comment.body !== "string" ||
-      codePointLength(comment.body) > 16_384 ||
-      !workflowCommentAuthorKind(comment.authorKind) ||
-      !identifier(comment.authorId, 128) ||
-      (comment.authorUserId !== undefined && !identifier(comment.authorUserId, 128)) ||
-      !timestamp(comment.createdAt) ||
-      !timestamp(comment.updatedAt)
+      !identifier(ownership.conductorId, 128) ||
+      !identifier(ownership.sourceCommentId, 128) ||
+      !identifier(ownership.sourceCommentRemoteVersion, 512)
     ) {
-      throw new Error("linear_root_scheduling_invalid");
+      throw new Error("linear_project_root_index_invalid");
     }
   }
 }

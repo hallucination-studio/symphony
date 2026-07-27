@@ -12,7 +12,7 @@ import {
 } from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
 import type { LinearRequestObserverImpl } from "../linear-gateway/internal/LinearRequestObserverImpl.js";
 import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
-import type { LinearIssueValue, WorkflowMutationCommand } from "../linear-gateway/types.js";
+import type { WorkflowMutationCommand } from "../linear-gateway/types.js";
 import type { LinearInstallation } from "../models.js";
 import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
@@ -91,8 +91,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       switch (body.kind) {
       case "resolve_conductor_project":
         return this.#resolveProject(gateway, body);
-      case "list_root_issues":
-        return this.#listRoots(gateway, body);
+      case "list_project_root_index_page":
+        return this.#listProjectRootIndexPage(gateway, body);
       case "get_workflow_issue_tree":
         return this.#getWorkflowTree(gateway, body);
       case "create_workflow_issue":
@@ -111,7 +111,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     }), {
       deadlineAtMs: Date.now() + MAX_LINEAR_REQUEST_TIMEOUT_MS,
       ...(classification === "mutation" ? {} : {
-        coalesceKey: JSON.stringify(body),
+        coalesceKey: linearReadCoalesceKey(body, installation),
       }),
     });
   }
@@ -225,7 +225,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     );
   }
 
-  async #listRoots(
+  async #listProjectRootIndexPage(
     gateway: LinearGatewayProtocolHandlerImpl,
     body: Body,
   ): Promise<JsonValue> {
@@ -234,17 +234,23 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
       throw new Error("linear_page_limit_invalid");
     }
-    const page = await gateway.listRootIssuesPage({
-      projectId: requiredString(body.project_id, "linear_project_id_missing"),
+    const page = await gateway.listProjectRootIndexPage({
+      projectId: requiredString(body.expected_project_id, "linear_project_id_missing"),
       limit,
       ...(typeof pageRequest.cursor === "string"
         ? { cursor: pageRequest.cursor }
         : {}),
     });
     return {
-      kind: "root_issues_page",
-      items: page.items.map((root) => ({
-        issue: issueSnapshot(root.issue),
+      kind: "project_root_index_page",
+      page: {
+        headers: page.headers.map((root) => ({
+        root_issue_id: root.rootIssueId,
+        identifier: root.identifier,
+        project_id: root.projectId,
+        state: root.state,
+        is_archived: root.isArchived,
+        updated_at: root.updatedAt,
         is_delegated_to_symphony: root.isDelegatedToSymphony,
         priority: root.priority,
         blockers: root.blockers.map((blocker) => ({
@@ -255,22 +261,20 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         root_conductor_labels: root.rootConductorLabels.map(({ conductorShortHash }) => ({
           conductor_short_hash: conductorShortHash,
         })),
-        root_managed_comments: root.rootManagedComments.map((comment) => ({
-          comment_id: comment.commentId,
-          issue_id: comment.issueId,
-          body: comment.body,
-          author_kind: comment.authorKind,
-          author_id: comment.authorId,
-          ...(comment.authorUserId ? { author_user_id: comment.authorUserId } : {}),
-          created_at: comment.createdAt,
-          updated_at: comment.updatedAt,
-        })),
+        ...(root.rootOwnership ? {
+          root_ownership: {
+            conductor_id: root.rootOwnership.conductorId,
+            source_comment_id: root.rootOwnership.sourceCommentId,
+            source_comment_remote_version: root.rootOwnership.sourceCommentRemoteVersion,
+          },
+        } : {}),
       })),
-      page_info: {
-        has_next_page: page.pageInfo.hasNextPage,
-        ...(page.pageInfo.endCursor
-          ? { end_cursor: page.pageInfo.endCursor }
-          : {}),
+        page_info: {
+          has_next_page: page.pageInfo.hasNextPage,
+          ...(page.pageInfo.endCursor
+            ? { end_cursor: page.pageInfo.endCursor }
+            : {}),
+        },
       },
     };
   }
@@ -414,8 +418,31 @@ function sameInstallation(left: LinearInstallation, right: LinearInstallation): 
 
 function requestClass(kind: string): InstallationRequestClass {
   if (kind === "resolve_conductor_project") return "control";
-  if (kind === "get_workflow_issue_tree" || kind === "list_root_issues") return "workflow";
+  if (kind === "get_workflow_issue_tree" || kind === "list_project_root_index_page") return "workflow";
   return "mutation";
+}
+
+function linearReadCoalesceKey(body: Body, installation: LinearInstallation): string {
+  if (body.kind === "list_project_root_index_page") {
+    const page = body.page;
+    if (
+      typeof body.expected_project_id === "string" &&
+      page !== null &&
+      typeof page === "object" &&
+      !Array.isArray(page)
+    ) {
+      const cursor = typeof page.cursor === "string" ? page.cursor : null;
+      const limit = typeof page.limit === "number" ? page.limit : null;
+      return JSON.stringify([
+        "project-root-index",
+        installation.installationId,
+        body.expected_project_id,
+        cursor,
+        limit,
+      ]);
+    }
+  }
+  return JSON.stringify(["linear-read", installation.installationId, body]);
 }
 
 function matchesRepository(
@@ -432,36 +459,6 @@ function matchesRepository(
     value.canonical_path === expected.repositoryRoot &&
     value.base_branch === expected.baseBranch
   );
-}
-
-function issueSnapshot(issue: LinearIssueValue) {
-  if (
-    issue.identifier === undefined ||
-    issue.projectId === undefined ||
-    issue.state === undefined ||
-    issue.order === undefined ||
-    issue.depth === undefined ||
-    issue.title === undefined ||
-    issue.description === undefined ||
-    !Array.isArray(issue.labels) ||
-    issue.labels.length > 64
-  ) {
-    throw new Error("linear_issue_snapshot_incomplete");
-  }
-  return {
-    issue_id: issue.issueId,
-    identifier: issue.identifier,
-    project_id: issue.projectId,
-    ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
-    state: issue.state,
-    order: issue.order,
-    depth: issue.depth,
-    title: issue.title,
-    description: issue.description,
-    labels: issue.labels,
-    is_archived: issue.isArchived,
-    updated_at: issue.updatedAt,
-  };
 }
 
 function requiredString(value: JsonValue | undefined, code: string): string {

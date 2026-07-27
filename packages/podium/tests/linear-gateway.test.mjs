@@ -18,26 +18,12 @@ async function createConductorServices(
   linearSdk,
   onLinearObserver = () => undefined,
   onRequestScope = () => undefined,
+  bindings = [conductorBinding()],
 ) {
-  const binding = {
-    bindingId: "binding-1",
-    conductorId: "conductor-1",
-    conductorShortHash: "abc123",
-    linearInstallationId: "installation-1",
-    organizationId: "organization-1",
-    repositoryContext: {
-      repositoryHandle: "repo-1",
-      repositoryIdentity: "repository-1",
-      repositoryDisplayName: "symphony",
-      repositoryRoot: "/repository",
-      baseBranch: "main",
-    },
-    desiredState: "running",
-  };
   const services = new PodiumConductorServicesImpl(
     {
-      getConductorBindingById: (bindingId) => bindingId === binding.bindingId ? binding : undefined,
-      listConductorBindings: () => [binding],
+      getConductorBindingById: (bindingId) => bindings.find((candidate) => candidate.bindingId === bindingId),
+      listConductorBindings: () => bindings,
       getLinearCredential: () => ({
         kind: "development_token",
         installationId: "installation-1",
@@ -57,21 +43,40 @@ async function createConductorServices(
       },
     },
   );
-  await services.handle({
+  await Promise.all(bindings.map(async (entry, index) => await services.handle({
     kind: "conductor_handshake",
-    binding_id: binding.bindingId,
-    instance_id: "instance-1",
-    conductor_id: binding.conductorId,
-    conductor_short_hash: binding.conductorShortHash,
-    linear_installation_id: binding.linearInstallationId,
-    organization_id: binding.organizationId,
+    binding_id: entry.bindingId,
+    instance_id: `instance-${index + 1}`,
+    conductor_id: entry.conductorId,
+    conductor_short_hash: entry.conductorShortHash,
+    linear_installation_id: entry.linearInstallationId,
+    organization_id: entry.organizationId,
     repository: {
-      repository_handle: binding.repositoryContext.repositoryHandle,
-      canonical_path: binding.repositoryContext.repositoryRoot,
-      base_branch: binding.repositoryContext.baseBranch,
+      repository_handle: entry.repositoryContext.repositoryHandle,
+      canonical_path: entry.repositoryContext.repositoryRoot,
+      base_branch: entry.repositoryContext.baseBranch,
     },
-  });
+  })));
   return services;
+}
+
+function conductorBinding(overrides = {}) {
+  return {
+    bindingId: "binding-1",
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-1",
+      repositoryIdentity: "repository-1",
+      repositoryDisplayName: "symphony",
+      repositoryRoot: "/repository",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+    ...overrides,
+  };
 }
 
 test("installation broker coalesces identical concurrent Podium reads", async () => {
@@ -95,6 +100,42 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
   assert.equal(reads, 1);
   release();
   assert.deepEqual(await first, await shared);
+});
+
+test("Project Root Index coalesces concurrent reads from three Conductors sharing an installation", async () => {
+  let physicalReads = 0;
+  let release;
+  const headers = Array.from({ length: 12 }, (_unused, index) => rootHeader({
+    rootIssueId: `root-${index + 1}`,
+    identifier: `SYM-${index + 1}`,
+  }));
+  const bindings = [
+    conductorBinding(),
+    conductorBinding({ bindingId: "binding-2", conductorId: "conductor-2", conductorShortHash: "def456" }),
+    conductorBinding({ bindingId: "binding-3", conductorId: "conductor-3", conductorShortHash: "ghi789" }),
+  ];
+  const services = await createConductorServices({
+    async listProjectRootIndexPage() {
+      physicalReads += 1;
+      await new Promise((resolve) => { release = resolve; });
+      return { headers, pageInfo: { hasNextPage: false } };
+    },
+  }, undefined, undefined, bindings);
+
+  const reads = bindings.map(({ bindingId }) => services.handle({
+    kind: "list_project_root_index_page",
+    binding_id: bindingId,
+    expected_project_id: "project-1",
+    page: { limit: 250 },
+  }));
+  await Promise.resolve();
+
+  assert.equal(physicalReads, 1);
+  release();
+  const pages = await Promise.all(reads);
+  assert.equal(pages.length, 3);
+  assert.ok(pages.every((page) => page.kind === "project_root_index_page" && page.page.headers.length === 12));
+  assert.equal(physicalReads, 1);
 });
 
 test("Podium reuses one Linear gateway for sequential requests in the same class", async () => {
@@ -161,224 +202,117 @@ test("workflow issue creation rejects a missing label_names field before dispatc
 });
 
 
-test("gateway reads fully paginate and reject cross-project issue data", async () => {
-  const cursors = [];
+function rootHeader(input = {}) {
+  return {
+    rootIssueId: input.rootIssueId ?? "root-1",
+    identifier: input.identifier ?? "SYM-1",
+    projectId: input.projectId ?? "project-1",
+    state: input.state ?? "In Progress",
+    isArchived: input.isArchived ?? false,
+    updatedAt: input.updatedAt ?? "2026-07-16T00:00:00.000Z",
+    priority: input.priority ?? "normal",
+    blockers: input.blockers ?? [],
+    rootConductorLabels: input.rootConductorLabels ?? [],
+    isDelegatedToSymphony: input.isDelegatedToSymphony ?? true,
+    ...(input.rootOwnership ? { rootOwnership: input.rootOwnership } : {}),
+  };
+}
+
+test("Project Root Index gateway validates one bounded Header page without aggregating it", async () => {
+  const requests = [];
   const handler = new LinearGatewayProtocolHandlerImpl(
     {
-      async listRootIssues({ cursor }) {
-        cursors.push(cursor);
-        return cursor
-          ? {
-              items: [{
-                issue: issue("root-2", "project-1"),
-                isDelegatedToSymphony: true,
-                priority: "high",
-                blockers: [],
-                rootConductorLabels: [],
-                rootManagedComments: [],
-              }],
-              pageInfo: { hasNextPage: false },
-            }
-          : {
-              items: [{
-                issue: issue("root-1", "project-1"),
-                isDelegatedToSymphony: true,
-                priority: "urgent",
-                blockers: [],
-                rootConductorLabels: [],
-                rootManagedComments: [],
-              }],
-              pageInfo: { hasNextPage: true, endCursor: "next" },
-            };
+      async listProjectRootIndexPage(input) {
+        requests.push(input);
+        return {
+          headers: [rootHeader({
+            priority: "urgent",
+            blockers: [{ sourceIssueId: "root-1", targetIssueId: "blocker-1", targetState: "Done" }],
+          })],
+          pageInfo: { hasNextPage: true, endCursor: "next" },
+        };
       },
     },
     { sleep: async () => undefined, maxAttempts: 3, baseDelayMs: 10 },
   );
 
-  const roots = await handler.listAllRootIssues("project-1");
-  assert.deepEqual(roots.map(({ issue }) => issue.issueId), ["root-1", "root-2"]);
-  assert.deepEqual(cursors, [undefined, "next"]);
+  const page = await handler.listProjectRootIndexPage({ projectId: "project-1", cursor: "cursor-1", limit: 1 });
 
-  const invalid = new LinearGatewayProtocolHandlerImpl(
-    {
-      async listRootIssues() {
-        return {
-          items: [{
-            issue: issue("root-x", "project-other"),
-            isDelegatedToSymphony: true,
-            priority: "normal",
-            blockers: [],
-            rootConductorLabels: [],
-            rootManagedComments: [],
-          }],
-          pageInfo: { hasNextPage: false },
-        };
+  assert.deepEqual(requests, [{ projectId: "project-1", cursor: "cursor-1", limit: 1 }]);
+  assert.equal(page.headers[0].priority, "urgent");
+  assert.deepEqual(page.pageInfo, { hasNextPage: true, endCursor: "next" });
+});
+
+test("Project Root Index gateway rejects malformed Header authority facts", async () => {
+  const invalidHeaders = [
+    rootHeader({ projectId: "project-other" }),
+    rootHeader({ blockers: [{ sourceIssueId: "wrong-root", targetIssueId: "blocker-1", targetState: "Done" }] }),
+    rootHeader({ rootConductorLabels: [{ conductorShortHash: "abc123" }, { conductorShortHash: "def456" }] }),
+  ];
+
+  for (const header of invalidHeaders) {
+    const handler = new LinearGatewayProtocolHandlerImpl(
+      {
+        async listProjectRootIndexPage() {
+          return { headers: [header], pageInfo: { hasNextPage: false } };
+        },
       },
-    },
-    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
-  );
-  await assert.rejects(invalid.listAllRootIssues("project-1"), /linear_project_mismatch/);
+      { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+    );
+    await assert.rejects(
+      handler.listProjectRootIndexPage({ projectId: "project-1", limit: 1 }),
+      /linear_project_root_index_invalid/u,
+    );
+  }
 });
 
-test("Root scheduling gateway preserves each bounded SDK page without making eligibility decisions", async () => {
+test("Project Root Index service emits a closed Header page", async () => {
   const services = await createConductorServices({
-    async listRootIssues({ cursor }) {
-      return cursor
-        ? {
-            items: [{
-              issue: issue("root-2", "project-1"),
-              isDelegatedToSymphony: true,
-              priority: "low",
-              blockers: [],
-              rootConductorLabels: [],
-              rootManagedComments: [],
-            }],
-            pageInfo: { hasNextPage: false },
-          }
-        : {
-            items: [{
-              issue: { ...issue("root-1", "project-1"), order: 12.5 },
-              isDelegatedToSymphony: true,
-              priority: "urgent",
-              blockers: [
-                {
-                  sourceIssueId: "root-1",
-                  targetIssueId: "blocker-done",
-                  targetState: "Done",
-                },
-                {
-                  sourceIssueId: "root-1",
-                  targetIssueId: "blocker-active",
-                  targetState: "In Progress",
-                },
-              ],
-              rootConductorLabels: [],
-              rootManagedComments: [{
-                commentId: "comment-1",
-                issueId: "root-1",
-                authorKind: "symphony",
-                authorId: "symphony-bot",
-                createdAt: "2026-07-16T00:00:00Z",
-                updatedAt: "2026-07-16T00:00:00Z",
-                body: v3PrimaryComment(),
-              }],
-            }],
-            pageInfo: { hasNextPage: true, endCursor: "next" },
-          };
-    },
-  });
-
-  const first = await services.handle({
-    kind: "list_root_issues",
-    project_id: "project-1",
-    page: { limit: 250 },
-  });
-  const second = await services.handle({
-    kind: "list_root_issues",
-    project_id: "project-1",
-    page: { limit: 250, cursor: "next" },
-  });
-
-  assert.equal(first.kind, "root_issues_page");
-  assert.equal(first.items.length, 1);
-  assert.equal(first.items[0].priority, "urgent");
-  assert.equal(first.items[0].issue.order, 12.5);
-  assert.deepEqual(first.items[0].blockers.map(({ target_state }) => target_state), [
-    "Done",
-    "In Progress",
-  ]);
-  assert.equal(first.items[0].root_managed_comments[0].comment_id, "comment-1");
-  assert.deepEqual(first.page_info, { has_next_page: true, end_cursor: "next" });
-  assert.equal(second.items.length, 1);
-  assert.equal(second.items[0].issue.issue_id, "root-2");
-  assert.equal(second.items[0].priority, "low");
-  assert.deepEqual(second.page_info, { has_next_page: false });
-});
-
-test("Root scheduling service emits the complete issue snapshot required by the protocol", async () => {
-  const services = await createConductorServices({
-    async listRootIssues() {
+    async listProjectRootIndexPage() {
       return {
-        items: [{
-          issue: { ...issue("root-1", "project-1"), labels: ["symphony:conductor/abc123"], isArchived: false },
-          isDelegatedToSymphony: true,
-          priority: "normal",
-          blockers: [],
-          rootConductorLabels: [{ conductorShortHash: "abc123" }],
-          rootManagedComments: [],
-        }],
+        headers: [rootHeader({
+          rootConductorLabels: [{ conductorShortHash: "abc123def456" }],
+          rootOwnership: {
+            conductorId: "conductor-1",
+            sourceCommentId: "ownership-1",
+            sourceCommentRemoteVersion: "2026-07-16T00:00:00.000Z",
+          },
+        })],
         pageInfo: { hasNextPage: false },
       };
     },
   });
 
   const result = await services.handle({
-    kind: "list_root_issues",
-    project_id: "project-1",
+    kind: "list_project_root_index_page",
+    binding_id: "binding-1",
+    expected_project_id: "project-1",
     page: { limit: 250 },
   });
 
-  assert.deepEqual(result.items[0].issue.labels, ["symphony:conductor/abc123"]);
-  assert.equal(result.items[0].issue.is_archived, false);
-});
-
-test("Root scheduling gateway rejects malformed closed values", async () => {
-  const valid = {
-    issue: issue("root-1", "project-1"),
-    isDelegatedToSymphony: true,
-    priority: "normal",
-    blockers: [],
-    rootConductorLabels: [],
-    rootManagedComments: [],
-  };
-  const invalidRoots = [
-    { ...valid, priority: undefined },
-    { ...valid, blockers: undefined },
-    { ...valid, rootManagedComments: undefined },
-    {
-      ...valid,
-      rootManagedComments: [{
-        commentId: "comment-1",
-        issueId: "root-other",
-        updatedAt: "2026-07-16T00:00:00Z",
-        body: v3PrimaryComment(),
-      }],
-    },
-    {
-      ...valid,
-      blockers: [{
-        sourceIssueId: "wrong-root",
-        targetIssueId: "blocker-1",
-        targetState: "Done",
-      }],
-    },
-    {
-      ...valid,
-      blockers: [{
-        sourceIssueId: "root-1",
-        targetIssueId: "blocker-1",
-        targetState: "Unknown",
-      }],
-    },
-  ];
-
-  for (const root of invalidRoots) {
-    const handler = new LinearGatewayProtocolHandlerImpl(
-      {
-        async listRootIssues() {
-          return {
-            items: [root],
-            pageInfo: { hasNextPage: false },
-          };
+  assert.deepEqual(result, {
+    kind: "project_root_index_page",
+    page: {
+      headers: [{
+        root_issue_id: "root-1",
+        identifier: "SYM-1",
+        project_id: "project-1",
+        state: "In Progress",
+        is_archived: false,
+        updated_at: "2026-07-16T00:00:00.000Z",
+        priority: "normal",
+        blockers: [],
+        root_conductor_labels: [{ conductor_short_hash: "abc123def456" }],
+        is_delegated_to_symphony: true,
+        root_ownership: {
+          conductor_id: "conductor-1",
+          source_comment_id: "ownership-1",
+          source_comment_remote_version: "2026-07-16T00:00:00.000Z",
         },
-      },
-      { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
-    );
-    await assert.rejects(
-      handler.listAllRootIssues("project-1"),
-      /linear_root_scheduling_invalid/u,
-    );
-  }
+      }],
+      page_info: { has_next_page: false },
+    },
+  });
 });
 
 test("workflow Issue Tree validates status identity, comments, relations, and scope", async () => {

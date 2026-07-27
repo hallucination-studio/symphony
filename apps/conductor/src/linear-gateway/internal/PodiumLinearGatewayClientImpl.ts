@@ -27,20 +27,6 @@ interface ProtocolClient {
   }): Promise<JsonValue>;
 }
 
-type WireIssue = {
-  issue_id: string;
-  identifier: string;
-  project_id: string;
-  parent_issue_id?: string;
-  state: LinearIssueState;
-  order: number;
-  depth: number;
-  title: string;
-  description: string;
-  is_archived: boolean;
-  updated_at: string;
-};
-
 export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   #sequence = 0;
   #projectId: string | undefined;
@@ -112,45 +98,25 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     do {
       const response = record(
         await this.#request({
-          kind: "list_root_issues",
+          kind: "list_project_root_index_page",
           binding_id: this.#bindingId(),
-          project_id: projectId,
+          expected_project_id: projectId,
           page: {
             limit: 250,
             ...(cursor ? { cursor } : {}),
           },
         }),
       );
-      if (response.kind !== "root_issues_page") throw protocolError(response);
-      const items = array(response.items, "linear_roots_invalid");
+      if (response.kind !== "project_root_index_page") throw protocolError(response);
+      const headers = array(record(response.page).headers, "linear_roots_invalid");
       const roots: DiscoveredRoot[] = [];
-      for (const value of items) {
-        const item = record(value);
-        const issue = wireIssue(item.issue);
-        const managedConductorId = rootManagedConductorId(item.root_managed_comments, issue.issue_id);
-        const discovered: DiscoveredRoot = {
-          issueId: issue.issue_id,
-          identifier: issue.identifier,
-          state: issue.state,
-          title: issue.title,
-          description: issue.description,
-          updatedAt: issue.updated_at,
-          projectId: issue.project_id,
-          parentIssueId: issue.parent_issue_id ?? null,
-          isDelegatedToSymphony: boolean(item.is_delegated_to_symphony, "linear_root_delegation_invalid"),
-          priority: linearPriority(item.priority),
-          order: issue.order,
-          blockers: array(item.blockers, "linear_blockers_invalid").map(
-            (blocker) => linearBlocker(issue.issue_id, blocker),
-          ),
-          rootConductorLabels: pool(item.root_conductor_labels),
-          ...(managedConductorId ? { managedConductorId } : {}),
-        };
+      for (const value of headers) {
+        const discovered = rootHeader(value);
         roots.push(discovered);
         rootCount += 1;
         if (rootCount > 512) throw new Error("linear_roots_too_many");
       }
-      const pageInfo = record(response.page_info);
+      const pageInfo = record(record(response.page).page_info);
       const hasNextPage = boolean(
         pageInfo.has_next_page,
         "linear_page_info_invalid",
@@ -216,7 +182,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
 
   #request(body: JsonValue) {
     if (this.#activeDiscovery && body && typeof body === "object" && !Array.isArray(body)) {
-      if (body.kind === "list_root_issues") this.#activeDiscovery.listPageCount += 1;
+      if (body.kind === "list_project_root_index_page") this.#activeDiscovery.listPageCount += 1;
       if (body.kind === "get_workflow_issue_tree") this.#activeDiscovery.workflowTreeCount += 1;
     }
     this.#sequence += 1;
@@ -239,10 +205,6 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
   #bindingId(): string {
     return this.options.bindingId ?? "binding-1";
   }
-}
-
-function wireIssue(value: JsonValue | undefined): WireIssue {
-  return record(value) as unknown as WireIssue;
 }
 
 function record(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -287,25 +249,36 @@ function pool(value: JsonValue | undefined): ConductorPoolMember[] {
   });
 }
 
-function rootManagedConductorId(value: JsonValue | undefined, rootIssueId: string): string | undefined {
-  if (value === undefined) return undefined;
-  const comments = array(value, "linear_root_managed_comments_invalid");
-  if (comments.length > 2) throw new Error("linear_root_managed_comments_invalid");
-  let conductorId: string | undefined;
-  for (const item of comments) {
-    const comment = record(item);
-    if (string(comment.issue_id, "linear_root_managed_comment_invalid") !== rootIssueId) {
-      throw new Error("linear_root_managed_comment_scope_invalid");
-    }
-    if (comment.author_kind !== "symphony") continue;
-    const body = string(comment.body, "linear_root_managed_comment_invalid");
-    const parsed = parseManagedRecord(body);
-    if (!parsed.ok || parsed.value.kind !== "root_ownership") continue;
-    if (parsed.value.rootIssueId !== rootIssueId) throw new Error("linear_root_ownership_scope_invalid");
-    if (conductorId !== undefined) throw new Error("linear_root_ownership_duplicate");
-    conductorId = parsed.value.conductorId;
+function rootHeader(value: JsonValue): DiscoveredRoot {
+  const header = record(value);
+  const issueId = string(header.root_issue_id, "linear_root_header_invalid");
+  const labels = pool(header.root_conductor_labels);
+  if (labels.length > 1) throw new Error("linear_root_header_invalid");
+  const ownership = header.root_ownership === undefined
+    ? undefined
+    : record(header.root_ownership);
+  const managedConductorId = ownership === undefined
+    ? undefined
+    : string(ownership.conductor_id, "linear_root_ownership_invalid");
+  if (ownership !== undefined) {
+    string(ownership.source_comment_id, "linear_root_ownership_invalid");
+    string(ownership.source_comment_remote_version, "linear_root_ownership_invalid");
   }
-  return conductorId;
+  return {
+    issueId,
+    identifier: string(header.identifier, "linear_root_header_invalid"),
+    projectId: string(header.project_id, "linear_root_header_invalid"),
+    state: linearIssueState(header.state),
+    isArchived: boolean(header.is_archived, "linear_root_header_invalid"),
+    updatedAt: string(header.updated_at, "linear_root_header_invalid"),
+    isDelegatedToSymphony: boolean(header.is_delegated_to_symphony, "linear_root_delegation_invalid"),
+    priority: linearPriority(header.priority),
+    blockers: array(header.blockers, "linear_blockers_invalid").map(
+      (blocker) => linearBlocker(issueId, blocker),
+    ),
+    rootConductorLabels: labels,
+    ...(managedConductorId ? { managedConductorId } : {}),
+  };
 }
 
 function linearPriority(value: JsonValue | undefined): LinearPriority {

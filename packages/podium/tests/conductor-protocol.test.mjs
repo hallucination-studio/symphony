@@ -27,45 +27,39 @@ test("Podium-Conductor handler validates, dispatches, and correlates messages", 
   assert.equal(requests.length, 1);
 });
 
-test("Podium-Conductor handler accepts target workflow states in root discovery", async () => {
+test("Podium-Conductor handler accepts a closed Project Root Index page", async () => {
   const handler = new PodiumConductorProtocolHandler({
     async handle() {
       return {
-        kind: "root_issues_page",
-        items: [{
-          issue: {
-            issue_id: "root-1",
+        kind: "project_root_index_page",
+        page: {
+          headers: [{
+            root_issue_id: "root-1",
             identifier: "SYM-1",
             project_id: "project-1",
             state: "Succeeded",
-            order: 1,
-            depth: 0,
-            title: "Completed root",
-            description: "",
-            labels: [],
             is_archived: false,
             updated_at: "2026-07-22T00:00:00.000Z",
-          },
-          is_delegated_to_symphony: true,
-          priority: "normal",
-          blockers: [],
-          root_conductor_labels: [],
-          root_managed_comments: [],
-        }],
-        page_info: { has_next_page: false },
+            priority: "normal",
+            blockers: [],
+            root_conductor_labels: [],
+            is_delegated_to_symphony: true,
+          }],
+          page_info: { has_next_page: false },
+        },
       };
     },
   });
 
   const response = await handler.handle(envelope({
-    kind: "list_root_issues",
+    kind: "list_project_root_index_page",
     binding_id: "binding-1",
-    project_id: "project-1",
+    expected_project_id: "project-1",
     page: { limit: 250 },
   }));
 
-  assert.equal(response.body.kind, "root_issues_page");
-  assert.equal(response.body.items[0].issue.state, "Succeeded");
+  assert.equal(response.body.kind, "project_root_index_page");
+  assert.equal(response.body.page.headers[0].state, "Succeeded");
 });
 
 test("Podium-Conductor handler rejects invalid messages without dispatch", async () => {

@@ -32,9 +32,10 @@ Conductor通过自己的Conductor Project Label解析唯一Project。Project上�
 
 Podium通过一个Project-scoped `ListProjectRootIndexPageQuery`分页读取顶层Root headers；Conductor消费closed、versioned
 `ProjectRootIndexPage`后才按自身routing过滤和排序。Index page包括带ownership record的terminal Roots；不能因为用户把
-Root改成Done、Canceled或其他status就使该修改绕过Root Reconciler。Header包含Priority、规范化的`updatedAt`、
-blockers、routing、native delegation和bounded ownership/source identity，不包含完整Cycle descendants或任何current
-Cycle/ready node副本。
+Root改成Done、Canceled或其他status就使该修改绕过Root Reconciler。每个`RootHeader`只包含`root_issue_id`、`identifier`、
+`project_id`、当前`state`、`is_archived`、规范化的`updated_at`、`priority`、blockers、routing labels和native delegation。
+可选`root_ownership`只包含已验证的`conductor_id`、`source_comment_id`和`source_comment_remote_version`；缺失即unowned。
+Header不包含title、description、order、parent、完整Cycle descendants、普通comments或任何current Cycle/ready node副本。
 
 `ListProjectRootIndexPageQuery`是Root discovery唯一的Linear读取路径。Podium必须使用一份显式、字段有界的GraphQL document
 在一个physical request中读取一页Root所需的全部header facts；禁止在page返回后逐Root调用SDK model的`state`、

@@ -1,6 +1,5 @@
 import {
   LinearClient,
-  type Comment,
   type Issue,
   type IssueLabel,
   type ProjectLabel,
@@ -18,7 +17,7 @@ import type {
   LinearBlockerValue,
   LinearPriority,
   ConductorPoolValue,
-  RootIssueValue,
+  RootHeaderValue,
   WorkflowCommentValue,
   WorkflowCommentAuthorKind,
   WorkflowMutationCommand,
@@ -26,6 +25,7 @@ import type {
   WorkflowRelationValue,
   WorkflowSourceManifestEntryValue,
 } from "../types.js";
+import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
 import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
 import {
   inspectTargetWorkflowCatalog,
@@ -38,7 +38,6 @@ import {
 const PAGE_LIMIT = 250;
 const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
-const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const DEVELOPMENT_TOKEN_ORGANIZATION_REQUEST_TIMEOUT_MS = 30_000;
 const SYMPHONY_RECEIPT_EMOJI = {
@@ -315,6 +314,35 @@ const PROJECT_RESOLUTION_QUERY = `
     }
   }
 `;
+const PROJECT_ROOT_INDEX_QUERY = `
+  query SymphonyProjectRootIndex($projectId: String!, $cursor: String, $limit: Int!) {
+    viewer { id }
+    project(id: $projectId) {
+      id
+      issues(first: $limit, after: $cursor, includeArchived: true, filter: { parent: { null: true } }) {
+        nodes {
+          id identifier updatedAt archivedAt priority
+          project { id }
+          state { name }
+          delegate { id }
+          labels(first: 2, includeArchived: false, filter: { name: { startsWith: "symphony:conductor/" } }) {
+            nodes { name }
+            pageInfo { hasNextPage }
+          }
+          comments(first: 2, includeArchived: false, filter: { body: { contains: "\\"kind\\":\\"root_ownership\\"" } }) {
+            nodes { id body updatedAt user { id } botActor { id } externalUser { id } issue { id } }
+            pageInfo { hasNextPage }
+          }
+          inverseRelations(first: 250, includeArchived: true) {
+            nodes { id type issue { id state { name } } relatedIssue { id } }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
 export type LinearSdkCredential =
@@ -493,6 +521,62 @@ interface ProjectResolutionData {
       } | null;
     }>;
     pageInfo?: ProjectPoolPageInfo;
+  } | null;
+}
+
+interface ProjectRootIndexPageInfo {
+  hasNextPage?: boolean;
+  endCursor?: string | null;
+}
+
+interface ProjectRootIndexComment {
+  id?: string;
+  body?: string;
+  updatedAt?: string;
+  user?: { id?: string } | null;
+  botActor?: { id?: string } | null;
+  externalUser?: { id?: string } | null;
+  issue?: { id?: string } | null;
+}
+
+interface ProjectRootIndexRelation {
+  id?: string;
+  type?: string;
+  issue?: { id?: string; state?: { name?: string } | null } | null;
+  relatedIssue?: { id?: string } | null;
+}
+
+interface ProjectRootIndexIssue {
+  id?: string;
+  identifier?: string;
+  updatedAt?: string;
+  archivedAt?: string | null;
+  priority?: number | null;
+  project?: { id?: string } | null;
+  state?: { name?: string } | null;
+  delegate?: { id?: string } | null;
+  labels?: {
+    nodes?: Array<{ name?: string }>;
+    pageInfo?: ProjectRootIndexPageInfo;
+  } | null;
+  comments?: {
+    nodes?: ProjectRootIndexComment[];
+    pageInfo?: ProjectRootIndexPageInfo;
+  } | null;
+  inverseRelations?: {
+    nodes?: ProjectRootIndexRelation[];
+    pageInfo?: ProjectRootIndexPageInfo;
+  } | null;
+}
+
+interface ProjectRootIndexData {
+  viewer?: { id?: string } | null;
+  project?: {
+    id?: string;
+    issues?: {
+      nodes?: ProjectRootIndexIssue[];
+      pageInfo?: ProjectRootIndexPageInfo;
+    } | null;
   } | null;
 }
 
@@ -1224,49 +1308,77 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
   }
 
-  async listRootIssues(input: {
+  async listProjectRootIndexPage(input: {
     projectId: string;
     cursor?: string;
     limit: number;
-  }): Promise<{ items: RootIssueValue[]; pageInfo: PageInfo }> {
-    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
-    if (!SAFE_ID.test(delegateActorId)) throw new Error("linear_delegate_actor_invalid");
-    const project = await this.#client.project(input.projectId);
-    const page = await project.issues({
-      first: input.limit,
-      includeArchived: false,
-      ...(input.cursor ? { after: input.cursor } : {}),
-    });
-    const roots = page.nodes.flatMap((issue) => {
-      if (issue.archivedAt !== null && issue.archivedAt !== undefined) return [];
-      if (issue.projectId !== input.projectId) {
-        throw new Error("linear_root_project_mismatch");
+  }): Promise<{ headers: RootHeaderValue[]; pageInfo: PageInfo }> {
+    if (!SAFE_ID.test(input.projectId) || !Number.isInteger(input.limit) || input.limit < 1 || input.limit > PAGE_LIMIT) {
+      throw new Error("linear_project_root_index_request_invalid");
+    }
+    const data = await this.#compactRawRequest<ProjectRootIndexData, {
+      projectId: string;
+      cursor?: string;
+      limit: number;
+    }>(PROJECT_ROOT_INDEX_QUERY, input);
+    const project = data.project;
+    const page = project?.issues;
+    const delegateActorId = this.#delegateActorId ?? data.viewer?.id;
+    if (
+      project?.id !== input.projectId ||
+      !page ||
+      !Array.isArray(page.nodes) ||
+      !page.pageInfo ||
+      typeof page.pageInfo.hasNextPage !== "boolean" ||
+      !delegateActorId ||
+      !SAFE_ID.test(delegateActorId)
+    ) {
+      throw new Error("linear_project_root_index_invalid");
+    }
+    if (page.nodes.length > input.limit) throw new Error("linear_project_root_index_page_too_large");
+    const rootIds = new Set<string>();
+    const headers = page.nodes.map((root) => {
+      const rootIssueId = root.id;
+      const identifier = root.identifier;
+      const updatedAt = timestampValueOrUndefined(root.updatedAt);
+      const priority = root.priority;
+      if (
+        typeof rootIssueId !== "string" ||
+        !SAFE_ID.test(rootIssueId) ||
+        typeof identifier !== "string" ||
+        !shortTextValue(identifier) ||
+        root.project?.id !== input.projectId ||
+        !root.state?.name ||
+        updatedAt === undefined ||
+        typeof priority !== "number" ||
+        rootIds.has(rootIssueId)
+      ) {
+        throw new Error("linear_project_root_index_header_invalid");
       }
-      return issue.parentId
-        ? []
-        : [{ issue, priority: linearPriority(issue.priority) }];
+      rootIds.add(rootIssueId);
+      const labels = indexLabels(root.labels);
+      const ownership = rootOwnershipHeader(root.comments, rootIssueId, delegateActorId);
+      return {
+        rootIssueId,
+        identifier,
+        projectId: input.projectId,
+        state: linearIssueState(root.state.name),
+        isArchived: root.archivedAt !== null && root.archivedAt !== undefined,
+        updatedAt,
+        priority: linearPriority(priority),
+        blockers: indexBlockers(root.inverseRelations, rootIssueId),
+        rootConductorLabels: labels,
+        isDelegatedToSymphony: root.delegate?.id === delegateActorId,
+        ...(ownership ? { rootOwnership: ownership } : {}),
+      };
     });
-    const items = await mapConcurrent(
-      roots,
-      ROOT_READ_CONCURRENCY,
-      async ({ issue, priority }) => {
-        const [value, blockers, rootManagedComments, labels] = await Promise.all([
-          issueValue(issue, 0),
-          blockerValues(issue),
-          this.#rootManagedCommentValues(issue),
-          allNodes(issue.labels({ first: 64 }), 64),
-        ]);
-        return {
-          issue: { ...value, labels: labels.map(({ name }) => name) },
-          isDelegatedToSymphony: issue.delegateId === delegateActorId,
-          priority,
-          blockers,
-          rootConductorLabels: conductorPoolFromLabels(labels.map(({ name }) => name)),
-          rootManagedComments,
-        };
+    return {
+      headers,
+      pageInfo: {
+        hasNextPage: page.pageInfo.hasNextPage,
+        ...(page.pageInfo.endCursor ? { endCursor: page.pageInfo.endCursor } : {}),
       },
-    );
-    return { items, pageInfo: pageInfo(page.pageInfo) };
+    };
   }
 
   async #batchedIssueTree(
@@ -2145,22 +2257,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     return catalog;
   }
 
-  async #rootComments(issue: Issue): Promise<Comment[]> {
-    return allNodes(
-      issue.comments({ first: PAGE_LIMIT }),
-      MAX_ROOT_COMMENTS,
-    );
-  }
-
-  async #rootManagedCommentValues(issue: Issue) {
-    const comments = await this.#rootComments(issue);
-    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
-    return comments.flatMap((comment) => {
-      const value = rootManagedCommentValue(comment, issue.id, delegateActorId);
-      return value.authorKind === "symphony" ? [value] : [];
-    });
-  }
-
   async #projectLabelsNamed(name: string): Promise<ProjectLabel[]> {
     const labels = await allNodes(
       this.#client.projectLabels({
@@ -2535,22 +2631,153 @@ function workflowCommentReactions(
   });
 }
 
-function rootManagedCommentValue(
-  comment: WorkflowCommentSource,
-  issueId: string,
+function indexLabels(value: ProjectRootIndexIssue["labels"]): ConductorPoolValue[] {
+  if (
+    !value ||
+    !Array.isArray(value.nodes) ||
+    value.nodes.length > 1 ||
+    value.pageInfo?.hasNextPage !== false ||
+    value.nodes.some((label) => typeof label.name !== "string" || !label.name.startsWith(CONDUCTOR_LABEL_PREFIX))
+  ) {
+    throw new Error("linear_project_root_index_routing_invalid");
+  }
+  return conductorPoolFromLabels(value.nodes.map((label) => label.name!));
+}
+
+function rootOwnershipHeader(
+  value: ProjectRootIndexIssue["comments"],
+  rootIssueId: string,
   delegateActorId: string,
-) {
-  const actor = workflowCommentActor(comment, delegateActorId);
+): RootHeaderValue["rootOwnership"] {
+  if (
+    !value ||
+    !Array.isArray(value.nodes) ||
+    value.nodes.length > 2 ||
+    value.pageInfo?.hasNextPage !== false
+  ) {
+    throw new Error("linear_project_root_index_ownership_incomplete");
+  }
+  if (value.nodes.length === 0) return undefined;
+  if (value.nodes.length !== 1) throw new Error("linear_project_root_index_ownership_ambiguous");
+  const comment = value.nodes[0]!;
+  const commentId = comment.id;
+  const commentIssueId = comment.issue?.id;
+  const commentUpdatedAt = timestampValueOrUndefined(comment.updatedAt);
+  const actorIds = [comment.user?.id, comment.botActor?.id, comment.externalUser?.id];
+  if (
+    typeof commentId !== "string" ||
+    !SAFE_ID.test(commentId) ||
+    typeof commentIssueId !== "string" ||
+    !SAFE_ID.test(commentIssueId) ||
+    commentIssueId !== rootIssueId ||
+    typeof comment.body !== "string" ||
+    commentUpdatedAt === undefined ||
+    actorIds.some((id) => id !== undefined && !SAFE_ID.test(id)) ||
+    !actorIds.includes(delegateActorId)
+  ) {
+    throw new Error("linear_project_root_index_ownership_invalid");
+  }
+  const block = parseManagedRecordBlock(comment.body);
+  if (!block.ok) throw new Error("linear_project_root_index_ownership_invalid");
+  const record = strictRootOwnershipRecord(block.record, rootIssueId);
   return {
-    commentId: comment.id,
-    issueId,
-    authorKind: actor.kind,
-    authorId: actor.id,
-    ...(actor.userId ? { authorUserId: actor.userId } : {}),
-    createdAt: timestampValue(comment.createdAt),
-    updatedAt: timestampValue(comment.updatedAt),
-    body: comment.body,
+    conductorId: record.conductorId,
+    sourceCommentId: commentId,
+    sourceCommentRemoteVersion: commentUpdatedAt,
   };
+}
+
+function strictRootOwnershipRecord(value: unknown, rootIssueId: string): { conductorId: string } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("linear_project_root_index_ownership_invalid");
+  }
+  const record = value as Record<string, unknown>;
+  const required = [
+    "kind", "version", "root_issue_id", "conductor_id", "performer_profile_id", "delivery_branch", "owner_generation",
+  ];
+  const allowed = new Set([...required, "pull_request"]);
+  const conductorId = typeof record.conductor_id === "string" ? record.conductor_id : undefined;
+  const performerProfileId = typeof record.performer_profile_id === "string" ? record.performer_profile_id : undefined;
+  const ownerGeneration = typeof record.owner_generation === "string" ? record.owner_generation : undefined;
+  if (
+    required.some((field) => !(field in record)) ||
+    Object.keys(record).some((field) => !allowed.has(field)) ||
+    record.kind !== "root_ownership" ||
+    record.version !== 1 ||
+    record.root_issue_id !== rootIssueId ||
+    !conductorId ||
+    !SAFE_ID.test(conductorId) ||
+    !performerProfileId ||
+    !SAFE_ID.test(performerProfileId) ||
+    !ownerGeneration ||
+    !SAFE_ID.test(ownerGeneration) ||
+    !boundedTextValue(record.delivery_branch) ||
+    (record.pull_request !== undefined && !boundedTextValue(record.pull_request))
+  ) {
+    throw new Error("linear_project_root_index_ownership_invalid");
+  }
+  return { conductorId };
+}
+
+function indexBlockers(
+  value: ProjectRootIndexIssue["inverseRelations"],
+  rootIssueId: string,
+): LinearBlockerValue[] {
+  if (
+    !value ||
+    !Array.isArray(value.nodes) ||
+    value.nodes.length > 250 ||
+    value.pageInfo?.hasNextPage !== false
+  ) {
+    throw new Error("linear_project_root_index_blockers_incomplete");
+  }
+  const relationIds = new Set<string>();
+  const blockers: LinearBlockerValue[] = [];
+  for (const relation of value.nodes) {
+    if (relation.type !== "blocks") continue;
+    const relationId = relation.id;
+    const sourceIssueId = relation.issue?.id;
+    const targetIssueId = relation.relatedIssue?.id;
+    const targetState = relation.issue?.state?.name;
+    if (
+      typeof relationId !== "string" ||
+      !SAFE_ID.test(relationId) ||
+      typeof sourceIssueId !== "string" ||
+      !SAFE_ID.test(sourceIssueId) ||
+      typeof targetIssueId !== "string" ||
+      !SAFE_ID.test(targetIssueId) ||
+      sourceIssueId === rootIssueId ||
+      targetIssueId !== rootIssueId ||
+      !targetState ||
+      relationIds.has(relationId)
+    ) {
+      throw new Error("linear_project_root_index_blocker_invalid");
+    }
+    relationIds.add(relationId);
+    blockers.push({
+      sourceIssueId: rootIssueId,
+      targetIssueId: sourceIssueId,
+      targetState: linearIssueState(targetState),
+    });
+  }
+  return blockers;
+}
+
+function boundedTextValue(value: unknown): value is string {
+  return typeof value === "string" && Array.from(value).length <= 16_384 && !value.includes("\0");
+}
+
+function shortTextValue(value: string): boolean {
+  return Array.from(value).length >= 1 && Array.from(value).length <= 256 && !value.includes("\0");
+}
+
+function timestampValueOrUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    return timestampValue(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function workflowCommentActor(
@@ -3066,25 +3293,6 @@ function validateTreeRelations(fact: IssueTreeFact): void {
   }
 }
 
-async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
-  const statePromise = issue.state;
-  const state = statePromise ? await statePromise : undefined;
-  return {
-    issueId: issue.id,
-    identifier: issue.identifier,
-    ...(issue.projectId ? { projectId: issue.projectId } : {}),
-    ...(issue.parentId ? { parentIssueId: issue.parentId } : {}),
-    ...(state ? { state: linearIssueState(state.name) } : {}),
-    order: issue.subIssueSortOrder ?? issue.sortOrder,
-    depth,
-    title: issue.title,
-    description: issue.description ?? "",
-    labels: [],
-    isArchived: issue.archivedAt !== null && issue.archivedAt !== undefined,
-    updatedAt: issue.updatedAt.toISOString(),
-  };
-}
-
 function linearIssueState(value: string): LinearIssueState {
   if (isTargetWorkflowStatusName(value)) return value;
   throw new Error("linear_issue_state_invalid");
@@ -3272,37 +3480,6 @@ function assertTargetWorkflowPreconditions(
   }
 }
 
-async function blockerValues(issue: Issue): Promise<LinearBlockerValue[]> {
-  const relations = await allNodes(
-    issue.inverseRelations({ first: PAGE_LIMIT }),
-    MAX_TREE_NODES,
-  );
-  const blockers: LinearBlockerValue[] = [];
-  for (const relation of relations) {
-    if (relation.type !== "blocks") continue;
-    if (
-      !relation.issueId ||
-      relation.relatedIssueId !== issue.id ||
-      relation.issueId === issue.id
-    ) {
-      throw new Error("linear_blocker_relation_invalid");
-    }
-    const target = await relation.issue;
-    if (!target || target.id !== relation.issueId) {
-      throw new Error("linear_blocker_relation_invalid");
-    }
-    const statePromise = target.state;
-    const state = statePromise ? await statePromise : undefined;
-    if (!state) throw new Error("linear_blocker_target_state_missing");
-    blockers.push({
-      sourceIssueId: issue.id,
-      targetIssueId: target.id,
-      targetState: linearIssueState(state.name),
-    });
-  }
-  return blockers;
-}
-
 async function allNodes<Node>(
   connectionPromise: Promise<{ nodes: Node[]; pageInfo: { hasNextPage: boolean }; fetchNext(): Promise<unknown> }>,
   maximum: number,
@@ -3314,27 +3491,6 @@ async function allNodes<Node>(
   }
   if (connection.nodes.length > maximum) throw new Error("linear_collection_too_large");
   return connection.nodes;
-}
-
-async function mapConcurrent<Input, Output>(
-  values: Input[],
-  concurrency: number,
-  map: (value: Input) => Promise<Output>,
-): Promise<Output[]> {
-  const results = new Array<Output>(values.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, values.length) },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        results[index] = await map(values[index]!);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }
 
 function pageInfo(value: {

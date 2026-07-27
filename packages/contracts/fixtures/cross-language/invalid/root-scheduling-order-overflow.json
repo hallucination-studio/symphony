@@ -1,23 +1,16 @@
 {
-  "schema": "podium-conductor.schema.json#/$defs/RootIssueSnapshot",
+  "schema": "podium-conductor.schema.json#/$defs/RootHeader",
   "value": {
-    "issue": {
-      "issue_id": "root-1",
-      "identifier": "SYM-1",
-      "project_id": "project-1",
-      "state": "Todo",
-      "order": 1000000001,
-      "depth": 0,
-      "title": "Root",
-      "description": "Root description",
-      "labels": [],
-      "is_archived": false,
-      "updated_at": "2026-07-19T00:00:00Z"
-    },
+    "root_issue_id": "root-1",
+    "identifier": "SYM-1",
+    "project_id": "project-1",
+    "state": "Todo",
+    "is_archived": false,
+    "updated_at": "2026-07-19T00:00:00Z",
     "is_delegated_to_symphony": true,
     "priority": "normal",
     "blockers": [],
     "root_conductor_labels": [],
-    "root_managed_comments": []
+    "order": 1000000001
   }
 }

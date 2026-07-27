@@ -20,16 +20,28 @@ const legacyTurnUsageScope = "legacy-turn-" + "usage";
 const syntheticE2ECompletionScope = "synthetic-e2e-" + "completion";
 const syntheticFinal = "synthetic " + "final";
 const syntheticFinalRecord = "target_e2e_" + "synthetic_final";
+const retiredRootListScope = "retired-root-list-" + "discovery";
+const retiredRootListSymbols = [
+  ["List", "Root", "Issues", "Query"].join(""),
+  ["Root", "Issues", "Page", "Result"].join(""),
+  ["Root", "Issue", "Snapshot"].join(""),
+  ["list", "Root", "Issues"].join(""),
+  ["list", "All", "Root", "Issues"].join(""),
+  "list_root_" + "issues",
+  "root_issues_" + "page",
+  "root_managed_" + "comments",
+];
 
 test("hard-cut inventory names every retired comment, timeline, usage, and E2E surface", async () => {
   const inventory = JSON.parse(await readFile("tools/architecture/retired-inventory.json", "utf8"));
 
-  assert.deepEqual(Object.keys(inventory.scopes).slice(-3), [
+  assert.deepEqual(Object.keys(inventory.scopes).slice(-4), [
     managedHtmlRecordsScope,
+    retiredRootListScope,
     legacyTurnUsageScope,
     syntheticE2ECompletionScope,
   ]);
-  for (const scope of Object.values(inventory.scopes).slice(-3)) {
+  for (const scope of Object.values(inventory.scopes).slice(-4)) {
     assert.match(scope.source, /^docs\/architecture\/[^#]+\.md#/u);
   }
   assert.deepEqual(Object.keys(inventory.scopes[managedHtmlRecordsScope].symbols), [
@@ -47,6 +59,10 @@ test("hard-cut inventory names every retired comment, timeline, usage, and E2E s
     syntheticFinal,
     syntheticFinalRecord,
   ]);
+  assert.deepEqual(
+    Object.keys(inventory.scopes[retiredRootListScope].symbols),
+    retiredRootListSymbols,
+  );
 });
 
 test("final inventory contains no reachable hard-cut timeline projection surface", async () => {

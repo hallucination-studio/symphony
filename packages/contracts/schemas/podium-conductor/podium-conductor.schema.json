@@ -228,30 +228,66 @@
         }
       }
     },
-    "RootIssueSnapshot": {
+    "RootOwnershipHeader": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "issue",
-        "is_delegated_to_symphony",
+        "conductor_id",
+        "source_comment_id",
+        "source_comment_remote_version"
+      ],
+      "properties": {
+        "conductor_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "source_comment_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "source_comment_remote_version": {
+          "$ref": "common.schema.json#/$defs/OpaqueIdentifier"
+        }
+      }
+    },
+    "RootHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_issue_id",
+        "identifier",
+        "project_id",
+        "state",
+        "is_archived",
+        "updated_at",
         "priority",
         "blockers",
         "root_conductor_labels",
-        "root_managed_comments"
+        "is_delegated_to_symphony"
       ],
       "properties": {
-        "issue": {
-          "$ref": "#/$defs/LinearIssueNodeSnapshot"
+        "root_issue_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
         },
-        "is_delegated_to_symphony": {
+        "identifier": {
+          "$ref": "common.schema.json#/$defs/ShortText"
+        },
+        "project_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "state": {
+          "$ref": "common.schema.json#/$defs/LinearIssueState"
+        },
+        "is_archived": {
           "type": "boolean"
+        },
+        "updated_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
         },
         "priority": {
           "$ref": "#/$defs/LinearPriority"
         },
         "blockers": {
           "type": "array",
-          "maxItems": 512,
+          "maxItems": 250,
           "items": {
             "$ref": "#/$defs/LinearBlockerSnapshot"
           }
@@ -263,12 +299,11 @@
             "$ref": "#/$defs/ConductorPool"
           }
         },
-        "root_managed_comments": {
-          "type": "array",
-          "maxItems": 2,
-          "items": {
-            "$ref": "#/$defs/LinearCommentSnapshot"
-          }
+        "is_delegated_to_symphony": {
+          "type": "boolean"
+        },
+        "root_ownership": {
+          "$ref": "#/$defs/RootOwnershipHeader"
         }
       }
     },
@@ -485,23 +520,23 @@
         }
       }
     },
-    "ListRootIssuesQuery": {
+    "ListProjectRootIndexPageQuery": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "kind",
         "binding_id",
-        "project_id",
+        "expected_project_id",
         "page"
       ],
       "properties": {
         "kind": {
-          "const": "list_root_issues"
+          "const": "list_project_root_index_page"
         },
         "binding_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
         },
-        "project_id": {
+        "expected_project_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
         },
         "page": {
@@ -509,27 +544,39 @@
         }
       }
     },
-    "RootIssuesPageResult": {
+    "ProjectRootIndexPage": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind",
-        "items",
+        "headers",
         "page_info"
       ],
       "properties": {
-        "kind": {
-          "const": "root_issues_page"
-        },
-        "items": {
+        "headers": {
           "type": "array",
           "maxItems": 250,
           "items": {
-            "$ref": "#/$defs/RootIssueSnapshot"
+            "$ref": "#/$defs/RootHeader"
           }
         },
         "page_info": {
           "$ref": "common.schema.json#/$defs/PageInfo"
+        }
+      }
+    },
+    "ProjectRootIndexPageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "page"
+      ],
+      "properties": {
+        "kind": {
+          "const": "project_root_index_page"
+        },
+        "page": {
+          "$ref": "#/$defs/ProjectRootIndexPage"
         }
       }
     },
@@ -1709,7 +1756,7 @@
           "$ref": "#/$defs/ResolveConductorProjectQuery"
         },
         {
-          "$ref": "#/$defs/ListRootIssuesQuery"
+          "$ref": "#/$defs/ListProjectRootIndexPageQuery"
         },
         {
           "$ref": "#/$defs/GetWorkflowIssueTreeQuery"
@@ -1718,7 +1765,7 @@
           "$ref": "#/$defs/ProjectResolutionResult"
         },
         {
-          "$ref": "#/$defs/RootIssuesPageResult"
+          "$ref": "#/$defs/ProjectRootIndexPageResult"
         },
         {
           "$ref": "#/$defs/WorkflowIssueTreeResult"

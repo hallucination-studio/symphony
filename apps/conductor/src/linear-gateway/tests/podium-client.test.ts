@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PodiumLinearGatewayClientImpl } from "../internal/PodiumLinearGatewayClientImpl.js";
-import { serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 
 const now = "2026-07-21T09:00:00Z";
 
@@ -12,9 +11,11 @@ test("gateway resolves the project and discovers routed Roots", async () => {
     requests.push(body);
     if (body.kind === "resolve_conductor_project") return resolved();
     return {
-      kind: "root_issues_page",
-      items: [{ issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [], root_conductor_labels: [{ conductor_short_hash: "abc123" }] }],
-      page_info: { has_next_page: false },
+      kind: "project_root_index_page",
+      page: {
+        headers: [rootHeader({ priority: "high", root_conductor_labels: [{ conductor_short_hash: "abc123" }] })],
+        page_info: { has_next_page: false },
+      },
     };
   });
 
@@ -23,32 +24,36 @@ test("gateway resolves the project and discovers routed Roots", async () => {
     conductorPool: [{ conductorShortHash: "abc123" }, { conductorShortHash: "def456" }],
   });
   assert.deepEqual(await gateway.listRoots("project-1"), [{
-    issueId: "root-1", identifier: "SYM-1", state: "In Progress", title: "Root", description: "Build it",
-    updatedAt: now, projectId: "project-1", parentIssueId: null,
-    isDelegatedToSymphony: true,
-    priority: "high", order: 0, blockers: [],
+    issueId: "root-1", identifier: "SYM-1", state: "In Progress",
+    updatedAt: now, projectId: "project-1",
+    isDelegatedToSymphony: true, isArchived: false,
+    priority: "high", blockers: [],
     rootConductorLabels: [{ conductorShortHash: "abc123" }],
   }]);
-  assert.deepEqual(requests.map(({ kind }) => kind), ["resolve_conductor_project", "list_root_issues"]);
+  assert.deepEqual(requests.map(({ kind }) => kind), ["resolve_conductor_project", "list_project_root_index_page"]);
+  assert.deepEqual(requests[1], {
+    kind: "list_project_root_index_page",
+    binding_id: "binding-1",
+    expected_project_id: "project-1",
+    page: { limit: 250 },
+  });
 });
 
 test("root discovery projects the Conductor identity from a target managed record", async () => {
   const gateway = createGateway(async (body) => {
     if (body.kind === "resolve_conductor_project") return resolved();
     return {
-      kind: "root_issues_page",
-      items: [{
-        issue: root("root-1"), is_delegated_to_symphony: true, priority: "high", blockers: [], root_conductor_labels: [{ conductor_short_hash: "abc123" }],
-        root_managed_comments: [{
-          comment_id: "ownership-comment", issue_id: "root-1",
-          body: serializeManagedRecord({
-            kind: "root_ownership", version: 1, rootIssueId: "root-1", conductorId: "conductor-1",
-            performerProfileId: "profile-1", deliveryBranch: "symphony/runs/sym-1", ownerGeneration: "generation-1",
-          }),
-          author_kind: "symphony", author_id: "symphony-1", updated_at: now,
-        }],
-      }],
-      page_info: { has_next_page: false },
+      kind: "project_root_index_page",
+      page: {
+        headers: [rootHeader({
+          root_ownership: {
+            conductor_id: "conductor-1",
+            source_comment_id: "ownership-comment",
+            source_comment_remote_version: now,
+          },
+        })],
+        page_info: { has_next_page: false },
+      },
     };
   });
   await gateway.resolveProject();
@@ -64,7 +69,7 @@ test("gateway evaluates the IPC timeout for each request", async () => {
       timeouts.push(timeoutMs);
       if ((body as { kind: string }).kind === "resolve_conductor_project") return resolved();
       return {
-        kind: "root_issues_page", items: [], page_info: { has_next_page: false },
+        kind: "project_root_index_page", page: { headers: [], page_info: { has_next_page: false } },
       };
     },
   }, { timeoutMs: () => remaining });
@@ -148,9 +153,20 @@ function resolved() {
   } };
 }
 
-function root(issueId: string) {
-  return { issue_id: issueId, identifier: "SYM-1", project_id: "project-1", state: "In Progress", order: 0, depth: 0,
-    title: "Root", description: "Build it", updated_at: now };
+function rootHeader(overrides: Record<string, unknown> = {}) {
+  return {
+    root_issue_id: "root-1",
+    identifier: "SYM-1",
+    project_id: "project-1",
+    state: "In Progress",
+    is_archived: false,
+    updated_at: now,
+    priority: "normal",
+    blockers: [],
+    root_conductor_labels: [],
+    is_delegated_to_symphony: true,
+    ...overrides,
+  };
 }
 
 function workflowTree() {

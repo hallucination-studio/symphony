@@ -429,7 +429,7 @@ function dependencies(input: {
     issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
     description: "Build it", updatedAt: "2026-07-24T00:00:00Z", projectId: "project-1",
     parentIssueId: null, priority: "normal" as const, order: 0,
-    blockers: [], rootConductorLabels: [{ conductorShortHash: "abc123" }], isDelegatedToSymphony: true,
+    blockers: [], rootConductorLabels: [{ conductorShortHash: "abc123" }], isDelegatedToSymphony: true, isArchived: false,
   };
   return {
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",

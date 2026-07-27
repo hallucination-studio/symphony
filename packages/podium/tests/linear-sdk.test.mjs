@@ -242,143 +242,130 @@ test("physical SDK transport sends requests without an installation permit", asy
   assert.equal(fetches, 2);
 });
 
-test("Root header snapshots map every Linear priority and retain Linear node order", async () => {
-  const roots = [0, 1, 2, 3, 4].map((priority) => issue({
-    id: `root-${priority}`,
-    priority,
-    order: 10.5 + priority,
-  }));
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection(roots) }),
+function projectRootIndexNode(input = {}) {
+  const issueId = input.issueId ?? "root-1";
+  return {
+    id: issueId,
+    identifier: input.identifier ?? issueId.toUpperCase(),
+    updatedAt: input.updatedAt ?? "2026-07-16T00:00:00.000Z",
+    archivedAt: input.archivedAt ?? null,
+    priority: input.priority ?? 2,
+    project: { id: input.projectId ?? "project-1" },
+    state: { name: input.state ?? "In Progress" },
+    delegate: input.delegateId === null ? null : { id: input.delegateId ?? "app-user" },
+    labels: {
+      nodes: input.labels ?? [],
+      pageInfo: { hasNextPage: input.labelsHasNextPage ?? false },
+    },
+    comments: {
+      nodes: input.comments ?? [],
+      pageInfo: { hasNextPage: input.commentsHasNextPage ?? false },
+    },
+    inverseRelations: {
+      nodes: input.relations ?? [],
+      pageInfo: { hasNextPage: input.relationsHasNextPage ?? false },
+    },
   };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
+}
 
-  const result = await adapter.listRootIssues({
-    projectId: "project-1",
-    limit: 250,
+function rootOwnershipComment(rootIssueId, commentId = `${rootIssueId}-ownership`) {
+  const record = {
+    kind: "root_ownership",
+    version: 1,
+    root_issue_id: rootIssueId,
+    conductor_id: "conductor-1",
+    performer_profile_id: "profile-1",
+    delivery_branch: `symphony/runs/${rootIssueId}`,
+    owner_generation: "generation-1",
+  };
+  return {
+    id: commentId,
+    body: `Root ownership recorded.\n\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\``,
+    updatedAt: "2026-07-16T00:00:00.000Z",
+    user: { id: "app-user" },
+    issue: { id: rootIssueId },
+  };
+}
+
+function rootIndexAdapter(nodes, requests) {
+  return new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    client: {
+      async rawRequest(document, variables) {
+        requests.push({ document, variables });
+        return { data: {
+          viewer: { id: "app-user" },
+          project: {
+            id: "project-1",
+            issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } },
+          },
+        } };
+      },
+    },
   });
+}
 
-  assert.deepEqual(
-    result.items.map(({ issue: root, priority, blockers }) => ({
-      order: root.order,
-      priority,
-      blockers,
-    })),
-    [
-      { order: 10.5, priority: "no_priority", blockers: [] },
-      { order: 11.5, priority: "urgent", blockers: [] },
-      { order: 12.5, priority: "high", blockers: [] },
-      { order: 13.5, priority: "normal", blockers: [] },
-      { order: 14.5, priority: "low", blockers: [] },
-    ],
-  );
-});
+test("Project Root Index reads bounded Root Headers in one project-scoped request", async () => {
+  const roots = Array.from({ length: 12 }, (_, index) => projectRootIndexNode({
+    issueId: `root-${index}`,
+    priority: index % 5,
+    archivedAt: index === 1 ? "2026-07-15T00:00:00.000Z" : null,
+    delegateId: index === 2 ? "another-actor" : "app-user",
+    ...(index === 0 ? {
+      labels: [{ name: "symphony:conductor/abc123def456" }],
+      comments: [rootOwnershipComment("root-0")],
+      relations: [{
+        id: "relation-1",
+        type: "blocks",
+        issue: { id: "blocker-1", state: { name: "Todo" } },
+        relatedIssue: { id: "root-0" },
+      }],
+    } : {}),
+  }));
+  const requests = [];
+  const adapter = rootIndexAdapter(roots, requests);
 
-test("Root snapshots project only native delegation to the verified Symphony actor", async () => {
-  const sdk = {
-    viewer: Promise.resolve({ id: "symphony-actor" }),
-    project: async () => ({ issues: async () => connection([
-      issue({ id: "undelegated-root", delegateId: "another-actor" }),
-      issue({ id: "delegated-root", delegateId: "symphony-actor" }),
-    ]) }),
-  };
-  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const page = await adapter.listProjectRootIndexPage({ projectId: "project-1", limit: 12 });
 
-  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-
-  assert.deepEqual(result.items.map((root) => ({
-    issueId: root.issue.issueId,
-    isDelegatedToSymphony: root.isDelegatedToSymphony,
-  })), [
-    { issueId: "undelegated-root", isDelegatedToSymphony: false },
-    { issueId: "delegated-root", isDelegatedToSymphony: true },
-  ]);
-});
-
-test("Root scheduling reads one and 250 Root headers without interpreting managed records", async () => {
-  for (const rootCount of [1, 250]) {
-    const roots = Array.from({ length: rootCount }, (_, index) => {
-      const root = issue({ id: `root-${index}`, priority: index % 5, order: index });
-      root.comments = async () => connection([]);
-      root.inverseRelations = async () => connection([]);
-      return root;
-    });
-    let batchReads = 0;
-    const sdk = {
-      viewer: { id: "app-user" },
-      project: async () => ({ issues: async () => connection(roots) }),
-      client: {
-        async rawRequest(_query, variables) {
-          batchReads += 1;
-          assert.equal(variables.rootIds.length, rootCount);
-          return { data: {
-            viewer: { id: "app-user" },
-            issues: {
-              nodes: roots.map((root) => ({
-                id: root.id,
-                identifier: root.identifier,
-                title: root.title,
-                description: root.description,
-                priority: root.priority,
-                sortOrder: root.sortOrder,
-                updatedAt: root.updatedAt.toISOString(),
-                project: { id: root.projectId },
-                parent: null,
-                delegate: { id: "app-user" },
-                state: { name: "Todo" },
-                labels: { nodes: [], pageInfo: { hasNextPage: false } },
-                comments: { nodes: [], pageInfo: { hasNextPage: false } },
-                inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
-              })),
-              pageInfo: { hasNextPage: false },
-            },
-          } };
-        },
-      },
-    };
-    const adapter = new LinearSdkImpl(
-      { kind: "oauth", token: "token" },
-      "organization-1",
-      sdk,
-    );
-
-    const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-
-    assert.equal(result.items.length, rootCount);
-    assert.equal(batchReads, 0);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].variables, { projectId: "project-1", limit: 12 });
+  assert.match(requests[0].document, /query SymphonyProjectRootIndex/u);
+  assert.match(requests[0].document, /project\(id: \$projectId\)/u);
+  assert.match(requests[0].document, /issues\(first: \$limit, after: \$cursor, includeArchived: true, filter: \{ parent: \{ null: true \} \}\)/u);
+  assert.match(requests[0].document, /comments\(first: 2, includeArchived: false/u);
+  assert.match(requests[0].document, /inverseRelations\(first: 250, includeArchived: true\)/u);
+  for (const omittedField of ["title", "description", "sortOrder", "subIssueSortOrder"]) {
+    assert.doesNotMatch(requests[0].document, new RegExp(`\\b${omittedField}\\b`, "u"));
   }
-});
-
-test("Root scheduling excludes archived Issues from active Root candidates", async () => {
-  const activeRoot = issue({ id: "active-root", priority: 2 });
-  const archivedRoot = issue({ id: "archived-root", priority: 5 });
-  archivedRoot.archivedAt = new Date("2026-07-15T00:00:00Z");
-  archivedRoot.state = Promise.resolve({ id: "obsolete-state", name: "Obsolete" });
-  const issueQueries = [];
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({
-      issues: async (input) => {
-        issueQueries.push(input);
-        return connection([archivedRoot, activeRoot]);
-      },
-    }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-
-  assert.deepEqual(result.items.map(({ issue: root }) => root.issueId), ["active-root"]);
-  assert.deepEqual(issueQueries, [{ first: 250, includeArchived: false }]);
+  assert.doesNotMatch(requests[0].document, /\n\s+parent\s*\{/u);
+  assert.equal(page.headers.length, 12);
+  assert.deepEqual(page.headers.slice(0, 3).map((header) => ({
+    rootIssueId: header.rootIssueId,
+    priority: header.priority,
+    isArchived: header.isArchived,
+    isDelegatedToSymphony: header.isDelegatedToSymphony,
+  })), [
+    { rootIssueId: "root-0", priority: "no_priority", isArchived: false, isDelegatedToSymphony: true },
+    { rootIssueId: "root-1", priority: "urgent", isArchived: true, isDelegatedToSymphony: true },
+    { rootIssueId: "root-2", priority: "high", isArchived: false, isDelegatedToSymphony: false },
+  ]);
+  assert.deepEqual(page.headers[0], {
+    rootIssueId: "root-0",
+    identifier: "ROOT-0",
+    projectId: "project-1",
+    state: "In Progress",
+    isArchived: false,
+    updatedAt: "2026-07-16T00:00:00.000Z",
+    priority: "no_priority",
+    blockers: [{ sourceIssueId: "root-0", targetIssueId: "blocker-1", targetState: "Todo" }],
+    rootConductorLabels: [{ conductorShortHash: "abc123def456" }],
+    isDelegatedToSymphony: true,
+    rootOwnership: {
+      conductorId: "conductor-1",
+      sourceCommentId: "root-0-ownership",
+      sourceCommentRemoteVersion: "2026-07-16T00:00:00.000Z",
+    },
+  });
+  assert.deepEqual(page.pageInfo, { hasNextPage: false });
 });
 
 test("Project Pool preflight uses one compact query for an empty Project", async () => {
@@ -504,236 +491,60 @@ test("Project resolution uses one compact query without SDK relation fragments",
   assert.doesNotMatch(requests[0].document, /description/u);
 });
 
-test("Root scheduling passes Symphony-authored comments as native Linear facts", async () => {
-  const primary = "Root ownership recorded.\n\n```json\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
-  const root = issue({ id: "root-1", priority: 2, order: 3 });
-  root.delegateId = "app-user";
-  root.comments = async () => connection([{
-    id: "primary-1", body: primary, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
-    user: { id: "app-user" }, issue: { id: "root-1" },
-  }]);
-  root.inverseRelations = async () => connection([]);
-  const sdk = {
-    viewer: { id: "app-user" },
-    project: async () => ({ issues: async () => connection([root]) }),
-    client: {
-      async rawRequest(query, variables) {
-        return { data: {
-          viewer: { id: "app-user" },
-          issues: { nodes: [{
-            id: "root-1",
-            identifier: "ROOT-1",
-            title: "Title",
-            description: "Description",
-            priority: 2,
-            sortOrder: 3,
-            updatedAt: "2026-07-16T00:00:00Z",
-            project: { id: "project-1" },
-            parent: null,
-            delegate: { id: "app-user" },
-            state: { name: "In Progress" },
-            labels: { nodes: [], pageInfo: { hasNextPage: false } },
-            comments: { nodes: [{
-              id: "primary-1",
-              body: primary,
-              createdAt: "2026-07-16T00:00:00Z",
-              updatedAt: "2026-07-16T00:00:00Z",
-              user: { id: "app-user" },
-              issue: { id: "root-1" },
-            }], pageInfo: { hasNextPage: false } },
-            inverseRelations: { nodes: [{
-              type: "blocks",
-              issue: { id: "blocker-1", state: { name: "Todo" } },
-              relatedIssue: { id: "root-1" },
-            }], pageInfo: { hasNextPage: false } },
-          }], pageInfo: { hasNextPage: false } },
-        } };
-      },
-    },
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-
-  assert.equal(result.items[0].issue.state, "Todo");
-  assert.equal(result.items[0].rootManagedComments[0].body, primary);
-  assert.deepEqual(result.items[0].blockers, []);
-});
-
-test("Root scheduling leaves ownership record interpretation to Conductor", async () => {
-  const ownership = 'Root ownership recorded.\n\n```json\n{"kind":"root_ownership","version":1}\n```';
-  const root = issue({ id: "root-1", priority: 2, order: 3 });
-  root.comments = async () => connection([{
-    id: "ownership-1", body: ownership, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
-    user: { id: "app-user" }, issue: { id: "root-1" },
-  }]);
-  root.inverseRelations = async () => connection([]);
-  const sdk = {
-    viewer: { id: "app-user" },
-    project: async () => ({ issues: async () => connection([root]) }),
-    client: {
-      async rawRequest(query, variables) {
-        return { data: {
-          viewer: { id: "app-user" },
-          issues: { nodes: [{
-            id: "root-1", identifier: "ROOT-1", title: "Title", description: "Description",
-            priority: 2, sortOrder: 3, updatedAt: "2026-07-16T00:00:00Z",
-            project: { id: "project-1" }, parent: null, delegate: { id: "app-user" },
-            state: { name: "In Progress" },
-            labels: { nodes: [], pageInfo: { hasNextPage: false } },
-            comments: { nodes: [], pageInfo: { hasNextPage: false } },
-            workflowManagedComments: { nodes: [{
-              id: "ownership-1", body: ownership, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", user: { id: "app-user" }, issue: { id: "root-1" },
-            }], pageInfo: { hasNextPage: false } },
-            inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
-          }], pageInfo: { hasNextPage: false } },
-        } };
-      },
-    },
-  };
-  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
-
-  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-
-  assert.equal(result.items[0].rootManagedComments[0].body, ownership);
-});
-
-test("Root scheduling reads candidate facts with bounded concurrency", async () => {
-  let releaseReads;
-  const readsReleased = new Promise((resolve) => { releaseReads = resolve; });
-  let activeReads = 0;
-  let maxActiveReads = 0;
-  const roots = Array.from({ length: 12 }, (_, index) => {
-    const root = issue({ id: `root-${index}` });
-    root.inverseRelations = async () => {
-      activeReads += 1;
-      maxActiveReads = Math.max(maxActiveReads, activeReads);
-      await readsReleased;
-      activeReads -= 1;
-      return connection([]);
-    };
-    return root;
-  });
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection(roots) }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  const pending = adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-  await new Promise((resolve) => setImmediate(resolve));
-  const observedConcurrency = maxActiveReads;
-  releaseReads();
-  await pending;
-
-  assert.ok(observedConcurrency > 1);
-  assert.ok(observedConcurrency <= 8);
-});
-
-
-test("Root scheduling reads every blocker page and target state outside the candidate set", async () => {
-  const doneBlocker = issue({ id: "external-done" });
-  doneBlocker.state = Promise.resolve({ id: "state-done", name: "Done" });
-  const activeBlocker = issue({ id: "external-active" });
-  activeBlocker.state = Promise.resolve({ id: "state-progress", name: "In Progress" });
-  const root = issue({ id: "root-1" });
-  root.inverseRelations = async () => paginatedConnection([
-    [blocks(doneBlocker, root)],
-    [blocks(activeBlocker, root)],
-  ]);
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection([root]) }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  const result = await adapter.listRootIssues({
-    projectId: "project-1",
-    limit: 250,
-  });
-
-  assert.deepEqual(result.items[0].blockers, [
+test("Project Root Index fails closed for ambiguous ownership and incomplete nested relations", async () => {
+  const cases = [
     {
-      sourceIssueId: "root-1",
-      targetIssueId: "external-done",
-      targetState: "Done",
+      root: projectRootIndexNode({
+        comments: [rootOwnershipComment("root-1", "ownership-1"), rootOwnershipComment("root-1", "ownership-2")],
+      }),
+      error: /linear_project_root_index_ownership_ambiguous/u,
     },
     {
-      sourceIssueId: "root-1",
-      targetIssueId: "external-active",
-      targetState: "In Progress",
+      root: projectRootIndexNode({
+        comments: [rootOwnershipComment("root-1")],
+        commentsHasNextPage: true,
+      }),
+      error: /linear_project_root_index_ownership_incomplete/u,
     },
-  ]);
+    {
+      root: projectRootIndexNode({ relationsHasNextPage: true }),
+      error: /linear_project_root_index_blockers_incomplete/u,
+    },
+  ];
+
+  for (const { root, error } of cases) {
+    const adapter = rootIndexAdapter([root], []);
+    await assert.rejects(
+      adapter.listProjectRootIndexPage({ projectId: "project-1", limit: 1 }),
+      error,
+    );
+  }
 });
 
-test("Root scheduling fails closed when a blocker relation has inconsistent endpoints", async () => {
-  const blocker = issue({ id: "blocker-1" });
-  const root = issue({ id: "root-1" });
-  const wrongTarget = issue({ id: "root-2" });
-  root.inverseRelations = async () => connection([blocks(blocker, wrongTarget)]);
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection([root]) }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
+test("Project Root Index rejects malformed Header authority facts", async () => {
+  const cases = [
+    { root: projectRootIndexNode({ priority: 5 }), error: /linear_issue_priority_invalid/u },
+    { root: projectRootIndexNode({ projectId: "project-2" }), error: /linear_project_root_index_header_invalid/u },
+    {
+      root: projectRootIndexNode({
+        relations: [{
+          id: "relation-1",
+          type: "blocks",
+          issue: { id: "blocker-1", state: { name: "Todo" } },
+          relatedIssue: { id: "root-2" },
+        }],
+      }),
+      error: /linear_project_root_index_blocker_invalid/u,
+    },
+  ];
 
-  await assert.rejects(
-    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
-    /linear_blocker_relation_invalid/u,
-  );
-});
-
-test("Root scheduling fails closed for an unknown Linear priority", async () => {
-  const root = issue({ id: "root-1", priority: 5 });
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection([root]) }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  await assert.rejects(
-    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
-    /linear_issue_priority_invalid/u,
-  );
-});
-
-test("Root scheduling fails closed for a cross-project Root", async () => {
-  const root = issue({ id: "root-1" });
-  root.projectId = "project-2";
-  const sdk = {
-    viewer: Promise.resolve({ id: "app-user" }),
-    project: async () => ({ issues: async () => connection([root]) }),
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "oauth", token: "token" },
-    "organization-1",
-    sdk,
-  );
-
-  await assert.rejects(
-    adapter.listRootIssues({ projectId: "project-1", limit: 250 }),
-    /linear_root_project_mismatch/u,
-  );
+  for (const { root, error } of cases) {
+    const adapter = rootIndexAdapter([root], []);
+    await assert.rejects(
+      adapter.listProjectRootIndexPage({ projectId: "project-1", limit: 1 }),
+      error,
+    );
+  }
 });
 
 test("workflow Issue Tree maps every bounded comment, native thread, reaction, relation, and Team status", async () => {

@@ -30,28 +30,28 @@ export interface LinearIssueValue {
   updatedAt: string;
 }
 
-export interface RootIssueValue {
-  issue: LinearIssueValue;
+export interface RootOwnershipHeaderValue {
+  conductorId: string;
+  sourceCommentId: string;
+  sourceCommentRemoteVersion: string;
+}
+
+export interface RootHeaderValue {
+  rootIssueId: string;
+  identifier: string;
+  projectId: string;
+  state: LinearIssueState;
+  isArchived: boolean;
+  updatedAt: string;
   isDelegatedToSymphony: boolean;
   priority: LinearPriority;
   blockers: LinearBlockerValue[];
   rootConductorLabels: ConductorPoolValue[];
-  rootManagedComments: RootManagedCommentValue[];
+  rootOwnership?: RootOwnershipHeaderValue;
 }
 
 export interface ConductorPoolValue {
   conductorShortHash: string;
-}
-
-export interface RootManagedCommentValue {
-  commentId: string;
-  issueId: string;
-  authorKind: WorkflowCommentAuthorKind;
-  authorId: string;
-  authorUserId?: string;
-  createdAt: string;
-  updatedAt: string;
-  body: string;
 }
 
 export type WorkflowStatusCategory =

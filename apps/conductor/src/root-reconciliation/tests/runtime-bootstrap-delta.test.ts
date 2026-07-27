@@ -26,7 +26,7 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
     issueId: "root-1", identifier: "SYM-1", state: "Todo" as const, title: "Root",
     description: "Build it", updatedAt: "2026-07-23T00:00:00Z", projectId: "project-1",
     parentIssueId: null, priority: "normal" as const, order: 0,
-    blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
+    blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true, isArchived: false,
   };
   const tree = workflowTree();
   let opens = 0;
@@ -370,7 +370,7 @@ function failureDependencies(input: {
     issueId: "root-1", identifier: "SYM-1", state: "Todo" as const, title: "Root",
     description: "Build it", updatedAt: "2026-07-23T00:00:00Z", projectId: "project-1",
     parentIssueId: null, priority: "normal" as const, order: 0,
-    blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
+    blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true, isArchived: false,
   };
   return {
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",

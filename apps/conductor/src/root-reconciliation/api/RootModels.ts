@@ -13,22 +13,16 @@ export interface LinearBlockerSnapshot {
   targetState: LinearIssueState;
 }
 
-export interface RootIssue {
+export interface DiscoveredRoot {
   issueId: string;
   identifier: string;
   state: LinearIssueState;
-  title: string;
-  description: string;
   updatedAt: string;
-}
-
-export interface DiscoveredRoot extends RootIssue {
   projectId: string;
-  parentIssueId: string | null;
+  isArchived: boolean;
   isDelegatedToSymphony: boolean;
   managedConductorId?: string;
   priority: LinearPriority;
-  order: number;
   blockers: LinearBlockerSnapshot[];
   rootConductorLabels: Array<{ conductorShortHash: string }>;
 }

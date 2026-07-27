@@ -9,12 +9,13 @@ export function discoverCurrentRoots(input: {
 }): DiscoveredRoot[] {
   return input.roots.filter((root) =>
     root.projectId === input.projectId &&
-    root.parentIssueId === null &&
     isRootRoutedToConductor(root, input.conductorShortHash, input.conductorPool) &&
-    root.state !== "Done" &&
-    (root.state !== "Canceled" || root.managedConductorId === input.conductorId) &&
     (root.managedConductorId === input.conductorId ||
-      (!root.managedConductorId && root.isDelegatedToSymphony))
+      (!root.managedConductorId &&
+        root.isDelegatedToSymphony &&
+        !root.isArchived &&
+        root.state !== "Done" &&
+        root.state !== "Canceled"))
   );
 }
 

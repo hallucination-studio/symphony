@@ -14,10 +14,10 @@ import type {
 import type { DiscoveredRoot } from "./RootModels.js";
 
 export type RootTree = LinearWorkflowTreeSnapshot;
-export type RootIssueSnapshot = RootTree["issues"][number];
+export type RootTreeIssue = RootTree["issues"][number];
 export type RootCommentSnapshot = RootTree["comments"][number];
 export type RootRelationSnapshot = RootTree["relations"][number];
-export type RootIssueKind = NonNullable<RootIssueSnapshot["issue_kind"]>;
+export type RootIssueKind = NonNullable<RootTreeIssue["issue_kind"]>;
 export type RootFactIssueKind = "root" | "cycle" | "plan" | "work" | "verify" | "human_action";
 export type RootActorKind = "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
 export type LinearFactState =

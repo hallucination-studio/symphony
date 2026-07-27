@@ -1,5 +1,3 @@
-import type { LinearPriority } from "../types.js";
-
 export interface PageInfo {
   hasNextPage: boolean;
   endCursor?: string;
@@ -134,12 +132,12 @@ export interface LinearClientInterface {
     | { kind: "conflict" }
   >;
 
-  listRootIssues(input: {
+  listProjectRootIndexPage(input: {
     projectId: string;
     cursor?: string;
     limit: number;
   }): Promise<{
-    items: import("../types.js").RootIssueValue[];
+    headers: import("../types.js").RootHeaderValue[];
     pageInfo: PageInfo;
   }>;
 

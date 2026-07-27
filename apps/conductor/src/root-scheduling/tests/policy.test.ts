@@ -129,7 +129,7 @@ function root(
     order,
     blockers,
     rootConductorLabels: [],
-    isDelegatedToSymphony: true,
+    isDelegatedToSymphony: true, isArchived: false,
   };
 }
 

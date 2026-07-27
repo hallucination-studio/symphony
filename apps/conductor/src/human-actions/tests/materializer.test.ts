@@ -160,9 +160,9 @@ function planReviewDirective(): RequestHumanActionDirective {
 function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {
   return {
     root: {
-      issueId: "root-1", identifier: "SYM-1", state: "In Progress", title: "Root", description: "Root description",
-      updatedAt: "2026-07-24T00:00:00Z", projectId: "project-1", parentIssueId: null,
-      priority: "normal", order: 0, blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
+      issueId: "root-1", identifier: "SYM-1", state: "In Progress",
+      updatedAt: "2026-07-24T00:00:00Z", projectId: "project-1",
+      priority: "normal", blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true, isArchived: false,
     },
     tree,
     git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 16, has_more: false, partial: false } },

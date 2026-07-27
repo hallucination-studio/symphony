@@ -1,19 +1,12 @@
 {
-  "schema": "podium-conductor.schema.json#/$defs/RootIssueSnapshot",
+  "schema": "podium-conductor.schema.json#/$defs/RootHeader",
   "value": {
-    "issue": {
-      "issue_id": "root-1",
-      "identifier": "SYM-1",
-      "project_id": "project-1",
-      "state": "Todo",
-      "order": 12.5,
-      "depth": 0,
-      "title": "Roadmap 2 Root",
-      "description": "Schedule this Root from current Linear facts.",
-      "labels": [],
-      "is_archived": false,
-      "updated_at": "2026-07-19T00:00:00Z"
-    },
+    "root_issue_id": "root-1",
+    "identifier": "SYM-1",
+    "project_id": "project-1",
+    "state": "Todo",
+    "is_archived": false,
+    "updated_at": "2026-07-19T00:00:00Z",
     "is_delegated_to_symphony": true,
     "priority": "urgent",
     "blockers": [
@@ -24,6 +17,10 @@
       }
     ],
     "root_conductor_labels": [],
-    "root_managed_comments": []
+    "root_ownership": {
+      "conductor_id": "conductor-1",
+      "source_comment_id": "comment-1",
+      "source_comment_remote_version": "2026-07-19T00:00:00Z"
+    }
   }
 }

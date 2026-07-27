@@ -15,6 +15,11 @@ const protocolFamilies = [
   "podium-conductor",
   "conductor-performer",
 ];
+const retiredRootListContracts = [
+  ["List", "Root", "Issues", "Query"].join(""),
+  ["Root", "Issues", "Page", "Result"].join(""),
+  ["Root", "Issue", "Snapshot"].join(""),
+];
 
 async function loadSchema(family) {
   const schemaPath = path.join(schemaRoot, family, `${family}.schema.json`);
@@ -62,6 +67,10 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "DesktopOverviewView",
     "OpenExternalUrlCommand",
     "ResolveConductorProjectQuery",
+    "ListProjectRootIndexPageQuery",
+    "ProjectRootIndexPageResult",
+    "ProjectRootIndexPage",
+    "RootHeader",
     "WorkflowMutationCommand",
     "ConductorPerformerMessage",
     "RootBootstrapSnapshot",
@@ -137,43 +146,68 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "Archive" + "WorkflowIssueCommand",
     "Restore" + "WorkflowIssueCommand",
     "Remove" + "WorkflowRelationCommand",
+    ...retiredRootListContracts,
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
   }
 });
 
-test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
+test("Project Root Index discovery facts are closed, bounded, and redacted", async () => {
   const schema = await loadSchema("podium-conductor");
-  const root = schema.$defs.RootIssueSnapshot;
-  const issue = schema.$defs.LinearIssueNodeSnapshot;
+  const root = schema.$defs.RootHeader;
+  const ownership = schema.$defs.RootOwnershipHeader;
+  const query = schema.$defs.ListProjectRootIndexPageQuery;
+  const page = schema.$defs.ProjectRootIndexPage;
+  const result = schema.$defs.ProjectRootIndexPageResult;
   const priority = schema.$defs.LinearPriority;
   const blocker = schema.$defs.LinearBlockerSnapshot;
 
-  assert.ok(root.required.includes("priority"));
-  assert.ok(root.required.includes("is_delegated_to_symphony"));
-  assert.ok(root.required.includes("blockers"));
-  assert.ok(root.required.includes("root_managed_comments"));
-  assert.equal(root.properties.priority.$ref, "#/$defs/LinearPriority");
-  assert.deepEqual(priority.enum, [
-    "urgent",
-    "high",
-    "normal",
-    "low",
-    "no_priority",
+  assert.deepEqual(root.required, [
+    "root_issue_id",
+    "identifier",
+    "project_id",
+    "state",
+    "is_archived",
+    "updated_at",
+    "priority",
+    "blockers",
+    "root_conductor_labels",
+    "is_delegated_to_symphony",
   ]);
-  assert.equal(root.properties.blockers.maxItems, 512);
+  assert.deepEqual(Object.keys(root.properties).sort(), [
+    "blockers",
+    "identifier",
+    "is_archived",
+    "is_delegated_to_symphony",
+    "priority",
+    "project_id",
+    "root_conductor_labels",
+    "root_issue_id",
+    "root_ownership",
+    "state",
+    "updated_at",
+  ]);
+  assert.equal(root.properties.priority.$ref, "#/$defs/LinearPriority");
+  assert.deepEqual(priority.enum, ["urgent", "high", "normal", "low", "no_priority"]);
+  assert.equal(root.properties.blockers.maxItems, 250);
   assert.equal(
     root.properties.blockers.items.$ref,
     "#/$defs/LinearBlockerSnapshot",
   );
-  assert.equal(root.properties.root_managed_comments.maxItems, 2);
-  assert.equal(
-    root.properties.root_managed_comments.items.$ref,
-    "#/$defs/LinearCommentSnapshot",
-  );
-  assert.equal(issue.properties.order.type, "number");
-  assert.equal(issue.properties.order.minimum, -1000000000);
-  assert.equal(issue.properties.order.maximum, 1000000000);
+  assert.equal(root.properties.root_conductor_labels.maxItems, 1);
+  assert.equal(root.properties.root_ownership.$ref, "#/$defs/RootOwnershipHeader");
+  assert.deepEqual(ownership.required, [
+    "conductor_id",
+    "source_comment_id",
+    "source_comment_remote_version",
+  ]);
+  assert.equal(ownership.additionalProperties, false);
+  assert.equal(query.properties.kind.const, "list_project_root_index_page");
+  assert.deepEqual(query.required, ["kind", "binding_id", "expected_project_id", "page"]);
+  assert.equal(page.properties.headers.items.$ref, "#/$defs/RootHeader");
+  assert.equal(page.properties.headers.maxItems, 250);
+  assert.equal(result.properties.kind.const, "project_root_index_page");
+  assert.equal(result.properties.page.$ref, "#/$defs/ProjectRootIndexPage");
   assert.equal(blocker.additionalProperties, false);
   assert.deepEqual(blocker.required, [
     "source_issue_id",
@@ -185,7 +219,7 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
 test("Project resolution carries a closed Conductor pool and Root routing labels", async () => {
   const schema = await loadSchema("podium-conductor");
   const resolved = schema.$defs.ResolvedConductorProject;
-  const root = schema.$defs.RootIssueSnapshot;
+  const root = schema.$defs.RootHeader;
   const pool = schema.$defs.ConductorPool;
 
   assert.ok(resolved.required.includes("conductor_pool"));

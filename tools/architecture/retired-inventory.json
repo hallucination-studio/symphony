@@ -134,6 +134,21 @@
         "```symphony": []
       }
     },
+    "retired-root-list-discovery": {
+      "source": "docs/architecture/contracts.md#podium-conductor-boundary",
+      "path_patterns": [],
+      "paths": [],
+      "symbols": {
+        "ListRootIssuesQuery": [],
+        "RootIssuesPageResult": [],
+        "RootIssueSnapshot": [],
+        "listRootIssues": [],
+        "listAllRootIssues": [],
+        "list_root_issues": [],
+        "root_issues_page": [],
+        "root_managed_comments": []
+      }
+    },
     "legacy-turn-usage": {
       "source": "docs/architecture/performer-profiles.md#token-usage",
       "path_patterns": [],

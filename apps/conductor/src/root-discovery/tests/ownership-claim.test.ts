@@ -332,7 +332,7 @@ function discoveredRoot() {
     order: 0,
     blockers: [],
     rootConductorLabels: [],
-    isDelegatedToSymphony: true,
+    isDelegatedToSymphony: true, isArchived: false,
   };
 }
 

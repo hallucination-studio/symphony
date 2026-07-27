@@ -18,7 +18,7 @@ const root = {
   issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
   description: "Build it", updatedAt: "2026-07-25T00:00:00Z", projectId: "project-1",
   parentIssueId: null, priority: "normal" as const, order: 0,
-  blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
+  blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true, isArchived: false,
 };
 
 test("a repair limit persists one deterministic convergence assessment and reads it back", async () => {
