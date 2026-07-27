@@ -337,6 +337,63 @@ test("Project Root Index gateway validates one bounded Header page without aggre
   assert.deepEqual(page.pageInfo, { hasNextPage: true, endCursor: "next" });
 });
 
+test("Project Root Index gateway retries an official retryable Linear failure within the bounded policy", async () => {
+  class RatelimitedLinearError extends Error {}
+  let attempts = 0;
+  const sleeps = [];
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async listProjectRootIndexPage() {
+        attempts += 1;
+        if (attempts === 1) throw new RatelimitedLinearError("private rate limit detail");
+        return { headers: [rootHeader()], pageInfo: { hasNextPage: false } };
+      },
+    },
+    { sleep: async (delayMs) => { sleeps.push(delayMs); }, maxAttempts: 3, baseDelayMs: 10, random: () => 0 },
+  );
+
+  const page = await handler.listProjectRootIndexPage({ projectId: "project-1", limit: 1 });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [10]);
+  assert.equal(page.headers.length, 1);
+});
+
+test("Project Root Index preserves an exhausted official Linear failure across the Conductor boundary", async () => {
+  class RatelimitedLinearError extends Error {}
+  let attempts = 0;
+  const services = await createConductorServices({
+    async listProjectRootIndexPage() {
+      attempts += 1;
+      throw new RatelimitedLinearError("private rate limit detail");
+    },
+  });
+  const handler = new PodiumConductorProtocolHandler(services);
+
+  const response = await handler.handle({
+    protocol_version: "1",
+    request_id: "request-1",
+    body: {
+      kind: "list_project_root_index_page",
+      binding_id: "binding-1",
+      instance_id: "instance-1",
+      expected_project_id: "project-1",
+      page: { limit: 1 },
+    },
+  });
+
+  assert.equal(attempts, 4);
+  assert.deepEqual(response.body, {
+    code: "linear_rate_limited",
+    category: "linear",
+    sanitized_reason: "Linear rate limit exceeded.",
+    retryable: true,
+    action_required: "block_root",
+    next_action: "Resolve the Linear error, then retry the Root.",
+  });
+  assert.doesNotMatch(JSON.stringify(response), /private rate limit detail/u);
+});
+
 test("Project Root Index gateway rejects malformed Header authority facts", async () => {
   const invalidHeaders = [
     rootHeader({ projectId: "project-other" }),

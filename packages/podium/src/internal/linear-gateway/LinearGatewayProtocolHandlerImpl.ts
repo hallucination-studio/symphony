@@ -43,7 +43,7 @@ function normalizedFailure(error: unknown): {
   };
 }
 
-function protocolFailure(error: unknown): ProtocolError {
+export function linearProtocolFailure(error: unknown): ProtocolError {
   const normalized = normalizedFailure(error);
   const classified = classifyLinearFailure(error);
   return {
@@ -87,16 +87,18 @@ export class LinearGatewayProtocolHandlerImpl {
     cursor?: string;
     limit: number;
   }) {
-    const page = await this.client.listProjectRootIndexPage(input);
-    if (page.headers.length > input.limit) {
-      throw new Error("linear_project_root_index_page_too_large");
-    }
-    const rootIssueIds = new Set<string>();
-    for (const header of page.headers) {
-      validateRootHeader(header, input.projectId, rootIssueIds);
-    }
-    nextCursor(page.pageInfo);
-    return page;
+    return this.#retryRead(async () => {
+      const page = await this.client.listProjectRootIndexPage(input);
+      if (page.headers.length > input.limit) {
+        throw new Error("linear_project_root_index_page_too_large");
+      }
+      const rootIssueIds = new Set<string>();
+      for (const header of page.headers) {
+        validateRootHeader(header, input.projectId, rootIssueIds);
+      }
+      nextCursor(page.pageInfo);
+      return page;
+    });
   }
 
   async getWorkflowIssueTree(projectId: string, rootIssueId: string) {
@@ -333,21 +335,40 @@ export class LinearGatewayProtocolHandlerImpl {
           }
         }
         if (!isRetryable || attempt === this.retry.maxAttempts) {
-          return { kind: "failed", error: protocolFailure(error) };
+          return { kind: "failed", error: linearProtocolFailure(error) };
         }
-        const retryAfterMs = typeof record.retryAfterMs === "number" &&
-          Number.isFinite(record.retryAfterMs) && record.retryAfterMs >= 0
-          ? record.retryAfterMs : 0;
-        const exponential = this.retry.baseDelayMs * 2 ** (attempt - 1);
-        const jitter = this.retry.random
-          ? Math.floor(exponential * 0.25 * this.retry.random()) : 0;
-        await this.retry.sleep(Math.min(
-          this.retry.maxDelayMs ?? 60_000,
-          Math.max(retryAfterMs, exponential) + jitter,
-        ));
+        await this.retry.sleep(this.#retryDelayMs(error, attempt));
       }
     }
-    return { kind: "failed", error: protocolFailure(new Error("Linear retry exhausted.")) };
+    return { kind: "failed", error: linearProtocolFailure(new Error("Linear retry exhausted.")) };
+  }
+
+  async #retryRead<T>(read: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt += 1) {
+      try {
+        return await read();
+      } catch (error) {
+        const record = errorRecord(error);
+        const retryable = record.retryable === true || classifyLinearFailure(error)?.retryable === true;
+        if (!retryable || attempt === this.retry.maxAttempts) throw error;
+        await this.retry.sleep(this.#retryDelayMs(error, attempt));
+      }
+    }
+    throw new Error("linear_retry_exhausted");
+  }
+
+  #retryDelayMs(error: unknown, attempt: number): number {
+    const record = errorRecord(error);
+    const retryAfterMs = typeof record.retryAfterMs === "number" &&
+      Number.isFinite(record.retryAfterMs) && record.retryAfterMs >= 0
+      ? record.retryAfterMs : 0;
+    const exponential = this.retry.baseDelayMs * 2 ** (attempt - 1);
+    const jitter = this.retry.random
+      ? Math.floor(exponential * 0.25 * this.retry.random()) : 0;
+    return Math.min(
+      this.retry.maxDelayMs ?? 60_000,
+      Math.max(retryAfterMs, exponential) + jitter,
+    );
   }
 
   async #checkWorkflowIdempotentOutcome(
@@ -434,7 +455,7 @@ export class LinearGatewayProtocolHandlerImpl {
         },
       };
     } catch {
-      return { kind: "failed", error: protocolFailure(error) };
+      return { kind: "failed", error: linearProtocolFailure(error) };
     }
   }
 

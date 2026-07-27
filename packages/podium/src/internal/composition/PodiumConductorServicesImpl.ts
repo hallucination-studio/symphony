@@ -7,7 +7,10 @@ import type {
   PodiumConductorChannel,
   PodiumConductorServices,
 } from "../../public/PodiumConductorProtocolHandler.js";
-import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
+import {
+  LinearGatewayProtocolHandlerImpl,
+  linearProtocolFailure,
+} from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import {
   LinearRequestBrokerImpl,
@@ -303,13 +306,18 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
       throw new Error("linear_page_limit_invalid");
     }
-    const page = await gateway.listProjectRootIndexPage({
-      projectId: requiredString(body.expected_project_id, "linear_project_id_missing"),
-      limit,
-      ...(typeof pageRequest.cursor === "string"
-        ? { cursor: pageRequest.cursor }
-        : {}),
-    });
+    let page;
+    try {
+      page = await gateway.listProjectRootIndexPage({
+        projectId: requiredString(body.expected_project_id, "linear_project_id_missing"),
+        limit,
+        ...(typeof pageRequest.cursor === "string"
+          ? { cursor: pageRequest.cursor }
+          : {}),
+      });
+    } catch (error) {
+      return wireLinearFailure(error);
+    }
     return {
       kind: "project_root_index_page",
       page: {
@@ -555,6 +563,18 @@ function matchesRepository(
 function requiredString(value: JsonValue | undefined, code: string): string {
   if (typeof value !== "string") throw new Error(code);
   return value;
+}
+
+function wireLinearFailure(error: unknown) {
+  const failure = linearProtocolFailure(error);
+  return {
+    code: failure.code,
+    category: failure.category,
+    sanitized_reason: failure.sanitizedReason,
+    retryable: failure.retryable,
+    action_required: failure.actionRequired,
+    next_action: failure.nextAction,
+  };
 }
 
 function failure(kind: string) {
