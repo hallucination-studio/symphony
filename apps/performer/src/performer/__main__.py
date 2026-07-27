@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("--workspace-root", type=Path)
     args = parser.parse_args()
     try:
-        load_role_prompt_catalog()
+        prompt_catalog = load_role_prompt_catalog()
         sdk = create_sdk()
     except ValueError as error:
         raise SystemExit(str(error)) from None
@@ -32,7 +32,7 @@ def main() -> None:
         for result in ProfileControlHost(sdk).iter_results(metadata, sys.stdin.buffer):
             print(json.dumps(result, separators=(",", ":")), flush=True)
         return
-    backend = CodexBackendImpl(sdk)
+    backend = CodexBackendImpl(sdk, prompt_catalog)
     if args.agent:
         cancel_event = Event()
         try:
