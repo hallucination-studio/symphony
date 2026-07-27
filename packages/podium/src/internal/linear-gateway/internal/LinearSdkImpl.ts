@@ -32,6 +32,8 @@ import { planProjectConductorPoolMutation } from "../../conductor-bindings/Proje
 import {
   inspectTargetWorkflowCatalog,
   HUMAN_ACTION_LABEL_NAMES,
+  TARGET_WORKFLOW_LABEL_NAMES,
+  WORKFLOW_KIND_LABEL_NAMES,
   isTargetWorkflowStatusName,
   planTargetWorkflowInitialization,
   type TargetWorkflowInitializationOperation,
@@ -1101,8 +1103,8 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (plan.kind !== "ready") {
       throw new Error(`linear_workflow_setup_${plan.reason}`);
     }
-    const initialHumanActionLabels = input.authorized === true
-      ? await this.#readHumanActionLabels(target.teamId)
+    const initialWorkflowLabels = input.authorized === true
+      ? await this.#readTargetWorkflowLabels(target.teamId)
       : [];
     if (input.authorized !== true) {
       return {
@@ -1111,6 +1113,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         teamId: target.teamId,
         currentStatuses: target.states.map(linearWorkflowStateValueFromRaw),
         operations: plan.operations,
+        workflowKindLabels: [...WORKFLOW_KIND_LABEL_NAMES],
         humanActionLabels: [...HUMAN_ACTION_LABEL_NAMES],
         nativeDuplicate: linearWorkflowStateValueFromRaw(
           target.states.find(({ type }) => type === "duplicate")!,
@@ -1130,7 +1133,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         }
       }
     }
-    for (const labelName of HUMAN_ACTION_LABEL_NAMES) {
+    for (const labelName of TARGET_WORKFLOW_LABEL_NAMES) {
       await this.#uniqueIssueLabel(labelName, target.teamId);
     }
     const finalTarget = await this.#readTargetTeamWorkflow(input.projectId);
@@ -1138,20 +1141,21 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (inspection.kind !== "complete") {
       throw ambiguousError("linear_workflow_setup_read_back_failed");
     }
-    const humanActionLabels = await this.#readHumanActionLabels(finalTarget.teamId);
-    if (humanActionLabels.length !== HUMAN_ACTION_LABEL_NAMES.length ||
-        HUMAN_ACTION_LABEL_NAMES.some((name, index) => humanActionLabels[index] !== name)) {
-      throw ambiguousError("linear_human_action_labels_read_back_failed");
+    const workflowLabels = await this.#readTargetWorkflowLabels(finalTarget.teamId);
+    if (workflowLabels.length !== TARGET_WORKFLOW_LABEL_NAMES.length ||
+        TARGET_WORKFLOW_LABEL_NAMES.some((name, index) => workflowLabels[index] !== name)) {
+      throw ambiguousError("linear_workflow_labels_read_back_failed");
     }
     return {
       kind: plan.operations.length === 0 &&
-        initialHumanActionLabels.length === HUMAN_ACTION_LABEL_NAMES.length
+        initialWorkflowLabels.length === TARGET_WORKFLOW_LABEL_NAMES.length
         ? "already_applied" as const
         : "applied" as const,
       projectId: finalTarget.projectId,
       teamId: finalTarget.teamId,
       canonicalStatuses: inspection.canonicalStatuses.map(linearWorkflowStateValue),
-      humanActionLabels,
+      workflowKindLabels: workflowLabels.slice(0, WORKFLOW_KIND_LABEL_NAMES.length),
+      humanActionLabels: workflowLabels.slice(WORKFLOW_KIND_LABEL_NAMES.length),
       nativeDuplicate: linearWorkflowStateValue(inspection.nativeDuplicate),
     };
   }
@@ -2498,9 +2502,9 @@ export class LinearSdkImpl implements LinearClientInterface {
     return ids;
   }
 
-  async #readHumanActionLabels(teamId: string): Promise<string[]> {
+  async #readTargetWorkflowLabels(teamId: string): Promise<string[]> {
     const names: string[] = [];
-    for (const name of HUMAN_ACTION_LABEL_NAMES) {
+    for (const name of TARGET_WORKFLOW_LABEL_NAMES) {
       const matches = await this.#issueLabelsNamed(name, teamId);
       if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
       if (matches.length === 1) names.push(name);

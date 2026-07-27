@@ -1529,7 +1529,7 @@ function retainedWorkflowStates() {
   ].map(([id, name, type], position) => ({ id, name, type, position }));
 }
 
-function workflowSetupSdk(states, { failAfterCreate, issueLabelNames = [] } = {}) {
+function workflowSetupSdk(states, { failAfterCreate, issueLabelNames = [], omitCreatedIssueLabelNames = new Set() } = {}) {
   const observations = { projects: 0, teams: 0, states: 0, batches: 0, updates: [], creates: [], labelCreates: [] };
   const labels = issueLabelNames.map((name, index) => issueLabel(name, index));
   const team = {
@@ -1571,7 +1571,7 @@ function workflowSetupSdk(states, { failAfterCreate, issueLabelNames = [] } = {}
       async createIssueLabel(input) {
         observations.labelCreates.push(input.name);
         const label = issueLabel(input.name, labels.length);
-        labels.push(label);
+        if (!omitCreatedIssueLabelNames.has(input.name)) labels.push(label);
         return { success: true, issueLabel: Promise.resolve(label) };
       },
       organization: Promise.resolve({ id: "organization-1" }),
@@ -1627,6 +1627,9 @@ test("Team workflow setup returns a bounded dry-run without explicit authorizati
   assert.equal(result.nativeDuplicate.category, "duplicate");
   assert.equal(result.operations.length, 12);
   assert.equal(result.operations.at(-1)?.name, "Failed");
+  assert.deepEqual(result.workflowKindLabels, [
+    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+  ]);
   assert.deepEqual(result.humanActionLabels, [
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
   ]);
@@ -1656,7 +1659,11 @@ test("Team workflow setup renames Backlog, creates missing states, and reads bac
     ["Changes Required", "completed"], ["Failed", "canceled"],
   ].map(([name, type]) => ({ name, type })));
   assert.deepEqual(observations.labelCreates, [
+    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
+  ]);
+  assert.deepEqual(result.workflowKindLabels, [
+    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
   ]);
   assert.equal(observations.states, 2);
 });
@@ -1731,6 +1738,7 @@ test("Team workflow setup is a no-op after the canonical catalog and labels are 
   ].map(([id, name, type], position) => ({ id, name, type, position }));
   const { sdk, observations } = workflowSetupSdk(states, {
     issueLabelNames: [
+      "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
       "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
     ],
   });
@@ -1739,10 +1747,37 @@ test("Team workflow setup is a no-op after the canonical catalog and labels are 
   const result = await adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true });
 
   assert.equal(result.kind, "already_applied");
+  assert.deepEqual(result.workflowKindLabels, [
+    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+  ]);
   assert.deepEqual(result.humanActionLabels, [
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
   ]);
   assert.equal(observations.updates.length, 0);
   assert.equal(observations.creates.length, 0);
   assert.equal(observations.labelCreates.length, 0);
+});
+
+test("Team workflow setup rejects duplicate primary kind labels", async () => {
+  const { sdk } = workflowSetupSdk(retainedWorkflowStates(), {
+    issueLabelNames: ["Root", "Root"],
+  });
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await assert.rejects(
+    adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true }),
+    /linear_issue_label_ambiguous/u,
+  );
+});
+
+test("Team workflow setup rejects an incomplete primary kind label read-back", async () => {
+  const { sdk } = workflowSetupSdk(retainedWorkflowStates(), {
+    omitCreatedIssueLabelNames: new Set(["Root"]),
+  });
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  await assert.rejects(
+    adapter.initializeTargetTeamWorkflow({ projectId: "project-1", authorized: true }),
+    /linear_workflow_labels_read_back_failed/u,
+  );
 });

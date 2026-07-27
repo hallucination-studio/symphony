@@ -32,6 +32,20 @@ export const HUMAN_ACTION_LABEL_NAMES = Object.freeze([
   "Convergence Override",
 ] as const);
 
+export const WORKFLOW_KIND_LABEL_NAMES = Object.freeze([
+  "Root",
+  "Cycle",
+  "Plan",
+  "Work",
+  "Verify",
+  "Finding",
+] as const);
+
+export const TARGET_WORKFLOW_LABEL_NAMES = Object.freeze([
+  ...WORKFLOW_KIND_LABEL_NAMES,
+  ...HUMAN_ACTION_LABEL_NAMES,
+] as const);
+
 export function isTargetWorkflowStatusName(value: unknown): value is TargetWorkflowStatusName {
   return typeof value === "string" && value in TARGET_WORKFLOW_STATUS_CATEGORIES;
 }
