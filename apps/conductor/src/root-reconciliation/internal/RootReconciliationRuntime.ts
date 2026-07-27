@@ -340,7 +340,7 @@ export class RootReconciliationRuntime {
       this.dependencies.log("root_reconciler_failed", {
         root_issue_id: root.issueId,
         failure_id: result.failure.failureId,
-        category: result.failure.category,
+        failure_code: result.failure.category,
       });
       return "needs-attention";
     }

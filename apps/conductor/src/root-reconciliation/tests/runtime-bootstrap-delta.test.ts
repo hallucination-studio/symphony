@@ -482,6 +482,13 @@ test("Root runtime reports each fresh Reconciler failure without writing machine
   assert.equal(opens, 1);
   assert.deepEqual(tree.comments, commentsBefore);
   assert.equal(logs.at(-1)?.event, "root_reconciler_failed");
+  const failureLog = logs.at(-1)?.fields ?? {};
+  const failureId = failureLog.failure_id;
+  assert.equal(failureLog.root_issue_id, "root-1");
+  assert.equal(failureLog.failure_code, "schema_invalid");
+  assert.ok(typeof failureId === "string");
+  assert.match(failureId, /^root-1:.+:failure$/u);
+  assert.equal("category" in failureLog, false);
 
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 2);
