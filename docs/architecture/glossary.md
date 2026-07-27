@@ -68,7 +68,8 @@ baseBranch
 
 | Canonical Term | 代码类型/字段 | 定义 |
 |---|---|---|
-| Root Issue | `RootIssueSnapshot` | 带有有效 Conductor routing label 的顶层 Linear Issue |
+| Root Issue | `RootHeader` / `root_issue_id` | 带有有效 Conductor routing label 的顶层 Linear Issue；完整Tree读取前只以header参与discovery |
+| Project Root Index Page | `ProjectRootIndexPage` | Podium一次Project-scoped显式query返回的一页bounded Root headers；对同Project全部Conductor共享，不是durable cache |
 | Root Run | 领域概念 | Symphony对一个Root Issue的完整处理生命周期 |
 | Root Workflow State | `RootWorkflowState` | Root允许的Todo、In Progress、Needs Approval、Needs Info、In Review、Done或Canceled Linear status |
 | Root Reconciliation View | `RootReconciliationView` | 从fresh active/archived Linear Tree和Git事实重建的当前内存视图 |
@@ -163,7 +164,8 @@ LinearGatewayInterface
 | 代码类型 | 定义 |
 |---|---|
 | `LinearProjectSnapshot` | Gateway读取到的Project外部事实副本 |
-| `RootIssueSnapshot` | Root header、routing label、Priority、blockers和bounded Control Record外部事实副本；不含完整Tree |
+| `ProjectRootIndexPage` | 一个Project page的完整Root discovery外部事实；physical读取可跨Conductor共享，不含完整Tree |
+| `RootHeader` | Root routing、Priority、`updatedAt`、blockers、native delegation和bounded ownership identity；不含完整Tree |
 | `WorkflowRootTreeSnapshot` | 一个Root的完整descendant tree副本 |
 | `LinearIssueNodeSnapshot` | Tree中的单个Issue节点副本 |
 | `LinearCommentSnapshot` | Linear Comment外部事实副本 |
@@ -176,7 +178,7 @@ LinearGatewayInterface
 
 ```text
 ResolveConductorProjectQuery
-ListRootIssuesQuery
+ListProjectRootIndexPageQuery
 GetWorkflowIssueTreeQuery
 ```
 

@@ -48,7 +48,7 @@ packages/podium/src/
 | `linear-auth` | OAuth、refresh、credential |
 | `project-catalog` | Project pagination |
 | `conductor-bindings` | Conductor Identity、Repository Context、Project Conductor Pool与Root routing assignment |
-| `linear-gateway` | closed Linear query/mutation |
+| `linear-gateway` | closed Linear query/mutation与Project-scoped Root Index |
 | `performer-profile-relay` | 把Desktop Profile Command转发给目标Conductor，不保存payload |
 | `conductor-presence` | 从当前private channel派生online/offline，不持久化 |
 | `desktop-views` | 组合Overview、Conductor和Settings所需的named Desktop View |
@@ -71,7 +71,7 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - validate and mutate one Root Conductor Label from that pool；
 - create a Root only after validating one selected pool member and write only the
   matching `symphony:conductor/<short-hash>` Issue Label；
-- list Roots；
+- list `ProjectRootIndexPage`；
 - fetch complete Workflow Issue Tree；
 - fetch resolved Team workflow status catalog；
 - read Priority、normalized `updatedAt`、blocker和comments；Root `sortOrder`不定义跨Root调度；
@@ -82,6 +82,15 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 - read-back ambiguous mutation。
 
 不暴露arbitrary GraphQL、SDK object、Token或Header。
+
+Root discovery必须由`linear-gateway`中的Project-scoped Root Index实现。它使用显式compact GraphQL document读取一页
+Root headers及其bounded routing、delegation、blocker和ownership facts，不得使用Linear SDK model lazy relations逐Root
+补读。Index先按Binding验证installation/Project scope，再以
+`linear_installation_id + project_id + refresh_generation + page_cursor + page_size`作为共享fresh-read identity；
+startup、Project webhook、matching mutation或idle safety boundary使generation失效，不同Binding和Conductor共享同一
+generation的bounded in-flight/read-through pages。该共享值不写`podium.db`，不能替代candidate完整fresh Tree、mutation
+precondition或completion evidence，并在generation失效或Podium restart后丢弃。字段、coverage、ownership唯一性、批量
+continuation上限和physical request budget由[Linear端到端流转](linear-flow.md)唯一规定。
 
 每个Project级mutation必须携带`conductor_short_hash + expected_project_id`和Project
 remote precondition。修改已有Issue、Comment或Label时还携带目标对象的

@@ -27,7 +27,22 @@ Interface不能包含SDK、database、credential、raw Provider thread、process
 ## 2. Podium-Conductor boundary
 
 Podium独占Linear OAuth、Token和SDK。Conductor通过closed `LinearGatewayProtocol`读取Project、status catalog、
-Root headers以及完整Root Tree，并执行受限mutation。
+`ProjectRootIndexPage`以及完整Root Tree，并执行受限mutation。
+
+Root discovery query只有一个current variant：
+
+```text
+ListProjectRootIndexPageQuery
+  -> ProjectRootIndexPageResult
+     -> ProjectRootIndexPage
+        -> RootHeader[]
+```
+
+Query携带`binding_id`、`expected_project_id`和bounded page request；response携带closed protocol version、完整pageInfo和
+每个Root的header facts。`binding_id`只用于Podium授权，不属于physical fresh-read identity。协议不保留
+`ListRootIssuesQuery`、`RootIssuesPageResult`、`RootIssueSnapshot`或兼容union。`RootHeader`只承载
+[Linear端到端流转](linear-flow.md)定义的discovery facts，不允许完整Issue description、descendants、普通comments、
+SDK对象或arbitrary metadata。
 
 完整Tree查询必须支持：
 
@@ -292,6 +307,12 @@ human actor写入相同code block、普通文本声称自己是Symphony、作者
 record。Symphony actor写出的缺失、重复或无效`json` block是mechanical violation，也不能降级成另一种旧marker。
 所有旧`<!-- symphony ... -->`HTML marker、`managed_marker`字段、reader、writer和兼容union均被硬删除；没有迁移、
 dual read、fallback或legacy root恢复路径。
+
+Shared managed-record parser只搜索唯一terminal strict `json` fenced block。找不到该block时统一返回
+`managed_record_block_missing`，不扫描HTML signature、旧info string或其他retired syntax，也不存在
+`managed_record_block_legacy_format`专用结果。调用方因此只区分“普通Linear文本中没有managed record”和“当前`json`
+block存在但无效”；旧格式不是可识别输入类别。tracked生产代码和测试不得保留旧格式literal、regex、fixture或拒绝分支，
+retired inventory只作为零残留guard，不能把兼容测试登记成允许baseline。
 
 ## 9. Interface ownership
 

@@ -116,14 +116,22 @@ GraphQL query；不得通过SDK model relation或其默认fragment读取`Project
 缺cursor fail closed。SDK报告的rate-limit/network/internal failure必须保持为脱敏、可重试的Linear runtime
 failure，不能降级为Project、Root或routing业务事实无效。
 
+Root discovery同样必须使用[Linear端到端流转](linear-flow.md)定义的Project Root Index显式query和physical request
+budget。protocol logical request与physical request分别计数；一个共享Index page被多个Conductor消费时仍只记一次physical
+request。broker必须提供按operation、installation和Project关联的计数，使单页12 Roots/3 Conductors fixture可以证明
+常态1次、bounded fallback最多2次，而不是只证明logical request成功。
+
 broker按installation在内存中分配physical request和GraphQL complexity permits。unchanged background
 runtime在当前两个窗口中最多消耗25%，至少保留50%给control、mutation和ambiguous-write read-back；
 窗口信息不足时background fail closed或延后。control和mutation read-back高于background observation，
 但不能长期饿死完整Root reads。分页、并发、payload、排队deadline和retry次数都有上限。
 
-只允许bounded、相同fresh-read identity的in-flight coalescing；mutation invalidation、操作结束或process
-restart后不得复用。coalesced result和memory cache不能决定workflow、dispatch、mutation authority或
-completion，也不能替代last-responsible-point fresh precondition和semantic read-back。
+只允许bounded、相同fresh-read identity的in-flight/read-through coalescing；Project Root Index由memory-only refresh
+generation限定共享scope，其identity必须排除Binding和Conductor identity，其他query不得擅自扩大共享scope。matching
+mutation、webhook/safety generation invalidation或process
+restart后不得复用。coalesced result和memory cache不能成为workflow/mutation authority、单独授权dispatch或证明
+completion，也不能替代last-responsible-point fresh precondition和semantic read-back。Project Root Index可以按
+`linear-flow.md`提供candidate routing/eligibility/order，但不能单独授权dispatch；selected candidate仍须完整fresh Tree。
 
 429和transient failure处理：
 
@@ -133,6 +141,11 @@ completion，也不能替代last-responsible-point fresh precondition和semantic
 - retry前重新验证Project、Root和当前mutation precondition；
 - 达到runtime上限后释放permit，写一条去重的operator-visible Problem；
 - 不保存durable retry counter或next-at timestamp作为Workflow state。
+
+Project discovery transient network、429和5xx失败不得逃出主cycle并终止整个Conductor。matching Binding进入不调度新
+Root的memory-only degraded/backoff状态，已有Root也不能基于不完整Index继续推进；下一次bounded wake重新读取。
+authorization、schema、Binding和coverage失败保持fail closed并产生actionable correlated Problem，不进行busy retry。
+单个Root的routing/ownership shape非法只隔离该Root或其page，不能被解释成普通空结果，也不能终止其他Project的runtime。
 
 ## 6. Error、Problem与日志
 

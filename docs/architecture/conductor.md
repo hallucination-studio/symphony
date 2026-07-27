@@ -170,6 +170,8 @@ verified HEAD。
 - ownership/Profile不可验证时立即取消matching sessions并拒绝late output；用户修改Root terminal status时只建立与
   其他用户输入相同的execution barrier，业务取消或修复必须来自Root Reconciler；
 - 任何required Linear mutation、Reconciler reply或timeline comment写入/read-back失败时停止当前Root并记录错误；
+- Project Root Index的transient discovery失败进入bounded degraded/backoff并停止matching Binding的新admission，不得逃出
+  runtime cycle终止整个Conductor；configuration、authorization、schema或coverage失败继续fail closed并暴露correlated Problem；
 - 所有用户可见错误必须sanitized、actionable并有source correlation。
 
 ## 10. 不变量

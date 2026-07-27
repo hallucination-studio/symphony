@@ -698,6 +698,16 @@ reporter     脱敏前台进度
 通用 process management、polling、deadline、Linear pagination、managed-record decoding 和 cleanup 各只能有
 一份实现。Case 文件不得创建 process、reset Project、解析私有 code block 或实现 Workflow 决策。
 
+Campaign必须观测生产Podium transport报告的logical/physical Linear request计数，但该runtime observation只用于
+架构性能预算断言，不能证明任何Case Workflow成功。固定discovery budget fixture为同一Project的一个refresh generation、单页12 Roots、3个
+Conductor：常态Project Root Index最多1个physical request，只有显式批量continuation时最多2个；请求数随Root或
+Conductor线性增长直接失败，不得通过放宽timeout、并发或rate limit规避。计数不得记录query text、variables、Issue
+内容或credential。
+
+Podium、任一Conductor或Performer child在Campaign仍等待其负责的mandatory boundary时unexpected exit，matching Cases必须
+立即结束为failed或incomplete并进入final fresh evidence read；runner不得继续等待通用Root timeout。process exit本身仍然
+不是Workflow verdict evidence，最终分类必须明确缺失的Linear/Git coverage和对应process fault。
+
 真实 Campaign 不包含 request gate 或 required-write outage 注入。required Linear write fail-closed 由拥有该
 物理 transport 的生产模块集成测试验证；未来只有能从产品外制造真实 outage 时，才可新增独立黑盒 Case。
 
