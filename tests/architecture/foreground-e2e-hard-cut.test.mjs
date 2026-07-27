@@ -10,7 +10,7 @@ import {
 
 const syntheticCompletion = "target_e2e_" + "synthetic_final";
 
-test("foreground E2E guard fixes the seven mandatory Case IDs", () => {
+test("foreground E2E guard fixes the eight mandatory Case IDs", () => {
   assert.deepEqual(MANDATORY_FOREGROUND_CASE_IDS, [
     "approved_happy_path",
     "plan_rejected_and_replanned",
@@ -19,6 +19,7 @@ test("foreground E2E guard fixes the seven mandatory Case IDs", () => {
     "parallel_multi_conductor",
     "same_conductor_preemption",
     "conductor_restart_recovery",
+    "missing_worktree_recovery",
   ]);
 });
 
@@ -39,7 +40,7 @@ test("foreground E2E guard rejects retired control-plane paths and symbols", () 
       'import { LinearSdkImpl } from "../../packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts";',
       "const outage = createRequiredWriteOutageController();",
       'await readFile("podium.db");',
-      "await writeManagedRecord({});",
+      `await ${["write", "Managed", "Record"].join("")}({});`,
       `const completion = ${syntheticCompletion};`,
       'const caseId = "required_linear_write_fail_closed";',
     ].join("\n")],

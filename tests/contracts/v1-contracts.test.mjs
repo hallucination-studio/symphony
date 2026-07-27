@@ -34,6 +34,18 @@ function run(command, args, options = {}) {
   });
 }
 
+test("generated contract names do not repeat an existing schema-family prefix", async () => {
+  const generated = await readFile(path.join(generatedRoot, "typescript/contracts.ts"), "utf8");
+  for (const repeated of [
+    "ConductorPerformerConductorPerformerMessage",
+    "DesktopHostDesktopHostMessage",
+    "PodiumClientPodiumClientMessage",
+    "PodiumConductorPodiumConductorMessage",
+  ]) {
+    assert.equal(generated.includes(repeated), false, repeated);
+  }
+});
+
 test("all active protocol families are closed JSON Schema 2020-12 sources", async () => {
   for (const family of protocolFamilies) {
     const schema = await loadSchema(family);
@@ -84,7 +96,7 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "UserCommentReply",
     "UserCommentThreadStateInput",
     "CancelRootDirective",
-    "MaterializeApprovedPlanDagDirective",
+    "MaterializePlanNodeAction",
     "PlanTurnRequest",
     "WorkTurnRequest",
     "VerifyTurnRequest",
@@ -96,8 +108,6 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "SetCommentThreadStateCommand",
     "TurnUsage",
     "ModelTurnRecord",
-    "UsageAggregate",
-    "WorkflowTimelineRecord",
   ]) {
     assert.match(source, new RegExp(`"${requiredName}"`), requiredName);
   }
@@ -155,7 +165,6 @@ test("the schemas include only the approved active protocol vocabulary", async (
 test("Project Root Index discovery facts are closed, bounded, and redacted", async () => {
   const schema = await loadSchema("podium-conductor");
   const root = schema.$defs.RootHeader;
-  const ownership = schema.$defs.RootOwnershipHeader;
   const query = schema.$defs.ListProjectRootIndexPageQuery;
   const page = schema.$defs.ProjectRootIndexPage;
   const result = schema.$defs.ProjectRootIndexPageResult;
@@ -183,7 +192,6 @@ test("Project Root Index discovery facts are closed, bounded, and redacted", asy
     "project_id",
     "root_conductor_labels",
     "root_issue_id",
-    "root_ownership",
     "state",
     "updated_at",
   ]);
@@ -195,15 +203,9 @@ test("Project Root Index discovery facts are closed, bounded, and redacted", asy
     "#/$defs/LinearBlockerSnapshot",
   );
   assert.equal(root.properties.root_conductor_labels.maxItems, 1);
-  assert.equal(root.properties.root_ownership.$ref, "#/$defs/RootOwnershipHeader");
-  assert.deepEqual(ownership.required, [
-    "conductor_id",
-    "source_comment_id",
-    "source_comment_remote_version",
-  ]);
-  assert.equal(ownership.additionalProperties, false);
+  assert.equal(Object.hasOwn(schema.$defs, "RootOwnershipHeader"), false);
   assert.equal(query.properties.kind.const, "list_project_root_index_page");
-  assert.deepEqual(query.required, ["kind", "binding_id", "expected_project_id", "page"]);
+  assert.deepEqual(query.required, ["kind", "binding_id", "instance_id", "expected_project_id", "page"]);
   assert.equal(page.properties.headers.items.$ref, "#/$defs/RootHeader");
   assert.equal(page.properties.headers.maxItems, 250);
   assert.equal(result.properties.kind.const, "project_root_index_page");
@@ -229,6 +231,25 @@ test("Project resolution carries a closed Conductor pool and Root routing labels
   assert.ok(root.required.includes("root_conductor_labels"));
   assert.equal(root.properties.root_conductor_labels.maxItems, 1);
   assert.equal(root.properties.root_conductor_labels.items.$ref, "#/$defs/ConductorPool");
+});
+
+test("private channel registration binds one transient Binding generation before Conductor traffic", async () => {
+  const schema = await loadSchema("podium-conductor");
+  const registration = schema.$defs.ConductorChannelRegistrationCommand;
+  const accepted = schema.$defs.ConductorChannelRegistrationResult;
+
+  assert.equal(registration.additionalProperties, false);
+  assert.deepEqual(registration.required, ["kind", "binding_id", "conductor_id", "instance_id"]);
+  assert.equal(registration.properties.kind.const, "conductor_channel_registration");
+  assert.equal(accepted.additionalProperties, false);
+  assert.deepEqual(accepted.required, ["kind", "binding_id", "conductor_id", "instance_id"]);
+  assert.equal(accepted.properties.kind.const, "conductor_channel_registered");
+  assert.ok(schema.$defs.PodiumConductorBody.oneOf.some(
+    ({ $ref }) => $ref === "#/$defs/ConductorChannelRegistrationCommand",
+  ));
+  assert.ok(schema.$defs.PodiumConductorBody.oneOf.some(
+    ({ $ref }) => $ref === "#/$defs/ConductorChannelRegistrationResult",
+  ));
 });
 
 test("Agent execution policies are closed, bounded, and shared by Profile contracts", async () => {
@@ -334,12 +355,43 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/IssueCurrentValue", "#/$defs/IssueDetached",
     "#/$defs/CommentCurrentValue", "#/$defs/CommentThreadStateCurrentValue", "#/$defs/CommentRemoved",
     "#/$defs/RelationCurrentValue", "#/$defs/RelationRemoved",
-    "#/$defs/ManagedRecordCurrentValue", "#/$defs/ManagedRecordRemoved",
-    "#/$defs/PlanContractCurrentValue", "#/$defs/PlanCompletedResultCurrentValue",
-    "#/$defs/PlanContractRemoved", "#/$defs/PlanCompletedResultRemoved",
-    "#/$defs/GitFactsCurrentValue",
+    "#/$defs/WorktreeGateCurrentValue",
     "#/$defs/MechanicalViolationsCurrentValue",
     "#/$defs/ConvergenceCurrentValue",
+  ]);
+  assert.deepEqual(schema.$defs.CycleObservation.required, [
+    "cycle_issue", "cycle_status", "is_archived", "issues", "relations",
+  ]);
+  const retiredRecord = ["Managed", "Record"].join("");
+  for (const retired of [
+    `${retiredRecord}CurrentValue`, `${retiredRecord}Removed`,
+    "RecordReference",
+    "PlanContractCurrentValue", "PlanCompletedResultCurrentValue",
+    "PlanContractRemoved", "PlanCompletedResultRemoved",
+  ]) {
+    assert.equal(Object.hasOwn(schema.$defs, retired), false, retired);
+  }
+  assert.deepEqual(schema.$defs.EvidenceRef.properties.source_kind.enum, [
+    "linear_issue", "linear_comment", "git", "check", "result",
+  ]);
+  assert.deepEqual(schema.$defs.IssueSnapshot.properties.issue_kind.enum, [
+    "root", "cycle", "plan", "work", "verify", "finding",
+  ]);
+  assert.deepEqual(schema.$defs.PlanTurnContext.required, [
+    "root_contract", "cycle", "current_plan_issue", "prior_plan_attempt_facts",
+    "prior_approved_plan_facts", "unresolved_finding_issue_facts",
+    "human_action_thread_facts", "current_git_facts", "required_output",
+  ]);
+  assert.deepEqual(schema.$defs.WorkTurnContext.required, [
+    "approved_plan_contract", "current_active_work_dag", "selected_work",
+    "completed_work_evidence", "prior_work_attempt_facts", "human_action_thread_facts",
+    "git_baseline", "workspace_capability",
+  ]);
+  assert.deepEqual(schema.$defs.VerifyTurnContext.required, [
+    "approved_plan_contract", "complete_active_cycle_dag", "archived_cycle_nodes",
+    "completed_work_issue_facts", "unresolved_finding_issue_facts",
+    "human_action_thread_facts", "verification_requirements",
+    "immutable_target_revision", "repository_snapshot",
   ]);
   for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
     const definition = schema.$defs[name];
@@ -376,8 +428,52 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   ]);
 });
 
+test("Root bootstrap uses native authority and one closed worktree gate result", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const root = schema.$defs.RootObservation;
+  const bootstrap = schema.$defs.RootBootstrapSnapshot;
+  const gate = schema.$defs.RootWorktreeGateResult;
+
+  assert.equal(root.additionalProperties, false);
+  assert.equal(root.required.includes("ownership"), false);
+  assert.equal(Object.hasOwn(root.properties, "ownership"), false);
+  assert.equal(bootstrap.required.includes("managed_records"), false);
+  assert.equal(Object.hasOwn(bootstrap.properties, "managed_records"), false);
+  assert.equal(bootstrap.required.includes("delivery"), false);
+  assert.equal(Object.hasOwn(bootstrap.properties, "delivery"), false);
+  assert.equal(bootstrap.required.includes("git_facts"), false);
+  assert.equal(Object.hasOwn(bootstrap.properties, "git_facts"), false);
+  assert.ok(bootstrap.required.includes("worktree_gate"));
+  assert.equal(bootstrap.properties.worktree_gate.$ref, "#/$defs/RootWorktreeGateResult");
+  assert.ok(Array.isArray(gate.oneOf));
+  assert.ok(gate.oneOf.length >= 3);
+  for (const { $ref } of gate.oneOf) {
+    const definition = schema.$defs[$ref.slice("#/$defs/".length)];
+    assert.equal(definition.additionalProperties, false);
+    assert.ok(definition.required.includes("kind"));
+  }
+});
+
 test("workflow gateway contracts expose catalog, complete Tree facts, and stable writes", async () => {
   const schema = await loadSchema("podium-conductor");
+  const generationBoundQueries = [
+    "ResolveConductorProjectQuery",
+    "ListProjectRootIndexPageQuery",
+    "GetWorkflowIssueTreeQuery",
+  ];
+  const generationBoundMutations = schema.$defs.WorkflowMutationCommand.oneOf.map(
+    ({ $ref }) => $ref.slice("#/$defs/".length),
+  );
+
+  for (const definitionName of [...generationBoundQueries, ...generationBoundMutations]) {
+    const definition = schema.$defs[definitionName];
+    assert.ok(definition.required.includes("instance_id"), `${definitionName} must require instance_id`);
+    assert.equal(
+      definition.properties.instance_id.$ref,
+      "common.schema.json#/$defs/Identifier",
+      `${definitionName}.instance_id must be an Identifier`,
+    );
+  }
 
   const status = schema.$defs.WorkflowStatusSnapshot;
   assert.deepEqual(status.required, ["status_id", "name", "category", "position"]);
@@ -387,9 +483,28 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
 
   const tree = schema.$defs.WorkflowRootTreeSnapshot;
   assert.deepEqual(tree.required, [
-    "root_issue_id", "status_catalog", "issues", "comments", "relations", "observed_at",
+    "root_issue_id", "status_catalog", "issues", "comments", "relations", "attachments", "activities", "observed_at",
     "source_manifest", "coverage",
   ]);
+  assert.equal(tree.properties.attachments.items.$ref, "#/$defs/WorkflowAttachmentSnapshot");
+  assert.equal(tree.properties.attachments.maxItems, 1024);
+  assert.equal(tree.properties.activities.items.$ref, "#/$defs/WorkflowActivitySnapshot");
+  assert.equal(tree.properties.activities.maxItems, 8192);
+  assert.equal(tree.properties.source_manifest.maxItems, 16384);
+  assert.deepEqual(schema.$defs.WorkflowAttachmentSnapshot.required, [
+    "attachment_id", "issue_id", "title", "url", "source_type", "remote_version", "created_at", "updated_at",
+  ]);
+  assert.equal(schema.$defs.WorkflowAttachmentSnapshot.additionalProperties, false);
+  assert.deepEqual(schema.$defs.WorkflowActivitySnapshot.required, [
+    "activity_id", "issue_id", "activity_kinds", "actor_kind", "remote_version", "created_at",
+  ]);
+  assert.equal(schema.$defs.WorkflowActivitySnapshot.additionalProperties, false);
+  assert.deepEqual(schema.$defs.WorkflowActivityKind.enum, [
+    "status_changed", "description_changed", "archive_changed", "labels_changed",
+    "parent_changed", "delegation_changed", "attachment_changed",
+  ]);
+  assert.equal(schema.$defs.WorkflowActivitySnapshot.properties.activity_kinds.minItems, 1);
+  assert.equal(schema.$defs.WorkflowActivitySnapshot.properties.activity_kinds.uniqueItems, true);
   assert.equal(schema.$defs.WorkflowSourceManifestEntry.additionalProperties, false);
   assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.required, [
     "source_kind", "source_id", "source_version", "actor_kind",
@@ -407,7 +522,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   assert.equal(Object.hasOwn(tree.properties, "comment_" + "thread_changes"), false);
   assert.deepEqual(schema.$defs.WorkflowSourceManifestEntry.properties.source_kind.enum, [
     "linear_issue", "linear_comment", "linear_relation",
-    "linear_status_catalog",
+    "linear_attachment", "linear_activity", "linear_status_catalog",
   ]);
   assert.equal(schema.$defs.WorkflowRelationSnapshot.additionalProperties, false);
   assert.ok(schema.$defs.UpdateWorkflowIssueCommand.required.includes("is_archived"));
@@ -420,6 +535,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "#/$defs/CreateWorkflowIssueCommand",
     "#/$defs/UpdateWorkflowIssueCommand",
     "#/$defs/AppendWorkflowCommentCommand",
+    "#/$defs/CreateWorkflowAttachmentCommand",
     "#/$defs/CreateCommentReplyCommand",
     "#/$defs/SetCommentReceiptReactionCommand",
     "#/$defs/SetCommentThreadStateCommand",
@@ -429,6 +545,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "CreateWorkflowIssueCommand",
     "UpdateWorkflowIssueCommand",
     "AppendWorkflowCommentCommand",
+    "CreateWorkflowAttachmentCommand",
     "CreateCommentReplyCommand",
     "SetCommentReceiptReactionCommand",
     "SetCommentThreadStateCommand",
@@ -450,7 +567,7 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   ]);
 });
 
-test("turn facts, comment replies, and timelines have one closed durable record shape", async () => {
+test("turn facts and comment replies have closed transient contract shapes", async () => {
   const schema = await loadSchema("conductor-performer");
 
   assert.deepEqual(schema.$defs.TurnUsage.oneOf.map(({ $ref }) => $ref), [
@@ -469,7 +586,7 @@ test("turn facts, comment replies, and timelines have one closed durable record 
     "#/$defs/StageModelTurnRecord",
   ]);
 
-  for (const name of ["PlanResult", "WorkResult", "VerifyResult", "RootDirective", "RootReconcilerFailureRecord"]) {
+  for (const name of ["PlanResult", "WorkResult", "VerifyResult", "RootDirective", "RootReconcilerFailure"]) {
     assert.ok(schema.$defs[name].required.includes("model_turn"), name);
     assert.equal(Object.hasOwn(schema.$defs[name].properties, "usage"), false, name);
   }
@@ -491,13 +608,6 @@ test("turn facts, comment replies, and timelines have one closed durable record 
     "resolve", "keep_open", "reopen",
   ]);
 
-  assert.deepEqual(schema.$defs.WorkflowTimelineRecord.required, [
-    "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids", "source_versions",
-    "write_id", "rendered_schema_version", "occurred_at",
-  ]);
-  assert.deepEqual(schema.$defs.UsageAggregate.required, [
-    "scope", "source_record_count", "source_digest", "is_complete", "unknown_turn_count", "entries",
-  ]);
 });
 
 test("generation is deterministic and check mode detects drift", async () => {

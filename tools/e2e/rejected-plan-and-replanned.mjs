@@ -15,20 +15,19 @@ export async function runRejectedPlanAndReplannedCase({ definition, human, rootC
   await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
   await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
 
-  const initialAction = await waitForAction({ human, rootIssueId: root.rootIssueId, signal });
-  const comment = await human.createComment({ issueId: initialAction.actionIssueId, body: rejection.body, ...(signal ? { signal } : {}) });
-  if (!identifier(comment?.commentId) || comment.issueId !== initialAction.actionIssueId) {
-    throw stableError("foreground_e2e_rejected_reason_comment_invalid");
-  }
-  await human.setHumanActionTerminalStatus({
-    issueId: initialAction.actionIssueId,
-    terminalStatus: "Rejected",
-    stateId: initialAction.terminalStatusId,
+  const initialRequest = await waitForRequest({ human, rootIssueId: root.rootIssueId, signal });
+  const comment = await human.replyToHumanAction({
+    rootIssueId: root.rootIssueId,
+    requestCommentId: initialRequest.requestCommentId,
+    body: rejection.body,
     ...(signal ? { signal } : {}),
   });
+  if (!identifier(comment?.commentId) || comment.issueId !== root.rootIssueId || comment.requestCommentId !== initialRequest.requestCommentId) {
+    throw stableError("foreground_e2e_rejected_reason_comment_invalid");
+  }
 
-  const replacementAction = await waitForAction({ human, rootIssueId: root.rootIssueId, signal });
-  if (replacementAction.actionIssueId === initialAction.actionIssueId) {
+  const replacementRequest = await waitForRequest({ human, rootIssueId: root.rootIssueId, signal });
+  if (replacementRequest.requestCommentId === initialRequest.requestCommentId || replacementRequest.planIssueId === initialRequest.planIssueId) {
     throw stableError("foreground_e2e_rejected_replacement_action_invalid");
   }
 
@@ -42,26 +41,28 @@ export async function runRejectedPlanAndReplannedCase({ definition, human, rootC
         binding: rejection.inputBinding,
         commentId: comment.commentId,
       })]),
-      rejectedActionIssueId: initialAction.actionIssueId,
-      replacementActionIssueId: replacementAction.actionIssueId,
+      rejectedPlanIssueId: initialRequest.planIssueId,
+      rejectionRequestCommentId: initialRequest.requestCommentId,
+      replacementPlanIssueId: replacementRequest.planIssueId,
+      replacementRequestCommentId: replacementRequest.requestCommentId,
     }),
   });
 }
 
-async function waitForAction({ human, rootIssueId, signal }) {
-  const action = await human.waitForPlanReviewAction({
+async function waitForRequest({ human, rootIssueId, signal }) {
+  const request = await human.waitForPlanApprovalRequest({
     rootIssueId,
-    terminalStatus: "Rejected",
     ...(signal ? { signal } : {}),
   });
-  if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+  if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId)) {
     throw stableError("foreground_e2e_rejected_plan_review_invalid");
   }
-  return action;
+  return request;
 }
 
 function frozenRejection(definition) {
-  const reason = definition.declaredUserInteractions.find(({ kind }) => kind === "create_action_comment");
+  const reason = definition.declaredUserInteractions.find((interaction) =>
+    interaction.kind === "reply_to_human_action" && interaction.inputBinding === "rejection_reason");
   if (!reason || reason.actionBinding !== "rejected_plan_review" || reason.commentBinding !== "rejection_reason" ||
       reason.inputBinding !== "rejection_reason" || !text(reason.body)) {
     throw stableError("foreground_e2e_rejected_case_definition_invalid");
@@ -77,8 +78,8 @@ function assertDefinition(definition) {
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanReviewAction !== "function" || typeof human.createComment !== "function" ||
-      typeof human.setHumanActionTerminalStatus !== "function" || !rootCreation || !identifier(rootCreation.teamId) ||
+      typeof human.waitForPlanApprovalRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
+      !rootCreation || !identifier(rootCreation.teamId) ||
       !identifier(rootCreation.projectId) || !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||
       (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"))) {
     throw stableError("foreground_e2e_rejected_case_input_invalid");

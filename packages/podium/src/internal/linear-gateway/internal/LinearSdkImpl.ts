@@ -23,9 +23,11 @@ import type {
   WorkflowMutationCommand,
   WorkflowMutationReadBack,
   WorkflowRelationValue,
+  WorkflowAttachmentValue,
+  WorkflowActivityValue,
+  WorkflowActivityKind,
   WorkflowSourceManifestEntryValue,
 } from "../types.js";
-import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
 import { planProjectConductorPoolMutation } from "../../conductor-bindings/ProjectConductorPoolPolicy.js";
 import {
   inspectTargetWorkflowCatalog,
@@ -38,6 +40,8 @@ import {
 const PAGE_LIMIT = 250;
 const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
+const MAX_ROOT_ATTACHMENTS = 1_024;
+const MAX_ROOT_ACTIVITIES = 8_192;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const DEVELOPMENT_TOKEN_ORGANIZATION_REQUEST_TIMEOUT_MS = 30_000;
 const SYMPHONY_RECEIPT_EMOJI = {
@@ -172,7 +176,7 @@ function workflowScopeIssueBelongsToRoot(
 const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
   query SymphonyIssueTreeRoot($rootIssueId: String!) {
     issue(id: $rootIssueId) {
-      id identifier title description sortOrder updatedAt archivedAt
+      id identifier title description sortOrder createdAt updatedAt archivedAt
       project { id }
       parent { id }
       state { name }
@@ -189,6 +193,18 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
         nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
         pageInfo { hasNextPage endCursor }
       }
+      attachments(first: 8) {
+        nodes { id title url sourceType createdAt updatedAt issue { id } }
+        pageInfo { hasNextPage endCursor }
+      }
+      history(first: 8) {
+        nodes {
+          id createdAt updatedAt issue { id } actor { id } botActor { id }
+          fromStateId toStateId updatedDescription archived addedLabelIds removedLabelIds
+          fromParentId toParentId fromDelegate { id } toDelegate { id } attachmentId
+        }
+        pageInfo { hasNextPage endCursor }
+      }
     }
   }
 `;
@@ -196,7 +212,7 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
   query SymphonyIssueTreeChildren($parentIds: [ID!]!, $cursor: String) {
     issues(first: 25, after: $cursor, includeArchived: true, filter: { parent: { id: { in: $parentIds } } }) {
       nodes {
-        id identifier title description sortOrder subIssueSortOrder updatedAt archivedAt
+        id identifier title description sortOrder subIssueSortOrder createdAt updatedAt archivedAt
         project { id }
         parent { id }
         state { name }
@@ -211,6 +227,18 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
         }
         inverseRelations(first: 8) {
           nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
+          pageInfo { hasNextPage endCursor }
+        }
+        attachments(first: 8) {
+          nodes { id title url sourceType createdAt updatedAt issue { id } }
+          pageInfo { hasNextPage endCursor }
+        }
+        history(first: 8) {
+          nodes {
+            id createdAt updatedAt issue { id } actor { id } botActor { id }
+            fromStateId toStateId updatedDescription archived addedLabelIds removedLabelIds
+            fromParentId toParentId fromDelegate { id } toDelegate { id } attachmentId
+          }
           pageInfo { hasNextPage endCursor }
         }
       }
@@ -239,6 +267,32 @@ const WORKFLOW_ISSUE_TREE_RELATIONS_PAGE_QUERY = `
       id
       inverseRelations(first: 25, after: $cursor) {
         nodes { id type issue { id state { name } project { id } } relatedIssue { id project { id } } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
+const WORKFLOW_ISSUE_TREE_ATTACHMENTS_PAGE_QUERY = `
+  query SymphonyWorkflowIssueTreeAttachments($issueId: String!, $cursor: String!) {
+    issue(id: $issueId) {
+      id
+      attachments(first: 25, after: $cursor) {
+        nodes { id title url sourceType createdAt updatedAt issue { id } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
+const WORKFLOW_ISSUE_TREE_ACTIVITIES_PAGE_QUERY = `
+  query SymphonyWorkflowIssueTreeActivities($issueId: String!, $cursor: String!) {
+    issue(id: $issueId) {
+      id
+      history(first: 25, after: $cursor) {
+        nodes {
+          id createdAt updatedAt issue { id } actor { id } botActor { id }
+          fromStateId toStateId updatedDescription archived addedLabelIds removedLabelIds
+          fromParentId toParentId fromDelegate { id } toDelegate { id } attachmentId
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -329,10 +383,6 @@ const PROJECT_ROOT_INDEX_QUERY = `
             nodes { name }
             pageInfo { hasNextPage }
           }
-          comments(first: 2, includeArchived: false, filter: { body: { contains: "\\"kind\\":\\"root_ownership\\"" } }) {
-            nodes { id body updatedAt user { id } botActor { id } externalUser { id } issue { id } }
-            pageInfo { hasNextPage }
-          }
           inverseRelations(first: 250, includeArchived: true) {
             nodes { id type issue { id state { name } } relatedIssue { id } }
             pageInfo { hasNextPage }
@@ -404,6 +454,36 @@ interface IssueTreeRelation {
   relatedIssue?: { id: string; project?: { id: string } | null } | null;
 }
 
+interface IssueTreeAttachment {
+  id: string;
+  title: string;
+  url: string;
+  sourceType: string;
+  createdAt: string;
+  updatedAt: string;
+  issue: { id: string };
+}
+
+interface IssueTreeActivity {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  issue: { id: string };
+  actor?: { id: string } | null;
+  botActor?: { id: string } | null;
+  fromStateId?: string | null;
+  toStateId?: string | null;
+  updatedDescription?: string | null;
+  archived?: boolean | null;
+  addedLabelIds?: string[] | null;
+  removedLabelIds?: string[] | null;
+  fromParentId?: string | null;
+  toParentId?: string | null;
+  fromDelegate?: { id: string } | null;
+  toDelegate?: { id: string } | null;
+  attachmentId?: string | null;
+}
+
 interface IssueTreeFact {
   id: string;
   identifier: string;
@@ -411,6 +491,7 @@ interface IssueTreeFact {
   description?: string | null;
   sortOrder: number;
   subIssueSortOrder?: number | null;
+  createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
   project?: { id: string } | null;
@@ -428,6 +509,14 @@ interface IssueTreeFact {
     nodes: IssueTreeRelation[];
     pageInfo: IssueTreePageInfo;
   };
+  attachments: {
+    nodes: IssueTreeAttachment[];
+    pageInfo: IssueTreePageInfo;
+  };
+  history: {
+    nodes: IssueTreeActivity[];
+    pageInfo: IssueTreePageInfo;
+  };
 }
 
 interface IssueTreeRootFact extends IssueTreeFact {
@@ -443,6 +532,8 @@ interface IssueTreeNestedPageData {
     id: string;
     comments?: IssueTreeFact["comments"];
     inverseRelations?: IssueTreeFact["inverseRelations"];
+    attachments?: IssueTreeFact["attachments"];
+    history?: IssueTreeFact["history"];
   } | null;
 }
 interface IssueTreeChildrenData {
@@ -532,16 +623,6 @@ interface ProjectRootIndexPageInfo {
   endCursor?: string | null;
 }
 
-interface ProjectRootIndexComment {
-  id?: string;
-  body?: string;
-  updatedAt?: string;
-  user?: { id?: string } | null;
-  botActor?: { id?: string } | null;
-  externalUser?: { id?: string } | null;
-  issue?: { id?: string } | null;
-}
-
 interface ProjectRootIndexRelation {
   id?: string;
   type?: string;
@@ -560,10 +641,6 @@ interface ProjectRootIndexIssue {
   delegate?: { id?: string } | null;
   labels?: {
     nodes?: Array<{ name?: string }>;
-    pageInfo?: ProjectRootIndexPageInfo;
-  } | null;
-  comments?: {
-    nodes?: ProjectRootIndexComment[];
     pageInfo?: ProjectRootIndexPageInfo;
   } | null;
   inverseRelations?: {
@@ -1360,7 +1437,6 @@ export class LinearSdkImpl implements LinearClientInterface {
       }
       rootIds.add(rootIssueId);
       const labels = indexLabels(root.labels);
-      const ownership = rootOwnershipHeader(root.comments, rootIssueId, delegateActorId);
       return {
         rootIssueId,
         identifier,
@@ -1372,7 +1448,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         blockers: indexBlockers(root.inverseRelations, rootIssueId),
         rootConductorLabels: labels,
         isDelegatedToSymphony: root.delegate?.id === delegateActorId,
-        ...(ownership ? { rootOwnership: ownership } : {}),
       };
     });
     return {
@@ -1483,11 +1558,38 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (relations.length > 1_024) {
       throw new Error("linear_workflow_relations_too_many");
     }
+    const attachments = [...facts.values()].flatMap(({ fact }) =>
+      fact.attachments.nodes.map((attachment) => workflowAttachmentValue(attachment, fact.id)),
+    );
+    if (attachments.length > MAX_ROOT_ATTACHMENTS) {
+      throw new Error("linear_workflow_attachments_too_many");
+    }
+    const attachmentIds = new Set<string>();
+    for (const attachment of attachments) {
+      if (attachmentIds.has(attachment.attachmentId)) throw new Error("linear_workflow_attachment_ambiguous");
+      attachmentIds.add(attachment.attachmentId);
+    }
+    const activities = [...facts.values()].flatMap(({ fact }) =>
+      fact.history.nodes.flatMap((activity) => {
+        const value = workflowActivityValue(activity, fact.id, delegateActorId);
+        return value ? [value] : [];
+      }),
+    );
+    if (activities.length > MAX_ROOT_ACTIVITIES) {
+      throw new Error("linear_workflow_activities_too_many");
+    }
+    const activityIds = new Set<string>();
+    for (const activity of activities) {
+      if (activityIds.has(activity.activityId)) throw new Error("linear_workflow_activity_ambiguous");
+      activityIds.add(activity.activityId);
+    }
     return {
       nodes,
       rootConductorLabels,
       comments,
       relations,
+      attachments,
+      activities,
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false as const },
     };
@@ -1522,6 +1624,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         labels: issue.labels,
         isArchived: issue.isArchived,
         remoteVersion: issue.updatedAt,
+        createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
       };
     });
@@ -1532,6 +1635,8 @@ export class LinearSdkImpl implements LinearClientInterface {
       issues,
       comments,
       relations: tree.relations,
+      attachments: tree.attachments,
+      activities: tree.activities,
     });
     return {
       rootIssueId: input.rootIssueId,
@@ -1539,6 +1644,8 @@ export class LinearSdkImpl implements LinearClientInterface {
       issues,
       comments,
       relations: tree.relations,
+      attachments: tree.attachments,
+      activities: tree.activities,
       sourceManifest,
       coverage: { isComplete: true, omissions: [] },
       observedAt: tree.observedAt,
@@ -1561,6 +1668,23 @@ export class LinearSdkImpl implements LinearClientInterface {
       const outcome = await this.readWorkflowMutationOutcome(command);
       if (outcome) return { kind: "already_applied", readBack: outcome };
       return await this.#nativeCommentPreconditionsMatch(command)
+        ? { kind: "ready" }
+        : { kind: "precondition_conflict" };
+    }
+    if (command.kind === "create_workflow_attachment") {
+      const outcome = await this.readWorkflowMutationOutcome(command);
+      if (outcome) return { kind: "already_applied", readBack: outcome };
+      const tree = await this.getWorkflowIssueTree({
+        projectId: command.expectedProjectId,
+        rootIssueId: command.rootIssueId,
+      });
+      const root = tree.issues.find((issue) => issue.issueId === command.rootIssueId);
+      const target = tree.issues.find((issue) => issue.issueId === command.target.targetIssueId);
+      return root?.remoteVersion === command.expectedRootRemoteVersion &&
+        target?.remoteVersion === command.target.expectedRemoteVersion &&
+        (command.target.expectedStatusId === undefined || target.statusId === command.target.expectedStatusId) &&
+        (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId) &&
+        (command.target.expectedIsArchived === undefined || target.isArchived === command.target.expectedIsArchived)
         ? { kind: "ready" }
         : { kind: "precondition_conflict" };
     }
@@ -1661,6 +1785,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!preflight) await this.#assertWorkflowMutationScope(command);
     switch (command.kind) {
       case "create_workflow_issue": {
+        assertNativeWorkflowContent(command.description);
         const parentFact = preflight?.get(command.parentIssueId);
         const parent = parentFact ? undefined : await this.#client.issue(command.parentIssueId);
         const teamId = parentFact?.team?.id ?? parent?.teamId;
@@ -1682,6 +1807,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         return;
       }
       case "update_workflow_issue": {
+        assertNativeWorkflowContent(command.description);
         const issue = await this.#client.issue(command.target.targetIssueId);
         if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
         const currentArchived = issue.archivedAt !== null && issue.archivedAt !== undefined;
@@ -1690,10 +1816,13 @@ export class LinearSdkImpl implements LinearClientInterface {
           if (!restored.success) throw new Error("linear_workflow_issue_restore_failed");
         }
         await this.#workflowStatusId(issue, command.statusId);
+        const team = await issue.team;
+        if (!team) throw new Error("linear_workflow_team_missing");
         await this.#client.updateIssue(command.target.targetIssueId, {
           title: command.title,
           description: command.description,
           stateId: command.statusId,
+          labelIds: await this.#workflowIssueLabelIds(command.labelNames, team.id),
           ...(command.parentAssignment.mode === "set"
             ? { parentId: command.parentAssignment.parentIssueId }
             : command.parentAssignment.mode === "clear" ? { parentId: null } : {}),
@@ -1706,9 +1835,18 @@ export class LinearSdkImpl implements LinearClientInterface {
         return;
       }
       case "append_workflow_comment": {
+        assertNativeWorkflowContent(command.body);
         await this.#client.createComment({
           issueId: command.target.targetIssueId,
           body: command.body,
+        });
+        return;
+      }
+      case "create_workflow_attachment": {
+        await this.#client.createAttachment({
+          issueId: command.target.targetIssueId,
+          title: command.title,
+          url: command.url,
         });
         return;
       }
@@ -2033,6 +2171,28 @@ export class LinearSdkImpl implements LinearClientInterface {
       return comment && comment.body === command.body
         ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: comment.updatedAt.toISOString(),
           issueVersions: [{ issueId: command.target.targetIssueId, remoteVersion: issue.updatedAt.toISOString() }] }
+        : undefined;
+    }
+    if (command.kind === "create_workflow_attachment") {
+      const tree = await this.getWorkflowIssueTree({
+        projectId: command.expectedProjectId,
+        rootIssueId: command.rootIssueId,
+      });
+      const matches = tree.attachments.filter((attachment) =>
+        attachment.issueId === command.target.targetIssueId &&
+        attachment.title === command.title &&
+        attachment.url === command.url,
+      );
+      if (matches.length > 1) throw new Error("linear_workflow_attachment_ambiguous");
+      const attachment = matches[0];
+      const target = tree.issues.find((issue) => issue.issueId === command.target.targetIssueId);
+      return attachment && target
+        ? {
+          writeId: command.writeId,
+          targetIssueId: target.issueId,
+          remoteVersion: attachment.remoteVersion,
+          issueVersions: [{ issueId: target.issueId, remoteVersion: target.remoteVersion }],
+        }
         : undefined;
     }
     if (command.kind !== "create_workflow_relation") return undefined;
@@ -2647,81 +2807,6 @@ function indexLabels(value: ProjectRootIndexIssue["labels"]): ConductorPoolValue
   return conductorPoolFromLabels(value.nodes.map((label) => label.name!));
 }
 
-function rootOwnershipHeader(
-  value: ProjectRootIndexIssue["comments"],
-  rootIssueId: string,
-  delegateActorId: string,
-): RootHeaderValue["rootOwnership"] {
-  if (
-    !value ||
-    !Array.isArray(value.nodes) ||
-    value.nodes.length > 2 ||
-    value.pageInfo?.hasNextPage !== false
-  ) {
-    throw new Error("linear_project_root_index_ownership_incomplete");
-  }
-  if (value.nodes.length === 0) return undefined;
-  if (value.nodes.length !== 1) throw new Error("linear_project_root_index_ownership_ambiguous");
-  const comment = value.nodes[0]!;
-  const commentId = comment.id;
-  const commentIssueId = comment.issue?.id;
-  const commentUpdatedAt = timestampValueOrUndefined(comment.updatedAt);
-  const actorIds = [comment.user?.id, comment.botActor?.id, comment.externalUser?.id];
-  if (
-    typeof commentId !== "string" ||
-    !SAFE_ID.test(commentId) ||
-    typeof commentIssueId !== "string" ||
-    !SAFE_ID.test(commentIssueId) ||
-    commentIssueId !== rootIssueId ||
-    typeof comment.body !== "string" ||
-    commentUpdatedAt === undefined ||
-    actorIds.some((id) => id !== undefined && !SAFE_ID.test(id)) ||
-    !actorIds.includes(delegateActorId)
-  ) {
-    throw new Error("linear_project_root_index_ownership_invalid");
-  }
-  const block = parseManagedRecordBlock(comment.body);
-  if (!block.ok) throw new Error("linear_project_root_index_ownership_invalid");
-  const record = strictRootOwnershipRecord(block.record, rootIssueId);
-  return {
-    conductorId: record.conductorId,
-    sourceCommentId: commentId,
-    sourceCommentRemoteVersion: commentUpdatedAt,
-  };
-}
-
-function strictRootOwnershipRecord(value: unknown, rootIssueId: string): { conductorId: string } {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("linear_project_root_index_ownership_invalid");
-  }
-  const record = value as Record<string, unknown>;
-  const required = [
-    "kind", "version", "root_issue_id", "conductor_id", "performer_profile_id", "delivery_branch", "owner_generation",
-  ];
-  const allowed = new Set([...required, "pull_request"]);
-  const conductorId = typeof record.conductor_id === "string" ? record.conductor_id : undefined;
-  const performerProfileId = typeof record.performer_profile_id === "string" ? record.performer_profile_id : undefined;
-  const ownerGeneration = typeof record.owner_generation === "string" ? record.owner_generation : undefined;
-  if (
-    required.some((field) => !(field in record)) ||
-    Object.keys(record).some((field) => !allowed.has(field)) ||
-    record.kind !== "root_ownership" ||
-    record.version !== 1 ||
-    record.root_issue_id !== rootIssueId ||
-    !conductorId ||
-    !SAFE_ID.test(conductorId) ||
-    !performerProfileId ||
-    !SAFE_ID.test(performerProfileId) ||
-    !ownerGeneration ||
-    !SAFE_ID.test(ownerGeneration) ||
-    !boundedTextValue(record.delivery_branch) ||
-    (record.pull_request !== undefined && !boundedTextValue(record.pull_request))
-  ) {
-    throw new Error("linear_project_root_index_ownership_invalid");
-  }
-  return { conductorId };
-}
-
 function indexBlockers(
   value: ProjectRootIndexIssue["inverseRelations"],
   rootIssueId: string,
@@ -2845,12 +2930,126 @@ function workflowRelationValues(
   return relations;
 }
 
+function workflowAttachmentValue(
+  attachment: IssueTreeAttachment,
+  issueId: string,
+): WorkflowAttachmentValue {
+  if (
+    !SAFE_ID.test(attachment.id) ||
+    attachment.issue?.id !== issueId ||
+    !boundedTextValue(attachment.title) ||
+    !boundedTextValue(attachment.url) ||
+    !shortTextValue(attachment.sourceType)
+  ) {
+    throw new Error("linear_workflow_attachment_invalid");
+  }
+  const createdAt = timestampValue(attachment.createdAt);
+  const updatedAt = timestampValue(attachment.updatedAt);
+  return {
+    attachmentId: attachment.id,
+    issueId,
+    title: attachment.title,
+    url: attachment.url,
+    sourceType: attachment.sourceType,
+    remoteVersion: updatedAt,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function workflowActivityValue(
+  activity: IssueTreeActivity,
+  issueId: string,
+  delegateActorId: string,
+): WorkflowActivityValue | undefined {
+  if (!SAFE_ID.test(activity.id) || activity.issue?.id !== issueId) {
+    throw new Error("linear_workflow_activity_invalid");
+  }
+  const actorId = activity.actor?.id;
+  const botActorId = activity.botActor?.id;
+  if ((actorId && !SAFE_ID.test(actorId)) || (botActorId && !SAFE_ID.test(botActorId)) ||
+      (actorId !== undefined && botActorId !== undefined)) {
+    throw new Error("linear_workflow_activity_actor_invalid");
+  }
+  const activityKinds: WorkflowActivityKind[] = [];
+  if (activity.fromStateId != null || activity.toStateId != null) activityKinds.push("status_changed");
+  if (activity.updatedDescription != null) activityKinds.push("description_changed");
+  if (activity.archived != null) activityKinds.push("archive_changed");
+  if ((activity.addedLabelIds?.length ?? 0) > 0 || (activity.removedLabelIds?.length ?? 0) > 0) {
+    activityKinds.push("labels_changed");
+  }
+  if (activity.fromParentId != null || activity.toParentId != null) activityKinds.push("parent_changed");
+  if (activity.fromDelegate != null || activity.toDelegate != null) activityKinds.push("delegation_changed");
+  if (activity.attachmentId != null) activityKinds.push("attachment_changed");
+  if (activityKinds.length === 0) return undefined;
+
+  const addedLabelIds = workflowActivityIds(activity.addedLabelIds);
+  const removedLabelIds = workflowActivityIds(activity.removedLabelIds);
+  const fromStateId = workflowOptionalId(activity.fromStateId);
+  const toStateId = workflowOptionalId(activity.toStateId);
+  const fromParentId = workflowOptionalId(activity.fromParentId);
+  const toParentId = workflowOptionalId(activity.toParentId);
+  const fromDelegateId = workflowOptionalId(activity.fromDelegate?.id);
+  const toDelegateId = workflowOptionalId(activity.toDelegate?.id);
+  const attachmentId = workflowOptionalId(activity.attachmentId);
+  if (activity.updatedDescription !== undefined && activity.updatedDescription !== null &&
+      !boundedTextValue(activity.updatedDescription)) {
+    throw new Error("linear_workflow_activity_description_invalid");
+  }
+  const selectedActorId = actorId ?? botActorId;
+  const actorKind: WorkflowCommentAuthorKind = selectedActorId === undefined
+    ? "unknown"
+    : selectedActorId === delegateActorId
+      ? "symphony"
+      : botActorId
+        ? "external_automation"
+        : "human";
+  return {
+    activityId: activity.id,
+    issueId,
+    activityKinds,
+    actorKind,
+    ...(selectedActorId ? { actorId: selectedActorId } : {}),
+    ...(fromStateId ? { fromStateId } : {}),
+    ...(toStateId ? { toStateId } : {}),
+    ...(activity.updatedDescription !== undefined && activity.updatedDescription !== null
+      ? { updatedDescription: activity.updatedDescription } : {}),
+    ...(activity.archived !== undefined && activity.archived !== null ? { archived: activity.archived } : {}),
+    ...(addedLabelIds !== undefined ? { addedLabelIds } : {}),
+    ...(removedLabelIds !== undefined ? { removedLabelIds } : {}),
+    ...(fromParentId ? { fromParentId } : {}),
+    ...(toParentId ? { toParentId } : {}),
+    ...(fromDelegateId ? { fromDelegateId } : {}),
+    ...(toDelegateId ? { toDelegateId } : {}),
+    ...(attachmentId ? { attachmentId } : {}),
+    remoteVersion: timestampValue(activity.updatedAt),
+    createdAt: timestampValue(activity.createdAt),
+  };
+}
+
+function workflowOptionalId(value: string | null | undefined): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (!SAFE_ID.test(value)) throw new Error("linear_workflow_activity_reference_invalid");
+  return value;
+}
+
+function workflowActivityIds(value: string[] | null | undefined): string[] | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 64 || value.some((id) => !SAFE_ID.test(id)) ||
+      new Set(value).size !== value.length) {
+    throw new Error("linear_workflow_activity_references_invalid");
+  }
+  return value;
+}
+
 function workflowSourceManifest(input: {
   projectId: string;
   statusCatalog: readonly WorkflowStatusCatalogEntry[];
   issues: readonly LinearIssueValue[];
   comments: readonly WorkflowCommentValue[];
   relations: readonly WorkflowRelationValue[];
+  attachments: readonly WorkflowAttachmentValue[];
+  activities: readonly WorkflowActivityValue[];
 }): WorkflowSourceManifestEntryValue[] {
   const statusVersion = createHash("sha256")
     .update(JSON.stringify(input.statusCatalog.map((status) => ({
@@ -2878,6 +3077,18 @@ function workflowSourceManifest(input: {
       sourceId: relation.relationId,
       sourceVersion: relation.relationId,
       actorKind: "unknown" as const,
+    })),
+    ...input.attachments.map((attachment) => ({
+      sourceKind: "linear_attachment" as const,
+      sourceId: attachment.attachmentId,
+      sourceVersion: attachment.remoteVersion,
+      actorKind: "unknown" as const,
+    })),
+    ...input.activities.map((activity) => ({
+      sourceKind: "linear_activity" as const,
+      sourceId: activity.activityId,
+      sourceVersion: activity.remoteVersion,
+      actorKind: activity.actorKind,
     })),
     {
       sourceKind: "linear_status_catalog" as const,
@@ -2968,6 +3179,7 @@ function workflowPreflightOutcome(
     const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
     return target.statusId === command.statusId && target.title === command.title &&
       target.description === command.description &&
+      workflowLabelsMatch(target.labels, command.labelNames) &&
       target.isArchived === command.isArchived &&
       workflowParentAssignmentMatches(target.parentIssueId, command.parentAssignment) &&
       (command.order === undefined || target.order === command.order) &&
@@ -3024,6 +3236,12 @@ function workflowPreflightRelation(
   return [...facts.values()].flatMap((fact) => fact.inverseRelations?.nodes ?? []).find((relation) =>
     relation.type === expectedType && relation.issue?.id === sourceIssueId &&
     relation.relatedIssue?.id === targetIssueId);
+}
+
+function assertNativeWorkflowContent(value: string): void {
+  if (/```json|<!--|\0/u.test(value)) {
+    throw new Error("linear_workflow_machine_content_rejected");
+  }
 }
 
 function workflowPreconditionMismatch(
@@ -3244,6 +3462,52 @@ async function completeNestedIssueTreeFact(
       cursor = page.inverseRelations.pageInfo.endCursor;
     }
   }
+
+  if (fact.attachments.pageInfo.hasNextPage) {
+    let cursor = fact.attachments.pageInfo.endCursor;
+    const seenCursors = new Set<string>();
+    while (fact.attachments.pageInfo.hasNextPage) {
+      if (!cursor || seenCursors.has(cursor)) throw new Error("linear_tree_batch_incomplete");
+      seenCursors.add(cursor);
+      const response = await rawRequest<IssueTreeNestedPageData, { issueId: string; cursor: string }>(
+        WORKFLOW_ISSUE_TREE_ATTACHMENTS_PAGE_QUERY,
+        { issueId: fact.id, cursor },
+      );
+      const page = response.data?.issue;
+      if (!page || page.id !== fact.id || !page.attachments) {
+        throw new Error("linear_tree_batch_incomplete");
+      }
+      if (page.attachments.nodes.some((attachment) => attachment.issue.id !== fact.id)) {
+        throw new Error("linear_tree_batch_invalid");
+      }
+      fact.attachments.nodes.push(...page.attachments.nodes);
+      fact.attachments.pageInfo = page.attachments.pageInfo;
+      cursor = page.attachments.pageInfo.endCursor;
+    }
+  }
+
+  if (fact.history.pageInfo.hasNextPage) {
+    let cursor = fact.history.pageInfo.endCursor;
+    const seenCursors = new Set<string>();
+    while (fact.history.pageInfo.hasNextPage) {
+      if (!cursor || seenCursors.has(cursor)) throw new Error("linear_tree_batch_incomplete");
+      seenCursors.add(cursor);
+      const response = await rawRequest<IssueTreeNestedPageData, { issueId: string; cursor: string }>(
+        WORKFLOW_ISSUE_TREE_ACTIVITIES_PAGE_QUERY,
+        { issueId: fact.id, cursor },
+      );
+      const page = response.data?.issue;
+      if (!page || page.id !== fact.id || !page.history) {
+        throw new Error("linear_tree_batch_incomplete");
+      }
+      if (page.history.nodes.some((activity) => activity.issue.id !== fact.id)) {
+        throw new Error("linear_tree_batch_invalid");
+      }
+      fact.history.nodes.push(...page.history.nodes);
+      fact.history.pageInfo = page.history.pageInfo;
+      cursor = page.history.pageInfo.endCursor;
+    }
+  }
 }
 
 function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
@@ -3259,6 +3523,7 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     description: fact.description ?? "",
     labels: issueLabels(fact.labels),
     isArchived: fact.archivedAt !== null && fact.archivedAt !== undefined,
+    createdAt: timestampValue(fact.createdAt),
     updatedAt: timestampValue(fact.updatedAt),
   };
 }

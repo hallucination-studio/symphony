@@ -43,33 +43,10 @@ test("gateway resolves the project and reads one closed Root Index page", async 
   assert.deepEqual(requests[1], {
     kind: "list_project_root_index_page",
     binding_id: "binding-1",
+    instance_id: "instance-1",
     expected_project_id: "project-1",
     page: { limit: 250 },
   });
-});
-
-test("root discovery projects the Conductor identity from a target managed record", async () => {
-  const gateway = createGateway(async (body) => {
-    if (body.kind === "resolve_conductor_project") return resolved();
-    return {
-      kind: "project_root_index_page",
-      page: {
-        headers: [rootHeader({
-          root_ownership: {
-            conductor_id: "conductor-1",
-            source_comment_id: "ownership-comment",
-            source_comment_remote_version: now,
-          },
-        })],
-        page_info: { has_next_page: false },
-      },
-    };
-  });
-  await gateway.resolveProject();
-
-  const result = await gateway.readProjectRootIndexPage({ projectId: "project-1", limit: 250 });
-  assert.equal(result.kind, "page");
-  if (result.kind === "page") assert.equal(result.page.roots[0]?.managedConductorId, "conductor-1");
 });
 
 test("gateway evaluates the IPC timeout for each request", async () => {
@@ -83,7 +60,7 @@ test("gateway evaluates the IPC timeout for each request", async () => {
         kind: "project_root_index_page", page: { headers: [], page_info: { has_next_page: false } },
       };
     },
-  }, { timeoutMs: () => remaining });
+  }, { bindingId: "binding-1", instanceId: "instance-1", timeoutMs: () => remaining });
 
   await gateway.resolveProject();
   remaining = 1_000;
@@ -144,17 +121,42 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
   const result = await gateway.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-1", expectedProjectId: "project-1", rootIssueId: "root-1",
     expectedRootRemoteVersion: now, target: { targetIssueId: "work-1", expectedRemoteVersion: now },
-    statusId: "status-progress", title: "Updated", description: "Description",
+    statusId: "status-progress", title: "Updated", description: "Description", labelNames: ["Work", "Changes Required"],
     isArchived: false, parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "applied", readBack: { writeId: "write-1", targetIssueId: "work-1", remoteVersion: "v2" } });
   assert.deepEqual(requests[1], {
-    kind: "update_workflow_issue", binding_id: "binding-1", write_id: "write-1", conductor_short_hash: "abc123",
+    kind: "update_workflow_issue", binding_id: "binding-1", instance_id: "instance-1", write_id: "write-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
     target: { target_issue_id: "work-1", expected_remote_version: now },
-    status_id: "status-progress", title: "Updated", description: "Description",
+    status_id: "status-progress", title: "Updated", description: "Description", label_names: ["Work", "Changes Required"],
     is_archived: false, parent_assignment: { mode: "retain" },
+  });
+});
+
+test("workflow gateway serializes a native attachment mutation", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    requests.push(body);
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return { kind: "applied", read_back: { write_id: "attachment-write", target_issue_id: "work-1", remote_version: "attachment-v1" } };
+  });
+  await gateway.resolveProject();
+
+  await gateway.mutateWorkflow({
+    kind: "create_workflow_attachment", writeId: "attachment-write", expectedProjectId: "project-1",
+    rootIssueId: "root-1", expectedRootRemoteVersion: now,
+    target: { targetIssueId: "work-1", expectedRemoteVersion: now, expectedStatusId: "status-todo" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
+  });
+
+  assert.deepEqual(requests[1], {
+    kind: "create_workflow_attachment", binding_id: "binding-1", instance_id: "instance-1",
+    write_id: "attachment-write", conductor_short_hash: "abc123", expected_project_id: "project-1",
+    root_issue_id: "root-1", expected_root_remote_version: now,
+    target: { target_issue_id: "work-1", expected_remote_version: now, expected_status_id: "status-todo" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
   });
 });
 
@@ -170,31 +172,49 @@ test("workflow tree decoder rejects a foreign issue", async () => {
   await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_/u);
 });
 
-test("workflow tree derives descendant kind only from a strict WorkflowIssueRecord description", async () => {
+test("workflow tree derives every descendant kind from exactly one primary kind label", async () => {
   const gateway = createGateway(async (body) => {
     if (body.kind === "resolve_conductor_project") return resolved();
     const tree = workflowTree();
     tree.issues.forEach((issue) => { issue.is_archived = false; });
-    const work = tree.issues[1]!;
-    work.description = [
-      "Implement it",
-      "",
-      "```json",
-      "{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"directive-1:work\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}",
-      "```",
-    ].join("\n");
     return { kind: "workflow_issue_tree", tree };
   });
   await gateway.resolveProject();
 
   const tree = await gateway.readWorkflowIssueTree("root-1");
   assert.equal(tree.issues.find(({ issue_id }) => issue_id === "work-1")?.issue_kind, "work");
+  assert.equal(tree.issues.find(({ issue_id }) => issue_id === "finding-1")?.issue_kind, "finding");
+  assert.equal(tree.attachments[0]?.url, "https://github.com/acme/repo/commit/abc123");
+});
+
+test("workflow tree rejects a descendant without a primary kind label", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    const tree = workflowTree();
+    tree.issues[1]!.labels = ["Changes Required"];
+    return { kind: "workflow_issue_tree", tree };
+  });
+  await gateway.resolveProject();
+
+  await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_issue_kind_invalid/u);
+});
+
+test("workflow tree rejects a descendant with multiple primary kind labels", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    const tree = workflowTree();
+    tree.issues[1]!.labels = ["Work", "Verify"];
+    return { kind: "workflow_issue_tree", tree };
+  });
+  await gateway.resolveProject();
+
+  await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_issue_kind_invalid/u);
 });
 
 function createGateway(request: (body: Record<string, unknown>) => Promise<unknown>) {
   return new PodiumLinearGatewayClientImpl("abc123", {
     async request({ body }) { return await request(body as Record<string, unknown>) as never; },
-  }, { timeoutMs: 1_000 });
+  }, { bindingId: "binding-1", instanceId: "instance-1", timeoutMs: 1_000 });
 }
 
 function resolved() {
@@ -228,9 +248,12 @@ function workflowTree() {
       { status_id: "status-todo", name: "Todo", category: "unstarted", position: 1 },
     ],
     issues: [
-      { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], is_archived: false, remote_version: now, updated_at: now },
-      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: [], is_archived: false, remote_version: now, updated_at: now },
+      { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], is_archived: false, remote_version: now, created_at: now, updated_at: now },
+      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: ["Work"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
+      { issue_id: "finding-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 2, depth: 1, title: "Finding", description: "Investigate it", labels: ["Finding", "High"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
     ],
-    comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
+    comments: [], relations: [],
+    attachments: [{ attachment_id: "attachment-1", issue_id: "work-1", title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123", source_type: "github", remote_version: now, created_at: now, updated_at: now }],
+    activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
   };
 }

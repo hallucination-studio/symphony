@@ -263,11 +263,9 @@ function toWireBootstrap(input: RootBootstrap): JsonRecord {
       cycles: input.rootSnapshot.cycles.map(toWireCycleObservation),
       issues: input.rootSnapshot.issues.map(toWireFactIssue),
       relations: input.rootSnapshot.relations.map(toWireRelation),
-      managed_records: input.rootSnapshot.managedRecords.map(toWireRecordReference),
       user_comments: input.rootSnapshot.userComments.map(toWireComment),
       user_comment_thread_states: input.rootSnapshot.userCommentThreadStates.map(toWireCommentThreadState),
-      git_facts: toWireGitFacts(input.rootSnapshot.gitFacts),
-      delivery: input.rootSnapshot.delivery === null ? null : toWireRecordReference(input.rootSnapshot.delivery),
+      worktree_gate: toWireWorktreeGate(input.rootSnapshot.worktreeGate),
       mechanical_violations: input.rootSnapshot.mechanicalViolations.map(toWireMechanicalViolation),
     },
     source_manifest: input.sourceManifest.map((entry) => ({
@@ -307,25 +305,9 @@ function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
   if (change.kind === "comment_current_value") return { ...base, user_input: toWireUserCommentInput(change.userInput) };
   if (change.kind === "comment_thread_state_current_value") return { ...base, thread_state: toWireCommentThreadState(change.threadState) };
   if (change.kind === "relation_current_value") return { ...base, relation: toWireRelation(change.relation) };
-  if (change.kind === "managed_record_current_value") return { ...base, record: toWireRecordReference(change.record) };
-  if (change.kind === "plan_contract_current_value") {
-    return { ...base, plan_issue_id: change.planIssueId, plan_contract: toWireCanonicalPlanContract(change.planContract) };
+  if (change.kind === "worktree_gate_current_value") {
+    return { ...base, worktree_gate: toWireWorktreeGate(change.worktreeGate) };
   }
-  if (change.kind === "plan_completed_result_current_value") {
-    return { ...base, plan_completed_result: toWirePlanCompletedResult(change.planCompletedResult) };
-  }
-  if (change.kind === "plan_contract_removed") {
-    return {
-      ...base,
-      cycle_issue_id: change.cycleIssueId,
-      plan_issue_id: change.planIssueId,
-      plan_contract_digest: change.planContractDigest,
-    };
-  }
-  if (change.kind === "plan_completed_result_removed") {
-    return { ...base, cycle_issue_id: change.cycleIssueId, result_id: change.resultId };
-  }
-  if (change.kind === "git_facts_current_value") return { ...base, git_facts: toWireGitFacts(change.gitFacts) };
   if (change.kind === "mechanical_violations_current_value") {
     return { ...base, mechanical_violations: change.mechanicalViolations.map(toWireMechanicalViolation) };
   }
@@ -347,9 +329,45 @@ function toWireRootObservation(input: import("../../root-reconciliation/api/Root
     })),
     constraints: input.constraints,
     root_status: input.rootStatus,
-    ownership: toWireRecordReference(input.ownership),
     convergence: toWireRootConvergence(input.convergence),
   };
+}
+
+function toWireWorktreeGate(
+  input: import("../../git-workspaces/api/GitWorkspaceInterface.js").RootWorktreeGateResult,
+): JsonRecord {
+  switch (input.kind) {
+    case "valid":
+      return {
+        kind: input.kind,
+        repository_identity: input.repositoryIdentity,
+        branch: input.branch,
+        head_revision: input.headRevision,
+        is_clean: input.isClean,
+        changed_paths: input.changedPaths,
+      };
+    case "fresh_missing":
+      return {
+        kind: input.kind,
+        repository_identity: input.repositoryIdentity,
+        base_branch: input.baseBranch,
+        base_revision: input.baseRevision,
+      };
+    case "recoverable_missing":
+      return {
+        kind: input.kind,
+        repository_identity: input.repositoryIdentity,
+        branch: input.branch,
+        head_revision: input.headRevision,
+      };
+    case "execution_generation_invalid":
+      return {
+        kind: input.kind,
+        repository_identity: input.repositoryIdentity,
+        expected_branch: input.expectedBranch,
+        reason: input.reason,
+      };
+  }
 }
 
 function toWireRootConvergence(
@@ -357,14 +375,9 @@ function toWireRootConvergence(
 ): JsonRecord {
   return {
     policy: {
-      kind: input.policy.kind,
-      version: input.policy.version,
-      policy_id: input.policy.policyId,
-      root_issue_id: input.policy.rootIssueId,
       max_cycles_per_root: input.policy.maxCyclesPerRoot,
       max_same_open_finding_cycles: input.policy.maxSameOpenFindingCycles,
       max_consecutive_no_progress: input.policy.maxConsecutiveNoProgress,
-      max_total_tokens: input.policy.maxTotalTokens,
       max_cycle_repair_attempts: input.policy.maxCycleRepairAttempts,
       deadline_at: input.policy.deadlineAt,
     },
@@ -375,149 +388,21 @@ function toWireRootConvergence(
         open_cycle_count: finding.openCycleCount,
       })),
       consecutive_no_progress: input.view.consecutiveNoProgress,
-      settled_tokens: input.view.settledTokens,
-      open_token_reservations: input.view.openTokenReservations.map((reservation) => ({
-        stage_execution_id: reservation.stageExecutionId,
-        reserved_total_tokens: reservation.reservedTotalTokens,
-      })),
       ...(input.view.activeCycleIssueId ? { active_cycle_issue_id: input.view.activeCycleIssueId } : {}),
       active_cycle_repair_attempts: input.view.activeCycleRepairAttempts,
       is_deadline_exceeded: input.view.isDeadlineExceeded,
       root_is_canceled: input.view.rootIsCanceled,
     },
-    ...(input.assessment ? { assessment: toWireRecordReference(input.assessment) } : {}),
   };
 }
 
 function toWireCycleObservation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootCycleObservation): JsonRecord {
   return {
     cycle_issue: toWireFactIssue(input.cycleIssue),
-    predecessor_cycle_issue_id: input.predecessorCycleIssueId,
     cycle_status: input.cycleStatus,
     is_archived: input.isArchived,
-    ...(input.activePlanContract ? { active_plan_contract: toWireCanonicalPlanContract(input.activePlanContract) } : {}),
-    ...(input.budget ? { budget: toWireBudget(input.budget) } : {}),
-    ...(input.outcome ? { outcome: toWireRecordReference(input.outcome) } : {}),
     issues: input.issues.map(toWireFactIssue),
     relations: input.relations.map(toWireRelation),
-    plan_results: input.planResults.map(toWireRecordReference),
-    plan_completed_results: input.planCompletedResults.map(toWirePlanCompletedResult),
-    work_results: input.workResults.map(toWireRecordReference),
-    verify_results: input.verifyResults.map(toWireRecordReference),
-    findings: input.findings.map(toWireFinding),
-    human_action_records: input.humanActionRecords.map(toWireHumanActionRecord),
-    human_action_resolutions: input.humanActionResolutions.map(toWireHumanActionResolution),
-  };
-}
-
-function toWireCanonicalPlanContract(input: import("../../root-reconciliation/api/ManagedRecords.js").PlanContract): JsonRecord {
-  return {
-    kind: input.kind,
-    version: input.version,
-    root_issue_id: input.rootIssueId,
-    cycle_issue_id: input.cycleIssueId,
-    plan_contract_digest: input.planContractDigest,
-    ...toWirePlanContractProposal(input),
-    proposed_work_dag: toWirePlanDag(input.proposedWorkDag),
-  };
-}
-
-function toWirePlanCompletedResult(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootPlanCompletedResult): JsonRecord {
-  return {
-    result_id: input.resultId,
-    root_issue_id: input.rootIssueId,
-    cycle_issue_id: input.cycleIssueId,
-    node_issue_id: input.nodeIssueId,
-    summary: input.summary,
-    completed_at: input.completedAt,
-    plan_contract_digest: input.planContractDigest,
-    plan_contract: toWirePlanContractProposal(input.planContract),
-    proposed_work_dag: toWirePlanDag(input.proposedWorkDag),
-    risks: input.risks,
-    required_permissions: input.requiredPermissions,
-    evidence_refs: input.evidenceRefs.map((reference) => ({ reference_id: reference.referenceId, source_kind: reference.sourceKind })),
-  };
-}
-
-function toWirePlanContractProposal(input: import("../../root-reconciliation/api/ManagedRecords.js").PlanContractProposal): JsonRecord {
-  return {
-    objective: input.objective,
-    included_scope: input.includedScope,
-    excluded_scope: input.excludedScope,
-    assumptions: input.assumptions,
-    constraints: input.constraints,
-    acceptance_criteria: input.acceptanceCriteria.map((criterion) => ({
-      criterion_key: criterion.criterionKey,
-      statement: criterion.statement,
-      verification_method: criterion.verificationMethod,
-    })),
-    verification_requirements: input.verificationRequirements,
-  };
-}
-
-function toWirePlanDag(input: import("../../root-reconciliation/api/ManagedRecords.js").ProposedWorkDag): JsonRecord {
-  return {
-    work_nodes: input.workNodes.map((work) => ({
-      proposal_key: work.proposalKey,
-      title: work.title,
-      description: work.description,
-      expected_outcome: work.expectedOutcome,
-      required_checks: work.requiredChecks,
-      dependency_proposal_keys: work.dependencyProposalKeys,
-    })),
-    dependency_edges: input.dependencyEdges.map((relation) => ({
-      relation_id: relation.relationId,
-      relation_kind: relation.relationKind,
-      source_issue_id: relation.sourceIssueId,
-      target_issue_id: relation.targetIssueId,
-    })),
-    verify_node: {
-      title: input.verifyNode.title,
-      acceptance_criteria: input.verifyNode.acceptanceCriteria.map((criterion) => ({
-        criterion_key: criterion.criterionKey,
-        statement: criterion.statement,
-        verification_method: criterion.verificationMethod,
-      })),
-      required_checks: input.verifyNode.requiredChecks,
-    },
-  };
-}
-
-function toWireHumanActionRecord(record: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootHumanActionRecord): JsonRecord {
-  return {
-    action_id: record.actionId,
-    action_issue_id: record.actionIssueId,
-    action_kind: record.actionKind,
-    parent_scope: record.parentScope,
-    ...(record.cycleIssueId ? { cycle_issue_id: record.cycleIssueId } : {}),
-    status: record.status,
-    is_archived: record.isArchived,
-    related_issue_ids: record.relatedIssueIds,
-  };
-}
-
-function toWireHumanActionResolution(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").HumanActionResolution): JsonRecord {
-  return {
-    resolution_id: input.resolutionId,
-    action_id: input.actionId,
-    action_issue_id: input.actionIssueId,
-    ...(input.actionKind ? { action_kind: input.actionKind } : {}),
-    outcome: input.outcome,
-    terminal_status: input.terminalStatus,
-    terminal_remote_version: input.terminalRemoteVersion,
-    proposal_digest: input.proposalDigest,
-    ...(input.sourceCommentIds ? { source_comment_ids: input.sourceCommentIds } : {}),
-    actor_kind: input.actorKind,
-    resolved_at: input.resolvedAt,
-  };
-}
-
-function toWireRecordReference(reference: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootRecordReference): JsonRecord {
-  return {
-    record_id: reference.recordId,
-    record_kind: reference.recordKind,
-    record_version: reference.recordVersion,
-    write_id: reference.writeId,
   };
 }
 
@@ -605,25 +490,8 @@ function toWireRelation(relation: import("../../root-reconciliation/api/RootReco
   };
 }
 
-function toWireGitFacts(facts: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootGitFacts): JsonRecord {
-  return {
-    head_revision: facts.headRevision,
-    baseline_revision: facts.baselineRevision,
-    status_summary: facts.statusSummary,
-    changed_paths: facts.changedPaths,
-  };
-}
-
 function toWireMechanicalViolation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").MechanicalViolation): JsonRecord {
   return { violation_kind: input.violationKind, source_issue_ids: input.sourceIssueIds, summary: input.summary };
-}
-
-function toWireFinding(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFinding): JsonRecord {
-  return { finding_id: input.findingId, category: input.category, severity: input.severity, summary: input.summary };
-}
-
-function toWireBudget(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootBudgetSnapshot): JsonRecord {
-  return { turns_used: input.turnsUsed, turns_remaining: input.turnsRemaining, tokens_used: input.tokensUsed, tokens_remaining: input.tokensRemaining };
 }
 
 function toWireStageInput(input: StageTurnInput): JsonRecord {
@@ -640,10 +508,10 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
       root_contract: rootContract,
       cycle: { cycle_issue_id: cycleIssue.issue_id, trigger: "initial" },
       current_plan_issue: toWireIssue(targetIssue),
-      prior_plan_results: [],
-      prior_plan_contracts: [],
-      unresolved_findings: [],
-      human_resolutions: [],
+      prior_plan_attempt_facts: [],
+      prior_approved_plan_facts: [],
+      unresolved_finding_issue_facts: [],
+      human_action_thread_facts: [],
       current_git_facts: gitFacts,
       required_output: input.goal,
     }
@@ -653,8 +521,8 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
         current_active_work_dag: planDag,
         selected_work: toWireIssue(targetIssue),
         completed_work_evidence: [],
-        prior_turn_results: [],
-        human_resolutions: [],
+        prior_work_attempt_facts: [],
+        human_action_thread_facts: [],
         git_baseline: gitFacts,
         workspace_capability: "workspace_write",
       }
@@ -662,9 +530,9 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
         approved_plan_contract: planContract,
         complete_active_cycle_dag: planDag,
         archived_cycle_nodes: input.tree.issues.filter((issue) => issue.is_archived).map((issue) => toWireIssue(issue)),
-        completed_work_results: [],
-        unresolved_findings: [],
-        human_resolutions: [],
+        completed_work_issue_facts: [],
+        unresolved_finding_issue_facts: [],
+        human_action_thread_facts: [],
         verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
         immutable_target_revision: input.git.head,
         repository_snapshot: gitFacts,
@@ -716,7 +584,7 @@ function toWireIssue(issue: RootTree["issues"][number]): JsonRecord {
   const issueKind = issue.issue_kind ?? "work";
   return {
     issue_id: issue.issue_id,
-    issue_kind: issueKind === "human" ? "human_action" : issueKind,
+    issue_kind: issueKind,
     ...(issue.parent_issue_id ? { parent_issue_id: issue.parent_issue_id } : {}),
     title: issue.title,
     description: issue.description,
@@ -829,8 +697,8 @@ function decodeDirective(value: unknown): RootDirective {
   }
   if (typeof action.kind !== "string" || !new Set([
     "execute_plan", "execute_work", "execute_verify", "rerun_stage", "revise_root_tree",
-    "materialize_approved_plan_dag",
-    "replan_current_cycle", "supersede_cycle", "create_cycle", "request_human_action",
+    "materialize_plan_node",
+    "replan_current_cycle", "supersede_cycle", "create_cycle", "create_root_workspace", "create_human_action",
     "conclude_cycle", "conclude_root", "cancel_root", "wait", "acknowledge",
   ]).has(action.kind)) throw new Error("root_directive_action_invalid");
   return camelizeKeys(directive) as RootDirective;
@@ -851,8 +719,6 @@ function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
   return {
     kind: "failed",
     failure: {
-      kind: "root_reconciler_failure",
-      version: 1,
       failureId: textValue(failure, "failure_id"),
       reconcilerSessionId: textValue(failure, "reconciler_session_id"),
       reconcilerTurnId: textValue(failure, "reconciler_turn_id"),
@@ -985,7 +851,10 @@ function normalizeStageResultOutcome(outcome: JsonRecord): StageResult["outcome"
       kind,
       ...(typeof targetRevision === "string" ? { verifiedRevision: targetRevision } : {}),
       ...(kind === "verify_passed" ? { conclusion: "passed" as const } : {}),
-      ...(kind === "verify_changes_required" ? { conclusion: "changes_required" as const } : {}),
+      ...(kind === "verify_changes_required" ? {
+        conclusion: "changes_required" as const,
+        findings: normalizeFindings(outcome.findings),
+      } : {}),
       ...(kind === "verify_inconclusive" ? { conclusion: "inconclusive" as const } : {}),
     };
   }
@@ -1023,11 +892,34 @@ function evidenceReferences(value: unknown): NonNullable<StageResult["outcome"][
     const referenceId = string(reference.reference_id, "role_result_plan_evidence_invalid");
     const sourceKind = reference.source_kind;
     if (typeof sourceKind !== "string" || ![
-      "linear_issue", "linear_comment", "linear_record", "git", "check", "result",
+      "linear_issue", "linear_comment", "git", "check", "result",
     ].includes(sourceKind)) {
       throw new Error("role_result_plan_evidence_invalid");
     }
     return { referenceId, sourceKind: sourceKind as NonNullable<StageResult["outcome"]["evidenceRefs"]>[number]["sourceKind"] };
+  });
+}
+
+function normalizeFindings(value: unknown): NonNullable<StageResult["outcome"]["findings"]> {
+  if (!Array.isArray(value)) throw new Error("role_result_findings_invalid");
+  return value.map((entry) => {
+    const finding = record(entry);
+    const category = string(finding.category, "role_result_finding_category_invalid");
+    const severity = string(finding.severity, "role_result_finding_severity_invalid");
+    if (!["product", "code", "test", "infra", "requirement", "policy"].includes(category)) {
+      throw new Error("role_result_finding_category_invalid");
+    }
+    if (!["critical", "high", "medium", "low"].includes(severity)) {
+      throw new Error("role_result_finding_severity_invalid");
+    }
+    return {
+      findingId: string(finding.finding_id, "role_result_finding_id_invalid"),
+      category: category as NonNullable<StageResult["outcome"]["findings"]>[number]["category"],
+      severity: severity as NonNullable<StageResult["outcome"]["findings"]>[number]["severity"],
+      description: string(finding.description, "role_result_finding_description_invalid"),
+      evidenceRefs: evidenceReferences(finding.evidence_refs),
+      relatedWorkIssueIds: stringArray(finding.related_work_issue_ids, "role_result_finding_work_ids_invalid"),
+    };
   });
 }
 

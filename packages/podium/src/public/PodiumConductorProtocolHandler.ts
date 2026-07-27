@@ -1,4 +1,4 @@
-import { decodePodiumConductorPodiumConductorMessage } from "@symphony/contracts";
+import { decodePodiumConductorMessage } from "@symphony/contracts";
 
 import type { JsonValue } from "./DesktopViewInterface.js";
 
@@ -8,31 +8,34 @@ type ProtocolMessage = {
   body: Record<string, JsonValue> & { kind: string };
 };
 
+export interface PodiumConductorChannel {
+  handle(body: ProtocolMessage["body"], secretFrame?: Uint8Array): Promise<JsonValue>;
+  isAuthenticated(): boolean;
+  close(input?: { observedAt?: string; sanitizedReason?: string }): void;
+}
+
 export interface PodiumConductorServices {
+  openChannel(input: { bindingId: string; conductorId: string; instanceId: string }): PodiumConductorChannel;
   observeExit(input: {
     bindingId: string;
     instanceId: string;
     observedAt: string;
     sanitizedReason?: string;
   }): void;
-  handle(
-    body: ProtocolMessage["body"],
-    secretFrame?: Uint8Array,
-  ): Promise<JsonValue>;
 }
 
 export class PodiumConductorProtocolHandler {
-  constructor(private readonly services: PodiumConductorServices) {}
+  constructor(private readonly channel: PodiumConductorChannel) {}
 
   async handle(value: JsonValue, secretFrame?: Uint8Array): Promise<JsonValue> {
     let requestId = "invalid-request";
     try {
-      const request = decodePodiumConductorPodiumConductorMessage(
+      const request = decodePodiumConductorMessage(
         value,
       ) as unknown as ProtocolMessage;
       requestId = request.request_id;
-      const body = await this.services.handle(request.body, secretFrame);
-      return decodePodiumConductorPodiumConductorMessage({
+      const body = await this.channel.handle(request.body, secretFrame);
+      return decodePodiumConductorMessage({
         protocol_version: "1",
         request_id: requestId,
         body,

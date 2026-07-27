@@ -33,7 +33,7 @@ test("foreground E2E command keeps one .env-loaded foreground entrypoint", () =>
   assert.match(makefile, /^e2e:\n\tnpm run e2e$/mu);
 });
 
-test("foreground E2E Campaign fixes the seven mandatory Cases", () => {
+test("foreground E2E Campaign fixes the eight mandatory Cases", () => {
   assert.deepEqual(FOREGROUND_E2E_CASE_IDS, [
     "approved_happy_path",
     "plan_rejected_and_replanned",
@@ -42,6 +42,7 @@ test("foreground E2E Campaign fixes the seven mandatory Cases", () => {
     "parallel_multi_conductor",
     "same_conductor_preemption",
     "conductor_restart_recovery",
+    "missing_worktree_recovery",
   ]);
 });
 
@@ -79,7 +80,7 @@ test("foreground E2E CLI preserves the closed Project reset failure code without
   });
 });
 
-test("Campaign composes the real seven-Case lifecycle after readiness and reads each created Root before cleanup", async () => {
+test("Campaign composes the real eight-Case lifecycle after readiness and reads each created Root before cleanup", async () => {
   const events = [];
   const completedDrivers = [];
   const finalReads = [];

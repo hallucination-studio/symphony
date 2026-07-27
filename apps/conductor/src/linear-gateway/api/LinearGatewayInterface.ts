@@ -21,9 +21,9 @@ export interface LinearWorkflowTreeSnapshot {
     description: string;
     labels: string[];
     is_archived: boolean;
-    issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "human";
-    workflow_issue_key?: string;
+    issue_kind?: "root" | "cycle" | "plan" | "work" | "verify" | "finding";
     remote_version: string;
+    created_at: string;
     updated_at: string;
   }>;
   comments: Array<{
@@ -52,8 +52,18 @@ export interface LinearWorkflowTreeSnapshot {
     source_issue_id: string;
     target_issue_id: string;
   }>;
+  attachments: Array<{
+    attachment_id: string;
+    issue_id: string;
+    title: string;
+    url: string;
+    source_type: string;
+    remote_version: string;
+    created_at: string;
+    updated_at: string;
+  }>;
   source_manifest: Array<{
-    source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_status_catalog";
+    source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_attachment" | "linear_activity" | "linear_status_catalog";
     source_id: string;
     source_version: string;
     actor_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
@@ -104,6 +114,7 @@ export type LinearWorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      labelNames: string[];
       isArchived: boolean;
       parentAssignment:
         | { mode: "retain" }
@@ -126,6 +137,23 @@ export type LinearWorkflowMutationCommand =
         expectedIsArchived?: boolean;
       };
       body: string;
+    }
+  | {
+      kind: "create_workflow_attachment";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedIsArchived?: boolean;
+      };
+      title: string;
+      url: string;
     }
   | {
       kind: "create_comment_reply";

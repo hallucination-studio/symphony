@@ -14,11 +14,9 @@ const CASE_ASSERTION_IDS = Object.freeze({
     "plan_approval_precedes_work",
     "cycle_plan_work_verify_tree_materialized",
     "stage_chain_delivered",
-    "turn_usage_aggregated",
     "boundary_in_review_delivery",
     "work_before_approval",
     "duplicate_or_synthetic_completion",
-    "usage_missing_or_double_counted",
   ],
   plan_rejected_and_replanned: [
     "rejection_consumed_and_replied",
@@ -47,11 +45,11 @@ const CASE_ASSERTION_IDS = Object.freeze({
     "undeclared_revision_or_conductor_interpretation",
   ],
   parallel_multi_conductor: [
-    "root_ownership_and_workspace_isolated",
+    "root_routing_and_workspace_isolated",
     "independent_delivery_chains",
     "cross_conductor_stage_overlap",
     "boundary_all_roots_delivered",
-    "cross_conductor_takeover",
+    "cross_conductor_routing_violation",
     "shared_workspace_writer",
     "telemetry_substitutes_overlap",
   ],
@@ -68,12 +66,22 @@ const CASE_ASSERTION_IDS = Object.freeze({
   conductor_restart_recovery: [
     "old_execution_terminal_once",
     "recovery_uses_fresh_execution",
-    "ownership_persists",
+    "routing_persists",
     "unaffected_root_continues",
     "boundary_recovered_and_continuous_delivered",
     "late_old_session_success",
     "checkpoint_or_linear_rewrite",
     "unaffected_conductor_reconfigured",
+  ],
+  missing_worktree_recovery: [
+    "worktree_missing_detected_before_dispatch",
+    "valid_branch_rematerialized",
+    "invalid_generation_canceled_and_archived",
+    "fresh_generation_uses_new_native_ids",
+    "fresh_generation_requires_fresh_approval",
+    "boundary_recoverable_and_fresh_generations_delivered",
+    "invalid_branch_remounted",
+    "old_generation_authorizes_fresh_work",
   ],
 });
 
@@ -115,12 +123,12 @@ test("Case topology and declared interactions satisfy the mandatory human and co
   const byId = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, definition]));
 
   assert.equal(byId.get("approved_happy_path").rootTopology.length, 1);
-  assert.equal(byId.get("plan_rejected_and_replanned").declaredUserInteractions.at(-1).terminalStatus, "Rejected");
-  assert.equal(byId.get("information_requested_and_answered").declaredUserInteractions.at(-1).terminalStatus, "Answered");
+  assert.equal(byId.get("plan_rejected_and_replanned").declaredUserInteractions.at(-1).kind, "reply_to_human_action");
+  assert.equal(byId.get("information_requested_and_answered").declaredUserInteractions.at(-1).kind, "reply_to_human_action");
   assert.deepEqual(
     byId.get("root_revision_and_comment").declaredUserInteractions.map(({ kind }) => kind),
     [
-      "wait_for_plan_contract_and_human_action",
+      "wait_for_plan_approval_gate",
       "update_root_description",
       "wait_for_input_receipt",
       "create_comment",
@@ -147,6 +155,11 @@ test("Case topology and declared interactions satisfy the mandatory human and co
   );
   assert.equal(byId.get("conductor_restart_recovery").rootTopology.length, 2);
   assert.deepEqual(byId.get("conductor_restart_recovery").allowedProcessFaults, ["kill_and_restart_owning_conductor"]);
+  assert.equal(byId.get("missing_worktree_recovery").rootTopology.length, 2);
+  assert.deepEqual(byId.get("missing_worktree_recovery").allowedProcessFaults, [
+    "stop_owner_and_remove_exact_recoverable_worktree",
+    "stop_owner_remove_exact_worktree_and_execution_branch",
+  ]);
 });
 
 test("revision Case freezes its initial Plan gate and every user-input receipt", () => {
@@ -154,7 +167,7 @@ test("revision Case freezes its initial Plan gate and every user-input receipt",
   const interactions = definition.declaredUserInteractions;
 
   assert.deepEqual(interactions[0], {
-    kind: "wait_for_plan_contract_and_human_action",
+    kind: "wait_for_plan_approval_gate",
     rootKey: "revision-root",
     actionKind: "plan_review",
     actionBinding: "initial_plan_review",
@@ -172,7 +185,7 @@ test("revision Case freezes its initial Plan gate and every user-input receipt",
   assert.deepEqual(
     interactions.filter(({ kind }) => kind === "wait_for_input_receipt").map(({ requiredFacts }) => requiredFacts),
     [
-      ["root_directive"],
+      ["native_activity", "cycle_status", "successor_cycle"],
       ["reply", "reaction"],
       ["reply", "reaction"],
       ["reply", "reaction", "thread_state"],
@@ -188,7 +201,7 @@ test("preemption Case binds only frozen roles and waits before its finite approv
     "bind_preemption_roles",
     "touch_bound_root_description",
     "wait_for_bound_root_stage",
-    "set_each_matching_human_action_status",
+    "reply_to_each_matching_human_action",
   ]);
 
   const binding = bindSameConductorPreemptionRoles({
@@ -205,10 +218,10 @@ test("preemption Case binds only frozen roles and waits before its finite approv
 
   const approvals = interactions.at(-1);
   assert.deepEqual(approvals, {
-    kind: "set_each_matching_human_action_status",
+    kind: "reply_to_each_matching_human_action",
     rootKeys: ["inflight-root", "touched-root", "remaining-root", "low-priority-root"],
     actionKind: "plan_review",
-    terminalStatus: "Approved",
+    body: "Approved.",
     oncePerRoot: true,
     after: "preemption_ordering_proven",
   });

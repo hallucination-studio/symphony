@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   createForegroundE2EEnvironment,
@@ -13,6 +14,7 @@ import {
 import { resetDedicatedE2EProject } from "../../tools/e2e/linear-environment.mjs";
 import { createForegroundReporter } from "../../tools/e2e/reporter.mjs";
 import {
+  acquireForegroundBindingProcessFence,
   closeOwnedProcess,
   closeForegroundProductionRuntime,
   createConductorMultiplexer,
@@ -22,8 +24,11 @@ import {
   createProjectRootIndexRequestBudget,
   createPodiumEnvironment,
   createConductorRuntimeLogForwarder,
+  removeExactRootWorktreesAndRestart,
   startConfiguredConductors,
 } from "../../tools/e2e/runtime-owner.mjs";
+
+const executeFile = promisify(execFile);
 
 const config = Object.freeze({
   linear: Object.freeze({ clientId: "linear-client", projectSlugId: "e2e-project", setupAuthorized: true }),
@@ -395,6 +400,105 @@ test("owned process cleanup escalates to SIGKILL when SIGTERM is ignored", { ski
     assert.equal(child.signalCode, "SIGKILL");
   } finally {
     await closeOwnedProcess(child, { timeoutMs: 1_000 });
+  }
+});
+
+test("foreground Binding process fence excludes a replacement until the exact OS lock is released", { skip: process.platform === "win32" }, async () => {
+  const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-fence-test-"));
+  let first;
+  let other;
+  let replacement;
+  try {
+    first = await acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: "binding-1" });
+    other = await acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: "binding-2" });
+    await assert.rejects(
+      acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: "binding-1" }),
+      hasCode("foreground_e2e_binding_process_fence_unavailable"),
+    );
+
+    await first.close();
+    first = undefined;
+    replacement = await acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: "binding-1" });
+  } finally {
+    await Promise.allSettled([first?.close(), other?.close(), replacement?.close()]);
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test("missing-worktree fault removes only an exact fenced worktree and optionally its execution branch", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-worktree-fault-test-"));
+  const repositoryRoot = path.join(directory, "repository");
+  const dataRoot = path.join(directory, "conductor");
+  const runtimeRoot = path.join(directory, "runtime");
+  const conductors = [1, 2].map((index) => ({
+    bindingId: `binding-${index}`,
+    conductorId: `conductor-${index}`,
+    repositoryRoot,
+    dataRoot,
+  }));
+  const oldFences = new Map();
+  try {
+    await gitCommand(["init", "-b", "main", repositoryRoot]);
+    await gitCommand(["-C", repositoryRoot, "config", "user.email", "e2e@example.test"]);
+    await gitCommand(["-C", repositoryRoot, "config", "user.name", "Symphony E2E"]);
+    await writeFile(path.join(repositoryRoot, "base.txt"), "base\n");
+    await gitCommand(["-C", repositoryRoot, "add", "base.txt"]);
+    await gitCommand(["-C", repositoryRoot, "commit", "-m", "base"]);
+
+    const faults = [
+      { conductorId: "conductor-1", rootIssueId: "root-recoverable", rootIdentifier: "ENG-10", invalidateExecutionBranch: false },
+      { conductorId: "conductor-2", rootIssueId: "root-invalid", rootIdentifier: "ENG-20", invalidateExecutionBranch: true },
+    ];
+    const expected = new Map();
+    for (const input of faults) {
+      const branch = `symphony/runs/${input.rootIdentifier.toLowerCase()}`;
+      const worktreePath = path.join(dataRoot, "worktrees", input.rootIssueId);
+      await mkdir(path.dirname(worktreePath), { recursive: true });
+      await gitCommand(["-C", repositoryRoot, "worktree", "add", "-b", branch, worktreePath, "main"]);
+      await writeFile(path.join(worktreePath, `${input.rootIssueId}.txt`), "committed\n");
+      await gitCommand(["-C", worktreePath, "add", "."]);
+      await gitCommand(["-C", worktreePath, "commit", "-m", input.rootIssueId]);
+      const oldHead = await gitCommand(["-C", worktreePath, "rev-parse", "HEAD"]);
+      expected.set(input.rootIssueId, { branch, worktreePath, oldHead, invalidateExecutionBranch: input.invalidateExecutionBranch });
+    }
+    for (const conductor of conductors) {
+      oldFences.set(conductor.conductorId, await acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: conductor.bindingId }));
+    }
+    const events = [];
+    const result = await removeExactRootWorktreesAndRestart({
+      faults,
+      runtimeRoot,
+      async stopConductor({ conductorId }) {
+        events.push(`stopped:${conductorId}`);
+        await oldFences.get(conductorId).close();
+        oldFences.delete(conductorId);
+        return conductors.find((candidate) => candidate.conductorId === conductorId);
+      },
+      async restartConductor({ conductorId }) {
+        events.push(`restarted:${conductorId}`);
+        const conductor = conductors.find((candidate) => candidate.conductorId === conductorId);
+        const replacement = await acquireForegroundBindingProcessFence({ runtimeRoot, bindingId: conductor.bindingId });
+        await replacement.close();
+        return { conductorId };
+      },
+    });
+
+    assert.deepEqual(events.slice(0, 2), ["stopped:conductor-1", "stopped:conductor-2"]);
+    assert.deepEqual(new Set(events.slice(2)), new Set(["restarted:conductor-1", "restarted:conductor-2"]));
+    for (const fault of result.faults) {
+      const { branch, worktreePath, oldHead, invalidateExecutionBranch } = expected.get(fault.rootIssueId);
+      assert.equal(fault.branch, branch);
+      assert.equal(fault.headRevision, oldHead);
+      await assert.rejects(access(worktreePath));
+      if (invalidateExecutionBranch) {
+        await assert.rejects(gitCommand(["-C", repositoryRoot, "rev-parse", "--verify", `${branch}^{commit}`]));
+      } else {
+        assert.equal(await gitCommand(["-C", repositoryRoot, "rev-parse", "--verify", `${branch}^{commit}`]), oldHead);
+      }
+    }
+  } finally {
+    await Promise.allSettled([...oldFences.values()].map((fence) => fence.close()));
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -871,6 +975,7 @@ test("production child environments keep development and Codex API secrets outsi
       linearInstallationId: "installation-1",
       organizationId: "organization-1",
       repositoryHandle: "repository-1",
+      repositoryIdentity: "repository-identity-1",
       repositoryRoot: "/tmp/repository",
       baseBranch: "main",
       dataRoot: "/tmp/conductor",
@@ -886,6 +991,7 @@ test("production child environments keep development and Codex API secrets outsi
   assert.equal(conductor.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(conductor.SYMPHONY_E2E_CODEX_API_KEY, undefined);
   assert.equal(conductor.SYMPHONY_CODEX_BASE_URL, "https://example.test");
+  assert.equal(conductor.SYMPHONY_REPOSITORY_IDENTITY, "repository-identity-1");
 });
 
 function eventReporter(events) {
@@ -898,6 +1004,11 @@ function eventReporter(events) {
 
 function hasCode(expected) {
   return (error) => error?.code === expected;
+}
+
+async function gitCommand(arguments_) {
+  const { stdout } = await executeFile("git", arguments_, { maxBuffer: 1_048_576 });
+  return stdout.trim();
 }
 
 function childReady(child) {

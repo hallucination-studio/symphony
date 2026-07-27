@@ -19,12 +19,13 @@ test("approved happy path creates its declared Root and approves only the produc
     async delegateRootIssue(input) {
       calls.push({ kind: "delegate_root", input });
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
-      return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
+      return { requestCommentId: "request-1", planIssueId: "plan-1", cycleIssueId: "cycle-1" };
     },
-    async setHumanActionTerminalStatus(input) {
+    async replyToHumanAction(input) {
       calls.push({ kind: "approve_plan_review", input });
+      return { commentId: "reply-1", requestCommentId: input.requestCommentId };
     },
   };
 
@@ -55,14 +56,14 @@ test("approved happy path creates its declared Root and approves only the produc
     { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     {
       kind: "wait_for_plan_review",
-      input: { rootIssueId: "root-1", terminalStatus: "Approved" },
+      input: { rootIssueId: "root-1" },
     },
     {
       kind: "approve_plan_review",
       input: {
-        issueId: "action-1",
-        terminalStatus: "Approved",
-        stateId: "approved-state",
+        rootIssueId: "root-1",
+        requestCommentId: "request-1",
+        body: "Approved.",
       },
     },
   ]);
@@ -70,6 +71,8 @@ test("approved happy path creates its declared Root and approves only the produc
     context: {
       humanActorId: "human-1",
       rootIssueIdsByKey: { "approved-root": "root-1" },
+      approvalRequestCommentId: "request-1",
+      approvalReplyCommentId: "reply-1",
     },
   });
 });
@@ -81,8 +84,8 @@ test("approved happy path rejects a Case definition or Human boundary outside th
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
-    async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
-    async setHumanActionTerminalStatus() {},
+    async waitForPlanApprovalRequest() { return { requestCommentId: "request-1", planIssueId: "plan-1", cycleIssueId: "cycle-1" }; },
+    async replyToHumanAction(input) { return { commentId: "reply-1", requestCommentId: input.requestCommentId }; },
   };
 
   await assert.rejects(
@@ -112,11 +115,11 @@ test("approved happy path forwards Case cancellation to every Linear Human opera
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive(input) { inputs.push(input); },
     async delegateRootIssue(input) { inputs.push(input); },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       inputs.push(input);
-      return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
+      return { requestCommentId: "request-1", planIssueId: "plan-1", cycleIssueId: "cycle-1" };
     },
-    async setHumanActionTerminalStatus() {},
+    async replyToHumanAction(input) { return { commentId: "reply-1", requestCommentId: input.requestCommentId }; },
   };
 
   await runApprovedHappyPathCase({
@@ -129,7 +132,7 @@ test("approved happy path forwards Case cancellation to every Linear Human opera
   assert.deepEqual(inputs, [
     { rootIssueId: "root-1", signal: abortController.signal },
     { rootIssueId: "root-1", signal: abortController.signal },
-    { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal },
+    { rootIssueId: "root-1", signal: abortController.signal },
   ]);
 });
 

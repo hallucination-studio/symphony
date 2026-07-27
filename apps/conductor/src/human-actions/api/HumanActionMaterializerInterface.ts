@@ -1,15 +1,15 @@
 import type {
-  RequestHumanActionDirective,
+  CreateHumanActionAction,
   RootReconciliationView,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 export type HumanActionMaterializationResult =
-  | { kind: "materialized"; actionIssueId: string; actionId: string }
+  | { kind: "materialized"; requestCommentId: string }
   | { kind: "failed"; code: string; sanitizedReason: string };
 
 export interface HumanActionMaterializerInterface {
   materialize(input: {
-    directive: RequestHumanActionDirective;
+    action: CreateHumanActionAction;
     rootDirectiveId: string;
     view: RootReconciliationView;
   }): Promise<HumanActionMaterializationResult>;

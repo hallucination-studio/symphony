@@ -109,7 +109,9 @@ export class LinearGatewayProtocolHandlerImpl {
       tree.issues.length === 0 ||
       tree.issues.length > MAX_TREE_NODES ||
       tree.comments.length > 4_096 ||
-      tree.relations.length > 1_024
+      tree.relations.length > 1_024 ||
+      tree.attachments.length > 1_024 ||
+      tree.activities.length > 8_192
     ) {
       throw new Error("linear_workflow_tree_invalid");
     }
@@ -152,6 +154,7 @@ export class LinearGatewayProtocolHandlerImpl {
         issue.labels.some((label) => !shortText(label)) ||
         new Set(issue.labels).size !== issue.labels.length ||
         !identifier(issue.remoteVersion, 512) ||
+        !timestamp(issue.createdAt) ||
         !timestamp(issue.updatedAt) ||
         (issue.parentIssueId !== undefined &&
           (!identifier(issue.parentIssueId, 128) || issue.parentIssueId === issue.issueId)) ||
@@ -239,6 +242,30 @@ export class LinearGatewayProtocolHandlerImpl {
         throw new Error("linear_workflow_relation_invalid");
       }
       relationIds.add(relation.relationId);
+    }
+    const attachmentIds = new Set<string>();
+    for (const attachment of tree.attachments) {
+      if (!identifier(attachment.attachmentId, 128) || !issueIds.has(attachment.issueId) ||
+          !boundedText(attachment.title) || !boundedText(attachment.url) || !shortText(attachment.sourceType) ||
+          !identifier(attachment.remoteVersion, 512) || !timestamp(attachment.createdAt) ||
+          !timestamp(attachment.updatedAt) || attachmentIds.has(attachment.attachmentId)) {
+        throw new Error("linear_workflow_attachment_invalid");
+      }
+      attachmentIds.add(attachment.attachmentId);
+    }
+    const activityIds = new Set<string>();
+    for (const activity of tree.activities) {
+      if (!identifier(activity.activityId, 128) || !issueIds.has(activity.issueId) ||
+          !Array.isArray(activity.activityKinds) || activity.activityKinds.length === 0 ||
+          activity.activityKinds.length > 7 || new Set(activity.activityKinds).size !== activity.activityKinds.length ||
+          activity.activityKinds.some((kind) => !workflowActivityKind(kind)) ||
+          !workflowCommentAuthorKind(activity.actorKind) ||
+          (activity.actorId !== undefined && !identifier(activity.actorId, 128)) ||
+          !workflowActivityReferencesValid(activity) || !identifier(activity.remoteVersion, 512) ||
+          !timestamp(activity.createdAt) || activityIds.has(activity.activityId)) {
+        throw new Error("linear_workflow_activity_invalid");
+      }
+      activityIds.add(activity.activityId);
     }
     validateWorkflowSourceFacts(tree, projectId);
     return tree;
@@ -537,16 +564,6 @@ function validateRootHeader(
       throw new Error("linear_project_root_index_invalid");
     }
   }
-  if (root.rootOwnership) {
-    const ownership = root.rootOwnership;
-    if (
-      !identifier(ownership.conductorId, 128) ||
-      !identifier(ownership.sourceCommentId, 128) ||
-      !identifier(ownership.sourceCommentRemoteVersion, 512)
-    ) {
-      throw new Error("linear_project_root_index_invalid");
-    }
-  }
 }
 
 function identifier(value: string | undefined, maximum: number): boolean {
@@ -607,6 +624,29 @@ function workflowRelationKind(value: string | undefined): boolean {
   return value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by";
 }
 
+function workflowActivityKind(value: string | undefined): boolean {
+  return value === "status_changed" || value === "description_changed" ||
+    value === "archive_changed" || value === "labels_changed" ||
+    value === "parent_changed" || value === "delegation_changed" ||
+    value === "attachment_changed";
+}
+
+function workflowActivityReferencesValid(
+  activity: Awaited<ReturnType<LinearClientInterface["getWorkflowIssueTree"]>>["activities"][number],
+): boolean {
+  const optionalIds = [
+    activity.fromStateId, activity.toStateId, activity.fromParentId, activity.toParentId,
+    activity.fromDelegateId, activity.toDelegateId, activity.attachmentId,
+  ];
+  const idArrays = [activity.addedLabelIds, activity.removedLabelIds];
+  return optionalIds.every((value) => value === undefined || identifier(value, 128)) &&
+    (activity.updatedDescription === undefined || boundedText(activity.updatedDescription)) &&
+    (activity.archived === undefined || typeof activity.archived === "boolean") &&
+    idArrays.every((values) => values === undefined ||
+      (Array.isArray(values) && values.length <= 64 && new Set(values).size === values.length &&
+        values.every((value) => identifier(value, 128))));
+}
+
 function validateWorkflowSourceFacts(
   tree: Awaited<ReturnType<LinearClientInterface["getWorkflowIssueTree"]>>,
   projectId: string,
@@ -617,7 +657,7 @@ function validateWorkflowSourceFacts(
     !Array.isArray(tree.coverage.omissions) ||
     tree.coverage.omissions.length !== 0 ||
     !Array.isArray(tree.sourceManifest) ||
-    tree.sourceManifest.length > 8_192
+    tree.sourceManifest.length > 16_384
   ) {
     throw new Error("linear_workflow_source_coverage_incomplete");
   }
@@ -630,6 +670,12 @@ function validateWorkflowSourceFacts(
   }
   for (const relation of tree.relations) {
     expected.set(`linear_relation:${relation.relationId}`, relation.relationId);
+  }
+  for (const attachment of tree.attachments) {
+    expected.set(`linear_attachment:${attachment.attachmentId}`, attachment.remoteVersion);
+  }
+  for (const activity of tree.activities) {
+    expected.set(`linear_activity:${activity.activityId}`, activity.remoteVersion);
   }
   const statusSourceId = `${projectId}:status-catalog`;
   expected.set("linear_status_catalog:" + statusSourceId, "");
@@ -664,7 +710,8 @@ function validateWorkflowSourceFacts(
 
 function workflowSourceKind(value: string | undefined): boolean {
   return value === "linear_issue" || value === "linear_comment" ||
-    value === "linear_relation" ||
+    value === "linear_relation" || value === "linear_attachment" ||
+    value === "linear_activity" ||
     value === "linear_status_catalog";
 }
 

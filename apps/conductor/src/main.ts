@@ -8,7 +8,6 @@ import { RootReconciliationRuntime } from "./root-reconciliation/internal/RootRe
 import type { RootRuntimeDisposition } from "./root-reconciliation/api/RootRuntimeLoop.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
-import { LinearRootOwnershipClaimImpl } from "./root-discovery/internal/LinearRootOwnershipClaimImpl.js";
 import { FilePerformerProfileStoreImpl } from "./performer-profiles/internal/FilePerformerProfileStoreImpl.js";
 import { ConductorProfileRelayHandler } from "./performer-profiles/internal/ConductorProfileRelayHandler.js";
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
@@ -18,22 +17,15 @@ import { PersistentPerformerAgentChannelFactory } from "./performer-agent-client
 import { PerformerRootReconcilerClientImpl } from "./root-reconciler-client/internal/PerformerRootReconcilerClientImpl.js";
 import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
-import { LinearHumanActionResolutionMaterializerImpl } from "./human-actions/internal/LinearHumanActionResolutionMaterializerImpl.js";
-import { LinearHumanActionResolutionValidatorImpl } from "./human-actions/internal/LinearHumanActionResolutionValidatorImpl.js";
-import { LinearRootDirectiveMaterializerImpl } from "./root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.js";
-import { LinearRootDirectiveRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootDirectiveRecordWriterImpl.js";
-import { LinearRootReconcilerFailureRecordWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerFailureRecordWriterImpl.js";
-import { LinearRootReconcilerReplyWriterImpl } from "./root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
-import { LinearCycleTimelineCommentSubscriberImpl } from "./timeline-comments/internal/LinearCycleTimelineCommentSubscriberImpl.js";
-import { LinearRootTimelineCommentSubscriberImpl } from "./timeline-comments/internal/LinearRootTimelineCommentSubscriberImpl.js";
-import { InProcessWorkflowTimelinePublisherImpl } from "./workflow-events/internal/InProcessWorkflowTimelinePublisherImpl.js";
+import { LinearGitRootActionMaterializerImpl } from "./root-action-materialization/internal/LinearGitRootActionMaterializerImpl.js";
+import { LinearRootReconcilerReplyWriterImpl } from "./root-action-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { RootWakeController } from "./root-scheduling/internal/RootWakeController.js";
 import { LinearRootSafetyPolicyImpl } from "./root-reconciliation/internal/LinearRootSafetyPolicyImpl.js";
 import { LinearRootConvergencePolicyImpl } from "./root-reconciliation/internal/LinearRootConvergencePolicyImpl.js";
 import { PodiumRuntimeLogPublisherImpl } from "./runtime-logs/internal/PodiumRuntimeLogPublisherImpl.js";
-import type { DiscoveredRoot } from "./root-reconciliation/api/RootModels.js";
+import { GitRootDeliveryImpl } from "./root-delivery/internal/GitRootDeliveryImpl.js";
 
 type JsonValue =
   | null
@@ -120,6 +112,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     protocol,
     {
       bindingId: config.bindingId,
+      instanceId: config.instanceId,
       timeoutMs: () => MAX_PRIVATE_IPC_REQUEST_TIMEOUT_MS,
       observeDiscovery(evidence) {
         logs.publish({ level: "info", event: "root_discovery_evidence", fields: {
@@ -130,35 +123,6 @@ export async function runConductor(environment = process.env): Promise<void> {
       },
     },
   );
-  const workspaceFor = (root: DiscoveredRoot) => ({
-    rootIssueId: root.issueId,
-    branch: `symphony/runs/${root.identifier.toLowerCase()}`,
-    worktreePath: path.join(config.dataRoot, "worktrees", root.issueId),
-  });
-  const ownershipClaim = new LinearRootOwnershipClaimImpl({
-    linear: gateway,
-    git,
-    profileFor: async ({ ownedProfileId }) => {
-      const file = await profiles.list();
-      const profileId = ownedProfileId ?? file.activeProfileId;
-      const profile = profileId
-        ? file.profiles.find((candidate) => candidate.profileId === profileId)
-        : undefined;
-      if (!profile) return undefined;
-      return {
-        profileId: profile.profileId,
-        ready: await profileReadiness(profileControl, profile.profileId) === "ready",
-      };
-    },
-    workspaceFor,
-    convergencePolicyFor: async (_root, persistedPolicy) => ({
-      ...config.rootConvergencePolicy,
-      deadlineAt: persistedPolicy?.deadlineAt ?? deadlineAt(config.rootDeadlineDurationMs),
-    }),
-    conductorId: config.conductorId,
-    ownerGeneration: config.instanceId,
-    baseBranch: config.baseBranch,
-  });
   const report = async (body: JsonValue) => protocol.request({
     requestId: randomUUID(),
     body,
@@ -181,28 +145,26 @@ export async function runConductor(environment = process.env): Promise<void> {
   const runtime = new RootReconciliationRuntime({
     conductorId: config.conductorId,
     conductorShortHash: config.conductorShortHash,
+    repositoryIdentity: config.repositoryIdentity,
     baseBranch: config.baseBranch,
     linear: gateway,
     git,
-    ownership: ownershipClaim,
     scheduling: new LinearPriorityRootSchedulingPolicyImpl(),
     safety: new LinearRootSafetyPolicyImpl(),
-    convergence: new LinearRootConvergencePolicyImpl(gateway),
+    convergence: new LinearRootConvergencePolicyImpl(
+      config.rootConvergencePolicy,
+      config.rootDeadlineDurationMs,
+    ),
     reconciler,
     performer,
-    materializer: new LinearRootDirectiveMaterializerImpl(
+    materializer: new LinearGitRootActionMaterializerImpl(
       gateway,
       new LinearHumanActionMaterializerImpl(gateway),
+      git,
+      config.baseBranch,
+      new GitRootDeliveryImpl(gateway, git),
     ),
-    directiveRecordWriter: new LinearRootDirectiveRecordWriterImpl(gateway),
-    failureRecordWriter: new LinearRootReconcilerFailureRecordWriterImpl(gateway),
     replyWriter: new LinearRootReconcilerReplyWriterImpl(gateway),
-    humanActionResolutionValidator: new LinearHumanActionResolutionValidatorImpl(),
-    humanActionResolutionMaterializer: new LinearHumanActionResolutionMaterializerImpl(gateway),
-    timeline: new InProcessWorkflowTimelinePublisherImpl(
-      new LinearRootTimelineCommentSubscriberImpl(gateway),
-      new LinearCycleTimelineCommentSubscriberImpl(gateway),
-    ),
     profileIdFor: async () => {
       const file = await profiles.list();
       const profileId = file.activeProfileId;
@@ -275,6 +237,7 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     linearInstallationId: required(environment.SYMPHONY_LINEAR_INSTALLATION_ID, "linear_installation_id_missing"),
     organizationId: required(environment.SYMPHONY_ORGANIZATION_ID, "organization_id_missing"),
     repositoryHandle: required(environment.SYMPHONY_REPOSITORY_HANDLE, "repository_handle_missing"),
+    repositoryIdentity: required(environment.SYMPHONY_REPOSITORY_IDENTITY, "repository_identity_missing"),
     repositoryRoot: required(environment.SYMPHONY_REPOSITORY_ROOT, "repository_root_missing"),
     baseBranch: required(environment.SYMPHONY_BASE_BRANCH, "base_branch_missing"),
     dataRoot: required(environment.SYMPHONY_CONDUCTOR_DATA_ROOT, "conductor_data_root_missing"),
@@ -288,14 +251,9 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
       maxCyclesPerRoot: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT, "root_max_cycles_per_root_invalid"),
       maxSameOpenFindingCycles: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES, "root_max_same_open_finding_cycles_invalid"),
       maxConsecutiveNoProgress: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS, "root_max_consecutive_no_progress_invalid"),
-      maxTotalTokens: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_TOTAL_TOKENS, "root_max_total_tokens_invalid"),
       maxCycleRepairAttempts: rootPolicyNonNegativeInteger(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "root_max_cycle_repair_attempts_invalid"),
     },
   };
-}
-
-function deadlineAt(durationMs: number): string {
-  return new Date(Date.now() + durationMs).toISOString();
 }
 
 function required(value: string | undefined, code: string): string {

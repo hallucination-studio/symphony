@@ -89,6 +89,7 @@
         "linear_installation_id",
         "organization_id",
         "repository_handle",
+        "repository_identity",
         "repository_root",
         "base_branch",
         "conductor_data_root"
@@ -101,6 +102,7 @@
         "linear_installation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "organization_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
         "repository_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
         "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
         "conductor_data_root": { "$ref": "common.schema.json#/$defs/BoundedPath" }

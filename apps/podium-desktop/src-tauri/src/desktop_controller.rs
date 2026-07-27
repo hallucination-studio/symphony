@@ -1,3 +1,4 @@
+use crate::binding_process_fence::BindingProcessFence;
 use crate::desktop_lifecycle::{ManagedProcess, ProcessError};
 use crate::oauth_return::{OAuthReturn, OAuthReturnRegistry};
 use crate::repository_context::{select_repository, validate_base_branch, RepositoryContext};
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use symphony_contracts::{DesktopHostDesktopHostMessage, PodiumClientPodiumClientMessage};
+use symphony_contracts::{DesktopHostMessage, PodiumClientMessage, PodiumConductorMessage};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -32,6 +33,8 @@ pub enum ControllerError {
     ConductorMissing,
     ConductorMismatch,
     ConductorSpawnFailed,
+    ConductorFenceUnavailable,
+    ConductorChannelRegistrationFailed,
     ConductorShutdownFailed,
     HostCommandUnsupported,
     ExternalOpenFailed,
@@ -45,6 +48,7 @@ struct ConductorConfig {
     linear_installation_id: String,
     organization_id: String,
     repository_handle: String,
+    repository_identity: String,
     repository_root: String,
     base_branch: String,
     conductor_data_root: String,
@@ -54,6 +58,7 @@ struct ActiveConductor {
     config: ConductorConfig,
     instance_id: String,
     process: ManagedProcess,
+    _fence: BindingProcessFence,
 }
 
 pub struct DesktopController {
@@ -62,7 +67,8 @@ pub struct DesktopController {
     host: Mutex<UnixStream>,
     host_pending: Mutex<HashSet<String>>,
     host_acks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
-    conductor_channel: Mutex<UnixStream>,
+    conductor_socket_path: PathBuf,
+    runtime_root: PathBuf,
     repositories: Mutex<HashMap<String, RepositoryContext>>,
     conductors: AsyncMutex<HashMap<String, ActiveConductor>>,
     backend: AsyncMutex<ManagedProcess>,
@@ -70,18 +76,23 @@ pub struct DesktopController {
 
 impl DesktopController {
     pub fn start(app: AppHandle) -> Result<Arc<Self>, ControllerError> {
+        let runtime_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| ControllerError::BackendUnavailable)?
+            .join("runtime");
+        std::fs::create_dir_all(&runtime_root).map_err(|_| ControllerError::BackendUnavailable)?;
+        let conductor_socket_path = runtime_root.join(format!("conductor-{}.sock", uuid_like()));
         let (client_parent, client_child) =
             UnixStream::pair().map_err(|_| ControllerError::IpcCreateFailed)?;
         let (host_parent, host_child) =
-            UnixStream::pair().map_err(|_| ControllerError::IpcCreateFailed)?;
-        let (conductor_backend, conductor_child) =
             UnixStream::pair().map_err(|_| ControllerError::IpcCreateFailed)?;
         let mut command = backend_command(&app)?;
         let client_input = client_child.try_clone().map_err(|_| ControllerError::IpcCloneFailed)?;
         command.stdin(Stdio::from(OwnedFd::from(client_input)));
         command.stdout(Stdio::from(OwnedFd::from(client_child)));
         inherit_stream(&mut command, "SYMPHONY_HOST_IPC_FD", host_child)?;
-        inherit_stream(&mut command, "SYMPHONY_CONDUCTOR_IPC_FD", conductor_backend)?;
+        command.env("SYMPHONY_CONDUCTOR_SOCKET_PATH", &conductor_socket_path);
         let backend =
             ManagedProcess::spawn(command).map_err(|_| ControllerError::BackendSpawnFailed)?;
         let controller = Arc::new(Self {
@@ -90,7 +101,8 @@ impl DesktopController {
             host: Mutex::new(host_parent.try_clone().map_err(|_| ControllerError::IpcCloneFailed)?),
             host_pending: Mutex::new(HashSet::new()),
             host_acks: Mutex::new(HashMap::new()),
-            conductor_channel: Mutex::new(conductor_child),
+            conductor_socket_path,
+            runtime_root,
             repositories: Mutex::new(HashMap::new()),
             conductors: AsyncMutex::new(HashMap::new()),
             backend: AsyncMutex::new(backend),
@@ -114,8 +126,7 @@ impl DesktopController {
             frame.iter().position(|byte| *byte == b'\n').ok_or(ControllerError::ProtocolInvalid)?;
         let metadata: Value = serde_json::from_slice(&frame[..newline])
             .map_err(|_| ControllerError::ProtocolInvalid)?;
-        PodiumClientPodiumClientMessage::try_from(metadata)
-            .map_err(|_| ControllerError::ProtocolInvalid)?;
+        PodiumClientMessage::try_from(metadata).map_err(|_| ControllerError::ProtocolInvalid)?;
         let mut stream = self.client.lock().map_err(|_| ControllerError::BackendUnavailable)?;
         stream.write_all(frame).map_err(|_| ControllerError::ProtocolIoFailed)?;
         stream.flush().map_err(|_| ControllerError::ProtocolIoFailed)?;
@@ -123,8 +134,7 @@ impl DesktopController {
         let value: Value =
             serde_json::from_slice(response.strip_suffix(b"\n").unwrap_or(&response))
                 .map_err(|_| ControllerError::ProtocolInvalid)?;
-        PodiumClientPodiumClientMessage::try_from(value)
-            .map_err(|_| ControllerError::ProtocolInvalid)?;
+        PodiumClientMessage::try_from(value).map_err(|_| ControllerError::ProtocolInvalid)?;
         Ok(response)
     }
 
@@ -160,7 +170,7 @@ impl DesktopController {
                 "authorization_code": result.authorization_code,
             }
         });
-        DesktopHostDesktopHostMessage::try_from(message.clone())
+        DesktopHostMessage::try_from(message.clone())
             .map_err(|_| ControllerError::ProtocolInvalid)?;
         self.send_host_event(request_id, message)
     }
@@ -186,7 +196,7 @@ impl DesktopController {
             }
             let request: Value =
                 serde_json::from_str(&line).map_err(|_| ControllerError::ProtocolInvalid)?;
-            DesktopHostDesktopHostMessage::try_from(request.clone())
+            DesktopHostMessage::try_from(request.clone())
                 .map_err(|_| ControllerError::ProtocolInvalid)?;
             let request_id = string_field(&request, "request_id")?;
             if self
@@ -221,7 +231,7 @@ impl DesktopController {
                 "request_id": request_id,
                 "body": response_body,
             });
-            DesktopHostDesktopHostMessage::try_from(response.clone())
+            DesktopHostMessage::try_from(response.clone())
                 .map_err(|_| ControllerError::ProtocolInvalid)?;
             let mut writer = self.host.lock().map_err(|_| ControllerError::ProtocolIoFailed)?;
             writer
@@ -289,8 +299,11 @@ impl DesktopController {
         if active.contains_key(&config.binding_id) {
             return Err(ControllerError::ConductorAlreadyRunning);
         }
-        let (process, instance_id) = self.spawn_conductor(&config)?;
-        active.insert(config.binding_id.clone(), ActiveConductor { config, instance_id, process });
+        let (process, instance_id, fence) = self.spawn_conductor(&config)?;
+        active.insert(
+            config.binding_id.clone(),
+            ActiveConductor { config, instance_id, process, _fence: fence },
+        );
         Ok(())
     }
 
@@ -369,20 +382,24 @@ impl DesktopController {
     fn spawn_conductor(
         &self,
         config: &ConductorConfig,
-    ) -> Result<(ManagedProcess, String), ControllerError> {
+    ) -> Result<(ManagedProcess, String, BindingProcessFence), ControllerError> {
+        let fence = BindingProcessFence::acquire(&self.runtime_root, &config.binding_id)
+            .map_err(|_| ControllerError::ConductorFenceUnavailable)?;
         let executable = std::env::var_os("SYMPHONY_CONDUCTOR_EXECUTABLE")
             .map(PathBuf::from)
             .or_else(|| bundled_executable("conductor"))
             .unwrap_or_else(|| PathBuf::from("conductor"));
         let mut command = Command::new(executable);
-        let channel = self
-            .conductor_channel
-            .lock()
-            .map_err(|_| ControllerError::IpcCloneFailed)?
-            .try_clone()
-            .map_err(|_| ControllerError::IpcCloneFailed)?;
-        inherit_stream(&mut command, "SYMPHONY_PRIVATE_IPC_FD", channel)?;
         let instance_id = uuid_like();
+        let mut channel = UnixStream::connect(&self.conductor_socket_path)
+            .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+        register_conductor_channel(
+            &mut channel,
+            &config.binding_id,
+            &config.conductor_id,
+            &instance_id,
+        )?;
+        inherit_stream(&mut command, "SYMPHONY_PRIVATE_IPC_FD", channel)?;
         command
             .env("SYMPHONY_INSTANCE_ID", &instance_id)
             .env("SYMPHONY_BINDING_ID", &config.binding_id)
@@ -391,15 +408,19 @@ impl DesktopController {
             .env("SYMPHONY_LINEAR_INSTALLATION_ID", &config.linear_installation_id)
             .env("SYMPHONY_ORGANIZATION_ID", &config.organization_id)
             .env("SYMPHONY_REPOSITORY_HANDLE", &config.repository_handle)
+            .env("SYMPHONY_REPOSITORY_IDENTITY", &config.repository_identity)
             .env("SYMPHONY_REPOSITORY_ROOT", &config.repository_root)
             .env("SYMPHONY_BASE_BRANCH", &config.base_branch)
             .env("SYMPHONY_CONDUCTOR_DATA_ROOT", &config.conductor_data_root);
+        fence
+            .configure_child(&mut command)
+            .map_err(|_| ControllerError::ConductorFenceUnavailable)?;
         if let Some(performer) = bundled_executable("performer") {
             command.env("SYMPHONY_PERFORMER_EXECUTABLE", performer);
         }
         let process =
             ManagedProcess::spawn(command).map_err(|_| ControllerError::ConductorSpawnFailed)?;
-        Ok((process, instance_id))
+        Ok((process, instance_id, fence))
     }
 
     pub async fn shutdown(&self) {
@@ -429,7 +450,7 @@ impl DesktopController {
                 "sanitized_reason": reason,
             }
         });
-        DesktopHostDesktopHostMessage::try_from(message.clone())
+        DesktopHostMessage::try_from(message.clone())
             .map_err(|_| ControllerError::ProtocolInvalid)?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.host_acks
@@ -526,6 +547,61 @@ fn inherit_stream(
     Ok(())
 }
 
+fn register_conductor_channel(
+    stream: &mut UnixStream,
+    binding_id: &str,
+    conductor_id: &str,
+    instance_id: &str,
+) -> Result<(), ControllerError> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    let request_id = format!("channel-registration-{instance_id}");
+    let request = json!({
+        "protocol_version": "1",
+        "request_id": request_id,
+        "body": {
+            "kind": "conductor_channel_registration",
+            "binding_id": binding_id,
+            "conductor_id": conductor_id,
+            "instance_id": instance_id,
+        }
+    });
+    PodiumConductorMessage::try_from(request.clone())
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    stream.flush().map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    let response = read_line(stream)?;
+    let response: Value = serde_json::from_slice(response.strip_suffix(b"\n").unwrap_or(&response))
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    PodiumConductorMessage::try_from(response.clone())
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    let body = response
+        .get("body")
+        .and_then(Value::as_object)
+        .ok_or(ControllerError::ConductorChannelRegistrationFailed)?;
+    if response.get("request_id").and_then(Value::as_str) != Some(request_id.as_str())
+        || body.get("kind").and_then(Value::as_str) != Some("conductor_channel_registered")
+        || body.get("binding_id").and_then(Value::as_str) != Some(binding_id)
+        || body.get("conductor_id").and_then(Value::as_str) != Some(conductor_id)
+        || body.get("instance_id").and_then(Value::as_str) != Some(instance_id)
+    {
+        return Err(ControllerError::ConductorChannelRegistrationFailed);
+    }
+    stream
+        .set_read_timeout(None)
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    stream
+        .set_write_timeout(None)
+        .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
+    Ok(())
+}
+
 fn read_line(stream: &mut UnixStream) -> Result<Vec<u8>, ControllerError> {
     let mut bytes = Vec::new();
     let mut byte = [0_u8; 1];
@@ -549,6 +625,7 @@ fn parse_conductor(
         linear_installation_id: map_string(body, "linear_installation_id")?.to_owned(),
         organization_id: map_string(body, "organization_id")?.to_owned(),
         repository_handle: map_string(body, "repository_handle")?.to_owned(),
+        repository_identity: map_string(body, "repository_identity")?.to_owned(),
         repository_root: map_string(body, "repository_root")?.to_owned(),
         base_branch: map_string(body, "base_branch")?.to_owned(),
         conductor_data_root: map_string(body, "conductor_data_root")?.to_owned(),
@@ -579,6 +656,10 @@ fn protocol_error(error: ControllerError) -> Value {
         ControllerError::ConductorMismatch => "conductor_identity_mismatch",
         ControllerError::ConductorShutdownFailed => "conductor_shutdown_failed",
         ControllerError::ConductorSpawnFailed => "conductor_spawn_failed",
+        ControllerError::ConductorFenceUnavailable => "conductor_process_fence_unavailable",
+        ControllerError::ConductorChannelRegistrationFailed => {
+            "conductor_channel_registration_failed"
+        }
         _ => "desktop_host_command_failed",
     };
     json!({
@@ -631,12 +712,18 @@ mod tests {
                 linear_installation_id: "installation".to_owned(),
                 organization_id: "organization".to_owned(),
                 repository_handle: "repository".to_owned(),
+                repository_identity: "repository-identity".to_owned(),
                 repository_root: "/repository".to_owned(),
                 base_branch: "main".to_owned(),
                 conductor_data_root: "/data".to_owned(),
             },
             instance_id: format!("instance-{binding_id}"),
             process: ManagedProcess::spawn(command).unwrap(),
+            _fence: BindingProcessFence::acquire(
+                &std::env::temp_dir().join(format!("symphony-controller-test-{}", uuid_like())),
+                binding_id,
+            )
+            .unwrap(),
         }
     }
 

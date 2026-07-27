@@ -1,18 +1,10 @@
 import { createHash } from "node:crypto";
 
-import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
+import type { RootWorktreeGateInspection, RootWorktreeGateResult } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import { cycleOutcomeId, parseManagedRecord } from "../api/index.js";
 import { rootInputId } from "./RootInputIdentity.js";
-import type {
-  FindingRecord,
-  ManagedRecord,
-  PlanContract,
-  StageResultRecord,
-} from "../api/ManagedRecords.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type {
-  HumanActionKind,
   MechanicalViolation,
   RootBootstrap,
   RootBootstrapSnapshot,
@@ -23,10 +15,6 @@ import type {
   RootFactComment,
   RootFactIssue,
   RootFactRelation,
-  RootGitFacts,
-  RootHumanActionRecord,
-  RootPlanCompletedResult,
-  RootRecordReference,
   RootReconciliationView,
   UserCommentInput,
 } from "../api/RootReconciliationContracts.js";
@@ -44,7 +32,7 @@ export interface RootFactSet {
 export function buildRootFactSet(input: {
   root: DiscoveredRoot;
   tree: LinearWorkflowTreeSnapshot;
-  git: GitWorkspaceSnapshot;
+  worktreeGate: RootWorktreeGateResult;
   convergence: RootConvergenceSnapshot;
   mechanicalViolations: MechanicalViolation[];
 }): RootFactSet {
@@ -66,50 +54,8 @@ export function buildRootFactSet(input: {
     });
   }
 
-  const managedRecords: RootRecordReference[] = [];
-  const managedRecordComments: Array<{
-    comment: LinearWorkflowTreeSnapshot["comments"][number];
-    record: ManagedRecord;
-  }> = [];
   const userComments: RootFactComment[] = [];
   for (const comment of input.tree.comments) {
-    if (comment.author_kind === "symphony") {
-      const parsed = parseManagedRecord(comment.body);
-      if (!parsed.ok) throw new Error(`root_managed_record_invalid:${parsed.error}`);
-      const record = recordReference(parsed.value, manifest.get(`linear_comment:${comment.comment_id}`)?.stable_write_id);
-      managedRecords.push(record);
-      managedRecordComments.push({ comment, record: parsed.value });
-      add(entries, `linear_record:${record.recordId}`, {
-        kind: "managed_record_current_value",
-        sourceId: record.recordId,
-        sourceVersion: comment.remote_version,
-        actorKind: "symphony",
-        observedAt: comment.updated_at,
-        record,
-      });
-      if (parsed.value.kind === "plan_contract") {
-        add(entries, `linear_plan_contract:${comment.comment_id}`, {
-          kind: "plan_contract_current_value",
-          sourceId: comment.comment_id,
-          sourceVersion: comment.remote_version,
-          actorKind: "symphony",
-          observedAt: comment.updated_at,
-          planIssueId: comment.issue_id,
-          planContract: parsed.value,
-        });
-      }
-      if (isCompletedPlanResult(parsed.value)) {
-        add(entries, `linear_plan_completed_result:${comment.comment_id}`, {
-          kind: "plan_completed_result_current_value",
-          sourceId: comment.comment_id,
-          sourceVersion: comment.remote_version,
-          actorKind: "symphony",
-          observedAt: comment.updated_at,
-          planCompletedResult: planCompletedResult(parsed.value),
-        });
-      }
-      continue;
-    }
     if (comment.author_kind === "linear_integration") continue;
     const source = manifest.get(`linear_comment:${comment.comment_id}`);
     const current = toFactComment(comment);
@@ -127,7 +73,8 @@ export function buildRootFactSet(input: {
 
   const userCommentThreadStates: RootCommentThreadState[] = [];
   for (const comment of input.tree.comments) {
-    if (isAcknowledgedThreadState(comment, managedRecordComments)) continue;
+    if (comment.comment_id !== comment.thread_root_comment_id ||
+        isAcknowledgedThreadState(comment, input.tree)) continue;
     const threadState = toCommentThreadState(comment, input.tree.observed_at);
     userCommentThreadStates.push(threadState);
     add(entries, `linear_comment_thread_state:${comment.comment_id}`, {
@@ -153,14 +100,14 @@ export function buildRootFactSet(input: {
     });
   }
 
-  const gitFacts = toGitFacts(input.git);
+  const worktreeGate = input.worktreeGate;
   add(entries, `git:${input.root.issueId}`, {
-    kind: "git_facts_current_value",
+    kind: "worktree_gate_current_value",
     sourceId: `git:${input.root.issueId}`,
-    sourceVersion: digest(gitFacts),
+    sourceVersion: digest(worktreeGate),
     actorKind: "symphony",
     observedAt: input.tree.observed_at,
-    gitFacts,
+    worktreeGate,
   });
   add(entries, `mechanical:${input.root.issueId}`, {
     kind: "mechanical_violations_current_value",
@@ -181,10 +128,7 @@ export function buildRootFactSet(input: {
 
   const cycles = input.tree.issues
     .filter((issue) => issue.issue_kind === "cycle")
-    .map((cycle) => cycleObservation(cycle, input.tree, issues, managedRecordComments));
-  const ownership = managedRecords.find(({ recordKind }) => recordKind === "root_ownership");
-  if (!ownership) throw new Error("root_fact_ownership_missing");
-  const delivery = managedRecords.find(({ recordKind }) => recordKind === "delivery") ?? null;
+    .map((cycle) => cycleObservation(cycle, input.tree, issues));
   const snapshot: RootBootstrapSnapshot = {
     root: {
       issue: rootIssue,
@@ -197,17 +141,14 @@ export function buildRootFactSet(input: {
       }],
       constraints: [],
       rootStatus: rootIssue.status,
-      ownership,
       convergence: input.convergence,
     },
     cycles,
     issues,
     relations,
-    managedRecords,
     userComments,
     userCommentThreadStates,
-    gitFacts,
-    delivery,
+    worktreeGate,
     mechanicalViolations: input.mechanicalViolations,
   };
   const sourceManifest = input.tree.source_manifest.map((source) => ({
@@ -217,15 +158,16 @@ export function buildRootFactSet(input: {
     actorKind: source.actor_kind,
     ...(source.stable_write_id ? { stableWriteId: source.stable_write_id } : {}),
   }));
-  const consumedInputIds = new Set(managedRecordComments.flatMap(({ record }) =>
-    record.kind === "root_directive" ? record.consumedInputIds : []));
+  const receiptedInputIds = new Set(userComments
+    .filter((comment) => isNativelyReceipted(comment, input.tree))
+    .map((comment) => commentBodyInputId(comment.commentId, bodyDigest(comment.body))));
   const pendingInputIds = [...entries.values()]
     .filter(({ change }) =>
       change.actorKind !== "symphony" &&
-      change.kind !== "git_facts_current_value" &&
+      change.kind !== "worktree_gate_current_value" &&
       change.kind !== "mechanical_violations_current_value" &&
       (change.kind !== "comment_thread_state_current_value" || isPendingThreadState(change.threadState, input.tree)) &&
-      !consumedInputIds.has(inputIdFor(change)),
+      !receiptedInputIds.has(inputIdFor(change)),
     )
     .map(({ change }) => inputIdFor(change));
   const bootstrap: RootBootstrap = {
@@ -244,17 +186,19 @@ export function buildRootFactSet(input: {
 export function viewFromFactSet(input: {
   root: DiscoveredRoot;
   tree: LinearWorkflowTreeSnapshot;
-  git: GitWorkspaceSnapshot;
+  gate: RootWorktreeGateInspection;
   factSet: RootFactSet;
 }): RootReconciliationView {
-  return {
+  const base = {
     root: input.root,
     tree: input.tree,
-    git: input.git,
     observedAt: input.tree.observed_at,
     treeDigest: input.factSet.bootstrap.rootDigest,
-    complete: true,
+    complete: true as const,
   };
+  return "workspace" in input.gate
+    ? { ...base, worktreeGate: input.gate.result, workspace: input.gate.workspace, git: input.gate.snapshot }
+    : { ...base, worktreeGate: input.gate.result };
 }
 
 export function diffRootFactSets(previous: RootFactSet, current: RootFactSet): RootDelta {
@@ -324,29 +268,11 @@ function tombstone(change: RootDeltaChange): RootDeltaChange {
   if (change.kind.startsWith("issue_")) return { ...base, kind: "issue_detached" };
   if (change.kind.startsWith("comment_")) return { ...base, kind: "comment_removed" };
   if (change.kind.startsWith("relation_")) return { ...base, kind: "relation_removed" };
-  if (change.kind.startsWith("managed_record_")) return { ...base, kind: "managed_record_removed" };
-  if (change.kind === "plan_contract_current_value") {
-    return {
-      ...base,
-      kind: "plan_contract_removed",
-      cycleIssueId: change.planContract.cycleIssueId,
-      planIssueId: change.planIssueId,
-      planContractDigest: change.planContract.planContractDigest,
-    };
-  }
-  if (change.kind === "plan_completed_result_current_value") {
-    return {
-      ...base,
-      kind: "plan_completed_result_removed",
-      cycleIssueId: change.planCompletedResult.cycleIssueId,
-      resultId: change.planCompletedResult.resultId,
-    };
-  }
   return { ...base, kind: "mechanical_violations_current_value", mechanicalViolations: [] };
 }
 
 function toFactIssue(issue: LinearWorkflowTreeSnapshot["issues"][number]): RootFactIssue {
-  const issueKind = issue.issue_kind === "human" ? "human_action" : issue.issue_kind;
+  const issueKind = issue.issue_kind;
   if (!issueKind) throw new Error("root_issue_kind_missing");
   return {
     issueId: issue.issue_id,
@@ -440,13 +366,25 @@ function isPendingThreadState(
 
 function isAcknowledgedThreadState(
   comment: LinearWorkflowTreeSnapshot["comments"][number],
-  records: Array<{ comment: LinearWorkflowTreeSnapshot["comments"][number]; record: ManagedRecord }>,
+  tree: LinearWorkflowTreeSnapshot,
 ): boolean {
-  return records.some(({ record }) => {
-    if (record.kind !== "root_reconciler_reply" || record.source.commentId !== comment.comment_id) return false;
-    const expectedState = record.threadAction === "resolve" ? "resolved" : "unresolved";
-    return comment.thread_state === expectedState;
-  });
+  return tree.comments.some((reply) =>
+    reply.parent_comment_id === comment.comment_id &&
+    reply.thread_root_comment_id === comment.thread_root_comment_id &&
+    reply.author_kind === "symphony" &&
+    reply.body.trim().length > 0);
+}
+
+function isNativelyReceipted(comment: RootFactComment, tree: LinearWorkflowTreeSnapshot): boolean {
+  if (comment.authorKind !== "human" || !comment.authorUserId || comment.authorId !== comment.authorUserId) return false;
+  const receipts = new Set(comment.reactions
+    .filter(({ actorKind, emoji }) => actorKind === "symphony" && (emoji === "✅" || emoji === "❌"))
+    .map(({ emoji }) => emoji));
+  return receipts.size === 1 && tree.comments.some((reply) =>
+    reply.parent_comment_id === comment.commentId &&
+    reply.thread_root_comment_id === comment.threadRootCommentId &&
+    reply.author_kind === "symphony" &&
+    reply.body.trim().length > 0);
 }
 
 function cycleForIssue(issueId: string, tree: LinearWorkflowTreeSnapshot): string | undefined {
@@ -466,18 +404,10 @@ function toFactRelation(relation: LinearWorkflowTreeSnapshot["relations"][number
   return { relationId: relation.relation_id, relationKind: relation.relation_kind, sourceIssueId: relation.source_issue_id, targetIssueId: relation.target_issue_id };
 }
 
-function toGitFacts(git: GitWorkspaceSnapshot): RootGitFacts {
-  return { headRevision: git.head, baselineRevision: git.head, statusSummary: git.status.items.join("\n") || "clean", changedPaths: git.status.items };
-}
-
 function cycleObservation(
   cycle: LinearWorkflowTreeSnapshot["issues"][number],
   tree: LinearWorkflowTreeSnapshot,
   issues: RootFactIssue[],
-  managedRecordComments: Array<{
-    comment: LinearWorkflowTreeSnapshot["comments"][number];
-    record: ManagedRecord;
-  }>,
 ) {
   const descendants = new Set<string>();
   for (const issue of tree.issues) {
@@ -493,188 +423,15 @@ function cycleObservation(
     }
   }
   const cycleIssues = issues.filter(({ issueId }) => descendants.has(issueId));
-  const cycleCommentIssueIds = new Set([cycle.issue_id, ...descendants]);
   const cycleRelations = tree.relations
     .filter((relation) => descendants.has(relation.source_issue_id) && descendants.has(relation.target_issue_id))
     .map(toFactRelation);
-  const humanActionRecords = cycleIssues.filter(({ issueKind }) => issueKind === "human_action").map((issue) => humanActionRecord(issue, cycle.issue_id, tree));
-  const humanActionIssueIds = new Set(humanActionRecords.map(({ actionIssueId }) => actionIssueId));
-  const humanActionResolutions = tree.comments
-    .map((comment) => parseManagedRecord(comment.body))
-    .filter((parsed): parsed is { ok: true; value: Extract<ManagedRecord, { kind: "human_action_resolution" }> } =>
-      parsed.ok && parsed.value.kind === "human_action_resolution" && humanActionIssueIds.has(parsed.value.actionIssueId))
-    .map(({ value }) => ({
-      resolutionId: value.resolutionId,
-      actionId: value.actionId,
-      actionIssueId: value.actionIssueId,
-      actionKind: value.actionKind,
-      outcome: value.outcome,
-      terminalStatus: value.terminalStatus,
-      terminalRemoteVersion: value.terminalRemoteVersion,
-      proposalDigest: value.proposalDigest,
-      sourceCommentIds: value.sourceCommentIds,
-      actorKind: value.actorKind,
-      resolvedAt: value.resolvedAt,
-    }));
-  const planResults = managedRecordComments.flatMap((entry) =>
-    isCompletedPlanResult(entry.record) &&
-    entry.record.rootIssueId === tree.root_issue_id &&
-    entry.record.cycleIssueId === cycle.issue_id &&
-    descendants.has(entry.record.nodeIssueId)
-      ? [{ comment: entry.comment, record: entry.record }]
-      : [],
-  );
-  const workResults = managedRecordComments.flatMap((entry) =>
-    entry.record.kind === "stage_result" &&
-    entry.record.stage === "work" &&
-    entry.record.rootIssueId === tree.root_issue_id &&
-    entry.record.cycleIssueId === cycle.issue_id &&
-    descendants.has(entry.record.nodeIssueId)
-      ? [{ comment: entry.comment, record: entry.record }]
-      : [],
-  );
-  const verifyResults = managedRecordComments.flatMap((entry) =>
-    entry.record.kind === "verify_result" &&
-    entry.record.rootIssueId === tree.root_issue_id &&
-    entry.record.cycleIssueId === cycle.issue_id &&
-    descendants.has(entry.record.nodeIssueId)
-      ? [{ comment: entry.comment, record: entry.record }]
-      : [],
-  );
-  const verifyExecutionIds = new Set(verifyResults.map(({ record }) => record.stageExecutionId));
-  const findings = managedRecordComments.flatMap((entry) =>
-    entry.record.kind === "finding" &&
-    cycleCommentIssueIds.has(entry.comment.issue_id) &&
-    verifyExecutionIds.has(entry.record.sourceVerifyId)
-      ? [rootFinding(entry.record)]
-      : [],
-  );
-  const outcomes = managedRecordComments.flatMap((entry) =>
-    entry.record.kind === "cycle_outcome" &&
-    entry.comment.issue_id === cycle.issue_id &&
-    entry.record.rootIssueId === tree.root_issue_id &&
-    entry.record.cycleIssueId === cycle.issue_id &&
-    entry.record.cycleOutcomeId === cycleOutcomeId({
-      rootIssueId: entry.record.rootIssueId,
-      cycleIssueId: entry.record.cycleIssueId,
-      rootDirectiveId: entry.record.sourceRootDirectiveId,
-    })
-      ? [{ comment: entry.comment, record: entry.record }]
-      : [],
-  );
-  const activePlanIssueIds = new Set(tree.issues
-    .filter((issue) => issue.parent_issue_id === cycle.issue_id && issue.issue_kind === "plan" && !issue.is_archived && issue.status_name === "In Review")
-    .map(({ issue_id }) => issue_id));
-  const activePlanContracts = managedRecordComments
-    .filter((entry): entry is { comment: LinearWorkflowTreeSnapshot["comments"][number]; record: PlanContract } =>
-      entry.record.kind === "plan_contract" &&
-      entry.record.rootIssueId === tree.root_issue_id &&
-      entry.record.cycleIssueId === cycle.issue_id &&
-      activePlanIssueIds.has(entry.comment.issue_id),
-    )
-    .sort((left, right) => right.comment.updated_at.localeCompare(left.comment.updated_at) || right.comment.comment_id.localeCompare(left.comment.comment_id));
   return {
     cycleIssue: toFactIssue(cycle),
-    predecessorCycleIssueId: cycle.parent_issue_id ?? "none",
     cycleStatus: cycle.status_name as RootFactIssue["status"],
     isArchived: cycle.is_archived,
-    ...(activePlanContracts[0] ? { activePlanContract: activePlanContracts[0].record } : {}),
-    ...(outcomes.length === 1 ? { outcome: recordReference(outcomes[0]!.record) } : {}),
     issues: cycleIssues,
     relations: cycleRelations,
-    planResults: planResults.map(({ comment, record }) => recordReference(record, comment.remote_version)),
-    planCompletedResults: planResults.map(({ record }) => planCompletedResult(record)),
-    workResults: workResults.map(({ record }) => recordReference(record)),
-    verifyResults: verifyResults.map(({ record }) => recordReference(record)),
-    findings,
-    humanActionRecords,
-    humanActionResolutions,
-  };
-}
-
-function rootFinding(record: FindingRecord) {
-  return {
-    findingId: record.findingId,
-    category: record.category,
-    severity: record.severity,
-    summary: record.suggestedRemediation.join(" ") || `Finding ${record.findingId}.`,
-  };
-}
-
-type CompletedPlanManagedRecord = StageResultRecord & {
-  outcomeKind: "plan_completed";
-  planContractDigest: string;
-  planContract: NonNullable<StageResultRecord["planContract"]>;
-  proposedWorkDag: NonNullable<StageResultRecord["proposedWorkDag"]>;
-  risks: string[];
-  requiredPermissions: string[];
-  evidenceRefs: NonNullable<StageResultRecord["evidenceRefs"]>;
-};
-
-function isCompletedPlanResult(record: ManagedRecord): record is CompletedPlanManagedRecord {
-  return record.kind === "stage_result" &&
-    record.stage === "plan" &&
-    record.outcomeKind === "plan_completed" &&
-    record.planContractDigest !== undefined &&
-    record.planContract !== undefined &&
-    record.proposedWorkDag !== undefined &&
-    record.risks !== undefined &&
-    record.requiredPermissions !== undefined &&
-    record.evidenceRefs !== undefined;
-}
-
-function planCompletedResult(record: CompletedPlanManagedRecord): RootPlanCompletedResult {
-  return {
-    resultId: record.resultId,
-    rootIssueId: record.rootIssueId,
-    cycleIssueId: record.cycleIssueId,
-    nodeIssueId: record.nodeIssueId,
-    summary: record.summary,
-    completedAt: record.completedAt,
-    planContractDigest: record.planContractDigest,
-    planContract: record.planContract,
-    proposedWorkDag: record.proposedWorkDag,
-    risks: record.risks,
-    requiredPermissions: record.requiredPermissions,
-    evidenceRefs: record.evidenceRefs,
-  };
-}
-
-function humanActionRecord(issue: RootFactIssue, cycleIssueId: string, tree: LinearWorkflowTreeSnapshot): RootHumanActionRecord {
-  const actionKind = actionKindFor(issue.labels);
-  const relatedIssueIds = tree.relations.flatMap((relation) => {
-    const relatedId = relation.source_issue_id === issue.issueId ? relation.target_issue_id : relation.target_issue_id === issue.issueId ? relation.source_issue_id : undefined;
-    if (!relatedId) return [];
-    const target = tree.issues.find(({ issue_id }) => issue_id === relatedId);
-    return target && ["plan", "work", "verify"].includes(target.issue_kind ?? "") ? [relatedId] : [];
-  });
-  return { actionId: issue.issueId, actionIssueId: issue.issueId, actionKind, parentScope: "cycle", cycleIssueId, status: issue.status, isArchived: issue.isArchived, relatedIssueIds };
-}
-
-function actionKindFor(labels: string[]): HumanActionKind {
-  const mapping: Array<[string, HumanActionKind]> = [
-    ["Plan Review", "plan_review"], ["Clarification", "clarification"], ["Permission", "permission"],
-    ["Finding Waiver", "finding_waiver"], ["Convergence Override", "convergence_override"],
-  ];
-  const found = mapping.find(([label]) => labels.includes(label));
-  if (!labels.includes("Human Action") || !found) throw new Error("human_action_label_invalid");
-  return found[1];
-}
-
-function recordReference(record: ManagedRecord, stableWriteId?: string): RootRecordReference {
-  const identity = "replyId" in record ? record.replyId
-    : "resultId" in record ? record.resultId
-    : "resolutionId" in record ? record.resolutionId
-      : "rootDirectiveId" in record ? record.rootDirectiveId
-      : "actionId" in record ? record.actionId
-        : "supersessionId" in record ? record.supersessionId
-          : "cycleOutcomeId" in record ? record.cycleOutcomeId
-        : `${record.kind}:${digest(record).slice(0, 24)}`;
-  return {
-    recordId: identity,
-    recordKind: record.kind,
-    recordVersion: "1",
-    writeId: stableWriteId ?? identity,
   };
 }
 

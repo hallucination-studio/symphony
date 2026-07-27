@@ -66,10 +66,14 @@ function contractTypes(registry: Record<string, Schema>): ContractType[] {
           ? Object.keys(schema.$defs).sort()
           : [];
       return definitions.map((definition) => ({
-        name: `${family}${pascalCase(definition)}`,
+        name: contractTypeName(family, pascalCase(definition)),
         reference: `${identifier}#/$defs/${definition}`,
       }));
     });
+}
+
+function contractTypeName(family: string, definition: string): string {
+  return definition.startsWith(family) ? definition : `${family}${definition}`;
 }
 
 function typescriptOutput(registryJson: string, types: ContractType[]): string {

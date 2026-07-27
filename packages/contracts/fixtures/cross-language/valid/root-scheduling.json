@@ -16,11 +16,6 @@
         "target_state": "Done"
       }
     ],
-    "root_conductor_labels": [],
-    "root_ownership": {
-      "conductor_id": "conductor-1",
-      "source_comment_id": "comment-1",
-      "source_comment_remote_version": "2026-07-19T00:00:00Z"
-    }
+    "root_conductor_labels": []
   }
 }

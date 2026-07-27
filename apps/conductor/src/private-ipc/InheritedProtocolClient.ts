@@ -1,5 +1,5 @@
 import {
-  decodePodiumConductorPodiumConductorMessage,
+  decodePodiumConductorMessage,
   decodePodiumConductorWorkflowIssueTreeResult,
 } from "@symphony/contracts";
 
@@ -261,7 +261,7 @@ export class InheritedProtocolClient {
 
 function validateMessage(value: unknown): ProtocolMessage {
   try {
-    return decodePodiumConductorPodiumConductorMessage(
+    return decodePodiumConductorMessage(
       value as JsonValue,
     ) as unknown as ProtocolMessage;
   } catch (error) {

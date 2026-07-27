@@ -36,14 +36,13 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
     async delegateRootIssue(input) {
       calls.push({ kind: "delegate_root", input });
     },
-    async waitForPlanContractAndPlanReviewAction(input) {
+    async waitForPlanApprovalGate(input) {
       calls.push({ kind: "wait_for_initial_plan", input });
       return {
         cycleIssueId: "initial-cycle",
         planIssueId: "initial-plan",
-        planContractDigest: "initial-contract",
-        planContractSourceCommentId: "initial-contract-comment",
-        planReviewActionIssueId: "initial-review",
+        planRemoteVersion: "2026-07-26T00:00:01.000Z",
+        requestCommentId: "initial-review",
       };
     },
     async updateRootDescription(input) {
@@ -78,14 +77,13 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
       assert.ok([inputs.resolved, inputs.reopened].includes(input.inputReference));
       calls.push({ kind: "wait_for_thread_receipt", input });
     },
-    async waitForSuccessorPlanContractAndPlanReviewAction(input) {
+    async waitForSuccessorPlanApprovalGate(input) {
       calls.push({ kind: "wait_for_successor_plan", input });
       return {
         cycleIssueId: "successor-cycle",
         planIssueId: "successor-plan",
-        planContractDigest: "successor-contract",
-        planContractSourceCommentId: "successor-contract-comment",
-        planReviewActionIssueId: "successor-review",
+        planRemoteVersion: "2026-07-26T00:00:06.000Z",
+        requestCommentId: "successor-review",
       };
     },
   };
@@ -116,7 +114,7 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
     { kind: "wait_for_thread_receipt", input: { issueId: "root-1", inputReference: revisionInput("revision-thread-resolve", "comment_thread_state", { commentId: "revision-comment", threadRootCommentId: "revision-comment", expectedThreadState: "resolved", remoteVersion: "2026-07-26T00:00:04.000Z" }) } },
     { kind: "reopen_thread", input: { issueId: "root-1", threadRootCommentId: "revision-comment" } },
     { kind: "wait_for_thread_receipt", input: { issueId: "root-1", inputReference: revisionInput("revision-thread-reopen", "comment_thread_state", { commentId: "revision-comment", threadRootCommentId: "revision-comment", expectedThreadState: "unresolved", remoteVersion: "2026-07-26T00:00:05.000Z" }) } },
-    { kind: "wait_for_successor_plan", input: { rootIssueId: "root-1", priorCycleIssueId: "initial-cycle", priorPlanReviewActionIssueId: "initial-review" } },
+    { kind: "wait_for_successor_plan", input: { rootIssueId: "root-1", priorCycleIssueId: "initial-cycle", priorRequestCommentId: "initial-review" } },
   ]);
   assert.deepEqual(result, {
     context: {
@@ -125,16 +123,14 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
       initialPlan: {
         cycleIssueId: "initial-cycle",
         planIssueId: "initial-plan",
-        planContractDigest: "initial-contract",
-        planContractSourceCommentId: "initial-contract-comment",
-        planReviewActionIssueId: "initial-review",
+        planRemoteVersion: "2026-07-26T00:00:01.000Z",
+        requestCommentId: "initial-review",
       },
       successorPlan: {
         cycleIssueId: "successor-cycle",
         planIssueId: "successor-plan",
-        planContractDigest: "successor-contract",
-        planContractSourceCommentId: "successor-contract-comment",
-        planReviewActionIssueId: "successor-review",
+        planRemoteVersion: "2026-07-26T00:00:06.000Z",
+        requestCommentId: "successor-review",
       },
       inputReferences: [
         revisionInput("revision-description", "description"),
@@ -154,7 +150,7 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
-    async waitForPlanContractAndPlanReviewAction() { return { cycleIssueId: "cycle-1", planIssueId: "plan-1", planContractDigest: "contract-1", planContractSourceCommentId: "contract-comment-1", planReviewActionIssueId: "review-1" }; },
+    async waitForPlanApprovalGate() { return planGate("cycle-1", "plan-1", "review-1", "2026-07-26T00:00:01.000Z"); },
     async updateRootDescription() { return revisionInput("description", "description"); },
     async waitForRootDescriptionReceipt() {},
     async createComment() { return { commentId: "comment-1", issueId: "root-1", inputReference: revisionInput("create", "comment_body", { commentId: "comment-1" }) }; },
@@ -163,7 +159,7 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
     async resolveCommentThread() { return revisionInput("resolve", "comment_thread_state", { commentId: "comment-1", threadRootCommentId: "comment-1", expectedThreadState: "resolved", remoteVersion: "2026-07-26T00:00:04.000Z" }); },
     async reopenCommentThread() { return revisionInput("reopen", "comment_thread_state", { commentId: "comment-1", threadRootCommentId: "comment-1", expectedThreadState: "unresolved", remoteVersion: "2026-07-26T00:00:05.000Z" }); },
     async waitForCommentThreadReceipt() {},
-    async waitForSuccessorPlanContractAndPlanReviewAction() { return { cycleIssueId: "cycle-2", planIssueId: "plan-2", planContractDigest: "contract-2", planContractSourceCommentId: "contract-comment-2", planReviewActionIssueId: "review-2" }; },
+    async waitForSuccessorPlanApprovalGate() { return planGate("cycle-2", "plan-2", "review-2", "2026-07-26T00:00:06.000Z"); },
   };
 
   const rootCreation = { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" };
@@ -192,7 +188,7 @@ test("revision Case forwards cancellation to every Linear Human operation", asyn
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive(input) { waits.push(input); },
     async delegateRootIssue(input) { waits.push(input); },
-    async waitForPlanContractAndPlanReviewAction(input) { waits.push(input); return planGate("cycle-1", "plan-1", "contract-1", "contract-comment-1", "review-1"); },
+    async waitForPlanApprovalGate(input) { waits.push(input); return planGate("cycle-1", "plan-1", "review-1", "2026-07-26T00:00:01.000Z"); },
     async updateRootDescription() { return description; },
     async waitForRootDescriptionReceipt(input) { waits.push(input); },
     async createComment() { return { commentId, issueId: "root-1", inputReference: created }; },
@@ -201,7 +197,7 @@ test("revision Case forwards cancellation to every Linear Human operation", asyn
     async resolveCommentThread() { return resolved; },
     async reopenCommentThread() { return reopened; },
     async waitForCommentThreadReceipt(input) { waits.push(input); },
-    async waitForSuccessorPlanContractAndPlanReviewAction(input) { waits.push(input); return planGate("cycle-2", "plan-2", "contract-2", "contract-comment-2", "review-2"); },
+    async waitForSuccessorPlanApprovalGate(input) { waits.push(input); return planGate("cycle-2", "plan-2", "review-2", "2026-07-26T00:00:06.000Z"); },
   };
 
   await runRootRevisionAndCommentCase({
@@ -215,8 +211,8 @@ test("revision Case forwards cancellation to every Linear Human operation", asyn
   assert.ok(waits.every(({ signal }) => signal === abortController.signal));
 });
 
-function planGate(cycleIssueId, planIssueId, planContractDigest, planContractSourceCommentId, planReviewActionIssueId) {
-  return { cycleIssueId, planIssueId, planContractDigest, planContractSourceCommentId, planReviewActionIssueId };
+function planGate(cycleIssueId, planIssueId, requestCommentId, planRemoteVersion) {
+  return { cycleIssueId, planIssueId, requestCommentId, planRemoteVersion };
 }
 
 function revisionInput(sourceId, kind, extra = {}) {

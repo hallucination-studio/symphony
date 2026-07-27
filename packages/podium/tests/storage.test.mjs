@@ -10,6 +10,16 @@ import { SqlitePodiumStoreImpl } from "../dist/internal/storage/SqlitePodiumStor
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 import { ConductorPresenceImpl } from "../dist/internal/conductor-presence/ConductorPresenceImpl.js";
 
+async function openChannelAndHandshake(services, body) {
+  const channel = services.openChannel({
+    bindingId: body.binding_id,
+    conductorId: body.conductor_id,
+    instanceId: body.instance_id,
+  });
+  await channel.handle(body);
+  return channel;
+}
+
 test("podium.db excludes transient Conductor presence and workflow observations", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-"));
   const store = new SqlitePodiumStoreImpl(path.join(directory, "podium.db"));
@@ -50,7 +60,7 @@ test("podium.db excludes transient Conductor presence and workflow observations"
     sleep: async () => undefined,
     createLinearSdk: () => { throw new Error("unused"); },
   });
-  await services.handle({
+  await openChannelAndHandshake(services, {
     kind: "conductor_handshake",
     binding_id: "binding-1",
     instance_id: "instance-1",
@@ -91,7 +101,7 @@ test("podium.db excludes transient Conductor presence and workflow observations"
     },
     desiredState: "running",
   });
-  await services.handle({
+  await openChannelAndHandshake(services, {
     kind: "conductor_handshake",
     binding_id: "binding-2",
     instance_id: "instance-2",
@@ -122,6 +132,74 @@ test("podium.db excludes transient Conductor presence and workflow observations"
   ]);
 
   store.close();
+});
+
+test("Podium revokes the old private channel before accepting a replacement generation", async () => {
+  const binding = {
+    bindingId: "binding-1",
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-1",
+      repositoryIdentity: "repository-1",
+      repositoryDisplayName: "symphony",
+      repositoryRoot: "/repository",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+  };
+  let linearCalls = 0;
+  const services = new PodiumConductorServicesImpl({
+    getConductorBindingById: (bindingId) => bindingId === binding.bindingId ? binding : undefined,
+    listConductorBindings: () => [binding],
+    getLinearCredential: () => undefined,
+  }, new ConductorPresenceImpl(), {
+    now: () => "2026-07-16T00:00:00Z",
+    sleep: async () => undefined,
+    createLinearSdk: () => { linearCalls += 1; throw new Error("unexpected"); },
+  });
+
+  const oldChannel = services.openChannel({
+    bindingId: "binding-1", conductorId: "conductor-1", instanceId: "instance-1",
+  });
+  assert.throws(
+    () => services.openChannel({
+      bindingId: "binding-1", conductorId: "conductor-1", instanceId: "instance-2",
+    }),
+    /conductor_channel_already_active/u,
+  );
+  await oldChannel.handle({
+    kind: "conductor_handshake", binding_id: "binding-1", instance_id: "instance-1",
+    conductor_id: "conductor-1", conductor_short_hash: "abc123",
+    linear_installation_id: "installation-1", organization_id: "organization-1",
+    repository: { repository_handle: "repo-1", canonical_path: "/repository", base_branch: "main" },
+  });
+  await assert.rejects(
+    oldChannel.handle({
+      kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-stale",
+      conductor_short_hash: "abc123",
+    }),
+    /conductor_channel_instance_mismatch/u,
+  );
+  assert.equal(linearCalls, 0);
+  services.observeExit({
+    bindingId: "binding-1", instanceId: "instance-1", observedAt: "2026-07-16T00:00:01Z",
+  });
+  const replacement = services.openChannel({
+    bindingId: "binding-1", conductorId: "conductor-1", instanceId: "instance-2",
+  });
+
+  await assert.rejects(
+    oldChannel.handle({
+      kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1",
+      conductor_short_hash: "abc123",
+    }),
+    /conductor_channel_revoked/u,
+  );
+  assert.equal(linearCalls, 0);
+  replacement.close();
 });
 
 test("Host can acknowledge a Conductor exit before its handshake", async () => {
@@ -167,7 +245,7 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
   });
 
   assert.equal(presence.snapshot("binding-1")?.presence, "offline");
-  await services.handle({
+  await openChannelAndHandshake(services, {
     kind: "conductor_handshake",
     binding_id: "binding-1",
     instance_id: "active-instance",

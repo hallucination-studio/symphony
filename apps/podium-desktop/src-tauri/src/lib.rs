@@ -1,3 +1,4 @@
+pub mod binding_process_fence;
 pub mod desktop_controller;
 pub mod desktop_lifecycle;
 pub mod oauth_return;

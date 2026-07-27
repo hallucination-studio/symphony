@@ -29,7 +29,6 @@ class FakeBackend:
                 "evidence_refs": [{"reference_id": "fact-1", "source_kind": "result"}],
                 "consumed_input_ids": [],
                 "comment_replies": [],
-                "human_action_resolutions": [],
                 "action": {"kind": "wait", "reason_code": "human", "blocking_fact_refs": [{"reference_id": "fact-1", "source_kind": "result"}]},
             }}
         return {
@@ -71,8 +70,35 @@ class InvalidRootDirectiveBackend(FakeBackend):
                 "evidence_refs": [],
                 "consumed_input_ids": [],
                 "comment_replies": [],
-                "human_action_resolutions": [],
                 "action": {"kind": "wait", "reason_code": "human"},
+            }}
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
+class CreateRootWorkspaceBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            return {"output": {
+                "rationale": "The Root needs its deterministic workspace.",
+                "evidence_refs": [],
+                "consumed_input_ids": [],
+                "comment_replies": [],
+                "action": {
+                    "kind": "create_root_workspace",
+                    "root_issue_id": "root-1",
+                    "expected_root_remote_version": "root-v1",
+                    "expected_worktree_gate": {
+                        "kind": "fresh_missing",
+                        "repository_identity": "repository-1",
+                        "base_branch": "main",
+                        "base_revision": "base-1",
+                    },
+                },
             }}
         return super().execute_role_turn(
             session,
@@ -105,7 +131,6 @@ class UnexpectedCommentReplyBackend(FakeBackend):
                     "reaction": "check",
                     "thread_action": "resolve",
                 }],
-                "human_action_resolutions": [],
                 "action": {
                     "kind": "wait",
                     "reason_code": "human",
@@ -140,7 +165,6 @@ class MatchingCommentReplyBackend(FakeBackend):
                     "reaction": "check",
                     "thread_action": "resolve",
                 }],
-                "human_action_resolutions": [],
                 "action": {
                     "kind": "wait",
                     "reason_code": "human",
@@ -172,26 +196,20 @@ def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
                 "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}],
                 "constraints": [],
                 "root_status": "Todo",
-                "ownership": {
-                    "record_id": "owner-1",
-                    "record_kind": "root_ownership",
-                    "record_version": "1",
-                    "write_id": "owner-write-1",
-                },
                 "convergence": convergence_snapshot(),
             },
             "cycles": [],
             "issues": [],
             "relations": [],
-            "managed_records": [],
             "user_comments": [],
             "user_comment_thread_states": [],
-            "git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
-            "delivery": {
-                "record_id": "delivery-1",
-                "record_kind": "delivery",
-                "record_version": "1",
-                "write_id": "delivery-write-1",
+            "worktree_gate": {
+                "kind": "valid",
+                "repository_identity": "repository-1",
+                "branch": "symphony/root-1",
+                "head_revision": "head-1",
+                "is_clean": True,
+                "changed_paths": [],
             },
             "mechanical_violations": [],
         },
@@ -241,14 +259,9 @@ def root_delta(request_id: str, session_id: str, turn_id: str, base: str, target
 def convergence_snapshot() -> dict[str, object]:
     return {
         "policy": {
-            "kind": "root_convergence_policy",
-            "version": 1,
-            "policy_id": "root-convergence-policy-1",
-            "root_issue_id": "root-1",
             "max_cycles_per_root": 3,
             "max_same_open_finding_cycles": 2,
             "max_consecutive_no_progress": 2,
-            "max_total_tokens": 10000,
             "max_cycle_repair_attempts": 0,
             "deadline_at": "2027-07-24T00:00:00Z",
         },
@@ -256,8 +269,6 @@ def convergence_snapshot() -> dict[str, object]:
             "cycle_count": 0,
             "open_finding_persistence": [],
             "consecutive_no_progress": 0,
-            "settled_tokens": 0,
-            "open_token_reservations": [],
             "active_cycle_repair_attempts": 0,
             "is_deadline_exceeded": False,
             "root_is_canceled": False,
@@ -303,50 +314,13 @@ def plan_dag() -> dict[str, object]:
     }
 
 
-def canonical_plan_contract() -> dict[str, object]:
-    return {
-        "kind": "plan_contract",
-        "version": 1,
-        "root_issue_id": "root-1",
-        "cycle_issue_id": "cycle-1",
-        "plan_contract_digest": "plan-contract-1",
-        **plan_contract(),
-        "proposed_work_dag": plan_dag(),
-    }
-
-
-def completed_plan_result() -> dict[str, object]:
-    return {
-        "result_id": "plan-result-1",
-        "root_issue_id": "root-1",
-        "cycle_issue_id": "cycle-1",
-        "node_issue_id": "plan-1",
-        "summary": "The complete Plan is ready for review.",
-        "completed_at": "2026-07-23T00:00:01Z",
-        "plan_contract_digest": "plan-contract-1",
-        "plan_contract": plan_contract(),
-        "proposed_work_dag": plan_dag(),
-        "risks": [],
-        "required_permissions": [],
-        "evidence_refs": [],
-    }
-
-
 def cycle_snapshot() -> dict[str, object]:
     return {
         "cycle_issue": issue_snapshot("cycle"),
-        "predecessor_cycle_issue_id": "none",
         "cycle_status": "Todo",
         "is_archived": False,
         "issues": [issue_snapshot("plan")],
         "relations": [],
-        "plan_results": [],
-        "plan_completed_results": [],
-        "work_results": [],
-        "verify_results": [],
-        "findings": [],
-        "human_action_records": [],
-        "human_action_resolutions": [],
     }
 
 
@@ -355,21 +329,21 @@ def stage_context(role: str) -> dict[str, object]:
         return {
             "root_contract": {"objective": "Complete the root objective", "requested_scope": "the requested scope", "constraints": [], "acceptance_criteria": [{"criterion_key": "criterion-1", "statement": "The objective is complete", "verification_method": "automated test"}]},
             "cycle": {"cycle_issue_id": "cycle-1", "trigger": "initial"},
-            "current_plan_issue": issue_snapshot("plan"), "prior_plan_results": [], "prior_plan_contracts": [],
-            "unresolved_findings": [], "human_resolutions": [],
+            "current_plan_issue": issue_snapshot("plan"), "prior_plan_attempt_facts": [], "prior_approved_plan_facts": [],
+            "unresolved_finding_issue_facts": [], "human_action_thread_facts": [],
             "current_git_facts": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
             "required_output": "return a PlanResult",
         }
     if role == "work":
         return {
             "approved_plan_contract": plan_contract(), "current_active_work_dag": plan_dag(), "selected_work": issue_snapshot("work"),
-            "completed_work_evidence": [], "prior_turn_results": [], "human_resolutions": [],
+            "completed_work_evidence": [], "prior_work_attempt_facts": [], "human_action_thread_facts": [],
             "git_baseline": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
             "workspace_capability": "workspace_write",
         }
     return {
         "approved_plan_contract": plan_contract(), "complete_active_cycle_dag": plan_dag(), "archived_cycle_nodes": [],
-        "completed_work_results": [], "unresolved_findings": [], "human_resolutions": [], "verification_requirements": ["automated test"],
+        "completed_work_issue_facts": [], "unresolved_finding_issue_facts": [], "human_action_thread_facts": [], "verification_requirements": ["automated test"],
         "immutable_target_revision": "head-1", "repository_snapshot": {"head_revision": "head-1", "baseline_revision": "head-1", "status_summary": "clean", "changed_paths": []},
     }
 
@@ -480,69 +454,52 @@ def test_delta_replaces_the_structured_convergence_snapshot_in_the_root_baseline
     assert baseline["root_snapshot"]["root"]["convergence"]["view"]["active_cycle_repair_attempts"] == 1
 
 
-def test_delta_retains_and_removes_canonical_plan_facts_in_the_root_baseline():
+def test_delta_updates_and_removes_the_native_plan_issue_in_the_root_baseline():
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
     open_request = open_root_request()
     bootstrap = root_bootstrap()
     bootstrap["root_snapshot"]["cycles"] = [cycle_snapshot()]
+    plan = {**issue_snapshot("plan"), "parent_issue_id": "cycle-1"}
+    bootstrap["root_snapshot"]["cycles"][0]["issues"] = [plan]
+    bootstrap["root_snapshot"]["issues"] = [issue_snapshot("cycle"), plan]
     open_request["bootstrap"] = bootstrap
     host.handle(open_request)
 
-    contract = canonical_plan_contract()
-    completed = completed_plan_result()
     added = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
-    added["delta"]["changes"] = [
-        {
-            "kind": "plan_contract_current_value",
-            "source_id": "plan-contract-comment-1",
-            "source_version": "comment-v1",
-            "actor_kind": "symphony",
-            "observed_at": "2026-07-23T00:00:01Z",
-            "plan_issue_id": "plan-1",
-            "plan_contract": contract,
-        },
-        {
-            "kind": "plan_completed_result_current_value",
-            "source_id": "plan-result-comment-1",
-            "source_version": "comment-v1",
-            "actor_kind": "symphony",
-            "observed_at": "2026-07-23T00:00:01Z",
-            "plan_completed_result": completed,
-        },
-    ]
+    updated_plan = {
+        **plan,
+        "description": "# Objective\nComplete the cycle using native Linear facts.",
+        "status": "In Review",
+        "labels": ["Plan"],
+        "remote_version": "plan-v2",
+    }
+    added["delta"]["changes"] = [{
+        "kind": "issue_current_value",
+        "source_id": "plan-1",
+        "source_version": "plan-v2",
+        "actor_kind": "symphony",
+        "observed_at": "2026-07-23T00:00:01Z",
+        "issue": updated_plan,
+    }]
     assert host.handle(added)["based_on_target_root_digest"] == "tree-2"
     baseline = host._root._baselines["root-session"].canonical_facts
     cycle = baseline["root_snapshot"]["cycles"][0]
-    assert cycle["active_plan_contract"]["objective"] == "Complete the cycle objective"
-    assert cycle["plan_completed_results"][0]["result_id"] == "plan-result-1"
+    assert cycle["issues"][0] == updated_plan
+    assert next(issue for issue in baseline["root_snapshot"]["issues"] if issue["issue_id"] == "plan-1") == updated_plan
 
     removed = root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3")
-    removed["delta"]["changes"] = [
-        {
-            "kind": "plan_contract_removed",
-            "source_id": "plan-contract-comment-1",
-            "source_version": "comment-v1",
-            "actor_kind": "symphony",
-            "observed_at": "2026-07-23T00:00:02Z",
-            "cycle_issue_id": "cycle-1",
-            "plan_issue_id": "plan-1",
-            "plan_contract_digest": "plan-contract-1",
-        },
-        {
-            "kind": "plan_completed_result_removed",
-            "source_id": "plan-result-comment-1",
-            "source_version": "comment-v1",
-            "actor_kind": "symphony",
-            "observed_at": "2026-07-23T00:00:02Z",
-            "cycle_issue_id": "cycle-1",
-            "result_id": "plan-result-1",
-        },
-    ]
+    removed["delta"]["changes"] = [{
+        "kind": "issue_detached",
+        "source_id": "plan-1",
+        "source_version": "plan-v2",
+        "actor_kind": "symphony",
+        "observed_at": "2026-07-23T00:00:02Z",
+    }]
     assert host.handle(removed)["based_on_target_root_digest"] == "tree-3"
     cycle = host._root._baselines["root-session"].canonical_facts["root_snapshot"]["cycles"][0]
-    assert "active_plan_contract" not in cycle
-    assert cycle["plan_completed_results"] == []
+    assert cycle["issues"] == []
+    assert [issue["issue_id"] for issue in host._root._baselines["root-session"].canonical_facts["root_snapshot"]["issues"]] == ["cycle-1"]
 
 
 def test_host_persists_root_provider_failure_as_a_typed_model_turn_result():
@@ -579,6 +536,31 @@ def test_host_reports_root_directive_contract_failure():
     assert failure["kind"] == "root_reconciler_failed"
     assert failure["failure"]["category"] == "schema_invalid"
     assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
+
+
+def test_host_accepts_create_root_workspace_as_one_closed_root_action():
+    request = open_root_request()
+    request["bootstrap"]["root_snapshot"]["worktree_gate"] = {
+        "kind": "fresh_missing",
+        "repository_identity": "repository-1",
+        "base_branch": "main",
+        "base_revision": "base-1",
+    }
+
+    result = AgentProtocolHost(CreateRootWorkspaceBackend()).handle(request)
+
+    assert result["kind"] == "root_reconciler_opened"
+    assert result["initial_result"]["action"] == {
+        "kind": "create_root_workspace",
+        "root_issue_id": "root-1",
+        "expected_root_remote_version": "root-v1",
+        "expected_worktree_gate": {
+            "kind": "fresh_missing",
+            "repository_identity": "repository-1",
+            "base_branch": "main",
+            "base_revision": "base-1",
+        },
+    }
 
 
 def test_host_rejects_unexpected_comment_replies_when_no_comment_input_is_pending():

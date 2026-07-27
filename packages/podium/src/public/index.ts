@@ -14,6 +14,7 @@ export {
 } from "./PodiumClientProtocolHandler.js";
 export {
   PodiumConductorProtocolHandler,
+  type PodiumConductorChannel,
   type PodiumConductorServices,
 } from "./PodiumConductorProtocolHandler.js";
 export {

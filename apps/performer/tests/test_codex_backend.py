@@ -133,10 +133,10 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "ROOT COMMENT REPLY RULE:" in sdk.thread.calls[0][0]
     assert "No comment source is pending in this turn, so comment_replies must be []." in sdk.thread.calls[0][0]
     assert sdk.thread.calls[0][1]["output_schema"]["required"] == [
-        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action",
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action",
     ]
     assert set(sdk.thread.calls[0][1]["output_schema"]["properties"]) == {
-        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action",
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action",
     }
     action_variants = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]["oneOf"]
     execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")

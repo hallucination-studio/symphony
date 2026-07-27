@@ -19,6 +19,7 @@ export interface PodiumDesktopHostPorts {
     linearInstallationId: string;
     organizationId: string;
     repositoryHandle: string;
+    repositoryIdentity: string;
     repositoryRoot: string;
     baseBranch: string;
   }): Promise<void>;

@@ -15,20 +15,19 @@ export async function runInformationRequestedAndAnsweredCase({ definition, human
   await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
   await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
 
-  const action = await waitForClarification({ human, rootIssueId: root.rootIssueId, signal });
-  const comment = await human.createComment({ issueId: action.actionIssueId, body: answer.body, ...(signal ? { signal } : {}) });
-  if (!identifier(comment?.commentId) || comment.issueId !== action.actionIssueId) {
-    throw stableError("foreground_e2e_information_answer_comment_invalid");
-  }
-  await human.setHumanActionTerminalStatus({
-    issueId: action.actionIssueId,
-    terminalStatus: "Answered",
-    stateId: action.terminalStatusId,
+  const request = await waitForInformation({ human, rootIssueId: root.rootIssueId, signal });
+  const comment = await human.replyToHumanAction({
+    rootIssueId: root.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: answer.body,
     ...(signal ? { signal } : {}),
   });
+  if (!identifier(comment?.commentId) || comment.issueId !== root.rootIssueId || comment.requestCommentId !== request.requestCommentId) {
+    throw stableError("foreground_e2e_information_answer_comment_invalid");
+  }
 
-  const replacementAction = await waitForPlanReview({ human, rootIssueId: root.rootIssueId, signal });
-  if (replacementAction.actionIssueId === action.actionIssueId) {
+  const replacementRequest = await waitForPlanReview({ human, rootIssueId: root.rootIssueId, signal });
+  if (replacementRequest.requestCommentId === request.requestCommentId) {
     throw stableError("foreground_e2e_information_replacement_action_invalid");
   }
 
@@ -42,38 +41,37 @@ export async function runInformationRequestedAndAnsweredCase({ definition, human
         binding: answer.inputBinding,
         commentId: comment.commentId,
       })]),
-      answeredActionIssueId: action.actionIssueId,
-      replacementActionIssueId: replacementAction.actionIssueId,
+      informationRequestCommentId: request.requestCommentId,
+      replacementRequestCommentId: replacementRequest.requestCommentId,
     }),
   });
 }
 
-async function waitForClarification({ human, rootIssueId, signal }) {
-  const action = await human.waitForClarificationAction({
+async function waitForInformation({ human, rootIssueId, signal }) {
+  const request = await human.waitForInformationRequest({
     rootIssueId,
-    terminalStatus: "Answered",
     ...(signal ? { signal } : {}),
   });
-  if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+  if (!identifier(request?.requestCommentId) || request.rootIssueId !== rootIssueId) {
     throw stableError("foreground_e2e_information_clarification_invalid");
   }
-  return action;
+  return request;
 }
 
 async function waitForPlanReview({ human, rootIssueId, signal }) {
-  const action = await human.waitForPlanReviewAction({
+  const request = await human.waitForPlanApprovalRequest({
     rootIssueId,
-    terminalStatus: "Approved",
     ...(signal ? { signal } : {}),
   });
-  if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+  if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId)) {
     throw stableError("foreground_e2e_information_plan_review_invalid");
   }
-  return action;
+  return request;
 }
 
 function frozenAnswer(definition) {
-  const answer = definition.declaredUserInteractions.find(({ kind }) => kind === "create_action_comment");
+  const answer = definition.declaredUserInteractions.find((interaction) =>
+    interaction.kind === "reply_to_human_action" && interaction.inputBinding === "separator_answer");
   if (!answer || answer.actionBinding !== "separator_clarification" || answer.commentBinding !== "separator_answer" ||
       answer.inputBinding !== "separator_answer" || !text(answer.body)) {
     throw stableError("foreground_e2e_information_case_definition_invalid");
@@ -89,8 +87,8 @@ function assertDefinition(definition) {
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForClarificationAction !== "function" || typeof human.createComment !== "function" ||
-      typeof human.setHumanActionTerminalStatus !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
+      typeof human.waitForInformationRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
+      typeof human.waitForPlanApprovalRequest !== "function" ||
       !rootCreation || !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||
       (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"))) {

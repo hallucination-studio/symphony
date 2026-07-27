@@ -12,8 +12,6 @@ import type {
   ProjectRootIndexPageResult,
 } from "../../root-discovery/api/ProjectRootIndexInterface.js";
 import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
-import { parseManagedRecord } from "../../root-reconciliation/api/index.js";
-import type { WorkflowIssueRecord } from "../../root-reconciliation/api/ManagedRecords.js";
 
 type JsonValue =
   | null
@@ -43,7 +41,8 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     private readonly conductorShortHash: string,
     private readonly protocol: ProtocolClient,
     private readonly options: {
-      bindingId?: string;
+      bindingId: string;
+      instanceId: string;
       timeoutMs: number | (() => number);
       observeDiscovery?(evidence: {
         rootHeaderCount: number;
@@ -60,7 +59,8 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     const response = record(
       await this.#request({
         kind: "resolve_conductor_project",
-        binding_id: this.#bindingId(),
+        binding_id: this.options.bindingId,
+        instance_id: this.options.instanceId,
         conductor_short_hash: this.conductorShortHash,
       }),
     );
@@ -93,7 +93,8 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       const response = record(
         await this.#request({
           kind: "list_project_root_index_page",
-          binding_id: this.#bindingId(),
+          binding_id: this.options.bindingId,
+          instance_id: this.options.instanceId,
           expected_project_id: projectId,
           page: {
             limit,
@@ -138,7 +139,8 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     if (!this.#projectId) throw new Error("linear_project_not_resolved");
     const response = record(await this.#request({
       kind: "get_workflow_issue_tree",
-      binding_id: this.#bindingId(),
+      binding_id: this.options.bindingId,
+      instance_id: this.options.instanceId,
       conductor_short_hash: this.conductorShortHash,
       expected_project_id: this.#projectId,
       root_issue_id: rootIssueId,
@@ -151,7 +153,12 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
   ): Promise<import("../api/LinearGatewayInterface.js").LinearWorkflowMutationOutcome> {
     this.#assertProject(input.expectedProjectId);
-    const response = record(await this.#request(workflowMutationBody(input, this.conductorShortHash, this.#bindingId())));
+    const response = record(await this.#request(workflowMutationBody(
+      input,
+      this.conductorShortHash,
+      this.options.bindingId,
+      this.options.instanceId,
+    )));
     if (response.kind === "precondition_conflict") return { kind: "precondition_conflict" };
     if (response.kind === "applied" || response.kind === "already_applied") {
       return {
@@ -199,9 +206,6 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     }
   }
 
-  #bindingId(): string {
-    return this.options.bindingId ?? "binding-1";
-  }
 }
 
 function record(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -251,16 +255,6 @@ function rootHeader(value: JsonValue): DiscoveredRoot {
   const issueId = string(header.root_issue_id, "linear_root_header_invalid");
   const labels = pool(header.root_conductor_labels);
   if (labels.length > 1) throw new Error("linear_root_header_invalid");
-  const ownership = header.root_ownership === undefined
-    ? undefined
-    : record(header.root_ownership);
-  const managedConductorId = ownership === undefined
-    ? undefined
-    : string(ownership.conductor_id, "linear_root_ownership_invalid");
-  if (ownership !== undefined) {
-    string(ownership.source_comment_id, "linear_root_ownership_invalid");
-    string(ownership.source_comment_remote_version, "linear_root_ownership_invalid");
-  }
   return {
     issueId,
     identifier: string(header.identifier, "linear_root_header_invalid"),
@@ -274,7 +268,6 @@ function rootHeader(value: JsonValue): DiscoveredRoot {
       (blocker) => linearBlocker(issueId, blocker),
     ),
     rootConductorLabels: labels,
-    ...(managedConductorId ? { managedConductorId } : {}),
   };
 }
 
@@ -371,17 +364,13 @@ function workflowTree(
         string(label, "linear_workflow_issue_label_invalid")),
       is_archived: boolean(issue.is_archived, "linear_workflow_issue_invalid"),
       remote_version: string(issue.remote_version, "linear_workflow_issue_invalid"),
+      created_at: string(issue.created_at, "linear_workflow_issue_invalid"),
       updated_at: string(issue.updated_at, "linear_workflow_issue_invalid"),
     };
   });
   const issues = rawIssues.map((issue) => {
     if (issue.issue_id === root) return { ...issue, issue_kind: "root" as const };
-    const record = workflowIssueRecord(issue, root);
-    return record === undefined ? issue : {
-      ...issue,
-      issue_kind: record.issueKind,
-      workflow_issue_key: record.issueKey,
-    };
+    return { ...issue, issue_kind: primaryIssueKind(issue.labels) };
   });
   if (issues.length === 0 || issues.length > 512) {
     throw new Error("linear_workflow_issues_invalid");
@@ -455,6 +444,27 @@ function workflowTree(
     }
     relationIds.add(relation.relation_id);
   }
+  const attachments = array(value.attachments, "linear_workflow_attachments_invalid").map((item) => {
+    const attachment = record(item);
+    return {
+      attachment_id: string(attachment.attachment_id, "linear_workflow_attachment_invalid"),
+      issue_id: string(attachment.issue_id, "linear_workflow_attachment_invalid"),
+      title: string(attachment.title, "linear_workflow_attachment_invalid"),
+      url: string(attachment.url, "linear_workflow_attachment_invalid"),
+      source_type: string(attachment.source_type, "linear_workflow_attachment_invalid"),
+      remote_version: string(attachment.remote_version, "linear_workflow_attachment_invalid"),
+      created_at: string(attachment.created_at, "linear_workflow_attachment_invalid"),
+      updated_at: string(attachment.updated_at, "linear_workflow_attachment_invalid"),
+    };
+  });
+  if (attachments.length > 1_024) throw new Error("linear_workflow_attachments_invalid");
+  const attachmentIds = new Set<string>();
+  for (const attachment of attachments) {
+    if (attachmentIds.has(attachment.attachment_id) || !issueIds.has(attachment.issue_id)) {
+      throw new Error("linear_workflow_attachment_invalid");
+    }
+    attachmentIds.add(attachment.attachment_id);
+  }
   const sourceManifest = array(value.source_manifest, "linear_workflow_source_manifest_invalid").map((item) => {
     const source = record(item);
     return {
@@ -496,31 +506,28 @@ function workflowTree(
     issues,
     comments,
     relations,
+    attachments,
     source_manifest: sourceManifest,
     coverage,
     observed_at: string(value.observed_at, "linear_workflow_tree_invalid"),
   };
 }
 
-function workflowIssueRecord(
-  issue: { issue_id: string; parent_issue_id?: string; description: string },
-  rootIssueId: string,
-): WorkflowIssueRecord | undefined {
-  const parsed = parseManagedRecord(issue.description);
-  if (!parsed.ok) {
-    if (parsed.error !== "managed_record_block_missing") {
-      throw new Error(`linear_workflow_issue_record_invalid:${parsed.error}`);
+function primaryIssueKind(
+  labels: string[],
+): "cycle" | "plan" | "work" | "verify" | "finding" {
+  const matches = labels.flatMap((label) => {
+    switch (label) {
+      case "Cycle": return ["cycle" as const];
+      case "Plan": return ["plan" as const];
+      case "Work": return ["work" as const];
+      case "Verify": return ["verify" as const];
+      case "Finding": return ["finding" as const];
+      default: return [];
     }
-    return undefined;
-  }
-  if (parsed.value.kind !== "workflow_issue") return undefined;
-  if (
-    parsed.value.rootIssueId !== rootIssueId ||
-    parsed.value.parentIssueId !== issue.parent_issue_id
-  ) {
-    throw new Error("linear_workflow_issue_record_scope_invalid");
-  }
-  return parsed.value;
+  });
+  if (matches.length !== 1) throw new Error("linear_workflow_issue_kind_invalid");
+  return matches[0]!;
 }
 
 function workflowStatusCategory(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["status_catalog"][number]["category"] {
@@ -572,7 +579,7 @@ function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeS
 }
 
 function workflowSourceKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["source_manifest"][number]["source_kind"] {
-  if (value === "linear_issue" || value === "linear_comment" || value === "linear_relation" || value === "linear_status_catalog") return value;
+  if (value === "linear_issue" || value === "linear_comment" || value === "linear_relation" || value === "linear_attachment" || value === "linear_activity" || value === "linear_status_catalog") return value;
   throw new Error("linear_workflow_source_manifest_invalid");
 }
 
@@ -625,9 +632,11 @@ function workflowMutationBody(
   input: import("../api/LinearGatewayInterface.js").LinearWorkflowMutationCommand,
   conductorShortHash: string,
   bindingId: string,
+  instanceId: string,
 ): Record<string, JsonValue> {
   const common = {
     binding_id: bindingId,
+    instance_id: instanceId,
     write_id: input.writeId,
     conductor_short_hash: conductorShortHash,
     expected_project_id: input.expectedProjectId,
@@ -650,6 +659,7 @@ function workflowMutationBody(
       };
     case "update_workflow_issue":
     case "append_workflow_comment":
+    case "create_workflow_attachment":
       return {
         ...common,
         kind: input.kind,
@@ -665,13 +675,15 @@ function workflowMutationBody(
             status_id: input.statusId,
             title: input.title,
             description: input.description,
+            label_names: input.labelNames,
             is_archived: input.isArchived,
             parent_assignment: input.parentAssignment.mode === "set"
               ? { mode: "set", parent_issue_id: input.parentAssignment.parentIssueId }
               : { mode: input.parentAssignment.mode },
             ...(input.order === undefined ? {} : { order: input.order }),
           }
-          : input.kind === "append_workflow_comment" ? { body: input.body } : {}),
+          : input.kind === "append_workflow_comment" ? { body: input.body }
+            : input.kind === "create_workflow_attachment" ? { title: input.title, url: input.url } : {}),
       };
     case "create_comment_reply":
       return {

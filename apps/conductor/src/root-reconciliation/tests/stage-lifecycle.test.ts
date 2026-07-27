@@ -6,7 +6,6 @@ import type {
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
-  ManagedRecord,
   RootConvergencePolicyInterface,
   RootDirective,
   StageModelTurnRecord,
@@ -14,8 +13,6 @@ import type {
   StageTurnInput,
   TurnUsage,
 } from "../api/index.js";
-import { parseManagedRecord, serializeManagedRecord } from "../api/index.js";
-import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTimelineEvents.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import {
   RootReconciliationRuntime,
@@ -50,7 +47,7 @@ test("Stage Result outcomes have one closed target status", () => {
   }
 });
 
-test("Stage execution persists In Progress, a Stage Result, and the terminal status in order", async () => {
+test("Stage execution materializes one native terminal Issue postcondition without a Result comment", async () => {
   const linear = new FakeLinear("work");
   let performerCalls = 0;
   const runtime = new RootReconciliationRuntime(dependencies({
@@ -73,12 +70,108 @@ test("Stage execution persists In Progress, a Stage Result, and the terminal sta
   assert.equal(performerCalls, 1);
   assert.deepEqual(linear.mutations.map((command) => command.kind), [
     "update_workflow_issue",
-    "append_workflow_comment",
     "update_workflow_issue",
   ]);
   assert.deepEqual(statusMutations(linear), ["In Progress", "Done"]);
   assert.equal(stage(linear.tree).status_name, "Done");
-  assert.equal(linear.stageResultCount(), 1);
+  assert.equal(linear.stageResultCount(), 0);
+  assert.match(stage(linear.tree).description, /Work Completed/u);
+  assert.doesNotMatch(stage(linear.tree).description, /```json|stage_result|stage-execution|tokens?|model/iu);
+  assert.equal(linear.tree.comments.length, 0);
+});
+
+test("Verify changes required materializes one native Finding Issue per finding before terminalizing Verify", async () => {
+  const linear = new FakeLinear("verify");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "verify",
+    outcomeKind: "verify_changes_required",
+    onExecute(input) { return changesRequiredResult(input); },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  const finding = linear.tree.issues.find(({ issue_kind }) => issue_kind === "finding");
+  assert.ok(finding);
+  assert.equal(finding.parent_issue_id, "cycle-1");
+  assert.equal(finding.status_name, "Todo");
+  assert.deepEqual(finding.labels, ["Finding", "High", "Code"]);
+  assert.match(finding.description, /Null input crashes the parser\./u);
+  assert.match(finding.description, /check parser-regression/u);
+  assert.doesNotMatch(finding.description, /finding-transport-1|```json|stage_result/u);
+  assert.deepEqual(linear.tree.relations.map(({ relation_kind, source_issue_id, target_issue_id }) => [
+    relation_kind, source_issue_id, target_issue_id,
+  ]).sort(), [
+    ["relates_to", finding.issue_id, "stage-1"],
+    ["relates_to", finding.issue_id, "work-1"],
+  ]);
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), [
+    "update_workflow_issue",
+    "create_workflow_attachment",
+    "create_workflow_issue",
+    "create_workflow_relation",
+    "create_workflow_relation",
+    "update_workflow_issue",
+  ]);
+  assert.equal(stage(linear.tree).status_name, "Done");
+  assert.deepEqual(stage(linear.tree).labels, ["Changes Required"]);
+  assert.deepEqual(linear.tree.attachments.map(({ issue_id, title, url }) => ({ issue_id, title, url })), [{
+    issue_id: "stage-1",
+    title: "Verified Git revision",
+    url: "https://github.com/acme/repo/commit/head-1",
+  }]);
+});
+
+test("Verify materializes the exact revision attachment before its terminal status", async () => {
+  const linear = new FakeLinear("verify");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "verify",
+    outcomeKind: "verify_passed",
+    onExecute(input) { return stageResult(input, "verify_passed"); },
+  }));
+
+  assert.equal(await runtime.cycle(), "progress");
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), [
+    "update_workflow_issue",
+    "create_workflow_attachment",
+    "update_workflow_issue",
+  ]);
+  assert.equal(stage(linear.tree).status_name, "Done");
+  assert.deepEqual(stage(linear.tree).labels, ["Passed"]);
+});
+
+test("Verify revision mismatch blocks attachment and terminal mutation", async () => {
+  const linear = new FakeLinear("verify");
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "verify",
+    outcomeKind: "verify_passed",
+    onExecute(input) {
+      const result = stageResult(input, "verify_passed");
+      return { ...result, outcome: { ...result.outcome, verifiedRevision: "other-head" } } as StageResult;
+    },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), ["update_workflow_issue"]);
+  assert.equal(stage(linear.tree).status_name, "In Progress");
+  assert.deepEqual(linear.tree.attachments, []);
+});
+
+test("Verify Finding materialization fails closed when create read-back has indistinguishable native candidates", async () => {
+  const linear = new FakeLinear("verify");
+  linear.findingCreateCopies = 2;
+  const runtime = new RootReconciliationRuntime(dependencies({
+    linear,
+    role: "verify",
+    outcomeKind: "verify_changes_required",
+    onExecute(input) { return changesRequiredResult(input); },
+  }));
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(linear.tree.issues.filter(({ issue_kind }) => issue_kind === "finding").length, 2);
+  assert.equal(stage(linear.tree).status_name, "In Progress");
+  assert.equal(linear.tree.relations.length, 0);
 });
 
 test("a Cycle repair limit rejects another stage before accepting its directive", async () => {
@@ -97,136 +190,10 @@ test("a Cycle repair limit rejects another stage before accepting its directive"
 
   assert.equal(await runtime.cycle(), "needs-attention");
   assert.equal(performerCalls, 0);
-  assert.equal(linear.managedRecords().some(({ kind }) => kind === "root_directive"), false);
   assert.equal(stage(linear.tree).status_name, "Todo");
 });
 
-test("a durable Stage Result must materialize its Cycle timeline before the terminal status", async () => {
-  const linear = new FakeLinear("work");
-  const events: WorkflowTimelineEvent[] = [];
-  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
-  const runtime = new RootReconciliationRuntime(dependencies({
-    linear,
-    role: "work",
-    outcomeKind: "work_completed",
-    onExecute(input) { return stageResult(input, "work_completed"); },
-    timeline: {
-      async publish(event) {
-        events.push(event);
-        return {
-          kind: "failed" as const,
-          timelineEventId: event.timelineEventId,
-          code: "timeline_read_back_missing",
-          sanitizedReason: "timeline_read_back_missing",
-        };
-      },
-    },
-    log(event, fields) { logs.push({ event, fields }); },
-  }));
-
-  assert.equal(await runtime.cycle(), "needs-attention");
-  assert.equal(linear.stageResultCount(), 1);
-  assert.deepEqual(statusMutations(linear), ["In Progress"]);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.timelineKind, "cycle");
-  assert.equal(events[0]?.kind, "work_turn_completed");
-  assert.equal(events[0]?.occurredAt, "2026-07-24T00:00:02Z");
-  assert.deepEqual(events[0]?.sourceRecordIds, [stageExecutionIdFor("root-1", "directive-1", "work", "stage-1")]);
-  assert.deepEqual(logs.find(({ event }) => event === "workflow_timeline_materialization_failed"), {
-    event: "workflow_timeline_materialization_failed",
-    fields: {
-      root_issue_id: "root-1",
-      timeline_event_id: events[0]?.timelineEventId ?? "",
-      timeline_kind: "cycle",
-      reason: "timeline_read_back_missing",
-    },
-  });
-});
-
-test("Stage Result comments show actual model and derive Issue usage from immutable Results", async () => {
-  const linear = new FakeLinear("work");
-  linear.addManagedComment("stage-1", serializeManagedRecord({
-    kind: "stage_result" as const,
-    version: 1 as const,
-    resultId: "previous-work-execution",
-    rootIssueId: "root-1",
-    cycleIssueId: "cycle-1",
-    nodeIssueId: "stage-1",
-    stage: "work" as const,
-    roleSessionId: "previous-session",
-    roleTurnId: "previous-turn",
-    observedTreeDigest: "previous-tree",
-    contextDigest: "previous-context",
-    outcomeKind: "work_completed" as const,
-    summary: "The earlier work turn completed.",
-    sourceManifest: [],
-    completedAt: "2026-07-24T00:00:01Z",
-    modelTurn: {
-      turnRecordId: "previous-work-execution:previous-turn",
-      role: "work" as const,
-      rootIssueId: "root-1",
-      cycleIssueId: "cycle-1",
-      targetIssueId: "stage-1",
-      stageExecutionId: "previous-work-execution",
-      roleSessionId: "previous-session",
-      roleTurnId: "previous-turn",
-      invocationState: "confirmed" as const,
-      model: "gpt-4.1",
-      outcome: "work_completed" as const,
-      usage: {
-        status: "measured" as const,
-        inputTokens: 2,
-        cachedInputTokens: 1,
-        outputTokens: 3,
-        reasoningOutputTokens: 1,
-        totalTokens: 5,
-      },
-      terminalAt: "2026-07-24T00:00:01Z",
-    },
-    changedPaths: ["src/previous.ts"],
-    commitRevision: "previous-revision",
-  }));
-  const runtime = new RootReconciliationRuntime(dependencies({
-    linear,
-    role: "work",
-    outcomeKind: "work_completed",
-    onExecute(input) { return stageResult(input, "work_completed"); },
-  }));
-
-  assert.equal(await runtime.cycle(), "progress");
-  const currentComment = linear.tree.comments.find(({ body }) => body.includes('"result_id":"stage-execution:'));
-  assert.ok(currentComment);
-  assert.match(currentComment.body, /^## Symphony · Work/mu);
-  assert.match(currentComment.body, /- Model: `gpt`/u);
-  assert.match(currentComment.body, /- This turn: input=1, cached=0, output=1, reasoning=0, total=2\./u);
-  assert.match(currentComment.body, /- `gpt`: input=1, cached=0, output=1, reasoning=0, total=2/u);
-  assert.match(currentComment.body, /- `gpt-4\.1`: input=2, cached=1, output=3, reasoning=1, total=5/u);
-  assert.match(currentComment.body, /- Completeness: complete \(2 source records\)\./u);
-  assert.equal((currentComment.body.match(/```json/g) ?? []).length, 1);
-});
-
-test("Stage Result comments make unavailable Provider usage explicit", async () => {
-  const linear = new FakeLinear("verify");
-  const runtime = new RootReconciliationRuntime(dependencies({
-    linear,
-    role: "verify",
-    outcomeKind: "verify_blocked",
-    onExecute(input) {
-      return {
-        ...stageResult(input, "verify_blocked"),
-        modelTurn: stageModelTurn(input, "verify_blocked", { status: "unavailable", reason: "provider_omitted" }),
-      };
-    },
-  }));
-
-  assert.equal(await runtime.cycle(), "progress");
-  const comment = linear.tree.comments.find(({ body }) => body.includes('"kind":"stage_result"'));
-  assert.ok(comment);
-  assert.match(comment.body, /- This turn: unavailable \(provider_omitted\)\./u);
-  assert.match(comment.body, /- Completeness: incomplete \(1 unavailable turn\)\./u);
-});
-
-test("Stage Result Markdown keeps configured model text within its structured field", async () => {
+test("native Stage descriptions exclude Provider model and usage facts", async () => {
   const linear = new FakeLinear("work");
   const runtime = new RootReconciliationRuntime(dependencies({
     linear,
@@ -237,13 +204,11 @@ test("Stage Result Markdown keeps configured model text within its structured fi
   }));
 
   assert.equal(await runtime.cycle(), "progress");
-  const comment = linear.tree.comments.find(({ body }) => body.includes('"kind":"stage_result"'));
-  assert.ok(comment);
-  assert.match(comment.body, /- Model: ``gpt`not-code``/u);
-  assert.doesNotMatch(comment.body, /\n## /u);
+  assert.doesNotMatch(stage(linear.tree).description, /gpt|Model|Usage|tokens?|provider_omitted/iu);
+  assert.equal(linear.stageResultCount(), 0);
 });
 
-test("a completed Plan persists its canonical contract before In Review", async () => {
+test("a completed Plan materializes its complete contract and DAG in the Plan description", async () => {
   const linear = new FakeLinear("plan");
   const runtime = new RootReconciliationRuntime(dependencies({
     linear,
@@ -257,57 +222,19 @@ test("a completed Plan persists its canonical contract before In Review", async 
   assert.equal(await runtime.cycle(), "progress");
   assert.deepEqual(linear.mutations.map((command) => command.kind), [
     "update_workflow_issue",
-    "append_workflow_comment",
-    "append_workflow_comment",
     "update_workflow_issue",
   ]);
   assert.deepEqual(statusMutations(linear), ["In Progress", "In Review"]);
-
-  const records = linear.managedRecords();
-  const stageResult = records.find((record): record is Extract<ManagedRecord, { kind: "stage_result" }> => record.kind === "stage_result");
-  const planContract = records.find((record): record is Extract<ManagedRecord, { kind: "plan_contract" }> => record.kind === "plan_contract");
-  assert.ok(stageResult);
-  assert.ok(planContract);
-  assert.equal(stageResult.planContractDigest, planContract.planContractDigest);
-  assert.match(planContract.planContractDigest, /^[a-f0-9]{64}$/u);
-  assert.deepEqual(planContract, {
-    kind: "plan_contract",
-    version: 1,
-    rootIssueId: "root-1",
-    cycleIssueId: "cycle-1",
-    planContractDigest: planContract.planContractDigest,
-    objective: "Validate the durable Plan Contract.",
-    includedScope: ["apps/conductor"],
-    excludedScope: ["Podium Desktop"],
-    assumptions: ["The project status catalog is valid."],
-    constraints: ["Do not add compatibility paths."],
-    acceptanceCriteria: [{
-      criterionKey: "plan-acceptance",
-      statement: "The Plan Contract is durable before review.",
-      verificationMethod: "Read the managed record from Linear.",
-    }],
-    verificationRequirements: ["npm test -w @symphony/conductor"],
-    proposedWorkDag: {
-      workNodes: [{
-        proposalKey: "persist-contract",
-        title: "Persist the Plan Contract",
-        description: "Write and read back the immutable contract.",
-        expectedOutcome: "The contract is a durable Linear fact.",
-        requiredChecks: ["managed-record-read-back"],
-        dependencyProposalKeys: [],
-      }],
-      dependencyEdges: [],
-      verifyNode: {
-        title: "Verify the Plan Contract",
-        acceptanceCriteria: [{
-          criterionKey: "verify-contract",
-          statement: "The recorded Plan Contract matches the Plan Result.",
-          verificationMethod: "Read the managed record from Linear.",
-        }],
-        requiredChecks: ["managed-record-read-back"],
-      },
-    },
-  });
+  const description = stage(linear.tree).description;
+  assert.match(description, /Validate the durable Plan Contract\./u);
+  assert.match(description, /apps\/conductor/u);
+  assert.match(description, /Do not add compatibility paths\./u);
+  assert.match(description, /The Plan Contract is durable before review\./u);
+  assert.match(description, /Persist the Plan Contract/u);
+  assert.match(description, /Verify the Plan Contract/u);
+  assert.doesNotMatch(description, /```json|machine digest|stage_result/u);
+  assert.equal(linear.stageResultCount(), 0);
+  assert.equal(linear.planContractCount(), 0);
 });
 
 test("an incomplete completed Plan fails closed before its Stage Result is durable", async () => {
@@ -351,7 +278,7 @@ test("a failed In Progress mutation prevents Performer dispatch and leaves no St
   assert.equal(stage(linear.tree).status_name, "Todo");
 });
 
-test("a terminal status failure resumes from the durable Stage Result without calling Performer again", async () => {
+test("a failed terminal native write leaves In Progress terminal for dispatch and never reruns Performer", async () => {
   const linear = new FakeLinear("work");
   linear.failStatusName = "Done";
   let performerCalls = 0;
@@ -367,18 +294,18 @@ test("a terminal status failure resumes from the durable Stage Result without ca
 
   assert.equal(await runtime.cycle(), "needs-attention");
   assert.equal(performerCalls, 1);
-  assert.equal(linear.stageResultCount(), 1);
+  assert.equal(linear.stageResultCount(), 0);
   assert.equal(stage(linear.tree).status_name, "In Progress");
 
   delete linear.failStatusName;
-  assert.equal(await runtime.cycle(), "progress");
+  assert.equal(await runtime.cycle(), "needs-attention");
   assert.equal(performerCalls, 1);
-  assert.equal(stage(linear.tree).status_name, "Done");
+  assert.equal(stage(linear.tree).status_name, "In Progress");
 });
 
-test("a Plan Contract write failure resumes from the durable Plan Result without calling Performer again", async () => {
+test("an already In Progress Stage is not dispatched", async () => {
   const linear = new FakeLinear("plan");
-  linear.failAppendManagedRecordKind = "plan_contract";
+  Object.assign(stage(linear.tree), { status_id: "root-progress", status_name: "In Progress", status_category: "started" });
   let performerCalls = 0;
   const runtime = new RootReconciliationRuntime(dependencies({
     linear,
@@ -391,16 +318,8 @@ test("a Plan Contract write failure resumes from the durable Plan Result without
   }));
 
   assert.equal(await runtime.cycle(), "needs-attention");
-  assert.equal(performerCalls, 1);
-  assert.equal(linear.stageResultCount(), 1);
-  assert.equal(linear.planContractCount(), 0);
-  assert.equal(stage(linear.tree).status_name, "In Progress");
-
-  delete linear.failAppendManagedRecordKind;
-  assert.equal(await runtime.cycle(), "progress");
-  assert.equal(performerCalls, 1);
-  assert.equal(linear.planContractCount(), 1);
-  assert.equal(stage(linear.tree).status_name, "In Review");
+  assert.equal(performerCalls, 0);
+  assert.equal(linear.mutations.length, 0);
 });
 
 test("Stage execution IDs stay within the closed contract bound for long durable identities", () => {
@@ -422,7 +341,6 @@ function dependencies(input: {
   model?: string;
   onExecute(stageInput: StageTurnInput): StageResult;
   convergence?: RootConvergencePolicyInterface;
-  timeline?: RootReconciliationRuntimeDependencies["timeline"];
   log?: RootReconciliationRuntimeDependencies["log"];
 }): RootReconciliationRuntimeDependencies {
   const root = {
@@ -432,7 +350,7 @@ function dependencies(input: {
     blockers: [], rootConductorLabels: [{ conductorShortHash: "abc123" }], isDelegatedToSymphony: true, isArchived: false,
   };
   return {
-    conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
+    conductorId: "conductor-1", conductorShortHash: "abc123", repositoryIdentity: "repository-1", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] }; },
       async readProjectRootIndexPage() {
@@ -442,11 +360,9 @@ function dependencies(input: {
       mutateWorkflow: input.linear.mutateWorkflow.bind(input.linear),
     },
     git: {
-      async ensureWorkspace() { return { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" }; },
-      async inspect() { return { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
-    },
-    ownership: {
-      async claim() { return { kind: "already_owned" as const, ownership: {} as never, workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" } }; },
+      async inspectRootWorktreeGate() { return validWorktreeGateInspection(); },
+      async readCommitUrl({ revision }) { return `https://github.com/acme/repo/commit/${revision}`; },
+      async materializeRootWorkspace() { throw new Error("workspace_materialization_unexpected"); },
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
@@ -486,25 +402,31 @@ function dependencies(input: {
       async cancelAndReap() {},
     },
     materializer: { async materialize() { throw new Error("materializer_unexpected"); } },
-    directiveRecordWriter: {
-      async write({ directive: accepted }: { directive: RootDirective }) {
-        input.linear.addManagedComment("root-1", serializeManagedRecord({
-          kind: "root_directive", version: 1, rootDirectiveId: accepted.rootDirectiveId, rootIssueId: "root-1",
-          reconcilerSessionId: accepted.reconcilerSessionId, reconcilerTurnId: accepted.reconcilerTurnId,
-          basedOnTargetRootDigest: accepted.basedOnTargetRootDigest, consumedInputIds: accepted.consumedInputIds,
-          directive: accepted, acceptedAt: "2026-07-24T00:00:01Z",
-        }));
-        return { kind: "materialized" as const, record: {} as never };
-      },
-    },
-    failureRecordWriter: { async write() { throw new Error("failure_record_writer_unexpected"); } },
     replyWriter: { async write() { return { kind: "materialized" as const, replyId: "reply-1" }; } },
-    humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
-    humanActionResolutionMaterializer: { async materialize() { throw new Error("human_action_unexpected"); } },
-    timeline: input.timeline ?? { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
     profileIdFor: async () => "profile-1",
     modelSettingsFor: async () => ({ model: input.model ?? "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
     log: input.log ?? (() => {}),
+  };
+}
+
+function validWorktreeGateInspection() {
+  const workspace = { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" };
+  const snapshot = {
+    head: "head-1",
+    branch: workspace.branch,
+    status: { items: [], returned: 0, cap: 32, has_more: false, partial: false },
+  };
+  return {
+    result: {
+      kind: "valid" as const,
+      repositoryIdentity: "repository-1",
+      branch: workspace.branch,
+      headRevision: snapshot.head,
+      isClean: true,
+      changedPaths: [],
+    },
+    workspace,
+    snapshot,
   };
 }
 
@@ -521,7 +443,7 @@ function directive(
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1", reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1", modelTurn: rootModelTurn("turn-1"), basedOnTargetRootDigest: digest, rationale: "Execute the selected stage.",
-    evidenceRefs: [], consumedInputIds, commentReplies: [], humanActionResolutions: [], action,
+    evidenceRefs: [], consumedInputIds, commentReplies: [], action,
   };
 }
 
@@ -532,14 +454,9 @@ function allowingConvergence(): RootConvergencePolicyInterface {
         trigger: "none",
         snapshot: {
           policy: {
-            kind: "root_convergence_policy",
-            version: 1,
-            policyId: "root-convergence-policy-1",
-            rootIssueId: "root-1",
             maxCyclesPerRoot: 3,
             maxSameOpenFindingCycles: 2,
             maxConsecutiveNoProgress: 2,
-            maxTotalTokens: 10_000,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-26T00:00:00.000Z",
           },
@@ -547,8 +464,6 @@ function allowingConvergence(): RootConvergencePolicyInterface {
             cycleCount: 1,
             openFindingPersistence: [],
             consecutiveNoProgress: 0,
-            settledTokens: 0,
-            openTokenReservations: [],
             activeCycleIssueId: "cycle-1",
             activeCycleRepairAttempts: 0,
             isDeadlineExceeded: false,
@@ -556,9 +471,6 @@ function allowingConvergence(): RootConvergencePolicyInterface {
           },
         },
       };
-    },
-    async persistNonAllowing() {
-      throw new Error("convergence_persist_unexpected");
     },
   };
 }
@@ -570,14 +482,9 @@ function exhaustedCycleConvergence(): RootConvergencePolicyInterface {
         trigger: "max_cycle_repair_attempts" as const,
         snapshot: {
           policy: {
-            kind: "root_convergence_policy",
-            version: 1,
-            policyId: "root-convergence-policy-1",
-            rootIssueId: "root-1",
             maxCyclesPerRoot: 3,
             maxSameOpenFindingCycles: 2,
             maxConsecutiveNoProgress: 2,
-            maxTotalTokens: 10_000,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-26T00:00:00.000Z",
           },
@@ -585,29 +492,20 @@ function exhaustedCycleConvergence(): RootConvergencePolicyInterface {
             cycleCount: 1,
             openFindingPersistence: [],
             consecutiveNoProgress: 0,
-            settledTokens: 0,
-            openTokenReservations: [],
             activeCycleIssueId: "cycle-1",
             activeCycleRepairAttempts: 1,
             isDeadlineExceeded: false,
             rootIsCanceled: false,
           },
-          assessment: {
-            recordId: "convergence-1",
-            recordKind: "convergence",
-            recordVersion: "1",
-            writeId: "convergence-1",
-          },
         },
       };
-    },
-    async persistNonAllowing() {
-      throw new Error("convergence_persist_unexpected");
     },
   };
 }
 
 function stageResult(input: StageTurnInput, outcomeKind: StageResult["outcome"]["kind"]): StageResult {
+  const revisionBound = outcomeKind === "verify_passed" || outcomeKind === "verify_changes_required" ||
+    outcomeKind === "verify_inconclusive" || outcomeKind === "verify_plan_contract_violation";
   return {
     protocolVersion: 1, resultId: input.stageExecutionId, stageExecutionId: input.stageExecutionId,
     rootIssueId: input.rootIssueId, cycleIssueId: input.cycleIssueId, targetIssueId: input.targetIssueId,
@@ -615,7 +513,7 @@ function stageResult(input: StageTurnInput, outcomeKind: StageResult["outcome"][
     observedTreeDigest: input.observedTreeDigest, contextDigest: input.contextDigest,
     summary: "The stage finished.", sourceManifest: [], completedAt: "2026-07-24T00:00:02Z",
     modelTurn: stageModelTurn(input, outcomeKind),
-    outcome: { kind: outcomeKind },
+    outcome: { kind: outcomeKind, ...(revisionBound ? { verifiedRevision: input.git.head } : {}) },
   };
 }
 
@@ -708,6 +606,27 @@ function completedPlanResult(input: StageTurnInput): StageResult {
   } as unknown as StageResult;
 }
 
+function changesRequiredResult(input: StageTurnInput): StageResult {
+  return {
+    ...stageResult(input, "verify_changes_required"),
+    outcome: {
+      kind: "verify_changes_required",
+      targetRevision: "head-1",
+      verifiedRevision: "head-1",
+      acceptanceResults: [],
+      findings: [{
+        findingId: "finding-transport-1",
+        category: "code",
+        severity: "high",
+        description: "Null input crashes the parser.",
+        evidenceRefs: [{ referenceId: "parser-regression", sourceKind: "check" }],
+        relatedWorkIssueIds: ["work-1"],
+      }],
+      checks: [],
+    },
+  } as unknown as StageResult;
+}
+
 function statusMutations(linear: FakeLinear): string[] {
   return linear.mutations.flatMap((command) => command.kind === "update_workflow_issue"
     ? [linear.statusName(command.statusId)]
@@ -724,7 +643,7 @@ class FakeLinear {
   readonly tree: LinearWorkflowTreeSnapshot;
   readonly mutations: LinearWorkflowMutationCommand[] = [];
   failStatusName?: string;
-  failAppendManagedRecordKind?: "plan_contract";
+  findingCreateCopies = 1;
 
   constructor(role: "plan" | "work" | "verify") {
     this.tree = {
@@ -741,20 +660,12 @@ class FakeLinear {
       issues: [
         issue("root-1", "root", undefined, "root-progress", "In Progress", 0),
         issue("cycle-1", "cycle", "root-1", "cycle-executing", "Executing", 1),
+        ...(role === "verify" ? [issue("work-1", "work", "cycle-1", "done", "Done", 2)] : []),
         issue("stage-1", role, "cycle-1", "todo", "Todo", 2),
       ],
-      comments: [], relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+      comments: [], relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-24T00:00:00Z",
     };
-    this.addManagedComment("root-1", serializeManagedRecord({
-      kind: "root_ownership" as const,
-      version: 1 as const,
-      rootIssueId: "root-1",
-      conductorId: "conductor-1",
-      performerProfileId: "profile-1",
-      deliveryBranch: "symphony/runs/sym-1",
-      ownerGeneration: "generation-1",
-    }));
   }
 
   statusName(statusId: string): string {
@@ -782,15 +693,49 @@ class FakeLinear {
     return this.tree.comments.filter(({ body }) => body.includes('"kind":"plan_contract"')).length;
   }
 
-  managedRecords(): ManagedRecord[] {
-    return this.tree.comments.flatMap(({ body }) => {
-      const parsed = parseManagedRecord(body);
-      return parsed.ok ? [parsed.value] : [];
-    });
-  }
-
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
     this.mutations.push(command);
+    if (command.kind === "create_workflow_issue") {
+      for (let index = 0; index < this.findingCreateCopies; index += 1) {
+        const created = issue(`finding-${this.tree.issues.length + 1}`, "finding", command.parentIssueId, command.statusId, "Todo", 2);
+        Object.assign(created, {
+          title: command.title,
+          description: command.description,
+          labels: command.labelNames,
+          order: command.order ?? 0,
+        });
+        this.tree.issues.push(created);
+      }
+      this.bump("root-1");
+      const created = this.tree.issues.at(-1)!;
+      return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: created.issue_id, remoteVersion: created.remote_version } };
+    }
+    if (command.kind === "create_workflow_relation") {
+      if (command.relationState !== "present") throw new Error("unexpected_relation_state");
+      this.tree.relations.push({
+        relation_id: `relation-${this.tree.relations.length + 1}`,
+        relation_kind: command.relationKind,
+        source_issue_id: command.sourceIssueId,
+        target_issue_id: command.targetIssueId,
+      });
+      this.bump(command.sourceIssueId);
+      this.bump(command.targetIssueId);
+      return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: stageOrRoot(this.tree, command.sourceIssueId).remote_version } };
+    }
+    if (command.kind === "create_workflow_attachment") {
+      this.tree.attachments.push({
+        attachment_id: `attachment-${this.tree.attachments.length + 1}`,
+        issue_id: command.target.targetIssueId,
+        title: command.title,
+        url: command.url,
+        source_type: "github",
+        remote_version: `attachment-v${this.tree.attachments.length + 1}`,
+        created_at: "2026-07-24T00:00:01Z",
+        updated_at: "2026-07-24T00:00:01Z",
+      });
+      this.bump(command.target.targetIssueId);
+      return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: `attachment-v${this.tree.attachments.length}` } };
+    }
     if (command.kind === "update_workflow_issue") {
       const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
       if (!status) throw new Error("status_missing");
@@ -798,17 +743,13 @@ class FakeLinear {
       const target = stageOrRoot(this.tree, command.target.targetIssueId);
       Object.assign(target, {
         status_id: status.status_id, status_name: status.name, status_category: status.category,
-        status_position: status.position, title: command.title, description: command.description,
+        status_position: status.position, title: command.title, description: command.description, labels: command.labelNames,
       });
       if (command.order !== undefined) target.order = command.order;
       this.bump(target.issue_id);
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: target.issue_id, remoteVersion: target.remote_version } };
     }
     if (command.kind === "append_workflow_comment") {
-      const record = parseManagedRecord(command.body);
-      if (record.ok && record.value.kind === this.failAppendManagedRecordKind) {
-        return { kind: "failed" as const, code: "linear_write_failed", summary: "failed" };
-      }
       this.addManagedComment(command.target.targetIssueId, command.body);
       const target = stageOrRoot(this.tree, command.target.targetIssueId);
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: target.issue_id, remoteVersion: target.remote_version } };
@@ -826,7 +767,7 @@ class FakeLinear {
 
 function issue(
   issueId: string,
-  issueKind: "root" | "cycle" | "plan" | "work" | "verify",
+  issueKind: "root" | "cycle" | "plan" | "work" | "verify" | "finding",
   parentIssueId: string | undefined,
   statusId: string,
   statusName: string,
@@ -837,7 +778,7 @@ function issue(
     issue_id: issueId, identifier: issueId, project_id: "project-1", ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusId, status_name: statusName, status_category: category as "unstarted" | "started", status_position: depth + 1,
     order: depth, depth, title: issueKind, description: `${issueKind} description`, labels: [], is_archived: false,
-    issue_kind: issueKind, remote_version: `${issueId}-v1`, updated_at: "2026-07-24T00:00:00Z",
+    issue_kind: issueKind, remote_version: `${issueId}-v1`, created_at: "2026-07-24T00:00:00Z", updated_at: "2026-07-24T00:00:00Z",
   };
 }
 

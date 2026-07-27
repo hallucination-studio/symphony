@@ -22,6 +22,7 @@
         "labels": [],
         "is_archived": false,
         "remote_version": "2026-07-21T09:00:00Z",
+        "created_at": "2026-07-21T08:00:00Z",
         "updated_at": "2026-07-21T09:00:00Z"
       },
       {
@@ -40,6 +41,7 @@
         "labels": [],
         "is_archived": false,
         "remote_version": "2026-07-21T09:01:00Z",
+        "created_at": "2026-07-21T08:01:00Z",
         "updated_at": "2026-07-21T09:01:00Z"
       }
     ],
@@ -67,6 +69,30 @@
         "target_issue_id": "root-1"
       }
     ],
+    "attachments": [
+      {
+        "attachment_id": "attachment-1",
+        "issue_id": "root-1",
+        "title": "Pull request",
+        "url": "https://example.test/pull/1",
+        "source_type": "github",
+        "remote_version": "2026-07-21T09:01:30Z",
+        "created_at": "2026-07-21T09:01:30Z",
+        "updated_at": "2026-07-21T09:01:30Z"
+      }
+    ],
+    "activities": [
+      {
+        "activity_id": "activity-1",
+        "issue_id": "root-1",
+        "activity_kinds": ["status_changed"],
+        "actor_kind": "human",
+        "actor_id": "user-1",
+        "to_state_id": "status-progress",
+        "remote_version": "2026-07-21T09:00:02Z",
+        "created_at": "2026-07-21T09:00:02Z"
+      }
+    ],
     "source_manifest": [
       {
         "source_kind": "linear_issue",
@@ -92,6 +118,18 @@
         "source_id": "relation-1",
         "source_version": "relation-1",
         "actor_kind": "unknown"
+      },
+      {
+        "source_kind": "linear_attachment",
+        "source_id": "attachment-1",
+        "source_version": "2026-07-21T09:01:30Z",
+        "actor_kind": "unknown"
+      },
+      {
+        "source_kind": "linear_activity",
+        "source_id": "activity-1",
+        "source_version": "2026-07-21T09:00:02Z",
+        "actor_kind": "human"
       },
       {
         "source_kind": "linear_status_catalog",

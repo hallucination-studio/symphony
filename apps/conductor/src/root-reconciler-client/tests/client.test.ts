@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PerformerRootReconcilerClientImpl } from "../internal/PerformerRootReconcilerClientImpl.js";
-import type { RootDirective } from "../../root-reconciliation/api/RootReconciliationContracts.js";
-import type { RootReconcilerFailureRecord } from "../../root-reconciliation/api/ManagedRecords.js";
+import type { RootDirective, RootReconcilerFailure } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 const directive = {
   protocolVersion: 1 as const, requestId: "request-1", rootDirectiveId: "directive-1",
   reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", modelTurn: rootModelTurn(), basedOnTargetRootDigest: "root-1",
-  rationale: "wait", evidenceRefs: [], consumedInputIds: [], commentReplies: [], humanActionResolutions: [],
+  rationale: "wait", evidenceRefs: [], consumedInputIds: [], commentReplies: [],
   action: { kind: "wait" as const, reasonCode: "test", blockingFactRefs: [] },
 };
 
@@ -129,10 +128,8 @@ test("root reconciler client discards an advance session after a closed failure"
   await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
 });
 
-function failureRecord(): RootReconcilerFailureRecord {
+function failureRecord(): RootReconcilerFailure {
   return {
-    kind: "root_reconciler_failure",
-    version: 1,
     failureId: "root-1:turn-1:failure",
     reconcilerSessionId: "session-1",
     reconcilerTurnId: "turn-1",

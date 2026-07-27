@@ -20,14 +20,14 @@ test("parallel Case concurrently creates its frozen routed Roots and approves on
     async delegateRootIssue(input) {
       calls.push({ kind: "delegate_root", input });
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return {
-        actionIssueId: input.rootIssueId === "parallel-a-root-id" ? "parallel-a-action" : "parallel-b-action",
-        terminalStatusId: "approved-state",
+        requestCommentId: input.rootIssueId === "parallel-a-root-id" ? "parallel-a-action" : "parallel-b-action",
+        planIssueId: `${input.rootIssueId}-plan`,
       };
     },
-    async setHumanActionTerminalStatus(input) {
+    async replyToHumanAction(input) {
       calls.push({ kind: "approve_plan_review", input });
     },
   };
@@ -54,10 +54,10 @@ test("parallel Case concurrently creates its frozen routed Roots and approves on
     { kind: "assert_undelegated", input: { rootIssueId: "parallel-b-root-id" } },
     { kind: "delegate_root", input: { rootIssueId: "parallel-a-root-id" } },
     { kind: "delegate_root", input: { rootIssueId: "parallel-b-root-id" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-a-root-id", terminalStatus: "Approved" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-b-root-id", terminalStatus: "Approved" } },
-    { kind: "approve_plan_review", input: { issueId: "parallel-a-action", terminalStatus: "Approved", stateId: "approved-state" } },
-    { kind: "approve_plan_review", input: { issueId: "parallel-b-action", terminalStatus: "Approved", stateId: "approved-state" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-a-root-id" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-b-root-id" } },
+    { kind: "approve_plan_review", input: { rootIssueId: "parallel-a-root-id", requestCommentId: "parallel-a-action", body: "Approved." } },
+    { kind: "approve_plan_review", input: { rootIssueId: "parallel-b-root-id", requestCommentId: "parallel-b-action", body: "Approved." } },
   ]);
   assert.deepEqual(result, {
     context: {
@@ -83,8 +83,8 @@ test("parallel Case rejects noncanonical definitions, incomplete topology bindin
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
-    async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
-    async setHumanActionTerminalStatus() {},
+    async waitForPlanApprovalRequest() { return { requestCommentId: "action-1", planIssueId: "plan-1" }; },
+    async replyToHumanAction() {},
   };
   const rootCreationsByRootKey = {
     "parallel-a-root": rootCreation("route-a", "conductor-a-id", "profile-a", "/repositories/a"),
@@ -100,7 +100,7 @@ test("parallel Case rejects noncanonical definitions, incomplete topology bindin
     hasCode("foreground_e2e_parallel_case_input_invalid"),
   );
   await assert.rejects(
-    runParallelMultiConductorCase({ definition, human: { ...human, setHumanActionTerminalStatus: undefined }, rootCreationsByRootKey }),
+    runParallelMultiConductorCase({ definition, human: { ...human, replyToHumanAction: undefined }, rootCreationsByRootKey }),
     hasCode("foreground_e2e_parallel_case_input_invalid"),
   );
 });
@@ -118,11 +118,11 @@ test("parallel Case forwards cancellation to every independent Linear Human oper
     },
     async assertRootUndelegatedAndInactive(input) { waits.push(input); },
     async delegateRootIssue(input) { waits.push(input); },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       waits.push(input);
-      return { actionIssueId: `${input.rootIssueId}-action`, terminalStatusId: "approved-state" };
+      return { requestCommentId: `${input.rootIssueId}-action`, planIssueId: `${input.rootIssueId}-plan` };
     },
-    async setHumanActionTerminalStatus() {},
+    async replyToHumanAction() {},
   };
 
   await runParallelMultiConductorCase({
@@ -140,8 +140,8 @@ test("parallel Case forwards cancellation to every independent Linear Human oper
     { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
     { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
     { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
-    { rootIssueId: "parallel-a-root-id", terminalStatus: "Approved", signal: abortController.signal },
-    { rootIssueId: "parallel-b-root-id", terminalStatus: "Approved", signal: abortController.signal },
+    { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
+    { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
   ]);
 });
 
@@ -153,7 +153,7 @@ function rootCreateInput(rootKey, { teamId, projectId, routingLabelId, rootStatu
   return { caseId: "parallel_multi_conductor", rootKey, teamId, projectId, routingLabelId, rootStatusId };
 }
 
-function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, planReviewActionIssueId, {
+function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, approvalRequestCommentId, {
   routingLabelId,
   conductorId,
   performerProfileId,
@@ -164,7 +164,7 @@ function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, planRev
     conductorRef,
     repositoryRef,
     rootIssueId,
-    planReviewActionIssueId,
+    approvalRequestCommentId,
     routingLabelId,
     conductorId,
     performerProfileId,

@@ -19,7 +19,7 @@ test("Podium-Conductor handler validates, dispatches, and correlates messages", 
   });
 
   const response = await handler.handle(
-    envelope({ kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" }),
+    envelope({ kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" }),
   );
 
   assert.equal(response.request_id, "request-1");
@@ -54,6 +54,7 @@ test("Podium-Conductor handler accepts a closed Project Root Index page", async 
   const response = await handler.handle(envelope({
     kind: "list_project_root_index_page",
     binding_id: "binding-1",
+    instance_id: "instance-1",
     expected_project_id: "project-1",
     page: { limit: 250 },
   }));
@@ -84,7 +85,7 @@ test("Podium-Conductor failures are concrete sanitized blockers", async () => {
   });
 
   const response = await handler.handle(
-    envelope({ kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" }),
+    envelope({ kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" }),
   );
 
   assert.equal(response.body.action_required, "block_root");

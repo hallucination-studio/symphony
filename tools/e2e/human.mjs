@@ -6,22 +6,15 @@ import {
   NetworkLinearError,
   RatelimitedLinearError,
 } from "@linear/sdk";
-import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
 
 import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 import { readAllLinearNodes } from "./linear-environment.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const TERMINAL_HUMAN_ACTION_STATUSES = new Set(["Approved", "Rejected", "Answered", "Canceled"]);
-const PLAN_REVIEW_TERMINAL_STATUSES = new Set(["Approved", "Rejected"]);
-const CLARIFICATION_TERMINAL_STATUSES = new Set(["Answered"]);
-const HUMAN_ACTION_KIND_LABELS = new Set([
-  "Plan Review",
-  "Clarification",
-  "Permission",
-  "Finding Waiver",
-  "Convergence Override",
-]);
+const HUMAN_ACTION_HEADINGS = Object.freeze({
+  planApproval: "## 需要你审批",
+  information: "## 需要你补充信息",
+});
 const PREEMPTION_CORE_ROOT_KEYS = new Set(
   FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption")
     ?.declaredUserInteractions.find(({ kind }) => kind === "bind_preemption_roles")?.rootKeys ?? [],
@@ -252,13 +245,13 @@ export async function createForegroundE2EHumanActor({
       verifiedUndelegatedRootIds.delete(rootIssueId);
     },
 
-    async waitForPlanReviewAction({ rootIssueId, terminalStatus, signal } = {}) {
+    async waitForPlanApprovalRequest({ rootIssueId, signal } = {}) {
       const known = assertKnownRoot(roots, rootIssueId);
-      assertPlanReviewWaitInput({ terminalStatus, signal });
+      assertRevisionWaitInput({ signal });
       const requestClient = clientForCase(signal);
       while (true) {
-        const action = await activePlanReviewAction({ client: requestClient, rootIssueId, known, actorId, terminalStatus });
-        if (action) return Object.freeze(action);
+        const request = await activePlanApprovalRequest({ client: requestClient, rootIssueId, known, productActorId: delegateActorId });
+        if (request) return Object.freeze(request);
         await waitForChange(signal, "foreground_e2e_human_plan_review_aborted");
       }
     },
@@ -275,9 +268,9 @@ export async function createForegroundE2EHumanActor({
       }
     },
 
-    async waitForSameConductorPreemptionCandidate({ inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId, signal } = {}) {
+    async waitForSameConductorPreemptionCandidate({ inflightStageIssueId, touchedRootIssueId, remainingRootIssueId, signal } = {}) {
       const known = assertPreemptionCandidateRoots(roots, {
-        inflightStageExecutionId,
+        inflightStageIssueId,
         touchedRootIssueId,
         remainingRootIssueId,
       });
@@ -288,7 +281,7 @@ export async function createForegroundE2EHumanActor({
         const candidate = preemptionCandidate({
           snapshots,
           actorId,
-          inflightStageExecutionId,
+          inflightStageIssueId,
           touchedRootIssueId,
           remainingRootIssueId,
         });
@@ -309,43 +302,55 @@ export async function createForegroundE2EHumanActor({
       }
     },
 
-    async waitForClarificationAction({ rootIssueId, terminalStatus, signal } = {}) {
-      const known = assertKnownClarificationRoot(roots, rootIssueId);
-      assertClarificationWaitInput({ terminalStatus, signal });
+    async waitForMissingWorktreeRecoveryAdmission({ rootIssueIds, signal } = {}) {
+      const known = assertMissingWorktreeRoots(roots, rootIssueIds);
+      assertRevisionWaitInput({ signal });
       const requestClient = clientForCase(signal);
       while (true) {
-        const action = await activeClarificationAction({ client: requestClient, rootIssueId, known, actorId, terminalStatus });
-        if (action) return Object.freeze(action);
+        const snapshots = await Promise.all([...known.values()].map((root) => readRestartRecoveryRootSnapshot({ client: requestClient, root })));
+        const admission = missingWorktreeRecoveryAdmission(snapshots);
+        if (admission) return Object.freeze(admission);
+        await waitForChange(signal, "foreground_e2e_human_missing_worktree_wait_aborted");
+      }
+    },
+
+    async waitForInformationRequest({ rootIssueId, signal } = {}) {
+      const known = assertKnownClarificationRoot(roots, rootIssueId);
+      assertRevisionWaitInput({ signal });
+      const requestClient = clientForCase(signal);
+      while (true) {
+        const request = await activeInformationRequest({ client: requestClient, rootIssueId, known, productActorId: delegateActorId });
+        if (request) return Object.freeze(request);
         await waitForChange(signal, "foreground_e2e_human_clarification_aborted");
       }
     },
 
-    async waitForPlanContractAndPlanReviewAction({ rootIssueId, signal } = {}) {
+    async waitForPlanApprovalGate({ rootIssueId, signal } = {}) {
       const known = assertKnownRoot(roots, rootIssueId);
       assertRevisionWaitInput({ signal });
       const requestClient = clientForCase(signal);
       while (true) {
-        const gate = await activePlanGate({ client: requestClient, rootIssueId, known, actorId });
+        const gate = await activePlanApprovalRequest({ client: requestClient, rootIssueId, known, productActorId: delegateActorId });
         if (gate) return Object.freeze(gate);
         await waitForChange(signal, "foreground_e2e_human_revision_wait_aborted");
       }
     },
 
-    async waitForSuccessorPlanContractAndPlanReviewAction({ rootIssueId, priorCycleIssueId, priorPlanReviewActionIssueId, signal } = {}) {
+    async waitForSuccessorPlanApprovalGate({ rootIssueId, priorCycleIssueId, priorRequestCommentId, signal } = {}) {
       const known = assertKnownRoot(roots, rootIssueId);
-      if (!identifier(priorCycleIssueId) || !identifier(priorPlanReviewActionIssueId)) {
+      if (!identifier(priorCycleIssueId) || !identifier(priorRequestCommentId)) {
         throw stableError("foreground_e2e_human_successor_plan_input_invalid");
       }
       assertRevisionWaitInput({ signal });
       const requestClient = clientForCase(signal);
       while (true) {
-        const gate = await activePlanGate({
+        const gate = await activePlanApprovalRequest({
           client: requestClient,
           rootIssueId,
           known,
-          actorId,
+          productActorId: delegateActorId,
           excludedCycleIssueId: priorCycleIssueId,
-          excludedPlanReviewActionIssueId: priorPlanReviewActionIssueId,
+          excludedRequestCommentId: priorRequestCommentId,
         });
         if (gate) return Object.freeze(gate);
         await waitForChange(signal, "foreground_e2e_human_revision_wait_aborted");
@@ -407,6 +412,40 @@ export async function createForegroundE2EHumanActor({
         commentId: created.id,
         issueId: created.issueId,
         inputReference: rememberReceipt(receiptInputs, commentBodyInputReference(created)),
+      });
+    },
+
+    async replyToHumanAction({ rootIssueId, requestCommentId, body, signal } = {}) {
+      if (!identifier(rootIssueId) || !identifier(requestCommentId) || !text(body)) {
+        throw stableError("foreground_e2e_human_action_reply_input_invalid");
+      }
+      assertOperationSignal(signal, "foreground_e2e_human_action_reply_input_invalid");
+      const known = assertKnownRoot(roots, rootIssueId);
+      const requestClient = clientForCase(signal);
+      const root = await readIssue(requestClient, rootIssueId, "foreground_e2e_human_action_reply_target_invalid");
+      const labels = await readLabels(root, "foreground_e2e_human_action_reply_target_invalid");
+      const request = await readComment(requestClient, requestCommentId, "foreground_e2e_human_action_reply_target_invalid");
+      if (!matchesKnownRoot(root, labels, known) || !isProductHumanActionRequest(request, { rootIssueId, productActorId: delegateActorId })) {
+        throw stableError("foreground_e2e_human_action_reply_target_invalid");
+      }
+      const payload = await write(
+        () => requestClient.createComment({ issueId: rootIssueId, parentId: requestCommentId, body }),
+        "foreground_e2e_human_action_reply_failed",
+        signal,
+      );
+      if (payload?.success !== true || !identifier(payload.commentId)) {
+        throw stableError("foreground_e2e_human_action_reply_failed");
+      }
+      const reply = await readComment(requestClient, payload.commentId, "foreground_e2e_human_action_reply_read_back_failed");
+      if (!matchesOwnedHumanActionReply(reply, { rootIssueId, requestCommentId, body, actorId })) {
+        throw stableError("foreground_e2e_human_action_reply_read_back_failed");
+      }
+      comments.set(reply.id, Object.freeze({ issueId: rootIssueId }));
+      return Object.freeze({
+        commentId: reply.id,
+        issueId: rootIssueId,
+        requestCommentId,
+        inputReference: rememberReceipt(receiptInputs, commentBodyInputReference(reply)),
       });
     },
 
@@ -475,8 +514,8 @@ export async function createForegroundE2EHumanActor({
         const root = await readIssue(requestClient, rootIssueId, "foreground_e2e_human_description_receipt_read_failed");
         const labels = await readLabels(root, "foreground_e2e_human_description_receipt_read_failed");
         if (!matchesKnownRoot(root, labels, known)) throw stableError("foreground_e2e_human_description_receipt_target_invalid");
-        const directives = await readIssueComments(root, "foreground_e2e_human_description_receipt_read_failed");
-        if (hasDescriptionDirectiveReceipt(directives, rootIssueId, expected.sourceId, actorId)) return;
+        const history = await readIssueHistory(root, "foreground_e2e_human_description_receipt_read_failed");
+        if (hasDescriptionConsequence(history, expected, delegateActorId)) return;
         await waitForChange(signal, "foreground_e2e_human_revision_wait_aborted");
       }
     },
@@ -488,8 +527,8 @@ export async function createForegroundE2EHumanActor({
       const requestClient = clientForCase(signal);
       while (true) {
         const source = await readComment(requestClient, expected.commentId, "foreground_e2e_human_comment_receipt_read_failed");
-        if (!matchesOwnedRootComment(source, { issueId, actorId })) throw stableError("foreground_e2e_human_comment_receipt_target_invalid");
-        if (await hasCommentReceipt({ source, expected, actorId, threadAction: undefined })) return;
+        if (!matchesOwnedHumanInput(source, { issueId, actorId })) throw stableError("foreground_e2e_human_comment_receipt_target_invalid");
+        if (await hasCommentReceipt({ source, expected, actorId, productActorId: delegateActorId, threadAction: undefined })) return;
         await waitForChange(signal, "foreground_e2e_human_revision_wait_aborted");
       }
     },
@@ -506,7 +545,7 @@ export async function createForegroundE2EHumanActor({
           throw stableError("foreground_e2e_human_thread_receipt_target_invalid");
         }
         const action = expected.expectedThreadState === "resolved" ? "resolve" : "reopen";
-        if (await hasCommentReceipt({ source, expected, actorId, threadAction: action })) return;
+        if (await hasCommentReceipt({ source, expected, actorId, productActorId: delegateActorId, threadAction: action })) return;
         await waitForChange(signal, "foreground_e2e_human_revision_wait_aborted");
       }
     },
@@ -537,29 +576,6 @@ export async function createForegroundE2EHumanActor({
       return Object.freeze({ reactionId: payload.reactionId, commentId, emoji });
     },
 
-    async setHumanActionTerminalStatus({ issueId, terminalStatus, stateId, signal } = {}) {
-      if (!identifier(issueId) || !identifier(stateId) || !TERMINAL_HUMAN_ACTION_STATUSES.has(terminalStatus)) {
-        throw stableError("foreground_e2e_human_action_status_input_invalid");
-      }
-      assertOperationSignal(signal, "foreground_e2e_human_action_status_input_invalid");
-      const requestClient = clientForCase(signal);
-      const before = await readIssue(requestClient, issueId, "foreground_e2e_human_action_target_invalid");
-      const beforeLabels = await readLabels(before, "foreground_e2e_human_action_target_invalid");
-      if (!isHumanAction(beforeLabels)) throw stableError("foreground_e2e_human_action_target_invalid");
-      const payload = await write(
-        () => requestClient.updateIssue(issueId, { stateId }),
-        "foreground_e2e_human_action_status_failed",
-        signal,
-      );
-      if (payload?.success !== true || payload.issueId !== issueId) {
-        throw stableError("foreground_e2e_human_action_status_failed");
-      }
-      const after = await readIssue(requestClient, issueId, "foreground_e2e_human_action_read_back_failed");
-      const afterLabels = await readLabels(after, "foreground_e2e_human_action_read_back_failed");
-      if (!isHumanAction(afterLabels) || after.stateId !== stateId) {
-        throw stableError("foreground_e2e_human_action_read_back_failed");
-      }
-    },
   });
 }
 
@@ -709,8 +725,8 @@ function assertPreemptionRoots(roots, rootIssueIds, code) {
   return known;
 }
 
-function assertPreemptionCandidateRoots(roots, { inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId }) {
-  if (!identifier(inflightStageExecutionId) || !identifier(touchedRootIssueId) || !identifier(remainingRootIssueId) ||
+function assertPreemptionCandidateRoots(roots, { inflightStageIssueId, touchedRootIssueId, remainingRootIssueId }) {
+  if (!identifier(inflightStageIssueId) || !identifier(touchedRootIssueId) || !identifier(remainingRootIssueId) ||
       touchedRootIssueId === remainingRootIssueId) {
     throw stableError("foreground_e2e_human_preemption_candidate_input_invalid");
   }
@@ -737,6 +753,20 @@ function assertRestartRecoveryRoots(roots, { affectedRootIssueId, continuousRoot
   return new Map([[affectedRootIssueId, affected], [continuousRootIssueId, continuous]]);
 }
 
+function assertMissingWorktreeRoots(roots, rootIssueIds) {
+  if (!Array.isArray(rootIssueIds) || rootIssueIds.length !== 2 || new Set(rootIssueIds).size !== 2 ||
+      rootIssueIds.some((rootIssueId) => !identifier(rootIssueId))) {
+    throw stableError("foreground_e2e_human_missing_worktree_admission_input_invalid");
+  }
+  const known = new Map(rootIssueIds.map((rootIssueId) => [rootIssueId, roots.get(rootIssueId)]));
+  const rootKeys = new Set([...known.values()].map((root) => root?.rootKey));
+  if ([...known.values()].some((root) => root?.caseId !== "missing_worktree_recovery") ||
+      rootKeys.size !== 2 || !rootKeys.has("recoverable-worktree-root") || !rootKeys.has("invalid-generation-root")) {
+    throw stableError("foreground_e2e_human_missing_worktree_admission_input_invalid");
+  }
+  return known;
+}
+
 async function readPreemptionRootSnapshot({ client, root }) {
   const code = "foreground_e2e_human_preemption_read_failed";
   const issue = await readIssue(client, root.rootIssueId, code);
@@ -744,26 +774,33 @@ async function readPreemptionRootSnapshot({ client, root }) {
   if (!matchesKnownRoot(issue, labels, root) || !Number.isFinite(issue.priority)) {
     throw stableError(code);
   }
+  const statuses = await readTeamStatuses(client, root.teamId, code);
+  const statusById = new Map(statuses.map((status) => [status.id, status.name]));
   const tree = await readPreemptionIssueTree(issue, code, new Set());
-  const records = [];
-  for (const node of tree) {
-    const comments = await readIssueComments(node, code);
-    for (const comment of comments) {
-      const record = parseRecord(comment?.body);
-      if (record) records.push(record);
-    }
+  const stages = [];
+  for (const node of tree.slice(1)) {
+    const nodeLabels = await readLabels(node, code);
+    if (!nodeLabels.some(({ name }) => ["Plan", "Work", "Verify"].includes(name))) continue;
+    const statusName = statusById.get(node.stateId);
+    if (!statusName) throw stableError(code);
+    const activity = await readIssueHistory(node, code);
+    const currentStatusActivity = latestStatusActivity(activity, node.stateId);
+    if (!currentStatusActivity) throw stableError(code);
+    stages.push({
+      issueId: node.id,
+      issueKind: nodeLabels.find(({ name }) => ["Plan", "Work", "Verify"].includes(name)).name.toLowerCase(),
+      statusName,
+      changedAt: remoteVersion(currentStatusActivity),
+    });
   }
-  const history = await readHumanNodes(
-    (after) => issue.history({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
-    code,
-  );
+  const history = await readIssueHistory(issue, code);
   if (history.some((entry) => !validPreemptionActivity(entry, root.rootIssueId))) throw stableError(code);
   return {
     rootIssueId: root.rootIssueId,
     priority: issue.priority,
-    owners: records.filter((record) => record.kind === "root_ownership" && record.root_issue_id === root.rootIssueId),
-    executions: records.filter((record) => record.kind === "stage_execution" && record.root_issue_id === root.rootIssueId),
-    results: records.filter((record) => record.kind === "stage_result" && record.root_issue_id === root.rootIssueId),
+    routingLabelId: root.routingLabelId,
+    stages,
+    nativeIssueIds: tree.map(({ id }) => id),
     history,
   };
 }
@@ -773,18 +810,7 @@ async function readRestartRecoveryRootSnapshot({ client, root }) {
   const issue = await readIssue(client, root.rootIssueId, code);
   const labels = await readLabels(issue, code);
   if (!matchesKnownRoot(issue, labels, root)) throw stableError(code);
-  const records = [];
-  for (const node of await readPreemptionIssueTree(issue, code, new Set())) {
-    for (const comment of await readIssueComments(node, code)) {
-      const record = parseRecord(comment?.body);
-      if (record) records.push(record);
-    }
-  }
-  return {
-    rootIssueId: root.rootIssueId,
-    executions: records.filter((record) => record.kind === "stage_execution" && record.root_issue_id === root.rootIssueId),
-    results: records.filter((record) => record.kind === "stage_result" && record.root_issue_id === root.rootIssueId),
-  };
+  return readPreemptionRootSnapshot({ client, root });
 }
 
 async function readPreemptionIssueTree(issue, code, seen) {
@@ -800,57 +826,69 @@ async function readPreemptionIssueTree(issue, code, seen) {
 function preemptionAdmission(snapshots) {
   if (!Array.isArray(snapshots) || snapshots.length !== 3 || !samePreemptionOwner(snapshots) ||
       new Set(snapshots.map(({ priority }) => priority)).size !== 1) return undefined;
-  const active = snapshots.flatMap((snapshot) => snapshot.executions.filter((record) => !stageResultFor(snapshot.results, record.stage_execution_id))
-    .map((record) => ({ rootIssueId: snapshot.rootIssueId, stageExecutionId: record.stage_execution_id })));
-  const ready = snapshots.filter(({ executions }) => executions.length === 0).map(({ rootIssueId }) => rootIssueId);
-  if (active.length !== 1 || ready.length !== 2 || !active.every(({ rootIssueId, stageExecutionId }) => identifier(rootIssueId) && identifier(stageExecutionId))) {
+  const active = snapshots.flatMap((snapshot) => snapshot.stages.filter(({ statusName }) => statusName === "In Progress")
+    .map((stage) => ({ rootIssueId: snapshot.rootIssueId, stageIssueId: stage.issueId })));
+  const ready = snapshots.filter(({ stages }) => stages.length === 0).map(({ rootIssueId }) => rootIssueId);
+  if (active.length !== 1 || ready.length !== 2 || !active.every(({ rootIssueId, stageIssueId }) => identifier(rootIssueId) && identifier(stageIssueId))) {
     return undefined;
   }
-  return { inflightRootIssueId: active[0].rootIssueId, inflightStageExecutionId: active[0].stageExecutionId, readyRootIssueIds: ready };
+  return { inflightRootIssueId: active[0].rootIssueId, inflightStageIssueId: active[0].stageIssueId, readyRootIssueIds: ready };
 }
 
 function restartRecoveryAdmission(snapshots, affectedRootIssueId) {
   if (!Array.isArray(snapshots) || snapshots.length !== 2) return undefined;
   const affected = snapshots.find(({ rootIssueId }) => rootIssueId === affectedRootIssueId);
   if (!affected) return undefined;
-  const active = affected.executions.filter((record) => !stageResultFor(affected.results, record.stage_execution_id));
-  if (active.length !== 1 || !identifier(active[0]?.stage_execution_id)) return undefined;
-  return { affectedRootIssueId, oldStageExecutionId: active[0].stage_execution_id };
+  const active = affected.stages.filter(({ statusName }) => statusName === "In Progress");
+  if (active.length !== 1 || !identifier(active[0]?.issueId)) return undefined;
+  return { affectedRootIssueId, interruptedStageIssueId: active[0].issueId };
 }
 
-function preemptionCandidate({ snapshots, actorId, inflightStageExecutionId, touchedRootIssueId, remainingRootIssueId }) {
+function missingWorktreeRecoveryAdmission(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length !== 2) return undefined;
+  const stages = snapshots.map((snapshot) => {
+    const activeVerify = snapshot.stages.filter(({ issueKind, statusName }) => issueKind === "verify" && statusName === "In Progress");
+    return activeVerify.length === 1 ? [snapshot.rootIssueId, activeVerify[0].issueId] : undefined;
+  });
+  if (stages.some((stage) => !stage)) return undefined;
+  return {
+    verifyIssueIdsByRootId: Object.freeze(Object.fromEntries(stages)),
+    nativeIssueIdsByRootId: Object.freeze(Object.fromEntries(snapshots.map(({ rootIssueId, nativeIssueIds }) => [
+      rootIssueId,
+      Object.freeze([...nativeIssueIds]),
+    ]))),
+  };
+}
+
+function preemptionCandidate({ snapshots, actorId, inflightStageIssueId, touchedRootIssueId, remainingRootIssueId }) {
   const inflight = snapshots.find(({ rootIssueId }) => rootIssueId !== touchedRootIssueId && rootIssueId !== remainingRootIssueId);
   const touched = snapshots.find(({ rootIssueId }) => rootIssueId === touchedRootIssueId);
   const remaining = snapshots.find(({ rootIssueId }) => rootIssueId === remainingRootIssueId);
   if (!inflight || !touched || !remaining || !samePreemptionOwner(snapshots)) return undefined;
-  const result = stageResultFor(inflight.results, inflightStageExecutionId);
-  const terminalAt = Date.parse(result?.completed_at);
+  const oldStage = inflight.stages.find(({ issueId }) => issueId === inflightStageIssueId);
+  const terminalAt = ["Done", "Interrupted", "Failed", "Canceled"].includes(oldStage?.statusName)
+    ? Date.parse(oldStage.changedAt)
+    : Number.NaN;
   if (!Number.isFinite(terminalAt)) return undefined;
-  const readyAtTerminal = [touched, remaining].every((snapshot) => snapshot.executions
-    .every(({ started_at }) => Date.parse(started_at) > terminalAt));
+  const readyAtTerminal = [touched, remaining].every((snapshot) => snapshot.stages
+    .every(({ changedAt }) => Date.parse(changedAt) > terminalAt));
   if (!readyAtTerminal) return undefined;
   const touch = touched.history.filter((entry) => entry.actorId === actorId && entry.updatedDescription === true)
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   if (touch.length !== 1 || !identifier(touch[0].id) || Date.parse(touch[0].createdAt) >= terminalAt) return undefined;
-  const candidates = [touched, remaining].flatMap((snapshot) => snapshot.executions
-    .filter(({ started_at }) => Date.parse(started_at) > terminalAt)
-    .map((record) => ({ rootIssueId: snapshot.rootIssueId, record })))
-    .sort((left, right) => Date.parse(left.record.started_at) - Date.parse(right.record.started_at));
+  const candidates = [touched, remaining].flatMap((snapshot) => snapshot.stages
+    .filter(({ statusName, changedAt }) => statusName === "In Progress" && Date.parse(changedAt) > terminalAt)
+    .map((stage) => ({ rootIssueId: snapshot.rootIssueId, stage })))
+    .sort((left, right) => Date.parse(left.stage.changedAt) - Date.parse(right.stage.changedAt));
   const first = candidates[0];
-  if (!first || candidates.filter(({ record }) => record.started_at === first.record.started_at).length !== 1 ||
-      first.rootIssueId !== touchedRootIssueId || !identifier(first.record.stage_execution_id)) return undefined;
-  return { rootIssueId: touchedRootIssueId, stageExecutionId: first.record.stage_execution_id, touchActivityId: touch[0].id };
+  if (!first || candidates.filter(({ stage }) => stage.changedAt === first.stage.changedAt).length !== 1 ||
+      first.rootIssueId !== touchedRootIssueId || !identifier(first.stage.issueId)) return undefined;
+  return { rootIssueId: touchedRootIssueId, stageIssueId: first.stage.issueId, touchActivityId: touch[0].id };
 }
 
 function samePreemptionOwner(snapshots) {
-  const owners = snapshots.map(({ owners }) => owners);
-  return owners.every((records) => records.length === 1 && identifier(records[0]?.conductor_id)) &&
-    new Set(owners.map(([record]) => record.conductor_id)).size === 1;
-}
-
-function stageResultFor(results, stageExecutionId) {
-  const matches = results.filter((record) => record.model_turn?.stage_execution_id === stageExecutionId || record.result_id === stageExecutionId);
-  return matches.length === 1 ? matches[0] : undefined;
+  return snapshots.every(({ routingLabelId }) => identifier(routingLabelId)) &&
+    new Set(snapshots.map(({ routingLabelId }) => routingLabelId)).size === 1;
 }
 
 function validPreemptionActivity(entry, rootIssueId) {
@@ -859,152 +897,59 @@ function validPreemptionActivity(entry, rootIssueId) {
     timestampValue(entry.createdAt) && timestampValue(entry.updatedAt);
 }
 
-async function activePlanReviewAction({ client, rootIssueId, known, actorId, terminalStatus }) {
-  const root = await readIssue(client, rootIssueId, "foreground_e2e_human_plan_review_target_invalid");
-  const rootLabels = await readLabels(root, "foreground_e2e_human_plan_review_target_invalid");
-  if (!matchesKnownRoot(root, rootLabels, known)) {
-    throw stableError("foreground_e2e_human_plan_review_target_invalid");
-  }
-  const cycles = await readChildren(root, "foreground_e2e_human_plan_review_read_failed");
-  const candidates = [];
-  for (const cycle of cycles) {
-    if (!matchesChildScope(cycle, { parentId: rootIssueId, known })) continue;
-    const children = await readChildren(cycle, "foreground_e2e_human_plan_review_read_failed");
-    for (const child of children) {
-      if (!matchesChildScope(child, { parentId: cycle.id, known })) continue;
-      const labels = await readLabels(child, "foreground_e2e_human_plan_review_read_failed");
-      if (!isPlanReviewAction(labels)) continue;
-      if (!identifier(child.creatorId) || child.creatorId === actorId) {
-        throw stableError("foreground_e2e_human_plan_review_creator_invalid");
-      }
-      if (!isProductPlanReviewAction(child)) {
-        throw stableError("foreground_e2e_human_plan_review_content_invalid");
-      }
-      candidates.push(child);
-    }
-  }
-  if (candidates.length === 0) return undefined;
-  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_plan_review_read_failed");
-  const terminal = statuses.filter(({ name, archivedAt }) => name === terminalStatus && !archivedAt);
-  if (terminal.length !== 1) throw stableError("foreground_e2e_human_plan_review_status_invalid");
-
-  const pending = candidates.filter((action) => {
-    const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
-    if (current.length !== 1) throw stableError("foreground_e2e_human_plan_review_status_invalid");
-    if (["Todo", "In Progress"].includes(current[0].name)) return true;
-    if (["Approved", "Rejected", "Canceled"].includes(current[0].name)) return false;
-    throw stableError("foreground_e2e_human_plan_review_status_invalid");
-  });
-  if (pending.length > 1) throw stableError("foreground_e2e_human_plan_review_ambiguous");
-  const action = pending[0];
-  return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
-}
-
-async function activeClarificationAction({ client, rootIssueId, known, actorId, terminalStatus }) {
-  const root = await readIssue(client, rootIssueId, "foreground_e2e_human_clarification_target_invalid");
-  const rootLabels = await readLabels(root, "foreground_e2e_human_clarification_target_invalid");
-  if (!matchesKnownRoot(root, rootLabels, known)) {
-    throw stableError("foreground_e2e_human_clarification_target_invalid");
-  }
-  const cycles = await readChildren(root, "foreground_e2e_human_clarification_read_failed");
-  const candidates = [];
-  for (const cycle of cycles) {
-    if (!matchesChildScope(cycle, { parentId: rootIssueId, known })) continue;
-    const children = await readChildren(cycle, "foreground_e2e_human_clarification_read_failed");
-    for (const child of children) {
-      if (!matchesChildScope(child, { parentId: cycle.id, known })) continue;
-      const labels = await readLabels(child, "foreground_e2e_human_clarification_read_failed");
-      if (!isClarificationAction(labels)) continue;
-      if (!identifier(child.creatorId) || child.creatorId === actorId) {
-        throw stableError("foreground_e2e_human_clarification_creator_invalid");
-      }
-      if (!isProductClarificationAction(child)) {
-        throw stableError("foreground_e2e_human_clarification_content_invalid");
-      }
-      candidates.push(child);
-    }
-  }
-  if (candidates.length === 0) return undefined;
-  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_clarification_read_failed");
-  const terminal = statuses.filter(({ name, archivedAt }) => name === terminalStatus && !archivedAt);
-  if (terminal.length !== 1) throw stableError("foreground_e2e_human_clarification_status_invalid");
-
-  const pending = candidates.filter((action) => {
-    const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
-    if (current.length !== 1) throw stableError("foreground_e2e_human_clarification_status_invalid");
-    if (["Todo", "In Progress"].includes(current[0].name)) return true;
-    if (["Answered", "Canceled"].includes(current[0].name)) return false;
-    throw stableError("foreground_e2e_human_clarification_status_invalid");
-  });
-  if (pending.length > 1) throw stableError("foreground_e2e_human_clarification_ambiguous");
-  const action = pending[0];
-  return action ? { actionIssueId: action.id, terminalStatusId: terminal[0].id } : undefined;
-}
-
-async function activePlanGate({
+async function activePlanApprovalRequest({
   client,
   rootIssueId,
   known,
-  actorId,
+  productActorId,
   excludedCycleIssueId = undefined,
-  excludedPlanReviewActionIssueId = undefined,
+  excludedRequestCommentId = undefined,
 }) {
   const root = await readIssue(client, rootIssueId, "foreground_e2e_human_plan_gate_target_invalid");
   const rootLabels = await readLabels(root, "foreground_e2e_human_plan_gate_target_invalid");
   if (!matchesKnownRoot(root, rootLabels, known)) throw stableError("foreground_e2e_human_plan_gate_target_invalid");
-  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_plan_gate_read_failed");
   const cycles = await readChildren(root, "foreground_e2e_human_plan_gate_read_failed");
-  const gates = [];
+  const plans = [];
   for (const cycle of cycles) {
     if (!matchesChildScope(cycle, { parentId: rootIssueId, known }) || cycle.id === excludedCycleIssueId) continue;
     const children = await readChildren(cycle, "foreground_e2e_human_plan_gate_read_failed");
-    const plans = [];
-    const actions = [];
     for (const child of children) {
       if (!matchesChildScope(child, { parentId: cycle.id, known })) continue;
       const labels = await readLabels(child, "foreground_e2e_human_plan_gate_read_failed");
-      if (isPlanIssue(labels)) plans.push(child);
-      if (isPlanReviewAction(labels)) actions.push(child);
+      if (isPlanIssue(labels)) plans.push({ cycle, plan: child });
     }
-    if (plans.length > 1 || actions.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
-    const plan = plans[0];
-    const action = actions[0];
-    if (!plan || !action || action.id === excludedPlanReviewActionIssueId) continue;
-    if (!identifier(action.creatorId) || action.creatorId === actorId || !isProductPlanReviewAction(action) ||
-        !isPendingPlanReviewAction(action, statuses)) continue;
-    const contract = await matchingPlanContract({ plan, rootIssueId, cycleIssueId: cycle.id, actorId });
-    if (!contract) continue;
-    gates.push({
+  }
+  const statuses = await readTeamStatuses(client, root.teamId, "foreground_e2e_human_plan_gate_read_failed");
+  const reviewStatus = statuses.filter(({ name, archivedAt }) => name === "In Review" && !archivedAt);
+  if (reviewStatus.length !== 1) throw stableError("foreground_e2e_human_plan_gate_status_invalid");
+  const reviewPlans = plans.filter(({ plan }) => plan.stateId === reviewStatus[0].id && text(plan.description) && identifier(plan.identifier));
+  const comments = await readIssueComments(root, "foreground_e2e_human_plan_gate_read_failed");
+  const gates = comments.flatMap((comment) => {
+    if (comment.id === excludedRequestCommentId || !isProductHumanActionRequest(comment, { rootIssueId, productActorId }) ||
+        !comment.body.startsWith(HUMAN_ACTION_HEADINGS.planApproval) || threadState(comment) !== "unresolved") return [];
+    const targets = reviewPlans.filter(({ plan }) => mentionsIdentifier(comment.body, plan.identifier));
+    if (targets.length !== 1) return [];
+    const [{ cycle, plan }] = targets;
+    return [{
       cycleIssueId: cycle.id,
       planIssueId: plan.id,
-      planContractDigest: contract.planContractDigest,
-      planContractSourceCommentId: contract.sourceCommentId,
-      planReviewActionIssueId: action.id,
-    });
-  }
+      planRemoteVersion: remoteVersion(plan),
+      requestCommentId: comment.id,
+    }];
+  });
   if (gates.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
   return gates[0];
 }
 
-function isPendingPlanReviewAction(action, statuses) {
-  const current = statuses.filter(({ id, archivedAt }) => id === action.stateId && !archivedAt);
-  if (current.length !== 1) throw stableError("foreground_e2e_human_plan_gate_status_invalid");
-  if (["Todo", "In Progress"].includes(current[0].name)) return true;
-  if (["Approved", "Rejected", "Canceled"].includes(current[0].name)) return false;
-  throw stableError("foreground_e2e_human_plan_gate_status_invalid");
-}
-
-async function matchingPlanContract({ plan, rootIssueId, cycleIssueId, actorId }) {
-  const comments = await readIssueComments(plan, "foreground_e2e_human_plan_gate_read_failed");
-  const matches = comments.flatMap((comment) => {
-    const record = parseRecord(comment.body);
-    return identifier(comment?.userId) && comment.userId !== actorId && record?.kind === "plan_contract" && record.root_issue_id === rootIssueId &&
-      record.cycle_issue_id === cycleIssueId && identifier(record.plan_contract_digest)
-      ? [{ sourceCommentId: comment.id, planContractDigest: record.plan_contract_digest }]
-      : [];
-  });
-  if (matches.length > 1) throw stableError("foreground_e2e_human_plan_gate_ambiguous");
-  return matches[0];
+async function activeInformationRequest({ client, rootIssueId, known, productActorId }) {
+  const root = await readIssue(client, rootIssueId, "foreground_e2e_human_clarification_target_invalid");
+  const rootLabels = await readLabels(root, "foreground_e2e_human_clarification_target_invalid");
+  if (!matchesKnownRoot(root, rootLabels, known)) throw stableError("foreground_e2e_human_clarification_target_invalid");
+  const comments = await readIssueComments(root, "foreground_e2e_human_clarification_read_failed");
+  const requests = comments.filter((comment) => isProductHumanActionRequest(comment, { rootIssueId, productActorId }) &&
+    comment.body.startsWith(HUMAN_ACTION_HEADINGS.information) && threadState(comment) === "unresolved");
+  if (requests.length > 1) throw stableError("foreground_e2e_human_clarification_ambiguous");
+  return requests[0] ? { requestCommentId: requests[0].id, rootIssueId } : undefined;
 }
 
 function isPlanIssue(labels) {
@@ -1018,32 +963,20 @@ function matchesChildScope(issue, { parentId, known }) {
     (issue.archivedAt === null || issue.archivedAt === undefined);
 }
 
-function isPlanReviewAction(labels) {
-  const names = labels.map(({ name }) => name);
-  return names.length === 2 && names.includes("Human Action") && names.includes("Plan Review");
+function isProductHumanActionRequest(comment, { rootIssueId, productActorId }) {
+  return comment && identifier(comment.id) && comment.issueId === rootIssueId &&
+    (comment.parentId === null || comment.parentId === undefined) && identifier(productActorId) && comment.userId === productActorId &&
+    text(comment.body) && Object.values(HUMAN_ACTION_HEADINGS).some((heading) => comment.body.startsWith(heading));
 }
 
-function isClarificationAction(labels) {
-  const names = labels.map(({ name }) => name);
-  return names.length === 2 && names.includes("Human Action") && names.includes("Clarification");
+function mentionsIdentifier(body, issueIdentifier) {
+  const escaped = issueIdentifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9._:/-])${escaped}($|[^A-Za-z0-9._:/-])`, "u").test(body);
 }
 
-function isProductPlanReviewAction(issue) {
-  return typeof issue.description === "string" && issue.description.includes("## Plan Contract") &&
-    issue.description.includes("Approved:") && issue.description.includes("Rejected:");
-}
-
-function isProductClarificationAction(issue) {
-  return typeof issue.description === "string" && [
-    "## Symphony Human Action",
-    "## Requested action",
-    "## What is being reviewed or requested",
-    "## Available outcomes",
-    "- Answered:",
-    "## Comment requirement",
-    "fresh comment",
-    "## What happens next",
-  ].every((required) => issue.description.includes(required));
+function matchesOwnedHumanActionReply(comment, { rootIssueId, requestCommentId, body, actorId }) {
+  return comment && identifier(comment.id) && comment.issueId === rootIssueId && comment.parentId === requestCommentId &&
+    comment.userId === actorId && comment.body === body;
 }
 
 async function readActorId(client) {
@@ -1079,48 +1012,30 @@ async function readIssueComments(issue, code) {
   return readHumanNodes((after) => issue.comments({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
 }
 
-function hasDescriptionDirectiveReceipt(comments, rootIssueId, sourceId, actorId) {
-  const matches = comments.filter((comment) => {
-    const record = parseRecord(comment?.body);
-    return identifier(comment?.userId) && comment.userId !== actorId && record?.kind === "root_directive" && record.root_issue_id === rootIssueId &&
-      Array.isArray(record.consumed_input_ids) && record.consumed_input_ids.filter((id) => id === sourceId).length === 1;
-  });
-  if (matches.length > 1) throw stableError("foreground_e2e_human_description_receipt_ambiguous");
-  return matches.length === 1;
+function hasDescriptionConsequence(history, expected, productActorId) {
+  return identifier(productActorId) && history.some((entry) => identifier(entry?.id) && entry.actorId === productActorId &&
+    timestampValue(entry.updatedAt) && Date.parse(remoteVersion(entry)) > Date.parse(expected.remoteVersion));
 }
 
-async function hasCommentReceipt({ source, expected, actorId, threadAction }) {
+async function hasCommentReceipt({ source, expected, actorId, productActorId, threadAction }) {
   if (!source || typeof source.children !== "function") throw stableError("foreground_e2e_human_comment_receipt_read_failed");
   const comments = await readHumanNodes(
     (after) => source.children({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
     "foreground_e2e_human_comment_receipt_read_failed",
   );
-  const replies = comments.filter((comment) => matchingReplyRecord({ comment, source, expected, threadAction, actorId }));
+  const replies = comments.filter((comment) => matchingHumanReadableReply({ comment, source, expected, actorId, productActorId }));
   if (replies.length > 1) throw stableError("foreground_e2e_human_comment_receipt_ambiguous");
   if (replies.length !== 1) return false;
   const reply = replies[0];
-  const record = parseRecord(reply.body);
-  if (!record) throw stableError("foreground_e2e_human_comment_receipt_read_failed");
   return expected.kind === "comment_body"
-    ? nativeReceipt(source, reply.userId) === record.reaction
-    : record.reaction === "none";
+    ? ["check", "cross"].includes(nativeReceipt(source, reply.userId))
+    : threadAction === (expected.expectedThreadState === "resolved" ? "resolve" : "reopen");
 }
 
-function matchingReplyRecord({ comment, source, expected, threadAction, actorId }) {
-  const record = parseRecord(comment?.body);
-  if (!record || record.kind !== "root_reconciler_reply" || record.source_input_id !== expected.sourceId ||
-      comment.parentId !== source.id || record.target_issue_id !== source.issueId ||
-      !identifier(comment.userId) || comment.userId === actorId || !record.source || typeof record.source !== "object") return false;
-  if (expected.kind === "comment_body") {
-    return record.source.kind === "comment_body" && record.source.comment_id === expected.commentId &&
-      record.source.comment_body_digest === expected.commentBodyDigest &&
-      ["check", "cross", "none"].includes(record.reaction) && ["resolve", "keep_open", "reopen"].includes(record.thread_action);
-  }
-  return record.source.kind === "comment_thread_state" && record.source.comment_id === expected.commentId &&
-    record.source.comment_remote_version === expected.remoteVersion &&
-    record.source.thread_root_comment_id === expected.threadRootCommentId &&
-    record.source.thread_state === expected.expectedThreadState && record.reaction === "none" &&
-    record.thread_action === threadAction;
+function matchingHumanReadableReply({ comment, source, expected, actorId, productActorId }) {
+  return comment && comment.parentId === source.id && comment.issueId === source.issueId && text(comment.body) &&
+    identifier(productActorId) && comment.userId === productActorId && comment.userId !== actorId &&
+    Date.parse(remoteVersion(comment)) >= Date.parse(expected.remoteVersion);
 }
 
 function nativeReceipt(comment, receiptActorId) {
@@ -1130,11 +1045,6 @@ function nativeReceipt(comment, receiptActorId) {
     .map((reaction) => reaction.emoji === "✅" ? "check" : "cross"));
   if (receipts.size > 1) return undefined;
   return receipts.values().next().value ?? "none";
-}
-
-function parseRecord(body) {
-  const parsed = parseManagedRecordBlock(body);
-  return parsed.ok ? parsed.record : undefined;
 }
 
 function rememberReceipt(receipts, input) {
@@ -1219,6 +1129,20 @@ async function readChildren(issue, code) {
   return readHumanNodes((after) => issue.children({ first: 64, ...(after ? { after } : {}) }), code);
 }
 
+async function readIssueHistory(issue, code) {
+  if (!issue || typeof issue.history !== "function") throw stableError(code);
+  return readHumanNodes(
+    (after) => issue.history({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
+    code,
+  );
+}
+
+function latestStatusActivity(history, stateId) {
+  return history
+    .filter((entry) => entry?.toStateId === stateId && identifier(entry.id) && timestampValue(entry.updatedAt))
+    .sort((left, right) => Date.parse(remoteVersion(right)) - Date.parse(remoteVersion(left)))[0];
+}
+
 async function readTeamStatuses(client, teamId, code) {
   if (!client || typeof client.team !== "function" || !identifier(teamId)) throw stableError(code);
   const team = await humanRead(() => client.team(teamId), code);
@@ -1240,27 +1164,9 @@ function readHumanNodes(readPage, code) {
   return readAllLinearNodes(readPage, code, classifyLinearFailure);
 }
 
-function assertPlanReviewWaitInput({ terminalStatus, signal }) {
-  if (!PLAN_REVIEW_TERMINAL_STATUSES.has(terminalStatus)) {
-    throw stableError("foreground_e2e_human_plan_review_input_invalid");
-  }
-  if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
-    throw stableError("foreground_e2e_human_plan_review_input_invalid");
-  }
-}
-
 function assertRevisionWaitInput({ signal }) {
   if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_human_revision_wait_input_invalid");
-  }
-}
-
-function assertClarificationWaitInput({ terminalStatus, signal }) {
-  if (!CLARIFICATION_TERMINAL_STATUSES.has(terminalStatus)) {
-    throw stableError("foreground_e2e_human_clarification_input_invalid");
-  }
-  if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
-    throw stableError("foreground_e2e_human_clarification_input_invalid");
   }
 }
 
@@ -1314,10 +1220,9 @@ function matchesOwnedRootComment(comment, { issueId, body, actorId }) {
     (comment.parentId === null || comment.parentId === undefined) && (body === undefined || comment.body === body);
 }
 
-function isHumanAction(labels) {
-  const names = labels.map(({ name }) => name);
-  return names.filter((name) => name === "Human Action").length === 1 &&
-    names.filter((name) => HUMAN_ACTION_KIND_LABELS.has(name)).length === 1;
+function matchesOwnedHumanInput(comment, { issueId, actorId }) {
+  return comment?.issueId === issueId && comment.userId === actorId && identifier(comment.id) && text(comment.body) &&
+    (comment.parentId === null || comment.parentId === undefined || identifier(comment.parentId));
 }
 
 async function write(operation, code, signal) {

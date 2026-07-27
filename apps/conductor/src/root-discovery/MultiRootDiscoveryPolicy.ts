@@ -3,19 +3,16 @@ import type { DiscoveredRoot } from "../root-reconciliation/api/RootModels.js";
 export function discoverCurrentRoots(input: {
   projectId: string;
   roots: DiscoveredRoot[];
-  conductorId: string;
   conductorShortHash: string;
   conductorPool: readonly { conductorShortHash: string }[];
 }): DiscoveredRoot[] {
   return input.roots.filter((root) =>
     root.projectId === input.projectId &&
     isRootRoutedToConductor(root, input.conductorShortHash, input.conductorPool) &&
-    (root.managedConductorId === input.conductorId ||
-      (!root.managedConductorId &&
-        root.isDelegatedToSymphony &&
-        !root.isArchived &&
-        root.state !== "Done" &&
-        root.state !== "Canceled"))
+    root.isDelegatedToSymphony &&
+    !root.isArchived &&
+    root.state !== "Done" &&
+    root.state !== "Canceled"
   );
 }
 

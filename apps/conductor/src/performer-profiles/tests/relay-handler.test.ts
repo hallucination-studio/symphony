@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodePodiumConductorPodiumConductorMessage } from "@symphony/contracts";
+import { decodePodiumConductorMessage } from "@symphony/contracts";
 import type { PerformerProfile } from "../api/PerformerProfileStoreInterface.js";
 import { ConductorProfileRelayHandler } from "../internal/ConductorProfileRelayHandler.js";
 
@@ -86,7 +86,7 @@ test("Profile relay creates, reads, and activates one Conductor-owned Profile", 
   assert.equal((saved as { kind: string }).kind, "profile_saved");
   assert.equal((saved as { profile: { readiness: string } }).profile.readiness, "login-required");
   assert.equal(statusReads, 0);
-  assert.doesNotThrow(() => decodePodiumConductorPodiumConductorMessage({
+  assert.doesNotThrow(() => decodePodiumConductorMessage({
     protocol_version: "1",
     request_id: "profile-saved-1",
     body: saved,

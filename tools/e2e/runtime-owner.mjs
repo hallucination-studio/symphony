@@ -19,6 +19,38 @@ const PROFILE_READINESS_ATTEMPTS = 10;
 const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 const PROJECT_ROOT_INDEX_OPERATION = "SymphonyProjectRootIndex";
 const PROJECT_ROOT_INDEX_CONTINUATION_OPERATION = "SymphonyProjectRootIndexContinuation";
+const BINDING_FENCE_READY_FD = 4;
+const BINDING_FENCE_HOLDER = String.raw`
+import fcntl, os, sys
+lock_path, ready_fd_text = sys.argv[1:3]
+ready_fd = int(ready_fd_text)
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    os.write(ready_fd, b"locked\n")
+    sys.exit(73)
+os.write(ready_fd, b"ready\n")
+os.close(ready_fd)
+while os.read(0, 1):
+    pass
+`;
+const BINDING_FENCE_EXEC = String.raw`
+import fcntl, os, sys
+lock_path, ready_fd_text, executable, *arguments = sys.argv[1:]
+ready_fd = int(ready_fd_text)
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    os.write(ready_fd, b"locked\n")
+    sys.exit(73)
+os.set_inheritable(lock_fd, True)
+os.environ["SYMPHONY_BINDING_FENCE_FD"] = str(lock_fd)
+os.write(ready_fd, b"ready\n")
+os.close(ready_fd)
+os.execvpe(executable, [executable, *arguments], os.environ)
+`;
 
 export function createProjectRootIndexRequestBudget({ installationId, projectId } = {}) {
   if (!identifier(installationId) || !identifier(projectId)) {
@@ -77,6 +109,7 @@ export function createConductorEnvironment({ config, resources, conductor, envir
   if (!conductor || !identifier(conductor.bindingId) || !identifier(conductor.conductorId) ||
       !shortHash(conductor.conductorShortHash) || !identifier(conductor.linearInstallationId) ||
       !identifier(conductor.organizationId) || !identifier(conductor.repositoryHandle) ||
+      typeof conductor.repositoryIdentity !== "string" || conductor.repositoryIdentity.length === 0 ||
       !boundedPath(conductor.repositoryRoot) || !branch(conductor.baseBranch) ||
       !boundedPath(conductor.dataRoot) || !identifier(conductor.instanceId)) {
     throw stableError("foreground_e2e_conductor_environment_invalid");
@@ -91,6 +124,7 @@ export function createConductorEnvironment({ config, resources, conductor, envir
     SYMPHONY_LINEAR_INSTALLATION_ID: conductor.linearInstallationId,
     SYMPHONY_ORGANIZATION_ID: conductor.organizationId,
     SYMPHONY_REPOSITORY_HANDLE: conductor.repositoryHandle,
+    SYMPHONY_REPOSITORY_IDENTITY: conductor.repositoryIdentity,
     SYMPHONY_REPOSITORY_ROOT: conductor.repositoryRoot,
     SYMPHONY_BASE_BRANCH: conductor.baseBranch,
     SYMPHONY_CONDUCTOR_DATA_ROOT: conductor.dataRoot,
@@ -100,7 +134,6 @@ export function createConductorEnvironment({ config, resources, conductor, envir
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
     SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "3",
-    SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "1000000",
     SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
   });
 }
@@ -190,6 +223,21 @@ export async function startForegroundProductionRuntime({
           throw stableError("foreground_e2e_recovery_restart_failed");
         }
         return Object.freeze({ conductorId });
+      },
+      async removeRootWorktreesAndRestart({ faults } = {}) {
+        return removeExactRootWorktreesAndRestart({
+          faults,
+          runtimeRoot: path.join(resources.podiumDataRoot, "runtime"),
+          stopConductor: (input) => host.killAndObserveConductor(input),
+          async restartConductor({ conductorId: stoppedConductorId }) {
+            const result = await podium.client.command({ kind: "start_conductor", conductor_id: stoppedConductorId });
+            if (result?.kind !== "conductor_command_completed" || result.conductor_id !== stoppedConductorId ||
+                result.command_kind !== "start_conductor") {
+              throw stableError("foreground_e2e_missing_worktree_fault_restart_failed");
+            }
+            return Object.freeze({ conductorId: stoppedConductorId });
+          },
+        });
       },
       async close() {
         if (closed) return;
@@ -284,6 +332,187 @@ export async function forceKillOwnedProcess(child, { timeoutMs = 5_000 } = {}) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   terminate(child, "SIGKILL");
   if (!await exited(child, timeoutMs)) throw stableError("foreground_e2e_process_kill_failed");
+}
+
+export async function acquireForegroundBindingProcessFence({
+  runtimeRoot,
+  bindingId,
+  spawn = spawnProcess,
+} = {}) {
+  if (process.platform === "win32" || !boundedPath(runtimeRoot) || !identifier(bindingId) || typeof spawn !== "function") {
+    throw stableError("foreground_e2e_binding_process_fence_input_invalid");
+  }
+  const lockPath = await bindingProcessFencePath(runtimeRoot, bindingId);
+  const child = spawn("python3", ["-c", BINDING_FENCE_HOLDER, lockPath, "3"], {
+    env: baseChildEnvironment(process.env),
+    stdio: ["pipe", "ignore", "ignore", "pipe"],
+  });
+  try {
+    await bindingFenceReady(child, child.stdio?.[3]);
+  } catch (error) {
+    await closeOwnedProcess(child).catch(() => undefined);
+    throw error;
+  }
+  let closed = false;
+  return Object.freeze({
+    bindingId,
+    async close() {
+      if (closed) return;
+      closed = true;
+      child.stdin?.end();
+      await closeOwnedProcess(child);
+    },
+  });
+}
+
+export async function removeExactRootWorktreesAndRestart({
+  faults,
+  runtimeRoot,
+  stopConductor,
+  restartConductor,
+  runGit = git,
+  acquireFence = acquireForegroundBindingProcessFence,
+  now = () => new Date().toISOString(),
+} = {}) {
+  if (!validMissingWorktreeFaults(faults) || !boundedPath(runtimeRoot) ||
+      typeof stopConductor !== "function" || typeof restartConductor !== "function" ||
+      typeof runGit !== "function" || typeof acquireFence !== "function" || typeof now !== "function") {
+    throw stableError("foreground_e2e_missing_worktree_fault_input_invalid");
+  }
+  const conductors = await Promise.all(faults.map(({ conductorId }) => stopConductor({ conductorId })));
+  if (conductors.some((conductor, index) => !conductor || conductor.conductorId !== faults[index].conductorId ||
+      !identifier(conductor.bindingId) || !boundedPath(conductor.repositoryRoot) || !boundedPath(conductor.dataRoot)) ||
+      new Set(conductors.map(({ bindingId }) => bindingId)).size !== faults.length) {
+    throw stableError("foreground_e2e_missing_worktree_fault_stop_invalid");
+  }
+  const fences = [];
+  let evidence = [];
+  try {
+    for (const conductor of conductors) {
+      fences.push(await acquireFence({ runtimeRoot, bindingId: conductor.bindingId }));
+    }
+    evidence = await Promise.all(faults.map((fault, index) => removeExactRootWorktree({
+      repositoryRoot: conductors[index].repositoryRoot,
+      worktreeRoot: path.join(conductors[index].dataRoot, "worktrees"),
+      rootIssueId: fault.rootIssueId,
+      rootIdentifier: fault.rootIdentifier,
+      invalidateExecutionBranch: fault.invalidateExecutionBranch,
+      runGit,
+    })));
+    const removedAt = now();
+    if (!timestamp(removedAt)) throw stableError("foreground_e2e_missing_worktree_fault_observation_invalid");
+    evidence = evidence.map((item) => Object.freeze({ ...item, removedAt }));
+  } finally {
+    await Promise.allSettled(fences.map((fence) => fence.close()));
+  }
+  const restarted = await Promise.all(faults.map(({ conductorId }) => restartConductor({ conductorId })));
+  if (restarted.some((result, index) => result?.conductorId !== faults[index].conductorId)) {
+    throw stableError("foreground_e2e_missing_worktree_fault_restart_invalid");
+  }
+  return Object.freeze({
+    faults: Object.freeze(faults.map((fault, index) => Object.freeze({ ...fault, ...evidence[index] }))),
+  });
+}
+
+function validMissingWorktreeFaults(faults) {
+  return Array.isArray(faults) && faults.length === 2 &&
+    faults.every((fault) => fault && identifier(fault.conductorId) && safePathSegment(fault.rootIssueId) &&
+      safeRootIdentifier(fault.rootIdentifier) && typeof fault.invalidateExecutionBranch === "boolean") &&
+    new Set(faults.map(({ conductorId }) => conductorId)).size === faults.length &&
+    new Set(faults.map(({ rootIssueId }) => rootIssueId)).size === faults.length &&
+    faults.filter(({ invalidateExecutionBranch }) => invalidateExecutionBranch).length === 1;
+}
+
+async function removeExactRootWorktree({
+  repositoryRoot,
+  worktreeRoot,
+  rootIssueId,
+  rootIdentifier,
+  invalidateExecutionBranch,
+  runGit,
+}) {
+  const expectedRepository = await canonicalExistingPath(repositoryRoot, "foreground_e2e_missing_worktree_repository_invalid");
+  const canonicalWorktreeRoot = await canonicalExistingPath(worktreeRoot, "foreground_e2e_missing_worktree_identity_invalid");
+  const expectedWorktree = path.join(canonicalWorktreeRoot, rootIssueId);
+  const canonicalWorktree = await canonicalExistingPath(expectedWorktree, "foreground_e2e_missing_worktree_identity_invalid");
+  if (canonicalWorktree !== expectedWorktree) {
+    throw stableError("foreground_e2e_missing_worktree_identity_invalid");
+  }
+  const branchName = `symphony/runs/${rootIdentifier.toLowerCase()}`;
+  let topLevel;
+  let commonDirectory;
+  let actualBranch;
+  let headRevision;
+  let status;
+  try {
+    [topLevel, commonDirectory, actualBranch, headRevision, status] = await Promise.all([
+      runGit(["-C", canonicalWorktree, "rev-parse", "--show-toplevel"]),
+      runGit(["-C", canonicalWorktree, "rev-parse", "--path-format=absolute", "--git-common-dir"]),
+      runGit(["-C", canonicalWorktree, "branch", "--show-current"]),
+      runGit(["-C", canonicalWorktree, "rev-parse", "--verify", "HEAD^{commit}"]),
+      runGit(["-C", canonicalWorktree, "status", "--porcelain=v1"]),
+    ]);
+  } catch {
+    throw stableError("foreground_e2e_missing_worktree_identity_invalid");
+  }
+  const canonicalTopLevel = await canonicalExistingPath(topLevel, "foreground_e2e_missing_worktree_identity_invalid");
+  const canonicalCommon = await canonicalExistingPath(commonDirectory, "foreground_e2e_missing_worktree_identity_invalid");
+  if (canonicalTopLevel !== canonicalWorktree || path.dirname(canonicalCommon) !== expectedRepository ||
+      actualBranch !== branchName || !gitRevision(headRevision) || status !== "") {
+    throw stableError("foreground_e2e_missing_worktree_identity_invalid");
+  }
+  await runGit(["-C", expectedRepository, "worktree", "remove", canonicalWorktree]);
+  if (await existingPath(canonicalWorktree)) {
+    throw stableError("foreground_e2e_missing_worktree_remove_unconfirmed");
+  }
+  const worktreeList = await runGit(["-C", expectedRepository, "worktree", "list", "--porcelain"]);
+  if (worktreeList.split("\n").some((line) => line === `worktree ${canonicalWorktree}`)) {
+    throw stableError("foreground_e2e_missing_worktree_remove_unconfirmed");
+  }
+  if (invalidateExecutionBranch) {
+    await runGit(["-C", expectedRepository, "worktree", "prune"]);
+    await runGit(["-C", expectedRepository, "branch", "-D", branchName]);
+    try {
+      await runGit(["-C", expectedRepository, "rev-parse", "--verify", `${branchName}^{commit}`]);
+    } catch {
+      return Object.freeze({ branch: branchName, headRevision, invalidated: true });
+    }
+    throw stableError("foreground_e2e_missing_worktree_branch_remove_unconfirmed");
+  }
+  const preservedHead = await runGit(["-C", expectedRepository, "rev-parse", "--verify", `${branchName}^{commit}`]);
+  if (preservedHead !== headRevision) {
+    throw stableError("foreground_e2e_missing_worktree_branch_changed");
+  }
+  return Object.freeze({ branch: branchName, headRevision, invalidated: false });
+}
+
+async function canonicalExistingPath(candidate, code) {
+  try {
+    return await realpath(candidate);
+  } catch {
+    throw stableError(code);
+  }
+}
+
+async function existingPath(candidate) {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function gitRevision(value) {
+  return typeof value === "string" && /^[0-9a-f]{40,64}$/u.test(value);
+}
+
+function safePathSegment(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value) && value !== "." && value !== "..";
+}
+
+function safeRootIdentifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
 }
 
 export async function createForegroundLocalResources({
@@ -445,9 +674,15 @@ function createDesktopHost({
             return protocolFailure("conductor_start_invalid");
           }
           const instanceId = `e2e-${randomUUID()}`;
-          const child = spawn(process.execPath, [resources.conductor], {
-            cwd: resources.sourceRoot,
-            env: createConductorEnvironment({
+          let child;
+          try {
+            child = await spawnFencedConductor({
+              runtimeRoot: path.join(resources.podiumDataRoot, "runtime"),
+              bindingId: conductor.bindingId,
+              executable: process.execPath,
+              arguments_: [resources.conductor],
+              cwd: resources.sourceRoot,
+              environment: createConductorEnvironment({
               config,
               resources,
               conductor: {
@@ -456,9 +691,11 @@ function createDesktopHost({
               },
               environment,
             }),
-            detached: process.platform !== "win32",
-            stdio: ["ignore", "pipe", "pipe", "pipe"],
-          });
+              spawn,
+            });
+          } catch {
+            return protocolFailure("conductor_fence_unavailable");
+          }
           const channel = child.stdio?.[3];
           if (!channel || !child.stdout || !child.stderr) {
             await closeOwnedProcess(child);
@@ -566,7 +803,70 @@ function createDesktopHost({
     active.expectedExit = true;
     await forceKillOwnedProcess(active.child);
     await reportExit(active, active.exitReason);
+    return active.conductor;
   }
+}
+
+async function spawnFencedConductor({ runtimeRoot, bindingId, executable, arguments_, cwd, environment, spawn }) {
+  if (process.platform === "win32" || !boundedPath(runtimeRoot) || !identifier(bindingId) ||
+      !boundedPath(executable) || !Array.isArray(arguments_) || !arguments_.every((value) => typeof value === "string") ||
+      !boundedPath(cwd) || !environment || typeof environment !== "object" || typeof spawn !== "function") {
+    throw stableError("foreground_e2e_binding_process_fence_input_invalid");
+  }
+  const lockPath = await bindingProcessFencePath(runtimeRoot, bindingId);
+  const child = spawn("python3", [
+    "-c",
+    BINDING_FENCE_EXEC,
+    lockPath,
+    String(BINDING_FENCE_READY_FD),
+    executable,
+    ...arguments_,
+  ], {
+    cwd,
+    env: environment,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+  });
+  try {
+    await bindingFenceReady(child, child.stdio?.[BINDING_FENCE_READY_FD]);
+    return child;
+  } catch (error) {
+    await closeOwnedProcess(child).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function bindingProcessFencePath(runtimeRoot, bindingId) {
+  const lockRoot = path.join(runtimeRoot, "binding-fences");
+  await mkdir(lockRoot, { recursive: true });
+  return path.join(lockRoot, `${createHash("sha256").update(bindingId).digest("hex")}.lock`);
+}
+
+function bindingFenceReady(child, stream) {
+  if (!child || !stream || typeof stream.once !== "function") {
+    return Promise.reject(stableError("foreground_e2e_binding_process_fence_unavailable"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(reject, "foreground_e2e_binding_process_fence_unavailable"), 5_000);
+    const onData = (chunk) => {
+      const result = Buffer.from(chunk).toString("utf8");
+      if (result.includes("ready\n")) finish(resolve);
+      else if (result.includes("locked\n")) finish(reject, "foreground_e2e_binding_process_fence_unavailable");
+    };
+    const onExit = () => finish(reject, "foreground_e2e_binding_process_fence_unavailable");
+    const onError = () => finish(reject, "foreground_e2e_binding_process_fence_unavailable");
+    stream.on("data", onData);
+    child.once("exit", onExit);
+    child.once("error", onError);
+
+    function finish(callback, code) {
+      clearTimeout(timer);
+      stream.off("data", onData);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      callback(code ? stableError(code) : undefined);
+    }
+  });
 }
 
 function createPodiumClient({ input, output }) {
@@ -927,6 +1227,7 @@ function createdConductor(value, repository, installation) {
     linearInstallationId: installation.installationId,
     organizationId: installation.organizationId,
     repositoryHandle: repository.repositoryHandle,
+    repositoryIdentity: repository.repositoryIdentity,
     repositoryRoot: repository.repositoryRoot,
     baseBranch: repository.baseBranch,
   });
@@ -936,7 +1237,8 @@ function hostConductor(value, expectedOrganizationId) {
   if (!value || typeof value !== "object" || !identifier(value.binding_id) || !identifier(value.conductor_id) ||
       !shortHash(value.conductor_short_hash) || !identifier(value.linear_installation_id) ||
       !identifier(value.organization_id) || value.organization_id !== expectedOrganizationId ||
-      !identifier(value.repository_handle) || !boundedPath(value.repository_root) || !branch(value.base_branch) ||
+      !identifier(value.repository_handle) || typeof value.repository_identity !== "string" || value.repository_identity.length === 0 ||
+      !boundedPath(value.repository_root) || !branch(value.base_branch) ||
       !boundedPath(value.conductor_data_root)) {
     throw stableError("foreground_e2e_host_conductor_invalid");
   }
@@ -947,6 +1249,7 @@ function hostConductor(value, expectedOrganizationId) {
     linearInstallationId: value.linear_installation_id,
     organizationId: value.organization_id,
     repositoryHandle: value.repository_handle,
+    repositoryIdentity: value.repository_identity,
     repositoryRoot: value.repository_root,
     baseBranch: value.base_branch,
     dataRoot: value.conductor_data_root,

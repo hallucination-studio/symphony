@@ -33,21 +33,20 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
     ...(signal ? { signal } : {}),
   })));
 
-  const actions = await Promise.all(roots.map(async ({ root }) => {
-    const action = await human.waitForPlanReviewAction({
+  const requests = await Promise.all(roots.map(async ({ root }) => {
+    const request = await human.waitForPlanApprovalRequest({
       rootIssueId: root.rootIssueId,
-      terminalStatus: "Approved",
       ...(signal ? { signal } : {}),
     });
-    if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+    if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId)) {
       throw stableError("foreground_e2e_parallel_plan_review_invalid");
     }
-    return Object.freeze(action);
+    return Object.freeze({ ...request, rootIssueId: root.rootIssueId });
   }));
-  await Promise.all(actions.map((action) => human.setHumanActionTerminalStatus({
-    issueId: action.actionIssueId,
-    terminalStatus: "Approved",
-    stateId: action.terminalStatusId,
+  await Promise.all(requests.map((request) => human.replyToHumanAction({
+    rootIssueId: request.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: "Approved.",
     ...(signal ? { signal } : {}),
   })));
 
@@ -61,7 +60,7 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
           conductorRef: topology.conductorRef,
           repositoryRef: topology.repositoryRef,
           rootIssueId: root.rootIssueId,
-          planReviewActionIssueId: actions[index].actionIssueId,
+          approvalRequestCommentId: requests[index].requestCommentId,
           routingLabelId: creation.routingLabelId,
           conductorId: creation.conductorId,
           performerProfileId: creation.performerProfileId,
@@ -84,7 +83,7 @@ function assertDefinition(definition) {
 function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanReviewAction !== "function" || typeof human.setHumanActionTerminalStatus !== "function" ||
+      typeof human.waitForPlanApprovalRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
       !rootCreationsByRootKey || typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
       signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_parallel_case_input_invalid");

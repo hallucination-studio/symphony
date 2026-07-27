@@ -18,11 +18,9 @@ const targetRules = [
   ["apps/conductor/src/root-scheduling", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/root-reconciliation", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/root-reconciler-client", "conductor", "docs/architecture/conductor.md#模块"],
-  ["apps/conductor/src/root-directive-materialization", "conductor", "docs/architecture/conductor.md#模块"],
+  ["apps/conductor/src/root-action-materialization", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/performer-agent-client", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/human-actions", "conductor", "docs/architecture/conductor.md#模块"],
-  ["apps/conductor/src/workflow-events", "conductor", "docs/architecture/conductor.md#模块"],
-  ["apps/conductor/src/timeline-comments", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/performer-profiles", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/git-workspaces", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/root-delivery", "conductor", "docs/architecture/conductor.md#模块"],
@@ -50,11 +48,8 @@ const interfaceRules = [
   ["RootSchedulingPolicyInterface", "apps/conductor/src/root-scheduling/api/RootSchedulingPolicyInterface.ts", "LinearPriorityRootSchedulingPolicyImpl", "apps/conductor/src/root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.ts", "conductor"],
   ["RootSafetyPolicyInterface", "apps/conductor/src/root-reconciliation/api/RootSafetyPolicyInterface.ts", "LinearRootSafetyPolicyImpl", "apps/conductor/src/root-reconciliation/internal/LinearRootSafetyPolicyImpl.ts", "conductor"],
   ["RootReconcilerClientInterface", "apps/conductor/src/root-reconciler-client/api/RootReconcilerClientInterface.ts", "PerformerRootReconcilerClientImpl", "apps/conductor/src/root-reconciler-client/internal/PerformerRootReconcilerClientImpl.ts", "conductor"],
-  ["RootDirectiveMaterializerInterface", "apps/conductor/src/root-directive-materialization/api/RootDirectiveMaterializerInterface.ts", "LinearRootDirectiveMaterializerImpl", "apps/conductor/src/root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.ts", "conductor"],
+  ["RootActionMaterializerInterface", "apps/conductor/src/root-action-materialization/api/RootActionMaterializerInterface.ts", "LinearGitRootActionMaterializerImpl", "apps/conductor/src/root-action-materialization/internal/LinearGitRootActionMaterializerImpl.ts", "conductor"],
   ["PerformerAgentClientInterface", "apps/conductor/src/performer-agent-client/api/PerformerAgentClientInterface.ts", "SessionPerformerAgentClientImpl", "apps/conductor/src/performer-agent-client/internal/SessionPerformerAgentClientImpl.ts", "conductor"],
-  ["WorkflowTimelinePublisherInterface", "apps/conductor/src/workflow-events/api/WorkflowTimelinePublisherInterface.ts", "InProcessWorkflowTimelinePublisherImpl", "apps/conductor/src/workflow-events/internal/InProcessWorkflowTimelinePublisherImpl.ts", "conductor"],
-  ["RootTimelineCommentSubscriberInterface", "apps/conductor/src/timeline-comments/api/RootTimelineCommentSubscriberInterface.ts", "LinearRootTimelineCommentSubscriberImpl", "apps/conductor/src/timeline-comments/internal/LinearRootTimelineCommentSubscriberImpl.ts", "conductor"],
-  ["CycleTimelineCommentSubscriberInterface", "apps/conductor/src/timeline-comments/api/CycleTimelineCommentSubscriberInterface.ts", "LinearCycleTimelineCommentSubscriberImpl", "apps/conductor/src/timeline-comments/internal/LinearCycleTimelineCommentSubscriberImpl.ts", "conductor"],
   ["GitWorkspaceInterface", "apps/conductor/src/git-workspaces/api/GitWorkspaceInterface.ts", "NativeGitWorkspaceImpl", "apps/conductor/src/git-workspaces/internal/NativeGitWorkspaceImpl.ts", "conductor"],
   ["RootDeliveryInterface", "apps/conductor/src/root-delivery/api/RootDeliveryInterface.ts", "GitRootDeliveryImpl", "apps/conductor/src/root-delivery/internal/GitRootDeliveryImpl.ts", "conductor"],
   ["ProviderBackendInterface", "apps/performer/src/performer/backends/provider_backend_interface.py", "CodexBackendImpl", "apps/performer/src/performer/backends/codex/codex_backend_impl.py", "performer"],
@@ -71,8 +66,8 @@ const evidenceRules = [
 const alignmentTraceRules = [
   {
     id: "root_reconciler_turn_result",
-    owner: "RootReconcilerTurnResult",
-    architectureSource: "docs/architecture/root-reconciliation.md#7-rootdirective-contract",
+    owner: "RootNextAction",
+    architectureSource: "docs/architecture/root-reconciliation.md#6-closed-rootnextaction",
     contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
     implementationPaths: [
       "apps/performer/src/performer/root_reconciler/runtime.py",
@@ -83,7 +78,7 @@ const alignmentTraceRules = [
   {
     id: "stage_result",
     owner: "canonical Stage Result",
-    architectureSource: "docs/architecture/stage-orchestration.md#10-eventresult与materialization",
+    architectureSource: "docs/architecture/stage-orchestration.md#10-result与materialization",
     contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
     implementationPaths: ["apps/conductor/src/root-reconciliation/internal/RootReconciliationRuntime.ts"],
     testPaths: ["apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts"],
@@ -91,23 +86,23 @@ const alignmentTraceRules = [
   {
     id: "workflow_lifecycle",
     owner: "Linear Issue custom status and native archive flag",
-    architectureSource: "docs/architecture/root-issue.md#2-linear-status-catalog",
+    architectureSource: "docs/architecture/root-issue.md#6-planwork与verify-lifecycle",
     contractPaths: ["packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"],
-    implementationPaths: ["apps/conductor/src/root-directive-materialization/internal/LinearRootDirectiveMaterializerImpl.ts"],
+    implementationPaths: ["apps/conductor/src/root-action-materialization/internal/LinearGitRootActionMaterializerImpl.ts"],
     testPaths: ["apps/conductor/src/root-reconciliation/tests/stage-lifecycle.test.ts"],
   },
   {
     id: "human_action_lifecycle",
-    owner: "Linear Human Action status and archive flag",
-    architectureSource: "docs/architecture/human-actions.md#4-状态模型",
+    owner: "Root native Human Action comment thread",
+    architectureSource: "docs/architecture/human-actions.md#6-active与resolved语义",
     contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
-    implementationPaths: ["apps/conductor/src/human-actions/internal/LinearHumanActionResolutionValidatorImpl.ts"],
-    testPaths: ["apps/conductor/src/human-actions/tests/resolution-validator.test.ts"],
+    implementationPaths: ["apps/conductor/src/human-actions/internal/LinearHumanActionMaterializerImpl.ts"],
+    testPaths: ["apps/conductor/src/human-actions/tests/materializer.test.ts"],
   },
   {
     id: "root_input_recovery",
     owner: "RootBootstrapSnapshot and RootDelta",
-    architectureSource: "docs/architecture/root-reconciliation.md#4-bootstrap与delta-contract",
+    architectureSource: "docs/architecture/workflow-authority-recovery.md#4-恢复入口与worktree-gate",
     contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
     implementationPaths: ["apps/conductor/src/root-reconciliation/internal/RootFactSet.ts"],
     testPaths: ["apps/conductor/src/root-reconciliation/tests/runtime-bootstrap-delta.test.ts"],
@@ -115,26 +110,18 @@ const alignmentTraceRules = [
   {
     id: "native_comment_interaction",
     owner: "Linear native comment body, thread state, and reaction set",
-    architectureSource: "docs/architecture/root-reconciliation.md#6-用户comment回复contract",
+    architectureSource: "docs/architecture/human-actions.md#5-actor与有效回复",
     contractPaths: ["packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"],
-    implementationPaths: ["apps/conductor/src/root-directive-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts"],
-    testPaths: ["apps/conductor/src/root-directive-materialization/tests/reply-writer.test.ts"],
-  },
-  {
-    id: "workflow_timeline",
-    owner: "one-event one-comment WorkflowTimelineRecord",
-    architectureSource: "docs/architecture/workflow-timeline.md#2-解耦机制",
-    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
-    implementationPaths: ["apps/conductor/src/timeline-comments/internal/LinearTimelineCommentMaterializer.ts"],
-    testPaths: ["apps/conductor/src/timeline-comments/tests/timeline-comment-subscribers.test.ts"],
+    implementationPaths: ["apps/conductor/src/root-action-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts"],
+    testPaths: ["apps/conductor/src/root-action-materialization/tests/reply-writer.test.ts"],
   },
   {
     id: "model_usage",
-    owner: "immutable ModelTurnRecord",
-    architectureSource: "docs/architecture/performer-profiles.md#11-token-usage",
-    contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
-    implementationPaths: ["apps/conductor/src/root-reconciliation/internal/UsageAggregation.ts"],
-    testPaths: ["apps/conductor/src/root-reconciliation/tests/usage-aggregation.test.ts"],
+    owner: "runtime model and usage observability",
+    architectureSource: "docs/architecture/performer-profiles.md#11-model与usage-observability",
+    contractPaths: [],
+    implementationPaths: ["apps/conductor/src/runtime-logs/internal/PodiumRuntimeLogPublisherImpl.ts"],
+    testPaths: ["apps/conductor/src/performer-agent-client/tests/agent-client.test.ts"],
   },
 ];
 
@@ -275,7 +262,8 @@ export function inspectSchemaCoverage(sources) {
     const definitions = schema.$defs && typeof schema.$defs === "object" ? Object.keys(schema.$defs) : [];
     const prefix = pascalCase(family);
     for (const definition of definitions) {
-      const typeName = `${prefix}${pascalCase(definition)}`;
+      const definitionName = pascalCase(definition);
+      const typeName = definitionName.startsWith(prefix) ? definitionName : `${prefix}${definitionName}`;
       for (const [language, generatedPath] of Object.entries(generatedFiles)) {
         const generated = sources.get(generatedPath);
         if (generated === undefined || !new RegExp(`\\b${escapeRegExp(typeName)}\\b`).test(generated)) {

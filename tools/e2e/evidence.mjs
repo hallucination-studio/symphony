@@ -2,8 +2,6 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
 import { LinearClient } from "@linear/sdk";
-import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
-
 import { readAllLinearNodes } from "./linear-environment.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -70,20 +68,20 @@ async function readRoot({ client, rootIssueId, coverage, statusCatalog, statusCa
   await readIssueTree({ issue: rootIssue, rootIssueId, depth: 0, issues, coverage, statusCatalog, statusCatalogTeams, seen: new Set() });
   const comments = await readTreeComments({ issues, rootIssueId, coverage });
   const relations = await readTreeRelations({ issues, rootIssueId, coverage });
+  const attachments = await readTreeAttachments({ issues, rootIssueId, coverage });
   const activity = await readTreeActivity({ issues, rootIssueId, coverage });
-  const managedRecords = collectManagedRecords({ issues, comments, rootIssueId, coverage });
   return {
     rootIssueId,
     issues: issues.map(({ source, ...fact }) => fact),
     comments: comments.map(({ source, ...fact }) => fact),
     relations,
+    attachments,
     activity,
-    managedRecords,
   };
 }
 
 function emptyRoot(rootIssueId) {
-  return { rootIssueId, issues: [], comments: [], relations: [], activity: [], managedRecords: [] };
+  return { rootIssueId, issues: [], comments: [], relations: [], attachments: [], activity: [] };
 }
 
 async function readIssueTree({ issue, rootIssueId, depth, issues, coverage, statusCatalog, statusCatalogTeams, seen }) {
@@ -301,6 +299,49 @@ async function readTreeRelations({ issues, rootIssueId, coverage }) {
   return [...relations.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
+async function readTreeAttachments({ issues, rootIssueId, coverage }) {
+  const attachments = [];
+  for (const issue of issues) {
+    if (typeof issue.source.attachments !== "function") {
+      coverage.add({ rootIssueId, sourceId: issue.id, scope: "attachments", code: "foreground_e2e_evidence_attachment_read_failed" });
+      continue;
+    }
+    try {
+      const values = await readAllLinearNodes(
+        (after) => issue.source.attachments({ first: PAGE_SIZE, includeArchived: true, ...(after ? { after } : {}) }),
+        "foreground_e2e_evidence_pagination_failed",
+      );
+      for (const attachment of values) {
+        if (!validAttachment(attachment, issue.id)) {
+          coverage.add({ rootIssueId, sourceId: issue.id, scope: "attachments", code: "foreground_e2e_evidence_attachment_invalid" });
+          continue;
+        }
+        attachments.push({
+          id: attachment.id,
+          issueId: issue.id,
+          title: attachment.title,
+          url: attachment.url,
+          sourceType: attachment.sourceType,
+          archivedAt: timestampOrNull(attachment.archivedAt),
+          createdAt: timestamp(attachment.createdAt),
+          updatedAt: timestamp(attachment.updatedAt),
+          remoteVersion: timestamp(attachment.updatedAt),
+        });
+      }
+    } catch (error) {
+      coverage.add({
+        rootIssueId,
+        sourceId: issue.id,
+        scope: "attachments",
+        code: error?.code === "foreground_e2e_evidence_pagination_failed"
+          ? error.code
+          : "foreground_e2e_evidence_attachment_read_failed",
+      });
+    }
+  }
+  return attachments.sort((left, right) => left.id.localeCompare(right.id));
+}
+
 async function readTreeActivity({ issues, rootIssueId, coverage }) {
   const activity = [];
   for (const issue of issues) {
@@ -343,43 +384,6 @@ async function readTreeActivity({ issues, rootIssueId, coverage }) {
     }
   }
   return activity.sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function collectManagedRecords({ issues, comments, rootIssueId, coverage }) {
-  const records = [];
-  for (const issue of issues) {
-    addManagedRecord({
-      body: issue.description,
-      source: { kind: "issue_description", id: issue.id, remoteVersion: issue.remoteVersion },
-      issueId: issue.id,
-      rootIssueId,
-      coverage,
-      records,
-    });
-  }
-  for (const comment of comments) {
-    addManagedRecord({
-      body: comment.body,
-      source: { kind: "comment", id: comment.id, remoteVersion: comment.remoteVersion },
-      issueId: comment.issueId,
-      rootIssueId,
-      coverage,
-      records,
-    });
-  }
-  return records;
-}
-
-function addManagedRecord({ body, source, issueId, rootIssueId, coverage, records }) {
-  if (body === null) return;
-  const parsed = parseManagedRecordBlock(body);
-  if (!parsed.ok) {
-    if (parsed.error !== "managed_record_block_missing") {
-      coverage.add({ rootIssueId, sourceId: source.id, scope: "managed_record", code: "foreground_e2e_evidence_managed_record_invalid" });
-    }
-    return;
-  }
-  records.push({ issueId, source, markdown: parsed.markdown, record: parsed.record });
 }
 
 function threadFact({ comment, comments, rootIssueId, coverage }) {
@@ -518,6 +522,14 @@ function validRelation(relation) {
   return relation && IDENTIFIER.test(relation.id) && typeof relation.type === "string" &&
     IDENTIFIER.test(relation.issueId) && IDENTIFIER.test(relation.relatedIssueId) &&
     timestampValue(relation.createdAt) && timestampValue(relation.updatedAt);
+}
+
+function validAttachment(attachment, issueId) {
+  return attachment && IDENTIFIER.test(attachment.id) && attachment.issueId === issueId &&
+    typeof attachment.title === "string" && attachment.title.length > 0 &&
+    typeof attachment.url === "string" && attachment.url.length > 0 &&
+    typeof attachment.sourceType === "string" && attachment.sourceType.length > 0 &&
+    timestampValue(attachment.createdAt) && timestampValue(attachment.updatedAt);
 }
 
 function statusFact(state) {

@@ -41,6 +41,7 @@ export async function createForegroundE2EEnvironment({
           return runtime.subscribeUnexpectedExit(listener);
         },
         killAndRestartConductor: runtime.killAndRestartConductor,
+        removeRootWorktreesAndRestart: runtime.removeRootWorktreesAndRestart,
       }),
       async close() {
         if (closed) return;

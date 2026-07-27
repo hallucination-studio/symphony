@@ -27,13 +27,8 @@ export interface LinearIssueValue {
   description?: string;
   labels: string[];
   isArchived: boolean;
+  createdAt: string;
   updatedAt: string;
-}
-
-export interface RootOwnershipHeaderValue {
-  conductorId: string;
-  sourceCommentId: string;
-  sourceCommentRemoteVersion: string;
 }
 
 export interface RootHeaderValue {
@@ -47,7 +42,6 @@ export interface RootHeaderValue {
   priority: LinearPriority;
   blockers: LinearBlockerValue[];
   rootConductorLabels: ConductorPoolValue[];
-  rootOwnership?: RootOwnershipHeaderValue;
 }
 
 export interface ConductorPoolValue {
@@ -84,6 +78,7 @@ export interface WorkflowIssueValue {
   labels: string[];
   isArchived: boolean;
   remoteVersion: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -124,10 +119,53 @@ export interface WorkflowRelationValue {
   targetIssueId: string;
 }
 
+export interface WorkflowAttachmentValue {
+  attachmentId: string;
+  issueId: string;
+  title: string;
+  url: string;
+  sourceType: string;
+  remoteVersion: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkflowActivityKind =
+  | "status_changed"
+  | "description_changed"
+  | "archive_changed"
+  | "labels_changed"
+  | "parent_changed"
+  | "delegation_changed"
+  | "attachment_changed";
+
+export interface WorkflowActivityValue {
+  activityId: string;
+  issueId: string;
+  activityKinds: WorkflowActivityKind[];
+  actorKind: WorkflowCommentAuthorKind;
+  actorId?: string;
+  fromStateId?: string;
+  toStateId?: string;
+  updatedDescription?: string;
+  archived?: boolean;
+  addedLabelIds?: string[];
+  removedLabelIds?: string[];
+  fromParentId?: string;
+  toParentId?: string;
+  fromDelegateId?: string;
+  toDelegateId?: string;
+  attachmentId?: string;
+  remoteVersion: string;
+  createdAt: string;
+}
+
 export type WorkflowSourceKind =
   | "linear_issue"
   | "linear_comment"
   | "linear_relation"
+  | "linear_attachment"
+  | "linear_activity"
   | "linear_status_catalog";
 
 export interface WorkflowSourceManifestEntryValue {
@@ -154,6 +192,8 @@ export interface WorkflowRootTreeValue {
   issues: WorkflowIssueValue[];
   comments: WorkflowCommentValue[];
   relations: WorkflowRelationValue[];
+  attachments: WorkflowAttachmentValue[];
+  activities: WorkflowActivityValue[];
   sourceManifest: WorkflowSourceManifestEntryValue[];
   coverage: WorkflowSourceCoverageValue;
   observedAt: string;
@@ -203,6 +243,7 @@ export type WorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      labelNames: string[];
       isArchived: boolean;
       parentAssignment:
         | { mode: "retain" }
@@ -220,6 +261,18 @@ export type WorkflowMutationCommand =
         expectedIsArchived?: boolean;
       };
       body: string;
+    })
+  | (WorkflowMutationBase & {
+      kind: "create_workflow_attachment";
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedStatusId?: string;
+        expectedParentIssueId?: string;
+        expectedIsArchived?: boolean;
+      };
+      title: string;
+      url: string;
     })
   | (WorkflowMutationBase & {
       kind: "create_comment_reply";

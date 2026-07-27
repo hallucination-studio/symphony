@@ -115,13 +115,80 @@
         "changed_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } }
       }
     },
+    "ValidRootWorktreeGateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository_identity", "branch", "head_revision", "is_clean", "changed_paths"],
+      "properties": {
+        "kind": { "const": "valid" },
+        "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "head_revision": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "is_clean": { "type": "boolean" },
+        "changed_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } }
+      }
+    },
+    "FreshRootWorktreeMissingGateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository_identity", "base_branch", "base_revision"],
+      "properties": {
+        "kind": { "const": "fresh_missing" },
+        "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "base_revision": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+      }
+    },
+    "RecoverableRootWorktreeMissingGateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository_identity", "branch", "head_revision"],
+      "properties": {
+        "kind": { "const": "recoverable_missing" },
+        "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "head_revision": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+      }
+    },
+    "InvalidExecutionGenerationWorktreeGateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository_identity", "expected_branch", "reason"],
+      "properties": {
+        "kind": { "const": "execution_generation_invalid" },
+        "repository_identity": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "reason": {
+          "enum": [
+            "worktree_identity_conflict",
+            "branch_missing",
+            "required_commit_unreachable",
+            "git_evidence_incomplete"
+          ]
+        }
+      }
+    },
+    "RootWorktreeGateResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/ValidRootWorktreeGateResult" },
+        { "$ref": "#/$defs/FreshRootWorktreeMissingGateResult" },
+        { "$ref": "#/$defs/RecoverableRootWorktreeMissingGateResult" },
+        { "$ref": "#/$defs/InvalidExecutionGenerationWorktreeGateResult" }
+      ]
+    },
+    "MissingRootWorktreeGateResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/FreshRootWorktreeMissingGateResult" },
+        { "$ref": "#/$defs/RecoverableRootWorktreeMissingGateResult" }
+      ]
+    },
     "EvidenceRef": {
       "type": "object",
       "additionalProperties": false,
       "required": ["reference_id", "source_kind"],
       "properties": {
         "reference_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_record", "git", "check", "result"] }
+        "source_kind": { "enum": ["linear_issue", "linear_comment", "git", "check", "result"] }
       }
     },
     "AcceptanceCriterion": {
@@ -140,7 +207,7 @@
       "required": ["issue_id", "issue_kind", "title", "description", "status", "is_archived", "labels", "remote_version"],
       "properties": {
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "finding"] },
         "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "title": { "$ref": "common.schema.json#/$defs/ShortText" },
         "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
@@ -228,7 +295,7 @@
         "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "comment_body_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "finding"] },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "author_kind": { "enum": ["human", "linear_integration", "external_automation", "unknown"] },
         "author_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -254,7 +321,7 @@
         "comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "human_action"] },
+        "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "finding"] },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
         "thread_state": { "enum": ["resolved", "unresolved"] },
@@ -262,63 +329,10 @@
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "RecordReference": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["record_id", "record_kind", "record_version", "write_id"],
-      "properties": {
-        "record_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "record_kind": {
-          "enum": [
-            "root_ownership", "workflow_issue", "root_convergence_policy", "root_directive",
-            "root_reconciler_failure", "root_reconciler_reply", "delivery", "model_turn",
-            "stage_execution", "plan_contract", "plan_contract_supersession", "plan_result", "work_result", "stage_result",
-            "verify_result", "human_action_request", "human_action_resolution", "finding",
-            "finding_disposition", "progress_assessment", "cycle_outcome", "convergence",
-            "workflow_timeline"
-          ]
-        },
-        "record_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "HumanActionRecord": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["action_id", "action_issue_id", "action_kind", "parent_scope", "status", "is_archived", "related_issue_ids"],
-      "properties": {
-        "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] },
-        "parent_scope": { "enum": ["root", "cycle"] },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "is_archived": { "type": "boolean" },
-        "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }
-      }
-    },
-    "HumanActionResolution": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["resolution_id", "action_id", "action_issue_id", "outcome", "terminal_status", "terminal_remote_version", "proposal_digest", "actor_kind", "resolved_at"],
-      "properties": {
-        "resolution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] },
-        "outcome": { "enum": ["approved", "rejected", "answered", "canceled", "granted", "denied", "waived", "override_applied", "override_rejected"] },
-        "terminal_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "terminal_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "proposal_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_comment_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
-        "actor_kind": { "const": "human" },
-        "resolved_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
     "RootObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue", "objective", "scope", "acceptance_criteria", "root_status", "ownership", "convergence"],
+      "required": ["issue", "objective", "scope", "acceptance_criteria", "root_status", "convergence"],
       "properties": {
         "issue": { "$ref": "#/$defs/IssueSnapshot" },
         "objective": { "$ref": "common.schema.json#/$defs/BoundedText" },
@@ -326,23 +340,17 @@
         "acceptance_criteria": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } },
         "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } },
         "root_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
-        "ownership": { "$ref": "#/$defs/RecordReference" },
         "convergence": { "$ref": "#/$defs/RootConvergenceSnapshot" }
       }
     },
-    "RootConvergencePolicy": {
+    "RootConvergencePolicySnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "version", "policy_id", "root_issue_id", "max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_total_tokens", "max_cycle_repair_attempts", "deadline_at"],
+      "required": ["max_cycles_per_root", "max_same_open_finding_cycles", "max_consecutive_no_progress", "max_cycle_repair_attempts", "deadline_at"],
       "properties": {
-        "kind": { "const": "root_convergence_policy" },
-        "version": { "const": 1, "type": "integer" },
-        "policy_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "max_cycles_per_root": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "max_same_open_finding_cycles": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "max_consecutive_no_progress": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-        "max_total_tokens": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "max_cycle_repair_attempts": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
         "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
@@ -356,25 +364,14 @@
         "open_cycle_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
       }
     },
-    "OpenTokenReservation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["stage_execution_id", "reserved_total_tokens"],
-      "properties": {
-        "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reserved_total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
-      }
-    },
     "RootConvergenceView": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_count", "open_finding_persistence", "consecutive_no_progress", "settled_tokens", "open_token_reservations", "active_cycle_repair_attempts", "is_deadline_exceeded", "root_is_canceled"],
+      "required": ["cycle_count", "open_finding_persistence", "consecutive_no_progress", "active_cycle_repair_attempts", "is_deadline_exceeded", "root_is_canceled"],
       "properties": {
         "cycle_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
         "open_finding_persistence": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/OpenFindingPersistence" } },
         "consecutive_no_progress": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "settled_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "open_token_reservations": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/OpenTokenReservation" } },
         "active_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "active_cycle_repair_attempts": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
         "is_deadline_exceeded": { "type": "boolean" },
@@ -386,32 +383,20 @@
       "additionalProperties": false,
       "required": ["policy", "view"],
       "properties": {
-        "policy": { "$ref": "#/$defs/RootConvergencePolicy" },
-        "view": { "$ref": "#/$defs/RootConvergenceView" },
-        "assessment": { "$ref": "#/$defs/RecordReference" }
+        "policy": { "$ref": "#/$defs/RootConvergencePolicySnapshot" },
+        "view": { "$ref": "#/$defs/RootConvergenceView" }
       }
     },
     "CycleObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_issue", "predecessor_cycle_issue_id", "cycle_status", "is_archived", "issues", "relations", "plan_results", "plan_completed_results", "work_results", "verify_results", "findings", "human_action_records", "human_action_resolutions"],
+      "required": ["cycle_issue", "cycle_status", "is_archived", "issues", "relations"],
       "properties": {
         "cycle_issue": { "$ref": "#/$defs/IssueSnapshot" },
-        "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "cycle_status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
         "is_archived": { "type": "boolean" },
-        "active_plan_contract": { "$ref": "#/$defs/CanonicalPlanContract" },
-        "budget": { "$ref": "#/$defs/BudgetSnapshot" },
-        "outcome": { "$ref": "#/$defs/RecordReference" },
         "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
-        "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
-        "plan_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
-        "plan_completed_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/PlanCompletedResultRecord" } },
-        "work_results": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RecordReference" } },
-        "verify_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } },
-        "findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } },
-        "human_action_records": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionRecord" } },
-        "human_action_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }
+        "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } }
       }
     },
     "BudgetSnapshot": {
@@ -428,12 +413,14 @@
     "Finding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["finding_id", "category", "severity", "summary"],
+      "required": ["finding_id", "category", "severity", "description", "evidence_refs", "related_work_issue_ids"],
       "properties": {
         "finding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "category": { "enum": ["product", "code", "test", "infra", "requirement", "policy"] },
         "severity": { "enum": ["critical", "high", "medium", "low"] },
-        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } },
+        "related_work_issue_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }
       }
     },
     "MechanicalViolation": {
@@ -441,7 +428,7 @@
       "additionalProperties": false,
       "required": ["violation_kind", "source_issue_ids", "summary"],
       "properties": {
-        "violation_kind": { "enum": ["multiple_nonterminal_cycles", "canceled_root_has_active_cycle", "archived_dependency", "missing_stage_result", "cycle_terminal_outcome_mismatch", "invalid_tree"] },
+        "violation_kind": { "enum": ["multiple_nonterminal_cycles", "canceled_root_has_active_cycle", "archived_dependency", "invalid_tree"] },
         "source_issue_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } },
         "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
@@ -449,22 +436,15 @@
     "RootBootstrapSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "cycles", "issues", "relations", "managed_records", "user_comments", "user_comment_thread_states", "git_facts", "delivery", "mechanical_violations"],
+      "required": ["root", "cycles", "issues", "relations", "user_comments", "user_comment_thread_states", "worktree_gate", "mechanical_violations"],
       "properties": {
         "root": { "$ref": "#/$defs/RootObservation" },
         "cycles": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CycleObservation" } },
         "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
         "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
-        "managed_records": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RecordReference" } },
         "user_comments": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentSnapshot" } },
         "user_comment_thread_states": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentThreadStateSnapshot" } },
-        "git_facts": { "$ref": "#/$defs/GitFacts" },
-        "delivery": {
-          "oneOf": [
-            { "$ref": "#/$defs/RecordReference" },
-            { "type": "null" }
-          ]
-        },
+        "worktree_gate": { "$ref": "#/$defs/RootWorktreeGateResult" },
         "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
       }
     },
@@ -496,7 +476,7 @@
     "IssueDetached": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "plan_issue_id", "plan_contract_digest"],
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
       "properties": {
         "kind": { "const": "issue_detached" },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -568,98 +548,17 @@
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
-    "ManagedRecordCurrentValue": {
+    "WorktreeGateCurrentValue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "record"],
+      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "worktree_gate"],
       "properties": {
-        "kind": { "const": "managed_record_current_value" },
+        "kind": { "const": "worktree_gate_current_value" },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
         "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "record": { "$ref": "#/$defs/RecordReference" }
-      }
-    },
-    "ManagedRecordRemoved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
-      "properties": {
-        "kind": { "const": "managed_record_removed" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "PlanContractCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "plan_issue_id", "plan_contract"],
-      "properties": {
-        "kind": { "const": "plan_contract_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "const": "symphony" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "plan_contract": { "$ref": "#/$defs/CanonicalPlanContract" }
-      }
-    },
-    "PlanCompletedResultCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "plan_completed_result"],
-      "properties": {
-        "kind": { "const": "plan_completed_result_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "const": "symphony" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "plan_completed_result": { "$ref": "#/$defs/PlanCompletedResultRecord" }
-      }
-    },
-    "PlanContractRemoved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "plan_issue_id", "plan_contract_digest"],
-      "properties": {
-        "kind": { "const": "plan_contract_removed" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "const": "symphony" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "PlanCompletedResultRemoved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "cycle_issue_id", "result_id"],
-      "properties": {
-        "kind": { "const": "plan_completed_result_removed" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "const": "symphony" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "result_id": { "$ref": "common.schema.json#/$defs/Identifier" }
-      }
-    },
-    "GitFactsCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "git_facts"],
-      "properties": {
-        "kind": { "const": "git_facts_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "git_facts": { "$ref": "#/$defs/GitFacts" }
+        "worktree_gate": { "$ref": "#/$defs/RootWorktreeGateResult" }
       }
     },
     "MechanicalViolationsCurrentValue": {
@@ -693,10 +592,7 @@
         { "$ref": "#/$defs/IssueCurrentValue" }, { "$ref": "#/$defs/IssueDetached" },
         { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentThreadStateCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
         { "$ref": "#/$defs/RelationCurrentValue" }, { "$ref": "#/$defs/RelationRemoved" },
-        { "$ref": "#/$defs/ManagedRecordCurrentValue" }, { "$ref": "#/$defs/ManagedRecordRemoved" },
-        { "$ref": "#/$defs/PlanContractCurrentValue" }, { "$ref": "#/$defs/PlanCompletedResultCurrentValue" },
-        { "$ref": "#/$defs/PlanContractRemoved" }, { "$ref": "#/$defs/PlanCompletedResultRemoved" },
-        { "$ref": "#/$defs/GitFactsCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" },
+        { "$ref": "#/$defs/WorktreeGateCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" },
         { "$ref": "#/$defs/ConvergenceCurrentValue" }
       ]
     },
@@ -739,29 +635,6 @@
         { "$ref": "#/$defs/CommentThreadStateReplySource" }
       ]
     },
-    "RootReconcilerReplyRecord": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "reply_id", "reply_write_id", "root_directive_id", "source_input_id", "source", "target_issue_id", "disposition", "reaction", "thread_action",
-        "materialized_outcome_refs", "rendered_schema_version",
-        "replied_at"
-      ],
-      "properties": {
-        "reply_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "reply_write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "root_directive_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_input_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source": { "$ref": "#/$defs/UserCommentReplySource" },
-        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "disposition": { "enum": ["accepted", "not_applied", "follow_up_required"] },
-        "reaction": { "enum": ["check", "cross", "none"] },
-        "thread_action": { "enum": ["resolve", "keep_open", "reopen"] },
-        "materialized_outcome_refs": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/EvidenceRef" } },
-        "rendered_schema_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "replied_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
     "UserCommentReply": {
       "type": "object",
       "additionalProperties": false,
@@ -782,7 +655,7 @@
         "thread_action": { "enum": ["resolve", "keep_open", "reopen"] }
       }
     },
-    "RootReconcilerFailureRecord": {
+    "RootReconcilerFailure": {
       "type": "object",
       "additionalProperties": false,
       "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "category", "sanitized_reason", "failed_at"],
@@ -884,56 +757,10 @@
         { "$ref": "#/$defs/StageModelTurnRecord" }
       ]
     },
-    "UsageAggregateEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["role", "model", "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"],
-      "properties": {
-        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "role": { "enum": ["root_reconciler", "plan", "work", "verify"] },
-        "model": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "cached_input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "reasoning_output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" }
-      }
-    },
-    "UsageAggregate": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["scope", "source_record_count", "source_digest", "is_complete", "unknown_turn_count", "entries"],
-      "properties": {
-        "scope": { "enum": ["stage", "cycle", "root"] },
-        "source_record_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "source_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "is_complete": { "type": "boolean" },
-        "unknown_turn_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
-        "entries": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UsageAggregateEntry" } }
-      }
-    },
-    "WorkflowTimelineRecord": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "timeline_event_id", "timeline_kind", "target_issue_id", "source_record_ids", "source_versions",
-        "write_id", "rendered_schema_version", "occurred_at"
-      ],
-      "properties": {
-        "timeline_event_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "timeline_kind": { "enum": ["root", "cycle"] },
-        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_record_ids": { "type": "array", "maxItems": 256, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
-        "source_versions": { "type": "array", "maxItems": 256, "items": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" } },
-        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "rendered_schema_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
-        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
     "RootDirective": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol_version", "request_id", "root_directive_id", "reconciler_session_id", "reconciler_turn_id", "model_turn", "based_on_target_root_digest", "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action"],
+      "required": ["protocol_version", "request_id", "root_directive_id", "reconciler_session_id", "reconciler_turn_id", "model_turn", "based_on_target_root_digest", "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action"],
       "properties": {
         "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
         "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -946,7 +773,6 @@
         "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } },
         "consumed_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
         "comment_replies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/UserCommentReply" } },
-        "human_action_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } },
         "action": { "$ref": "#/$defs/RootDirectiveAction" }
       }
     },
@@ -959,7 +785,7 @@
         "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "kind": { "const": "root_reconciler_failed" },
         "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "failure": { "$ref": "#/$defs/RootReconcilerFailureRecord" }
+        "failure": { "$ref": "#/$defs/RootReconcilerFailure" }
       }
     },
     "RootReconcilerTurnResult": {
@@ -971,9 +797,10 @@
     "RootDirectiveAction": {
       "oneOf": [
         { "$ref": "#/$defs/ExecutePlanDirective" }, { "$ref": "#/$defs/ExecuteWorkDirective" }, { "$ref": "#/$defs/ExecuteVerifyDirective" },
-        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/MaterializeApprovedPlanDagDirective" }, { "$ref": "#/$defs/ReviseRootTreeDirective" },
+        { "$ref": "#/$defs/RerunStageDirective" }, { "$ref": "#/$defs/MaterializePlanNodeAction" }, { "$ref": "#/$defs/ReviseRootTreeDirective" },
         { "$ref": "#/$defs/ReplanCurrentCycleDirective" }, { "$ref": "#/$defs/SupersedeCycleDirective" }, { "$ref": "#/$defs/CreateCycleDirective" },
-        { "$ref": "#/$defs/RequestHumanActionDirective" }, { "$ref": "#/$defs/ConcludeCycleDirective" }, { "$ref": "#/$defs/ConcludeRootDirective" },
+        { "$ref": "#/$defs/CreateRootWorkspaceAction" }, { "$ref": "#/$defs/InvalidateExecutionGenerationAction" },
+        { "$ref": "#/$defs/CreateHumanActionAction" }, { "$ref": "#/$defs/ConcludeCycleDirective" }, { "$ref": "#/$defs/ConcludeRootDirective" },
         { "$ref": "#/$defs/CancelRootDirective" }, { "$ref": "#/$defs/WaitDirective" }, { "$ref": "#/$defs/AcknowledgeDirective" }
       ]
     },
@@ -1018,16 +845,24 @@
         "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }
       }
     },
-    "MaterializeApprovedPlanDagDirective": {
+    "MaterializePlanNodeAction": {
       "type": "object", "additionalProperties": false,
-      "required": ["kind", "cycle_issue_id", "plan_issue_id", "plan_contract_digest", "approval_action_issue_id", "approval_resolution_id"],
+      "required": ["kind", "cycle_issue_id", "expected_cycle_remote_version", "plan_issue_id", "expected_plan_remote_version", "approval_request_comment_id", "expected_approval_request_remote_version", "approval_reply_comment_id", "expected_approval_reply_remote_version", "node_kind", "title", "description", "order", "dependency_issue_ids"],
       "properties": {
-        "kind": { "const": "materialize_approved_plan_dag" },
+        "kind": { "const": "materialize_plan_node" },
         "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_cycle_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "approval_action_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "approval_resolution_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+        "expected_plan_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "approval_request_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_approval_request_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "approval_reply_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_approval_reply_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "node_kind": { "enum": ["work", "verify"] },
+        "title": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "dependency_issue_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }
       }
     },
     "TreeOperation": {
@@ -1043,7 +878,7 @@
     },
     "CreateNodeOperation": {
       "type": "object", "additionalProperties": false, "required": ["kind", "issue_kind", "title", "description", "parent_issue_id", "status", "precondition"],
-      "properties": { "kind": { "const": "create_node" }, "issue_kind": { "enum": ["plan", "work", "verify", "human_action"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } }
+      "properties": { "kind": { "const": "create_node" }, "issue_kind": { "enum": ["plan", "work", "verify"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } }
     },
     "UpdateNodeOperation": {
       "type": "object", "additionalProperties": false, "required": ["kind", "precondition", "title", "description", "status"],
@@ -1056,11 +891,34 @@
     "CreateRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_kind", "source_issue_id", "target_issue_id"], "properties": { "kind": { "const": "create_relation" }, "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] }, "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "RemoveRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_id", "precondition"], "properties": { "kind": { "const": "remove_relation" }, "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
     "ReviseRootTreeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "operations"], "properties": { "kind": { "const": "revise_root_tree" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "operations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/TreeOperation" } } } },
-    "ReplanCurrentCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "superseded_plan_contract_ids", "invalidate_execution_ids", "preserve_evidence_refs", "archive_or_restore_operations", "plan_issue_id", "fresh_plan_goal"], "properties": { "kind": { "const": "replan_current_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "superseded_plan_contract_ids": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "invalidate_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserve_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "archive_or_restore_operations": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/TreeOperation" } }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "fresh_plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "ReplanCurrentCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "invalidate_execution_ids", "preserve_evidence_refs", "archive_or_restore_operations", "plan_issue_id", "fresh_plan_goal"], "properties": { "kind": { "const": "replan_current_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "invalidate_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserve_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "archive_or_restore_operations": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/TreeOperation" } }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "fresh_plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "SupersedeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "current_cycle_issue_id", "reason", "invalidated_execution_ids", "unresolved_finding_ids", "preserved_evidence_refs", "successor"], "properties": { "kind": { "const": "supersede_cycle" }, "current_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["root_contract_changed", "cycle_change_not_absorbable", "no_safe_replan"] }, "invalidated_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor": { "$ref": "#/$defs/SuccessorPlan" } } },
     "SuccessorPlan": { "type": "object", "additionalProperties": false, "required": ["create", "plan_trigger", "inherited_fact_refs"], "properties": { "create": { "const": true }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "CreateCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "plan_trigger", "inherited_fact_refs", "invalidated_delivery_refs"], "properties": { "kind": { "const": "create_cycle" }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "enum": ["initial", "root_contract_changed", "repair_required", "exhausted", "user_requested_retry", "unresolved_findings"] }, "plan_trigger": { "$ref": "common.schema.json#/$defs/ShortText" }, "inherited_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "invalidated_delivery_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "RequestHumanActionDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "parent_scope", "root_issue_id", "action_kind", "title", "description", "related_issue_ids", "proposal_digest", "expected_parent_remote_version", "requested_decision", "options", "comment_required", "evidence_refs"], "properties": { "kind": { "const": "request_human_action" }, "parent_scope": { "enum": ["root", "cycle"] }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_review", "clarification", "permission", "finding_waiver", "convergence_override"] }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "related_issue_ids": { "type": "array", "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "proposal_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "expected_parent_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "requested_decision": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "comment_required": { "type": "boolean" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
+    "CreateRootWorkspaceAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "expected_root_remote_version", "expected_worktree_gate"],
+      "properties": {
+        "kind": { "const": "create_root_workspace" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "expected_worktree_gate": { "$ref": "#/$defs/MissingRootWorktreeGateResult" }
+      }
+    },
+    "InvalidateExecutionGenerationAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id", "cycle_issue_id", "expected_root_remote_version", "expected_worktree_gate"],
+      "properties": {
+        "kind": { "const": "invalidate_execution_generation" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "expected_worktree_gate": { "$ref": "#/$defs/InvalidExecutionGenerationWorktreeGateResult" }
+      }
+    },
+    "CreateHumanActionAction": { "type": "object", "additionalProperties": false, "required": ["kind", "root_issue_id", "action_kind", "target_issue_ids", "expected_root_remote_version", "question", "context", "options", "evidence_refs"], "properties": { "kind": { "const": "create_human_action" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "action_kind": { "enum": ["plan_approval", "information", "permission", "finding_waiver"] }, "target_issue_ids": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "question": { "$ref": "common.schema.json#/$defs/BoundedText" }, "context": { "$ref": "common.schema.json#/$defs/BoundedText" }, "options": { "type": "array", "maxItems": 16, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "ConcludeCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "conclusion", "completed_work_ids", "unresolved_finding_ids", "attempted_approach_refs", "verification_evidence_refs"], "properties": { "kind": { "const": "conclude_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "conclusion": { "enum": ["succeeded", "repair_required", "exhausted", "canceled"] }, "completed_work_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "unresolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "attempted_approach_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "verification_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "successor_recommendation": { "$ref": "#/$defs/SuccessorPlan" } } },
     "ConcludeRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "conclusion", "evidence_refs"], "properties": { "kind": { "const": "conclude_root" }, "conclusion": { "const": "ready_for_delivery" }, "evidence_refs": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "CancelRootDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "invalidated_execution_ids", "preserved_fact_refs"], "properties": { "kind": { "const": "cancel_root" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "active_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "invalidated_execution_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserved_fact_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
@@ -1076,26 +934,24 @@
     "InstructionBundle": { "type": "object", "additionalProperties": false, "required": ["instruction_set_id", "instructions", "output_schema"], "properties": { "instruction_set_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "instructions": { "$ref": "common.schema.json#/$defs/BoundedText" }, "output_schema": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "PlanCycleContext": { "type": "object", "additionalProperties": false, "required": ["cycle_issue_id", "trigger"], "properties": { "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "trigger": { "enum": ["initial", "verify_changes", "review_changes", "repair", "user_requested_retry"] }, "predecessor_cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "PlanRootContract": { "type": "object", "additionalProperties": false, "required": ["objective", "requested_scope", "constraints", "acceptance_criteria"], "properties": { "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "requested_scope": { "$ref": "common.schema.json#/$defs/BoundedText" }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } } } },
-    "PlanTurnContext": { "type": "object", "additionalProperties": false, "required": ["root_contract", "cycle", "current_plan_issue", "prior_plan_results", "prior_plan_contracts", "unresolved_findings", "human_resolutions", "current_git_facts", "required_output"], "properties": { "root_contract": { "$ref": "#/$defs/PlanRootContract" }, "cycle": { "$ref": "#/$defs/PlanCycleContext" }, "current_plan_issue": { "$ref": "#/$defs/IssueSnapshot" }, "prior_plan_results": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/RecordReference" } }, "prior_plan_contracts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/PlanContract" } }, "unresolved_findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "current_git_facts": { "$ref": "#/$defs/GitFacts" }, "required_output": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "PlanTurnContext": { "type": "object", "additionalProperties": false, "required": ["root_contract", "cycle", "current_plan_issue", "prior_plan_attempt_facts", "prior_approved_plan_facts", "unresolved_finding_issue_facts", "human_action_thread_facts", "current_git_facts", "required_output"], "properties": { "root_contract": { "$ref": "#/$defs/PlanRootContract" }, "cycle": { "$ref": "#/$defs/PlanCycleContext" }, "current_plan_issue": { "$ref": "#/$defs/IssueSnapshot" }, "prior_plan_attempt_facts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "prior_approved_plan_facts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "unresolved_finding_issue_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "human_action_thread_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CommentSnapshot" } }, "current_git_facts": { "$ref": "#/$defs/GitFacts" }, "required_output": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "PlanWorkNode": { "type": "object", "additionalProperties": false, "required": ["proposal_key", "title", "description", "expected_outcome", "required_checks", "dependency_proposal_keys"], "properties": { "proposal_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "expected_outcome": { "$ref": "common.schema.json#/$defs/BoundedText" }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "dependency_proposal_keys": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } } } },
     "PlanVerifyNode": { "type": "object", "additionalProperties": false, "required": ["title", "acceptance_criteria", "required_checks"], "properties": { "title": { "$ref": "common.schema.json#/$defs/ShortText" }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "required_checks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
     "PlanContract": { "type": "object", "additionalProperties": false, "required": ["objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements"], "properties": { "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "included_scope": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "excluded_scope": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } } } },
     "PlanDag": { "type": "object", "additionalProperties": false, "required": ["work_nodes", "dependency_edges", "verify_node"], "properties": { "work_nodes": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/PlanWorkNode" } }, "dependency_edges": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/RelationSnapshot" } }, "verify_node": { "$ref": "#/$defs/PlanVerifyNode" } } },
-    "CanonicalPlanContract": { "type": "object", "additionalProperties": false, "required": ["kind", "version", "root_issue_id", "cycle_issue_id", "plan_contract_digest", "objective", "included_scope", "excluded_scope", "assumptions", "constraints", "acceptance_criteria", "verification_requirements", "proposed_work_dag"], "properties": { "kind": { "const": "plan_contract" }, "version": { "const": 1 }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "objective": { "$ref": "common.schema.json#/$defs/BoundedText" }, "included_scope": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "excluded_scope": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "assumptions": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "constraints": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "acceptance_criteria": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/AcceptanceCriterion" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" } } },
     "PlanCompletedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"], "properties": { "kind": { "const": "plan_completed" }, "plan_contract": { "$ref": "#/$defs/PlanContract" }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" }, "risks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "required_permissions": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "PlanCompletedResultRecord": { "type": "object", "additionalProperties": false, "required": ["result_id", "root_issue_id", "cycle_issue_id", "node_issue_id", "summary", "completed_at", "plan_contract_digest", "plan_contract", "proposed_work_dag", "risks", "required_permissions", "evidence_refs"], "properties": { "result_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "node_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "plan_contract_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "plan_contract": { "$ref": "#/$defs/PlanContract" }, "proposed_work_dag": { "$ref": "#/$defs/PlanDag" }, "risks": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "required_permissions": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "PlanNeedsInformationResult": { "type": "object", "additionalProperties": false, "required": ["kind", "missing_questions", "impact", "evidence_refs"], "properties": { "kind": { "const": "plan_needs_information" }, "missing_questions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "impact": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "PlanBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "attempts", "evidence_refs"], "properties": { "kind": { "const": "plan_blocked" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "WorkTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "current_active_work_dag", "selected_work", "completed_work_evidence", "prior_turn_results", "human_resolutions", "git_baseline", "workspace_capability"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "current_active_work_dag": { "$ref": "#/$defs/PlanDag" }, "selected_work": { "$ref": "#/$defs/IssueSnapshot" }, "completed_work_evidence": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/EvidenceRef" } }, "prior_turn_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/RecordReference" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "git_baseline": { "$ref": "#/$defs/GitFacts" }, "workspace_capability": { "enum": ["workspace_write"] } } },
+    "WorkTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "current_active_work_dag", "selected_work", "completed_work_evidence", "prior_work_attempt_facts", "human_action_thread_facts", "git_baseline", "workspace_capability"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "current_active_work_dag": { "$ref": "#/$defs/PlanDag" }, "selected_work": { "$ref": "#/$defs/IssueSnapshot" }, "completed_work_evidence": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/EvidenceRef" } }, "prior_work_attempt_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "human_action_thread_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CommentSnapshot" } }, "git_baseline": { "$ref": "#/$defs/GitFacts" }, "workspace_capability": { "enum": ["workspace_write"] } } },
     "CheckResult": { "type": "object", "additionalProperties": false, "required": ["check_key", "command_or_method", "outcome", "evidence_ref"], "properties": { "check_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "command_or_method": { "$ref": "common.schema.json#/$defs/ShortText" }, "outcome": { "enum": ["passed", "failed", "not_run"] }, "evidence_ref": { "$ref": "#/$defs/EvidenceRef" } } },
     "ActualChanges": { "type": "object", "additionalProperties": false, "required": ["baseline_revision", "target_revision", "changed_paths", "summary"], "properties": { "baseline_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "changed_paths": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/BoundedPath" } }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "WorkCompletedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "actual_changes", "checks", "artifacts", "discovered_facts", "evidence_refs"], "properties": { "kind": { "const": "work_completed" }, "actual_changes": { "$ref": "#/$defs/ActualChanges" }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } }, "artifacts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "discovered_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "WorkBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "blocker_kind", "sanitized_reason", "attempted_approaches", "failed_check_evidence", "discovered_facts", "suggested_dag_changes"], "properties": { "kind": { "const": "work_blocked" }, "blocker_kind": { "$ref": "common.schema.json#/$defs/ShortText" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempted_approaches": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "failed_check_evidence": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "discovered_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "suggested_dag_changes": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } } } },
     "WorkSpecialResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "enum": ["work_plan_assumption_invalid", "work_scope_conflict", "work_permission_required", "work_information_required"] }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "VerifyTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "complete_active_cycle_dag", "archived_cycle_nodes", "completed_work_results", "unresolved_findings", "human_resolutions", "verification_requirements", "immutable_target_revision", "repository_snapshot"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "complete_active_cycle_dag": { "$ref": "#/$defs/PlanDag" }, "archived_cycle_nodes": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "completed_work_results": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/RecordReference" } }, "unresolved_findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "human_resolutions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/HumanActionResolution" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "immutable_target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "repository_snapshot": { "$ref": "#/$defs/GitFacts" } } },
+    "VerifyTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "complete_active_cycle_dag", "archived_cycle_nodes", "completed_work_issue_facts", "unresolved_finding_issue_facts", "human_action_thread_facts", "verification_requirements", "immutable_target_revision", "repository_snapshot"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "complete_active_cycle_dag": { "$ref": "#/$defs/PlanDag" }, "archived_cycle_nodes": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "completed_work_issue_facts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "unresolved_finding_issue_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "human_action_thread_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CommentSnapshot" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "immutable_target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "repository_snapshot": { "$ref": "#/$defs/GitFacts" } } },
     "VerifyCriterionResult": { "type": "object", "additionalProperties": false, "required": ["criterion_key", "outcome", "summary"], "properties": { "criterion_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "outcome": { "enum": ["passed", "failed", "not_run"] }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "VerifyPassedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "checks", "resolved_finding_ids", "evidence_refs"], "properties": { "kind": { "const": "verify_passed" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } }, "resolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
-    "VerifyChangesRequiredResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "findings", "checks"], "properties": { "kind": { "const": "verify_changes_required" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "findings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } } } },
+    "VerifyChangesRequiredResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "findings", "checks"], "properties": { "kind": { "const": "verify_changes_required" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "findings": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } } } },
     "VerifyInconclusiveResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "missing_evidence", "attempted_methods", "retryable"], "properties": { "kind": { "const": "verify_inconclusive" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "missing_evidence": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "attempted_methods": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "retryable": { "type": "boolean" } } },
     "VerifyPlanContractViolationResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "const": "verify_plan_contract_violation" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "VerifyBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "const": "verify_blocked" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },

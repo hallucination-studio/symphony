@@ -6,6 +6,7 @@ export const MANDATORY_FOREGROUND_CASE_IDS = Object.freeze([
   "parallel_multi_conductor",
   "same_conductor_preemption",
   "conductor_restart_recovery",
+  "missing_worktree_recovery",
 ]);
 
 export const RETIRED_WORKFLOW_E2E_INVENTORY = Object.freeze([
@@ -118,7 +119,7 @@ export function inspectForegroundE2EHardCut(trackedSources) {
     if (readsOrWritesPodiumDatabase(source)) {
       findings.push({ code: "e2e_direct_podium_database_access", path });
     }
-    if (mutatesManagedRecords(source)) {
+    if (mutatesRetiredWorkflowAuthority(source)) {
       findings.push({ code: "e2e_managed_record_mutation", path });
     }
     if (syntheticCompletion(source)) {
@@ -145,8 +146,9 @@ function readsOrWritesPodiumDatabase(source) {
   return /\b(?:readFile|writeFile|open|unlink|rm|stat)\s*\(\s*["'][^"']*podium\.db["']/u.test(source);
 }
 
-function mutatesManagedRecords(source) {
-  return /\b(?:write|append|create|update)(?:ManagedRecord|PlanContract|StageResult|Finding|Timeline|WorkflowComment)\s*\(/u.test(source);
+function mutatesRetiredWorkflowAuthority(source) {
+  const retiredRecord = ["Managed", "Record"].join("");
+  return new RegExp(`\\b(?:write|append|create|update)(?:${retiredRecord}|PlanContract|StageResult|Finding|Timeline|WorkflowComment)\\s*\\(`, "u").test(source);
 }
 
 function syntheticCompletion(source) {

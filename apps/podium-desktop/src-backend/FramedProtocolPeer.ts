@@ -37,6 +37,7 @@ export class FramedProtocolPeer {
         body: JsonValue,
         secret?: Uint8Array,
       ): Promise<JsonValue>;
+      onClose?(error: Error): void;
     },
   ) {
     input.on("data", (chunk: Buffer | string) => {
@@ -97,6 +98,12 @@ export class FramedProtocolPeer {
         },
       );
     });
+  }
+
+  close(reason = "private_peer_revoked"): void {
+    this.#fail(new Error(reason));
+    const output = this.output as NodeJS.WritableStream & { destroy?(): void };
+    output.destroy?.();
   }
 
   async #drain(): Promise<void> {
@@ -172,6 +179,7 @@ export class FramedProtocolPeer {
       pending.reject(error);
     }
     this.#pending.clear();
+    this.options.onClose?.(error);
   }
 }
 

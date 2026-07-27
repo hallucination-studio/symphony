@@ -1,4 +1,4 @@
-import { decodePodiumClientPodiumClientMessage } from "@symphony/contracts";
+import { decodePodiumClientMessage } from "@symphony/contracts";
 
 import { PodiumError } from "../internal/errors.js";
 import type { JsonValue } from "./DesktopViewInterface.js";
@@ -74,7 +74,7 @@ export class PodiumClientProtocolHandler {
   ): Promise<PodiumClientResponse> {
     let requestId = "invalid-request";
     try {
-      const message = decodePodiumClientPodiumClientMessage(
+      const message = decodePodiumClientMessage(
         value,
       ) as unknown as ClientMessage;
       requestId = message.request_id;
@@ -84,7 +84,7 @@ export class PodiumClientProtocolHandler {
           : queryKinds.has(message.body.kind)
             ? await this.services.query(message.body)
             : await this.services.command(message.body);
-      return decodePodiumClientPodiumClientMessage({
+      return decodePodiumClientMessage({
         protocol_version: "1",
         request_id: requestId,
         body,

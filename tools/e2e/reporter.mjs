@@ -21,22 +21,16 @@ const RUNTIME_DIAGNOSTIC_LEVELS = new Set(["info", "warning", "error"]);
 const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
   "private_ipc_failed",
   "root_project_unavailable",
-  "root_admission_blocked",
   "root_profile_missing",
   "root_safety_blocked",
   "root_reconciliation_failed",
-  "root_reconciler_failure_barrier",
-  "root_reconciler_failure_recorded",
+  "root_reconciler_failed",
   "root_directive_materialization_failed",
-  "root_stage_result_linear_write_threw",
-  "workflow_timeline_materialization_failed",
 ]);
 const KNOWN_CONDUCTOR_RUNTIME_LOG_EVENTS = new Set([
   ...FORWARDED_CONDUCTOR_RUNTIME_EVENTS,
   "root_discovery_evidence",
-  "root_directive_received",
-  "root_stage_result_linear_write_started",
-  "root_stage_result_linear_write_outcome",
+  "root_next_action_materialized",
 ]);
 const CONDUCTOR_RUNTIME_DIAGNOSTIC_EVENTS = new Set([
   ...FORWARDED_CONDUCTOR_RUNTIME_EVENTS,

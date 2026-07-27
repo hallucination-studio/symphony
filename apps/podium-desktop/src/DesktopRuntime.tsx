@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import {
-  decodePodiumClientPodiumClientMessage,
+  decodePodiumClientMessage,
   type JsonValue,
 } from "@symphony/contracts";
 
@@ -147,7 +147,7 @@ async function request(body: JsonValue, secret?: Uint8Array): Promise<JsonValue>
     const responseBytes = await invoke<number[]>("podium_client_request", {
       frame: [...frame],
     });
-    const response = decodePodiumClientPodiumClientMessage(
+    const response = decodePodiumClientMessage(
       JSON.parse(new TextDecoder().decode(new Uint8Array(responseBytes))),
     ) as unknown as { request_id: string; body: JsonValue };
     if (response.request_id !== requestId) {

@@ -1,0 +1,11 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/Finding",
+  "value": {
+    "finding_id": "finding-1",
+    "category": "code",
+    "severity": "high",
+    "summary": "Legacy Finding payload.",
+    "evidence_refs": [],
+    "related_work_issue_ids": []
+  }
+}

@@ -19,18 +19,15 @@ test("rejected Plan Case writes its frozen reason on the product Action, rejects
     async delegateRootIssue(input) {
       calls.push({ kind: "delegate_root", input });
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return calls.filter(({ kind }) => kind === "wait_for_plan_review").length === 1
-        ? { actionIssueId: "initial-action", terminalStatusId: "rejected-state" }
-        : { actionIssueId: "replacement-action", terminalStatusId: "rejected-state" };
+        ? { requestCommentId: "initial-request", planIssueId: "initial-plan" }
+        : { requestCommentId: "replacement-request", planIssueId: "replacement-plan" };
     },
-    async createComment(input) {
-      calls.push({ kind: "create_comment", input });
-      return { commentId: "rejection-comment", issueId: input.issueId };
-    },
-    async setHumanActionTerminalStatus(input) {
-      calls.push({ kind: "reject_plan_review", input });
+    async replyToHumanAction(input) {
+      calls.push({ kind: "create_reply", input });
+      return { commentId: "rejection-comment", issueId: input.rootIssueId, requestCommentId: input.requestCommentId };
     },
   };
 
@@ -59,27 +56,26 @@ test("rejected Plan Case writes its frozen reason on the product Action, rejects
     },
     { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
     { kind: "delegate_root", input: { rootIssueId: "root-1" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1", terminalStatus: "Rejected" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1" } },
     {
-      kind: "create_comment",
+      kind: "create_reply",
       input: {
-        issueId: "initial-action",
+        rootIssueId: "root-1",
+        requestCommentId: "initial-request",
         body: "The plan should preserve the existing utility contract before adding the new behavior.",
       },
     },
-    {
-      kind: "reject_plan_review",
-      input: { issueId: "initial-action", terminalStatus: "Rejected", stateId: "rejected-state" },
-    },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1", terminalStatus: "Rejected" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1" } },
   ]);
   assert.deepEqual(result, {
     context: {
       humanActorId: "human-1",
       rootIssueIdsByKey: { "rejected-plan-root": "root-1" },
       inputReferences: [{ sourceId: "rejection-comment", kind: "comment_create", binding: "rejection_reason", commentId: "rejection-comment" }],
-      rejectedActionIssueId: "initial-action",
-      replacementActionIssueId: "replacement-action",
+      rejectedPlanIssueId: "initial-plan",
+      rejectionRequestCommentId: "initial-request",
+      replacementPlanIssueId: "replacement-plan",
+      replacementRequestCommentId: "replacement-request",
     },
   });
 });
@@ -91,9 +87,8 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
-    async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "rejected-state" }; },
-    async createComment() { return { commentId: "comment-1", issueId: "action-1" }; },
-    async setHumanActionTerminalStatus() {},
+    async waitForPlanApprovalRequest() { return { requestCommentId: "request-1", planIssueId: "plan-1" }; },
+    async replyToHumanAction() { return { commentId: "comment-1", issueId: "root-1", requestCommentId: "request-1" }; },
   };
 
   await assert.rejects(
@@ -107,7 +102,7 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
   await assert.rejects(
     runRejectedPlanAndReplannedCase({
       definition,
-      human: { ...human, createComment: undefined },
+      human: { ...human, replyToHumanAction: undefined },
       rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
     }),
     hasCode("foreground_e2e_rejected_case_input_invalid"),

@@ -3,7 +3,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { ConductorPresence } from "../../public/ConductorPresence.js";
 import type { LinearWorkflowMutationRequestScope } from "../../public/LinearPhysicalRequestGate.js";
-import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
+import type {
+  PodiumConductorChannel,
+  PodiumConductorServices,
+} from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import {
@@ -26,7 +29,10 @@ type PhysicalRequestContext = {
 const MAX_LINEAR_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
-  readonly #activeInstances = new Map<string, string>();
+  readonly #activeChannels = new Map<string, {
+    instanceId: string;
+    token: symbol;
+  }>();
   readonly #physicalRequestScope = new AsyncLocalStorage<LinearWorkflowMutationRequestScope | undefined>();
   readonly #physicalRequestContext = new AsyncLocalStorage<PhysicalRequestContext | undefined>();
   readonly #linearRequests: LinearRequestBrokerImpl;
@@ -64,14 +70,14 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     sanitizedReason?: string;
   }): void {
     const binding = this.#bindingForId(input.bindingId);
-    const activeInstanceId = this.#activeInstances.get(input.bindingId);
+    const activeInstanceId = this.#activeChannels.get(input.bindingId)?.instanceId;
     if (
       !binding ||
       (activeInstanceId !== undefined && activeInstanceId !== input.instanceId)
     ) {
       throw new Error("conductor_exit_observation_mismatch");
     }
-    this.#activeInstances.delete(input.bindingId);
+    this.#activeChannels.delete(input.bindingId);
     this.presence.observeOffline({
       bindingId: binding.bindingId,
       observedAt: input.observedAt,
@@ -79,12 +85,68 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     });
   }
 
-  async handle(body: Body): Promise<JsonValue> {
+  openChannel(input: { bindingId: string; conductorId: string; instanceId: string }): PodiumConductorChannel {
+    const binding = this.#bindingForId(input.bindingId);
+    if (!binding || binding.conductorId !== input.conductorId || !isIdentifier(input.instanceId)) {
+      throw new Error("conductor_channel_registration_invalid");
+    }
+    if (this.#activeChannels.has(input.bindingId)) throw new Error("conductor_channel_already_active");
+    const token = Symbol(input.instanceId);
+    this.#activeChannels.set(input.bindingId, {
+      instanceId: input.instanceId,
+      token,
+    });
+    let closed = false;
+    let authenticated = false;
+    return {
+      handle: (body) => this.#handleChannel(
+        input.bindingId,
+        input.instanceId,
+        token,
+        body,
+        () => authenticated,
+        () => { authenticated = true; },
+      ),
+      isAuthenticated: () => {
+        const current = this.#activeChannels.get(input.bindingId);
+        return current?.token === token && authenticated;
+      },
+      close: (closeInput = {}) => {
+        if (closed) return;
+        closed = true;
+        const current = this.#activeChannels.get(input.bindingId);
+        if (current?.token !== token) return;
+        this.#activeChannels.delete(input.bindingId);
+        this.presence.observeOffline({
+          bindingId: input.bindingId,
+          observedAt: closeInput.observedAt ?? this.options.now(),
+          ...(closeInput.sanitizedReason
+            ? { sanitizedError: closeInput.sanitizedReason }
+            : {}),
+        });
+      },
+    };
+  }
+
+  async #handleChannel(
+    bindingId: string,
+    instanceId: string,
+    token: symbol,
+    body: Body,
+    isAuthenticated: () => boolean,
+    authenticate: () => void,
+  ): Promise<JsonValue> {
+    const channel = this.#activeChannels.get(bindingId);
+    if (channel?.token !== token || channel.instanceId !== instanceId) {
+      throw new Error("conductor_channel_revoked");
+    }
+    if (body.binding_id !== bindingId) throw new Error("conductor_channel_binding_mismatch");
+    if (body.instance_id !== instanceId) throw new Error("conductor_channel_instance_mismatch");
     if (body.kind === "conductor_handshake") {
-      return this.#runtime(body);
+      return this.#runtime(body, instanceId, authenticate);
     }
     const binding = this.#requestBinding(body);
-    if (!this.#activeInstances.has(binding.bindingId)) {
+    if (!isAuthenticated()) {
       throw new Error("conductor_handshake_required");
     }
     const installation = this.store.getLinearCredential(
@@ -107,6 +169,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         case "create_workflow_issue":
         case "update_workflow_issue":
         case "append_workflow_comment":
+        case "create_workflow_attachment":
         case "create_comment_reply":
         case "set_comment_receipt_reaction":
         case "set_comment_thread_state":
@@ -156,13 +219,13 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     return gateway;
   }
 
-  #runtime(body: Body): JsonValue {
+  #runtime(
+    body: Body,
+    instanceId: string,
+    authenticate: () => void,
+  ): JsonValue {
     const bindingId = requiredString(body.binding_id, "conductor_binding_missing");
     const binding = this.#bindingForId(bindingId);
-    const instanceId = requiredString(
-      body.instance_id,
-      "conductor_instance_missing",
-    );
     if (
       !binding ||
       (body.kind === "conductor_handshake" &&
@@ -175,13 +238,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       throw new Error("conductor_handshake_mismatch");
     }
     if (body.kind === "conductor_handshake") {
-      const activeInstanceId = this.#activeInstances.get(bindingId);
-      if (activeInstanceId && activeInstanceId !== instanceId) {
-        throw new Error("conductor_instance_already_active");
-      }
-      this.#activeInstances.set(bindingId, instanceId);
-    } else if (this.#activeInstances.get(bindingId) !== instanceId) {
-      throw new Error("conductor_instance_mismatch");
+      authenticate();
     }
     const observedAt = this.options.now();
     this.presence.observeOnline({
@@ -193,7 +250,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       kind: "conductor_handshake_ack",
       binding_id: binding.bindingId,
       instance_id: instanceId,
-      observed_at: this.options.now(),
+      observed_at: observedAt,
     };
   }
 
@@ -273,13 +330,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         root_conductor_labels: root.rootConductorLabels.map(({ conductorShortHash }) => ({
           conductor_short_hash: conductorShortHash,
         })),
-        ...(root.rootOwnership ? {
-          root_ownership: {
-            conductor_id: root.rootOwnership.conductorId,
-            source_comment_id: root.rootOwnership.sourceCommentId,
-            source_comment_remote_version: root.rootOwnership.sourceCommentRemoteVersion,
-          },
-        } : {}),
       })),
         page_info: {
           has_next_page: page.pageInfo.hasNextPage,
@@ -333,6 +383,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           labels: issue.labels,
           is_archived: issue.isArchived,
           remote_version: issue.remoteVersion,
+          created_at: issue.createdAt,
           updated_at: issue.updatedAt,
         })),
         comments: tree.comments.map((comment) => ({
@@ -360,6 +411,37 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           relation_kind: relation.relationKind,
           source_issue_id: relation.sourceIssueId,
           target_issue_id: relation.targetIssueId,
+        })),
+        attachments: tree.attachments.map((attachment) => ({
+          attachment_id: attachment.attachmentId,
+          issue_id: attachment.issueId,
+          title: attachment.title,
+          url: attachment.url,
+          source_type: attachment.sourceType,
+          remote_version: attachment.remoteVersion,
+          created_at: attachment.createdAt,
+          updated_at: attachment.updatedAt,
+        })),
+        activities: tree.activities.map((activity) => ({
+          activity_id: activity.activityId,
+          issue_id: activity.issueId,
+          activity_kinds: activity.activityKinds,
+          actor_kind: activity.actorKind,
+          ...(activity.actorId ? { actor_id: activity.actorId } : {}),
+          ...(activity.fromStateId ? { from_state_id: activity.fromStateId } : {}),
+          ...(activity.toStateId ? { to_state_id: activity.toStateId } : {}),
+          ...(activity.updatedDescription !== undefined
+            ? { updated_description: activity.updatedDescription } : {}),
+          ...(activity.archived !== undefined ? { archived: activity.archived } : {}),
+          ...(activity.addedLabelIds !== undefined ? { added_label_ids: activity.addedLabelIds } : {}),
+          ...(activity.removedLabelIds !== undefined ? { removed_label_ids: activity.removedLabelIds } : {}),
+          ...(activity.fromParentId ? { from_parent_id: activity.fromParentId } : {}),
+          ...(activity.toParentId ? { to_parent_id: activity.toParentId } : {}),
+          ...(activity.fromDelegateId ? { from_delegate_id: activity.fromDelegateId } : {}),
+          ...(activity.toDelegateId ? { to_delegate_id: activity.toDelegateId } : {}),
+          ...(activity.attachmentId ? { attachment_id: activity.attachmentId } : {}),
+          remote_version: activity.remoteVersion,
+          created_at: activity.createdAt,
         })),
         source_manifest: tree.sourceManifest.map((source) => ({
           source_kind: source.sourceKind,
@@ -389,21 +471,6 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       if (!binding) throw new Error("conductor_binding_missing");
       return binding;
     }
-    const requestedHash = typeof body.conductor_short_hash === "string"
-      ? body.conductor_short_hash
-      : typeof body.project === "object" && body.project !== null && !Array.isArray(body.project) &&
-          typeof body.project.conductor_short_hash === "string"
-        ? body.project.conductor_short_hash
-        : undefined;
-    if (!requestedHash && this.#activeInstances.size === 1) {
-      return this.#bindingForId([...this.#activeInstances.keys()][0]!)!;
-    }
-    if (!requestedHash) throw new Error("conductor_binding_missing");
-    const candidates = this.#allBindings().filter(
-      ({ conductorShortHash }) => conductorShortHash === requestedHash,
-    );
-    if (candidates.length === 1) return candidates[0]!;
-    if (candidates.length > 1) throw new Error("conductor_binding_ambiguous");
     throw new Error("conductor_binding_missing");
   }
 
@@ -588,6 +655,7 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
       title: requiredString(body.title, "linear_workflow_title_missing"),
       description: requiredString(body.description, "linear_workflow_description_missing"),
+      labelNames: requiredStringArray(body.label_names, "linear_workflow_label_names_missing"),
       isArchived: requiredBoolean(body.is_archived, "linear_workflow_archive_missing"),
       parentAssignment: workflowParentAssignment(
         body.parent_assignment,
@@ -599,6 +667,15 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
   if (body.kind === "append_workflow_comment") {
     return { ...common, kind: body.kind, target: targetValue,
       body: requiredString(body.body, "linear_workflow_comment_body_missing") };
+  }
+  if (body.kind === "create_workflow_attachment") {
+    return {
+      ...common,
+      kind: body.kind,
+      target: targetValue,
+      title: requiredString(body.title, "linear_workflow_attachment_title_missing"),
+      url: requiredString(body.url, "linear_workflow_attachment_url_missing"),
+    };
   }
   throw new Error("linear_workflow_kind_unsupported");
 }
@@ -751,4 +828,8 @@ function requiredStringArray(value: JsonValue | undefined, code: string): string
   const labels = value as string[];
   if (new Set(labels).size !== labels.length) throw new Error("linear_workflow_label_duplicate");
   return labels;
+}
+
+function isIdentifier(value: string): boolean {
+  return value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(value);
 }

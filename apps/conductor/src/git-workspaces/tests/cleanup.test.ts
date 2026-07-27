@@ -78,9 +78,16 @@ async function setup() {
   await runCommand("git", ["-C", repository, "commit", "-m", "initial"]);
   await runCommand("git", ["-C", repository, "push", "-u", "origin", "HEAD:main"]);
   const git = new NativeGitWorkspaceImpl(repository, worktrees);
-  const workspace = await git.ensureWorkspace({
-    rootIssueId: "root-1", rootIdentifier: "SYM-1", baseBranch: "main",
+  const gate = await git.inspectRootWorktreeGate({
+    repositoryIdentity: "repository-1", rootIssueId: "root-1",
+    rootIdentifier: "SYM-1", baseBranch: "main", executionKind: "fresh",
+    requiredRevisions: [],
   });
+  if (gate.result.kind !== "fresh_missing") throw new Error("fresh_missing_gate_expected");
+  const workspace = (await git.materializeRootWorkspace({
+    repositoryIdentity: "repository-1", rootIssueId: "root-1",
+    rootIdentifier: "SYM-1", baseBranch: "main", expectedGate: gate.result,
+  })).workspace;
   await runCommand("git", ["-C", workspace.worktreePath, "push", "-u", "origin", workspace.branch]);
   return { git, repository, workspace };
 }

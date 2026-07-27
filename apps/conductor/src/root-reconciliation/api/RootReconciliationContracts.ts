@@ -1,16 +1,14 @@
-import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
+import type { GitWorkspace, GitWorkspaceSnapshot, RootWorktreeGateResult } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
   EvidenceReference,
-  PlanContract,
+  FindingProposal,
   PlanContractProposal,
   ProposedWorkDag,
-  RootConvergencePolicy,
-  RootConvergenceView,
-  RootReconcilerFailureRecord,
   RootReconcilerModelTurnRecord,
   StageModelTurnRecord,
-} from "./ManagedRecords.js";
+} from "./StageContracts.js";
+import type { RootConvergencePolicySnapshot, RootConvergenceView } from "./RootConvergence.js";
 import type { DiscoveredRoot } from "./RootModels.js";
 
 export type RootTree = LinearWorkflowTreeSnapshot;
@@ -18,21 +16,31 @@ export type RootTreeIssue = RootTree["issues"][number];
 export type RootCommentSnapshot = RootTree["comments"][number];
 export type RootRelationSnapshot = RootTree["relations"][number];
 export type RootIssueKind = NonNullable<RootTreeIssue["issue_kind"]>;
-export type RootFactIssueKind = "root" | "cycle" | "plan" | "work" | "verify" | "human_action";
+export type RootFactIssueKind = "root" | "cycle" | "plan" | "work" | "verify" | "finding";
 export type RootActorKind = "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
 export type LinearFactState =
   | "Draft" | "Todo" | "Planning" | "Sealed" | "Executing" | "Verifying" | "In Progress"
   | "In Review" | "Needs Approval" | "Needs Info" | "Inconclusive" | "Escalated" | "Approved" | "Rejected" | "Answered" | "Succeeded"
   | "Changes Required" | "Done" | "Canceled" | "Failed";
 
-export interface RootReconciliationView {
+interface RootReconciliationViewBase {
   root: DiscoveredRoot;
   tree: RootTree;
-  git: GitWorkspaceSnapshot;
   observedAt: string;
   treeDigest: string;
   complete: true;
 }
+
+export type RootReconciliationView = RootReconciliationViewBase & (
+  | {
+    worktreeGate: Extract<RootWorktreeGateResult, { kind: "valid" }>;
+    workspace: GitWorkspace;
+    git: GitWorkspaceSnapshot;
+  }
+  | {
+    worktreeGate: Exclude<RootWorktreeGateResult, { kind: "valid" }>;
+  }
+);
 
 export interface ReconcilerLimits {
   maxContextBytes: number;
@@ -44,7 +52,7 @@ export interface ReconcilerLimits {
 }
 
 export interface RootSourceManifestEntry {
-  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_status_catalog";
+  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_attachment" | "linear_activity" | "linear_status_catalog";
   sourceId: string;
   sourceVersion: string;
   actorKind: RootActorKind;
@@ -106,101 +114,17 @@ export interface RootCommentThreadState {
   observedAt: string;
 }
 
-export interface RootRecordReference {
-  recordId: string;
-  recordKind: RootRecordKind;
-  recordVersion: "1";
-  writeId: string;
-}
-
 export interface RootConvergenceSnapshot {
-  policy: RootConvergencePolicy;
+  policy: RootConvergencePolicySnapshot;
   view: RootConvergenceView;
-  assessment?: RootRecordReference;
-}
-
-export type RootRecordKind =
-  | "root_ownership"
-  | "workflow_issue"
-  | "root_convergence_policy"
-  | "root_directive"
-  | "root_reconciler_failure"
-  | "root_reconciler_reply"
-  | "delivery"
-  | "model_turn"
-  | "stage_execution"
-  | "plan_contract"
-  | "plan_contract_supersession"
-  | "plan_result"
-  | "work_result"
-  | "stage_result"
-  | "verify_result"
-  | "human_action_request"
-  | "human_action_resolution"
-  | "finding"
-  | "finding_disposition"
-  | "progress_assessment"
-  | "cycle_outcome"
-  | "convergence"
-  | "workflow_timeline";
-
-export interface RootHumanActionRecord {
-  actionId: string;
-  actionIssueId: string;
-  actionKind: HumanActionKind;
-  parentScope: "root" | "cycle";
-  cycleIssueId?: string;
-  status: LinearFactState;
-  isArchived: boolean;
-  relatedIssueIds: string[];
-}
-
-export interface RootFinding {
-  findingId: string;
-  category: "product" | "code" | "test" | "infra" | "requirement" | "policy";
-  severity: "critical" | "high" | "medium" | "low";
-  summary: string;
-}
-
-export interface RootBudgetSnapshot {
-  turnsUsed: number;
-  turnsRemaining: number;
-  tokensUsed: number;
-  tokensRemaining: number;
-}
-
-export interface RootPlanCompletedResult {
-  resultId: string;
-  rootIssueId: string;
-  cycleIssueId: string;
-  nodeIssueId: string;
-  summary: string;
-  completedAt: string;
-  planContractDigest: string;
-  planContract: PlanContractProposal;
-  proposedWorkDag: ProposedWorkDag;
-  risks: string[];
-  requiredPermissions: string[];
-  evidenceRefs: EvidenceReference[];
 }
 
 export interface RootCycleObservation {
   cycleIssue: RootFactIssue;
-  predecessorCycleIssueId: string;
   cycleStatus: LinearFactState;
   isArchived: boolean;
-  activePlanContract?: PlanContract;
-  budget?: RootBudgetSnapshot;
-  outcome?: RootRecordReference;
   issues: RootFactIssue[];
   relations: RootFactRelation[];
-  planResults: RootRecordReference[];
-  planCompletedResults: RootPlanCompletedResult[];
-  workResults: RootRecordReference[];
-  verifyResults: RootRecordReference[];
-  findings: RootFinding[];
-  humanActionRecords: RootHumanActionRecord[];
-  humanActionResolutions: HumanActionResolution[];
 }
 
 export interface RootObservation {
@@ -210,7 +134,6 @@ export interface RootObservation {
   acceptanceCriteria: RootAcceptanceCriterion[];
   constraints: string[];
   rootStatus: LinearFactState;
-  ownership: RootRecordReference;
   convergence: RootConvergenceSnapshot;
 }
 
@@ -222,7 +145,7 @@ export interface RootGitFacts {
 }
 
 export interface MechanicalViolation {
-  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "missing_stage_result" | "cycle_terminal_outcome_mismatch" | "invalid_tree";
+  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "invalid_tree";
   sourceIssueIds: string[];
   summary: string;
 }
@@ -232,11 +155,9 @@ export interface RootBootstrapSnapshot {
   cycles: RootCycleObservation[];
   issues: RootFactIssue[];
   relations: RootFactRelation[];
-  managedRecords: RootRecordReference[];
   userComments: RootFactComment[];
   userCommentThreadStates: RootCommentThreadState[];
-  gitFacts: RootGitFacts;
-  delivery: RootRecordReference | null;
+  worktreeGate: RootWorktreeGateResult;
   mechanicalViolations: MechanicalViolation[];
 }
 
@@ -263,13 +184,7 @@ export type RootDeltaChange =
   | (RootDeltaChangeBase & { kind: "comment_removed" })
   | (RootDeltaChangeBase & { kind: "relation_current_value"; relation: RootFactRelation })
   | (RootDeltaChangeBase & { kind: "relation_removed" })
-  | (RootDeltaChangeBase & { kind: "managed_record_current_value"; record: RootRecordReference })
-  | (RootDeltaChangeBase & { kind: "managed_record_removed" })
-  | (RootDeltaChangeBase & { kind: "plan_contract_current_value"; planIssueId: string; planContract: PlanContract })
-  | (RootDeltaChangeBase & { kind: "plan_completed_result_current_value"; planCompletedResult: RootPlanCompletedResult })
-  | (RootDeltaChangeBase & { kind: "plan_contract_removed"; cycleIssueId: string; planIssueId: string; planContractDigest: string })
-  | (RootDeltaChangeBase & { kind: "plan_completed_result_removed"; cycleIssueId: string; resultId: string })
-  | (RootDeltaChangeBase & { kind: "git_facts_current_value"; gitFacts: RootGitFacts })
+  | (RootDeltaChangeBase & { kind: "worktree_gate_current_value"; worktreeGate: RootWorktreeGateResult })
   | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] })
   | (RootDeltaChangeBase & { kind: "convergence_current_value"; convergence: RootConvergenceSnapshot });
 
@@ -292,7 +207,6 @@ export interface RootDirectiveBase {
   evidenceRefs: EvidenceRef[];
   consumedInputIds: string[];
   commentReplies: UserCommentReply[];
-  humanActionResolutions: HumanActionResolution[];
 }
 
 export type RootDirective = RootDirectiveBase & {
@@ -301,12 +215,14 @@ export type RootDirective = RootDirectiveBase & {
     | ExecuteWorkDirective
     | ExecuteVerifyDirective
     | RerunStageDirective
-    | MaterializeApprovedPlanDagDirective
+    | MaterializePlanNodeAction
     | ReviseRootTreeDirective
     | ReplanCurrentCycleDirective
     | SupersedeCycleDirective
     | CreateCycleDirective
-    | RequestHumanActionDirective
+    | CreateRootWorkspaceAction
+    | InvalidateExecutionGenerationAction
+    | CreateHumanActionAction
     | ConcludeCycleDirective
     | ConcludeRootDirective
     | CancelRootDirective
@@ -314,7 +230,22 @@ export type RootDirective = RootDirectiveBase & {
     | AcknowledgeDirective;
 };
 
-export interface EvidenceRef { referenceId: string; sourceKind: "linear_issue" | "linear_comment" | "linear_record" | "git" | "check" | "result"; }
+export interface CreateRootWorkspaceAction {
+  kind: "create_root_workspace";
+  rootIssueId: string;
+  expectedRootRemoteVersion: string;
+  expectedWorktreeGate: Extract<RootWorktreeGateResult, { kind: "fresh_missing" | "recoverable_missing" }>;
+}
+
+export interface InvalidateExecutionGenerationAction {
+  kind: "invalidate_execution_generation";
+  rootIssueId: string;
+  cycleIssueId: string;
+  expectedRootRemoteVersion: string;
+  expectedWorktreeGate: Extract<RootWorktreeGateResult, { kind: "execution_generation_invalid" }>;
+}
+
+export interface EvidenceRef { referenceId: string; sourceKind: "linear_issue" | "linear_comment" | "git" | "check" | "result"; }
 export interface RootAcceptanceCriterion { criterionKey: string; statement: string; verificationMethod: string; }
 
 export type UserCommentInput =
@@ -373,20 +304,6 @@ export interface UserCommentReply {
   threadAction: "resolve" | "keep_open" | "reopen";
 }
 
-export interface HumanActionResolution {
-  resolutionId: string;
-  actionId: string;
-  actionIssueId: string;
-  actionKind?: HumanActionKind;
-  outcome: "approved" | "rejected" | "answered" | "canceled" | "granted" | "denied" | "waived" | "override_applied" | "override_rejected";
-  terminalStatus: "Approved" | "Rejected" | "Answered" | "Canceled";
-  terminalRemoteVersion: string;
-  proposalDigest: string;
-  sourceCommentIds?: string[];
-  actorKind: "human";
-  resolvedAt: string;
-}
-
 export interface ExecutePlanDirective {
   kind: "execute_plan";
   cycleIssueId: string;
@@ -420,13 +337,21 @@ export interface RerunStageDirective {
   reason: string;
   preservedEvidenceRefs: EvidenceRef[];
 }
-export interface MaterializeApprovedPlanDagDirective {
-  kind: "materialize_approved_plan_dag";
+export interface MaterializePlanNodeAction {
+  kind: "materialize_plan_node";
   cycleIssueId: string;
+  expectedCycleRemoteVersion: string;
   planIssueId: string;
-  planContractDigest: string;
-  approvalActionIssueId: string;
-  approvalResolutionId: string;
+  expectedPlanRemoteVersion: string;
+  approvalRequestCommentId: string;
+  expectedApprovalRequestRemoteVersion: string;
+  approvalReplyCommentId: string;
+  expectedApprovalReplyRemoteVersion: string;
+  nodeKind: "work" | "verify";
+  title: string;
+  description: string;
+  order: number;
+  dependencyIssueIds: string[];
 }
 
 export type TreePrecondition = {
@@ -436,7 +361,7 @@ export type TreePrecondition = {
   expectedStatus?: LinearFactState;
 };
 export type TreeOperation =
-  | { kind: "create_node"; issueKind: "plan" | "work" | "verify" | "human_action"; title: string; description: string; parentIssueId: string; status: LinearFactState; precondition: TreePrecondition }
+  | { kind: "create_node"; issueKind: "plan" | "work" | "verify"; title: string; description: string; parentIssueId: string; status: LinearFactState; precondition: TreePrecondition }
   | { kind: "update_node"; precondition: TreePrecondition; title: string; description: string; status: LinearFactState }
   | { kind: "archive_node"; precondition: TreePrecondition }
   | { kind: "restore_node"; precondition: TreePrecondition }
@@ -450,7 +375,6 @@ export interface ReplanCurrentCycleDirective {
   kind: "replan_current_cycle";
   cycleIssueId: string;
   reason: string;
-  supersededPlanContractIds: [string, ...string[]];
   invalidateExecutionIds: string[];
   preserveEvidenceRefs: EvidenceRef[];
   archiveOrRestoreOperations: TreeOperation[];
@@ -474,21 +398,16 @@ export interface CreateCycleDirective {
   inheritedFactRefs: EvidenceRef[];
   invalidatedDeliveryRefs: EvidenceRef[];
 }
-export type HumanActionKind = "plan_review" | "clarification" | "permission" | "finding_waiver" | "convergence_override";
-export interface RequestHumanActionDirective {
-  kind: "request_human_action";
-  parentScope: "root" | "cycle";
+export type HumanActionKind = "plan_approval" | "information" | "permission" | "finding_waiver";
+export interface CreateHumanActionAction {
+  kind: "create_human_action";
   rootIssueId: string;
-  cycleIssueId?: string;
   actionKind: HumanActionKind;
-  title: string;
-  description: string;
-  relatedIssueIds: string[];
-  proposalDigest: string;
-  expectedParentRemoteVersion: string;
-  requestedDecision: string;
+  targetIssueIds: string[];
+  expectedRootRemoteVersion: string;
+  question: string;
+  context: string;
   options: string[];
-  commentRequired: boolean;
   evidenceRefs: EvidenceRef[];
 }
 export interface ConcludeCycleDirective {
@@ -518,9 +437,20 @@ export interface RootReconcilerOpenInput {
   bootstrap: RootBootstrap;
   limits: ReconcilerLimits;
 }
+export interface RootReconcilerFailure {
+  failureId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  targetRootDigest: string;
+  attemptedInputIds: string[];
+  modelTurn: RootReconcilerModelTurnRecord;
+  category: "transport_failed" | "timed_out" | "schema_invalid" | "stale_output" | "canceled";
+  sanitizedReason: string;
+  failedAt: string;
+}
 export type RootReconcilerTurnResult =
   | { kind: "directive"; directive: RootDirective }
-  | { kind: "failed"; failure: RootReconcilerFailureRecord };
+  | { kind: "failed"; failure: RootReconcilerFailure };
 
 export interface RootReconcilerOpenResult {
   kind: "opened";
@@ -584,7 +514,7 @@ export type StageResult = StageResultBase & {
     commitRevision?: string;
     checks?: string[];
     conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
-    findings?: string[];
+    findings?: FindingProposal[];
     verifiedRevision?: string;
     errorCode?: string;
   };

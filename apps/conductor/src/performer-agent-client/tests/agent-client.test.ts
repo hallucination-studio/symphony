@@ -12,10 +12,8 @@ import {
   PersistentPerformerAgentChannelFactory,
   type PerformerAgentChannelFactory,
 } from "../internal/PerformerAgentChannel.js";
-import type { PlanContract } from "../../root-reconciliation/api/ManagedRecords.js";
 import type {
   RootCycleObservation,
-  RootPlanCompletedResult,
   RootReconcilerOpenInput,
   StageTurnInput,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
@@ -69,6 +67,7 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
         labels: [],
         is_archived: false,
         remote_version: "root-v1",
+        created_at: "2026-07-23T00:00:00Z",
         updated_at: "2026-07-23T00:00:00Z",
       }, {
         issue_id: "cycle-1",
@@ -87,6 +86,7 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
         is_archived: false,
         issue_kind: "cycle",
         remote_version: "cycle-v1",
+        created_at: "2026-07-23T00:00:00Z",
         updated_at: "2026-07-23T00:00:00Z",
       }, {
         issue_id: `${role}-1`,
@@ -105,10 +105,12 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
         is_archived: false,
         issue_kind: role,
         remote_version: `${role}-v1`,
+        created_at: "2026-07-23T00:00:00Z",
         updated_at: "2026-07-23T00:00:00Z",
       }],
       comments: [],
       relations: [],
+      attachments: [],
       source_manifest: [],
       coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-23T00:00:00Z",
@@ -229,6 +231,38 @@ function completedPlanResult(requestId: string) {
   };
 }
 
+function changesRequiredResult(requestId: string) {
+  return {
+    protocol_version: "1",
+    request_id: requestId,
+    stage_execution_id: "verify-execution",
+    role: "verify",
+    role_session_id: "verify-session",
+    role_turn_id: "verify-turn",
+    root_issue_id: "root-1",
+    cycle_issue_id: "cycle-1",
+    target_issue_id: "verify-1",
+    observed_tree_digest: "tree-1",
+    context_digest: "context-1",
+    completed_at: "2026-07-23T00:00:01Z",
+    model_turn: stageModelTurn("verify", "verify_changes_required"),
+    outcome: {
+      kind: "verify_changes_required",
+      target_revision: "head-1",
+      acceptance_results: [],
+      findings: [{
+        finding_id: "finding-1",
+        category: "code",
+        severity: "high",
+        description: "Null input crashes the parser.",
+        evidence_refs: [{ reference_id: "parser-regression", source_kind: "check" }],
+        related_work_issue_ids: ["work-1"],
+      }],
+      checks: [],
+    },
+  };
+}
+
 function openInput(requestId = "request-1"): RootReconcilerOpenInput {
   return {
     protocolVersion: 1,
@@ -261,22 +295,11 @@ function bootstrap() {
       root: {
         issue, objective: "Root description", scope: "Root", acceptanceCriteria: [], constraints: [],
         rootStatus: "Todo" as const,
-        ownership: {
-          recordId: "root-1:ownership",
-          recordKind: "root_ownership" as const,
-          recordVersion: "1" as const,
-          writeId: "root-1:ownership",
-        },
         convergence: {
           policy: {
-            kind: "root_convergence_policy" as const,
-            version: 1 as const,
-            policyId: "root-convergence-policy-1",
-            rootIssueId: "root-1",
             maxCyclesPerRoot: 3,
             maxSameOpenFindingCycles: 2,
             maxConsecutiveNoProgress: 2,
-            maxTotalTokens: 10_000,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-24T00:00:00Z",
           },
@@ -284,17 +307,22 @@ function bootstrap() {
             cycleCount: 0,
             openFindingPersistence: [],
             consecutiveNoProgress: 0,
-            settledTokens: 0,
-            openTokenReservations: [],
             activeCycleRepairAttempts: 0,
             isDeadlineExceeded: false,
             rootIsCanceled: false,
           },
         },
       },
-      cycles: [], issues: [issue], relations: [], managedRecords: [], userComments: [], userCommentThreadStates: [],
-      gitFacts: { headRevision: "head-1", baselineRevision: "head-1", statusSummary: "clean", changedPaths: [] },
-      delivery: null, mechanicalViolations: [],
+      cycles: [], issues: [issue], relations: [], userComments: [], userCommentThreadStates: [],
+      worktreeGate: {
+        kind: "valid" as const,
+        repositoryIdentity: "repository-1",
+        branch: "symphony/root-1",
+        headRevision: "head-1",
+        isClean: true,
+        changedPaths: [],
+      },
+      mechanicalViolations: [],
     },
     sourceManifest: [], coverage: { isComplete: true, omissions: [] }, rootDigest: "tree-1", pendingInputIds: [],
   };
@@ -313,7 +341,6 @@ function rootDirective() {
     evidence_refs: [],
     consumed_input_ids: [],
     comment_replies: [],
-    human_action_resolutions: [],
     action: { kind: "wait", reason_code: "initial_bootstrap", blocking_fact_refs: [{ reference_id: "bootstrap", source_kind: "linear_issue" }] },
   };
 }
@@ -331,7 +358,6 @@ function waitDirective(requestId: string, digest: string, turnId: string) {
     evidence_refs: [],
     consumed_input_ids: [],
     comment_replies: [],
-    human_action_resolutions: [],
     action: { kind: "wait", reason_code: "human", blocking_fact_refs: [{ reference_id: "fact-1", source_kind: "result" }] },
   };
 }
@@ -374,98 +400,36 @@ function rootFailure(requestId: string, turnId: string, targetRootDigest: string
   };
 }
 
-function planFacts(): {
-  contract: PlanContract;
-  result: RootPlanCompletedResult;
-  cycle: RootCycleObservation;
-} {
-  const proposal = {
-    objective: "Persist the complete Plan Contract.",
-    includedScope: ["apps/conductor"],
-    excludedScope: [],
-    assumptions: [],
-    constraints: ["Use durable Linear facts."],
-    acceptanceCriteria: [{
-      criterionKey: "contract-persisted",
-      statement: "The complete Plan Contract is stored before review.",
-      verificationMethod: "Read the Plan Contract record.",
-    }],
-    verificationRequirements: ["npm test -w @symphony/conductor"],
-  };
-  const proposedWorkDag = {
-    workNodes: [{
-      proposalKey: "persist-contract",
-      title: "Persist the Plan Contract",
-      description: "Write the canonical Plan Contract record.",
-      expectedOutcome: "The contract can be reconstructed after restart.",
-      requiredChecks: ["managed-record-read-back"],
-      dependencyProposalKeys: [],
-    }],
-    dependencyEdges: [],
-    verifyNode: {
-      title: "Verify Plan Contract persistence",
-      acceptanceCriteria: [{
-        criterionKey: "contract-read-back",
-        statement: "The stored contract matches the Plan result.",
-        verificationMethod: "Read the Plan Contract record.",
-      }],
-      requiredChecks: ["managed-record-read-back"],
-    },
-  };
-  const contract: PlanContract = {
-    kind: "plan_contract",
-    version: 1,
-    rootIssueId: "root-1",
-    cycleIssueId: "cycle-1",
-    planContractDigest: "a".repeat(64),
-    ...proposal,
-    proposedWorkDag,
-  };
-  const result: RootPlanCompletedResult = {
-    resultId: "plan-result-1",
-    rootIssueId: "root-1",
-    cycleIssueId: "cycle-1",
-    nodeIssueId: "plan-1",
-    summary: "The complete Plan is ready for review.",
-    completedAt: "2026-07-23T00:00:01Z",
-    planContractDigest: contract.planContractDigest,
-    planContract: proposal,
-    proposedWorkDag,
-    risks: [],
-    requiredPermissions: [],
-    evidenceRefs: [],
-  };
+function planFacts(): { cycle: RootCycleObservation } {
   const planIssue = {
     issueId: "plan-1",
     issueKind: "plan" as const,
     title: "Plan",
-    description: "Review the proposed execution.",
+    description: [
+      "# Objective",
+      "Persist the complete Plan as native Linear facts.",
+      "",
+      "# Work",
+      "- Persist the Plan on this Issue.",
+      "",
+      "# Verification",
+      "- npm test -w @symphony/conductor",
+    ].join("\n"),
     status: "In Review" as const,
     isArchived: false,
-    labels: [],
+    labels: ["Plan"],
     remoteVersion: "plan-v1",
   };
   return {
-    contract,
-    result,
     cycle: {
       cycleIssue: {
         issueId: "cycle-1", issueKind: "cycle", title: "Cycle", description: "Current Cycle",
-        status: "In Progress", isArchived: false, labels: [], remoteVersion: "cycle-v1",
+        status: "In Progress", isArchived: false, labels: ["Cycle"], remoteVersion: "cycle-v1",
       },
-      predecessorCycleIssueId: "none",
       cycleStatus: "In Progress",
       isArchived: false,
-      activePlanContract: contract,
       issues: [planIssue],
       relations: [],
-      planResults: [],
-      planCompletedResults: [result],
-      workResults: [],
-      verifyResults: [],
-      findings: [],
-      humanActionRecords: [],
-      humanActionResolutions: [],
     },
   };
 }
@@ -508,7 +472,7 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal(sent.performer_profile_id, "profile-1");
   const root = ((sent.bootstrap as Record<string, unknown>).root_snapshot as Record<string, unknown>).root as Record<string, unknown>;
   const convergence = root.convergence as Record<string, unknown>;
-  assert.equal((convergence.policy as Record<string, unknown>).policy_id, "root-convergence-policy-1");
+  assert.equal((convergence.policy as Record<string, unknown>).max_cycles_per_root, 3);
   assert.equal((convergence.view as Record<string, unknown>).active_cycle_repair_attempts, 0);
   assert.deepEqual((sent.bootstrap as Record<string, unknown>).source_manifest, [{
     source_kind: "linear_status_catalog",
@@ -593,7 +557,7 @@ test("agent client discards a session after an advance returns a closed Root fai
   assert.equal(calls.length, 2);
 });
 
-test("agent client carries canonical Plan and convergence facts in Root bootstrap and delta wires", async () => {
+test("agent client carries native Plan Issue and convergence facts in Root bootstrap and delta wires", async () => {
   const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
@@ -616,13 +580,10 @@ test("agent client carries canonical Plan and convergence facts in Root bootstra
     root_snapshot: { cycles: Array<Record<string, unknown>> };
   };
   const cycle = bootstrap.root_snapshot.cycles[0]!;
-  const contract = cycle.active_plan_contract as Record<string, unknown>;
-  const result = (cycle.plan_completed_results as Array<Record<string, unknown>>)[0]!;
-  assert.equal(contract.plan_contract_digest, "a".repeat(64));
-  assert.equal(contract.objective, "Persist the complete Plan Contract.");
-  assert.equal(result.result_id, "plan-result-1");
-  assert.equal((result.plan_contract as Record<string, unknown>).objective, "Persist the complete Plan Contract.");
-  assert.equal(((result.proposed_work_dag as Record<string, unknown>).work_nodes as unknown[]).length, 1);
+  const plan = (cycle.issues as Array<Record<string, unknown>>)[0]!;
+  assert.equal(plan.issue_kind, "plan");
+  assert.equal(plan.status, "In Review");
+  assert.match(String(plan.description), /Persist the complete Plan as native Linear facts/u);
 
   await client.advanceRootReconciler({
     requestId: "advance-request",
@@ -634,12 +595,9 @@ test("agent client carries canonical Plan and convergence facts in Root bootstra
       targetRootDigest: "tree-2",
       changes: [
         {
-          kind: "plan_contract_current_value", sourceId: "plan-contract-comment-1", sourceVersion: "comment-v1",
-          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z", planIssueId: "plan-1", planContract: facts.contract,
-        },
-        {
-          kind: "plan_completed_result_current_value", sourceId: "plan-result-comment-1", sourceVersion: "comment-v1",
-          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z", planCompletedResult: facts.result,
+          kind: "issue_current_value", sourceId: "plan-1", sourceVersion: "plan-v2",
+          actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z",
+          issue: { ...facts.cycle.issues[0]!, status: "Approved", remoteVersion: "plan-v2" },
         },
         {
           kind: "convergence_current_value", sourceId: "root-1", sourceVersion: "convergence-v2",
@@ -660,14 +618,12 @@ test("agent client carries canonical Plan and convergence facts in Root bootstra
   const delta = calls[1]!.delta as { changes: Array<Record<string, unknown>> };
   assert.equal("root_snapshot" in delta, false);
   assert.deepEqual(delta.changes.map(({ kind }) => kind), [
-    "plan_contract_current_value",
-    "plan_completed_result_current_value",
+    "issue_current_value",
     "convergence_current_value",
   ]);
-  assert.equal(((delta.changes[0]!.plan_contract as Record<string, unknown>).proposed_work_dag as Record<string, unknown>).verify_node !== undefined, true);
-  assert.equal((delta.changes[1]!.plan_completed_result as Record<string, unknown>).summary, "The complete Plan is ready for review.");
+  assert.equal((delta.changes[0]!.issue as Record<string, unknown>).status, "Approved");
   assert.equal(
-    (((delta.changes[2]!.convergence as Record<string, unknown>).view as Record<string, unknown>).active_cycle_repair_attempts),
+    (((delta.changes[1]!.convergence as Record<string, unknown>).view as Record<string, unknown>).active_cycle_repair_attempts),
     1,
   );
 });
@@ -788,6 +744,34 @@ test("agent client preserves every validated completed Plan field", async () => 
   });
 });
 
+test("agent client preserves every validated Verify Finding field", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => {
+      decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
+      return changesRequiredResult(requestId) as JsonValue;
+    }),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeVerifyTurn(stageInput("verify"));
+
+  assert.deepEqual(result.outcome, {
+    kind: "verify_changes_required",
+    verifiedRevision: "head-1",
+    conclusion: "changes_required",
+    findings: [{
+      findingId: "finding-1",
+      category: "code",
+      severity: "high",
+      description: "Null input crashes the parser.",
+      evidenceRefs: [{ referenceId: "parser-regression", sourceKind: "check" }],
+      relatedWorkIssueIds: ["work-1"],
+    }],
+  });
+});
+
 test("agent client sends role-specific closed stage contexts", async () => {
   const calls: Record<string, unknown>[] = [];
   const client = new SessionPerformerAgentClientImpl({
@@ -817,16 +801,16 @@ test("agent client sends role-specific closed stage contexts", async () => {
     is_fast_mode_enabled: false,
   });
   assert.deepEqual(Object.keys(requests[0]!.context as object).sort(), [
-    "current_git_facts", "current_plan_issue", "cycle", "human_resolutions", "prior_plan_contracts",
-    "prior_plan_results", "required_output", "root_contract", "unresolved_findings",
+    "current_git_facts", "current_plan_issue", "cycle", "human_action_thread_facts", "prior_approved_plan_facts",
+    "prior_plan_attempt_facts", "required_output", "root_contract", "unresolved_finding_issue_facts",
   ]);
   assert.deepEqual(Object.keys(requests[1]!.context as object).sort(), [
     "approved_plan_contract", "completed_work_evidence", "current_active_work_dag", "git_baseline",
-    "human_resolutions", "prior_turn_results", "selected_work", "workspace_capability",
+    "human_action_thread_facts", "prior_work_attempt_facts", "selected_work", "workspace_capability",
   ]);
   assert.deepEqual(Object.keys(requests[2]!.context as object).sort(), [
-    "approved_plan_contract", "archived_cycle_nodes", "complete_active_cycle_dag", "completed_work_results",
-    "human_resolutions", "immutable_target_revision", "repository_snapshot", "unresolved_findings",
+    "approved_plan_contract", "archived_cycle_nodes", "complete_active_cycle_dag", "completed_work_issue_facts",
+    "human_action_thread_facts", "immutable_target_revision", "repository_snapshot", "unresolved_finding_issue_facts",
     "verification_requirements",
   ]);
 });
@@ -874,7 +858,7 @@ test("agent client normalizes the Root directive wire fields", async () => {
         protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
         reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_target_root_digest: "tree-1",
         model_turn: rootModelTurn("turn-1"),
-        rationale: "execute the plan", evidence_refs: [], consumed_input_ids: [], comment_replies: [], human_action_resolutions: [],
+        rationale: "execute the plan", evidence_refs: [], consumed_input_ids: [], comment_replies: [],
         action: {
           kind: "execute_plan", cycle_issue_id: "cycle-1", plan_issue_id: "plan-1", plan_goal: "plan",
           required_outputs: [], prior_plan_result_ids: [], human_resolution_ids: [],

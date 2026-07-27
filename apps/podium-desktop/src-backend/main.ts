@@ -1,9 +1,10 @@
 import { createReadStream, createWriteStream } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 import {
-  decodeDesktopHostDesktopHostMessage,
-  decodePodiumConductorPodiumConductorMessage,
+  decodeDesktopHostMessage,
+  decodePodiumConductorMessage,
   type JsonValue,
 } from "@symphony/contracts";
 import {
@@ -15,6 +16,7 @@ import {
   type PodiumDesktopHostPorts,
   type PodiumClientServices,
   type PodiumConductorServices,
+  type PodiumConductorChannel,
 } from "@symphony/podium";
 import { FramedProtocolPeer } from "./FramedProtocolPeer.js";
 
@@ -96,53 +98,41 @@ export async function runPodiumBackend(
     createProductionComposition,
 ) {
   const dataRoot = required(environment.SYMPHONY_PODIUM_DATA_ROOT, "podium_data_root_missing");
-  const conductorFd = positiveInteger(
-    environment.SYMPHONY_CONDUCTOR_IPC_FD,
-    "conductor_ipc_fd_invalid",
+  const conductorSocketPath = required(
+    environment.SYMPHONY_CONDUCTOR_SOCKET_PATH,
+    "conductor_socket_path_missing",
   );
   const hostFd = positiveInteger(
     environment.SYMPHONY_HOST_IPC_FD,
     "host_ipc_fd_invalid",
   );
-  const conductorInput = streamInput(conductorFd);
-  const conductorOutput = streamOutput(conductorFd);
   const hostInput = streamInput(hostFd);
   const hostOutput = streamOutput(hostFd);
   const composition = await createComposition({ environment, dataRoot });
-  const conductorPeer = new FramedProtocolPeer(
-    conductorInput,
-    conductorOutput,
-    {
-      decode: decodePodiumConductorPodiumConductorMessage,
-      secretLength: profileSecretLength,
-      handleRequest: (body, secret) =>
-        new PodiumConductorProtocolHandler(composition.conductorServices).handle(
-          {
-            protocol_version: "1",
-            request_id: "conductor-incoming",
-            body,
-          },
-          secret,
-        ).then((response) => (
-          response as { body: JsonValue }
-        ).body),
-    },
+  const conductorChannels = new ConductorChannelRegistry();
+  const conductorServer = await serveConductorChannels(
+    conductorSocketPath,
+    composition.conductorServices,
+    conductorChannels,
   );
   const clientServices: { current?: PodiumClientServices } = {};
   const hostPeer = new FramedProtocolPeer(hostInput, hostOutput, {
-    decode: decodeDesktopHostDesktopHostMessage,
+    decode: decodeDesktopHostMessage,
     secretLength: () => 0,
     async handleRequest(body) {
       const event = object(body, "host_event_invalid");
       if (event.kind === "process_observed_exit") {
+        const bindingId = requiredString(event.binding_id, "binding_id_missing");
+        const instanceId = requiredString(event.instance_id, "instance_id_missing");
         composition.conductorServices.observeExit({
-          bindingId: requiredString(event.binding_id, "binding_id_missing"),
-          instanceId: requiredString(event.instance_id, "instance_id_missing"),
+          bindingId,
+          instanceId,
           observedAt: requiredString(event.observed_at, "observed_at_missing"),
           ...(typeof event.sanitized_reason === "string"
             ? { sanitizedReason: event.sanitized_reason }
             : {}),
         });
+        conductorChannels.revoke(bindingId, instanceId);
         return event;
       }
       if (event.kind !== "oauth_return" || !clientServices.current) {
@@ -158,7 +148,7 @@ export async function runPodiumBackend(
       return event;
     },
   });
-  const host = hostPorts(hostPeer, conductorPeer, dataRoot);
+  const host = hostPorts(hostPeer, conductorChannels, dataRoot);
   try {
     clientServices.current = await composition.createClientServices(host);
     await servePodiumClient(
@@ -167,6 +157,7 @@ export async function runPodiumBackend(
       process.stdout,
     );
   } finally {
+    await closeServer(conductorServer);
     composition.close();
   }
 }
@@ -256,9 +247,126 @@ function writeClientResponse(
   });
 }
 
+class ConductorChannelRegistry {
+  readonly #channels = new Map<string, {
+    conductorId: string;
+    instanceId: string;
+    peer: FramedProtocolPeer;
+    channel: PodiumConductorChannel;
+  }>();
+
+  register(
+    bindingId: string,
+    conductorId: string,
+    instanceId: string,
+    peer: FramedProtocolPeer,
+    channel: PodiumConductorChannel,
+  ): void {
+    if (this.#channels.has(bindingId) || [...this.#channels.values()].some(
+      (channel) => channel.conductorId === conductorId,
+    )) {
+      throw new Error("conductor_channel_already_active");
+    }
+    this.#channels.set(bindingId, { conductorId, instanceId, peer, channel });
+  }
+
+  remove(bindingId: string, instanceId: string, peer: FramedProtocolPeer): void {
+    const current = this.#channels.get(bindingId);
+    if (current?.instanceId === instanceId && current.peer === peer) {
+      this.#channels.delete(bindingId);
+    }
+  }
+
+  revoke(bindingId: string, instanceId: string): void {
+    const current = this.#channels.get(bindingId);
+    if (!current) return;
+    if (current.instanceId !== instanceId) {
+      throw new Error("conductor_channel_generation_mismatch");
+    }
+    this.#channels.delete(bindingId);
+    current.peer.close("conductor_channel_revoked");
+  }
+
+  request(body: JsonValue, secret: Uint8Array | undefined, requestId: string): Promise<JsonValue> {
+    const value = object(body, "conductor_profile_request_invalid");
+    const conductorId = requiredString(value.conductor_id, "conductor_id_missing");
+    const channel = [...this.#channels.values()].find(
+      (candidate) => candidate.conductorId === conductorId,
+    );
+    if (!channel?.channel.isAuthenticated()) throw new Error("conductor_channel_unavailable");
+    return channel.peer.request({
+      requestId,
+      body,
+      ...(secret ? { secret } : {}),
+      timeoutMs: 120_000,
+    });
+  }
+}
+
+async function serveConductorChannels(
+  socketPath: string,
+  services: PodiumConductorServices,
+  registry: ConductorChannelRegistry,
+): Promise<net.Server> {
+  const server = net.createServer((socket) => {
+    let channel: PodiumConductorChannel | undefined;
+    let bindingId: string | undefined;
+    let conductorId: string | undefined;
+    let instanceId: string | undefined;
+    const peer = new FramedProtocolPeer(socket, socket, {
+      decode: decodePodiumConductorMessage,
+      secretLength: profileSecretLength,
+      async handleRequest(body, secret) {
+        const request = object(body, "conductor_channel_request_invalid");
+        if (!channel) {
+          if (request.kind !== "conductor_channel_registration") {
+            throw new Error("conductor_channel_registration_required");
+          }
+          bindingId = requiredString(request.binding_id, "conductor_binding_missing");
+          conductorId = requiredString(request.conductor_id, "conductor_id_missing");
+          instanceId = requiredString(request.instance_id, "conductor_instance_missing");
+          channel = services.openChannel({ bindingId, conductorId, instanceId });
+          registry.register(bindingId, conductorId, instanceId, peer, channel);
+          return {
+            kind: "conductor_channel_registered",
+            binding_id: bindingId,
+            conductor_id: conductorId,
+            instance_id: instanceId,
+          };
+        }
+        if (request.kind === "conductor_channel_registration") {
+          throw new Error("conductor_channel_registration_duplicate");
+        }
+        const response = await new PodiumConductorProtocolHandler(channel).handle({
+          protocol_version: "1",
+          request_id: "conductor-channel-request",
+          body,
+        }, secret);
+        return (response as { body: JsonValue }).body;
+      },
+      onClose(error) {
+        if (bindingId && instanceId) registry.remove(bindingId, instanceId, peer);
+        channel?.close({ sanitizedReason: error.message });
+      },
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return server;
+}
+
+function closeServer(server: net.Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
 function hostPorts(
   host: FramedProtocolPeer,
-  conductor: FramedProtocolPeer,
+  conductor: ConductorChannelRegistry,
   dataRoot: string,
 ): PodiumDesktopHostPorts {
   let sequence = 0;
@@ -317,6 +425,7 @@ function hostPorts(
         linear_installation_id: input.linearInstallationId,
         organization_id: input.organizationId,
         repository_handle: input.repositoryHandle,
+        repository_identity: input.repositoryIdentity,
         repository_root: input.repositoryRoot,
         base_branch: input.baseBranch,
         conductor_data_root: path.join(dataRoot, "conductors", input.conductorId),
@@ -336,12 +445,7 @@ function hostPorts(
       });
     },
     relayProfile(body, secret) {
-      return conductor.request({
-        requestId: `profile-${++sequence}`,
-        body,
-        ...(secret ? { secret } : {}),
-        timeoutMs: 120_000,
-      });
+      return conductor.request(body, secret, `profile-${++sequence}`);
     },
   };
 }

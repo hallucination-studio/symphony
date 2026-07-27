@@ -9,6 +9,7 @@ import { createForegroundE2EEnvironment, installForegroundE2ESignalCleanup } fro
 import { readForegroundE2EFinalEvidence } from "./evidence.mjs";
 import { createForegroundE2EHumanActor } from "./human.mjs";
 import { runInformationRequestedAndAnsweredCase } from "./information-requested-and-answered.mjs";
+import { runMissingWorktreeRecoveryCase } from "./missing-worktree-recovery.mjs";
 import { runParallelMultiConductorCase } from "./parallel-multi-conductor.mjs";
 import { runRejectedPlanAndReplannedCase } from "./rejected-plan-and-replanned.mjs";
 import { createForegroundReporter } from "./reporter.mjs";
@@ -179,6 +180,8 @@ async function runCaseDriver({ definition, human, runtime, rootCreationsByRootKe
       return runSameConductorPreemptionCase({ definition, human, rootCreationsByRootKey: selectCreations(definition, rootCreationsByRootKey), signal });
     case "conductor_restart_recovery":
       return runConductorRestartRecoveryCase({ definition, human, runtime, rootCreationsByRootKey: selectCreations(definition, rootCreationsByRootKey), signal });
+    case "missing_worktree_recovery":
+      return runMissingWorktreeRecoveryCase({ definition, human, runtime, rootCreationsByRootKey: selectCreations(definition, rootCreationsByRootKey), signal });
     default:
       throw stableError("foreground_e2e_case_bindings_invalid");
   }
@@ -199,11 +202,11 @@ async function readCaseFinalEvidence({ definition, driverResult, human, rootCrea
   });
   return Object.freeze({
     evidence,
-    context: finalContext({ definition, driverResult, humanActorId: human.actorId, rootIssueIdsByKey, repositories }),
+    context: finalContext({ definition, driverResult, humanActorId: human.actorId, rootIssueIdsByKey, repositories, evidence }),
   });
 }
 
-function finalContext({ definition, driverResult, humanActorId, rootIssueIdsByKey, repositories }) {
+function finalContext({ definition, driverResult, humanActorId, rootIssueIdsByKey, repositories, evidence }) {
   const context = driverResult?.context && typeof driverResult.context === "object" ? driverResult.context : {};
   const repositoriesByRootId = new Map(repositories.map((repository) => [repository.rootIssueId, repository.repositoryRoot]));
   const base = {
@@ -225,6 +228,14 @@ function finalContext({ definition, driverResult, humanActorId, rootIssueIdsByKe
       ...context.recovery,
       affectedRepositoryRoot: repositoriesByRootId.get(context.recovery.affectedRootId),
       continuousRepositoryRoot: repositoriesByRootId.get(context.recovery.continuousRootId),
+    };
+  }
+  if (definition.caseId === "missing_worktree_recovery" && context.missingWorktree) {
+    const recoveredGit = evidence?.git?.find(({ rootIssueId }) => rootIssueId === context.missingWorktree.recoverableRootId);
+    base.missingWorktree = {
+      ...context.missingWorktree,
+      rematerializedBranch: recoveredGit?.branch,
+      afterRevision: recoveredGit?.headRevision,
     };
   }
   return Object.freeze(base);

@@ -4,17 +4,14 @@ import test from "node:test";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import {
-  parseManagedRecord,
-  serializeManagedRecord,
   type RootDirective,
   type RootConvergencePolicyInterface,
-  type RootReconcilerFailureRecord,
+  type RootReconcilerFailure,
   type UserCommentReply,
 } from "../api/index.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 import { rootInputId } from "../internal/RootInputIdentity.js";
 import {
-  directiveMaterializationComplete,
   RootReconciliationRuntime,
   type RootReconciliationRuntimeDependencies,
   validateConvergenceDirective,
@@ -39,6 +36,7 @@ test("Root runtime consumes every Index page before scheduling and reads only th
   const runtime = new RootReconciliationRuntime({
     conductorId: "conductor-1",
     conductorShortHash: "abc123",
+    repositoryIdentity: "repository-1",
     baseBranch: "main",
     linear: {
       async resolveProject() {
@@ -60,15 +58,6 @@ test("Root runtime consumes every Index page before scheduling and reads only th
       },
       async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
     },
-    ownership: {
-      async claim() {
-        return {
-          kind: "already_owned" as const,
-          ownership: {} as never,
-          workspace: { branch: "symphony/runs/sym-2", worktreePath: "/tmp/symphony-root-high" },
-        };
-      },
-    },
     scheduling: {
       evaluate(roots) {
         scheduledRoots.push(roots.map(({ issueId }) => issueId));
@@ -84,12 +73,7 @@ test("Root runtime consumes every Index page before scheduling and reads only th
     reconciler: {} as never,
     performer: {} as never,
     materializer: {} as never,
-    directiveRecordWriter: {} as never,
-    failureRecordWriter: {} as never,
     replyWriter: {} as never,
-    humanActionResolutionValidator: {} as never,
-    humanActionResolutionMaterializer: {} as never,
-    timeline: {} as never,
   } satisfies RootReconciliationRuntimeDependencies);
 
   assert.equal(await runtime.cycle(), "needs-attention");
@@ -102,6 +86,7 @@ test("Root runtime contains a transient Index failure inside the Binding cycle",
   const runtime = new RootReconciliationRuntime({
     conductorId: "conductor-1",
     conductorShortHash: "abc123",
+    repositoryIdentity: "repository-1",
     baseBranch: "main",
     linear: {
       async resolveProject() {
@@ -118,19 +103,13 @@ test("Root runtime contains a transient Index failure inside the Binding cycle",
     },
     log(event, fields) { logs.push({ event, fields }); },
     git: {} as never,
-    ownership: {} as never,
     scheduling: {} as never,
     safety: {} as never,
     convergence: {} as never,
     reconciler: {} as never,
     performer: {} as never,
     materializer: {} as never,
-    directiveRecordWriter: {} as never,
-    failureRecordWriter: {} as never,
     replyWriter: {} as never,
-    humanActionResolutionValidator: {} as never,
-    humanActionResolutionMaterializer: {} as never,
-    timeline: {} as never,
     profileIdFor: async () => undefined,
     modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
   } satisfies RootReconciliationRuntimeDependencies);
@@ -147,77 +126,56 @@ test("Root runtime contains a transient Index failure inside the Binding cycle",
   }]);
 });
 
-test("Root runtime exposes the nearest observed durable convergence deadline to the wake scheduler", async () => {
+test("Root worktree gate derives required revisions only from native Verify attachments", async () => {
   const tree = workflowTree();
-  tree.comments.push(workflowComment({
-    commentId: "convergence-policy",
-    authorKind: "symphony",
-    authorId: "symphony-bot",
-    body: serializeManagedRecord({
-      kind: "root_convergence_policy",
-      version: 1,
-      policyId: "root-convergence-policy-1",
-      rootIssueId: "root-1",
-      maxCyclesPerRoot: 3,
-      maxSameOpenFindingCycles: 2,
-      maxConsecutiveNoProgress: 2,
-      maxTotalTokens: 10_000,
-      maxCycleRepairAttempts: 0,
-      deadlineAt: "2099-07-27T00:01:00.000Z",
-    }),
-  }));
-  const root = {
-    issueId: "root-1",
-    identifier: "SYM-1",
-    state: "Todo" as const,
-    updatedAt: "2026-07-27T00:00:00.000Z",
-    projectId: "project-1",
-    priority: "normal" as const,
-    blockers: [],
-    rootConductorLabels: [{ conductorShortHash: "abc123" }],
-    isDelegatedToSymphony: true,
-    isArchived: false,
+  tree.status_catalog.push(
+    { status_id: "succeeded", name: "Succeeded", category: "completed", position: 2 },
+    { status_id: "done", name: "Done", category: "completed", position: 3 },
+  );
+  tree.issues.push(
+    {
+      issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1",
+      status_id: "succeeded", status_name: "Succeeded", status_category: "completed", status_position: 2,
+      order: 1, depth: 1, title: "Cycle", description: "Completed cycle", labels: ["Cycle"], is_archived: false,
+      issue_kind: "cycle", remote_version: "cycle-v1", created_at: tree.observed_at, updated_at: tree.observed_at,
+    },
+    {
+      issue_id: "verify-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
+      status_id: "done", status_name: "Done", status_category: "completed", status_position: 3,
+      order: 1, depth: 2, title: "Verify", description: "Passed", labels: ["Verify", "Passed"], is_archived: false,
+      issue_kind: "verify", remote_version: "verify-v1", created_at: tree.observed_at, updated_at: tree.observed_at,
+    },
+  );
+  tree.attachments.push({
+    attachment_id: "attachment-1", issue_id: "verify-1", title: "Verified Git revision",
+    url: "https://github.com/acme/repo/commit/head-1", source_type: "github", remote_version: "attachment-v1",
+    created_at: tree.observed_at, updated_at: tree.observed_at,
+  });
+  const dependencies = failureDependencies({ tree, logs: [], onOpen: failureFor });
+  let requiredRevisions: string[] | undefined;
+  dependencies.git.inspectRootWorktreeGate = async (input) => {
+    requiredRevisions = input.requiredRevisions;
+    return validWorktreeGateInspection();
   };
-  const runtime = new RootReconciliationRuntime({
-    conductorId: "conductor-1",
-    conductorShortHash: "abc123",
-    baseBranch: "main",
-    linear: {
-      async resolveProject() {
-        return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
-      },
-      async readProjectRootIndexPage() {
-        return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
-      },
-      async readWorkflowIssueTree() { return tree; },
-      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+
+  await new RootReconciliationRuntime(dependencies).cycle();
+  assert.deepEqual(requiredRevisions, ["head-1"]);
+});
+
+test("Root runtime exposes the configured native convergence deadline to the wake scheduler", async () => {
+  const dependencies = failureDependencies({
+    tree: workflowTree(),
+    logs: [],
+    onOpen(input) { return failureFor(input); },
+  });
+  dependencies.convergence = {
+    assess() {
+      const assessed = allowingConvergence().assess({} as never);
+      assessed.snapshot.policy.deadlineAt = "2099-07-27T00:01:00.000Z";
+      return assessed;
     },
-    ownership: {
-      async claim() {
-        return {
-          kind: "already_owned" as const,
-          ownership: {} as never,
-          workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" },
-        };
-      },
-    },
-    scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
-    safety: { validate() { return { kind: "blocked" as const, reason: "test_blocked", mechanicalViolations: [] }; } },
-    convergence: {} as never,
-    git: {} as never,
-    reconciler: {} as never,
-    performer: {} as never,
-    materializer: {} as never,
-    directiveRecordWriter: {} as never,
-    failureRecordWriter: {} as never,
-    replyWriter: {} as never,
-    humanActionResolutionValidator: {} as never,
-    humanActionResolutionMaterializer: {} as never,
-    timeline: {} as never,
-    profileIdFor: async () => "profile-1",
-    modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
-    log() {},
-  } satisfies RootReconciliationRuntimeDependencies);
+  };
+  const runtime = new RootReconciliationRuntime(dependencies);
 
   assert.equal(await runtime.cycle(), "needs-attention");
   assert.equal(runtime.nextWakeAt(), Date.parse("2099-07-27T00:01:00.000Z"));
@@ -228,6 +186,7 @@ test("Root runtime fails closed for a non-retryable Index failure without escapi
   const runtime = new RootReconciliationRuntime({
     conductorId: "conductor-1",
     conductorShortHash: "abc123",
+    repositoryIdentity: "repository-1",
     baseBranch: "main",
     linear: {
       async resolveProject() {
@@ -244,19 +203,13 @@ test("Root runtime fails closed for a non-retryable Index failure without escapi
     },
     log(event, fields) { logs.push({ event, fields }); },
     git: {} as never,
-    ownership: {} as never,
     scheduling: {} as never,
     safety: {} as never,
     convergence: {} as never,
     reconciler: {} as never,
     performer: {} as never,
     materializer: {} as never,
-    directiveRecordWriter: {} as never,
-    failureRecordWriter: {} as never,
     replyWriter: {} as never,
-    humanActionResolutionValidator: {} as never,
-    humanActionResolutionMaterializer: {} as never,
-    timeline: {} as never,
     profileIdFor: async () => undefined,
     modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
   } satisfies RootReconciliationRuntimeDependencies);
@@ -277,7 +230,7 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   let opens = 0;
   let advances = 0;
   const dependencies = {
-    conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
+    conductorId: "conductor-1", conductorShortHash: "abc123", repositoryIdentity: "repository-1", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [] }; },
       async readProjectRootIndexPage() {
@@ -287,11 +240,9 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
       async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
     },
     git: {
-      async ensureWorkspace() { return { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" }; },
-      async inspect() { return { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
-    },
-    ownership: {
-      async claim() { return { kind: "already_owned" as const, ownership: {} as never, workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" } }; },
+      async inspectRootWorktreeGate() { return validWorktreeGateInspection(); },
+      async readCommitUrl() { return "https://github.com/acme/repo/commit/head-1"; },
+      async materializeRootWorkspace() { throw new Error("workspace_materialization_unexpected"); },
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
@@ -304,43 +255,20 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
           kind: "opened" as const,
           sessionId: `session-${opens}`,
           bootstrapRootDigest: input.bootstrap.rootDigest,
-          initialResult: { kind: "directive" as const, directive: directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds) },
+          initialResult: { kind: "directive" as const, directive: humanActionDirective(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds) },
         };
       },
       async advance(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["advance"]>[0]) {
         advances += 1;
         assert.equal("rootSnapshot" in input.delta, false);
         assert.equal(input.delta.changes[0]?.kind, "issue_current_value");
-        return { kind: "directive" as const, directive: directive(input.delta.targetRootDigest, input.delta.pendingInputIds) };
+        return { kind: "directive" as const, directive: humanActionDirective(input.delta.targetRootDigest, input.delta.pendingInputIds) };
       },
       async close() {},
     },
     performer: {} as never,
     materializer: { async materialize() { return { kind: "materialized" as const, rootDirectiveId: "directive-1", sourceIssueIds: [] }; } },
-    directiveRecordWriter: {
-      async write({ directive }: { directive: RootDirective }) {
-        return {
-          kind: "materialized" as const,
-          record: {
-            kind: "root_directive" as const,
-            version: 1 as const,
-            rootDirectiveId: directive.rootDirectiveId,
-            rootIssueId: "root-1",
-            reconcilerSessionId: directive.reconcilerSessionId,
-            reconcilerTurnId: directive.reconcilerTurnId,
-            basedOnTargetRootDigest: directive.basedOnTargetRootDigest,
-            consumedInputIds: directive.consumedInputIds,
-            directive,
-            acceptedAt: "2026-07-23T00:00:02Z",
-          },
-        };
-      },
-    },
-    failureRecordWriter: { async write() { throw new Error("failure_record_writer_unexpected"); } },
     replyWriter: { async write() { return { kind: "materialized" as const, replyId: "reply-1" }; } },
-    humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
-    humanActionResolutionMaterializer: { async materialize() { return { kind: "failed" as const, code: "unused", sanitizedReason: "unused" }; } },
-    timeline: { async publish() { return { kind: "materialized" as const, timelineEventId: "timeline-1", commentId: "comment-1" }; } },
     profileIdFor: async () => "profile-1",
     modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
     log() {},
@@ -355,34 +283,145 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   assert.equal(advances, 1);
 });
 
-test("Root runtime persists a non-allowing convergence record before opening the Reconciler", async () => {
+test("Root runtime sends a fresh missing worktree gate to the Reconciler without materializing a workspace", async () => {
+  const tree = workflowTree();
+  let gateReads = 0;
+  let materializations = 0;
+  let opens = 0;
+  const dependencies = failureDependencies({
+    tree,
+    logs: [],
+    onOpen(input) {
+      opens += 1;
+      assert.deepEqual(input.bootstrap.rootSnapshot.worktreeGate, {
+        kind: "fresh_missing",
+        repositoryIdentity: "repository-1",
+        baseBranch: "main",
+        baseRevision: "base-1",
+      });
+      return failureFor(input);
+    },
+  });
+  dependencies.git = {
+    async readCommitUrl() { return "https://github.com/acme/repo/commit/head-1"; },
+    async inspectRootWorktreeGate() {
+      gateReads += 1;
+      return {
+        result: {
+          kind: "fresh_missing" as const,
+          repositoryIdentity: "repository-1",
+          baseBranch: "main",
+          baseRevision: "base-1",
+        },
+      };
+    },
+    async materializeRootWorkspace() {
+      materializations += 1;
+      throw new Error("workspace_materialization_unexpected");
+    },
+  };
+
+  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
+  assert.equal(gateReads, 1);
+  assert.equal(materializations, 0);
+  assert.equal(opens, 1);
+});
+
+test("Root runtime sends an invalid execution generation to the Reconciler and materializes its closed action", async () => {
+  const tree = workflowTree();
+  tree.issues.push({
+    issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", status_id: "todo", status_name: "Todo",
+    status_category: "unstarted", status_position: 1, order: 0, depth: 1, title: "Cycle",
+    description: "Execute the approved objective.", labels: [], is_archived: false, issue_kind: "cycle",
+    parent_issue_id: "root-1", remote_version: "cycle-v1", created_at: "2026-07-23T00:00:00Z",
+    updated_at: "2026-07-23T00:00:00Z",
+  });
+  const expectedGate = {
+    kind: "execution_generation_invalid" as const,
+    repositoryIdentity: "repository-1",
+    expectedBranch: "symphony/runs/sym-1",
+    reason: "branch_missing" as const,
+  };
+  let materializedAction: RootDirective["action"] | undefined;
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const dependencies = failureDependencies({ tree, logs, onOpen: failureFor });
+  dependencies.git = {
+    async inspectRootWorktreeGate() { return { result: expectedGate }; },
+    async readCommitUrl() { return "https://github.com/acme/repo/commit/head-1"; },
+    async materializeRootWorkspace() { throw new Error("workspace_materialization_unexpected"); },
+  };
+  dependencies.reconciler = {
+    async open(input) {
+      assert.deepEqual(input.bootstrap.rootSnapshot.worktreeGate, expectedGate);
+      return {
+        kind: "opened" as const,
+        sessionId: input.reconcilerSessionId,
+        bootstrapRootDigest: input.bootstrap.rootDigest,
+        initialResult: {
+          kind: "directive" as const,
+          directive: {
+            ...directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds),
+            reconcilerSessionId: input.reconcilerSessionId,
+            reconcilerTurnId: input.reconcilerTurnId,
+            modelTurn: {
+              ...rootModelTurn(),
+              reconcilerSessionId: input.reconcilerSessionId,
+              reconcilerTurnId: input.reconcilerTurnId,
+            },
+            action: {
+              kind: "invalidate_execution_generation" as const,
+              rootIssueId: "root-1",
+              cycleIssueId: "cycle-1",
+              expectedRootRemoteVersion: "root-v1",
+              expectedWorktreeGate: expectedGate,
+            },
+          },
+        },
+      };
+    },
+    async advance() { throw new Error("advance_unexpected"); },
+    async close() { throw new Error("close_unexpected"); },
+  };
+  dependencies.materializer = {
+    async materialize({ directive: candidate }) {
+      materializedAction = candidate.action;
+      return { kind: "materialized", rootDirectiveId: candidate.rootDirectiveId, sourceIssueIds: ["cycle-1"] };
+    },
+  };
+  dependencies.replyWriter = { async write() { throw new Error("reply_writer_unexpected"); } };
+
+  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "progress", JSON.stringify(logs));
+  assert.deepEqual(materializedAction, {
+    kind: "invalidate_execution_generation",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    expectedRootRemoteVersion: "root-v1",
+    expectedWorktreeGate: expectedGate,
+  });
+});
+
+test("Root runtime passes a non-allowing transient convergence snapshot to the Reconciler", async () => {
   const tree = workflowTree();
   const logs: Array<{ event: string; fields: Record<string, string> }> = [];
-  let persisted = false;
   let opens = 0;
   const dependencies = failureDependencies({
     tree,
     logs,
     onOpen(input) {
       opens += 1;
-      assert.equal(persisted, true);
-      assert.equal(input.bootstrap.rootSnapshot.root.convergence.assessment?.recordId, "convergence-1");
+      assert.equal(input.bootstrap.rootSnapshot.root.convergence.view.activeCycleRepairAttempts, 1);
       return failureFor(input);
     },
   });
-  dependencies.convergence = repairLimitConvergence({
-    tree,
-    onPersist() { persisted = true; },
-  });
+  dependencies.convergence = repairLimitConvergence();
 
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 1);
-  assert.equal(persisted, true);
 });
 
 test("convergence gates leave business choice to the Reconciler within their closed bounds", () => {
   const rootLevel = rootLevelConvergence();
-  const repairLimit = repairLimitConvergence({ tree: workflowTree(), onPersist() {} });
+  const repairLimit = repairLimitConvergence();
 
   assert.equal(
     validateConvergenceDirective({
@@ -426,8 +465,9 @@ test("convergence gates leave business choice to the Reconciler within their clo
   );
 });
 
-test("Root runtime persists a Reconciler failure once and blocks restart until a new user input exists", async () => {
+test("Root runtime reports each fresh Reconciler failure without writing machine state to Linear", async () => {
   const tree = workflowTree();
+  const commentsBefore = structuredClone(tree.comments);
   let opens = 0;
   const logs: Array<{ event: string; fields: Record<string, string> }> = [];
   const dependencies = failureDependencies({ tree, onOpen: (input) => {
@@ -437,88 +477,12 @@ test("Root runtime persists a Reconciler failure once and blocks restart until a
 
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 1);
-  assert.equal(tree.comments.filter((comment) => parseManagedFailure(comment.body)).length, 1);
+  assert.deepEqual(tree.comments, commentsBefore);
+  assert.equal(logs.at(-1)?.event, "root_reconciler_failed");
 
-  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
-  assert.equal(opens, 1);
-  assert.equal(logs.at(-1)?.event, "root_reconciler_failure_barrier");
-
-  tree.comments.push(workflowComment({
-    commentId: "human-comment-1",
-    authorKind: "human",
-    authorId: "user-1",
-    authorUserId: "user-1",
-    body: "Please use a different implementation approach.",
-  }));
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 2);
-});
-
-test("Root runtime fails closed when the Reconciler failure record cannot be written and read back", async () => {
-  const tree = workflowTree();
-  let opens = 0;
-  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
-  const dependencies = failureDependencies({
-    tree,
-    onOpen: (input) => {
-      opens += 1;
-      return failureFor(input);
-    },
-    logs,
-    failureWrite: "failed",
-  });
-
-  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
-  assert.equal(opens, 1);
-  assert.equal(tree.comments.filter((comment) => parseManagedFailure(comment.body)).length, 0);
-  assert.equal(logs.at(-1)?.event, "root_reconciliation_failed");
-  assert.equal(logs.at(-1)?.fields.failure_code, "root_reconciler_failure_record_read_back_missing");
-});
-
-test("partial native reply materialization remains resumable until its receipt and thread state read back", () => {
-  const source = workflowComment({
-    commentId: "comment-1",
-    authorKind: "human",
-    authorId: "user-1",
-    authorUserId: "user-1",
-    body: "Please rerun this check.",
-  });
-  const candidate = commentBodyReply(source);
-  const tree = workflowTree();
-  tree.comments = [
-    source,
-    workflowComment({
-      commentId: "reply-1",
-      parentCommentId: source.comment_id,
-      threadRootCommentId: source.thread_root_comment_id,
-      authorKind: "symphony",
-      authorId: "symphony-bot",
-      body: serializeManagedRecord({
-        kind: "root_reconciler_reply",
-        version: 1,
-        replyId: candidate.replyId,
-        replyWriteId: candidate.replyId,
-        rootDirectiveId: "directive-1",
-        sourceInputId: candidate.sourceInputId,
-        source: candidate.source,
-        targetIssueId: "root-1",
-        disposition: candidate.disposition,
-        reaction: candidate.reaction,
-        threadAction: candidate.threadAction,
-        materializedOutcomeRefs: [],
-        renderedSchemaVersion: "1",
-        repliedAt: "2026-07-23T00:00:01Z",
-      }),
-    }),
-  ];
-
-  assert.equal(
-    directiveMaterializationComplete(
-      directive("tree-v1", [candidate.sourceInputId], [candidate]),
-      tree,
-    ),
-    false,
-  );
+  assert.deepEqual(tree.comments, commentsBefore);
 });
 
 test("native thread-state inputs require their matching reply without relying on a legacy comment version", () => {
@@ -526,15 +490,7 @@ test("native thread-state inputs require their matching reply without relying on
     commentId: "comment-1",
     authorKind: "symphony",
     authorId: "symphony-bot",
-    body: serializeManagedRecord({
-      kind: "root_ownership",
-      version: 1,
-      rootIssueId: "root-1",
-      conductorId: "conductor-1",
-      performerProfileId: "profile-1",
-      deliveryBranch: "symphony/runs/root-1",
-      ownerGeneration: "generation-1",
-    }),
+    body: "Symphony processed this native thread state.",
     threadState: "resolved",
   });
   const sourceInputId = rootInputId(
@@ -602,16 +558,53 @@ function directive(
   return {
     protocolVersion: 1, requestId: "request-1", rootDirectiveId: "directive-1",
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", modelTurn: rootModelTurn(), basedOnTargetRootDigest: digest,
-    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies, humanActionResolutions: [],
+    rationale: "Wait for the next fact.", evidenceRefs: [], consumedInputIds, commentReplies,
     action: { kind: "wait", reasonCode: "test", blockingFactRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }] },
+  };
+}
+
+function humanActionDirective(digest: string, consumedInputIds: string[]): RootDirective {
+  return {
+    ...directive(digest, consumedInputIds),
+    action: {
+      kind: "create_human_action",
+      rootIssueId: "root-1",
+      actionKind: "information",
+      targetIssueIds: ["root-1"],
+      expectedRootRemoteVersion: "root-v1",
+      question: "Which deployment target should Symphony use?",
+      context: "The current Root facts do not identify one.",
+      options: [],
+      evidenceRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }],
+    },
+  };
+}
+
+function validWorktreeGateInspection() {
+  const workspace = { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" };
+  const snapshot = {
+    head: "head-1",
+    branch: workspace.branch,
+    status: { items: [], returned: 0, cap: 32, has_more: false, partial: false },
+  };
+  return {
+    result: {
+      kind: "valid" as const,
+      repositoryIdentity: "repository-1",
+      branch: workspace.branch,
+      headRevision: snapshot.head,
+      isClean: true,
+      changedPaths: [],
+    },
+    workspace,
+    snapshot,
   };
 }
 
 function failureDependencies(input: {
   tree: LinearWorkflowTreeSnapshot;
-  onOpen(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]): RootReconcilerFailureRecord;
+  onOpen(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]): RootReconcilerFailure;
   logs: Array<{ event: string; fields: Record<string, string> }>;
-  failureWrite?: "failed";
 }): RootReconciliationRuntimeDependencies {
   const root = {
     issueId: "root-1", identifier: "SYM-1", state: "Todo" as const, title: "Root",
@@ -620,7 +613,7 @@ function failureDependencies(input: {
     blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true, isArchived: false,
   };
   return {
-    conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",
+    conductorId: "conductor-1", conductorShortHash: "abc123", repositoryIdentity: "repository-1", baseBranch: "main",
     linear: {
       async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [] }; },
       async readProjectRootIndexPage() {
@@ -630,11 +623,9 @@ function failureDependencies(input: {
       async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
     },
     git: {
-      async ensureWorkspace() { return { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" }; },
-      async inspect() { return { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } }; },
-    },
-    ownership: {
-      async claim() { return { kind: "already_owned" as const, ownership: {} as never, workspace: { branch: "symphony/runs/sym-1", worktreePath: "/tmp/symphony-root-1" } }; },
+      async inspectRootWorktreeGate() { return validWorktreeGateInspection(); },
+      async readCommitUrl() { return "https://github.com/acme/repo/commit/head-1"; },
+      async materializeRootWorkspace() { throw new Error("workspace_materialization_unexpected"); },
     },
     scheduling: { evaluate() { return { orderedEligible: [root], blocked: [] }; } },
     safety: new LinearRootSafetyPolicyImpl(),
@@ -653,44 +644,15 @@ function failureDependencies(input: {
     },
     performer: {} as never,
     materializer: { async materialize() { throw new Error("materializer_unexpected"); } },
-    directiveRecordWriter: { async write() { throw new Error("directive_writer_unexpected"); } },
-    failureRecordWriter: {
-      async write({ failure }: { failure: RootReconcilerFailureRecord }) {
-        if (input.failureWrite === "failed") {
-          return {
-            kind: "failed" as const,
-            code: "root_reconciler_failure_record_read_back_missing",
-            sanitizedReason: "root_reconciler_failure_record_read_back_missing",
-          };
-        }
-        const comment = workflowComment({
-          commentId: `failure-${input.tree.comments.length + 1}`,
-          authorKind: "symphony",
-          authorId: "symphony-bot",
-          body: serializeManagedRecord(failure),
-        });
-        input.tree.comments.push({
-          ...comment,
-          created_at: `2026-07-23T00:00:${String(input.tree.comments.length + 1).padStart(2, "0")}Z`,
-          updated_at: `2026-07-23T00:00:${String(input.tree.comments.length + 1).padStart(2, "0")}Z`,
-        });
-        return { kind: "materialized" as const, record: failure };
-      },
-    },
     replyWriter: { async write() { throw new Error("reply_writer_unexpected"); } },
-    humanActionResolutionValidator: { validate() { return { kind: "pending" as const, reason: "not_terminal" as const }; } },
-    humanActionResolutionMaterializer: { async materialize() { throw new Error("resolution_materializer_unexpected"); } },
-    timeline: { async publish() { throw new Error("timeline_unexpected"); } },
     profileIdFor: async () => "profile-1",
     modelSettingsFor: async () => ({ model: "gpt", reasoningEffort: "medium" as const, isFastModeEnabled: false }),
     log(event, fields) { input.logs.push({ event, fields }); },
   };
 }
 
-function failureFor(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]): RootReconcilerFailureRecord {
+function failureFor(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]): RootReconcilerFailure {
   return {
-    kind: "root_reconciler_failure",
-    version: 1,
     failureId: `root-1:${input.reconcilerTurnId}:failure`,
     reconcilerSessionId: input.reconcilerSessionId,
     reconcilerTurnId: input.reconcilerTurnId,
@@ -714,11 +676,6 @@ function failureFor(input: Parameters<RootReconciliationRuntimeDependencies["rec
   };
 }
 
-function parseManagedFailure(body: string): boolean {
-  const record = parseManagedRecord(body);
-  return record.ok && record.value.kind === "root_reconciler_failure";
-}
-
 function rootModelTurn(): RootDirective["modelTurn"] {
   return {
     turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
@@ -735,14 +692,9 @@ function allowingConvergence(): RootConvergencePolicyInterface {
         trigger: "none",
         snapshot: {
           policy: {
-            kind: "root_convergence_policy",
-            version: 1,
-            policyId: "root-convergence-policy-1",
-            rootIssueId: "root-1",
             maxCyclesPerRoot: 3,
             maxSameOpenFindingCycles: 2,
             maxConsecutiveNoProgress: 2,
-            maxTotalTokens: 10_000,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-26T00:00:00.000Z",
           },
@@ -750,8 +702,6 @@ function allowingConvergence(): RootConvergencePolicyInterface {
             cycleCount: 0,
             openFindingPersistence: [],
             consecutiveNoProgress: 0,
-            settledTokens: 0,
-            openTokenReservations: [],
             activeCycleRepairAttempts: 0,
             isDeadlineExceeded: false,
             rootIsCanceled: false,
@@ -759,25 +709,14 @@ function allowingConvergence(): RootConvergencePolicyInterface {
         },
       };
     },
-    async persistNonAllowing() {
-      throw new Error("convergence_persist_unexpected");
-    },
   };
 }
 
-function repairLimitConvergence(input: {
-  tree: LinearWorkflowTreeSnapshot;
-  onPersist(): void;
-}): RootConvergencePolicyInterface {
+function repairLimitConvergence(): RootConvergencePolicyInterface {
   const policy = {
-    kind: "root_convergence_policy" as const,
-    version: 1 as const,
-    policyId: "root-convergence-policy-1",
-    rootIssueId: "root-1",
     maxCyclesPerRoot: 3,
     maxSameOpenFindingCycles: 2,
     maxConsecutiveNoProgress: 2,
-    maxTotalTokens: 10_000,
     maxCycleRepairAttempts: 0,
     deadlineAt: "2026-07-26T00:00:00.000Z",
   };
@@ -785,54 +724,17 @@ function repairLimitConvergence(input: {
     cycleCount: 1,
     openFindingPersistence: [],
     consecutiveNoProgress: 0,
-    settledTokens: 0,
-    openTokenReservations: [],
     activeCycleIssueId: "cycle-1",
     activeCycleRepairAttempts: 1,
     isDeadlineExceeded: false,
     rootIsCanceled: false,
   };
-  const record = {
-    kind: "convergence" as const,
-    version: 1 as const,
-    convergenceRecordId: "convergence-1",
-    rootIssueId: "root-1",
-    policyId: policy.policyId,
-    policy: {
-      maxCyclesPerRoot: policy.maxCyclesPerRoot,
-      maxSameOpenFindingCycles: policy.maxSameOpenFindingCycles,
-      maxConsecutiveNoProgress: policy.maxConsecutiveNoProgress,
-      maxTotalTokens: policy.maxTotalTokens,
-      maxCycleRepairAttempts: policy.maxCycleRepairAttempts,
-      deadlineAt: policy.deadlineAt,
-    },
-    view,
-    trigger: "max_cycle_repair_attempts" as const,
-  };
-  let persisted = false;
   return {
     assess() {
       return {
         trigger: "max_cycle_repair_attempts" as const,
-        record,
-        snapshot: {
-          policy,
-          view,
-          ...(persisted ? {
-            assessment: {
-              recordId: record.convergenceRecordId,
-              recordKind: "convergence" as const,
-              recordVersion: "1" as const,
-              writeId: record.convergenceRecordId,
-            },
-          } : {}),
-        },
+        snapshot: { policy, view },
       };
-    },
-    async persistNonAllowing() {
-      persisted = true;
-      input.onPersist();
-      return input.tree;
     },
   };
 }
@@ -844,14 +746,9 @@ function rootLevelConvergence(): RootConvergencePolicyInterface {
         trigger: "max_cycles_per_root" as const,
         snapshot: {
           policy: {
-            kind: "root_convergence_policy",
-            version: 1,
-            policyId: "root-convergence-policy-1",
-            rootIssueId: "root-1",
             maxCyclesPerRoot: 1,
             maxSameOpenFindingCycles: 2,
             maxConsecutiveNoProgress: 2,
-            maxTotalTokens: 10_000,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-26T00:00:00.000Z",
           },
@@ -859,23 +756,12 @@ function rootLevelConvergence(): RootConvergencePolicyInterface {
             cycleCount: 1,
             openFindingPersistence: [],
             consecutiveNoProgress: 0,
-            settledTokens: 0,
-            openTokenReservations: [],
             activeCycleRepairAttempts: 0,
             isDeadlineExceeded: false,
             rootIsCanceled: false,
           },
-          assessment: {
-            recordId: "convergence-1",
-            recordKind: "convergence",
-            recordVersion: "1",
-            writeId: "convergence-1",
-          },
         },
       };
-    },
-    async persistNonAllowing() {
-      throw new Error("convergence_persist_unexpected");
     },
   };
 }
@@ -888,23 +774,15 @@ function workflowTree(): LinearWorkflowTreeSnapshot {
       issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "todo", status_name: "Todo",
       status_category: "unstarted" as const, status_position: 1, order: 0, depth: 0, title: "Root",
       description: "Build it", labels: [], is_archived: false, issue_kind: "root" as const,
-      remote_version: "root-v1", updated_at: "2026-07-23T00:00:00Z",
+      remote_version: "root-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
     }],
     comments: [workflowComment({
       commentId: "ownership-comment",
       authorKind: "symphony",
       authorId: "symphony-bot",
-      body: serializeManagedRecord({
-        kind: "root_ownership",
-        version: 1,
-        rootIssueId: "root-1",
-        conductorId: "conductor-1",
-        performerProfileId: "profile-1",
-        deliveryBranch: "symphony/runs/root-1",
-        ownerGeneration: "generation-1",
-      }),
+      body: "Symphony is observing this Root.",
     })],
-    relations: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+    relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:00Z",
   };
 }

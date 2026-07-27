@@ -49,16 +49,22 @@ test("fresh evidence reader reads only exact Roots with active and archived fact
     id: "relation-1",
     remoteVersion: "2026-07-26T00:00:02.000Z",
   }]);
+  assert.deepEqual(root.attachments, [{
+    id: "attachment-1",
+    issueId: "root-1",
+    title: "Pull request",
+    url: "https://scm.example/pull/1",
+    sourceType: "github",
+    archivedAt: null,
+    createdAt: "2026-07-26T00:00:00.000Z",
+    updatedAt: "2026-07-26T00:00:02.000Z",
+    remoteVersion: "2026-07-26T00:00:02.000Z",
+  }]);
   assert.deepEqual(root.activity.map(({ id, remoteVersion }) => ({ id, remoteVersion })), [
     { id: "activity-1", remoteVersion: "2026-07-26T00:00:00.000Z" },
     { id: "activity-2", remoteVersion: "2026-07-26T00:00:02.000Z" },
   ]);
-  assert.deepEqual(root.managedRecords.map(({ source }) => source), [
-    { kind: "issue_description", id: "work-1", remoteVersion: "2026-07-26T00:00:02.000Z" },
-    { kind: "comment", id: "comment-root", remoteVersion: "2026-07-26T00:00:03.000Z" },
-  ]);
-  assert.equal(root.managedRecords[0].record.kind, "workflow_issue");
-  assert.equal(root.managedRecords[1].record.kind, "stage_result");
+  assert.equal(Object.hasOwn(root, "managedRecords"), false);
   assert.deepEqual(evidence.git, [{
     rootIssueId: "root-1",
     repositoryRoot: "/repositories/root-1",
@@ -70,10 +76,10 @@ test("fresh evidence reader reads only exact Roots with active and archived fact
   }]);
 });
 
-test("evidence reader records pagination, managed-block, and Git coverage omissions without a runtime fallback", async () => {
+test("evidence reader records pagination and Git coverage omissions without a runtime fallback", async () => {
   const fixture = createLinearFixture({
     childrenPageInfo: { hasNextPage: true, endCursor: "again" },
-    commentBody: "```json\n{not json}\n```",
+    commentBody: "Ordinary human-readable Markdown.",
     gitFailure: true,
   });
   const evidence = await readForegroundE2EFinalEvidence({
@@ -90,7 +96,6 @@ test("evidence reader records pagination, managed-block, and Git coverage omissi
     evidence.coverage.omissions.map(({ code }) => code).sort(),
     [
       "foreground_e2e_evidence_git_read_failed",
-      "foreground_e2e_evidence_managed_record_invalid",
       "foreground_e2e_evidence_pagination_failed",
     ],
   );
@@ -135,7 +140,7 @@ test("evidence reader records native label pagination failures as coverage omiss
 
 function createLinearFixture({
   childrenPageInfo = { hasNextPage: false },
-  commentBody = `Stage result\n\n\`\`\`json\n${JSON.stringify({ kind: "stage_result", version: 1, result_id: "result-1" })}\n\`\`\``,
+  commentBody = "Verification completed with native Issue and Git evidence.",
   gitFailure = false,
   labelsPageInfo = { hasNextPage: false },
   rootCommentParentId = null,
@@ -213,7 +218,7 @@ function createLinearFixture({
     id: "work-1",
     identifier: "SYM-2",
     title: "Archived work",
-    description: `Work description\n\n\`\`\`json\n${JSON.stringify({ kind: "workflow_issue", version: 1, issue_key: "work-1" })}\n\`\`\``,
+    description: "Work description",
     projectId: "project-1",
     teamId: "team-1",
     parentId: "root-1",
@@ -246,6 +251,10 @@ function createLinearFixture({
     history: async (options) => {
       readOptions.push(options);
       return page([childActivity]);
+    },
+    attachments: async (options) => {
+      readOptions.push(options);
+      return page([]);
     },
   };
   const root = {
@@ -285,6 +294,19 @@ function createLinearFixture({
     history: async (options) => {
       readOptions.push(options);
       return page([activity]);
+    },
+    attachments: async (options) => {
+      readOptions.push(options);
+      return page([{
+        id: "attachment-1",
+        issueId: "root-1",
+        title: "Pull request",
+        url: "https://scm.example/pull/1",
+        sourceType: "github",
+        archivedAt: null,
+        createdAt: issuedAt,
+        updatedAt,
+      }]);
     },
   };
   const issueRequests = [];

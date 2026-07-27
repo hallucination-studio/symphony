@@ -45,21 +45,39 @@ async function createConductorServices(
       observeLinearRequest,
     },
   );
-  await Promise.all(bindings.map(async (entry, index) => await services.handle({
-    kind: "conductor_handshake",
-    binding_id: entry.bindingId,
-    instance_id: `instance-${index + 1}`,
-    conductor_id: entry.conductorId,
-    conductor_short_hash: entry.conductorShortHash,
-    linear_installation_id: entry.linearInstallationId,
-    organization_id: entry.organizationId,
-    repository: {
-      repository_handle: entry.repositoryContext.repositoryHandle,
-      canonical_path: entry.repositoryContext.repositoryRoot,
-      base_branch: entry.repositoryContext.baseBranch,
+  const channels = new Map();
+  await Promise.all(bindings.map(async (entry, index) => {
+    const channel = services.openChannel({
+      bindingId: entry.bindingId,
+      conductorId: entry.conductorId,
+      instanceId: `instance-${index + 1}`,
+    });
+    channels.set(entry.bindingId, channel);
+    await channel.handle({
+      kind: "conductor_handshake",
+      binding_id: entry.bindingId,
+      instance_id: `instance-${index + 1}`,
+      conductor_id: entry.conductorId,
+      conductor_short_hash: entry.conductorShortHash,
+      linear_installation_id: entry.linearInstallationId,
+      organization_id: entry.organizationId,
+      repository: {
+        repository_handle: entry.repositoryContext.repositoryHandle,
+        canonical_path: entry.repositoryContext.repositoryRoot,
+        base_branch: entry.repositoryContext.baseBranch,
+      },
+    });
+  }));
+  return {
+    handle(body) {
+      const channel = channels.get(body.binding_id);
+      if (!channel) throw new Error("test_channel_missing");
+      return channel.handle(body);
     },
-  })));
-  return services;
+    close() {
+      for (const channel of channels.values()) channel.close();
+    },
+  };
 }
 
 function conductorBinding(overrides = {}) {
@@ -92,7 +110,7 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
     },
   });
   const body = {
-    kind: "get_workflow_issue_tree", binding_id: "binding-1", conductor_short_hash: "abc123",
+    kind: "get_workflow_issue_tree", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1",
   };
   const first = services.handle(body);
@@ -124,9 +142,10 @@ test("Project Root Index coalesces concurrent reads from three Conductors sharin
     },
   }, undefined, undefined, bindings);
 
-  const reads = bindings.map(({ bindingId }) => services.handle({
+  const reads = bindings.map(({ bindingId }, index) => services.handle({
     kind: "list_project_root_index_page",
     binding_id: bindingId,
+    instance_id: `instance-${index + 1}`,
     expected_project_id: "project-1",
     page: { limit: 250 },
   }));
@@ -168,9 +187,10 @@ test("Project Root Index physical observations retain the production installatio
     },
   }, (observe) => { observePhysical = observe; }, undefined, bindings, (observation) => observations.push(observation));
 
-  await Promise.all(bindings.map(({ bindingId }) => services.handle({
+  await Promise.all(bindings.map(({ bindingId }, index) => services.handle({
     kind: "list_project_root_index_page",
     binding_id: bindingId,
+    instance_id: `instance-${index + 1}`,
     expected_project_id: "project-1",
     page: { limit: 250 },
   })));
@@ -193,7 +213,7 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
     async getWorkflowIssueTree() { return workflowTree("project-1"); },
   }, () => { sdkCreations += 1; });
   const body = {
-    kind: "get_workflow_issue_tree", conductor_short_hash: "abc123",
+    kind: "get_workflow_issue_tree", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1",
   };
 
@@ -203,7 +223,7 @@ test("Podium reuses one Linear gateway for sequential requests in the same class
   assert.equal(sdkCreations, 1);
 });
 
-test("Podium scopes an appended workflow comment at the physical Linear request boundary", async () => {
+test("Podium scopes an appended human-readable workflow comment at the physical Linear request boundary", async () => {
   let requestScope;
   let physicalScope;
   const services = await createConductorServices({
@@ -217,11 +237,11 @@ test("Podium scopes an appended workflow comment at the physical Linear request 
   }, undefined, (scope) => { requestScope = scope; });
 
   await services.handle({
-    kind: "append_workflow_comment", binding_id: "binding-1", conductor_short_hash: "abc123",
+    kind: "append_workflow_comment", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123",
     write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
     expected_root_remote_version: "root-version",
     target: { target_issue_id: "cycle-1", expected_remote_version: "cycle-version" },
-    body: "## Timeline\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+    body: "The requested verification has completed.",
   });
 
   assert.deepEqual(physicalScope, {
@@ -230,17 +250,43 @@ test("Podium scopes an appended workflow comment at the physical Linear request 
       command_kind: "append_workflow_comment",
       write_id: "write-1",
       target_issue_id: "cycle-1",
-      body: "## Timeline\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+      body: "The requested verification has completed.",
     },
   });
   assert.equal(requestScope(), undefined);
+});
+
+test("Podium translates a closed native attachment command without metadata", async () => {
+  let observed;
+  const services = await createConductorServices({
+    async preflightWorkflowMutation(command) {
+      observed = command;
+      return { kind: "already_applied", readBack: { writeId: command.writeId, targetIssueId: "verify-1", remoteVersion: "attachment-v1" } };
+    },
+  });
+
+  const result = await services.handle({
+    kind: "create_workflow_attachment", binding_id: "binding-1", instance_id: "instance-1",
+    conductor_short_hash: "abc123", write_id: "attachment-write", expected_project_id: "project-1",
+    root_issue_id: "root-1", expected_root_remote_version: "root-version",
+    target: { target_issue_id: "verify-1", expected_remote_version: "verify-version", expected_status_id: "status-verifying" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
+  });
+
+  assert.deepEqual(observed, {
+    kind: "create_workflow_attachment", writeId: "attachment-write", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "verify-1", expectedRemoteVersion: "verify-version", expectedStatusId: "status-verifying" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
+  });
+  assert.equal(result.kind, "already_applied");
 });
 
 test("workflow issue creation rejects a missing label_names field before dispatch", async () => {
   const services = await createConductorServices({});
   await assert.rejects(
     services.handle({
-      kind: "create_workflow_issue", binding_id: "binding-1", conductor_short_hash: "abc123",
+      kind: "create_workflow_issue", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123",
       write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
       expected_root_remote_version: "root-version", parent_expected_remote_version: "parent-version",
       parent_expected_status_id: "status-todo", parent_issue_id: "root-1", issue_kind: "work",
@@ -263,7 +309,6 @@ function rootHeader(input = {}) {
     blockers: input.blockers ?? [],
     rootConductorLabels: input.rootConductorLabels ?? [],
     isDelegatedToSymphony: input.isDelegatedToSymphony ?? true,
-    ...(input.rootOwnership ? { rootOwnership: input.rootOwnership } : {}),
   };
 }
 
@@ -321,11 +366,6 @@ test("Project Root Index service emits a closed Header page", async () => {
       return {
         headers: [rootHeader({
           rootConductorLabels: [{ conductorShortHash: "abc123def456" }],
-          rootOwnership: {
-            conductorId: "conductor-1",
-            sourceCommentId: "ownership-1",
-            sourceCommentRemoteVersion: "2026-07-16T00:00:00.000Z",
-          },
         })],
         pageInfo: { hasNextPage: false },
       };
@@ -335,6 +375,7 @@ test("Project Root Index service emits a closed Header page", async () => {
   const result = await services.handle({
     kind: "list_project_root_index_page",
     binding_id: "binding-1",
+    instance_id: "instance-1",
     expected_project_id: "project-1",
     page: { limit: 250 },
   });
@@ -353,11 +394,6 @@ test("Project Root Index service emits a closed Header page", async () => {
         blockers: [],
         root_conductor_labels: [{ conductor_short_hash: "abc123def456" }],
         is_delegated_to_symphony: true,
-        root_ownership: {
-          conductor_id: "conductor-1",
-          source_comment_id: "ownership-1",
-          source_comment_remote_version: "2026-07-16T00:00:00.000Z",
-        },
       }],
       page_info: { has_next_page: false },
     },
@@ -412,6 +448,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   const result = await services.handle({
     kind: "get_workflow_issue_tree",
     binding_id: "binding-1",
+    instance_id: "instance-1",
     conductor_short_hash: "abc123",
     expected_project_id: "project-1",
     root_issue_id: "root-1",
@@ -420,6 +457,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
   assert.equal(result.kind, "workflow_issue_tree");
   assert.equal(result.tree.issues.length, 2);
   assert.equal(result.tree.issues[0].is_archived, false);
+  assert.equal(result.tree.issues[0].created_at, "2026-07-16T00:00:00Z");
   assert.equal(result.tree.relations[0].relation_id, "relation-1");
   assert.deepEqual(result.tree.comments[0].reactions, []);
   assert.equal(result.tree.comments[0].thread_root_comment_id, "comment-1");
@@ -435,6 +473,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
     body: {
       kind: "get_workflow_issue_tree",
       binding_id: "binding-1",
+      instance_id: "instance-1",
       conductor_short_hash: "abc123",
       expected_project_id: "project-1",
       root_issue_id: "root-1",
@@ -445,6 +484,7 @@ test("Podium-Conductor exposes the correlated workflow Tree route and rejects ha
     services.handle({
       kind: "get_workflow_issue_tree",
       binding_id: "binding-1",
+      instance_id: "instance-1",
       conductor_short_hash: "wrong-hash",
       expected_project_id: "project-1",
       root_issue_id: "root-1",
@@ -516,6 +556,7 @@ test("Podium-Conductor serializes native comment mutation commands and semantic 
   const result = await services.handle({
     kind: "create_comment_reply",
     binding_id: "binding-1",
+    instance_id: "instance-1",
     write_id: "reply-write-1",
     conductor_short_hash: "abc123",
     expected_project_id: "project-1",
@@ -670,6 +711,7 @@ function issue(issueId, projectId) {
     description: "",
     labels: [],
     isArchived: false,
+    createdAt: "2026-07-16T00:00:00Z",
     updatedAt: "2026-07-16T00:00:00Z",
   };
 }
@@ -687,6 +729,8 @@ function workflowTree(projectId) {
     ],
     comments: [{ commentId: "comment-1", issueId: "root-1", body: "status", authorKind: "human", authorId: "human-1", authorUserId: "human-1", threadRootCommentId: "comment-1", threadState: "unresolved", reactions: [], createdAt: "2026-07-16T00:00:00Z", remoteVersion: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:01Z" }],
     relations: [{ relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1" }],
+    attachments: [],
+    activities: [],
     sourceManifest: [
       { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown" },
       { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:00Z", actorKind: "unknown", stableWriteId: "root-1:work-1" },
@@ -697,13 +741,4 @@ function workflowTree(projectId) {
     coverage: { isComplete: true, omissions: [] },
     observedAt: "2026-07-16T00:00:02Z",
   };
-}
-
-function v3PrimaryComment() {
-  return ["Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
-    "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
-    "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
-    "Current problem: none", "", "```json",
-    "{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/root-1\",\"owner_generation\":\"owner-1\"}",
-    "```"].join("\n");
 }

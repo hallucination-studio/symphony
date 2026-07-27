@@ -21,7 +21,6 @@ export interface DiscoveredRoot {
   projectId: string;
   isArchived: boolean;
   isDelegatedToSymphony: boolean;
-  managedConductorId?: string;
   priority: LinearPriority;
   blockers: LinearBlockerSnapshot[];
   rootConductorLabels: Array<{ conductorShortHash: string }>;

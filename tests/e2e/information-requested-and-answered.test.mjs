@@ -19,20 +19,17 @@ test("information Case writes its frozen answer on the product Clarification Act
     async delegateRootIssue(input) {
       calls.push({ kind: "delegate_root", input });
     },
-    async waitForClarificationAction(input) {
+    async waitForInformationRequest(input) {
       calls.push({ kind: "wait_for_clarification", input });
-      return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" };
+      return { requestCommentId: "information-request", rootIssueId: "root-1" };
     },
-    async createComment(input) {
-      calls.push({ kind: "create_comment", input });
-      return { commentId: "answer-comment", issueId: input.issueId };
+    async replyToHumanAction(input) {
+      calls.push({ kind: "answer_information", input });
+      return { commentId: "answer-comment", issueId: input.rootIssueId, requestCommentId: input.requestCommentId };
     },
-    async setHumanActionTerminalStatus(input) {
-      calls.push({ kind: "answer_clarification", input });
-    },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
-      return { actionIssueId: "replacement-plan-review", terminalStatusId: "approved-state" };
+      return { requestCommentId: "replacement-plan-review", planIssueId: "replacement-plan" };
     },
   };
 
@@ -61,24 +58,20 @@ test("information Case writes its frozen answer on the product Clarification Act
     },
     { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
     { kind: "delegate_root", input: { rootIssueId: "root-1" } },
-    { kind: "wait_for_clarification", input: { rootIssueId: "root-1", terminalStatus: "Answered" } },
+    { kind: "wait_for_clarification", input: { rootIssueId: "root-1" } },
     {
-      kind: "create_comment",
-      input: { issueId: "clarification-action", body: "Use a colon as the identifier separator." },
+      kind: "answer_information",
+      input: { rootIssueId: "root-1", requestCommentId: "information-request", body: "Use a colon as the identifier separator." },
     },
-    {
-      kind: "answer_clarification",
-      input: { issueId: "clarification-action", terminalStatus: "Answered", stateId: "answered-state" },
-    },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1", terminalStatus: "Approved" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "root-1" } },
   ]);
   assert.deepEqual(result, {
     context: {
       humanActorId: "human-1",
       rootIssueIdsByKey: { "information-root": "root-1" },
       inputReferences: [{ sourceId: "answer-comment", kind: "comment_create", binding: "separator_answer", commentId: "answer-comment" }],
-      answeredActionIssueId: "clarification-action",
-      replacementActionIssueId: "replacement-plan-review",
+      informationRequestCommentId: "information-request",
+      replacementRequestCommentId: "replacement-plan-review",
     },
   });
 });
@@ -90,10 +83,9 @@ test("information Case rejects a noncanonical definition or a Human boundary out
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
-    async waitForClarificationAction() { return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" }; },
-    async createComment() { return { commentId: "answer-comment", issueId: "clarification-action" }; },
-    async setHumanActionTerminalStatus() {},
-    async waitForPlanReviewAction() { return { actionIssueId: "replacement-plan-review", terminalStatusId: "approved-state" }; },
+    async waitForInformationRequest() { return { requestCommentId: "information-request", rootIssueId: "root-1" }; },
+    async replyToHumanAction() { return { commentId: "answer-comment", issueId: "root-1", requestCommentId: "information-request" }; },
+    async waitForPlanApprovalRequest() { return { requestCommentId: "replacement-plan-review", planIssueId: "replacement-plan" }; },
   };
 
   await assert.rejects(
@@ -107,7 +99,7 @@ test("information Case rejects a noncanonical definition or a Human boundary out
   await assert.rejects(
     runInformationRequestedAndAnsweredCase({
       definition,
-      human: { ...human, waitForClarificationAction: undefined },
+      human: { ...human, waitForInformationRequest: undefined },
       rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
     }),
     hasCode("foreground_e2e_information_case_input_invalid"),
@@ -123,15 +115,14 @@ test("information Case forwards cancellation only to its Clarification and Plan 
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
     async assertRootUndelegatedAndInactive(input) { waits.push(input); },
     async delegateRootIssue(input) { waits.push(input); },
-    async waitForClarificationAction(input) {
+    async waitForInformationRequest(input) {
       waits.push(input);
-      return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" };
+      return { requestCommentId: "information-request", rootIssueId: "root-1" };
     },
-    async createComment() { return { commentId: "answer-comment", issueId: "clarification-action" }; },
-    async setHumanActionTerminalStatus() {},
-    async waitForPlanReviewAction(input) {
+    async replyToHumanAction() { return { commentId: "answer-comment", issueId: "root-1", requestCommentId: "information-request" }; },
+    async waitForPlanApprovalRequest(input) {
       waits.push(input);
-      return { actionIssueId: "replacement-plan-review", terminalStatusId: "approved-state" };
+      return { requestCommentId: "replacement-plan-review", planIssueId: "replacement-plan" };
     },
   };
 
@@ -145,8 +136,8 @@ test("information Case forwards cancellation only to its Clarification and Plan 
   assert.deepEqual(waits, [
     { rootIssueId: "root-1", signal: abortController.signal },
     { rootIssueId: "root-1", signal: abortController.signal },
-    { rootIssueId: "root-1", terminalStatus: "Answered", signal: abortController.signal },
-    { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal },
+    { rootIssueId: "root-1", signal: abortController.signal },
+    { rootIssueId: "root-1", signal: abortController.signal },
   ]);
 });
 

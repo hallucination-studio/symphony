@@ -17,25 +17,29 @@ export async function runApprovedHappyPathCase({ definition, human, rootCreation
   }
   await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
   await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
-  const action = await human.waitForPlanReviewAction({
+  const request = await human.waitForPlanApprovalRequest({
     rootIssueId: root.rootIssueId,
-    terminalStatus: "Approved",
     ...(signal ? { signal } : {}),
   });
-  if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+  if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId) || !identifier(request?.cycleIssueId)) {
     throw stableError("foreground_e2e_approved_plan_review_invalid");
   }
-  await human.setHumanActionTerminalStatus({
-    issueId: action.actionIssueId,
-    terminalStatus: "Approved",
-    stateId: action.terminalStatusId,
+  const reply = await human.replyToHumanAction({
+    rootIssueId: root.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: approvalReply(definition).body,
     ...(signal ? { signal } : {}),
   });
+  if (!identifier(reply?.commentId) || reply.requestCommentId !== request.requestCommentId) {
+    throw stableError("foreground_e2e_approved_reply_invalid");
+  }
 
   return Object.freeze({
     context: Object.freeze({
       humanActorId: human.actorId,
       rootIssueIdsByKey: Object.freeze({ [definition.rootTopology[0].rootKey]: root.rootIssueId }),
+      approvalRequestCommentId: request.requestCommentId,
+      approvalReplyCommentId: reply.commentId,
     }),
   });
 }
@@ -48,7 +52,7 @@ function assertDefinition(definition) {
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanReviewAction !== "function" || typeof human.setHumanActionTerminalStatus !== "function" ||
+      typeof human.waitForPlanApprovalRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
       !rootCreation || !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId)) {
     throw stableError("foreground_e2e_approved_case_input_invalid");
@@ -56,6 +60,14 @@ function assertInput({ human, rootCreation, signal }) {
   if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_approved_case_input_invalid");
   }
+}
+
+function approvalReply(definition) {
+  const interaction = definition.declaredUserInteractions.find(({ kind }) => kind === "reply_to_human_action");
+  if (!interaction || interaction.actionBinding !== "approved_plan_review" || interaction.body !== "Approved.") {
+    throw stableError("foreground_e2e_approved_case_definition_invalid");
+  }
+  return interaction;
 }
 
 function identifier(value) {

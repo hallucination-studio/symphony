@@ -241,6 +241,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
         linearInstallationId: binding.linearInstallationId,
         organizationId: binding.organizationId,
         repositoryHandle: binding.repositoryContext.repositoryHandle,
+        repositoryIdentity: binding.repositoryContext.repositoryIdentity,
         repositoryRoot: binding.repositoryContext.repositoryRoot,
         baseBranch: binding.repositoryContext.baseBranch,
       });

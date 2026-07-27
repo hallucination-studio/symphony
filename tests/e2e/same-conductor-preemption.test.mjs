@@ -24,7 +24,7 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
       calls.push({ kind: "wait_for_admission", input });
       return {
         inflightRootIssueId: "inflight-root-id",
-        inflightStageExecutionId: "inflight-execution",
+        inflightStageIssueId: "inflight-execution",
         readyRootIssueIds: ["remaining-root-id", "touched-root-id"],
       };
     },
@@ -34,13 +34,13 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
     },
     async waitForSameConductorPreemptionCandidate(input) {
       calls.push({ kind: "wait_for_candidate", input });
-      return { rootIssueId: "remaining-root-id", stageExecutionId: "touched-execution", touchActivityId: "touch-activity" };
+      return { rootIssueId: "remaining-root-id", stageIssueId: "touched-execution", touchActivityId: "touch-activity" };
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
-      return { actionIssueId: `${input.rootIssueId}-action`, terminalStatusId: "approved-state" };
+      return { requestCommentId: `${input.rootIssueId}-request`, planIssueId: `${input.rootIssueId}-plan` };
     },
-    async setHumanActionTerminalStatus(input) {
+    async replyToHumanAction(input) {
       calls.push({ kind: "approve_plan_review", input });
     },
   };
@@ -79,19 +79,19 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
     {
       kind: "wait_for_candidate",
       input: {
-        inflightStageExecutionId: "inflight-execution",
+        inflightStageIssueId: "inflight-execution",
         touchedRootIssueId: "remaining-root-id",
         remainingRootIssueId: "touched-root-id",
       },
     },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "inflight-root-id", terminalStatus: "Approved" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "touched-root-id", terminalStatus: "Approved" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "remaining-root-id", terminalStatus: "Approved" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "low-priority-root-id", terminalStatus: "Approved" } },
-    { kind: "approve_plan_review", input: { issueId: "inflight-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
-    { kind: "approve_plan_review", input: { issueId: "touched-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
-    { kind: "approve_plan_review", input: { issueId: "remaining-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
-    { kind: "approve_plan_review", input: { issueId: "low-priority-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "inflight-root-id" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "touched-root-id" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "remaining-root-id" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "low-priority-root-id" } },
+    ...["inflight-root-id", "touched-root-id", "remaining-root-id", "low-priority-root-id"].map((rootIssueId) => ({
+      kind: "approve_plan_review",
+      input: { rootIssueId, requestCommentId: `${rootIssueId}-request`, body: "Approved." },
+    })),
   ]);
   assert.deepEqual(result, {
     context: {
@@ -106,8 +106,8 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
         inflightRootId: "inflight-root-id",
         touchedRootId: "remaining-root-id",
         remainingRootId: "touched-root-id",
-        inflightExecutionId: "inflight-execution",
-        touchedExecutionId: "touched-execution",
+        inflightStageIssueId: "inflight-execution",
+        touchedStageIssueId: "touched-execution",
         touchedRootKey: "remaining-root",
         touchActivityId: "touch-activity",
         conductorId: "conductor-a-id",
@@ -125,14 +125,14 @@ test("preemption Case rejects noncanonical definitions, incomplete same-Conducto
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
     async waitForSameConductorPreemptionAdmission() {
-      return { inflightRootIssueId: "inflight-root-id", inflightStageExecutionId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
+      return { inflightRootIssueId: "inflight-root-id", inflightStageIssueId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
     },
     async updateRootDescription() { return { sourceId: "touch-input", kind: "description" }; },
     async waitForSameConductorPreemptionCandidate() {
-      return { rootIssueId: "touched-root-id", stageExecutionId: "remaining-execution", touchActivityId: "touch-activity" };
+      return { rootIssueId: "touched-root-id", stageIssueId: "remaining-execution", touchActivityId: "touch-activity" };
     },
-    async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
-    async setHumanActionTerminalStatus() {},
+    async waitForPlanApprovalRequest() { return { requestCommentId: "request-1", planIssueId: "plan-1" }; },
+    async replyToHumanAction() {},
   };
   const rootCreationsByRootKey = rootCreations(definition, {
     teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id",
@@ -163,18 +163,18 @@ test("preemption Case forwards cancellation to every native Linear Human operati
     async delegateRootIssue(input) { waits.push(input); },
     async waitForSameConductorPreemptionAdmission(input) {
       waits.push(input);
-      return { inflightRootIssueId: "inflight-root-id", inflightStageExecutionId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
+      return { inflightRootIssueId: "inflight-root-id", inflightStageIssueId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
     },
     async updateRootDescription() { return { sourceId: "touch-input", kind: "description" }; },
     async waitForSameConductorPreemptionCandidate(input) {
       waits.push(input);
-      return { rootIssueId: "remaining-root-id", stageExecutionId: "touched-execution", touchActivityId: "touch-activity" };
+      return { rootIssueId: "remaining-root-id", stageIssueId: "touched-execution", touchActivityId: "touch-activity" };
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       waits.push(input);
-      return { actionIssueId: `${input.rootIssueId}-action`, terminalStatusId: "approved-state" };
+      return { requestCommentId: `${input.rootIssueId}-request`, planIssueId: `${input.rootIssueId}-plan` };
     },
-    async setHumanActionTerminalStatus() {},
+    async replyToHumanAction() {},
   };
 
   await runSameConductorPreemptionCase({

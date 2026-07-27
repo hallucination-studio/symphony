@@ -50,6 +50,7 @@ function conductorEnvironment(root) {
     SYMPHONY_LINEAR_INSTALLATION_ID: "development-token:organization-1",
     SYMPHONY_ORGANIZATION_ID: "organization-1",
     SYMPHONY_REPOSITORY_HANDLE: "repository-1",
+    SYMPHONY_REPOSITORY_IDENTITY: "repository-identity-1",
     SYMPHONY_REPOSITORY_ROOT: path.join(root, "repository"),
     SYMPHONY_BASE_BRANCH: "main",
     SYMPHONY_CONDUCTOR_DATA_ROOT: path.join(root, "conductor"),
@@ -57,7 +58,6 @@ function conductorEnvironment(root) {
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
     SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "2",
-    SYMPHONY_ROOT_MAX_TOTAL_TOKENS: "10000",
     SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
   };
 }

@@ -6,7 +6,6 @@ import { discoverCurrentRoots } from "../MultiRootDiscoveryPolicy.js";
 test("does not discover a routed Root before the user delegates it to Symphony", () => {
   const roots = discoverCurrentRoots({
     projectId: "project-1",
-    conductorId: "conductor-1",
     conductorShortHash: "abc123def456",
     conductorPool: [{ conductorShortHash: "abc123def456" }],
     roots: [{
@@ -28,7 +27,6 @@ test("does not discover a routed Root before the user delegates it to Symphony",
 test("discovers a routed Root only after the user delegates it to Symphony", () => {
   const roots = discoverCurrentRoots({
     projectId: "project-1",
-    conductorId: "conductor-1",
     conductorShortHash: "abc123def456",
     conductorPool: [{ conductorShortHash: "abc123def456" }],
     roots: [{

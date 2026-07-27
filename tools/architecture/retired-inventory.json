@@ -102,6 +102,27 @@
         "synthetic final": [],
         "target_e2e_synthetic_final": []
       }
+    },
+    "native-workflow-authority-hard-cut": {
+      "source": "docs/architecture/workflow-authority-recovery.md#11-hard-cut",
+      "path_patterns": [
+        "^apps/conductor/src/workflow-events/",
+        "^apps/conductor/src/timeline-comments/",
+        "^packages/contracts/managed-record\\.(?:d\\.ts|mjs)$"
+      ],
+      "paths": [],
+      "symbols": {
+        "ManagedRecord": [],
+        "WorkflowIssueRecord": [],
+        "UsageAggregation": [],
+        "RootDirectiveRecord": [],
+        "RootReconcilerFailureRecord": [],
+        "StageResultRecord": [],
+        "CanonicalPlanContract": [],
+        "PlanCompletedResultRecord": [],
+        "plan_contract_digest": [],
+        "WorkflowTimelineRecord": []
+      }
     }
   }
 }

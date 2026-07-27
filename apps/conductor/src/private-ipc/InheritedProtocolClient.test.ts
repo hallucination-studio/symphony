@@ -13,7 +13,7 @@ test("private protocol correlates a closed response", async () => {
 
   const pending = client.request({
     requestId: "request-1",
-    body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+    body: { kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -54,7 +54,7 @@ test("private protocol times out and ignores a late response", async () => {
   await assert.rejects(
     client.request({
       requestId: "request-late",
-      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" },
       timeoutMs: 5,
     }),
     /private_ipc_request_timeout/,
@@ -68,7 +68,7 @@ test("private protocol times out and ignores a late response", async () => {
 
   const next = client.request({
     requestId: "request-next",
-      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
   responses.write(`${JSON.stringify({
@@ -85,7 +85,7 @@ test("invalid private response fails all pending requests closed", async () => {
   const client = new InheritedProtocolClient(responses, requests);
   const pending = client.request({
     requestId: "request-1",
-      body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+      body: { kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" },
     timeoutMs: 1_000,
   });
 
@@ -106,6 +106,7 @@ test("private protocol reports the nested workflow tree schema path", async () =
     body: {
       kind: "get_workflow_issue_tree",
       binding_id: "binding-1",
+      instance_id: "instance-1",
       conductor_short_hash: "abc123",
       expected_project_id: "project-1",
       root_issue_id: "root-1",
@@ -178,7 +179,7 @@ test("private protocol dispatches a pending response while an incoming Profile r
 
   const pending = client.request({
     requestId: "linear-request-1",
-    body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+    body: { kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1", conductor_short_hash: "abc123" },
     timeoutMs: 200,
   });
   input.write(`${JSON.stringify({

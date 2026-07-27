@@ -10,7 +10,7 @@ import {
 const htmlMarker = "<!" + "-- symphony";
 const snakeMarker = "managed_" + "marker";
 const camelMarker = "managed" + "Marker";
-const legacyManagedRecordError = "managed_record_block_" + "legacy_format";
+const legacyRecordBlockError = "managed_record_block_" + "legacy_format";
 const legacyInfoFence = "```" + "symphony";
 const stageUsage = "Stage" + "Usage";
 const stageUsageSnapshot = stageUsage + "Snapshot";
@@ -18,6 +18,7 @@ const managedHtmlRecordsScope = "managed-html-" + "records";
 const retiredTimelineScope = ["timeline", "projections"].join("-");
 const legacyTurnUsageScope = "legacy-turn-" + "usage";
 const syntheticE2ECompletionScope = "synthetic-e2e-" + "completion";
+const nativeAuthorityScope = "native-workflow-authority-" + "hard-cut";
 const syntheticFinal = "synthetic " + "final";
 const syntheticFinalRecord = "target_e2e_" + "synthetic_final";
 const retiredRootListScope = "retired-root-list-" + "discovery";
@@ -34,23 +35,24 @@ const retiredRootListSymbols = [
   ["list", "Root", "Pages"].join(""),
 ];
 
-test("hard-cut inventory names every retired comment, timeline, usage, and E2E surface", async () => {
+test("hard-cut inventory names every retired authority, comment, timeline, usage, and E2E surface", async () => {
   const inventory = JSON.parse(await readFile("tools/architecture/retired-inventory.json", "utf8"));
 
-  assert.deepEqual(Object.keys(inventory.scopes).slice(-4), [
+  assert.deepEqual(Object.keys(inventory.scopes).slice(-5), [
     managedHtmlRecordsScope,
     retiredRootListScope,
     legacyTurnUsageScope,
     syntheticE2ECompletionScope,
+    nativeAuthorityScope,
   ]);
-  for (const scope of Object.values(inventory.scopes).slice(-4)) {
+  for (const scope of Object.values(inventory.scopes).slice(-5)) {
     assert.match(scope.source, /^docs\/architecture\/[^#]+\.md#/u);
   }
   assert.deepEqual(Object.keys(inventory.scopes[managedHtmlRecordsScope].symbols), [
     htmlMarker,
     snakeMarker,
     camelMarker,
-    legacyManagedRecordError,
+    legacyRecordBlockError,
     legacyInfoFence,
   ]);
   assert.deepEqual(Object.keys(inventory.scopes[legacyTurnUsageScope].symbols), [

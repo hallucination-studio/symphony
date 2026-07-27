@@ -67,6 +67,7 @@ function issue(input) {
     priority: input.priority ?? 0,
     sortOrder: input.order ?? 1,
     subIssueSortOrder: input.parentId ? (input.order ?? 1) : undefined,
+    createdAt: new Date("2026-07-15T00:00:00Z"),
     updatedAt: new Date("2026-07-16T00:00:00Z"),
     state: Promise.resolve({ id: "state-todo", name: "Todo" }),
     team: Promise.resolve({
@@ -268,25 +269,6 @@ function projectRootIndexNode(input = {}) {
   };
 }
 
-function rootOwnershipComment(rootIssueId, commentId = `${rootIssueId}-ownership`) {
-  const record = {
-    kind: "root_ownership",
-    version: 1,
-    root_issue_id: rootIssueId,
-    conductor_id: "conductor-1",
-    performer_profile_id: "profile-1",
-    delivery_branch: `symphony/runs/${rootIssueId}`,
-    owner_generation: "generation-1",
-  };
-  return {
-    id: commentId,
-    body: `Root ownership recorded.\n\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\``,
-    updatedAt: "2026-07-16T00:00:00.000Z",
-    user: { id: "app-user" },
-    issue: { id: rootIssueId },
-  };
-}
-
 function rootIndexAdapter(nodes, requests) {
   return new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     client: {
@@ -312,7 +294,6 @@ test("Project Root Index reads bounded Root Headers in one project-scoped reques
     delegateId: index === 2 ? "another-actor" : "app-user",
     ...(index === 0 ? {
       labels: [{ name: "symphony:conductor/abc123def456" }],
-      comments: [rootOwnershipComment("root-0")],
       relations: [{
         id: "relation-1",
         type: "blocks",
@@ -331,7 +312,7 @@ test("Project Root Index reads bounded Root Headers in one project-scoped reques
   assert.match(requests[0].document, /query SymphonyProjectRootIndex/u);
   assert.match(requests[0].document, /project\(id: \$projectId\)/u);
   assert.match(requests[0].document, /issues\(first: \$limit, after: \$cursor, includeArchived: true, filter: \{ parent: \{ null: true \} \}\)/u);
-  assert.match(requests[0].document, /comments\(first: 2, includeArchived: false/u);
+  assert.doesNotMatch(requests[0].document, /comments\(/u);
   assert.match(requests[0].document, /inverseRelations\(first: 250, includeArchived: true\)/u);
   for (const omittedField of ["title", "description", "sortOrder", "subIssueSortOrder"]) {
     assert.doesNotMatch(requests[0].document, new RegExp(`\\b${omittedField}\\b`, "u"));
@@ -359,11 +340,6 @@ test("Project Root Index reads bounded Root Headers in one project-scoped reques
     blockers: [{ sourceIssueId: "root-0", targetIssueId: "blocker-1", targetState: "Todo" }],
     rootConductorLabels: [{ conductorShortHash: "abc123def456" }],
     isDelegatedToSymphony: true,
-    rootOwnership: {
-      conductorId: "conductor-1",
-      sourceCommentId: "root-0-ownership",
-      sourceCommentRemoteVersion: "2026-07-16T00:00:00.000Z",
-    },
   });
   assert.deepEqual(page.pageInfo, { hasNextPage: false });
 });
@@ -491,21 +467,8 @@ test("Project resolution uses one compact query without SDK relation fragments",
   assert.doesNotMatch(requests[0].document, /description/u);
 });
 
-test("Project Root Index fails closed for ambiguous ownership and incomplete nested relations", async () => {
+test("Project Root Index fails closed for incomplete nested relations", async () => {
   const cases = [
-    {
-      root: projectRootIndexNode({
-        comments: [rootOwnershipComment("root-1", "ownership-1"), rootOwnershipComment("root-1", "ownership-2")],
-      }),
-      error: /linear_project_root_index_ownership_ambiguous/u,
-    },
-    {
-      root: projectRootIndexNode({
-        comments: [rootOwnershipComment("root-1")],
-        commentsHasNextPage: true,
-      }),
-      error: /linear_project_root_index_ownership_incomplete/u,
-    },
     {
       root: projectRootIndexNode({ relationsHasNextPage: true }),
       error: /linear_project_root_index_blockers_incomplete/u,
@@ -551,7 +514,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
   const queries = [];
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "Root description",
-    sortOrder: 1, updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    sortOrder: 1, createdAt: "2026-07-15T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "In Progress" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
@@ -561,20 +524,36 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
       reactions: [{ id: "reaction-human", emoji: "eyes", user: { id: "human-2" } }],
     }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [{ id: "relation-1", type: "blocks", issue: { id: "work-1", state: { name: "Todo" }, project: { id: "project-1" } }, relatedIssue: { id: "root-1", project: { id: "project-1" } } }], pageInfo: { hasNextPage: false } },
+    attachments: { nodes: [{
+      id: "attachment-1", title: "Pull request", url: "https://example.test/pr/1", sourceType: "github",
+      createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" },
+    }], pageInfo: { hasNextPage: false } },
+    history: { nodes: [{
+      id: "activity-1", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:01Z",
+      issue: { id: "root-1" }, actor: { id: "human-1" }, toStateId: "state-progress",
+    }, {
+      id: "history-outside-projection", createdAt: "2026-07-16T00:00:00Z",
+      updatedAt: "2026-07-16T00:00:01Z", issue: { id: "root-1" }, actor: { id: "human-1" },
+      fromStateId: null, toStateId: null, updatedDescription: null, archived: null,
+      addedLabelIds: [], removedLabelIds: [], fromParentId: null, toParentId: null,
+      fromDelegate: null, toDelegate: null, attachmentId: null,
+    }], pageInfo: { hasNextPage: false } },
   };
   const child = {
     id: "work-1", identifier: "WORK-1", title: "Work", description: "Work description",
-    sortOrder: 2, subIssueSortOrder: 2, updatedAt: "2026-07-16T00:00:02Z",
+    sortOrder: 2, subIssueSortOrder: 2, createdAt: "2026-07-15T00:00:02Z", updatedAt: "2026-07-16T00:00:02Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
-      id: "comment-work", body: "Progress\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+      id: "comment-work", body: "Progress update.",
       createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z",
       user: { id: "symphony-bot" }, issue: { id: "work-1" }, parent: { id: "comment-root" },
       resolvedAt: "2026-07-16T00:00:04Z",
       reactions: [{ id: "reaction-symphony", emoji: "white_check_mark", user: { id: "symphony-bot" } }],
     }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    attachments: { nodes: [], pageInfo: { hasNextPage: false } },
+    history: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
     async issue() {
@@ -608,6 +587,8 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
   assert.ok(queries.every((query) => !query.includes("reactions(first:")));
   assert.ok(queries.every((query) => !/reactions\s*\{\s*nodes\b/u.test(query)));
   assert.ok(queries.some((query) => query.includes("inverseRelations(first: 8)")));
+  assert.ok(queries.some((query) => query.includes("attachments(first: 8)")));
+  assert.ok(queries.some((query) => query.includes("history(first: 8)")));
   assert.ok(queries.some((query) => query.includes("includeArchived: true")));
 
   assert.deepEqual(tree.statusCatalog, [
@@ -640,22 +621,35 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
   assert.deepEqual(tree.relations, [{
     relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
   }]);
+  assert.deepEqual(tree.attachments, [{
+    attachmentId: "attachment-1", issueId: "root-1", title: "Pull request",
+    url: "https://example.test/pr/1", sourceType: "github",
+    remoteVersion: "2026-07-16T00:00:01.000Z", createdAt: "2026-07-16T00:00:00.000Z",
+    updatedAt: "2026-07-16T00:00:01.000Z",
+  }]);
+  assert.deepEqual(tree.activities, [{
+    activityId: "activity-1", issueId: "root-1", activityKinds: ["status_changed"],
+    actorKind: "human", actorId: "human-1", toStateId: "state-progress",
+    remoteVersion: "2026-07-16T00:00:01.000Z", createdAt: "2026-07-16T00:00:00.000Z",
+  }]);
   assert.deepEqual(tree.sourceManifest, [
     { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00.000Z", actorKind: "unknown" },
     { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:02.000Z", actorKind: "unknown" },
     { sourceKind: "linear_comment", sourceId: "comment-root", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "human" },
     { sourceKind: "linear_comment", sourceId: "comment-work", sourceVersion: "2026-07-16T00:00:03.000Z", actorKind: "symphony" },
     { sourceKind: "linear_relation", sourceId: "relation-1", sourceVersion: "relation-1", actorKind: "unknown" },
+    { sourceKind: "linear_attachment", sourceId: "attachment-1", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "unknown" },
+    { sourceKind: "linear_activity", sourceId: "activity-1", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "human" },
     { sourceKind: "linear_status_catalog", sourceId: "project-1:status-catalog", sourceVersion: "f241b6b4887e72321a11ea914516224280ff68d55aa6709c0113557f6409e874", actorKind: "unknown" },
   ]);
   assert.deepEqual(tree.coverage, { isComplete: true, omissions: [] });
 });
 
-test("complete Workflow Issue Tree batches paginate nested comments and relations by issue", async () => {
+test("complete Workflow Issue Tree batches paginate every nested native fact by issue", async () => {
   const calls = [];
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
-    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    createdAt: "2026-07-15T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: {
       nodes: [{
@@ -669,14 +663,18 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
       nodes: [],
       pageInfo: { hasNextPage: true, endCursor: "relations-2" },
     },
+    attachments: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "attachments-2" } },
+    history: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "activities-2" } },
   };
   const child = {
     id: "work-1", identifier: "WORK-1", title: "Work", description: "", sortOrder: 1,
-    subIssueSortOrder: 1, updatedAt: "2026-07-16T00:00:03Z",
+    subIssueSortOrder: 1, createdAt: "2026-07-15T00:00:03Z", updatedAt: "2026-07-16T00:00:03Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    attachments: { nodes: [], pageInfo: { hasNextPage: false } },
+    history: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
     viewer: Promise.resolve({ id: "viewer-1" }),
@@ -709,6 +707,24 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
         pageInfo: { hasNextPage: false, endCursor: null },
       },
     } } };
+    if (query.includes("IssueTreeAttachments")) return { data: { issue: {
+      id: "root-1",
+      attachments: {
+        nodes: [{ id: "attachment-2", title: "Build", url: "https://example.test/build/2",
+          sourceType: "github", createdAt: "2026-07-16T00:00:02Z",
+          updatedAt: "2026-07-16T00:00:03Z", issue: { id: "root-1" } }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    } } };
+    if (query.includes("IssueTreeActivities")) return { data: { issue: {
+      id: "root-1",
+      history: {
+        nodes: [{ id: "activity-2", createdAt: "2026-07-16T00:00:02Z",
+          updatedAt: "2026-07-16T00:00:03Z", issue: { id: "root-1" },
+          botActor: { id: "automation-1" }, addedLabelIds: ["label-1"] }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    } } };
     return { data: { issues: {
       nodes: variables.parentIds?.includes("root-1") ? [child] : [],
       pageInfo: { hasNextPage: false, endCursor: null },
@@ -723,9 +739,13 @@ test("complete Workflow Issue Tree batches paginate nested comments and relation
   assert.deepEqual(tree.relations, [{
     relationId: "relation-1", relationKind: "blocks", sourceIssueId: "work-1", targetIssueId: "root-1",
   }]);
-  assert.deepEqual(calls.slice(1, 3).map(({ variables }) => variables), [
+  assert.equal(tree.attachments[0].attachmentId, "attachment-2");
+  assert.deepEqual(tree.activities[0].activityKinds, ["labels_changed"]);
+  assert.deepEqual(calls.slice(1, 5).map(({ variables }) => variables), [
     { issueId: "root-1", cursor: "comments-2" },
     { issueId: "root-1", cursor: "relations-2" },
+    { issueId: "root-1", cursor: "attachments-2" },
+    { issueId: "root-1", cursor: "activities-2" },
   ]);
 });
 
@@ -781,6 +801,7 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
   let updatedInput;
   let commentInput;
   let relationInput;
+  let attachmentInput;
   parent.team = Promise.resolve({
     states: async () => connection([{ id: "state-todo", name: "Todo", type: "unstarted", position: 1 }]),
   });
@@ -799,6 +820,7 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
     },
     async updateIssue(_issueId, input) { updatedInput = input; },
     async createComment(input) { commentInput = input; },
+    async createAttachment(input) { attachmentInput = input; },
     async createIssueRelation(input) { relationInput = input; return { success: true }; },
   };
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
@@ -823,13 +845,22 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
   assert.equal(commentInput.issueId, "root-1");
   assert.equal(commentInput.body, "Progress");
 
-  const managedRecord = "Root ownership recorded.\n\n```json\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
-  await adapter.executeWorkflowMutation({
-    kind: "append_workflow_comment", writeId: "write-record", conductorShortHash: "abc123",
+  await assert.rejects(adapter.executeWorkflowMutation({
+    kind: "append_workflow_comment", writeId: "write-machine-content", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "root-1", expectedRemoteVersion: "root-version" }, body: managedRecord,
+    target: { targetIssueId: "root-1", expectedRemoteVersion: "root-version" },
+    body: "Machine payload follows.\n\n```json\n{}\n```",
+  }), /linear_workflow_machine_content_rejected/u);
+
+  await adapter.executeWorkflowMutation({
+    kind: "create_workflow_attachment", writeId: "attachment-write", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
   });
-  assert.equal(commentInput.body, managedRecord);
+  assert.deepEqual(attachmentInput, {
+    issueId: "work-1", title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
+  });
 
   await adapter.executeWorkflowMutation({
     kind: "create_workflow_relation", writeId: "write-3", conductorShortHash: "abc123",
@@ -841,7 +872,7 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
 
   const targetIssue = issue({
     id: "work-1", parentId: "root-1", title: "Work",
-    description: "Work description\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```",
+    description: "Work description",
   });
   const targetRootIssue = issue({ id: "root-1" });
   targetRootIssue.team = Promise.resolve({
@@ -866,10 +897,48 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt },
     statusId: "state-todo", title: "Updated work", description: "Updated description",
+    labelNames: [],
     isArchived: false, parentAssignment: { mode: "retain" },
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.equal(updatedInput.description, "Updated description");
+  assert.deepEqual(updatedInput.labelIds, []);
+});
+
+test("workflow attachment read-back requires one exact native attachment", async () => {
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    async issue(issueId) {
+      return issueId === "root-1"
+        ? { id: "root-1", projectId: "project-1", parentId: undefined }
+        : { id: "verify-1", projectId: "project-1", parentId: "root-1" };
+    },
+  });
+  const command = {
+    kind: "create_workflow_attachment", writeId: "attachment-write", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-v1",
+    target: { targetIssueId: "verify-1", expectedRemoteVersion: "verify-v1" },
+    title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
+  };
+  const attachment = {
+    attachmentId: "attachment-1", issueId: "verify-1", title: command.title, url: command.url,
+    sourceType: "github", remoteVersion: "attachment-v1", createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
+  };
+  adapter.getWorkflowIssueTree = async () => ({
+    issues: [{ issueId: "verify-1", remoteVersion: "verify-v2" }], attachments: [attachment],
+  });
+
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "attachment-write", targetIssueId: "verify-1", remoteVersion: "attachment-v1",
+    issueVersions: [{ issueId: "verify-1", remoteVersion: "verify-v2" }],
+  });
+
+  adapter.getWorkflowIssueTree = async () => ({
+    issues: [{ issueId: "verify-1", remoteVersion: "verify-v2" }], attachments: [attachment, { ...attachment, attachmentId: "attachment-2" }],
+  });
+  await assert.rejects(
+    adapter.readWorkflowMutationOutcome(command),
+    /linear_workflow_attachment_ambiguous/u,
+  );
 });
 
 test("workflow SDK materializes native comment replies, receipts, and thread state with semantic read-back", async () => {
@@ -880,10 +949,12 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
   };
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
-    updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    createdAt: "2026-07-15T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [source], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    attachments: { nodes: [], pageInfo: { hasNextPage: false } },
+    history: { nodes: [], pageInfo: { hasNextPage: false } },
   };
   const calls = [];
   const sdk = {
@@ -1086,6 +1157,7 @@ test("workflow SDK update mutations use native Linear archive state", async () =
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt.toISOString(),
     target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: false },
     statusId: "state-todo", title: "Archived work", description: "Archived description",
+    labelNames: [],
     isArchived: true, parentAssignment: { mode: "retain" },
   };
 
@@ -1093,7 +1165,7 @@ test("workflow SDK update mutations use native Linear archive state", async () =
   assert.equal(archiveCalls, 1);
   assert.equal(restoreCalls, 0);
   assert.deepEqual(updateInput, {
-    title: "Archived work", description: "Archived description", stateId: "state-todo",
+    title: "Archived work", description: "Archived description", stateId: "state-todo", labelIds: [],
   });
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-archive", targetIssueId: "work-1", remoteVersion: target.updatedAt.toISOString(),
@@ -1331,7 +1403,7 @@ test("workflow relation mutation batches source and target scope ancestry", asyn
 
 test("workflow issue read-back batches child status facts", async () => {
   const parent = issue({ id: "root-1" });
-  const childDescription = "Implement\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
+  const childDescription = "Implement the scoped work.";
   const rawQueries = [];
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async () => parent,
@@ -1380,7 +1452,7 @@ test("workflow issue read-back batches child status facts", async () => {
 
 test("workflow SDK compact preflight validates all update facts in one physical request", async () => {
   const rawQueries = [];
-  const description = "Existing\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
+  const description = "Existing scoped work.";
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     client: { async rawRequest(query) {
       rawQueries.push(query);

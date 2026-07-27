@@ -51,7 +51,7 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
 
   const candidate = assertCandidate(
     await human.waitForSameConductorPreemptionCandidate(waitInput({
-      inflightStageExecutionId: admission.inflightStageExecutionId,
+      inflightStageIssueId: admission.inflightStageIssueId,
       touchedRootIssueId: rootIssueIdsByKey[roles.touchedRootKey],
       remainingRootIssueId: rootIssueIdsByKey[roles.remainingRootKey],
       signal,
@@ -59,24 +59,23 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
     rootIssueIdsByKey[roles.touchedRootKey],
   );
 
-  const actions = await Promise.all(roots.map(async ({ root }) => {
-    const action = await human.waitForPlanReviewAction({
+  const requests = await Promise.all(roots.map(async ({ root }) => {
+    const request = await human.waitForPlanApprovalRequest({
       rootIssueId: root.rootIssueId,
-      terminalStatus: "Approved",
       ...(signal ? { signal } : {}),
     });
-    if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+    if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId)) {
       throw stableError("foreground_e2e_preemption_plan_review_invalid");
     }
-    return Object.freeze(action);
+    return Object.freeze({ ...request, rootIssueId: root.rootIssueId });
   }));
-  if (new Set(actions.map(({ actionIssueId }) => actionIssueId)).size !== actions.length) {
+  if (new Set(requests.map(({ requestCommentId }) => requestCommentId)).size !== requests.length) {
     throw stableError("foreground_e2e_preemption_plan_review_invalid");
   }
-  await Promise.all(actions.map((action) => human.setHumanActionTerminalStatus({
-    issueId: action.actionIssueId,
-    terminalStatus: "Approved",
-    stateId: action.terminalStatusId,
+  await Promise.all(requests.map((request) => human.replyToHumanAction({
+    rootIssueId: request.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: "Approved.",
     ...(signal ? { signal } : {}),
   })));
 
@@ -88,8 +87,8 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
         inflightRootId: admission.inflightRootIssueId,
         touchedRootId: rootIssueIdsByKey[roles.touchedRootKey],
         remainingRootId: rootIssueIdsByKey[roles.remainingRootKey],
-        inflightExecutionId: admission.inflightStageExecutionId,
-        touchedExecutionId: candidate.stageExecutionId,
+        inflightStageIssueId: admission.inflightStageIssueId,
+        touchedStageIssueId: candidate.stageIssueId,
         touchedRootKey: roles.touchedRootKey,
         touchActivityId: candidate.touchActivityId,
         conductorId: rootCreations.get(roles.inflightRootKey).conductorId,
@@ -114,8 +113,8 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForSameConductorPreemptionAdmission !== "function" || typeof human.updateRootDescription !== "function" ||
-      typeof human.waitForSameConductorPreemptionCandidate !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
-      typeof human.setHumanActionTerminalStatus !== "function" || !rootCreationsByRootKey ||
+      typeof human.waitForSameConductorPreemptionCandidate !== "function" || typeof human.waitForPlanApprovalRequest !== "function" ||
+      typeof human.replyToHumanAction !== "function" || !rootCreationsByRootKey ||
       typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
       signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_preemption_case_input_invalid");
@@ -151,7 +150,7 @@ function validRootCreation(value) {
 }
 
 function assertAdmission(value, rootIssueIdsByKey) {
-  if (!value || !identifier(value.inflightRootIssueId) || !identifier(value.inflightStageExecutionId) ||
+  if (!value || !identifier(value.inflightRootIssueId) || !identifier(value.inflightStageIssueId) ||
       !distinctIdentifiers(value.readyRootIssueIds) || value.readyRootIssueIds.length !== 2) {
     throw stableError("foreground_e2e_preemption_admission_invalid");
   }
@@ -162,7 +161,7 @@ function assertAdmission(value, rootIssueIdsByKey) {
   }
   return Object.freeze({
     inflightRootIssueId: value.inflightRootIssueId,
-    inflightStageExecutionId: value.inflightStageExecutionId,
+    inflightStageIssueId: value.inflightStageIssueId,
     readyRootIssueIds: Object.freeze([...value.readyRootIssueIds]),
   });
 }
@@ -174,12 +173,12 @@ function assertTouch(value) {
 }
 
 function assertCandidate(value, touchedRootIssueId) {
-  if (!value || value.rootIssueId !== touchedRootIssueId || !identifier(value.stageExecutionId) || !identifier(value.touchActivityId)) {
+  if (!value || value.rootIssueId !== touchedRootIssueId || !identifier(value.stageIssueId) || !identifier(value.touchActivityId)) {
     throw stableError("foreground_e2e_preemption_candidate_invalid");
   }
   return Object.freeze({
     rootIssueId: value.rootIssueId,
-    stageExecutionId: value.stageExecutionId,
+    stageIssueId: value.stageIssueId,
     touchActivityId: value.touchActivityId,
   });
 }

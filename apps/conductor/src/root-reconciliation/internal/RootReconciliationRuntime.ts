@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";
-import type { RootOwnershipClaimResult } from "../../root-discovery/api/RootOwnershipClaimInterface.js";
 import type { RootSchedulingPolicyInterface } from "../../root-scheduling/api/RootSchedulingPolicyInterface.js";
+import { RootIterationGuard } from "../../root-scheduling/internal/RootIterationGuard.js";
 import type { RootSafetyPolicyInterface } from "../api/RootSafetyPolicyInterface.js";
 import type {
   RootConvergenceAssessment,
@@ -16,57 +16,34 @@ import type {
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerAgentClientInterface } from "../../performer-agent-client/api/PerformerAgentClientInterface.js";
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
-import type { RootDirectiveMaterializerInterface } from "../../root-directive-materialization/api/RootDirectiveMaterializerInterface.js";
-import type { RootDirectiveRecordWriterInterface } from "../../root-directive-materialization/api/RootDirectiveRecordWriterInterface.js";
-import type { RootReconcilerFailureRecordWriterInterface } from "../../root-directive-materialization/api/RootReconcilerFailureRecordWriterInterface.js";
-import type { RootReconcilerReplyWriterInterface } from "../../root-directive-materialization/api/RootReconcilerReplyWriterInterface.js";
-import type { HumanActionResolutionValidatorInterface } from "../../human-actions/api/HumanActionResolutionValidatorInterface.js";
-import type { HumanActionResolutionMaterializerInterface } from "../../human-actions/api/HumanActionResolutionMaterializerInterface.js";
-import type { WorkflowTimelinePublisherInterface } from "../../workflow-events/api/WorkflowTimelinePublisherInterface.js";
-import type { WorkflowTimelineEvent } from "../../workflow-events/api/WorkflowTimelineEvents.js";
+import type { RootActionMaterializerInterface } from "../../root-action-materialization/api/RootActionMaterializerInterface.js";
+import type { RootReconcilerReplyWriterInterface } from "../../root-action-materialization/api/RootReconcilerReplyWriterInterface.js";
 import type {
   RootDirective,
   RootReconciliationView,
   RootReconcilerTurnResult,
-  EvidenceRef,
   ReconcilerLimits,
   StageResult,
   StageTurnInput,
-  HumanActionResolution,
   UserCommentReply,
-} from "../api/index.js";
-import {
-  cycleOutcomeId,
-  findWorkflowIssue,
-  planContractSupersessionId,
-  parseManagedRecord,
-  serializeManagedRecord,
-  workflowIssueMarkdown,
 } from "../api/index.js";
 import type {
   EvidenceReference,
-  PlanContract,
+  FindingProposal,
   PlanContractProposal,
   ProposedWorkDag,
-  RootDirectiveRecord,
-  RootReconcilerFailureRecord,
-  StageResultRecord,
+  StageResultProjection,
   StageResultOutcomeKind,
-  TurnUsage,
-} from "../api/ManagedRecords.js";
+} from "../api/StageContracts.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type { RootRuntimeDisposition } from "../api/RootRuntimeLoop.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 import { rootInputId } from "./RootInputIdentity.js";
-import {
-  deriveIssueUsageAggregate,
-  type UsageAggregate,
-  type UsageAggregateGroup,
-} from "./UsageAggregation.js";
 
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
   conductorShortHash: string;
+  repositoryIdentity: string;
   baseBranch: string;
   linear: {
     resolveProject(): Promise<
@@ -82,19 +59,13 @@ export interface RootReconciliationRuntimeDependencies {
     mutateWorkflow: LinearGatewayInterface["mutateWorkflow"];
   };
   git: GitWorkspaceProvisionerInterface;
-  ownership: { claim(input: { root: DiscoveredRoot }): Promise<RootOwnershipClaimResult> };
   scheduling: RootSchedulingPolicyInterface;
   safety: RootSafetyPolicyInterface;
   convergence: RootConvergencePolicyInterface;
   reconciler: RootReconcilerClientInterface;
   performer: PerformerAgentClientInterface;
-  materializer: RootDirectiveMaterializerInterface;
-  directiveRecordWriter: RootDirectiveRecordWriterInterface;
-  failureRecordWriter: RootReconcilerFailureRecordWriterInterface;
+  materializer: RootActionMaterializerInterface;
   replyWriter: RootReconcilerReplyWriterInterface;
-  humanActionResolutionValidator: HumanActionResolutionValidatorInterface;
-  humanActionResolutionMaterializer: HumanActionResolutionMaterializerInterface;
-  timeline: WorkflowTimelinePublisherInterface;
   profileIdFor(root: DiscoveredRoot): Promise<string | undefined>;
   modelSettingsFor(profileId: string): Promise<{
     model: string;
@@ -114,6 +85,7 @@ interface RootSessionState {
 
 export class RootReconciliationRuntime {
   private readonly sessions = new Map<string, RootSessionState>();
+  private readonly iterationGuard = new RootIterationGuard();
   private nextDeadlineAtMs: number | undefined;
 
   constructor(private readonly dependencies: RootReconciliationRuntimeDependencies) {}
@@ -136,7 +108,6 @@ export class RootReconciliationRuntime {
     const roots = discoverCurrentRoots({
       projectId: project.projectId,
       roots: index.roots,
-      conductorId: this.dependencies.conductorId,
       conductorShortHash: this.dependencies.conductorShortHash,
       conductorPool: project.conductorPool,
     });
@@ -217,27 +188,30 @@ export class RootReconciliationRuntime {
   }
 
   private async readWorkflowIssueTree(rootIssueId: string): Promise<LinearWorkflowTreeSnapshot> {
-    const tree = await this.dependencies.linear.readWorkflowIssueTree(rootIssueId);
-    for (const comment of tree.comments) {
-      const parsed = parseManagedRecord(comment.body);
-      if (!parsed.ok || (parsed.value.kind !== "root_convergence_policy" && parsed.value.kind !== "stage_execution")) {
-        continue;
-      }
-      const deadlineAtMs = Date.parse(parsed.value.deadlineAt);
-      if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= Date.now()) continue;
-      this.nextDeadlineAtMs = this.nextDeadlineAtMs === undefined
-        ? deadlineAtMs
-        : Math.min(this.nextDeadlineAtMs, deadlineAtMs);
-    }
-    return tree;
+    return this.dependencies.linear.readWorkflowIssueTree(rootIssueId);
+  }
+
+  private observeDeadline(deadlineAt: string): void {
+    const deadlineAtMs = Date.parse(deadlineAt);
+    if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= Date.now()) return;
+    this.nextDeadlineAtMs = this.nextDeadlineAtMs === undefined
+      ? deadlineAtMs
+      : Math.min(this.nextDeadlineAtMs, deadlineAtMs);
   }
 
   private async reconcileRoot(root: DiscoveredRoot): Promise<RootRuntimeDisposition> {
+    const release = this.iterationGuard.tryAcquire(root.issueId);
+    if (!release) {
+      this.dependencies.log("root_iteration_coalesced", { root_issue_id: root.issueId });
+      return "empty";
+    }
     let phase = "admission";
     try {
       return await this.reconcileRootBody(root, (nextPhase) => { phase = nextPhase; });
     } catch (error) {
       throw new RootReconciliationPhaseError(phase, sanitizedFailureReason(error));
+    } finally {
+      release();
     }
   }
 
@@ -245,12 +219,6 @@ export class RootReconciliationRuntime {
     root: DiscoveredRoot,
     setPhase: (phase: string) => void,
   ): Promise<RootRuntimeDisposition> {
-    setPhase("admission");
-    const admission = await this.dependencies.ownership.claim({ root });
-    if (admission.kind !== "claimed" && admission.kind !== "already_owned") {
-      this.dependencies.log("root_admission_blocked", { root_issue_id: root.issueId, reason: admission.kind });
-      return "needs-attention";
-    }
     setPhase("profile");
     const profileId = await this.dependencies.profileIdFor(root);
     if (!profileId) {
@@ -258,7 +226,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     setPhase("read_tree");
-    let tree = await this.readWorkflowIssueTree(root.issueId);
+    const tree = await this.readWorkflowIssueTree(root.issueId);
     setPhase("validate_tree");
     const safety = this.dependencies.safety.validate({ root, tree });
     if (safety.kind === "blocked") {
@@ -268,64 +236,27 @@ export class RootReconciliationRuntime {
       });
       return "needs-attention";
     }
-    setPhase("git_workspace");
-    const workspace = await this.dependencies.git.ensureWorkspace({
+    setPhase("worktree_gate");
+    const gate = await this.dependencies.git.inspectRootWorktreeGate({
+      repositoryIdentity: this.dependencies.repositoryIdentity,
       rootIssueId: root.issueId,
       rootIdentifier: root.identifier,
       baseBranch: this.dependencies.baseBranch,
+      executionKind: tree.issues.some(({ issue_id }) => issue_id !== root.issueId) ? "existing" : "fresh",
+      requiredRevisions: verifiedRevisionsFromAttachments(tree),
     });
     setPhase("build_root_facts");
-    let git = await this.dependencies.git.inspect(workspace);
     setPhase("assess_root_convergence");
-    let convergence = this.dependencies.convergence.assess({ root, tree, git });
-    if (convergence.record && !convergence.snapshot.assessment) {
-      setPhase("persist_root_convergence_record");
-      tree = await this.dependencies.convergence.persistNonAllowing({ root, tree, assessment: convergence });
-      setPhase("refresh_git_after_convergence_record");
-      git = await this.dependencies.git.inspect(workspace);
-      setPhase("reassess_root_convergence");
-      convergence = this.dependencies.convergence.assess({ root, tree, git });
-      if (!convergence.snapshot.assessment || convergence.trigger === "none") {
-        throw new Error("root_convergence_record_read_back_invalid");
-      }
-    }
+    const convergence = this.dependencies.convergence.assess({ root, tree });
+    this.observeDeadline(convergence.snapshot.policy.deadlineAt);
     const factSet = buildRootFactSet({
       root,
       tree,
-      git,
+      worktreeGate: gate.result,
       convergence: convergence.snapshot,
       mechanicalViolations: safety.mechanicalViolations,
     });
-    const view: RootReconciliationView = viewFromFactSet({ root, tree, git, factSet });
-    const resumable = findResumableDirective(tree, root.issueId);
-    if (resumable && !directiveMaterializationComplete(resumable.directive, tree)) {
-      setPhase("resume_accepted_directive");
-      const materialization = await this.finishDirective(
-        resumable.directive,
-        viewWithDigest(view, resumable.directive.basedOnTargetRootDigest),
-        root,
-        profileId,
-        setPhase,
-        factSet.bootstrap.pendingInputIds,
-        convergence,
-        true,
-      );
-      if (materialization.kind === "failed") return "needs-attention";
-      const resumedSession = this.sessions.get(root.issueId);
-      if (resumedSession) await this.closeSessionsAfterDirective(resumable.directive, root, resumedSession.sessionId);
-      return dispositionAfterDirective(resumable.directive, await this.readWorkflowIssueTree(root.issueId));
-    }
-    const unresolvedFailure = latestUnresolvedRootReconcilerFailure(tree, root.issueId);
-    if (
-      unresolvedFailure &&
-      !factSet.bootstrap.pendingInputIds.some((inputId) => !unresolvedFailure.attemptedInputIds.includes(inputId))
-    ) {
-      this.dependencies.log("root_reconciler_failure_barrier", {
-        root_issue_id: root.issueId,
-        failure_id: unresolvedFailure.failureId,
-      });
-      return "needs-attention";
-    }
+    const view: RootReconciliationView = viewFromFactSet({ root, tree, gate, factSet });
     const limits = reconcilerLimits();
     const currentSession = this.sessions.get(root.issueId);
     const trustedSession = currentSession?.profileId === profileId ? currentSession : undefined;
@@ -400,11 +331,8 @@ export class RootReconciliationRuntime {
         attemptedInputIds,
       });
       if (failureValidation) throw new Error(failureValidation);
-      setPhase("persist_root_reconciler_failure_record");
-      const persisted = await this.dependencies.failureRecordWriter.write({ failure: result.failure, view });
       this.sessions.delete(root.issueId);
-      if (persisted.kind === "failed") throw new Error(persisted.code);
-      this.dependencies.log("root_reconciler_failure_recorded", {
+      this.dependencies.log("root_reconciler_failed", {
         root_issue_id: root.issueId,
         failure_id: result.failure.failureId,
         category: result.failure.category,
@@ -423,9 +351,8 @@ export class RootReconciliationRuntime {
       setPhase,
       factSet.bootstrap.pendingInputIds,
       convergence,
-      false,
     );
-    this.dependencies.log("root_directive_received", {
+    this.dependencies.log("root_next_action_materialized", {
       root_issue_id: root.issueId,
       directive_kind: result.directive.action.kind,
       directive_id: result.directive.rootDirectiveId,
@@ -439,7 +366,7 @@ export class RootReconciliationRuntime {
       return "needs-attention";
     }
     await this.closeSessionsAfterDirective(result.directive, root, sessionId);
-    return dispositionAfterDirective(result.directive, await this.readWorkflowIssueTree(root.issueId));
+    return dispositionAfterDirective(result.directive);
   }
 
   private async finishDirective(
@@ -450,47 +377,11 @@ export class RootReconciliationRuntime {
     setPhase: (phase: string) => void,
     pendingInputIds: string[],
     convergence: RootConvergenceAssessment,
-    alreadyAccepted: boolean,
   ) {
     const convergenceValidation = validateConvergenceDirective(directive, convergence);
     if (convergenceValidation) return failedMaterialization(directive, convergenceValidation);
-    if (!alreadyAccepted) {
-      const inputValidation = validateDirectiveInputs(directive, view.tree, pendingInputIds);
-      if (inputValidation) return failedMaterialization(directive, inputValidation);
-      setPhase("persist_root_directive_record");
-      const accepted = await this.dependencies.directiveRecordWriter.write({
-        directive,
-        view,
-        acceptedAt: view.observedAt,
-      });
-      if (accepted.kind === "failed") return accepted;
-      view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
-    }
-    setPhase("validate_human_action_resolutions");
-    for (const resolution of directive.humanActionResolutions) {
-      const validated = this.dependencies.humanActionResolutionValidator.validate({
-        tree: view.tree,
-        actionIssueId: resolution.actionIssueId,
-      });
-      if (validated.kind !== "valid") return failedMaterialization(directive, `human_action_resolution_${validated.kind}`);
-      if (
-        validated.actionId !== resolution.actionId ||
-        validated.outcome !== resolution.outcome ||
-        !sameIds(validated.sourceCommentIds, resolution.sourceCommentIds ?? [])
-      ) return failedMaterialization(directive, "human_action_resolution_directive_mismatch");
-      if (!resolution.actionKind || resolution.terminalStatus !== statusForOutcome(resolution.outcome)) {
-        return failedMaterialization(directive, "human_action_resolution_shape_invalid");
-      }
-      setPhase("persist_human_action_resolution");
-      const materialized = await this.dependencies.humanActionResolutionMaterializer.materialize({
-        resolution,
-        actionKind: resolution.actionKind,
-        tree: view.tree,
-        rootIssueId: root.issueId,
-      });
-      if (materialized.kind === "failed") return failedMaterialization(directive, materialized.code);
-      view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
-    }
+    const inputValidation = validateDirectiveInputs(directive, view.tree, pendingInputIds);
+    if (inputValidation) return failedMaterialization(directive, inputValidation);
     setPhase(`materialize_${directive.action.kind}`);
     const materialization = await this.materializeDirective(directive, view, root, profileId, setPhase);
     if (materialization.kind === "failed") return materialization;
@@ -500,13 +391,6 @@ export class RootReconciliationRuntime {
       const written = await this.dependencies.replyWriter.write({ directive, reply, view });
       if (written.kind === "failed") return failedMaterialization(directive, written.code);
       view = await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest);
-    }
-    setPhase("publish_root_timeline");
-    const event = timelineEvent(directive, root.issueId);
-    const timeline = await this.dependencies.timeline.publish(event);
-    if (timeline.kind === "failed") {
-      this.logTimelineFailure(root.issueId, event, timeline.code);
-      return failedMaterialization(directive, timeline.code);
     }
     return materialization;
   }
@@ -529,20 +413,6 @@ export class RootReconciliationRuntime {
       const targetIssueId = action.kind === "rerun_stage"
         ? action.targetIssueId
         : action.kind === "execute_plan" ? action.planIssueId : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
-      const stageExecutionId = stageExecutionIdFor(
-        root.issueId,
-        directive.rootDirectiveId,
-        role,
-        targetIssueId,
-      );
-      const existingResult = stageResultRecord(view.tree, stageExecutionId);
-      if (existingResult) {
-        const timelineView = await this.persistStageResultTimeline(view, directive, existingResult, setPhase);
-        if (timelineView.kind === "failed") return timelineView;
-        const contractView = await this.persistPlanContract(timelineView.view, directive.rootDirectiveId, existingResult, setPhase);
-        await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, existingResult, setPhase);
-        return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
-      }
       const modelSettings = await this.dependencies.modelSettingsFor(profileId);
       const executionView = await this.persistStageInProgress(view, directive.rootDirectiveId, role, targetIssueId, setPhase);
       const input = stageInput(
@@ -563,16 +433,70 @@ export class RootReconciliationRuntime {
           : await this.dependencies.performer.executeVerifyTurn(input);
       setPhase(`validate_${role}_result`);
       validateStageResult(input, stageResult);
-      setPhase(`persist_${role}_result`);
-      const resultView = await this.persistStageResult(executionView, directive.rootDirectiveId, stageResult, setPhase);
-      const resultRecord = toStageResultRecord(stageResult);
-      const timelineView = await this.persistStageResultTimeline(resultView, directive, resultRecord, setPhase);
-      if (timelineView.kind === "failed") return timelineView;
-      const contractView = await this.persistPlanContract(timelineView.view, directive.rootDirectiveId, resultRecord, setPhase);
-      await this.persistStageTerminalStatus(contractView, directive.rootDirectiveId, resultRecord, setPhase);
+      const resultRecord = toStageResultProjection(stageResult);
+      let terminalView = executionView;
+      if (resultRecord.stage === "verify" && revisionBoundVerifyOutcome(resultRecord.outcomeKind)) {
+        setPhase("materialize_verify_revision");
+        terminalView = await this.materializeVerifyRevision(terminalView, directive.rootDirectiveId, resultRecord);
+      }
+      if (resultRecord.stage === "verify" && resultRecord.outcomeKind === "verify_changes_required") {
+        setPhase("materialize_verify_findings");
+        terminalView = await this.materializeVerifyFindings(terminalView, directive.rootDirectiveId, resultRecord);
+      }
+      setPhase(`materialize_${role}_native_postcondition`);
+      await this.persistStageTerminalStatus(terminalView, directive.rootDirectiveId, resultRecord, setPhase);
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [targetIssueId] } as const;
     }
     return this.dependencies.materializer.materialize({ directive, view });
+  }
+
+  private async materializeVerifyRevision(
+    view: RootReconciliationView,
+    directiveId: string,
+    record: StageResultProjection,
+  ): Promise<RootReconciliationView> {
+    if (!("workspace" in view) || !record.verifiedRevision || record.verifiedRevision !== view.git.head) {
+      throw new Error("verify_revision_mismatch");
+    }
+    const verify = stageTarget(view, "verify", record.nodeIssueId);
+    if (verify.status_name !== "In Progress") throw new Error("verify_revision_target_invalid");
+    const root = view.tree.issues.find(({ issue_id }) => issue_id === view.root.issueId);
+    if (!root) throw new Error("verify_revision_root_missing");
+    const url = await this.dependencies.git.readCommitUrl({
+      workspace: view.workspace,
+      revision: record.verifiedRevision,
+    });
+    const expected = { issueId: verify.issue_id, title: VERIFIED_REVISION_TITLE, url };
+    const existing = matchingVerifiedRevisionAttachments(view.tree, expected);
+    if (existing.length > 1) throw new Error("verify_revision_attachment_ambiguous");
+    if (existing.length === 0) {
+      const outcome = await this.dependencies.linear.mutateWorkflow({
+        kind: "create_workflow_attachment",
+        writeId: verifyRevisionWriteId(directiveId, verify.issue_id, record.verifiedRevision),
+        conductorShortHash: this.dependencies.conductorShortHash,
+        expectedProjectId: root.project_id,
+        rootIssueId: root.issue_id,
+        expectedRootRemoteVersion: root.remote_version,
+        target: {
+          targetIssueId: verify.issue_id,
+          expectedRemoteVersion: verify.remote_version,
+          expectedStatusId: verify.status_id,
+          ...(verify.parent_issue_id === undefined ? {} : { expectedParentIssueId: verify.parent_issue_id }),
+          expectedIsArchived: false,
+        },
+        title: expected.title,
+        url: expected.url,
+      });
+      if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+        throw new Error(`verify_revision_attachment_${outcome.kind}`);
+      }
+      view = await this.refreshViewPreservingDigest(view, view.treeDigest);
+    }
+    const readBack = matchingVerifiedRevisionAttachments(view.tree, expected);
+    if (readBack.length !== 1) throw new Error(readBack.length > 1
+      ? "verify_revision_attachment_ambiguous"
+      : "verify_revision_attachment_read_back_failed");
+    return view;
   }
 
   private async persistStageInProgress(
@@ -584,24 +508,143 @@ export class RootReconciliationRuntime {
   ): Promise<RootReconciliationView> {
     const target = stageTarget(view, role, targetIssueId);
     if (target.status_name === "In Progress") {
-      setPhase(`persist_${role}_in_progress_linear_read_back`);
-      const readBack = await this.readWorkflowIssueTree(view.root.issueId);
-      const updated = readBack.issues.find(({ issue_id }) => issue_id === targetIssueId);
-      if (!updated || updated.status_name !== "In Progress") throw new Error("stage_in_progress_read_back_invalid");
-      return { ...view, tree: readBack, observedAt: readBack.observed_at };
+      throw new Error("stage_already_dispatched");
     }
+    if (target.status_name !== "Todo") throw new Error("stage_not_dispatchable");
     return this.persistStageStatus(view, directiveId, role, targetIssueId, "In Progress", "in_progress", setPhase);
+  }
+
+  private async materializeVerifyFindings(
+    initialView: RootReconciliationView,
+    directiveId: string,
+    record: StageResultProjection,
+  ): Promise<RootReconciliationView> {
+    const findings = record.findings;
+    if (!findings || findings.length === 0) throw new Error("verify_changes_required_findings_missing");
+    const rendered = findings.map(renderNativeFinding);
+    if (new Set(findings.map(({ findingId }) => findingId)).size !== findings.length) {
+      throw new Error("verify_finding_id_duplicate");
+    }
+    if (new Set(rendered.map(({ signature }) => signature)).size !== rendered.length) {
+      throw new Error("verify_finding_postcondition_indistinguishable");
+    }
+
+    let view = initialView;
+    for (let index = 0; index < findings.length; index += 1) {
+      view = await this.materializeVerifyFinding(view, directiveId, record, findings[index]!, rendered[index]!, index);
+    }
+    return view;
+  }
+
+  private async materializeVerifyFinding(
+    initialView: RootReconciliationView,
+    directiveId: string,
+    record: StageResultProjection,
+    finding: FindingProposal,
+    rendered: ReturnType<typeof renderNativeFinding>,
+    index: number,
+  ): Promise<RootReconciliationView> {
+    let view = initialView;
+    const root = view.tree.issues.find(({ issue_id }) => issue_id === view.root.issueId);
+    const cycle = view.tree.issues.find(({ issue_id }) => issue_id === record.cycleIssueId);
+    const verify = view.tree.issues.find(({ issue_id }) => issue_id === record.nodeIssueId);
+    const relatedWork = finding.relatedWorkIssueIds.map((issueId) => view.tree.issues.find(({ issue_id }) => issue_id === issueId));
+    if (!root || !cycle || !verify) throw new Error("verify_finding_target_missing");
+    if (cycle.issue_kind !== "cycle" || cycle.parent_issue_id !== root.issue_id || cycle.is_archived) {
+      throw new Error("verify_finding_cycle_invalid");
+    }
+    if (verify.issue_kind !== "verify" || verify.parent_issue_id !== cycle.issue_id || verify.is_archived || verify.status_name !== "In Progress") {
+      throw new Error("verify_finding_verify_invalid");
+    }
+    if (relatedWork.some((work) => !work || work.issue_kind !== "work" || work.parent_issue_id !== cycle.issue_id || work.is_archived)) {
+      throw new Error("verify_finding_related_work_invalid");
+    }
+
+    let matches = matchingFindings(view.tree, cycle.issue_id, rendered);
+    if (matches.length > 1) throw new Error("verify_finding_create_ambiguous");
+    if (matches.length === 0) {
+      const todo = view.tree.status_catalog.find(({ name }) => name === "Todo");
+      if (!todo) throw new Error("verify_finding_todo_status_missing");
+      const outcome = await this.dependencies.linear.mutateWorkflow({
+        kind: "create_workflow_issue",
+        writeId: findingWriteId(directiveId, finding.findingId, "create"),
+        conductorShortHash: this.dependencies.conductorShortHash,
+        expectedProjectId: root.project_id,
+        rootIssueId: root.issue_id,
+        expectedRootRemoteVersion: root.remote_version,
+        parentExpectedRemoteVersion: cycle.remote_version,
+        parentExpectedStatusId: cycle.status_id,
+        parentIssueId: cycle.issue_id,
+        title: rendered.title,
+        description: rendered.description,
+        statusId: todo.status_id,
+        labelNames: rendered.labels,
+        order: verify.order + 1 + index,
+      });
+      if (outcome.kind === "failed" || outcome.kind === "precondition_conflict") {
+        throw new Error(`verify_finding_create_${outcome.kind}`);
+      }
+      view = await this.refreshViewPreservingDigest(view, view.treeDigest);
+      matches = matchingFindings(view.tree, cycle.issue_id, rendered);
+      if (matches.length > 1) throw new Error("verify_finding_create_ambiguous");
+      if (matches.length === 0) throw new Error(`verify_finding_create_${outcome.kind}`);
+    }
+
+    const nativeFinding = matches[0]!;
+    for (const targetIssueId of [verify.issue_id, ...finding.relatedWorkIssueIds]) {
+      view = await this.ensureFindingRelation(view, directiveId, finding.findingId, nativeFinding.issue_id, targetIssueId);
+    }
+    return view;
+  }
+
+  private async ensureFindingRelation(
+    view: RootReconciliationView,
+    directiveId: string,
+    findingId: string,
+    nativeFindingIssueId: string,
+    targetIssueId: string,
+  ): Promise<RootReconciliationView> {
+    if (view.tree.relations.some((relation) => relation.relation_kind === "relates_to" &&
+      relation.source_issue_id === nativeFindingIssueId && relation.target_issue_id === targetIssueId)) return view;
+    const root = view.tree.issues.find(({ issue_id }) => issue_id === view.root.issueId);
+    const source = view.tree.issues.find(({ issue_id }) => issue_id === nativeFindingIssueId);
+    const target = view.tree.issues.find(({ issue_id }) => issue_id === targetIssueId);
+    if (!root || !source || !target) throw new Error("verify_finding_relation_target_missing");
+    const outcome = await this.dependencies.linear.mutateWorkflow({
+      kind: "create_workflow_relation",
+      writeId: findingWriteId(directiveId, findingId, `relate:${targetIssueId}`),
+      conductorShortHash: this.dependencies.conductorShortHash,
+      expectedProjectId: root.project_id,
+      rootIssueId: root.issue_id,
+      expectedRootRemoteVersion: root.remote_version,
+      sourceIssueId: source.issue_id,
+      sourceExpectedRemoteVersion: source.remote_version,
+      targetIssueId: target.issue_id,
+      targetExpectedRemoteVersion: target.remote_version,
+      relationKind: "relates_to",
+      relationState: "present",
+    });
+    if (outcome.kind === "failed" || outcome.kind === "precondition_conflict") {
+      throw new Error(`verify_finding_relation_${outcome.kind}`);
+    }
+    const readBack = await this.refreshViewPreservingDigest(view, view.treeDigest);
+    if (!readBack.tree.relations.some((relation) => relation.relation_kind === "relates_to" &&
+      relation.source_issue_id === nativeFindingIssueId && relation.target_issue_id === targetIssueId)) {
+      throw new Error(`verify_finding_relation_${outcome.kind}`);
+    }
+    return readBack;
   }
 
   private async persistStageTerminalStatus(
     view: RootReconciliationView,
     directiveId: string,
-    record: StageResultRecord,
+    record: StageResultProjection,
     setPhase: (phase: string) => void,
   ): Promise<RootReconciliationView> {
     const target = stageTarget(view, record.stage, record.nodeIssueId);
     const statusName = stageTerminalStatusForOutcome(record.outcomeKind);
-    if (target.status_name === statusName) return view;
+    const description = renderNativeStageDescription(record);
+    const labelNames = nativeStageLabels(target.labels, record);
     return this.persistStageStatus(
       view,
       directiveId,
@@ -610,6 +653,7 @@ export class RootReconciliationRuntime {
       statusName,
       `terminal_${statusCode(statusName)}`,
       setPhase,
+      { description, labelNames },
     );
   }
 
@@ -621,6 +665,7 @@ export class RootReconciliationRuntime {
     statusName: "In Progress" | "In Review" | "Done" | "Failed" | "Canceled",
     phaseSuffix: string,
     setPhase: (phase: string) => void,
+    desired?: { description: string; labelNames: string[] },
   ): Promise<RootReconciliationView> {
     const target = stageTarget(view, role, targetIssueId);
     const rootIssue = view.tree.issues.find(({ issue_id }) => issue_id === view.root.issueId);
@@ -643,7 +688,8 @@ export class RootReconciliationRuntime {
       },
       statusId: status.status_id,
       title: target.title,
-      description: target.description,
+      description: desired?.description ?? target.description,
+      labelNames: desired?.labelNames ?? target.labels,
       isArchived: target.is_archived,
       parentAssignment: { mode: "retain" },
       order: target.order,
@@ -656,7 +702,8 @@ export class RootReconciliationRuntime {
     setPhase(`persist_${role}_${phaseSuffix}_linear_read_back`);
     const readBack = await this.readWorkflowIssueTree(view.root.issueId);
     const updated = readBack.issues.find(({ issue_id }) => issue_id === targetIssueId);
-    if (!updated || updated.status_id !== status.status_id || updated.status_name !== statusName || updated.is_archived) {
+    if (!updated || updated.status_id !== status.status_id || updated.status_name !== statusName || updated.is_archived ||
+        (desired !== undefined && (updated.description !== desired.description || !sameIds(updated.labels, desired.labelNames)))) {
       throw new Error(`stage_status_${statusCode(statusName)}_read_back_invalid`);
     }
     return { ...view, tree: readBack, observedAt: readBack.observed_at };
@@ -682,172 +729,6 @@ export class RootReconciliationRuntime {
     }
   }
 
-  private async persistStageResult(
-    view: RootReconciliationView,
-    directiveId: string,
-    result: StageResult,
-    setPhase: (phase: string) => void,
-  ): Promise<RootReconciliationView> {
-    setPhase(`persist_${result.role}_target`);
-    const target = view.tree.issues.find((issue) => issue.issue_id === result.targetIssueId);
-    const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
-    if (!target || !rootIssue) throw new Error("role_result_target_missing");
-    stageTarget(view, result.role, result.targetIssueId);
-    if (result.rootIssueId !== view.root.issueId || result.cycleIssueId !== target.parent_issue_id) throw new Error("role_result_target_invalid");
-    setPhase(`persist_${result.role}_record`);
-    const record = toStageResultRecord(result);
-    const existing = stageResultRecords(view.tree, target.issue_id);
-    const matching = existing.filter((candidate) => candidate.resultId === record.resultId);
-    if (matching.length > 1) throw new Error("role_result_duplicate");
-    const usage = deriveIssueUsageAggregate({
-      tree: view.tree,
-      targetIssueId: target.issue_id,
-      ...(matching.length === 0 ? { prospectiveRecord: record } : {}),
-    });
-    const body = renderStageResultComment(record, usage);
-    if (matching.length === 1) {
-      if (!sameStageResultRecord(matching[0]!, record)) throw new Error("role_result_conflict");
-      const comment = view.tree.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
-      if (!comment) throw new Error("role_result_canonical_comment_invalid");
-      return view;
-    }
-    setPhase(`persist_${result.role}_linear_write`);
-    const command = {
-      kind: "append_workflow_comment" as const,
-      writeId: stageResultWriteId(directiveId, result.resultId),
-      expectedProjectId: target.project_id,
-      rootIssueId: view.root.issueId,
-      expectedRootRemoteVersion: rootIssue.remote_version,
-      target: {
-        targetIssueId: target.issue_id,
-        expectedRemoteVersion: target.remote_version,
-        expectedStatusId: target.status_id,
-      },
-      body,
-    };
-    this.dependencies.log("root_stage_result_linear_write_started", {
-      role: result.role,
-      body_bytes: String(Buffer.byteLength(body, "utf8")),
-      root_remote_version: rootIssue.remote_version,
-      target_remote_version: target.remote_version,
-    });
-    let outcome: Awaited<ReturnType<RootReconciliationRuntimeDependencies["linear"]["mutateWorkflow"]>>;
-    try {
-      outcome = await this.dependencies.linear.mutateWorkflow(command);
-    } catch (error) {
-      this.dependencies.log("root_stage_result_linear_write_threw", {
-        role: result.role,
-        reason: sanitizedFailureReason(error),
-        error_name: error instanceof Error ? safeFailureCode(error.name.toLowerCase()) : "unknown",
-      });
-      throw error;
-    }
-    this.dependencies.log("root_stage_result_linear_write_outcome", {
-      role: result.role,
-      outcome: outcome.kind,
-      ...(outcome.kind === "failed" ? { failure_code: safeFailureCode(outcome.code) } : {}),
-    });
-    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      const suffix = outcome.kind === "failed" ? safeFailureCode(outcome.code) : outcome.kind;
-      const code = `role_result_write_${suffix}`;
-      const error = new Error(code);
-      Object.assign(error, { code });
-      throw error;
-    }
-    setPhase(`persist_${result.role}_linear_read_back`);
-    const readBack = await this.readWorkflowIssueTree(view.root.issueId);
-    const readBackComment = readBack.comments.find((comment) => comment.body === body);
-    if (!readBackComment) {
-      throw new Error("role_result_read_back_missing");
-    }
-    const parsed = parseManagedRecord(readBackComment.body);
-    if (!parsed.ok || parsed.value.kind !== "stage_result" || !sameStageResultRecord(parsed.value, record)) {
-      throw new Error("role_result_read_back_invalid");
-    }
-    const readBackRecords = stageResultRecords(readBack, target.issue_id);
-    if (readBackRecords.filter((candidate) => candidate.resultId === record.resultId).length !== 1) {
-      throw new Error("role_result_read_back_duplicate");
-    }
-    const readBackUsage = deriveIssueUsageAggregate({ tree: readBack, targetIssueId: target.issue_id });
-    if (!sameUsageAggregate(usage, readBackUsage) || readBackComment.body !== renderStageResultComment(record, readBackUsage)) {
-      throw new Error("role_result_read_back_render_invalid");
-    }
-    return { ...view, tree: readBack, observedAt: readBack.observed_at };
-  }
-
-  private async persistStageResultTimeline(
-    view: RootReconciliationView,
-    directive: RootDirective,
-    result: StageResultRecord,
-    setPhase: (phase: string) => void,
-  ): Promise<{ kind: "materialized"; view: RootReconciliationView } | ReturnType<typeof failedMaterialization>> {
-    setPhase(`publish_${result.stage}_timeline`);
-    const event = stageTimelineEvent(result);
-    const timeline = await this.dependencies.timeline.publish(event);
-    if (timeline.kind === "failed") {
-      this.logTimelineFailure(result.rootIssueId, event, timeline.code);
-      return failedMaterialization(directive, timeline.code);
-    }
-    return {
-      kind: "materialized",
-      view: await this.refreshViewPreservingDigest(view, directive.basedOnTargetRootDigest),
-    };
-  }
-
-  private logTimelineFailure(rootIssueId: string, event: WorkflowTimelineEvent, code: string): void {
-    this.dependencies.log("workflow_timeline_materialization_failed", {
-      root_issue_id: rootIssueId,
-      timeline_event_id: event.timelineEventId,
-      timeline_kind: event.timelineKind,
-      reason: safeFailureCode(code),
-    });
-  }
-
-  private async persistPlanContract(
-    view: RootReconciliationView,
-    directiveId: string,
-    stageResult: StageResultRecord,
-    setPhase: (phase: string) => void,
-  ): Promise<RootReconciliationView> {
-    if (stageResult.stage !== "plan" || stageResult.outcomeKind !== "plan_completed") return view;
-    const contract = planContractFromStageResult(stageResult);
-    const target = stageTarget(view, "plan", stageResult.nodeIssueId);
-    const rootIssue = view.tree.issues.find((issue) => issue.issue_id === view.root.issueId);
-    if (!rootIssue) throw new Error("plan_contract_root_missing");
-    const body = serializeManagedRecord(contract);
-    for (const comment of view.tree.comments) {
-      const parsed = parseManagedRecord(comment.body);
-      if (!parsed.ok || parsed.value.kind !== "plan_contract" || parsed.value.planContractDigest !== contract.planContractDigest) continue;
-      if (comment.issue_id === target.issue_id && samePlanContract(parsed.value, contract)) return view;
-      throw new Error("plan_contract_conflict");
-    }
-    setPhase("persist_plan_contract_linear_write");
-    const outcome = await this.dependencies.linear.mutateWorkflow({
-      kind: "append_workflow_comment",
-      writeId: planContractWriteId(directiveId, stageResult.resultId, contract.planContractDigest),
-      expectedProjectId: target.project_id,
-      rootIssueId: view.root.issueId,
-      expectedRootRemoteVersion: rootIssue.remote_version,
-      target: {
-        targetIssueId: target.issue_id,
-        expectedRemoteVersion: target.remote_version,
-        expectedStatusId: target.status_id,
-      },
-      body,
-    });
-    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      throw new Error(`plan_contract_write_${outcome.kind}`);
-    }
-    setPhase("persist_plan_contract_linear_read_back");
-    const readBack = await this.readWorkflowIssueTree(view.root.issueId);
-    const comment = readBack.comments.find((candidate) => candidate.issue_id === target.issue_id && candidate.body === body);
-    if (!comment) throw new Error("plan_contract_read_back_missing");
-    const parsed = parseManagedRecord(comment.body);
-    if (!parsed.ok || parsed.value.kind !== "plan_contract" || !samePlanContract(parsed.value, contract)) {
-      throw new Error("plan_contract_read_back_invalid");
-    }
-    return { ...view, tree: readBack, observedAt: readBack.observed_at };
-  }
 }
 
 class RootReconciliationPhaseError extends Error {
@@ -865,18 +746,61 @@ function safeFailureCode(value: unknown): string {
     : "unknown";
 }
 
-function stageResultWriteId(directiveId: string, resultId: string): string {
-  const digest = createHash("sha256")
-    .update(`${directiveId}:result:${resultId}`, "utf8")
-    .digest("hex");
-  return `stage-result:${digest}`;
-}
-
 function stageStatusWriteId(directiveId: string, targetIssueId: string, statusName: string): string {
   const digest = createHash("sha256")
     .update(`${directiveId}:stage-status:${targetIssueId}:${statusName}`, "utf8")
     .digest("hex");
   return `stage-status:${digest}`;
+}
+
+const VERIFIED_REVISION_TITLE = "Verified Git revision";
+
+function verifyRevisionWriteId(directiveId: string, verifyIssueId: string, revision: string): string {
+  const digest = createHash("sha256")
+    .update(`${directiveId}:verify-revision:${verifyIssueId}:${revision}`, "utf8")
+    .digest("hex");
+  return `verify-revision:${digest}`;
+}
+
+function revisionBoundVerifyOutcome(outcome: StageResultOutcomeKind): boolean {
+  return outcome === "verify_passed" || outcome === "verify_changes_required" ||
+    outcome === "verify_inconclusive" || outcome === "verify_plan_contract_violation";
+}
+
+function matchingVerifiedRevisionAttachments(
+  tree: LinearWorkflowTreeSnapshot,
+  expected: { issueId: string; title: string; url: string },
+) {
+  return tree.attachments.filter((attachment) =>
+    attachment.issue_id === expected.issueId &&
+    attachment.title === expected.title &&
+    attachment.url === expected.url,
+  );
+}
+
+function verifiedRevisionsFromAttachments(tree: LinearWorkflowTreeSnapshot): string[] {
+  const verifyIssueIds = new Set(tree.issues
+    .filter((issue) => issue.issue_kind === "verify")
+    .map((issue) => issue.issue_id));
+  const revisions = tree.attachments.flatMap((attachment) => {
+    if (attachment.title !== VERIFIED_REVISION_TITLE || !verifyIssueIds.has(attachment.issue_id)) return [];
+    const revision = githubCommitRevision(attachment.url);
+    if (!revision) throw new Error("verify_revision_attachment_invalid");
+    return [revision];
+  });
+  return [...new Set(revisions)].sort();
+}
+
+function githubCommitRevision(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || url.search || url.hash) return undefined;
+    const segments = url.pathname.split("/").filter(Boolean);
+    const revision = segments.length === 4 && segments[2] === "commit" ? segments[3] : undefined;
+    return revision && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(revision) ? revision : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function stageTarget(
@@ -933,62 +857,13 @@ function statusCode(statusName: string): "in_progress" | "in_review" | "done" | 
   return "canceled";
 }
 
-function dispositionAfterDirective(
-  directive: RootDirective,
-  tree: RootReconciliationView["tree"],
-): RootRuntimeDisposition {
+function dispositionAfterDirective(directive: RootDirective): RootRuntimeDisposition {
   if (directive.action.kind === "wait") return "waiting-human";
-  if (directive.action.kind !== "request_human_action") return "progress";
-  const action = findWorkflowIssue(tree, `${directive.rootDirectiveId}:human-action`);
-  return action && !action.is_archived && ["Todo", "In Progress"].includes(action.status_name)
-    ? "waiting-human"
-    : "progress";
-}
-
-function findResumableDirective(
-  tree: RootReconciliationView["tree"],
-  rootIssueId: string,
-): RootDirectiveRecord | undefined {
-  const records = tree.comments
-    .flatMap((comment) => {
-      if (comment.author_kind !== "symphony") return [];
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId
-        ? [parsed.value]
-        : [];
-    })
-    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt) || right.rootDirectiveId.localeCompare(left.rootDirectiveId));
-  return records.find((record) => !directiveMaterializationComplete(record.directive, tree));
-}
-
-function latestUnresolvedRootReconcilerFailure(
-  tree: RootReconciliationView["tree"],
-  rootIssueId: string,
-): RootReconcilerFailureRecord | undefined {
-  const terminalRecords: Array<
-    | { createdAt: string; commentId: string; kind: "directive" }
-    | { createdAt: string; commentId: string; kind: "failure"; failure: RootReconcilerFailureRecord }
-  > = [];
-  for (const comment of tree.comments) {
-    if (comment.author_kind !== "symphony") continue;
-    const parsed = parseManagedRecord(comment.body);
-    if (!parsed.ok) continue;
-    if (parsed.value.kind === "root_directive" && parsed.value.rootIssueId === rootIssueId) {
-      terminalRecords.push({ createdAt: comment.created_at, commentId: comment.comment_id, kind: "directive" });
-    }
-    if (parsed.value.kind === "root_reconciler_failure" && parsed.value.modelTurn.rootIssueId === rootIssueId) {
-      terminalRecords.push({ createdAt: comment.created_at, commentId: comment.comment_id, kind: "failure", failure: parsed.value });
-    }
-  }
-  terminalRecords.sort((left, right) =>
-    right.createdAt.localeCompare(left.createdAt) || right.commentId.localeCompare(left.commentId),
-  );
-  const latest = terminalRecords[0];
-  return latest?.kind === "failure" ? latest.failure : undefined;
+  return directive.action.kind === "create_human_action" ? "waiting-human" : "progress";
 }
 
 function validateRootReconcilerFailure(input: {
-  failure: RootReconcilerFailureRecord;
+  failure: import("../api/RootReconciliationContracts.js").RootReconcilerFailure;
   rootIssueId: string;
   sessionId: string;
   reconcilerTurnId: string;
@@ -1010,7 +885,7 @@ function validateRootReconcilerFailure(input: {
     turn.reconcilerTurnId !== input.reconcilerTurnId ||
     turn.outcome !== failure.category ||
     turn.terminalAt !== failure.failedAt
-  ) return "root_reconciler_failure_record_invalid";
+  ) return "root_reconciler_failure_payload_invalid";
   if (new Set(failure.attemptedInputIds).size !== failure.attemptedInputIds.length || !sameIds(failure.attemptedInputIds, input.attemptedInputIds)) {
     return "root_reconciler_failure_inputs_invalid";
   }
@@ -1020,296 +895,8 @@ function validateRootReconcilerFailure(input: {
   return undefined;
 }
 
-export function directiveMaterializationComplete(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
-  if (!directiveTimelineMaterialized(directive, tree)) return false;
-  const repliesComplete = directive.commentReplies.every((reply) => {
-    const source = tree.comments.find((comment) => comment.comment_id === reply.source.commentId);
-    if (!source || !sourceMatchesReply(source, reply)) return false;
-    const matches = tree.comments.filter((comment) => {
-      if (
-        comment.author_kind !== "symphony" ||
-        comment.parent_comment_id !== source.comment_id ||
-        comment.thread_root_comment_id !== source.thread_root_comment_id
-      ) return false;
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "root_reconciler_reply" &&
-        parsed.value.replyId === reply.replyId &&
-        parsed.value.rootDirectiveId === directive.rootDirectiveId &&
-        parsed.value.sourceInputId === reply.sourceInputId &&
-        sameReplySource(parsed.value.source, reply.source);
-    });
-    if (matches.length !== 1) return false;
-    if (reply.source.kind === "comment_body" && symphonyReceipt(source) !== reply.reaction) return false;
-    if (reply.source.kind === "comment_thread_state" && reply.reaction !== "none") return false;
-    return source.thread_state === desiredThreadState(reply.threadAction);
-  });
-  if (!repliesComplete) return false;
-  const resolutionsComplete = directive.humanActionResolutions.every((resolution) => tree.comments.some((comment) => {
-    if (comment.author_kind !== "symphony") return false;
-    const parsed = parseManagedRecord(comment.body);
-    return parsed.ok && parsed.value.kind === "human_action_resolution" && parsed.value.resolutionId === resolution.resolutionId;
-  }));
-  if (!resolutionsComplete) return false;
-  const action = directive.action;
-  if (action.kind === "wait" || action.kind === "acknowledge") return true;
-  if (action.kind === "request_human_action") {
-    const actionId = `${directive.rootDirectiveId}:human-action`;
-    const humanAction = findWorkflowIssue(tree, actionId);
-    if (!humanAction) return false;
-    if (!action.relatedIssueIds.every((relatedIssueId) => tree.relations.some((relation) =>
-      relation.relation_kind === "relates_to" && relation.source_issue_id === humanAction.issue_id && relation.target_issue_id === relatedIssueId,
-    ))) return false;
-    return tree.comments.some((comment) => {
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "human_action_request" &&
-        comment.author_kind === "symphony" &&
-        parsed.value.actionId === actionId &&
-        parsed.value.actionIssueId === humanAction.issue_id &&
-        parsed.value.actionKind === action.actionKind &&
-        parsed.value.parentScope === action.parentScope &&
-        parsed.value.rootIssueId === action.rootIssueId &&
-        parsed.value.cycleIssueId === action.cycleIssueId &&
-        sameIds(parsed.value.relatedIssueIds, action.relatedIssueIds) &&
-        parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
-        parsed.value.basedOnTreeDigest === directive.basedOnTargetRootDigest &&
-        parsed.value.proposalDigest === action.proposalDigest &&
-        parsed.value.expectedParentRemoteVersion === action.expectedParentRemoteVersion;
-    });
-  }
-  if (action.kind === "execute_plan" || action.kind === "execute_work" || action.kind === "execute_verify") {
-    const role = action.kind === "execute_plan" ? "plan" : action.kind === "execute_work" ? "work" : "verify";
-    const targetIssueId = action.kind === "execute_plan" ? action.planIssueId : action.kind === "execute_work" ? action.workIssueId : action.verifyIssueId;
-    const executionId = `${rootIssueIdFromTree(tree)}:${directive.rootDirectiveId}:${role}:${targetIssueId}`;
-    return stageLifecycleComplete(tree, executionId, role, targetIssueId);
-  }
-  if (action.kind === "rerun_stage") {
-    return stageLifecycleComplete(
-      tree,
-      `${rootIssueIdFromTree(tree)}:${directive.rootDirectiveId}:${action.role}:${action.targetIssueId}`,
-      action.role,
-      action.targetIssueId,
-    );
-  }
-  if (action.kind === "conclude_cycle") {
-    const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
-    const expected = action.conclusion === "succeeded" ? "Succeeded" : action.conclusion === "canceled" ? "Canceled" : "Changes Required";
-    return cycle?.status_name === expected && tree.comments.some((comment) => {
-      if (comment.issue_id !== action.cycleIssueId || comment.author_kind !== "symphony") return false;
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "cycle_outcome" &&
-        parsed.value.cycleOutcomeId === cycleOutcomeId({
-          rootIssueId: tree.root_issue_id,
-          cycleIssueId: action.cycleIssueId,
-          rootDirectiveId: directive.rootDirectiveId,
-        }) &&
-        parsed.value.rootIssueId === tree.root_issue_id &&
-        parsed.value.cycleIssueId === action.cycleIssueId &&
-        parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
-        parsed.value.conclusion === action.conclusion &&
-        sameIds(parsed.value.completedWorkIds, action.completedWorkIds) &&
-        sameIds(parsed.value.unresolvedFindingIds, action.unresolvedFindingIds) &&
-        sameEvidenceRefs(parsed.value.attemptedApproachRefs, action.attemptedApproachRefs) &&
-        sameEvidenceRefs(parsed.value.verificationEvidenceRefs, action.verificationEvidenceRefs);
-    });
-  }
-  if (action.kind === "create_cycle") {
-    return Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
-      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
-  }
-  if (action.kind === "supersede_cycle") {
-    return cycleOutcomeMaterialized(tree, directive, action.currentCycleIssueId, "superseded", "Changes Required") &&
-      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:cycle`)) &&
-      Boolean(findWorkflowIssue(tree, `${directive.rootDirectiveId}:plan`));
-  }
-  if (action.kind === "replan_current_cycle") {
-    const cycle = tree.issues.find(({ issue_id }) => issue_id === action.cycleIssueId);
-    const plan = tree.issues.find(({ issue_id }) => issue_id === action.planIssueId);
-    if (action.supersededPlanContractIds.length === 0) return false;
-    if (new Set(action.supersededPlanContractIds).size !== action.supersededPlanContractIds.length) return false;
-    const supersessionsComplete = action.supersededPlanContractIds.every((supersededPlanContractDigest) => {
-      const supersessionId = planContractSupersessionId({
-        rootIssueId: tree.root_issue_id,
-        cycleIssueId: action.cycleIssueId,
-        rootDirectiveId: directive.rootDirectiveId,
-        supersededPlanContractDigest,
-      });
-      const matches = tree.comments.filter((comment) => {
-        if (comment.issue_id !== action.planIssueId || comment.author_kind !== "symphony") return false;
-        const parsed = parseManagedRecord(comment.body);
-        return parsed.ok && parsed.value.kind === "plan_contract_supersession" &&
-          parsed.value.supersessionId === supersessionId &&
-          parsed.value.rootIssueId === tree.root_issue_id &&
-          parsed.value.cycleIssueId === action.cycleIssueId &&
-          parsed.value.supersededPlanContractDigest === supersededPlanContractDigest &&
-          parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
-          parsed.value.freshPlanIssueId === action.planIssueId &&
-          parsed.value.supersededAt === directive.modelTurn.terminalAt;
-      });
-      return matches.length === 1;
-    });
-    return supersessionsComplete && treeOperationsComplete(action.archiveOrRestoreOperations, tree) &&
-      cycle?.status_name === "Planning" && plan?.status_name === "In Progress" && issueMarkdown(plan) === action.freshPlanGoal;
-  }
-  if (action.kind === "conclude_root") return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "In Review";
-  if (action.kind === "cancel_root") {
-    return tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id)?.status_name === "Canceled" &&
-      (!action.activeCycleIssueId || cycleOutcomeMaterialized(tree, directive, action.activeCycleIssueId, "canceled", "Canceled"));
-  }
-  if (action.kind === "revise_root_tree") return treeOperationsComplete(action.operations, tree);
-  return false;
-}
-
-function directiveTimelineMaterialized(directive: RootDirective, tree: RootReconciliationView["tree"]): boolean {
-  const event = timelineEvent(directive, tree.root_issue_id);
-  const targetIssueId = event.timelineKind === "cycle" ? event.cycleIssueId : event.rootIssueId;
-  if (!targetIssueId) return false;
-  const matches = tree.comments.flatMap((comment) => {
-    if (comment.author_kind !== "symphony") return [];
-    const parsed = parseManagedRecord(comment.body);
-    return parsed.ok && parsed.value.kind === "workflow_timeline" && parsed.value.timelineEventId === event.timelineEventId
-      ? [{ comment, record: parsed.value }]
-      : [];
-  });
-  if (matches.length !== 1) return false;
-  const { comment, record } = matches[0]!;
-  return comment.issue_id === targetIssueId && record.timelineKind === event.timelineKind &&
-    record.targetIssueId === targetIssueId && sameIds(record.sourceRecordIds, event.sourceRecordIds) &&
-    sameIds(record.sourceVersions, event.sourceVersions) && record.writeId === event.timelineEventId &&
-    record.renderedSchemaVersion === "1" && record.occurredAt === event.occurredAt;
-}
-
-function cycleOutcomeMaterialized(
-  tree: LinearWorkflowTreeSnapshot,
-  directive: RootDirective,
-  cycleIssueId: string,
-  conclusion: "succeeded" | "repair_required" | "exhausted" | "superseded" | "canceled",
-  expectedStatus: "Succeeded" | "Changes Required" | "Canceled",
-): boolean {
-  const cycle = tree.issues.find(({ issue_id }) => issue_id === cycleIssueId);
-  if (cycle?.status_name !== expectedStatus) return false;
-  const outcomes = tree.comments.filter((comment) => {
-    if (comment.issue_id !== cycleIssueId || comment.author_kind !== "symphony") return false;
-    const parsed = parseManagedRecord(comment.body);
-    return parsed.ok && parsed.value.kind === "cycle_outcome" &&
-      parsed.value.cycleOutcomeId === cycleOutcomeId({
-        rootIssueId: tree.root_issue_id,
-        cycleIssueId,
-        rootDirectiveId: directive.rootDirectiveId,
-      }) &&
-      parsed.value.rootIssueId === tree.root_issue_id &&
-      parsed.value.cycleIssueId === cycleIssueId &&
-      parsed.value.sourceRootDirectiveId === directive.rootDirectiveId &&
-      parsed.value.conclusion === conclusion;
-  });
-  return outcomes.length === 1;
-}
-
-function sameReplySource(
-  left: RootDirective["commentReplies"][number]["source"],
-  right: RootDirective["commentReplies"][number]["source"],
-): boolean {
-  if (left.kind !== right.kind || left.commentId !== right.commentId) return false;
-  if (left.kind === "comment_body" && right.kind === "comment_body") {
-    return left.commentBodyDigest === right.commentBodyDigest;
-  }
-  if (left.kind === "comment_thread_state" && right.kind === "comment_thread_state") {
-    return left.commentRemoteVersion === right.commentRemoteVersion &&
-      left.threadRootCommentId === right.threadRootCommentId && left.threadState === right.threadState;
-  }
-  return false;
-}
-
-function treeOperationsComplete(
-  operations: Extract<RootDirective["action"], { kind: "revise_root_tree" }>["operations"],
-  tree: RootReconciliationView["tree"],
-): boolean {
-  return operations.every((operation) => {
-    if (operation.kind === "create_node") {
-      return Boolean(findWorkflowIssue(tree, treeOperationIssueKey(operation)));
-    }
-    if (operation.kind === "update_node") {
-      const issue = tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId);
-      return Boolean(issue && issue.title === operation.title && issueMarkdown(issue) === operation.description && issue.status_name === operation.status);
-    }
-    if (operation.kind === "archive_node" || operation.kind === "restore_node") {
-      return tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId)?.is_archived === (operation.kind === "archive_node");
-    }
-    if (operation.kind === "reorder_nodes") {
-      return operation.orderedIssueIds.every((issueId, order) => tree.issues.find(({ issue_id }) => issue_id === issueId)?.order === order);
-    }
-    if (operation.kind === "replace_dependencies") {
-      const expected = new Set(operation.dependencyIssueIds);
-      const actual = new Set(tree.relations.filter((relation) => relation.relation_kind === "blocks" && relation.target_issue_id === operation.workIssueId).map((relation) => relation.source_issue_id));
-      return expected.size === actual.size && [...expected].every((issueId) => actual.has(issueId));
-    }
-    if (operation.kind === "create_relation") {
-      return tree.relations.some((relation) => relation.relation_kind === operation.relationKind && relation.source_issue_id === operation.sourceIssueId && relation.target_issue_id === operation.targetIssueId);
-    }
-    return !tree.relations.some(({ relation_id }) => relation_id === operation.relationId);
-  });
-}
-
-function stageLifecycleComplete(
-  tree: RootReconciliationView["tree"],
-  resultId: string,
-  role: StageResult["role"],
-  targetIssueId: string,
-): boolean {
-  const record = stageResultRecord(tree, resultId);
-  if (!record || record.stage !== role || record.nodeIssueId !== targetIssueId) return false;
-  if (record.outcomeKind === "plan_completed") {
-    const contract = planContractFromStageResult(record);
-    const hasMatchingContract = tree.comments.some((comment) => {
-      const parsed = parseManagedRecord(comment.body);
-      return parsed.ok && parsed.value.kind === "plan_contract" &&
-        comment.issue_id === targetIssueId && samePlanContract(parsed.value, contract);
-    });
-    if (!hasMatchingContract) return false;
-  }
-  return tree.issues.some((issue) =>
-    issue.issue_id === targetIssueId &&
-    !issue.is_archived &&
-    issue.status_name === stageTerminalStatusForOutcome(record.outcomeKind),
-  );
-}
-
-function stageResultRecord(
-  tree: RootReconciliationView["tree"],
-  resultId: string,
-): StageResultRecord | undefined {
-  for (const comment of tree.comments) {
-    if (comment.author_kind !== "symphony") continue;
-    const parsed = parseManagedRecord(comment.body);
-    if (parsed.ok && parsed.value.kind === "stage_result" && parsed.value.resultId === resultId) return parsed.value;
-  }
-  return undefined;
-}
-
-function rootIssueIdFromTree(tree: RootReconciliationView["tree"]): string {
-  return tree.root_issue_id;
-}
-
-function viewWithDigest(view: RootReconciliationView, treeDigest: string): RootReconciliationView {
-  return { ...view, treeDigest };
-}
-
 function sameIds(left: string[], right: string[]): boolean {
   return left.length === right.length && left.slice().sort().every((value, index) => value === right.slice().sort()[index]);
-}
-
-function sameEvidenceRefs(
-  left: EvidenceReference[],
-  right: EvidenceRef[],
-): boolean {
-  const key = (value: { referenceId: string; sourceKind: string }) => `${value.sourceKind}\0${value.referenceId}`;
-  return left.length === right.length && left.map(key).sort().every((value, index) => value === right.map(key).sort()[index]);
-}
-
-function statusForOutcome(outcome: HumanActionResolution["outcome"]): "Approved" | "Rejected" | "Answered" | "Canceled" {
-  if (outcome === "approved" || outcome === "granted" || outcome === "waived" || outcome === "override_applied") return "Approved";
-  if (outcome === "rejected" || outcome === "denied" || outcome === "override_rejected") return "Rejected";
-  if (outcome === "answered") return "Answered";
-  return "Canceled";
 }
 
 function failedMaterialization(directive: RootDirective, code: string) {
@@ -1414,103 +1001,8 @@ function sourceInputId(reply: UserCommentReply): string {
     );
 }
 
-function sourceMatchesReply(
-  source: RootReconciliationView["tree"]["comments"][number],
-  reply: UserCommentReply,
-): boolean {
-  return reply.source.kind === "comment_body"
-    ? commentBodyDigest(source.body) === reply.source.commentBodyDigest
-    : source.thread_root_comment_id === reply.source.threadRootCommentId;
-}
-
 function commentBodyDigest(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
-}
-
-function desiredThreadState(action: UserCommentReply["threadAction"]): "resolved" | "unresolved" {
-  return action === "resolve" ? "resolved" : "unresolved";
-}
-
-function symphonyReceipt(comment: RootReconciliationView["tree"]["comments"][number]): "check" | "cross" | "none" | undefined {
-  const receipts = new Set(comment.reactions
-    .filter(({ actor_kind, emoji }) => actor_kind === "symphony" && (emoji === "✅" || emoji === "❌"))
-    .map(({ emoji }) => emoji === "✅" ? "check" : "cross"));
-  if (receipts.size > 1) return undefined;
-  return receipts.values().next().value ?? "none";
-}
-
-function issueMarkdown(issue: RootReconciliationView["tree"]["issues"][number] | undefined): string | undefined {
-  if (!issue) return undefined;
-  return issue.issue_kind === "root" ? issue.description : workflowIssueMarkdown(issue);
-}
-
-function treeOperationIssueKey(
-  operation: Extract<RootDirective["action"], { kind: "revise_root_tree" }> ["operations"][number] & { kind: "create_node" },
-): string {
-  const identity = JSON.stringify([
-    operation.precondition.targetIssueId,
-    operation.parentIssueId,
-    operation.issueKind,
-    operation.title,
-    operation.description,
-  ]);
-  return `tree-node:${createHash("sha256").update(identity).digest("hex")}`;
-}
-
-function timelineEvent(
-  directive: RootDirective,
-  rootIssueId: string,
-): WorkflowTimelineEvent {
-  const cycleIssueId = cycleIdForAction(directive.action);
-  const timelineKind = cycleIssueId ? "cycle" : "root";
-  const timelineEventId = createHash("sha256")
-    .update(["decision_accepted", rootIssueId, cycleIssueId ?? "", directive.rootDirectiveId].join("\0"), "utf8")
-    .digest("hex");
-  const base = {
-    protocolVersion: 1 as const,
-    timelineEventId,
-    rootIssueId,
-    occurredAt: directive.modelTurn.terminalAt,
-    sourceRecordIds: [directive.rootDirectiveId],
-    sourceVersions: [directive.basedOnTargetRootDigest],
-    actor: "root_reconciler" as const,
-    summary: directive.rationale,
-    inputRefs: directive.consumedInputIds,
-    outputRefs: [directive.rootDirectiveId],
-    nextStep: directive.action.kind,
-  };
-  return cycleIssueId
-    ? { ...base, timelineKind: "cycle", cycleIssueId, kind: "cycle_decision_accepted" }
-    : { ...base, timelineKind: timelineKind as "root", kind: "root_decision_accepted" };
-}
-
-function stageTimelineEvent(result: StageResultRecord): WorkflowTimelineEvent {
-  const kind = result.stage === "plan"
-    ? "plan_turn_completed" as const
-    : result.stage === "verify"
-      ? "verify_turn_completed" as const
-      : result.outcomeKind === "work_completed"
-        ? "work_turn_completed" as const
-        : "work_turn_blocked" as const;
-  const timelineEventId = createHash("sha256")
-    .update(["stage_result", result.rootIssueId, result.cycleIssueId, result.resultId].join("\0"), "utf8")
-    .digest("hex");
-  return {
-    protocolVersion: 1,
-    timelineEventId,
-    timelineKind: "cycle",
-    rootIssueId: result.rootIssueId,
-    cycleIssueId: result.cycleIssueId,
-    occurredAt: result.completedAt,
-    sourceRecordIds: [result.resultId],
-    sourceVersions: [result.observedTreeDigest],
-    actor: result.stage,
-    kind,
-    summary: result.summary,
-    inputRefs: result.sourceManifest,
-    outputRefs: [result.resultId, result.nodeIssueId],
-    nextStep: "The Root Reconciler will evaluate the durable Stage Result.",
-  };
 }
 
 function cycleIdForAction(action: RootDirective["action"]): string | undefined {
@@ -1554,7 +1046,7 @@ function validateStageResult(input: StageTurnInput, result: StageResult): void {
   }
 }
 
-function toStageResultRecord(result: StageResult): StageResultRecord {
+function toStageResultProjection(result: StageResult): StageResultProjection {
   const outcome = result.outcome as unknown as {
     kind: StageResultOutcomeKind;
     planContract?: PlanContractProposal;
@@ -1564,15 +1056,14 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     evidenceRefs?: EvidenceReference[];
     changedPaths?: string[];
     commitRevision?: string;
-    conclusion?: StageResultRecord["verifyConclusion"];
+    conclusion?: StageResultProjection["verifyConclusion"];
+    findings?: FindingProposal[];
     verifiedRevision?: string;
     errorCode?: string;
   };
   if (!isStageResultOutcomeKind(outcome.kind)) throw new Error("role_result_outcome_invalid");
   const completedPlan = outcome.kind === "plan_completed" ? completedPlanResult(outcome) : undefined;
-  const record: StageResultRecord = {
-    kind: "stage_result",
-    version: 1,
+  const record: StageResultProjection = {
     resultId: result.resultId,
     rootIssueId: result.rootIssueId,
     cycleIssueId: result.cycleIssueId,
@@ -1588,7 +1079,6 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     completedAt: result.completedAt,
     modelTurn: result.modelTurn,
     ...(completedPlan === undefined ? {} : {
-      planContractDigest: canonicalPlanContractDigest(completedPlan),
       planContract: completedPlan.planContract,
       proposedWorkDag: completedPlan.proposedWorkDag,
       risks: completedPlan.risks,
@@ -1598,66 +1088,14 @@ function toStageResultRecord(result: StageResult): StageResultRecord {
     ...(outcome.changedPaths === undefined ? {} : { changedPaths: outcome.changedPaths }),
     ...(outcome.commitRevision === undefined ? {} : { commitRevision: outcome.commitRevision }),
     ...(outcome.conclusion === undefined ? {} : { verifyConclusion: outcome.conclusion }),
+    ...(outcome.findings === undefined ? {} : { findings: outcome.findings }),
     ...(outcome.verifiedRevision === undefined ? {} : { verifiedRevision: outcome.verifiedRevision }),
     ...(outcome.errorCode === undefined ? {} : { failureCode: outcome.errorCode }),
   };
   return record;
 }
 
-function stageResultRecords(
-  tree: RootReconciliationView["tree"],
-  targetIssueId: string,
-): StageResultRecord[] {
-  const records: StageResultRecord[] = [];
-  for (const comment of tree.comments) {
-    if (comment.issue_id !== targetIssueId || comment.author_kind !== "symphony") continue;
-    const parsed = parseManagedRecord(comment.body);
-    if (!parsed.ok || parsed.value.kind !== "stage_result") continue;
-    if (parsed.value.nodeIssueId !== targetIssueId) throw new Error("stage_result_comment_target_invalid");
-    records.push(parsed.value);
-  }
-  return records;
-}
-
-function sameStageResultRecord(left: StageResultRecord, right: StageResultRecord): boolean {
-  return serializeManagedRecord(left) === serializeManagedRecord(right);
-}
-
-function sameUsageAggregate(left: UsageAggregate, right: UsageAggregate): boolean {
-  return left.scope === right.scope &&
-    left.sourceRecordCount === right.sourceRecordCount &&
-    left.sourceDigest === right.sourceDigest &&
-    left.isComplete === right.isComplete &&
-    left.unknownTurnCount === right.unknownTurnCount &&
-    JSON.stringify(left.groups) === JSON.stringify(right.groups);
-}
-
-function renderStageResultComment(record: StageResultRecord, usage: UsageAggregate): string {
-  const sections = [
-    `## Symphony · ${stageDisplayName(record.stage)}`,
-    compactMarkdownText(record.summary),
-    "",
-    "**Result**",
-    stageOutcomeDisplayName(record.outcomeKind),
-  ];
-  const evidence = stageSupportingLines(record);
-  if (evidence.length > 0) sections.push("", "**Evidence**", ...evidence.map((line) => `- ${line}`));
-  sections.push(
-    "",
-    "**Usage**",
-    `- Model: ${inlineCode(record.modelTurn.model)}`,
-    `- This turn: ${turnUsageDisplay(record.modelTurn.usage)}`,
-    "- This Issue:",
-    ...usage.groups.map((group) => `  - ${inlineCode(group.model)}: ${stageUsageGroupDisplay(group)}`),
-    `  - Completeness: ${usageCompletenessDisplay(usage)}`,
-    "",
-    "**Next**",
-    "The Root Reconciler will evaluate the durable result.",
-  );
-  return serializeManagedRecord(record, sections.join("\n"));
-}
-
-function stageDisplayName(stage: StageResultRecord["stage"]): "Plan" | "Work" | "Verify" {
+function stageDisplayName(stage: StageResultProjection["stage"]): "Plan" | "Work" | "Verify" {
   if (stage === "plan") return "Plan";
   if (stage === "work") return "Work";
   return "Verify";
@@ -1667,7 +1105,7 @@ function stageOutcomeDisplayName(outcome: StageResultOutcomeKind): string {
   return outcome.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") + ".";
 }
 
-function stageSupportingLines(record: StageResultRecord): string[] {
+function stageSupportingLines(record: StageResultProjection): string[] {
   const lines: string[] = [];
   if (record.commitRevision) lines.push(`Commit: ${inlineCode(record.commitRevision)}`);
   if (record.verifiedRevision) lines.push(`Verified revision: ${inlineCode(record.verifiedRevision)}`);
@@ -1679,21 +1117,89 @@ function stageSupportingLines(record: StageResultRecord): string[] {
   return lines;
 }
 
-function stageUsageGroupDisplay(group: UsageAggregateGroup): string {
-  const measured = `input=${group.inputTokens}, cached=${group.cachedInputTokens}, output=${group.outputTokens}, reasoning=${group.reasoningOutputTokens}, total=${group.totalTokens}`;
-  return group.unavailableTurnCount === 0
-    ? measured
-    : `${measured}; unavailable turns=${group.unavailableTurnCount}`;
+const VERIFY_CONCLUSION_LABELS = ["Passed", "Changes Required", "Inconclusive", "Contract Violation"] as const;
+
+function nativeStageLabels(current: string[], record: StageResultProjection): string[] {
+  if (record.stage !== "verify") return current;
+  const retained = current.filter((label) => !VERIFY_CONCLUSION_LABELS.includes(label as typeof VERIFY_CONCLUSION_LABELS[number]));
+  const conclusion = record.outcomeKind === "verify_passed"
+    ? "Passed"
+    : record.outcomeKind === "verify_changes_required"
+      ? "Changes Required"
+      : record.outcomeKind === "verify_inconclusive"
+        ? "Inconclusive"
+        : record.outcomeKind === "verify_plan_contract_violation"
+          ? "Contract Violation"
+          : undefined;
+  return conclusion === undefined ? retained : [...retained, conclusion];
 }
 
-function usageCompletenessDisplay(usage: UsageAggregate): string {
-  if (usage.isComplete) return `complete (${usage.sourceRecordCount} source ${usage.sourceRecordCount === 1 ? "record" : "records"}).`;
-  return `incomplete (${usage.unknownTurnCount} unavailable ${usage.unknownTurnCount === 1 ? "turn" : "turns"}).`;
+function renderNativeStageDescription(record: StageResultProjection): string {
+  const lines = [
+    `# ${stageDisplayName(record.stage)} Result`,
+    "",
+    markdownFact(record.summary),
+    "",
+    "## Outcome",
+    stageOutcomeDisplayName(record.outcomeKind),
+  ];
+  if (record.stage === "plan" && record.outcomeKind === "plan_completed") {
+    const completed = completedPlanResult(record);
+    lines.push(
+      "",
+      "## Objective",
+      markdownFact(completed.planContract.objective),
+      "",
+      "## Included Scope",
+      ...markdownList(completed.planContract.includedScope),
+      "",
+      "## Excluded Scope",
+      ...markdownList(completed.planContract.excludedScope),
+      "",
+      "## Assumptions",
+      ...markdownList(completed.planContract.assumptions),
+      "",
+      "## Constraints",
+      ...markdownList(completed.planContract.constraints),
+      "",
+      "## Acceptance Criteria",
+      ...completed.planContract.acceptanceCriteria.map((criterion) =>
+        `- **${markdownFact(criterion.criterionKey)}:** ${markdownFact(criterion.statement)} Verification: ${markdownFact(criterion.verificationMethod)}`),
+      "",
+      "## Verification Requirements",
+      ...markdownList(completed.planContract.verificationRequirements),
+      "",
+      "## Proposed Work",
+      ...completed.proposedWorkDag.workNodes.map((node) =>
+        `- **${markdownFact(node.title)}:** ${markdownFact(node.description)} Expected outcome: ${markdownFact(node.expectedOutcome)} Required checks: ${node.requiredChecks.map(markdownFact).join(", ") || "None"}. Dependencies: ${node.dependencyProposalKeys.map(markdownFact).join(", ") || "None"}.`),
+      "",
+      "## Proposed Verification",
+      `- **${markdownFact(completed.proposedWorkDag.verifyNode.title)}**`,
+      ...completed.proposedWorkDag.verifyNode.acceptanceCriteria.map((criterion) =>
+        `- ${markdownFact(criterion.statement)} Verification: ${markdownFact(criterion.verificationMethod)}`),
+      ...markdownList(completed.proposedWorkDag.verifyNode.requiredChecks),
+      "",
+      "## Risks",
+      ...markdownList(completed.risks),
+      "",
+      "## Required Permissions",
+      ...markdownList(completed.requiredPermissions),
+    );
+  } else {
+    const evidence = stageSupportingLines(record);
+    if (evidence.length > 0) lines.push("", "## Evidence", ...evidence.map((value) => `- ${markdownFact(value)}`));
+  }
+  const description = lines.join("\n");
+  if ([...description].length > 16_384) throw new Error("stage_native_description_too_large");
+  return description;
 }
 
-function turnUsageDisplay(usage: TurnUsage): string {
-  if (usage.status === "unavailable") return `unavailable (${usage.reason}).`;
-  return `input=${usage.inputTokens}, cached=${usage.cachedInputTokens}, output=${usage.outputTokens}, reasoning=${usage.reasoningOutputTokens}, total=${usage.totalTokens}.`;
+function markdownList(values: string[]): string[] {
+  return values.length === 0 ? ["- None"] : values.map((value) => `- ${markdownFact(value)}`);
+}
+
+function markdownFact(value: string): string {
+  return compactMarkdownText(value).replace(/`/gu, "'");
 }
 
 function compactMarkdownText(value: string): string {
@@ -1708,22 +1214,55 @@ function inlineCode(value: string): string {
   return `${delimiter}${compact}${delimiter}`;
 }
 
-function planContractFromStageResult(result: StageResultRecord): PlanContract {
-  if (result.stage !== "plan" || result.outcomeKind !== "plan_completed") {
-    throw new Error("plan_contract_stage_result_invalid");
-  }
-  const completedPlan = completedPlanResult(result);
-  const planContractDigest = canonicalPlanContractDigest(completedPlan);
-  if (result.planContractDigest !== planContractDigest) throw new Error("plan_contract_digest_invalid");
+function renderNativeFinding(finding: FindingProposal): {
+  title: string;
+  description: string;
+  labels: string[];
+  signature: string;
+} {
+  const summary = compactMarkdownText(finding.description);
+  const title = `Finding: ${truncateCodePoints(summary, 247)}`;
+  const evidence = finding.evidenceRefs.map((reference) =>
+    `- ${markdownFact(reference.sourceKind)} ${markdownFact(reference.referenceId)}`);
+  const description = [
+    "# Finding",
+    "",
+    markdownFact(finding.description),
+    "",
+    "## Evidence",
+    ...(evidence.length === 0 ? ["- None"] : evidence),
+  ].join("\n");
+  if ([...description].length > 16_384) throw new Error("verify_finding_description_too_large");
+  const labels = ["Finding", displayLabel(finding.severity), displayLabel(finding.category)];
   return {
-    kind: "plan_contract",
-    version: 1,
-    rootIssueId: result.rootIssueId,
-    cycleIssueId: result.cycleIssueId,
-    planContractDigest,
-    ...completedPlan.planContract,
-    proposedWorkDag: completedPlan.proposedWorkDag,
+    title,
+    description,
+    labels,
+    signature: JSON.stringify({ title, description, labels }),
   };
+}
+
+function matchingFindings(
+  tree: LinearWorkflowTreeSnapshot,
+  cycleIssueId: string,
+  rendered: ReturnType<typeof renderNativeFinding>,
+) {
+  return tree.issues.filter((issue) => issue.issue_kind === "finding" && issue.parent_issue_id === cycleIssueId &&
+    !issue.is_archived && issue.status_name === "Todo" && issue.title === rendered.title &&
+    issue.description === rendered.description && sameIds(issue.labels, rendered.labels));
+}
+
+function findingWriteId(directiveId: string, findingId: string, operation: string): string {
+  return `verify-finding:${createHash("sha256").update(`${directiveId}:${findingId}:${operation}`, "utf8").digest("hex")}`;
+}
+
+function displayLabel(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function truncateCodePoints(value: string, maximum: number): string {
+  const points = [...value];
+  return points.length <= maximum ? value : `${points.slice(0, maximum - 3).join("")}...`;
 }
 
 function completedPlanResult(input: {
@@ -1755,47 +1294,6 @@ function completedPlanResult(input: {
     requiredPermissions: input.requiredPermissions,
     evidenceRefs: input.evidenceRefs,
   };
-}
-
-function canonicalPlanContractDigest(input: ReturnType<typeof completedPlanResult>): string {
-  return createHash("sha256")
-    .update(canonicalJson({
-      planContract: input.planContract,
-      proposedWorkDag: input.proposedWorkDag,
-      risks: input.risks,
-      requiredPermissions: input.requiredPermissions,
-      evidenceRefs: input.evidenceRefs,
-    }), "utf8")
-    .digest("hex");
-}
-
-function samePlanContract(left: PlanContract, right: PlanContract): boolean {
-  return canonicalJson(left) === canonicalJson(right);
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalJsonValue(value));
-}
-
-function canonicalJsonValue(value: unknown): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("plan_contract_canonical_value_invalid");
-    return value;
-  }
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => [key, canonicalJsonValue(child)]));
-  }
-  throw new Error("plan_contract_canonical_value_invalid");
-}
-
-function planContractWriteId(directiveId: string, resultId: string, planContractDigest: string): string {
-  const digest = createHash("sha256")
-    .update(`${directiveId}:plan-contract:${resultId}:${planContractDigest}`, "utf8")
-    .digest("hex");
-  return `plan-contract:${digest}`;
 }
 
 function isStageResultOutcomeKind(value: unknown): value is StageResultOutcomeKind {
@@ -1833,7 +1331,7 @@ function stageInput(
     goal: JSON.stringify(action),
     requiredEvidenceRefs: [],
     tree: view.tree,
-    git: view.git,
+    git: workspaceGit(view),
     profileId,
     modelSettings,
     executionPolicy: {
@@ -1841,6 +1339,11 @@ function stageInput(
       workspace_access: role === "work" ? "read_write" : "read_only",
     },
   } as StageTurnInput;
+}
+
+function workspaceGit(view: RootReconciliationView) {
+  if (!("git" in view)) throw new Error("root_worktree_gate_not_valid");
+  return view.git;
 }
 
 export function stageExecutionIdFor(

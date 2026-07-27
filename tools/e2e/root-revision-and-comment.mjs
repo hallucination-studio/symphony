@@ -71,22 +71,21 @@ export async function runRootRevisionAndCommentCase({ definition, human, rootCre
 }
 
 async function waitForInitialPlan({ human, rootIssueId, signal }) {
-  const plan = await human.waitForPlanContractAndPlanReviewAction({ rootIssueId, ...(signal ? { signal } : {}) });
+  const plan = await human.waitForPlanApprovalGate({ rootIssueId, ...(signal ? { signal } : {}) });
   return assertPlanGate(plan, "foreground_e2e_revision_initial_plan_invalid");
 }
 
 async function waitForSuccessorPlan({ human, rootIssueId, initialPlan, signal }) {
-  const plan = await human.waitForSuccessorPlanContractAndPlanReviewAction({
+  const plan = await human.waitForSuccessorPlanApprovalGate({
     rootIssueId,
     priorCycleIssueId: initialPlan.cycleIssueId,
-    priorPlanReviewActionIssueId: initialPlan.planReviewActionIssueId,
+    priorRequestCommentId: initialPlan.requestCommentId,
     ...(signal ? { signal } : {}),
   });
   const successor = assertPlanGate(plan, "foreground_e2e_revision_successor_plan_invalid");
   if (successor.cycleIssueId === initialPlan.cycleIssueId ||
       successor.planIssueId === initialPlan.planIssueId ||
-      successor.planContractDigest === initialPlan.planContractDigest ||
-      successor.planReviewActionIssueId === initialPlan.planReviewActionIssueId) {
+      successor.requestCommentId === initialPlan.requestCommentId) {
     throw stableError("foreground_e2e_revision_successor_plan_invalid");
   }
   return successor;
@@ -98,16 +97,14 @@ function waitInput({ signal, ...input }) {
 
 function assertPlanGate(value, code) {
   if (!value || !identifier(value.cycleIssueId) || !identifier(value.planIssueId) ||
-      !identifier(value.planContractDigest) || !identifier(value.planContractSourceCommentId) ||
-      !identifier(value.planReviewActionIssueId)) {
+      !identifier(value.requestCommentId) || !timestamp(value.planRemoteVersion)) {
     throw stableError(code);
   }
   return {
     cycleIssueId: value.cycleIssueId,
     planIssueId: value.planIssueId,
-    planContractDigest: value.planContractDigest,
-    planContractSourceCommentId: value.planContractSourceCommentId,
-    planReviewActionIssueId: value.planReviewActionIssueId,
+    planRemoteVersion: value.planRemoteVersion,
+    requestCommentId: value.requestCommentId,
   };
 }
 
@@ -135,10 +132,10 @@ function assertInputReference(value, kind, code) {
 
 function frozenInteractions(definition) {
   const [initial, description, descriptionReceipt, comment, commentReceipt, edit, editReceipt, resolve, resolveReceipt, reopen, reopenReceipt] = definition.declaredUserInteractions;
-  if (initial?.kind !== "wait_for_plan_contract_and_human_action" || initial.rootKey !== "revision-root" ||
+  if (initial?.kind !== "wait_for_plan_approval_gate" || initial.rootKey !== "revision-root" ||
       initial.actionKind !== "plan_review" || initial.actionBinding !== "initial_plan_review" ||
       description?.kind !== "update_root_description" || !text(description.description) || description.inputBinding !== "revision_description" ||
-      !receiptMatches(descriptionReceipt, "revision_description", ["root_directive"]) ||
+      !receiptMatches(descriptionReceipt, "revision_description", ["native_activity", "cycle_status", "successor_cycle"]) ||
       comment?.kind !== "create_comment" || !text(comment.body) || comment.commentBinding !== "revision_comment" || comment.inputBinding !== "revision_comment_create" ||
       !receiptMatches(commentReceipt, "revision_comment_create", ["reply", "reaction"]) ||
       edit?.kind !== "edit_comment" || !text(edit.body) || edit.commentBinding !== "revision_comment" || edit.inputBinding !== "revision_comment_edit" ||
@@ -166,12 +163,12 @@ function assertDefinition(definition) {
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanContractAndPlanReviewAction !== "function" || typeof human.updateRootDescription !== "function" ||
+      typeof human.waitForPlanApprovalGate !== "function" || typeof human.updateRootDescription !== "function" ||
       typeof human.waitForRootDescriptionReceipt !== "function" || typeof human.createComment !== "function" ||
       typeof human.waitForCommentReceipt !== "function" || typeof human.editComment !== "function" ||
       typeof human.resolveCommentThread !== "function" || typeof human.reopenCommentThread !== "function" ||
       typeof human.waitForCommentThreadReceipt !== "function" ||
-      typeof human.waitForSuccessorPlanContractAndPlanReviewAction !== "function" || !rootCreation ||
+      typeof human.waitForSuccessorPlanApprovalGate !== "function" || !rootCreation ||
       !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||
       (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"))) {

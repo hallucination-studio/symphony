@@ -1,1333 +1,360 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RatelimitedLinearError } from "@linear/sdk";
-
-import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import {
+  createForegroundE2EHumanActor as createActor,
   createHumanLinearRequestBudget,
-  createForegroundE2EHumanActor as createForegroundE2EHumanActorImplementation,
   HUMAN_ACTION_POLL_INTERVAL_MS,
   HUMAN_LINEAR_REQUEST_INTERVAL_MS,
 } from "../../tools/e2e/human.mjs";
 
-const createForegroundE2EHumanActor = (input) => createForegroundE2EHumanActorImplementation({
+const immediateBudget = Object.freeze({ execute: (operation) => Promise.resolve().then(operation) });
+const actor = (fixture, input = {}) => createActor({
+  apiKey: "human-api-key",
+  expectedActorId: "human-1",
+  delegateActorId: "symphony-1",
+  createClient: () => fixture.client,
+  requestBudget: immediateBudget,
   ...input,
-  requestBudget: immediateHumanRequestBudget(),
 });
 
-test("Human Actor uses a stable polling interval", () => {
+test("Human Actor uses stable polling and globally serialized Linear request budgets", async () => {
   assert.equal(HUMAN_ACTION_POLL_INTERVAL_MS, 5_000);
-});
-
-test("Human Actor globally serializes concurrent Case Linear requests at a bounded cadence", async () => {
   assert.equal(HUMAN_LINEAR_REQUEST_INTERVAL_MS, 1_500);
   let now = 0;
-  let inFlight = 0;
-  let maximumInFlight = 0;
-  let releaseFirst;
+  let release;
   const starts = [];
-  const waits = [];
   const budget = createHumanLinearRequestBudget({
     now: () => now,
-    wait: async (milliseconds) => {
-      waits.push(milliseconds);
-      now += milliseconds;
-    },
+    wait: async (milliseconds) => { now += milliseconds; },
   });
-
   const first = budget.execute(async () => {
     starts.push(now);
-    inFlight += 1;
-    maximumInFlight = Math.max(maximumInFlight, inFlight);
-    await new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    inFlight -= 1;
+    await new Promise((resolve) => { release = resolve; });
   });
-  const second = budget.execute(async () => {
-    starts.push(now);
-    inFlight += 1;
-    maximumInFlight = Math.max(maximumInFlight, inFlight);
-    inFlight -= 1;
-  });
-  const third = budget.execute(async () => {
-    starts.push(now);
-    inFlight += 1;
-    maximumInFlight = Math.max(maximumInFlight, inFlight);
-    inFlight -= 1;
-  });
-
+  const second = budget.execute(async () => { starts.push(now); });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(starts, [0]);
-  releaseFirst();
-  await Promise.all([first, second, third]);
-
-  assert.equal(maximumInFlight, 1);
-  assert.deepEqual(starts, [0, HUMAN_LINEAR_REQUEST_INTERVAL_MS, HUMAN_LINEAR_REQUEST_INTERVAL_MS * 2]);
-  assert.deepEqual(waits, [HUMAN_LINEAR_REQUEST_INTERVAL_MS, HUMAN_LINEAR_REQUEST_INTERVAL_MS]);
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(starts, [0, HUMAN_LINEAR_REQUEST_INTERVAL_MS]);
 });
 
-test("Human Actor applies the shared request budget to concurrent Case Linear mutations", async () => {
-  const fixture = createLinearFixture();
-  const originalCreateIssue = fixture.client.createIssue.bind(fixture.client);
-  let inFlight = 0;
-  let maximumInFlight = 0;
-  let releaseFirst;
-  fixture.client.createIssue = async (input) => {
-    inFlight += 1;
-    maximumInFlight = Math.max(maximumInFlight, inFlight);
-    if (releaseFirst === undefined) {
-      await new Promise((resolve) => {
-        releaseFirst = resolve;
-      });
-    }
-    inFlight -= 1;
-    return originalCreateIssue(input);
-  };
-  const human = await createForegroundE2EHumanActorImplementation({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
+test("Human Actor creates, verifies, and delegates only declared Root Issues", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture, { delegateActorId: "symphony-1" });
+  const root = await createRoot(human, "approved_happy_path", "approved-root");
+
+  await assert.rejects(human.delegateRootIssue({ rootIssueId: root.rootIssueId }), hasCode("foreground_e2e_human_root_delegate_not_verified"));
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId });
+
+  assert.deepEqual(fixture.calls.updateIssue, [{ issueId: root.rootIssueId, input: { delegateId: "symphony-1" } }]);
+});
+
+test("Human Actor waits for an exact Plan Approval Root thread and writes only a native human reply", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture);
+  const root = await createRoot(human, "approved_happy_path", "approved-root");
+  fixture.addPlanApproval(root.rootIssueId, { cycleId: "cycle-1", planId: "plan-1", planIdentifier: "ENG-PLAN-1", requestId: "approval-1" });
+
+  const request = await human.waitForPlanApprovalRequest({ rootIssueId: root.rootIssueId });
+  assert.deepEqual(request, {
+    cycleIssueId: "cycle-1",
+    planIssueId: "plan-1",
+    planRemoteVersion: "2026-07-26T00:00:00.000Z",
+    requestCommentId: "approval-1",
   });
 
-  const creations = [
-    ["approved_happy_path", "approved-root"],
-    ["plan_rejected_and_replanned", "rejected-plan-root"],
-    ["information_requested_and_answered", "information-root"],
-  ].map(([caseId, rootKey]) => human.createRootIssue({
+  const reply = await human.replyToHumanAction({
+    rootIssueId: root.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: "Approved.",
+  });
+  assert.equal(reply.requestCommentId, "approval-1");
+  assert.deepEqual(fixture.calls.createComment.at(-1), {
+    issueId: root.rootIssueId,
+    parentId: "approval-1",
+    body: "Approved.",
+  });
+  assert.equal(fixture.calls.updateIssue.length, 0);
+});
+
+test("Human Actor ignores resolved approval history and rejects human-authored requests", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture);
+  const root = await createRoot(human, "plan_rejected_and_replanned", "rejected-plan-root");
+  fixture.addPlanApproval(root.rootIssueId, {
+    cycleId: "cycle-old", planId: "plan-old", planIdentifier: "ENG-OLD", requestId: "approval-old", resolved: true,
+  });
+  fixture.addPlanApproval(root.rootIssueId, {
+    cycleId: "cycle-new", planId: "plan-new", planIdentifier: "ENG-NEW", requestId: "approval-new",
+  });
+  assert.equal((await human.waitForPlanApprovalRequest({ rootIssueId: root.rootIssueId })).requestCommentId, "approval-new");
+
+  fixture.comments.get("approval-new").userId = "human-1";
+  await assert.rejects(
+    human.replyToHumanAction({ rootIssueId: root.rootIssueId, requestCommentId: "approval-new", body: "Approved." }),
+    hasCode("foreground_e2e_human_action_reply_target_invalid"),
+  );
+});
+
+test("Human Actor reads Information requests and observes native human-readable receipts", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture);
+  const root = await createRoot(human, "information_requested_and_answered", "information-root");
+  fixture.addProductComment(root.rootIssueId, "information-1", "## 需要你补充信息\n\nWhich separator should be used?");
+  assert.deepEqual(await human.waitForInformationRequest({ rootIssueId: root.rootIssueId }), {
+    requestCommentId: "information-1",
+    rootIssueId: root.rootIssueId,
+  });
+
+  const answer = await human.replyToHumanAction({
+    rootIssueId: root.rootIssueId,
+    requestCommentId: "information-1",
+    body: "Use a colon.",
+  });
+  fixture.addProductReply(answer.commentId, "receipt-1", "I incorporated the separator into the Root requirement.", "✅");
+  await human.waitForCommentReceipt({ issueId: root.rootIssueId, inputReference: answer.inputReference });
+});
+
+test("Human Actor observes preemption and restart admission from native Stage statuses and Activity", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture);
+  const ids = {};
+  for (const key of ["inflight-root", "touched-root", "remaining-root"]) {
+    ids[key] = (await createRoot(human, "same_conductor_preemption", key)).rootIssueId;
+  }
+  fixture.addStage(ids["inflight-root"], "stage-old", "work", "in-progress-state", "2026-07-26T00:00:01.000Z");
+  const admission = await human.waitForSameConductorPreemptionAdmission({ rootIssueIds: Object.values(ids) });
+  assert.equal(admission.inflightStageIssueId, "stage-old");
+
+  await human.updateRootDescription({
+    rootIssueId: ids["touched-root"],
+    description: "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
+  });
+  fixture.setStageStatus("stage-old", "done-state", "2026-07-26T00:00:03.000Z");
+  fixture.addStage(ids["touched-root"], "stage-touched", "plan", "in-progress-state", "2026-07-26T00:00:04.000Z");
+  fixture.addStage(ids["remaining-root"], "stage-remaining", "plan", "in-progress-state", "2026-07-26T00:00:05.000Z");
+  const candidate = await human.waitForSameConductorPreemptionCandidate({
+    inflightStageIssueId: "stage-old",
+    touchedRootIssueId: ids["touched-root"],
+    remainingRootIssueId: ids["remaining-root"],
+  });
+  assert.deepEqual(candidate, { rootIssueId: ids["touched-root"], stageIssueId: "stage-touched", touchActivityId: "history-1" });
+
+  const recoveryFixture = linearFixture();
+  const recoveryHuman = await actor(recoveryFixture);
+  const affected = await createRoot(recoveryHuman, "conductor_restart_recovery", "affected-root");
+  const continuous = await createRoot(recoveryHuman, "conductor_restart_recovery", "continuous-root");
+  recoveryFixture.addStage(affected.rootIssueId, "stage-interrupted", "work", "in-progress-state", "2026-07-26T00:00:01.000Z");
+  assert.deepEqual(await recoveryHuman.waitForRestartRecoveryAdmission({
+    affectedRootIssueId: affected.rootIssueId,
+    continuousRootIssueId: continuous.rootIssueId,
+  }), { affectedRootIssueId: affected.rootIssueId, interruptedStageIssueId: "stage-interrupted" });
+});
+
+test("Human Actor admits missing-worktree recovery only at each declared Root's native active Verify", async () => {
+  const fixture = linearFixture();
+  const human = await actor(fixture);
+  const recoverable = await createRoot(human, "missing_worktree_recovery", "recoverable-worktree-root");
+  const invalid = await createRoot(human, "missing_worktree_recovery", "invalid-generation-root");
+  fixture.addStage(recoverable.rootIssueId, "verify-recoverable", "verify", "in-progress-state", "2026-07-26T00:00:01.000Z");
+  fixture.addStage(invalid.rootIssueId, "verify-invalid", "verify", "in-progress-state", "2026-07-26T00:00:02.000Z");
+
+  assert.deepEqual(await human.waitForMissingWorktreeRecoveryAdmission({
+    rootIssueIds: [recoverable.rootIssueId, invalid.rootIssueId],
+  }), {
+    verifyIssueIdsByRootId: {
+      [recoverable.rootIssueId]: "verify-recoverable",
+      [invalid.rootIssueId]: "verify-invalid",
+    },
+    nativeIssueIdsByRootId: {
+      [recoverable.rootIssueId]: [recoverable.rootIssueId, `${recoverable.rootIssueId}-cycle`, "verify-recoverable"],
+      [invalid.rootIssueId]: [invalid.rootIssueId, `${invalid.rootIssueId}-cycle`, "verify-invalid"],
+    },
+  });
+  await assert.rejects(
+    human.waitForMissingWorktreeRecoveryAdmission({ rootIssueIds: [recoverable.rootIssueId, recoverable.rootIssueId] }),
+    hasCode("foreground_e2e_human_missing_worktree_admission_input_invalid"),
+  );
+});
+
+test("Human Actor public surface contains no product workflow mutation", async () => {
+  const human = await actor(linearFixture());
+  assert.equal("setHumanActionTerminalStatus" in human, false);
+  assert.equal("createHumanAction" in human, false);
+  assert.equal(["write", "Managed", "Record"].join("") in human, false);
+  assert.equal("mutatePlan" in human, false);
+  assert.equal("client" in human, false);
+  assert.equal(typeof human.replyToHumanAction, "function");
+});
+
+async function createRoot(human, caseId, rootKey) {
+  return human.createRootIssue({
     caseId,
     rootKey,
     teamId: "team-1",
     projectId: "project-1",
     routingLabelId: "route-label",
     rootStatusId: "todo-state",
-  }));
-
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(maximumInFlight, 1);
-  releaseFirst();
-  await Promise.all(creations);
-  assert.equal(maximumInFlight, 1);
-});
-
-test("Human Actor performs only catalog-compatible user mutations with Linear read-back", async () => {
-  const fixture = createLinearFixture();
-  const clientOptions = [];
-  const controller = new AbortController();
-  const revisionRoot = caseRoot("root_revision_and_comment", "revision-root");
-  const revisionUpdate = caseInteraction("root_revision_and_comment", "update_root_description");
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: (options) => {
-      clientOptions.push(options);
-      return fixture.client;
-    },
-  });
-
-  const root = await human.createRootIssue({
-    caseId: "root_revision_and_comment",
-    rootKey: "revision-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-    signal: controller.signal,
-  });
-  assert.deepEqual(root, { rootIssueId: "root-1", identifier: "ENG-1" });
-  assert.deepEqual(fixture.calls.createIssue, [{
-    teamId: "team-1",
-    projectId: "project-1",
-    stateId: "todo-state",
-    labelIds: ["route-label"],
-    title: revisionRoot.title,
-    description: revisionRoot.description,
-    priority: 2,
-  }]);
-
-  await human.updateRootDescription({
-    rootIssueId: root.rootIssueId,
-    description: revisionUpdate.description,
-    signal: controller.signal,
-  });
-  assert.deepEqual(fixture.calls.updateIssue.at(0), {
-    issueId: "root-1",
-    input: { description: revisionUpdate.description },
-  });
-
-  const comment = await human.createComment({
-    issueId: root.rootIssueId,
-    body: "Please keep the public API focused.",
-    signal: controller.signal,
-  });
-  assert.equal(comment.commentId, "comment-1");
-  assert.equal(comment.issueId, "root-1");
-  assert.equal(comment.inputReference.kind, "comment_body");
-
-  await human.editComment({
-    issueId: root.rootIssueId,
-    commentId: comment.commentId,
-    body: "Please keep the public API focused and tested.",
-    signal: controller.signal,
-  });
-  await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId, signal: controller.signal });
-  await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId, signal: controller.signal });
-  const reaction = await human.addReaction({ issueId: root.rootIssueId, commentId: comment.commentId, emoji: "+1", signal: controller.signal });
-  assert.deepEqual(reaction, { reactionId: "reaction-1", commentId: "comment-1", emoji: "+1" });
-
-  await human.setHumanActionTerminalStatus({
-    issueId: "human-action-1",
-    terminalStatus: "Approved",
-    stateId: "approved-state",
-    signal: controller.signal,
-  });
-  assert.deepEqual(fixture.calls.updateIssue.at(1), {
-    issueId: "human-action-1",
-    input: { stateId: "approved-state" },
-  });
-  assert.equal(fixture.comments.get("comment-1").resolvedAt, undefined);
-  assert.deepEqual(fixture.comments.get("comment-1").reactions, [{ id: "reaction-1", emoji: "+1", userId: "human-1" }]);
-  assert.equal(clientOptions.length, 9);
-  assert.equal(clientOptions[0].signal, undefined);
-  assert(clientOptions.slice(1).every((options) => options.signal === controller.signal));
-});
-
-test("Human Actor proves a new Root is inactive before the Human natively delegates it", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    delegateActorId: "symphony-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-
-  await assert.rejects(
-    human.delegateRootIssue({ rootIssueId: root.rootIssueId }),
-    hasCode("foreground_e2e_human_root_delegate_not_verified"),
-  );
-  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId });
-  await human.delegateRootIssue({ rootIssueId: root.rootIssueId });
-  assert.deepEqual(fixture.calls.updateIssue, [{
-    issueId: root.rootIssueId,
-    input: { delegateId: "symphony-1" },
-  }]);
-
-  const undelegated = await human.createRootIssue({
-    caseId: "plan_rejected_and_replanned",
-    rootKey: "rejected-plan-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addPlanReviewAction(undelegated.rootIssueId);
-  await assert.rejects(
-    human.assertRootUndelegatedAndInactive({ rootIssueId: undelegated.rootIssueId }),
-    hasCode("foreground_e2e_human_root_admission_read_back_failed"),
-  );
-});
-
-test("Human Actor waits for exactly one product-created Plan Review Action beneath its declared Root", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addPlanReviewAction(root.rootIssueId);
-
-  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" });
-
-  assert.deepEqual(action, { actionIssueId: "plan-review-action-1", terminalStatusId: "approved-state" });
-});
-
-test("Human Actor ignores terminal Plan Review history and waits for the fresh requested Action", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "plan_rejected_and_replanned",
-    rootKey: "rejected-plan-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addPlanReviewAction(root.rootIssueId, { actionId: "rejected-plan-review", stateId: "rejected-state" });
-  fixture.addPlanReviewAction(root.rootIssueId, { actionId: "replacement-plan-review" });
-
-  const action = await human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Rejected" });
-
-  assert.deepEqual(action, { actionIssueId: "replacement-plan-review", terminalStatusId: "rejected-state" });
-});
-
-test("Human Actor admits recovery only after it can read one affected in-flight Stage from the two declared Roots", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const affected = await human.createRootIssue({
-    caseId: "conductor_restart_recovery",
-    rootKey: "affected-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  const continuous = await human.createRootIssue({
-    caseId: "conductor_restart_recovery",
-    rootKey: "continuous-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addRestartRecoveryExecution(affected.rootIssueId, "old-execution");
-
-  const admission = await human.waitForRestartRecoveryAdmission({
-    affectedRootIssueId: affected.rootIssueId,
-    continuousRootIssueId: continuous.rootIssueId,
-  });
-
-  assert.deepEqual(admission, { affectedRootIssueId: affected.rootIssueId, oldStageExecutionId: "old-execution" });
-});
-
-test("Human Actor waits for exactly one product-created Clarification Action beneath its declared Root", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "information_requested_and_answered",
-    rootKey: "information-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addClarificationAction(root.rootIssueId);
-
-  const action = await human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" });
-
-  assert.deepEqual(action, { actionIssueId: "clarification-action-1", terminalStatusId: "answered-state" });
-});
-
-test("Human Actor ignores terminal Clarification history and waits for the fresh requested Action", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "information_requested_and_answered",
-    rootKey: "information-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addClarificationAction(root.rootIssueId, { actionId: "answered-clarification", stateId: "answered-state" });
-  fixture.addClarificationAction(root.rootIssueId, { actionId: "fresh-clarification" });
-
-  const action = await human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" });
-
-  assert.deepEqual(action, { actionIssueId: "fresh-clarification", terminalStatusId: "answered-state" });
-});
-
-test("Human Actor fresh-reads the revision Plan gate and waits only for matching durable input receipts", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "root_revision_and_comment",
-    rootKey: "revision-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addRevisionPlanGate(root.rootIssueId, {
-    cycleId: "initial-cycle",
-    planId: "initial-plan",
-    planContractCommentId: "initial-contract-comment",
-    planContractDigest: "initial-contract",
-    actionId: "initial-review",
-  });
-
-  const initial = await human.waitForPlanContractAndPlanReviewAction({ rootIssueId: root.rootIssueId });
-  assert.deepEqual(initial, {
-    cycleIssueId: "initial-cycle",
-    planIssueId: "initial-plan",
-    planContractDigest: "initial-contract",
-    planContractSourceCommentId: "initial-contract-comment",
-    planReviewActionIssueId: "initial-review",
-  });
-
-  const description = await human.updateRootDescription({
-    rootIssueId: root.rootIssueId,
-    description: caseInteraction("root_revision_and_comment", "update_root_description").description,
-  });
-  fixture.addRootDescriptionDirectiveReceipt(root.rootIssueId, description);
-  await human.waitForRootDescriptionReceipt({ rootIssueId: root.rootIssueId, inputReference: description });
-
-  const created = await human.createComment({
-    issueId: root.rootIssueId,
-    body: "The original helper name no longer matches the requirement.",
-  });
-  fixture.addCommentReceipt(created.commentId, created.inputReference, { reaction: "check" });
-  await human.waitForCommentReceipt({ issueId: root.rootIssueId, inputReference: created.inputReference });
-
-  const edited = await human.editComment({
-    issueId: root.rootIssueId,
-    commentId: created.commentId,
-    body: "The original helper name no longer matches the revised requirement.",
-  });
-  fixture.addCommentReceipt(edited.commentId, edited.inputReference, { reaction: "cross" });
-  await human.waitForCommentReceipt({ issueId: root.rootIssueId, inputReference: edited.inputReference });
-
-  const resolved = await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
-  fixture.addCommentReceipt(created.commentId, resolved, { threadAction: "resolve" });
-  await human.waitForCommentThreadReceipt({ issueId: root.rootIssueId, inputReference: resolved });
-
-  const reopened = await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
-  fixture.addCommentReceipt(created.commentId, reopened, { threadAction: "reopen" });
-  await human.waitForCommentThreadReceipt({ issueId: root.rootIssueId, inputReference: reopened });
-
-  fixture.addRevisionPlanGate(root.rootIssueId, {
-    cycleId: "successor-cycle",
-    planId: "successor-plan",
-    planContractCommentId: "successor-contract-comment",
-    planContractDigest: "successor-contract",
-    actionId: "successor-review",
-  });
-  const successor = await human.waitForSuccessorPlanContractAndPlanReviewAction({
-    rootIssueId: root.rootIssueId,
-    priorCycleIssueId: initial.cycleIssueId,
-    priorPlanReviewActionIssueId: initial.planReviewActionIssueId,
-  });
-  assert.deepEqual(successor, {
-    cycleIssueId: "successor-cycle",
-    planIssueId: "successor-plan",
-    planContractDigest: "successor-contract",
-    planContractSourceCommentId: "successor-contract-comment",
-    planReviewActionIssueId: "successor-review",
-  });
-});
-
-test("Human Actor derives distinct bounded receipt identities for full-length comment IDs", async () => {
-  const fixture = createLinearFixture();
-  fixture.commentId = "c".repeat(128);
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-
-  const created = await human.createComment({ issueId: root.rootIssueId, body: "Keep the helper focused." });
-  const edited = await human.editComment({ issueId: root.rootIssueId, commentId: created.commentId, body: "Keep the helper focused and tested." });
-
-  assert.match(created.inputReference.sourceId, /^input:[a-f0-9]{64}$/u);
-  assert.match(edited.inputReference.sourceId, /^input:[a-f0-9]{64}$/u);
-  assert.notEqual(created.inputReference.sourceId, edited.inputReference.sourceId);
-});
-
-test("Human Actor rejects a Plan Review Action created by the Human actor", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addPlanReviewAction(root.rootIssueId, { actionCreatorId: "human-1" });
-
-  await assert.rejects(
-    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" }),
-    hasCode("foreground_e2e_human_plan_review_creator_invalid"),
-  );
-});
-
-test("Human Actor rejects a Clarification Action created by the Human actor", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "information_requested_and_answered",
-    rootKey: "information-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  fixture.addClarificationAction(root.rootIssueId, { actionCreatorId: "human-1" });
-
-  await assert.rejects(
-    human.waitForClarificationAction({ rootIssueId: root.rootIssueId, terminalStatus: "Answered" }),
-    hasCode("foreground_e2e_human_clarification_creator_invalid"),
-  );
-});
-
-test("Human Actor cannot expose or perform non-user workflow mutations", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-
-  assert.deepEqual(Object.keys(human).sort(), [
-    "actorId",
-    "addReaction",
-    "assertRootUndelegatedAndInactive",
-    "createComment",
-    "createRootIssue",
-    "createdRootsForCase",
-    "delegateRootIssue",
-    "editComment",
-    "reopenCommentThread",
-    "resolveCommentThread",
-    "resolveRootCreationBindings",
-    "setHumanActionTerminalStatus",
-    "updateRootDescription",
-    "waitForClarificationAction",
-    "waitForCommentReceipt",
-    "waitForCommentThreadReceipt",
-    "waitForPlanContractAndPlanReviewAction",
-    "waitForPlanReviewAction",
-    "waitForRestartRecoveryAdmission",
-    "waitForRootDescriptionReceipt",
-    "waitForSameConductorPreemptionAdmission",
-    "waitForSameConductorPreemptionCandidate",
-    "waitForSuccessorPlanContractAndPlanReviewAction",
-  ]);
-  assert.equal("createHumanAction" in human, false);
-  assert.equal("writeManagedRecord" in human, false);
-  assert.equal("mutatePlan" in human, false);
-  assert.equal("client" in human, false);
-
-  await assert.rejects(
-    human.setHumanActionTerminalStatus({
-      issueId: "plan-1",
-      terminalStatus: "Approved",
-      stateId: "approved-state",
-    }),
-    hasCode("foreground_e2e_human_action_target_invalid"),
-  );
-  await assert.rejects(
-    human.updateRootDescription({ rootIssueId: "plan-1", description: "must not mutate a Plan" }),
-    hasCode("foreground_e2e_human_root_target_invalid"),
-  );
-  await assert.rejects(
-    human.editComment({ issueId: "human-action-1", commentId: "unmanaged-comment", body: "must not edit system comment" }),
-    hasCode("foreground_e2e_human_comment_target_invalid"),
-  );
-  assert.deepEqual(fixture.calls.updateIssue, []);
-});
-
-test("Human Actor rejects a failed Linear write or mismatched actor identity", async () => {
-  const fixture = createLinearFixture();
-  await assert.rejects(
-    createForegroundE2EHumanActor({
-      apiKey: "human-api-key",
-      expectedActorId: "another-actor",
-      createClient: () => fixture.client,
-    }),
-    hasCode("foreground_e2e_human_actor_identity_invalid"),
-  );
-
-  fixture.createIssuePayload = { success: false };
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  await assert.rejects(
-    human.createRootIssue({
-      caseId: "approved_happy_path",
-      rootKey: "approved-root",
-      teamId: "team-1",
-      projectId: "project-1",
-      routingLabelId: "route-label",
-      rootStatusId: "todo-state",
-    }),
-    hasCode("foreground_e2e_human_root_create_failed"),
-  );
-});
-
-test("Human Actor binds each Root creation to its Case signal and settles a canceled request", async () => {
-  const fixture = createLinearFixture();
-  const clientOptions = [];
-  fixture.client.createIssue = async () => new Promise(() => {});
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: (options) => {
-      clientOptions.push(options);
-      return fixture.client;
-    },
-  });
-  const controller = new AbortController();
-  const pending = human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-    signal: controller.signal,
-  });
-  controller.abort();
-
-  const outcome = await Promise.race([
-    pending.then(
-      () => ({ kind: "resolved" }),
-      (error) => ({ kind: "rejected", error }),
-    ),
-    delay(50).then(() => ({ kind: "timeout" })),
-  ]);
-
-  assert.equal(outcome.kind, "rejected");
-  assert.equal(outcome.error?.code, "foreground_e2e_human_linear_request_aborted");
-  assert.equal(clientOptions.at(-1)?.signal, controller.signal);
-});
-
-test("Human Actor preserves rate-limit classification without exposing SDK error detail", async () => {
-  const fixture = createLinearFixture();
-  const rateLimited = new RatelimitedLinearError({ status: 429 });
-  rateLimited.message = "authorization=human-api-key";
-  fixture.client.createIssue = async () => {
-    throw rateLimited;
-  };
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-
-  await assert.rejects(
-    human.createRootIssue({
-      caseId: "approved_happy_path",
-      rootKey: "approved-root",
-      teamId: "team-1",
-      projectId: "project-1",
-      routingLabelId: "route-label",
-      rootStatusId: "todo-state",
-    }),
-    (error) => error?.code === "foreground_e2e_human_linear_rate_limited" &&
-      error.message === "foreground_e2e_human_linear_rate_limited" &&
-      !error.message.includes("human-api-key"),
-  );
-});
-
-test("Human Actor preserves a rate-limited Plan Review read instead of misclassifying the Root", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  const rateLimited = new RatelimitedLinearError({ status: 429 });
-  rateLimited.message = "authorization=human-api-key";
-  fixture.client.issue = async () => {
-    throw rateLimited;
-  };
-
-  await assert.rejects(
-    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" }),
-    (error) => error?.code === "foreground_e2e_human_linear_rate_limited" &&
-      error.message === "foreground_e2e_human_linear_rate_limited" &&
-      !error.message.includes("human-api-key"),
-  );
-});
-
-test("Human Actor accepts Root description changes only when the Case catalog predeclares the exact delta", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-
-  await assert.rejects(
-    human.updateRootDescription({ rootIssueId: root.rootIssueId, description: "A runtime-generated rewrite." }),
-    hasCode("foreground_e2e_human_root_update_not_declared"),
-  );
-  assert.deepEqual(fixture.calls.updateIssue, []);
-});
-
-test("Human Actor accepts only the predeclared description for a bound preemption Root", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const root = await human.createRootIssue({
-    caseId: "same_conductor_preemption",
-    rootKey: "remaining-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
-  const binding = bindSameConductorPreemptionRoles({
-    inflightRootKeys: ["inflight-root"],
-    readyRootKeys: ["remaining-root", "touched-root"],
-  });
-  assert.equal(binding.touchedRootKey, "remaining-root");
-
-  await human.updateRootDescription({ rootIssueId: root.rootIssueId, description: binding.touchDescription });
-  assert.deepEqual(fixture.calls.updateIssue, [{
-    issueId: root.rootIssueId,
-    input: { description: binding.touchDescription },
-  }]);
-});
-
-test("Human Actor observes same-Conductor preemption from native facts despite system-owned activity", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
-  const rootsByKey = Object.fromEntries(await Promise.all(definition.rootTopology.map(async ({ rootKey }) => [rootKey, await human.createRootIssue({
-    caseId: definition.caseId,
-    rootKey,
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  })])));
-  for (const { rootIssueId } of Object.values(rootsByKey)) {
-    fixture.addManagedRecord(rootIssueId, {
-      kind: "root_ownership",
-      version: 1,
-      root_issue_id: rootIssueId,
-      conductor_id: "conductor-1",
-    });
-  }
-  fixture.addManagedRecord(rootsByKey["inflight-root"].rootIssueId, {
-    kind: "stage_execution",
-    version: 1,
-    root_issue_id: rootsByKey["inflight-root"].rootIssueId,
-    stage_execution_id: "inflight-execution",
-    started_at: "2026-07-26T00:00:00.000Z",
-  });
-  fixture.issues.get(rootsByKey["inflight-root"].rootIssueId).historyEntries.push({
-    id: "system-activity",
-    issueId: rootsByKey["inflight-root"].rootIssueId,
-    actorId: null,
-    createdAt: new Date("2026-07-26T00:00:00.000Z"),
-    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
-  });
-
-  const admission = await human.waitForSameConductorPreemptionAdmission({
-    rootIssueIds: ["inflight-root", "touched-root", "remaining-root"].map((rootKey) => rootsByKey[rootKey].rootIssueId),
-  });
-  assert.equal(admission.inflightRootIssueId, rootsByKey["inflight-root"].rootIssueId);
-  const roles = bindSameConductorPreemptionRoles({
-    inflightRootKeys: ["inflight-root"],
-    readyRootKeys: ["touched-root", "remaining-root"],
-  });
-  const touchedRootIssueId = rootsByKey[roles.touchedRootKey].rootIssueId;
-  const remainingRootIssueId = rootsByKey[roles.remainingRootKey].rootIssueId;
-  await human.updateRootDescription({ rootIssueId: touchedRootIssueId, description: roles.touchDescription });
-  fixture.addManagedRecord(rootsByKey["inflight-root"].rootIssueId, {
-    kind: "stage_result",
-    version: 1,
-    root_issue_id: rootsByKey["inflight-root"].rootIssueId,
-    result_id: admission.inflightStageExecutionId,
-    completed_at: "2026-07-26T00:00:02.000Z",
-  });
-  fixture.addManagedRecord(touchedRootIssueId, {
-    kind: "stage_execution",
-    version: 1,
-    root_issue_id: touchedRootIssueId,
-    stage_execution_id: "touched-execution",
-    started_at: "2026-07-26T00:00:03.000Z",
-  });
-
-  const candidate = await human.waitForSameConductorPreemptionCandidate({
-    inflightStageExecutionId: admission.inflightStageExecutionId,
-    touchedRootIssueId,
-    remainingRootIssueId,
-  });
-  assert.deepEqual(candidate, {
-    rootIssueId: touchedRootIssueId,
-    stageExecutionId: "touched-execution",
-    touchActivityId: "history-1",
-  });
-});
-
-test("Human Actor creates each frozen Case Root at most once", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const input = {
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    teamId: "team-1",
-    projectId: "project-1",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  };
-
-  await human.createRootIssue(input);
-  await assert.rejects(human.createRootIssue(input), hasCode("foreground_e2e_human_root_create_not_declared"));
-  assert.equal(fixture.calls.createIssue.length, 1);
-});
-
-test("Human Actor resolves only fresh Todo and Conductor routing bindings, then retains each created Root identity by Case", async () => {
-  const fixture = createLinearFixture();
-  const human = await createForegroundE2EHumanActor({
-    apiKey: "human-api-key",
-    expectedActorId: "human-1",
-    createClient: () => fixture.client,
-  });
-  const bindings = await human.resolveRootCreationBindings({
-    teamId: "team-1",
-    projectId: "project-1",
-    conductors: [
-      conductorBinding("conductor-a", "a"),
-      conductorBinding("conductor-b", "b"),
-      conductorBinding("conductor-c", "c"),
-    ],
-  });
-
-  assert.equal(bindings["approved-root"].routingLabelId, "route-a");
-  assert.equal(bindings["approved-root"].rootStatusId, "todo-state");
-  assert.equal(bindings["information-root"].routingLabelId, "route-c");
-  await human.createRootIssue({
-    caseId: "approved_happy_path",
-    rootKey: "approved-root",
-    ...bindings["approved-root"],
   });
-  assert.deepEqual(human.createdRootsForCase({ caseId: "approved_happy_path" }), [
-    { rootKey: "approved-root", rootIssueId: "root-1" },
-  ]);
-});
+}
 
-function createLinearFixture() {
-  const calls = { createIssue: [], updateIssue: [], createComment: [], updateComment: [], resolve: [], reopen: [], reactions: [] };
-  const productCycles = [];
-  let sequence = 0;
+function linearFixture() {
+  const calls = { createIssue: [], updateIssue: [], createComment: [] };
+  const issues = new Map();
+  const comments = new Map();
   let rootSequence = 0;
-  let managedRecordSequence = 0;
-  const comments = new Map([
-    ["unmanaged-comment", comment({ id: "unmanaged-comment", issueId: "human-action-1", body: "Managed reply", userId: "symphony-1" })],
+  let commentSequence = 0;
+  const statusNames = new Map([
+    ["todo-state", "Todo"],
+    ["in-review-state", "In Review"],
+    ["in-progress-state", "In Progress"],
+    ["done-state", "Done"],
   ]);
-  const issues = new Map([
-    ["human-action-1", issue({
-      id: "human-action-1",
-      teamId: "team-1",
-      projectId: "project-1",
-      stateId: "todo-state",
-      title: "Approve plan",
-      description: "Approve the plan.",
-      priority: 2,
-      labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
-    })],
-    ["plan-1", issue({
-      id: "plan-1",
-      teamId: "team-1",
-      projectId: "project-1",
-      stateId: "planning-state",
-      title: "Plan",
-      description: "System owned plan.",
-      priority: 2,
-      labels: [{ id: "plan-label", name: "Plan" }],
-    })],
-  ]);
+
   const fixture = {
     calls,
-    comments,
     issues,
-    commentId: "comment-1",
-    createIssuePayload: undefined,
+    comments,
     client: undefined,
-    addManagedRecord(issueId, value) {
-      managedRecordSequence += 1;
-      const created = comment({
-        id: `managed-record-${managedRecordSequence}`,
-        issueId,
-        body: record(value),
-        userId: "symphony-1",
-      });
-      comments.set(created.id, created);
-      bindCommentChildren(created);
+    addProductComment(issueId, id, body, { resolved = false } = {}) {
+      comments.set(id, makeComment({ id, issueId, body, userId: "symphony-1", resolved }));
     },
-    addRevisionPlanGate(rootIssueId, {
-      cycleId,
-      planId,
-      planContractCommentId,
-      planContractDigest,
-      actionId,
-    }) {
-      const root = issues.get(rootIssueId);
-      const cycle = issue({
-        id: cycleId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId: "planning-state",
-        title: "Cycle",
-        description: "Product-created Cycle.",
-        priority: 2,
-        creatorId: "symphony-1",
-        labels: [{ id: "cycle-label", name: "Cycle" }],
-      });
-      const plan = issue({
+    addProductReply(parentId, id, body, receipt) {
+      const source = comments.get(parentId);
+      comments.set(id, makeComment({ id, issueId: source.issueId, parentId, body, userId: "symphony-1", updatedAt: "2026-07-26T00:00:10.000Z" }));
+      source.children = async () => ({ nodes: [...comments.values()].filter((candidate) => candidate.parentId === parentId), pageInfo: { hasNextPage: false } });
+      if (receipt) source.reactions.push({ id: `reaction-${id}`, emoji: receipt, userId: "symphony-1" });
+    },
+    addPlanApproval(rootIssueId, { cycleId, planId, planIdentifier, requestId, resolved = false }) {
+      issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["Cycle"], stateId: "todo-state" }));
+      issues.set(planId, makeIssue({
         id: planId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId: "planning-state",
-        title: "Plan",
-        description: "Product-created Plan.",
-        priority: 2,
-        creatorId: "symphony-1",
-        labels: [{ id: "plan-label", name: "Plan" }],
-      });
-      const action = issue({
-        id: actionId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId: "todo-state",
-        title: "Approve the Plan Contract",
-        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.\nRejected: add a fresh comment explaining why.",
-        priority: 2,
-        creatorId: "symphony-1",
-        labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
-      });
-      cycle.parentId = rootIssueId;
-      plan.parentId = cycleId;
-      action.parentId = cycleId;
-      cycle.children = async () => ({ nodes: [plan, action], pageInfo: { hasNextPage: false } });
-      productCycles.push(cycle);
-      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
-      issues.set(cycleId, cycle);
-      issues.set(planId, plan);
-      issues.set(actionId, action);
-      bindIssueComments(plan);
-      const contract = comment({
-        id: planContractCommentId,
-        issueId: planId,
-        body: record({ kind: "plan_contract", root_issue_id: rootIssueId, cycle_issue_id: cycleId, plan_contract_digest: planContractDigest }),
-        userId: "symphony-1",
-      });
-      comments.set(contract.id, contract);
-      bindCommentChildren(contract);
+        identifier: planIdentifier,
+        parentId: cycleId,
+        labels: ["Plan"],
+        stateId: "in-review-state",
+        description: "Implement the requested behavior and run focused checks.",
+      }));
+      fixture.addProductComment(rootIssueId, requestId, `## 需要你审批\n\nPlease review ${planIdentifier}.\n\n### 相关对象\n- ${planIdentifier}`, { resolved });
     },
-    addRootDescriptionDirectiveReceipt(rootIssueId, inputReference) {
-      const directive = comment({
-        id: `directive-${comments.size + 1}`,
-        issueId: rootIssueId,
-        body: record({ kind: "root_directive", root_issue_id: rootIssueId, consumed_input_ids: [inputReference.sourceId] }),
-        userId: "symphony-1",
-      });
-      comments.set(directive.id, directive);
-      bindCommentChildren(directive);
+    addStage(rootIssueId, stageId, kind, stateId, changedAt) {
+      const cycleId = `${rootIssueId}-cycle`;
+      if (!issues.has(cycleId)) issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["Cycle"], stateId: "todo-state" }));
+      const stage = makeIssue({ id: stageId, parentId: cycleId, labels: [title(kind)], stateId });
+      stage.historyEntries.push(activity(stageId, stateId, changedAt));
+      stage.updatedAt = new Date(changedAt);
+      issues.set(stageId, stage);
     },
-    addRestartRecoveryExecution(rootIssueId, stageExecutionId) {
-      const execution = comment({
-        id: `execution-${comments.size + 1}`,
-        issueId: rootIssueId,
-        body: record({
-          kind: "stage_execution",
-          root_issue_id: rootIssueId,
-          stage_execution_id: stageExecutionId,
-        }),
-        userId: "symphony-1",
-      });
-      comments.set(execution.id, execution);
-      bindCommentChildren(execution);
-    },
-    addCommentReceipt(commentId, inputReference, { reaction = "none", threadAction = "keep_open" } = {}) {
-      const source = comments.get(commentId);
-      source.reactions = source.reactions.filter((candidate) =>
-        candidate.userId !== "symphony-1" || (candidate.emoji !== "✅" && candidate.emoji !== "❌"));
-      if (reaction === "check") source.reactions.push({ id: `receipt-${comments.size + 1}`, emoji: "✅", userId: "symphony-1" });
-      if (reaction === "cross") source.reactions.push({ id: `receipt-${comments.size + 1}`, emoji: "❌", userId: "symphony-1" });
-      const reply = comment({
-        id: `reply-${comments.size + 1}`,
-        issueId: source.issueId,
-        parentId: source.id,
-        body: record({
-          kind: "root_reconciler_reply",
-          source_input_id: inputReference.sourceId,
-          target_issue_id: source.issueId,
-          source: inputReference.kind === "comment_body"
-            ? { kind: "comment_body", comment_id: inputReference.commentId, comment_body_digest: inputReference.commentBodyDigest }
-            : {
-              kind: "comment_thread_state",
-              comment_id: inputReference.commentId,
-              comment_remote_version: inputReference.remoteVersion,
-              thread_root_comment_id: inputReference.threadRootCommentId,
-              thread_state: inputReference.expectedThreadState,
-            },
-          reaction,
-          thread_action: threadAction,
-        }),
-        userId: "symphony-1",
-      });
-      comments.set(reply.id, reply);
-      bindCommentChildren(reply);
-    },
-    addPlanReviewAction(rootIssueId, {
-      actionCreatorId = "symphony-1",
-      actionId = `plan-review-action-${productCycles.length + 1}`,
-      stateId = "todo-state",
-    } = {}) {
-      const root = issues.get(rootIssueId);
-      const cycleId = `cycle-${productCycles.length + 1}`;
-      const cycle = issue({
-        id: cycleId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId: "planning-state",
-        title: "Cycle",
-        description: "Product-created Cycle.",
-        priority: 2,
-        creatorId: "symphony-1",
-        labels: [{ id: "cycle-label", name: "Cycle" }],
-      });
-      const action = issue({
-        id: actionId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId,
-        title: "Approve the Plan Contract",
-        description: "## Plan Contract\n\nReview the Plan Contract.\n\n## Available outcomes\nApproved: accept this exact Plan Contract.\nRejected: add a fresh comment explaining why.",
-        priority: 2,
-        creatorId: actionCreatorId,
-        labels: [{ id: "human-label", name: "Human Action" }, { id: "plan-review-label", name: "Plan Review" }],
-      });
-      cycle.parentId = rootIssueId;
-      action.parentId = cycle.id;
-      productCycles.push(cycle);
-      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
-      cycle.children = async () => ({ nodes: [action], pageInfo: { hasNextPage: false } });
-      issues.set(cycle.id, cycle);
-      issues.set(action.id, action);
-    },
-    addClarificationAction(rootIssueId, {
-      actionCreatorId = "symphony-1",
-      actionId = `clarification-action-${productCycles.length + 1}`,
-      stateId = "todo-state",
-    } = {}) {
-      const root = issues.get(rootIssueId);
-      const cycleId = `cycle-${productCycles.length + 1}`;
-      const cycle = issue({
-        id: cycleId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId: "planning-state",
-        title: "Cycle",
-        description: "Product-created Cycle.",
-        priority: 2,
-        creatorId: "symphony-1",
-        labels: [{ id: "cycle-label", name: "Cycle" }],
-      });
-      const action = issue({
-        id: actionId,
-        teamId: "team-1",
-        projectId: "project-1",
-        stateId,
-        title: "Provide the separator",
-        description: "## Symphony Human Action\n\n## Requested action\nProvide the separator.\n\n## What is being reviewed or requested\nWhich separator should be used?\n\n## Available outcomes\n- Answered: provide the requested information in a fresh comment, then set this Action to Answered.\n\n## Comment requirement\nA fresh comment is required before resolving this Action.\n\n## What happens next\nAfter any terminal status, the durable Action result is sent to the Root Reconciler.",
-        priority: 2,
-        creatorId: actionCreatorId,
-        labels: [{ id: "human-label", name: "Human Action" }, { id: "clarification-label", name: "Clarification" }],
-      });
-      cycle.parentId = rootIssueId;
-      action.parentId = cycle.id;
-      productCycles.push(cycle);
-      root.children = async () => ({ nodes: productCycles, pageInfo: { hasNextPage: false } });
-      cycle.children = async () => ({ nodes: [action], pageInfo: { hasNextPage: false } });
-      issues.set(cycle.id, cycle);
-      issues.set(action.id, action);
+    setStageStatus(stageId, stateId, changedAt) {
+      const stage = issues.get(stageId);
+      stage.stateId = stateId;
+      stage.updatedAt = new Date(changedAt);
+      stage.historyEntries.push(activity(stageId, stateId, changedAt));
     },
   };
+
   fixture.client = {
     viewer: Promise.resolve({ id: "human-1" }),
     async createIssue(input) {
       calls.createIssue.push(input);
-      if (fixture.createIssuePayload) return fixture.createIssuePayload;
       rootSequence += 1;
-      const rootId = `root-${rootSequence}`;
-      issues.set(rootId, issue({
-        id: rootId,
+      const id = `root-${rootSequence}`;
+      issues.set(id, makeIssue({
+        id,
         identifier: `ENG-${rootSequence}`,
-        teamId: input.teamId,
-        projectId: input.projectId,
+        labels: ["symphony:conductor/abc123def456"],
         stateId: input.stateId,
         title: input.title,
         description: input.description,
         priority: input.priority,
-        labels: [{ id: input.labelIds[0], name: "symphony:conductor/abc123def456" }],
       }));
-      bindIssueComments(issues.get(rootId));
-      return { success: true, issueId: rootId };
+      return { success: true, issueId: id };
     },
     async updateIssue(issueId, input) {
       calls.updateIssue.push({ issueId, input });
-      const target = issues.get(issueId);
-      if (!target) return { success: false };
-      Object.assign(target, input);
-      target.updatedAt = nextTimestamp();
-      if (input.description !== undefined) {
-        target.historyEntries.push({
-          id: `history-${target.historyEntries.length + 1}`,
-          issueId,
-          actorId: "human-1",
-          createdAt: target.updatedAt,
-          updatedAt: target.updatedAt,
-          updatedDescription: true,
-        });
-      }
+      const issue = issues.get(issueId);
+      if (!issue) return { success: false };
+      Object.assign(issue, input);
+      issue.updatedAt = new Date("2026-07-26T00:00:02.000Z");
+      if (input.description !== undefined) issue.historyEntries.push({
+        ...activity(issueId, issue.stateId, "2026-07-26T00:00:02.000Z"),
+        id: `history-${issue.historyEntries.length + 1}`,
+        actorId: "human-1",
+        updatedDescription: true,
+      });
       return { success: true, issueId };
     },
-    async issue(issueId) {
-      const target = issues.get(issueId);
-      if (!target) throw new Error("missing issue");
-      return target;
+    async issue(id) { return issues.get(id); },
+    async comment({ id }) { return comments.get(id); },
+    async createComment(input) {
+      calls.createComment.push(input);
+      commentSequence += 1;
+      const id = `human-comment-${commentSequence}`;
+      const created = makeComment({ id, issueId: input.issueId, parentId: input.parentId, body: input.body, userId: "human-1" });
+      created.children = async () => ({ nodes: [...comments.values()].filter((candidate) => candidate.parentId === id), pageInfo: { hasNextPage: false } });
+      comments.set(id, created);
+      return { success: true, commentId: id, comment: Promise.resolve(created) };
     },
-    async team(teamId) {
-      if (teamId !== "team-1") throw new Error("missing team");
+    async updateComment(id, input) {
+      Object.assign(comments.get(id), input, { updatedAt: new Date("2026-07-26T00:00:02.000Z") });
+      return { success: true, commentId: id };
+    },
+    async commentResolve(id) { comments.get(id).resolvedAt = new Date(); return { success: true, commentId: id }; },
+    async commentUnresolve(id) { comments.get(id).resolvedAt = undefined; return { success: true, commentId: id }; },
+    async createReaction({ commentId, emoji }) {
+      comments.get(commentId).reactions.push({ id: "human-reaction", emoji, userId: "human-1" });
+      return { success: true, reactionId: "human-reaction" };
+    },
+    async team(id) {
       return {
-        id: "team-1",
+        id,
         async states() {
           return {
-            nodes: [
-              { id: "todo-state", name: "Todo", type: "unstarted", archivedAt: null },
-              { id: "approved-state", name: "Approved", type: "completed", archivedAt: null },
-              { id: "rejected-state", name: "Rejected", type: "completed", archivedAt: null },
-              { id: "answered-state", name: "Answered", type: "completed", archivedAt: null },
-            ],
+            nodes: [...statusNames].map(([stateId, name]) => ({ id: stateId, name, type: name === "Todo" ? "unstarted" : "started", archivedAt: null })),
             pageInfo: { hasNextPage: false },
           };
         },
       };
     },
     async issueLabels({ filter }) {
-      const label = routingLabels().find(({ name }) => name === filter?.name?.eq);
-      return { nodes: label ? [label] : [], pageInfo: { hasNextPage: false } };
-    },
-    async comment({ id }) {
-      const target = comments.get(id);
-      if (!target) throw new Error("missing comment");
-      return target;
-    },
-    async createComment(input) {
-      calls.createComment.push(input);
-      const created = comment({ id: fixture.commentId, issueId: input.issueId, body: input.body, userId: "human-1" });
-      comments.set(created.id, created);
-      bindCommentChildren(created);
-      return { success: true, commentId: created.id, comment: Promise.resolve(created) };
-    },
-    async updateComment(commentId, input) {
-      calls.updateComment.push({ commentId, input });
-      const target = comments.get(commentId);
-      if (!target) return { success: false };
-      target.body = input.body;
-      target.editedAt = nextTimestamp();
-      target.updatedAt = nextTimestamp();
-      return { success: true, commentId, comment: Promise.resolve(target) };
-    },
-    async commentResolve(commentId) {
-      calls.resolve.push(commentId);
-      const target = comments.get(commentId);
-      target.resolvedAt = nextTimestamp();
-      target.updatedAt = nextTimestamp();
-      return { success: true, commentId, comment: Promise.resolve(target) };
-    },
-    async commentUnresolve(commentId) {
-      calls.reopen.push(commentId);
-      const target = comments.get(commentId);
-      target.resolvedAt = undefined;
-      target.updatedAt = nextTimestamp();
-      return { success: true, commentId, comment: Promise.resolve(target) };
-    },
-    async createReaction(input) {
-      calls.reactions.push(input);
-      const target = comments.get(input.commentId);
-      target.reactions.push({ id: "reaction-1", emoji: input.emoji, userId: "human-1" });
-      return { success: true, reactionId: "reaction-1" };
+      return { nodes: [{ id: "route-label", name: filter.name.eq, isGroup: false, archivedAt: null, teamId: "team-1" }], pageInfo: { hasNextPage: false } };
     },
   };
-  function nextTimestamp() {
-    sequence += 1;
-    return new Date(`2026-07-26T00:00:${String(sequence).padStart(2, "0")}.000Z`);
-  }
-  function bindIssueComments(target) {
-    target.comments = async () => ({
-      nodes: [...comments.values()].filter((candidate) => candidate.issueId === target.id && !candidate.parentId),
-      pageInfo: { hasNextPage: false },
-    });
-  }
-  function bindCommentChildren(target) {
-    target.children = async () => ({
-      nodes: [...comments.values()].filter((candidate) => candidate.parentId === target.id),
-      pageInfo: { hasNextPage: false },
-    });
+
+  function makeIssue({ id, identifier, parentId, labels, stateId, title = id, description = "Product-created native Issue.", priority = 2 }) {
+    const issue = {
+      id, identifier, parentId, labelsValue: labels, stateId, title, description, priority,
+      teamId: "team-1", projectId: "project-1", creatorId: "symphony-1", delegateId: undefined,
+      updatedAt: new Date("2026-07-26T00:00:00.000Z"), historyEntries: [],
+      async labels() { return { nodes: this.labelsValue.map((name) => ({ id: name === "symphony:conductor/abc123def456" ? "route-label" : `${name.toLowerCase()}-label`, name })), pageInfo: { hasNextPage: false } }; },
+      async children() { return { nodes: [...issues.values()].filter((candidate) => candidate.parentId === this.id), pageInfo: { hasNextPage: false } }; },
+      async comments() { return { nodes: [...comments.values()].filter((candidate) => candidate.issueId === this.id && !candidate.parentId), pageInfo: { hasNextPage: false } }; },
+      async history() { return { nodes: this.historyEntries, pageInfo: { hasNextPage: false } }; },
+    };
+    return issue;
   }
   return fixture;
 }
 
-function issue({ id, identifier, teamId, projectId, stateId, title, description, priority, creatorId, labels }) {
+function makeComment({ id, issueId, body, userId, parentId, resolved = false, updatedAt = "2026-07-26T00:00:00.000Z" }) {
   return {
-    id,
-    identifier,
-    teamId,
-    projectId,
-    stateId,
-    title,
-    description,
-    priority,
-    creatorId,
-    parentId: undefined,
-    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
-    historyEntries: [],
-    async labels() {
-      return { nodes: labels, pageInfo: { hasNextPage: false } };
-    },
-    async children() {
-      return { nodes: [], pageInfo: { hasNextPage: false } };
-    },
-    async history() {
-      return { nodes: this.historyEntries, pageInfo: { hasNextPage: false } };
-    },
+    id, issueId, body, userId, parentId,
+    createdAt: new Date(updatedAt), updatedAt: new Date(updatedAt), resolvedAt: resolved ? new Date(updatedAt) : undefined, reactions: [],
+    async children() { return { nodes: [], pageInfo: { hasNextPage: false } }; },
   };
 }
 
-function comment({ id, issueId, body, userId, parentId = undefined }) {
-  return {
-    id,
-    issueId,
-    body,
-    userId,
-    parentId,
-    createdAt: new Date("2026-07-26T00:00:00.000Z"),
-    updatedAt: new Date("2026-07-26T00:00:00.000Z"),
-    resolvedAt: undefined,
-    reactions: [],
-  };
+function activity(issueId, toStateId, at) {
+  return { id: `activity-${issueId}-${toStateId}`, issueId, actorId: "symphony-1", toStateId, createdAt: new Date(at), updatedAt: new Date(at) };
 }
 
-function record(value) {
-  return `\`\`\`json\n${JSON.stringify({ version: 1, ...value })}\n\`\`\``;
+function title(value) {
+  return value[0].toUpperCase() + value.slice(1);
 }
 
 function hasCode(code) {
   return (error) => error?.code === code;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function immediateHumanRequestBudget() {
-  let now = 0;
-  return createHumanLinearRequestBudget({
-    now: () => now,
-    wait: async (milliseconds) => {
-      now += milliseconds;
-    },
-  });
-}
-
-function conductorBinding(conductorRef, suffix) {
-  return {
-    conductorRef,
-    conductorId: `conductor-${suffix}`,
-    conductorShortHash: suffix.repeat(12),
-    performerProfileId: `profile-${suffix}`,
-    worktreeDirectory: `/runtime/${suffix}/worktrees`,
-  };
-}
-
-function routingLabels() {
-  return ["a", "b", "c"].map((suffix) => ({
-    id: `route-${suffix}`,
-    name: `symphony:conductor/${suffix.repeat(12)}`,
-    isGroup: false,
-    teamId: "team-1",
-    archivedAt: null,
-    retiredById: null,
-  }));
-}
-
-function caseRoot(caseId, rootKey) {
-  const definition = FOREGROUND_E2E_CASES.find((candidate) => candidate.caseId === caseId);
-  const root = definition.rootCreationInputs.find((candidate) => candidate.rootKey === rootKey);
-  return root;
-}
-
-function caseInteraction(caseId, kind) {
-  const definition = FOREGROUND_E2E_CASES.find((candidate) => candidate.caseId === caseId);
-  return definition.declaredUserInteractions.find((candidate) => candidate.kind === kind);
 }

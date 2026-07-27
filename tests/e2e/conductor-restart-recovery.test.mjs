@@ -25,13 +25,13 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
     },
     async waitForRestartRecoveryAdmission(input) {
       calls.push({ kind: "wait_for_admission", input });
-      return { affectedRootIssueId: "affected-root-id", oldStageExecutionId: "old-execution" };
+      return { affectedRootIssueId: "affected-root-id", interruptedStageIssueId: "old-execution" };
     },
-    async waitForPlanReviewAction(input) {
+    async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
-      return { actionIssueId: `${input.rootIssueId}-action`, terminalStatusId: "approved-state" };
+      return { requestCommentId: `${input.rootIssueId}-request`, planIssueId: `${input.rootIssueId}-plan` };
     },
-    async setHumanActionTerminalStatus(input) {
+    async replyToHumanAction(input) {
       calls.push({ kind: "approve_plan_review", input });
     },
   };
@@ -60,10 +60,10 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
       input: { affectedRootIssueId: "affected-root-id", continuousRootIssueId: "continuous-root-id" },
     },
     { kind: "kill_and_restart", input: { conductorId: "conductor-a" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "affected-root-id", terminalStatus: "Approved" } },
-    { kind: "wait_for_plan_review", input: { rootIssueId: "continuous-root-id", terminalStatus: "Approved" } },
-    { kind: "approve_plan_review", input: { issueId: "affected-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
-    { kind: "approve_plan_review", input: { issueId: "continuous-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "affected-root-id" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "continuous-root-id" } },
+    { kind: "approve_plan_review", input: { rootIssueId: "affected-root-id", requestCommentId: "affected-root-id-request", body: "Approved." } },
+    { kind: "approve_plan_review", input: { rootIssueId: "continuous-root-id", requestCommentId: "continuous-root-id-request", body: "Approved." } },
   ]);
   assert.deepEqual(result, {
     context: {
@@ -75,7 +75,7 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
       recovery: {
         affectedRootId: "affected-root-id",
         continuousRootId: "continuous-root-id",
-        oldExecutionId: "old-execution",
+        interruptedStageIssueId: "old-execution",
         affectedConductorId: "conductor-a",
         continuousConductorId: "conductor-b",
         affectedRoutingLabelId: "route-a",
@@ -97,10 +97,10 @@ test("restart recovery Case rejects noncanonical topology, non-owning runtime fa
     async assertRootUndelegatedAndInactive() {},
     async delegateRootIssue() {},
     async waitForRestartRecoveryAdmission() {
-      return { affectedRootIssueId: "continuous-root-id", oldStageExecutionId: "old-execution" };
+      return { affectedRootIssueId: "continuous-root-id", interruptedStageIssueId: "old-execution" };
     },
-    async waitForPlanReviewAction() { return { actionIssueId: "action", terminalStatusId: "approved-state" }; },
-    async setHumanActionTerminalStatus() {},
+    async waitForPlanApprovalRequest() { return { requestCommentId: "request", planIssueId: "plan" }; },
+    async replyToHumanAction() {},
   };
   const runtime = { async killAndRestartConductor() { return { conductorId: "conductor-a" }; } };
   const rootCreationsByRootKey = {
@@ -119,7 +119,7 @@ test("restart recovery Case rejects noncanonical topology, non-owning runtime fa
   const admittedHuman = {
     ...human,
     async waitForRestartRecoveryAdmission() {
-      return { affectedRootIssueId: "affected-root-id", oldStageExecutionId: "old-execution" };
+      return { affectedRootIssueId: "affected-root-id", interruptedStageIssueId: "old-execution" };
     },
   };
   await assert.rejects(

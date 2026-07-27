@@ -187,7 +187,6 @@ def _terminal(
             "evidence_refs": result["evidence_refs"],
             "consumed_input_ids": result["consumed_input_ids"],
             "comment_replies": result["comment_replies"],
-            "human_action_resolutions": result["human_action_resolutions"],
             "action": result["action"],
         }
     payload = {
@@ -321,7 +320,7 @@ def _provider_output(value: Any, role: str) -> dict[str, Any]:
     if role == "root_reconciler":
         if not isinstance(output.get("action"), dict):
             raise ValueError("provider_output_action_invalid")
-        for field in ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions"):
+        for field in ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies"):
             if field not in output:
                 raise ValueError(f"provider_output_{field}_missing")
         return output

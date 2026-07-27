@@ -40,24 +40,23 @@ export async function runConductorRestartRecoveryCase({ definition, human, runti
     throw stableError("foreground_e2e_recovery_restart_invalid");
   }
 
-  const actions = await Promise.all(roots.map(async ({ root }) => {
-    const action = await human.waitForPlanReviewAction({
+  const requests = await Promise.all(roots.map(async ({ root }) => {
+    const request = await human.waitForPlanApprovalRequest({
       rootIssueId: root.rootIssueId,
-      terminalStatus: "Approved",
       ...(signal ? { signal } : {}),
     });
-    if (!identifier(action?.actionIssueId) || !identifier(action?.terminalStatusId)) {
+    if (!identifier(request?.requestCommentId) || !identifier(request?.planIssueId)) {
       throw stableError("foreground_e2e_recovery_plan_review_invalid");
     }
-    return Object.freeze(action);
+    return Object.freeze({ ...request, rootIssueId: root.rootIssueId });
   }));
-  if (new Set(actions.map(({ actionIssueId }) => actionIssueId)).size !== actions.length) {
+  if (new Set(requests.map(({ requestCommentId }) => requestCommentId)).size !== requests.length) {
     throw stableError("foreground_e2e_recovery_plan_review_invalid");
   }
-  await Promise.all(actions.map((action) => human.setHumanActionTerminalStatus({
-    issueId: action.actionIssueId,
-    terminalStatus: "Approved",
-    stateId: action.terminalStatusId,
+  await Promise.all(requests.map((request) => human.replyToHumanAction({
+    rootIssueId: request.rootIssueId,
+    requestCommentId: request.requestCommentId,
+    body: "Approved.",
     ...(signal ? { signal } : {}),
   })));
 
@@ -68,7 +67,7 @@ export async function runConductorRestartRecoveryCase({ definition, human, runti
       recovery: {
         affectedRootId: affected.root.rootIssueId,
         continuousRootId: continuous.root.rootIssueId,
-        oldExecutionId: admission.oldStageExecutionId,
+        interruptedStageIssueId: admission.interruptedStageIssueId,
         affectedConductorId: rootCreations.get("affected-root").conductorId,
         continuousConductorId: rootCreations.get("continuous-root").conductorId,
         affectedRoutingLabelId: rootCreations.get("affected-root").routingLabelId,
@@ -94,8 +93,8 @@ function assertDefinition(definition) {
 function assertInput({ human, runtime, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
       typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForRestartRecoveryAdmission !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
-      typeof human.setHumanActionTerminalStatus !== "function" || !runtime ||
+      typeof human.waitForRestartRecoveryAdmission !== "function" || typeof human.waitForPlanApprovalRequest !== "function" ||
+      typeof human.replyToHumanAction !== "function" || !runtime ||
       typeof runtime.killAndRestartConductor !== "function" || !rootCreationsByRootKey ||
       typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
       signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
@@ -130,10 +129,10 @@ function validRootCreation(value) {
 }
 
 function assertAdmission(value, affectedRootIssueId) {
-  if (!value || value.affectedRootIssueId !== affectedRootIssueId || !identifier(value.oldStageExecutionId)) {
+  if (!value || value.affectedRootIssueId !== affectedRootIssueId || !identifier(value.interruptedStageIssueId)) {
     throw stableError("foreground_e2e_recovery_admission_invalid");
   }
-  return Object.freeze({ oldStageExecutionId: value.oldStageExecutionId });
+  return Object.freeze({ interruptedStageIssueId: value.interruptedStageIssueId });
 }
 
 function rootForKey(roots, rootKey) {
