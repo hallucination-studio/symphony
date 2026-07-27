@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 from performer.agent_protocol.host import AgentProtocolHost
 from performer.backends.provider_backend_interface import ProviderBackendError
 from performer.backends.provider_backend_interface import ProviderSession
+from performer.root_reconciler.comment_replies import pending_comment_reply_sources_from_request
 
 
 class FakeBackend:
@@ -71,6 +73,79 @@ class InvalidRootDirectiveBackend(FakeBackend):
                 "comment_replies": [],
                 "human_action_resolutions": [],
                 "action": {"kind": "wait", "reason_code": "human"},
+            }}
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
+class UnexpectedCommentReplyBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            return {"output": {
+                "rationale": "Start planning.",
+                "evidence_refs": [],
+                "consumed_input_ids": [],
+                "comment_replies": [{
+                    "reply_id": "reply-1",
+                    "source_input_id": "input:" + "0" * 64,
+                    "source": {
+                        "kind": "comment_body",
+                        "comment_id": "comment-1",
+                        "comment_body_digest": "0" * 64,
+                    },
+                    "acknowledgement": "We received the request.",
+                    "interpreted_request": "Start planning.",
+                    "decided_action": "Start planning.",
+                    "next_step": "Planning will begin.",
+                    "disposition": "accepted",
+                    "reaction": "check",
+                    "thread_action": "resolve",
+                }],
+                "human_action_resolutions": [],
+                "action": {
+                    "kind": "wait",
+                    "reason_code": "human",
+                    "blocking_fact_refs": [],
+                },
+            }}
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
+class MatchingCommentReplyBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            source = pending_comment_reply_sources_from_request(request)[0]
+            return {"output": {
+                "rationale": "The comment is accepted.",
+                "evidence_refs": [],
+                "consumed_input_ids": [source["source_input_id"]],
+                "comment_replies": [{
+                    "reply_id": "reply-1",
+                    "source_input_id": source["source_input_id"],
+                    "source": source["source"],
+                    "acknowledgement": "We received the request.",
+                    "interpreted_request": "Start planning.",
+                    "decided_action": "Start planning.",
+                    "next_step": "Planning will begin.",
+                    "disposition": "accepted",
+                    "reaction": "check",
+                    "thread_action": "resolve",
+                }],
+                "human_action_resolutions": [],
+                "action": {
+                    "kind": "wait",
+                    "reason_code": "human",
+                    "blocking_fact_refs": [],
+                },
             }}
         return super().execute_role_turn(
             session,
@@ -504,6 +579,48 @@ def test_host_reports_root_directive_contract_failure():
     assert failure["kind"] == "root_reconciler_failed"
     assert failure["failure"]["category"] == "schema_invalid"
     assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
+
+
+def test_host_rejects_unexpected_comment_replies_when_no_comment_input_is_pending():
+    host = AgentProtocolHost(UnexpectedCommentReplyBackend())
+    result = host.handle(open_root_request())
+
+    assert result["kind"] == "root_reconciler_opened"
+    failure = result["initial_result"]
+    assert failure["kind"] == "root_reconciler_failed"
+    assert failure["failure"]["category"] == "schema_invalid"
+
+
+def test_host_accepts_a_reply_that_matches_the_pending_user_comment_input():
+    request = open_root_request()
+    bootstrap = request["bootstrap"]
+    assert isinstance(bootstrap, dict)
+    snapshot = bootstrap["root_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["user_comments"] = [{
+        "comment_id": "comment-1",
+        "comment_remote_version": "comment-v1",
+        "issue_id": "root-1",
+        "author_kind": "human",
+        "author_id": "user-1",
+        "body": "Start planning.",
+        "thread_root_comment_id": "comment-1",
+        "thread_state": "unresolved",
+        "reactions": [],
+        "created_at": "2026-07-23T00:00:00Z",
+        "updated_at": "2026-07-23T00:00:00Z",
+    }]
+    body_digest = sha256(b"Start planning.").hexdigest()
+    source_input_id = "input:" + sha256(f"comment_body:comment-1\0{body_digest}".encode("utf-8")).hexdigest()
+    bootstrap["pending_input_ids"] = [source_input_id]
+    source = pending_comment_reply_sources_from_request(request)[0]
+
+    result = AgentProtocolHost(MatchingCommentReplyBackend()).handle(request)
+
+    assert result["kind"] == "root_reconciler_opened"
+    directive = result["initial_result"]
+    assert directive["action"]["kind"] == "wait"
+    assert directive["comment_replies"][0]["source_input_id"] == source["source_input_id"]
 
 
 def test_host_accepts_linear_status_catalog_in_root_bootstrap_manifest():

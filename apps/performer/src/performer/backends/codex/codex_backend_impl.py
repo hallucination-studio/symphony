@@ -21,6 +21,7 @@ from performer.backends.provider_backend_interface import (
     ProviderTurnCanceled,
     ProviderTurnDeadlineExpired,
 )
+from performer.root_reconciler.comment_replies import pending_comment_reply_sources_from_request
 
 CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
 CODEX_PLUGIN_BOOTSTRAP_OVERRIDE = "features.plugins=false"
@@ -44,6 +45,7 @@ ROLE_BASE_INSTRUCTIONS = {
         " EvidenceRef.source_kind must be exactly one of linear_issue, linear_comment, linear_record, git, check or result."
         " A ready Work action with no upstream evidence must set required_checks to a JSON string array and dependency_evidence_refs to [];"
         " a Verify action with no external evidence must set required_evidence_refs to []."
+        " Return comment_replies as [] when there are no pending user comment inputs."
     ),
     "plan": (
         "You are the Symphony Plan role.\n"
@@ -143,7 +145,7 @@ class CodexBackendImpl(ProviderBackendInterface):
                 effort=settings.get("reasoning_effort"),
                 sandbox=_sandbox_for_role(session.role),
                 service_tier=service_tier,
-                output_schema=_role_output_schema(session.role),
+                output_schema=_role_output_schema(session.role, request),
             )
         except Exception as error:
             raise ProviderBackendError(
@@ -295,6 +297,7 @@ def _role_prompt(role: str, request: dict[str, Any]) -> str:
         "RETURN ONLY THE JSON OBJECT."
     )
     if role == "root_reconciler":
+        reply_sources = pending_comment_reply_sources_from_request(request)
         prompt += (
             "\nROOT RESPONSE SHAPE: {\"action\":{\"kind\":\"...\"}}."
             " The action value must be an object, never a string."
@@ -306,6 +309,17 @@ def _role_prompt(role: str, request: dict[str, Any]) -> str:
             "\nROOT ACTION CLOSED VALUES:\n"
             f"{json.dumps(_root_action_closed_values(), separators=(',', ':'))}"
         )
+        if reply_sources:
+            prompt += (
+                "\nROOT COMMENT REPLY RULE: Return exactly one comment_replies entry for each source below, "
+                "copying source_input_id and source exactly. Do not reply to any other comment."
+                "\nROOT PENDING COMMENT REPLY SOURCES:\n"
+                f"{json.dumps(reply_sources, separators=(',', ':'))}"
+            )
+        else:
+            prompt += (
+                "\nROOT COMMENT REPLY RULE: No comment source is pending in this turn, so comment_replies must be []."
+            )
         if request.get("kind") == "open_root_reconciler":
             prompt += (
                 "\nROOT TARGET IDS:\n"
@@ -329,7 +343,7 @@ def _role_prompt(role: str, request: dict[str, Any]) -> str:
     return prompt
 
 
-def _role_output_schema(role: str) -> dict[str, Any]:
+def _role_output_schema(role: str, request: dict[str, Any] | None = None) -> dict[str, Any]:
     if role == "root_reconciler":
         conductor_schema = SCHEMA_REGISTRY[CONDUCTOR_PERFORMER_SCHEMA_ID]
         common_schema = SCHEMA_REGISTRY[COMMON_SCHEMA_ID]
@@ -339,11 +353,17 @@ def _role_output_schema(role: str) -> dict[str, Any]:
             common_defs=common_schema["$defs"],
         )
         output_fields = ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action")
+        properties = {field: root_directive["properties"][field] for field in output_fields}
+        if not pending_comment_reply_sources_from_request(request or {}):
+            properties["comment_replies"] = {
+                **properties["comment_replies"],
+                "maxItems": 0,
+            }
         return {
             "type": "object",
             "additionalProperties": False,
             "required": list(output_fields),
-            "properties": {field: root_directive["properties"][field] for field in output_fields},
+            "properties": properties,
         }
     outcome_definition = {
         "plan": "PlanResultOutcome",

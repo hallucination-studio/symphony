@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -127,7 +128,10 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "dependency_evidence_refs must be an array of EvidenceRef objects" in sdk.started[0]["base_instructions"]
     assert "EvidenceRef.source_kind must be exactly one of linear_issue" in sdk.started[0]["base_instructions"]
     assert "dependency_evidence_refs to []" in sdk.started[0]["base_instructions"]
+    assert "Return comment_replies as [] when there are no pending user comment inputs." in sdk.started[0]["base_instructions"]
     assert "plan-1" in sdk.thread.calls[0][0]
+    assert "ROOT COMMENT REPLY RULE:" in sdk.thread.calls[0][0]
+    assert "No comment source is pending in this turn, so comment_replies must be []." in sdk.thread.calls[0][0]
     assert sdk.thread.calls[0][1]["output_schema"]["required"] == [
         "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "human_action_resolutions", "action",
     ]
@@ -147,6 +151,8 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     ]
     assert "RETURN ONLY THE JSON OBJECT." in sdk.thread.calls[0][0]
     assert "additionalProperties" not in sdk.thread.calls[0][0]
+    comment_replies_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["comment_replies"]
+    assert comment_replies_schema["maxItems"] == 0
 
 
 def test_work_role_receives_workspace_and_is_archived():
@@ -163,6 +169,43 @@ def test_work_role_receives_workspace_and_is_archived():
 
     assert sdk.started[0]["sandbox"].value == "workspace-write"
     assert sdk.archived == ["thread-1"]
+
+
+def test_root_reconciler_prompt_exposes_the_pending_comment_reply_source():
+    body = "Please start planning."
+    body_digest = sha256(body.encode("utf-8")).hexdigest()
+    source_input_id = "input:" + sha256(f"comment_body:comment-1\0{body_digest}".encode("utf-8")).hexdigest()
+    sdk = FakeCodex(FakeThread('{"action":{"kind":"wait"}}'))
+    backend = CodexBackendImpl(sdk)
+    session = backend.open_role_session("root_reconciler", {"model": "gpt"})
+
+    backend.execute_role_turn(
+        session,
+        {
+            "kind": "open_root_reconciler",
+            "root_issue_id": "root-1",
+            "bootstrap": {
+                "root_digest": "tree-1",
+                "pending_input_ids": [source_input_id],
+                "root_snapshot": {
+                    "root": {"issue": {"issue_id": "root-1"}},
+                    "cycles": [],
+                    "user_comments": [{
+                        "comment_id": "comment-1",
+                        "body": body,
+                    }],
+                    "user_comment_thread_states": [],
+                },
+            },
+        },
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
+
+    prompt, options = sdk.thread.calls[0]
+    assert source_input_id in prompt
+    assert '"comment_body_digest":"' + body_digest in prompt
+    assert options["output_schema"]["properties"]["comment_replies"]["maxItems"] == 256
 
 
 @pytest.mark.parametrize("role", ["plan", "work", "verify"])
