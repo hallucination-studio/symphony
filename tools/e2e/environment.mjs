@@ -21,7 +21,12 @@ export async function createForegroundE2EEnvironment({
     }
     const project = await operations.initializeProject({ config, signal });
     assertProject(project);
-    await operations.resetProject({ projectId: project.projectId, operator: actors.client, signal });
+    await operations.resetProject({
+      projectId: project.projectId,
+      operator: actors.client,
+      authorized: config.linear.setupAuthorized,
+      signal,
+    });
     reporter.phase("starting");
     resources = await operations.createLocalResources({ config, project, signal });
     assertOwner(resources, "foreground_e2e_local_resources_invalid");
@@ -117,7 +122,11 @@ function defaultOperations() {
         updatedAt: result.project.updatedAt,
       };
     },
-    resetProject: ({ projectId, operator }) => resetDedicatedE2EProject({ projectId, client: operator }),
+    resetProject: ({ projectId, operator, authorized }) => resetDedicatedE2EProject({
+      projectId,
+      client: operator,
+      authorized,
+    }),
     createLocalResources: () => createForegroundLocalResources(),
     startProductionRuntime: (input) => startForegroundProductionRuntime(input),
   });

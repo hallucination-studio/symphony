@@ -85,27 +85,32 @@ export async function verifyDistinctLinearActors({
   return Object.freeze({ symphonyActorId, humanActorId, client: symphony });
 }
 
-export async function resetDedicatedE2EProject({ projectId, client } = {}) {
-  if (!identifier(projectId) || !client || typeof client.project !== "function") {
+export async function resetDedicatedE2EProject({ projectId, client, authorized } = {}) {
+  if (authorized !== true) throw stableError("foreground_e2e_project_reset_unauthorized");
+  if (!identifier(projectId) || !client || typeof client.project !== "function" ||
+      typeof client.deleteIssue !== "function") {
     throw stableError("foreground_e2e_project_reset_input_invalid");
   }
   const project = await readProject(client, projectId);
-  const activeIssues = await readAllLinearNodes(
-    (after) => project.issues({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
+  const issues = await readAllLinearNodes(
+    (after) => project.issues({ first: PAGE_SIZE, includeArchived: true, ...(after ? { after } : {}) }),
     "foreground_e2e_project_issue_read_failed",
   );
-  for (const issue of activeIssues) {
-    if (!issue || !identifier(issue.id) || typeof issue.archive !== "function") {
+  for (const issue of issues) {
+    if (!issue || !identifier(issue.id)) {
       throw stableError("foreground_e2e_project_issue_invalid");
     }
   }
-  for (const issue of activeIssues) {
-    const result = await write(() => issue.archive(), "foreground_e2e_project_issue_archive_failed");
-    if (result?.success !== true) throw stableError("foreground_e2e_project_issue_archive_failed");
+  for (const issue of issues) {
+    const result = await write(
+      () => client.deleteIssue(issue.id, { permanentlyDelete: true }),
+      "foreground_e2e_project_issue_delete_failed",
+    );
+    if (result?.success !== true) throw stableError("foreground_e2e_project_issue_delete_failed");
   }
   const baselineProject = await readProject(client, projectId);
   const remaining = await readAllLinearNodes(
-    (after) => baselineProject.issues({ first: PAGE_SIZE, ...(after ? { after } : {}) }),
+    (after) => baselineProject.issues({ first: PAGE_SIZE, includeArchived: true, ...(after ? { after } : {}) }),
     "foreground_e2e_project_issue_read_back_failed",
   );
   if (remaining.length !== 0) throw stableError("foreground_e2e_project_issue_read_back_failed");

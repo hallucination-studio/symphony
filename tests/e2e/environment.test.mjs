@@ -42,7 +42,7 @@ const config = Object.freeze({
   codex: Object.freeze({ baseUrl: "https://example.test", model: "gpt-5-codex" }),
 });
 
-test("environment archives every active Project Issue flatly and fresh-reads an empty baseline before local creation", async () => {
+test("environment permanently deletes every Project Issue and fresh-reads an empty archived-inclusive baseline before local creation", async () => {
   const events = [];
   const active = new Map([
     ["root-1", true],
@@ -73,18 +73,12 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
       projectReads += 1;
       return {
         id: "project-1",
-        async issues() {
+        async issues({ includeArchived }) {
+          assert.equal(includeArchived, true);
           return {
             nodes: [...active.entries()]
               .filter(([, isActive]) => isActive)
-              .map(([id]) => ({
-                id,
-                async archive() {
-                  assert.equal(localCreated, false);
-                  active.set(id, false);
-                  return { success: true };
-                },
-              })),
+              .map(([id]) => ({ id })),
             pageInfo: { hasNextPage: false },
           };
         },
@@ -92,6 +86,12 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
           return { nodes: [], pageInfo: { hasNextPage: false } };
         },
       };
+    },
+    async deleteIssue(issueId, { permanentlyDelete }) {
+      assert.equal(localCreated, false);
+      assert.equal(permanentlyDelete, true);
+      active.set(issueId, false);
+      return { success: true };
     },
   };
 
@@ -107,7 +107,10 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
         async initializeProject() {
           return { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" };
         },
-        resetProject: ({ projectId, operator }) => resetDedicatedE2EProject({ projectId, client: operator }),
+        resetProject: ({ projectId, operator, authorized }) => {
+          assert.equal(authorized, true);
+          return resetDedicatedE2EProject({ projectId, client: operator, authorized });
+        },
         async createLocalResources() {
           localCreated = true;
           return { directory: temporaryDirectory, async close() {} };
@@ -179,9 +182,10 @@ test("environment rejects matching actor identities before resetting a Project o
   assert.equal(resetAttempted, false);
 });
 
-test("Project reset paginates active Issues before archiving and reads the final baseline afresh", async () => {
-  const active = new Set(["root-1", "done-1"]);
+test("Project reset paginates active and archived Issues before permanent deletion and reads the final baseline afresh", async () => {
+  const issues = new Set(["root-1", "done-1"]);
   const seenCursors = [];
+  const deletions = [];
   const client = {
     client: {
       async rawRequest(query, variables) {
@@ -200,17 +204,12 @@ test("Project reset paginates active Issues before archiving and reads the final
     async project() {
       return {
         id: "project-1",
-        async issues({ after }) {
+        async issues({ after, includeArchived }) {
+          assert.equal(includeArchived, true);
           seenCursors.push(after ?? "initial");
           const ids = after === undefined ? ["root-1"] : after === "page-2" ? ["done-1"] : [];
           return {
-            nodes: ids.filter((id) => active.has(id)).map((id) => ({
-              id,
-              async archive() {
-                active.delete(id);
-                return { success: true };
-              },
-            })),
+            nodes: ids.filter((id) => issues.has(id)).map((id) => ({ id })),
             pageInfo: after === undefined
               ? { hasNextPage: true, endCursor: "page-2" }
               : { hasNextPage: false },
@@ -221,12 +220,34 @@ test("Project reset paginates active Issues before archiving and reads the final
         },
       };
     },
+    async deleteIssue(issueId, options) {
+      deletions.push({ issueId, options });
+      issues.delete(issueId);
+      return { success: true };
+    },
   };
 
-  await resetDedicatedE2EProject({ projectId: "project-1", client });
+  await resetDedicatedE2EProject({ projectId: "project-1", client, authorized: true });
 
-  assert.deepEqual([...active], []);
+  assert.deepEqual([...issues], []);
+  assert.deepEqual(deletions, [
+    { issueId: "root-1", options: { permanentlyDelete: true } },
+    { issueId: "done-1", options: { permanentlyDelete: true } },
+  ]);
   assert.deepEqual(seenCursors, ["initial", "page-2", "initial", "page-2"]);
+});
+
+test("Project reset rejects permanent deletion without explicit setup authorization", async () => {
+  let projectReads = 0;
+  await assert.rejects(
+    resetDedicatedE2EProject({
+      projectId: "project-1",
+      client: { async project() { projectReads += 1; } },
+      authorized: false,
+    }),
+    /foreground_e2e_project_reset_unauthorized/u,
+  );
+  assert.equal(projectReads, 0);
 });
 
 test("Project reset paginates routing labels before retiring only the dedicated Project labels", async () => {
@@ -322,9 +343,12 @@ test("Project reset paginates routing labels before retiring only the dedicated 
       removed.push({ projectId, labelId });
       return { success: true };
     },
+    async deleteIssue() {
+      throw new Error("no Issue deletion expected");
+    },
   };
 
-  await resetDedicatedE2EProject({ projectId: "project-1", client });
+  await resetDedicatedE2EProject({ projectId: "project-1", client, authorized: true });
 
   assert.deepEqual(labelCursors, ["initial", "page-2", "initial", "page-2"]);
   assert.equal(rawRequests.every(({ query }) => query.includes("nodes { id name isGroup archivedAt retiredBy { id } }") ||
