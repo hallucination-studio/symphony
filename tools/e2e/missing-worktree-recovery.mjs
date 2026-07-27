@@ -187,13 +187,13 @@ function exactIdentityMap(value, rootIssueIds) {
 }
 
 function validRootCreation(value) {
-  return value && identifier(value.teamId) && identifier(value.projectId) && identifier(value.routingLabelId) &&
+  return value && identifier(value.teamId) && identifier(value.projectId) && identifier(value.rootLabelId) && identifier(value.routingLabelId) &&
     identifier(value.rootStatusId) && identifier(value.conductorId) && identifier(value.performerProfileId) &&
     directory(value.worktreeDirectory) ? Object.freeze({ ...value }) : undefined;
 }
 
-function rootCreationInput({ teamId, projectId, routingLabelId, rootStatusId }) {
-  return { teamId, projectId, routingLabelId, rootStatusId };
+function rootCreationInput({ teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
+  return { teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
 }
 
 function identifier(value) { return typeof value === "string" && IDENTIFIER.test(value); }

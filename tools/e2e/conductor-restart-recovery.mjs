@@ -115,12 +115,12 @@ function assertInput({ human, runtime, rootCreationsByRootKey, signal }) {
   return creations;
 }
 
-function rootCreationInput({ teamId, projectId, routingLabelId, rootStatusId }) {
-  return { teamId, projectId, routingLabelId, rootStatusId };
+function rootCreationInput({ teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
+  return { teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
 }
 
 function validRootCreation(value) {
-  if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.routingLabelId) ||
+  if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.rootLabelId) || !identifier(value.routingLabelId) ||
       !identifier(value.rootStatusId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
       !worktreeDirectory(value.worktreeDirectory)) {
     return undefined;

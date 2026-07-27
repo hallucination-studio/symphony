@@ -44,7 +44,7 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
       calls.push({ kind: "approve_plan_review", input });
     },
   };
-  const rootCreation = { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id" };
+  const rootCreation = { teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id" };
 
   const running = runSameConductorPreemptionCase({
     definition,
@@ -135,7 +135,7 @@ test("preemption Case rejects noncanonical definitions, incomplete same-Conducto
     async replyToHumanAction() {},
   };
   const rootCreationsByRootKey = rootCreations(definition, {
-    teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id",
+    teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id",
   });
 
   await assert.rejects(
@@ -182,7 +182,7 @@ test("preemption Case forwards cancellation to every native Linear Human operati
     human,
     signal: abortController.signal,
     rootCreationsByRootKey: rootCreations(definition, {
-      teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id",
+      teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId: "route-label", rootStatusId: "todo-state", conductorId: "conductor-a-id",
     }),
   });
 
@@ -194,8 +194,8 @@ function rootCreations(definition, rootCreation) {
   return Object.fromEntries(definition.rootTopology.map(({ rootKey }) => [rootKey, rootCreation]));
 }
 
-function rootCreateInput(rootKey, { teamId, projectId, routingLabelId, rootStatusId }) {
-  return { caseId: "same_conductor_preemption", rootKey, teamId, projectId, routingLabelId, rootStatusId };
+function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
+  return { caseId: "same_conductor_preemption", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
 }
 
 function hasCode(code) {

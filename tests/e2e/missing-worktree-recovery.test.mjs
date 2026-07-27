@@ -14,7 +14,7 @@ test("missing-worktree Case approves old Plans, faults both fenced owners togeth
   let approvalCount = 0;
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) { calls.push(["create", input.rootKey]); return roots[input.rootKey]; },
+    async createRootIssue(input) { calls.push(["create", input]); return roots[input.rootKey]; },
     async assertRootUndelegatedAndInactive({ rootIssueId }) { calls.push(["undelegated", rootIssueId]); },
     async delegateRootIssue({ rootIssueId }) { calls.push(["delegate", rootIssueId]); },
     async waitForPlanApprovalRequest({ rootIssueId }) {
@@ -73,6 +73,10 @@ test("missing-worktree Case approves old Plans, faults both fenced owners togeth
 
   const result = await runMissingWorktreeRecoveryCase({ definition, human, runtime, rootCreationsByRootKey });
 
+  assert.deepEqual(calls.slice(0, 2), [
+    ["create", rootCreateInput("recoverable-worktree-root", rootCreationsByRootKey["recoverable-worktree-root"])],
+    ["create", rootCreateInput("invalid-generation-root", rootCreationsByRootKey["invalid-generation-root"])],
+  ]);
   assert.deepEqual(calls.map(([kind]) => kind), [
     "create", "create", "undelegated", "undelegated", "delegate", "delegate",
     "old-approval", "old-approval", "reply", "reply", "admission", "fault", "fresh-approval", "reply",
@@ -100,10 +104,15 @@ function rootCreation(routingLabelId, conductorId, worktreeDirectory) {
   return {
     teamId: "team-1",
     projectId: "project-1",
+    rootLabelId: "root-label",
     routingLabelId,
     rootStatusId: "todo-state",
     conductorId,
     performerProfileId: `profile-${conductorId}`,
     worktreeDirectory,
   };
+}
+
+function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
+  return { caseId: "missing_worktree_recovery", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
 }

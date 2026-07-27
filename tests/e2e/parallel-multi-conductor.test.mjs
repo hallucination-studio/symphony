@@ -146,11 +146,11 @@ test("parallel Case forwards cancellation to every independent Linear Human oper
 });
 
 function rootCreation(routingLabelId, conductorId, performerProfileId, worktreeDirectory) {
-  return { teamId: "team-1", projectId: "project-1", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
+  return { teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
 }
 
-function rootCreateInput(rootKey, { teamId, projectId, routingLabelId, rootStatusId }) {
-  return { caseId: "parallel_multi_conductor", rootKey, teamId, projectId, routingLabelId, rootStatusId };
+function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
+  return { caseId: "parallel_multi_conductor", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
 }
 
 function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, approvalRequestCommentId, {

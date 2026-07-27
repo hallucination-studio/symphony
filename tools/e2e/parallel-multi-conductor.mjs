@@ -15,6 +15,7 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
       rootKey: topology.rootKey,
       teamId: creation.teamId,
       projectId: creation.projectId,
+      rootLabelId: creation.rootLabelId,
       routingLabelId: creation.routingLabelId,
       rootStatusId: creation.rootStatusId,
       ...(signal ? { signal } : {}),
@@ -105,7 +106,7 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
 }
 
 function validRootCreation(value) {
-  if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.routingLabelId) ||
+  if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.rootLabelId) || !identifier(value.routingLabelId) ||
       !identifier(value.rootStatusId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
       !worktreeDirectory(value.worktreeDirectory)) {
     return undefined;
@@ -113,6 +114,7 @@ function validRootCreation(value) {
   return Object.freeze({
     teamId: value.teamId,
     projectId: value.projectId,
+    rootLabelId: value.rootLabelId,
     routingLabelId: value.routingLabelId,
     rootStatusId: value.rootStatusId,
     conductorId: value.conductorId,
