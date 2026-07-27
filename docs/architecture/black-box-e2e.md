@@ -72,6 +72,7 @@ labels和repository base在Case启动前验证。
 ```text
 validate tools and credentials
 -> provision isolated Project/repository
+-> permanently delete every active and archived Issue from the explicitly authorized isolated Project and fresh-read zero Issues
 -> start product processes concurrently
 -> create all case Roots without delegation
 -> assert undelegated zero side effects
@@ -85,6 +86,12 @@ validate tools and credentials
 ```
 
 Campaign使用all-settled语义：一个Case失败不能取消其他Case的evidence collection。cleanup失败单独报告，不能覆盖Case verdict。
+
+Project reset是test-resource lifecycle，不是产品workflow mutation。只有`.env`精确选择、target setup明确授权且setup read-back返回的
+隔离E2E Project可以进入reset；runner必须分页读取该Project的全部active和archived Issues，使用Linear permanent delete逐一移除，
+然后以`includeArchived = true` fresh-read零Issues，之后才能启动Podium和Conductor。只archive旧Issues不构成reset，因为Project Root
+Index必须读取archived authority facts；按title、label、creator、时间或本次Campaign namespace过滤旧Issues同样禁止。任一delete或
+read-back不完整都fail closed，不能用新的Root掩盖历史测试资源。
 
 ## 5. Immutable Case definition
 
