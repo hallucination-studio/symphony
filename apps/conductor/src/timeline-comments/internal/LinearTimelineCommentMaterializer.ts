@@ -272,8 +272,8 @@ function validTarget(
 
 function isValidEventText(event: WorkflowTimelineEvent): boolean {
   return event.summary.trim().length > 0 && event.summary.length <= MAX_SUMMARY_CHARS &&
-    !event.summary.includes("```symphony") &&
-    (event.nextStep === undefined || (event.nextStep.trim().length > 0 && event.nextStep.length <= MAX_NEXT_STEP_CHARS && !event.nextStep.includes("```symphony")));
+    !event.summary.includes("```json") &&
+    (event.nextStep === undefined || (event.nextStep.trim().length > 0 && event.nextStep.length <= MAX_NEXT_STEP_CHARS && !event.nextStep.includes("```json")));
 }
 
 function renderTimelineComment(

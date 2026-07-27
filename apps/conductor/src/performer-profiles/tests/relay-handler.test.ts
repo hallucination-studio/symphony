@@ -8,6 +8,7 @@ import { ConductorProfileRelayHandler } from "../internal/ConductorProfileRelayH
 test("Profile relay creates, reads, and activates one Conductor-owned Profile", async () => {
   const profiles: PerformerProfile[] = [];
   let activeProfileId: string | undefined;
+  let statusReads = 0;
   const handler = new ConductorProfileRelayHandler(
     "conductor-1",
     {
@@ -51,6 +52,7 @@ test("Profile relay creates, reads, and activates one Conductor-owned Profile", 
     },
     {
       async status(profileId) {
+        statusReads += 1;
         return { kind: "profile_status", profile_id: profileId, readiness: "ready" };
       },
       async startChatGptLogin() {
@@ -82,6 +84,8 @@ test("Profile relay creates, reads, and activates one Conductor-owned Profile", 
     },
   });
   assert.equal((saved as { kind: string }).kind, "profile_saved");
+  assert.equal((saved as { profile: { readiness: string } }).profile.readiness, "login-required");
+  assert.equal(statusReads, 0);
   assert.doesNotThrow(() => decodePodiumConductorPodiumConductorMessage({
     protocol_version: "1",
     request_id: "profile-saved-1",

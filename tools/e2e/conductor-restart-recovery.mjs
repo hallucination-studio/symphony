@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -10,12 +12,21 @@ export async function runConductorRestartRecoveryCase({ definition, human, runti
       caseId: definition.caseId,
       rootKey: topology.rootKey,
       ...rootCreationInput(rootCreations.get(topology.rootKey)),
+      ...(signal ? { signal } : {}),
     });
     if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
       throw stableError("foreground_e2e_recovery_root_create_invalid");
     }
     return Object.freeze({ topology, root });
   }));
+  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
+  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
   const rootIssueIdsByKey = Object.freeze(Object.fromEntries(roots.map(({ topology, root }) => [topology.rootKey, root.rootIssueId])));
   const affected = rootForKey(roots, "affected-root");
   const continuous = rootForKey(roots, "continuous-root");
@@ -47,6 +58,7 @@ export async function runConductorRestartRecoveryCase({ definition, human, runti
     issueId: action.actionIssueId,
     terminalStatus: "Approved",
     stateId: action.terminalStatusId,
+    ...(signal ? { signal } : {}),
   })));
 
   return deepFreeze({
@@ -63,8 +75,8 @@ export async function runConductorRestartRecoveryCase({ definition, human, runti
         continuousRoutingLabelId: rootCreations.get("continuous-root").routingLabelId,
         affectedPerformerProfileId: rootCreations.get("affected-root").performerProfileId,
         continuousPerformerProfileId: rootCreations.get("continuous-root").performerProfileId,
-        affectedRepositoryRoot: rootCreations.get("affected-root").repositoryRoot,
-        continuousRepositoryRoot: rootCreations.get("continuous-root").repositoryRoot,
+        affectedRepositoryRoot: path.join(rootCreations.get("affected-root").worktreeDirectory, affected.root.rootIssueId),
+        continuousRepositoryRoot: path.join(rootCreations.get("continuous-root").worktreeDirectory, continuous.root.rootIssueId),
       },
     },
   });
@@ -81,6 +93,7 @@ function assertDefinition(definition) {
 
 function assertInput({ human, runtime, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForRestartRecoveryAdmission !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
       typeof human.setHumanActionTerminalStatus !== "function" || !runtime ||
       typeof runtime.killAndRestartConductor !== "function" || !rootCreationsByRootKey ||
@@ -97,7 +110,7 @@ function assertInput({ human, runtime, rootCreationsByRootKey, signal }) {
   if ([...creations.values()].some((value) => !value) ||
       new Set([...creations.values()].map(({ conductorId }) => conductorId)).size !== 2 ||
       new Set([...creations.values()].map(({ performerProfileId }) => performerProfileId)).size !== 2 ||
-      new Set([...creations.values()].map(({ repositoryRoot }) => repositoryRoot)).size !== 2) {
+      new Set([...creations.values()].map(({ worktreeDirectory }) => worktreeDirectory)).size !== 2) {
     throw stableError("foreground_e2e_recovery_case_input_invalid");
   }
   return creations;
@@ -110,7 +123,7 @@ function rootCreationInput({ teamId, projectId, routingLabelId, rootStatusId }) 
 function validRootCreation(value) {
   if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.routingLabelId) ||
       !identifier(value.rootStatusId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
-      !repositoryRoot(value.repositoryRoot)) {
+      !worktreeDirectory(value.worktreeDirectory)) {
     return undefined;
   }
   return Object.freeze({ ...value });
@@ -137,7 +150,7 @@ function identifier(value) {
   return typeof value === "string" && IDENTIFIER.test(value);
 }
 
-function repositoryRoot(value) {
+function worktreeDirectory(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 4_096 && !value.includes("\u0000");
 }
 

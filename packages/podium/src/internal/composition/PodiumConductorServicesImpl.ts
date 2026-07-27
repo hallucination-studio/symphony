@@ -515,6 +515,7 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       targetIssueId: requiredString(body.target_issue_id, "linear_workflow_target_id_missing"),
       targetExpectedRemoteVersion: requiredString(body.target_expected_remote_version, "linear_workflow_target_version_missing"),
       relationKind: workflowRelationKind(body.relation_kind),
+      relationState: workflowRelationState(body.relation_state),
     };
   }
   if (body.kind === "create_comment_reply") {
@@ -566,6 +567,11 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
       title: requiredString(body.title, "linear_workflow_title_missing"),
       description: requiredString(body.description, "linear_workflow_description_missing"),
+      isArchived: requiredBoolean(body.is_archived, "linear_workflow_archive_missing"),
+      parentAssignment: workflowParentAssignment(
+        body.parent_assignment,
+        "linear_workflow_parent_assignment_invalid",
+      ),
       ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
     };
   }
@@ -573,19 +579,20 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     return { ...common, kind: body.kind, target: targetValue,
       body: requiredString(body.body, "linear_workflow_comment_body_missing") };
   }
-  if (body.kind === "remove_workflow_relation") {
-    return {
-      ...common,
-      kind: body.kind,
-      relationId: requiredString(body.relation_id, "linear_workflow_relation_id_missing"),
-      sourceIssueId: requiredString(body.source_issue_id, "linear_workflow_source_id_missing"),
-      sourceExpectedRemoteVersion: requiredString(body.source_expected_remote_version, "linear_workflow_source_version_missing"),
-      targetIssueId: requiredString(body.target_issue_id, "linear_workflow_target_id_missing"),
-      targetExpectedRemoteVersion: requiredString(body.target_expected_remote_version, "linear_workflow_target_version_missing"),
-      relationKind: workflowRelationKind(body.relation_kind),
-    };
-  }
   throw new Error("linear_workflow_kind_unsupported");
+}
+
+function workflowParentAssignment(
+  value: JsonValue | undefined,
+  code: string,
+): { mode: "retain" } | { mode: "set"; parentIssueId: string } | { mode: "clear" } {
+  const assignment = recordValue(value, code);
+  if (assignment.mode === "retain") return { mode: "retain" };
+  if (assignment.mode === "clear") return { mode: "clear" };
+  if (assignment.mode === "set") {
+    return { mode: "set", parentIssueId: requiredString(assignment.parent_issue_id, code) };
+  }
+  throw new Error(code);
 }
 
 function workflowMutationScope(body: Body): {
@@ -612,6 +619,11 @@ function workflowMutationScope(body: Body): {
 function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" | "triggered_by" {
   if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
+}
+
+function workflowRelationState(value: JsonValue | undefined): "present" | "absent" {
+  if (value === "present" || value === "absent") return value;
+  throw new Error("linear_workflow_relation_state_invalid");
 }
 
 function workflowCommentThreadState(

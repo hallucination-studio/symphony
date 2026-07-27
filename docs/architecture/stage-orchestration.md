@@ -391,7 +391,7 @@ Result接受顺序固定：
 fresh-read Root/Cycle/target/Git preconditions
 -> validate wire schema, role/session/turn correlation and context digest
 -> validate target revision and capability-specific evidence
--> persist immutable Result with nested ModelTurnRecord in one managed Stage comment and one symphony block
+-> persist immutable Result with nested ModelTurnRecord in one managed Stage comment and one `json` block
 -> semantic read-back
 -> settle token reservation
 -> derive and materialize Stage/Cycle/Root usage snapshots from fresh Linear turn records
@@ -402,7 +402,7 @@ fresh-read Root/Cycle/target/Git preconditions
 ### 10.1 Stage Result comment
 
 每次已验证的Plan、Work或Verify Result必须在matching Stage Issue追加一条canonical managed comment。该comment是
-执行事实唯一的用户可见载体：上半部分由closed renderer输出结构化Markdown，末尾唯一`symphony` block承载Result与
+执行事实唯一的用户可见载体：上半部分由closed renderer输出结构化Markdown，末尾唯一`json` block承载Result与
 nested `ModelTurnRecord`。它不是Cycle timeline、Root Reconciler reply或第二份usage comment。
 
 ````markdown
@@ -424,12 +424,12 @@ nested `ModelTurnRecord`。它不是Cycle timeline、Root Reconciler reply或第
 **Next**
 <the Root Reconciler will evaluate the durable result; do not promise a directive not yet accepted>
 
-```symphony
+```json
 {"kind":"<plan_result | work_result | verify_result>","version":1,"record_id":"...",...}
 ```
 ````
 
-没有对应事实的section省略；renderer允许heading、列表、表格、链接、引用和非`symphony` code block，但不输出raw
+没有对应事实的section省略；renderer允许heading、列表、表格、链接、引用和非`json` code block，但不输出raw
 reasoning、secret或未经验证的Provider text。实际wire fields和Result variants只由generated schema定义；该模板不增加
 第二份Result、status、usage或恢复语义。comment与block必须在同一次required Linear materialization中read-back；失败时
 matching Root停止，不能以runtime Result、timeline或日志代替。

@@ -10,8 +10,8 @@ import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyIm
 const root = {
   issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
   description: "Build it", updatedAt: "2026-07-23T00:00:00Z", projectId: "project-1",
-  parentIssueId: null, isDelegatedToSymphony: true, priority: "normal" as const, order: 0,
-  blockers: [], rootConductorLabels: [],
+  parentIssueId: null, priority: "normal" as const, order: 0,
+  blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
 };
 
 function buildRootFactSet(input: Omit<Parameters<typeof buildRootFactSetImpl>[0], "convergence">) {

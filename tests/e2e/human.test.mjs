@@ -1,17 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { RatelimitedLinearError } from "@linear/sdk";
+
 import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
-import { createForegroundE2EHumanActor } from "../../tools/e2e/human.mjs";
+import {
+  createForegroundE2EHumanActor,
+  HUMAN_ACTION_POLL_INTERVAL_MS,
+} from "../../tools/e2e/human.mjs";
+
+test("Human Actor bounds concurrent Case polling below the Linear request burst threshold", () => {
+  assert.equal(HUMAN_ACTION_POLL_INTERVAL_MS, 5_000);
+});
 
 test("Human Actor performs only catalog-compatible user mutations with Linear read-back", async () => {
   const fixture = createLinearFixture();
+  const clientOptions = [];
+  const controller = new AbortController();
   const revisionRoot = caseRoot("root_revision_and_comment", "revision-root");
   const revisionUpdate = caseInteraction("root_revision_and_comment", "update_root_description");
   const human = await createForegroundE2EHumanActor({
     apiKey: "human-api-key",
     expectedActorId: "human-1",
-    createClient: () => fixture.client,
+    createClient: (options) => {
+      clientOptions.push(options);
+      return fixture.client;
+    },
   });
 
   const root = await human.createRootIssue({
@@ -21,6 +35,7 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
     projectId: "project-1",
     routingLabelId: "route-label",
     rootStatusId: "todo-state",
+    signal: controller.signal,
   });
   assert.deepEqual(root, { rootIssueId: "root-1", identifier: "ENG-1" });
   assert.deepEqual(fixture.calls.createIssue, [{
@@ -36,6 +51,7 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
   await human.updateRootDescription({
     rootIssueId: root.rootIssueId,
     description: revisionUpdate.description,
+    signal: controller.signal,
   });
   assert.deepEqual(fixture.calls.updateIssue.at(0), {
     issueId: "root-1",
@@ -45,6 +61,7 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
   const comment = await human.createComment({
     issueId: root.rootIssueId,
     body: "Please keep the public API focused.",
+    signal: controller.signal,
   });
   assert.equal(comment.commentId, "comment-1");
   assert.equal(comment.issueId, "root-1");
@@ -54,16 +71,18 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
     issueId: root.rootIssueId,
     commentId: comment.commentId,
     body: "Please keep the public API focused and tested.",
+    signal: controller.signal,
   });
-  await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId });
-  await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId });
-  const reaction = await human.addReaction({ issueId: root.rootIssueId, commentId: comment.commentId, emoji: "+1" });
+  await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId, signal: controller.signal });
+  await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: comment.commentId, signal: controller.signal });
+  const reaction = await human.addReaction({ issueId: root.rootIssueId, commentId: comment.commentId, emoji: "+1", signal: controller.signal });
   assert.deepEqual(reaction, { reactionId: "reaction-1", commentId: "comment-1", emoji: "+1" });
 
   await human.setHumanActionTerminalStatus({
     issueId: "human-action-1",
     terminalStatus: "Approved",
     stateId: "approved-state",
+    signal: controller.signal,
   });
   assert.deepEqual(fixture.calls.updateIssue.at(1), {
     issueId: "human-action-1",
@@ -71,6 +90,52 @@ test("Human Actor performs only catalog-compatible user mutations with Linear re
   });
   assert.equal(fixture.comments.get("comment-1").resolvedAt, undefined);
   assert.deepEqual(fixture.comments.get("comment-1").reactions, [{ id: "reaction-1", emoji: "+1", userId: "human-1" }]);
+  assert.equal(clientOptions.length, 9);
+  assert.equal(clientOptions[0].signal, undefined);
+  assert(clientOptions.slice(1).every((options) => options.signal === controller.signal));
+});
+
+test("Human Actor proves a new Root is inactive before the Human natively delegates it", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    delegateActorId: "symphony-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+
+  await assert.rejects(
+    human.delegateRootIssue({ rootIssueId: root.rootIssueId }),
+    hasCode("foreground_e2e_human_root_delegate_not_verified"),
+  );
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId });
+  assert.deepEqual(fixture.calls.updateIssue, [{
+    issueId: root.rootIssueId,
+    input: { delegateId: "symphony-1" },
+  }]);
+
+  const undelegated = await human.createRootIssue({
+    caseId: "plan_rejected_and_replanned",
+    rootKey: "rejected-plan-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  fixture.addPlanReviewAction(undelegated.rootIssueId);
+  await assert.rejects(
+    human.assertRootUndelegatedAndInactive({ rootIssueId: undelegated.rootIssueId }),
+    hasCode("foreground_e2e_human_root_admission_read_back_failed"),
+  );
 });
 
 test("Human Actor waits for exactly one product-created Plan Review Action beneath its declared Root", async () => {
@@ -361,11 +426,15 @@ test("Human Actor cannot expose or perform non-user workflow mutations", async (
   assert.deepEqual(Object.keys(human).sort(), [
     "actorId",
     "addReaction",
+    "assertRootUndelegatedAndInactive",
     "createComment",
     "createRootIssue",
+    "createdRootsForCase",
+    "delegateRootIssue",
     "editComment",
     "reopenCommentThread",
     "resolveCommentThread",
+    "resolveRootCreationBindings",
     "setHumanActionTerminalStatus",
     "updateRootDescription",
     "waitForClarificationAction",
@@ -430,6 +499,71 @@ test("Human Actor rejects a failed Linear write or mismatched actor identity", a
       rootStatusId: "todo-state",
     }),
     hasCode("foreground_e2e_human_root_create_failed"),
+  );
+});
+
+test("Human Actor binds each Root creation to its Case signal and settles a canceled request", async () => {
+  const fixture = createLinearFixture();
+  const clientOptions = [];
+  fixture.client.createIssue = async () => new Promise(() => {});
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: (options) => {
+      clientOptions.push(options);
+      return fixture.client;
+    },
+  });
+  const controller = new AbortController();
+  const pending = human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  const outcome = await Promise.race([
+    pending.then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    ),
+    delay(50).then(() => ({ kind: "timeout" })),
+  ]);
+
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(outcome.error?.code, "foreground_e2e_human_linear_request_aborted");
+  assert.equal(clientOptions.at(-1)?.signal, controller.signal);
+});
+
+test("Human Actor preserves rate-limit classification without exposing SDK error detail", async () => {
+  const fixture = createLinearFixture();
+  const rateLimited = new RatelimitedLinearError({ status: 429 });
+  rateLimited.message = "authorization=human-api-key";
+  fixture.client.createIssue = async () => {
+    throw rateLimited;
+  };
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+
+  await assert.rejects(
+    human.createRootIssue({
+      caseId: "approved_happy_path",
+      rootKey: "approved-root",
+      teamId: "team-1",
+      projectId: "project-1",
+      routingLabelId: "route-label",
+      rootStatusId: "todo-state",
+    }),
+    (error) => error?.code === "foreground_e2e_human_linear_rate_limited" &&
+      error.message === "foreground_e2e_human_linear_rate_limited" &&
+      !error.message.includes("human-api-key"),
   );
 });
 
@@ -524,7 +658,7 @@ test("Human Actor observes same-Conductor preemption from native facts despite s
   });
 
   const admission = await human.waitForSameConductorPreemptionAdmission({
-    rootIssueIds: definition.rootTopology.map(({ rootKey }) => rootsByKey[rootKey].rootIssueId),
+    rootIssueIds: ["inflight-root", "touched-root", "remaining-root"].map((rootKey) => rootsByKey[rootKey].rootIssueId),
   });
   assert.equal(admission.inflightRootIssueId, rootsByKey["inflight-root"].rootIssueId);
   const roles = bindSameConductorPreemptionRoles({
@@ -580,6 +714,36 @@ test("Human Actor creates each frozen Case Root at most once", async () => {
   await human.createRootIssue(input);
   await assert.rejects(human.createRootIssue(input), hasCode("foreground_e2e_human_root_create_not_declared"));
   assert.equal(fixture.calls.createIssue.length, 1);
+});
+
+test("Human Actor resolves only fresh Todo and Conductor routing bindings, then retains each created Root identity by Case", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const bindings = await human.resolveRootCreationBindings({
+    teamId: "team-1",
+    projectId: "project-1",
+    conductors: [
+      conductorBinding("conductor-a", "a"),
+      conductorBinding("conductor-b", "b"),
+      conductorBinding("conductor-c", "c"),
+    ],
+  });
+
+  assert.equal(bindings["approved-root"].routingLabelId, "route-a");
+  assert.equal(bindings["approved-root"].rootStatusId, "todo-state");
+  assert.equal(bindings["information-root"].routingLabelId, "route-c");
+  await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    ...bindings["approved-root"],
+  });
+  assert.deepEqual(human.createdRootsForCase({ caseId: "approved_happy_path" }), [
+    { rootKey: "approved-root", rootIssueId: "root-1" },
+  ]);
 });
 
 function createLinearFixture() {
@@ -872,15 +1036,19 @@ function createLinearFixture() {
         async states() {
           return {
             nodes: [
-              { id: "todo-state", name: "Todo", archivedAt: null },
-              { id: "approved-state", name: "Approved", archivedAt: null },
-              { id: "rejected-state", name: "Rejected", archivedAt: null },
-              { id: "answered-state", name: "Answered", archivedAt: null },
+              { id: "todo-state", name: "Todo", type: "unstarted", archivedAt: null },
+              { id: "approved-state", name: "Approved", type: "completed", archivedAt: null },
+              { id: "rejected-state", name: "Rejected", type: "completed", archivedAt: null },
+              { id: "answered-state", name: "Answered", type: "completed", archivedAt: null },
             ],
             pageInfo: { hasNextPage: false },
           };
         },
       };
+    },
+    async issueLabels({ filter }) {
+      const label = routingLabels().find(({ name }) => name === filter?.name?.eq);
+      return { nodes: label ? [label] : [], pageInfo: { hasNextPage: false } };
     },
     async comment({ id }) {
       const target = comments.get(id);
@@ -984,11 +1152,36 @@ function comment({ id, issueId, body, userId, parentId = undefined }) {
 }
 
 function record(value) {
-  return `\`\`\`symphony\n${JSON.stringify({ version: 1, ...value })}\n\`\`\``;
+  return `\`\`\`json\n${JSON.stringify({ version: 1, ...value })}\n\`\`\``;
 }
 
 function hasCode(code) {
   return (error) => error?.code === code;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function conductorBinding(conductorRef, suffix) {
+  return {
+    conductorRef,
+    conductorId: `conductor-${suffix}`,
+    conductorShortHash: suffix.repeat(12),
+    performerProfileId: `profile-${suffix}`,
+    worktreeDirectory: `/runtime/${suffix}/worktrees`,
+  };
+}
+
+function routingLabels() {
+  return ["a", "b", "c"].map((suffix) => ({
+    id: `route-${suffix}`,
+    name: `symphony:conductor/${suffix.repeat(12)}`,
+    isGroup: false,
+    teamId: "team-1",
+    archivedAt: null,
+    retiredById: null,
+  }));
 }
 
 function caseRoot(caseId, rootKey) {

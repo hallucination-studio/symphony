@@ -13,6 +13,12 @@ test("approved happy path creates its declared Root and approves only the produc
       calls.push({ kind: "create_root", input });
       return { rootIssueId: "root-1", identifier: "ENG-1" };
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForPlanReviewAction(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
@@ -45,6 +51,8 @@ test("approved happy path creates its declared Root and approves only the produc
         rootStatusId: "todo-state",
       },
     },
+    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
+    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     {
       kind: "wait_for_plan_review",
       input: { rootIssueId: "root-1", terminalStatus: "Approved" },
@@ -71,6 +79,8 @@ test("approved happy path rejects a Case definition or Human boundary outside th
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
     async setHumanActionTerminalStatus() {},
   };
@@ -93,15 +103,17 @@ test("approved happy path rejects a Case definition or Human boundary outside th
   );
 });
 
-test("approved happy path forwards Case cancellation only to the Plan Review wait", async () => {
+test("approved happy path forwards Case cancellation to every Linear Human operation", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
   const abortController = new AbortController();
-  let waitInput;
+  const inputs = [];
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive(input) { inputs.push(input); },
+    async delegateRootIssue(input) { inputs.push(input); },
     async waitForPlanReviewAction(input) {
-      waitInput = input;
+      inputs.push(input);
       return { actionIssueId: "action-1", terminalStatusId: "approved-state" };
     },
     async setHumanActionTerminalStatus() {},
@@ -114,7 +126,11 @@ test("approved happy path forwards Case cancellation only to the Plan Review wai
     rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
   });
 
-  assert.deepEqual(waitInput, { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal });
+  assert.deepEqual(inputs, [
+    { rootIssueId: "root-1", signal: abortController.signal },
+    { rootIssueId: "root-1", signal: abortController.signal },
+    { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal },
+  ]);
 });
 
 function hasCode(code) {

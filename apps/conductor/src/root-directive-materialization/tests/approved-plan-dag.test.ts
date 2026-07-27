@@ -171,7 +171,7 @@ function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {
     root: {
       issueId: "root-1", identifier: "SYM-1", state: "In Progress", title: "Root", description: "Root description",
       updatedAt: "2026-07-24T00:00:00Z", projectId: "project-1", parentIssueId: null,
-      isDelegatedToSymphony: true, priority: "normal", order: 0, blockers: [], rootConductorLabels: [],
+      priority: "normal", order: 0, blockers: [], rootConductorLabels: [], isDelegatedToSymphony: true,
     },
     tree,
     git: { head: "head-1", branch: "main", status: { items: [], returned: 0, cap: 16, has_more: false, partial: false } },

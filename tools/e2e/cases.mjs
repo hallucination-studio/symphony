@@ -35,6 +35,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       repositoryRef: "approved-repository",
       title: "Add a focused text normalization helper",
       description: "Implement a small text normalization helper in the dedicated test repository and cover its supported input with focused tests.",
+      priority: "urgent",
       acceptanceCriteria: [
         "The helper has focused tests for its supported input.",
         "The repository checks pass.",
@@ -48,6 +49,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
     verificationBoundary: "in_review_delivery",
     assertions: [
       assertion("plan_approval_precedes_work", "required", "ordered", ["plan_review", "work"], ["root_id", "plan_contract_id", "approval_resolution_id"]),
+      assertion("cycle_plan_work_verify_tree_materialized", "required", "linked", ["issue_tree", "workflow_issues", "human_action", "stage_results"], ["root_id", "cycle_id", "plan_issue_id", "work_issue_ids", "verify_issue_id", "plan_review_action_id"]),
       assertion("stage_chain_delivered", "required", "linked", ["plan", "work", "verify", "delivery", "git"], ["root_id", "cycle_id", "stage_execution_ids", "git_revision"]),
       assertion("turn_usage_aggregated", "required", "aggregate", ["stage_usage", "cycle_usage", "root_usage"], ["root_id", "cycle_ids", "turn_ids"]),
       assertion("boundary_in_review_delivery", "boundary", "linked", ["root_status", "verify_result", "delivery", "git"], ["root_id", "verify_result_id", "delivery_id", "git_revision"]),
@@ -64,6 +66,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       repositoryRef: "rejected-plan-repository",
       title: "Add a small reversible identifier utility",
       description: "Implement a small utility that reverses a short identifier and cover the supported behavior with focused tests.",
+      priority: "normal",
       acceptanceCriteria: [
         "The initial Plan is available for review.",
         "A rejected Plan produces a fresh replacement Plan rather than in-place mutation.",
@@ -93,6 +96,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       repositoryRef: "information-repository",
       title: "Format an identifier after obtaining the required separator",
       description: "Add an identifier formatter. The separator is intentionally unspecified and must be requested before a Plan is finalized.",
+      priority: "low",
       acceptanceCriteria: [
         "The missing separator is requested through a Human Action.",
         "The answer leads to a fresh Plan that records the selected separator.",
@@ -121,6 +125,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
       repositoryRef: "revision-repository",
       title: "Add an uppercase identifier helper",
       description: "Implement an uppercase identifier helper with focused tests.",
+      priority: "high",
       acceptanceCriteria: [
         "The initial requirement is planned before the revision.",
         "The revised requirement starts a successor Cycle with a fresh Plan review.",
@@ -159,6 +164,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "parallel-a-repository",
         title: "Add a prefix helper",
         description: "Implement a small prefix helper with focused tests.",
+        priority: "high",
         acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
       }),
       root({
@@ -167,6 +173,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "parallel-b-repository",
         title: "Add a suffix helper",
         description: "Implement a small suffix helper with focused tests.",
+        priority: "normal",
         acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
       }),
     ],
@@ -196,6 +203,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "preemption-inflight-repository",
         title: "Add an in-flight marker helper",
         description: "Implement a small marker helper with focused tests.",
+        priority: "high",
         acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
       }),
       root({
@@ -204,6 +212,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "preemption-touched-repository",
         title: "Add a touched marker helper",
         description: "Implement a small marker helper with focused tests.",
+        priority: "high",
         acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
       }),
       root({
@@ -212,6 +221,16 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "preemption-remaining-repository",
         title: "Add a remaining marker helper",
         description: "Implement a small marker helper with focused tests.",
+        priority: "high",
+        acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
+      }),
+      root({
+        rootKey: "low-priority-root",
+        conductorRef: "conductor-a",
+        repositoryRef: "preemption-low-priority-repository",
+        title: "Add a low priority marker helper",
+        description: "Implement a small low priority marker helper with focused tests.",
+        priority: "low",
         acceptanceCriteria: ["The helper is delivered with a passing Verify result."],
       }),
     ],
@@ -223,12 +242,13 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         "remaining-root": "Implement a small marker helper with focused tests. Scheduling note: this request remains semantically unchanged.",
       }),
       waitForBoundRootStage("preemption_touched_root", "preemption_inflight_terminal"),
-      terminalActionForEachRoot(["inflight-root", "touched-root", "remaining-root"], "plan_review", "Approved", "preemption_ordering_proven"),
+      terminalActionForEachRoot(["inflight-root", "touched-root", "remaining-root", "low-priority-root"], "plan_review", "Approved", "preemption_ordering_proven"),
     ],
     verificationBoundary: "all_roots_delivered",
     assertions: [
       assertion("inflight_stage_completes", "required", "ordered", ["stage_executions", "stage_results"], ["root_id", "inflight_execution_id"]),
       assertion("latest_ready_root_runs_next", "required", "ordered", ["root_headers", "root_ownership", "activity", "stage_executions", "stage_results"], ["root_ids", "conductor_id", "touched_root_id", "execution_ids"]),
+      assertion("higher_priority_roots_run_before_lower_priority_root", "required", "ordered", ["root_headers", "root_ownership", "stage_executions", "stage_results"], ["root_ids", "conductor_id", "higher_priority_root_ids", "lower_priority_root_id", "execution_ids"]),
       assertion("remaining_ready_root_progresses", "required", "ordered", ["stage_executions", "stage_results"], ["root_ids", "conductor_id", "execution_ids"]),
       assertion("boundary_all_roots_delivered", "boundary", "aggregate", ["root_status", "verify_results", "deliveries", "git"], ["root_ids", "verify_result_ids", "delivery_ids", "git_revisions"]),
       assertion("inflight_turn_interrupted", "prohibited", "equals", ["stage_executions", "stage_results"], ["root_id", "inflight_execution_id"]),
@@ -245,6 +265,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "recovery-affected-repository",
         title: "Add a recovery marker helper",
         description: "Implement a small marker helper with focused tests.",
+        priority: "urgent",
         acceptanceCriteria: ["The helper is delivered after a Conductor restart."],
       }),
       root({
@@ -253,6 +274,7 @@ export const FOREGROUND_E2E_CASES = deepFreeze([
         repositoryRef: "recovery-continuous-repository",
         title: "Add a continuous marker helper",
         description: "Implement a small marker helper with focused tests.",
+        priority: "low",
         acceptanceCriteria: ["The helper remains continuously deliverable while another Conductor restarts."],
       }),
     ],
@@ -294,11 +316,11 @@ function caseDefinition({ caseId, roots, interactions, processFaults = [], verif
       description,
       acceptanceCriteria,
     })),
-    rootCreationInputs: roots.map(({ rootKey, conductorRef, title, description, acceptanceCriteria }) => ({
+    rootCreationInputs: roots.map(({ rootKey, conductorRef, title, description, acceptanceCriteria, priority }) => ({
       rootKey,
       title,
       description: rootCreationDescription(description, acceptanceCriteria),
-      priority: "high",
+      priority,
       conductorRef,
     })),
     declaredUserInteractions: interactions,
@@ -312,8 +334,13 @@ function caseDefinition({ caseId, roots, interactions, processFaults = [], verif
   };
 }
 
-function root({ rootKey, conductorRef, repositoryRef, title, description, acceptanceCriteria }) {
-  return { rootKey, conductorRef, repositoryRef, title, description, acceptanceCriteria };
+function root({ rootKey, conductorRef, repositoryRef, title, description, acceptanceCriteria, priority }) {
+  if (!validPriority(priority)) throw new Error(`invalid foreground E2E priority for ${rootKey}`);
+  return { rootKey, conductorRef, repositoryRef, title, description, acceptanceCriteria, priority };
+}
+
+function validPriority(value) {
+  return ["urgent", "high", "normal", "low", "no_priority"].includes(value);
 }
 
 function requirement({ rootKey, title, description, acceptanceCriteria }) {
@@ -322,7 +349,7 @@ function requirement({ rootKey, title, description, acceptanceCriteria }) {
 }
 
 function rootCreationDescription(description, acceptanceCriteria) {
-  return `${description}\n\n## Acceptance Criteria\n${acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")}`;
+  return `${description}\n\n## Acceptance Criteria\n\n${acceptanceCriteria.map((criterion) => `* ${criterion}`).join("\n")}`;
 }
 
 function waitForAction(rootKey, actionKind, actionBinding) {

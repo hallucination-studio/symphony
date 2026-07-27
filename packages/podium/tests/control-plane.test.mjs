@@ -372,6 +372,300 @@ test("creating a Conductor initializes the Team before extending its Project poo
   assert.equal(binding.desiredState, "running");
 });
 
+test("creating multiple Conductors reuses successful Project workflow initialization", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+
+  let workflowInitializations = 0;
+  let members = [];
+  const client = {
+    async initializeTargetTeamWorkflow() {
+      workflowInitializations += 1;
+      return { kind: "already_applied", projectId: "project-1", teamId: "team-1", canonicalStatuses: [], nativeDuplicate: {} };
+    },
+    async readConductorProjectPool({ projectId }) {
+      return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [...members] };
+    },
+    async preflightConductorProjectPool({ projectId, desiredMembers }) {
+      return {
+        kind: "ready",
+        projectId,
+        expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+        fingerprint: desiredMembers.join(":"),
+        currentMembers: [...members],
+        desiredMembers: [...desiredMembers],
+        addMembers: desiredMembers.filter((member) => !members.includes(member)),
+        removeMembers: [],
+        routeRoots: [],
+      };
+    },
+    async reconcileConductorProjectPool({ plan }) {
+      members = [...plan.desiredMembers];
+      return {
+        kind: "applied",
+        projectId: plan.projectId,
+        fingerprint: plan.fingerprint,
+        members: [...members],
+      };
+    },
+  };
+  const services = new PodiumClientServicesImpl(
+    store,
+    new ConductorPresenceImpl(),
+    {},
+    {},
+    {
+      async resolveRepository(repositoryHandle, baseBranch) {
+        return {
+          repositoryHandle,
+          repositoryIdentity: `${repositoryHandle}-identity`,
+          repositoryDisplayName: repositoryHandle,
+          repositoryRoot: `/private/${repositoryHandle}`,
+          baseBranch,
+        };
+      },
+    },
+    () => "2026-07-16T00:00:00Z",
+    () => client,
+  );
+
+  for (const repositoryHandle of ["repository-1", "repository-2"]) {
+    await services.command({
+      kind: "create_conductor",
+      project_id: "project-1",
+      repository: { repository_handle: repositoryHandle, base_branch: "main" },
+    });
+  }
+
+  assert.equal(workflowInitializations, 1);
+  assert.equal(store.listConductorBindings().length, 2);
+  assert.equal(members.length, 2);
+  store.close();
+});
+
+test("creating a Conductor retries failed Project workflow initialization", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+
+  let initializationAttempts = 0;
+  const client = {
+    async initializeTargetTeamWorkflow() {
+      initializationAttempts += 1;
+      if (initializationAttempts === 1) throw new Error("temporary workflow initialization failure");
+      return { kind: "already_applied", projectId: "project-1", teamId: "team-1", canonicalStatuses: [], nativeDuplicate: {} };
+    },
+    async readConductorProjectPool({ projectId }) {
+      return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [] };
+    },
+    async preflightConductorProjectPool({ projectId, desiredMembers }) {
+      return {
+        kind: "ready",
+        projectId,
+        expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+        fingerprint: "pool-1",
+        currentMembers: [],
+        desiredMembers: [...desiredMembers],
+        addMembers: [...desiredMembers],
+        removeMembers: [],
+        routeRoots: [],
+      };
+    },
+    async reconcileConductorProjectPool({ plan }) {
+      return {
+        kind: "applied",
+        projectId: plan.projectId,
+        fingerprint: plan.fingerprint,
+        members: [...plan.desiredMembers],
+      };
+    },
+  };
+  const services = new PodiumClientServicesImpl(
+    store,
+    new ConductorPresenceImpl(),
+    {},
+    {},
+    {
+      async resolveRepository(repositoryHandle, baseBranch) {
+        return {
+          repositoryHandle,
+          repositoryIdentity: "repository-1",
+          repositoryDisplayName: "Repository",
+          repositoryRoot: "/private/repository",
+          baseBranch,
+        };
+      },
+    },
+    () => "2026-07-16T00:00:00Z",
+    () => client,
+  );
+  const command = {
+    kind: "create_conductor",
+    project_id: "project-1",
+    repository: { repository_handle: "repository-1", base_branch: "main" },
+  };
+
+  await assert.rejects(
+    services.command(command),
+    (error) => error?.protocolError?.code === "conductor_target_workflow_initialization_failed",
+  );
+  await services.command(command);
+
+  assert.equal(initializationAttempts, 2);
+  assert.equal(store.listConductorBindings().length, 1);
+  store.close();
+});
+
+test("creating a Conductor exposes stable sanitized failures for each external creation stage", async (t) => {
+  const installation = {
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  };
+  const project = {
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  };
+  const repositoryContext = {
+    repositoryHandle: "repo-handle-1",
+    repositoryIdentity: "repository-1",
+    repositoryDisplayName: "Repository",
+    repositoryRoot: "/private/repository",
+    baseBranch: "main",
+  };
+  const scenarios = [
+    {
+      name: "repository resolution",
+      expectedCode: "conductor_repository_resolution_failed",
+      fail: "repository",
+    },
+    {
+      name: "Team workflow initialization",
+      expectedCode: "conductor_target_workflow_initialization_failed",
+      fail: "workflow",
+    },
+    {
+      name: "binding creation",
+      expectedCode: "conductor_binding_creation_failed",
+      fail: "binding",
+    },
+    {
+      name: "initial desired state persistence",
+      expectedCode: "conductor_initial_desired_state_persistence_failed",
+      fail: "initial-state",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      let binding;
+      const store = {
+        getOnlyLinearCredential: () => installation,
+        getLinearCredential: (installationId) => installationId === installation.installationId ? installation : undefined,
+        getProject: (projectId) => projectId === project.projectId ? project : undefined,
+        listConductorBindings: () => {
+          if (scenario.fail === "binding") throw new Error("binding store detail");
+          return binding ? [binding] : [];
+        },
+        getConductorBindingById: () => undefined,
+        saveConductorBinding: (value) => { binding = value; },
+        setConductorDesiredState: (_bindingId, desiredState) => {
+          if (scenario.fail === "initial-state" && desiredState === "stopped") {
+            throw new Error("binding state store detail");
+          }
+          binding.desiredState = desiredState;
+        },
+      };
+      const services = new PodiumClientServicesImpl(
+        store,
+        new ConductorPresenceImpl(),
+        {},
+        {},
+        {
+          async resolveRepository() {
+            if (scenario.fail === "repository") throw new Error("repository host detail");
+            return repositoryContext;
+          },
+        },
+        () => "2026-07-16T00:00:00Z",
+        () => ({
+          async initializeTargetTeamWorkflow() {
+            if (scenario.fail === "workflow") throw new Error("linear upstream detail");
+            return { kind: "already_applied", projectId: "project-1", teamId: "team-1", canonicalStatuses: [], nativeDuplicate: {} };
+          },
+          async readConductorProjectPool() {
+            return { projectId: "project-1", updatedAt: "2026-07-16T00:00:00Z", members: [] };
+          },
+          async preflightConductorProjectPool({ projectId, desiredMembers }) {
+            return {
+              kind: "ready",
+              projectId,
+              expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+              fingerprint: "pool-1",
+              currentMembers: [],
+              desiredMembers: [...desiredMembers],
+              addMembers: [...desiredMembers],
+              removeMembers: [],
+              routeRoots: [],
+            };
+          },
+          async reconcileConductorProjectPool({ plan }) {
+            return {
+              kind: "applied",
+              projectId: plan.projectId,
+              fingerprint: plan.fingerprint,
+              members: [...plan.desiredMembers],
+            };
+          },
+        }),
+      );
+
+      await assert.rejects(
+        services.command({
+          kind: "create_conductor",
+          project_id: "project-1",
+          repository: { repository_handle: "repo-handle-1", base_branch: "main" },
+        }),
+        (error) => error?.protocolError?.code === scenario.expectedCode &&
+          error.protocolError.sanitizedReason === scenario.expectedCode,
+      );
+    });
+  }
+});
+
 test("Binding creation persists one stopped intent and safely resumes Pool reconciliation", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
@@ -398,7 +692,9 @@ test("Binding creation persists one stopped intent and safely resumes Pool recon
       },
       async preflightConductorProjectPool({ projectId, desiredMembers }) {
         attempts += 1;
-        if (attempts === 1) throw new Error("ambiguous remote failure");
+        if (attempts === 1) {
+          return { kind: "blocked", projectId, reason: "project_roots_invalid" };
+        }
         return {
           kind: "ready",
           projectId,
@@ -439,7 +735,8 @@ test("Binding creation persists one stopped intent and safely resumes Pool recon
       projectId: "project-1",
       repositoryContext,
     }),
-    /ambiguous remote failure/,
+    (error) => error?.protocolError?.code === "linear_project_pool_project_roots_invalid" &&
+      error.protocolError.sanitizedReason === "linear_project_pool_project_roots_invalid",
   );
   assert.equal(store.listConductorBindings()[0]?.desiredState, "stopped");
 
@@ -451,5 +748,123 @@ test("Binding creation persists one stopped intent and safely resumes Pool recon
   assert.equal(recovered.bindingId, "binding-1");
   assert.equal(recovered.desiredState, "running");
   assert.equal(attempts, 2);
+  store.close();
+});
+
+test("Binding creation preserves Linear rate limiting as a retryable failure", async () => {
+  class RatelimitedLinearError extends Error {}
+
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  const useCase = new ConductorBindingUseCase(
+    store,
+    {
+      async readConductorProjectPool({ projectId }) {
+        return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [] };
+      },
+      async preflightConductorProjectPool() {
+        throw new RatelimitedLinearError("rate limit detail must not cross the boundary");
+      },
+      async reconcileConductorProjectPool() {
+        throw new Error("unreachable");
+      },
+    },
+    {
+      createBindingId: () => "binding-1",
+      createConductorId: () => "conductor-1",
+    },
+  );
+
+  await assert.rejects(
+    useCase.create({
+      installationId: "installation-1",
+      projectId: "project-1",
+      repositoryContext: {
+        repositoryHandle: "repository-1",
+        repositoryIdentity: "repository-1",
+        repositoryDisplayName: "Repository",
+        repositoryRoot: "/private/repository",
+        baseBranch: "main",
+      },
+    }),
+    (error) => error?.protocolError?.code === "linear_rate_limited" &&
+      error.protocolError.sanitizedReason === "Linear rate limit exceeded." &&
+      error.protocolError.retryable === true &&
+      error.protocolError.actionRequired === "retry_request",
+  );
+  assert.equal(store.listConductorBindings()[0]?.desiredState, "stopped");
+  store.close();
+});
+
+test("Binding creation preserves unknown official Linear failures as retryable", async () => {
+  class UnknownLinearError extends Error {}
+
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  const useCase = new ConductorBindingUseCase(
+    store,
+    {
+      async readConductorProjectPool({ projectId }) {
+        return { projectId, updatedAt: "2026-07-16T00:00:00Z", members: [] };
+      },
+      async preflightConductorProjectPool() {
+        throw new UnknownLinearError("upstream detail must not cross the boundary");
+      },
+      async reconcileConductorProjectPool() {
+        throw new Error("unreachable");
+      },
+    },
+    {
+      createBindingId: () => "binding-1",
+      createConductorId: () => "conductor-1",
+    },
+  );
+
+  await assert.rejects(
+    useCase.create({
+      installationId: "installation-1",
+      projectId: "project-1",
+      repositoryContext: {
+        repositoryHandle: "repository-1",
+        repositoryIdentity: "repository-1",
+        repositoryDisplayName: "Repository",
+        repositoryRoot: "/private/repository",
+        baseBranch: "main",
+      },
+    }),
+    (error) => error?.protocolError?.code === "linear_unknown_failed" &&
+      error.protocolError.sanitizedReason === "Linear request failed." &&
+      error.protocolError.retryable === true &&
+      error.protocolError.actionRequired === "retry_request",
+  );
+  assert.equal(store.listConductorBindings()[0]?.desiredState, "stopped");
   store.close();
 });

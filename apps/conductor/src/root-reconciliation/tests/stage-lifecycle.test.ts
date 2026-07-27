@@ -202,7 +202,7 @@ test("Stage Result comments show actual model and derive Issue usage from immuta
   assert.match(currentComment.body, /- `gpt`: input=1, cached=0, output=1, reasoning=0, total=2/u);
   assert.match(currentComment.body, /- `gpt-4\.1`: input=2, cached=1, output=3, reasoning=1, total=5/u);
   assert.match(currentComment.body, /- Completeness: complete \(2 source records\)\./u);
-  assert.equal((currentComment.body.match(/```symphony/g) ?? []).length, 1);
+  assert.equal((currentComment.body.match(/```json/g) ?? []).length, 1);
 });
 
 test("Stage Result comments make unavailable Provider usage explicit", async () => {
@@ -428,8 +428,8 @@ function dependencies(input: {
   const root = {
     issueId: "root-1", identifier: "SYM-1", state: "In Progress" as const, title: "Root",
     description: "Build it", updatedAt: "2026-07-24T00:00:00Z", projectId: "project-1",
-    parentIssueId: null, isDelegatedToSymphony: true, priority: "normal" as const, order: 0,
-    blockers: [], rootConductorLabels: [{ conductorShortHash: "abc123" }],
+    parentIssueId: null, priority: "normal" as const, order: 0,
+    blockers: [], rootConductorLabels: [{ conductorShortHash: "abc123" }], isDelegatedToSymphony: true,
   };
   return {
     conductorId: "conductor-1", conductorShortHash: "abc123", baseBranch: "main",

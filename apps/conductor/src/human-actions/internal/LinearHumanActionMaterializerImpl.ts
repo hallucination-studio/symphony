@@ -86,6 +86,7 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
         targetIssueId: target.issue_id,
         targetExpectedRemoteVersion: target.remote_version,
         relationKind: "relates_to",
+        relationState: "present",
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return failed(`human_action_relation_write_${outcome.kind}`);
       tree = await this.linear.readWorkflowIssueTree(input.view.root.issueId);

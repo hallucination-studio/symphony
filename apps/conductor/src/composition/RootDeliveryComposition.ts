@@ -70,6 +70,8 @@ export class LinearRootDeliveryCompletionWriter implements RootDeliveryCompletio
       statusId: status.status_id,
       title: freshRoot.title,
       description: freshRoot.description,
+      isArchived: freshRoot.is_archived,
+      parentAssignment: { mode: "retain" },
     });
     if (outcome.kind === "failed" || outcome.kind === "precondition_conflict") throw new Error("root_delivery_status_write_failed");
     const readBack = await this.linear.readWorkflowIssueTree(command.rootIssueId);

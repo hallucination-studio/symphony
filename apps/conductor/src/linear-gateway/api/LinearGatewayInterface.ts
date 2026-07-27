@@ -104,6 +104,11 @@ export type LinearWorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      isArchived: boolean;
+      parentAssignment:
+        | { mode: "retain" }
+        | { mode: "set"; parentIssueId: string }
+        | { mode: "clear" };
       order?: number;
     }
   | {
@@ -164,21 +169,6 @@ export type LinearWorkflowMutationCommand =
       threadState: "resolved" | "unresolved";
     }
   | {
-      kind: "archive_workflow_issue" | "restore_workflow_issue";
-      writeId: string;
-      conductorShortHash?: string;
-      expectedProjectId: string;
-      rootIssueId: string;
-      expectedRootRemoteVersion: string;
-      target: {
-        targetIssueId: string;
-        expectedRemoteVersion: string;
-        expectedStatusId?: string;
-        expectedParentIssueId?: string;
-        expectedIsArchived?: boolean;
-      };
-    }
-  | {
       kind: "create_workflow_relation";
       writeId: string;
       conductorShortHash?: string;
@@ -190,20 +180,7 @@ export type LinearWorkflowMutationCommand =
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
       relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
-    }
-  | {
-      kind: "remove_workflow_relation";
-      writeId: string;
-      conductorShortHash?: string;
-      expectedProjectId: string;
-      rootIssueId: string;
-      expectedRootRemoteVersion: string;
-      relationId: string;
-      sourceIssueId: string;
-      sourceExpectedRemoteVersion: string;
-      targetIssueId: string;
-      targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+      relationState: "present" | "absent";
     };
 
 export type LinearWorkflowMutationOutcome =

@@ -12,6 +12,7 @@ import {
 const CASE_ASSERTION_IDS = Object.freeze({
   approved_happy_path: [
     "plan_approval_precedes_work",
+    "cycle_plan_work_verify_tree_materialized",
     "stage_chain_delivered",
     "turn_usage_aggregated",
     "boundary_in_review_delivery",
@@ -57,6 +58,7 @@ const CASE_ASSERTION_IDS = Object.freeze({
   same_conductor_preemption: [
     "inflight_stage_completes",
     "latest_ready_root_runs_next",
+    "higher_priority_roots_run_before_lower_priority_root",
     "remaining_ready_root_progresses",
     "boundary_all_roots_delivered",
     "inflight_turn_interrupted",
@@ -94,6 +96,10 @@ test("immutable Case catalog contains every architecture assertion exactly once"
     assert.equal(new Set(definition.rootTopology.map(({ rootKey }) => rootKey)).size, definition.rootTopology.length);
     assert.equal(new Set(definition.rootTopology.map(({ repositoryRef }) => repositoryRef)).size, definition.rootTopology.length);
     assertInteractionRootsAreFrozen(definition);
+    assert.ok(
+      definition.rootCreationInputs.every(({ priority }) => ["urgent", "high", "normal", "low", "no_priority"].includes(priority)),
+      `${definition.caseId}: explicit priority`,
+    );
 
     for (const assertion of definition.assertions) {
       assert.match(assertion.reasonCode, new RegExp(`^e2e\\.${definition.caseId}\\.${assertion.assertionId}$`, "u"));
@@ -128,8 +134,17 @@ test("Case topology and declared interactions satisfy the mandatory human and co
     ],
   );
   assert.equal(byId.get("parallel_multi_conductor").rootTopology.length, 2);
-  assert.equal(byId.get("same_conductor_preemption").rootTopology.length, 3);
+  assert.equal(byId.get("same_conductor_preemption").rootTopology.length, 4);
   assert.equal(new Set(byId.get("same_conductor_preemption").rootTopology.map(({ conductorRef }) => conductorRef)).size, 1);
+  assert.deepEqual(
+    Object.fromEntries(byId.get("same_conductor_preemption").rootCreationInputs.map(({ rootKey, priority }) => [rootKey, priority])),
+    {
+      "inflight-root": "high",
+      "touched-root": "high",
+      "remaining-root": "high",
+      "low-priority-root": "low",
+    },
+  );
   assert.equal(byId.get("conductor_restart_recovery").rootTopology.length, 2);
   assert.deepEqual(byId.get("conductor_restart_recovery").allowedProcessFaults, ["kill_and_restart_owning_conductor"]);
 });
@@ -191,7 +206,7 @@ test("preemption Case binds only frozen roles and waits before its finite approv
   const approvals = interactions.at(-1);
   assert.deepEqual(approvals, {
     kind: "set_each_matching_human_action_status",
-    rootKeys: ["inflight-root", "touched-root", "remaining-root"],
+    rootKeys: ["inflight-root", "touched-root", "remaining-root", "low-priority-root"],
     actionKind: "plan_review",
     terminalStatus: "Approved",
     oncePerRoot: true,
@@ -232,9 +247,9 @@ function assertRequirementHashes(definition) {
       definition.caseId,
     );
     assert.match(rootCreationInput.description, new RegExp(`^${escapeRegExp(input.description)}\\n\\n`, "u"), definition.caseId);
-    assert.match(rootCreationInput.description, /^## Acceptance Criteria$/mu, definition.caseId);
+    assert.ok(rootCreationInput.description.includes("\n## Acceptance Criteria\n\n* "), definition.caseId);
     for (const criterion of input.acceptanceCriteria) {
-      assert.match(rootCreationInput.description, new RegExp(`^- ${escapeRegExp(criterion)}$`, "mu"), definition.caseId);
+      assert.match(rootCreationInput.description, new RegExp(`^\\* ${escapeRegExp(criterion)}$`, "mu"), definition.caseId);
     }
   }
 }
@@ -250,7 +265,12 @@ function assertInteractionRootsAreFrozen(definition) {
       for (const rootKey of interaction.rootKeys) assert.equal(rootKeys.has(rootKey), true, `${definition.caseId}.${interaction.kind}`);
     }
     if (interaction.descriptionsByRootKey !== undefined) {
-      assert.deepEqual(Object.keys(interaction.descriptionsByRootKey).sort(), [...rootKeys].sort(), `${definition.caseId}.${interaction.kind}`);
+      const describedRootKeys = Object.keys(interaction.descriptionsByRootKey).sort();
+      assert.ok(describedRootKeys.length > 0 && describedRootKeys.every((rootKey) => rootKeys.has(rootKey)), `${definition.caseId}.${interaction.kind}`);
+      if (interaction.kind === "touch_bound_root_description") {
+        const binding = definition.declaredUserInteractions.find(({ kind }) => kind === "bind_preemption_roles");
+        assert.deepEqual(describedRootKeys, [...binding.rootKeys].sort(), `${definition.caseId}.${interaction.kind}`);
+      }
     }
   }
 }

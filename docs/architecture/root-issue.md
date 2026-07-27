@@ -40,7 +40,7 @@ Linear status按Team配置。Project初始化必须验证以下display statuses�
 | Completed | `Succeeded`, `Changes Required`, `Done`, `Approved`, `Answered` |
 | Canceled | `Canceled`, `Failed`, `Rejected` |
 
-Symphony通过Issue description中strict `symphony` code block承载的唯一`WorkflowIssueRecord`和matching primary kind label
+Symphony通过Issue description中strict `json` code block承载的唯一`WorkflowIssueRecord`和matching primary kind label
 限制每类Issue允许的status子集。`WorkflowIssueRecord`只证明后代Issue的stable identity、scope和kind，不表达lifecycle；
 缺失、同名重复、category错误、kind/status不匹配或非法transition使相关Root fail closed。Label表达Issue kind；status
 表达未归档期间的workflow lifecycle。
@@ -230,8 +230,8 @@ is immutable evidence for one mechanically derived limit. Neither owns a
 lifecycle transition. Their fields, calculation, delta transport, and
 directive gate are owned solely by [Root Reconciliation](root-reconciliation.md).
 
-managed records位于Symphony actor所写Linear comment的唯一`symphony` fenced code block中；`WorkflowIssueRecord`
-位于matching descendant Issue description的唯一`symphony` block中。二者都使用closed、versioned schema，不包含SDK object、
+managed records位于Symphony actor所写Linear comment的唯一`json` fenced code block中；`WorkflowIssueRecord`
+位于matching descendant Issue description的唯一`json` block中。二者都使用closed、versioned schema，不包含SDK object、
 raw reasoning、secret或arbitrary metadata。不存在HTML marker、`managed_marker`字段或兼容reader。
 runtime session只做内存correlation；恢复不能依赖Provider conversation pointer。
 
@@ -336,7 +336,7 @@ status、Tree和matching managed records读取。
 - 用户archive/restore managed Node后，Conductor把当前值和由此形成的DAG violation交给Root Reconciler；
 - Human Action status/comment作为用户input交给Root Reconciler，由directive决定是否形成resolution；
 - human actor创建、编辑comment，或产生新的当前native thread-state revision，进入pending input，并在处理后收到matching reply；
-- 用户粘贴`symphony` code block仍是普通输入；伪造actor/stable identity或试图扩大owned Root范围时安全gate fail closed；可读取的非法status、跨Tree relation或active
+- 用户粘贴`json` code block仍是普通输入；伪造actor/stable identity或试图扩大owned Root范围时安全gate fail closed；可读取的非法status、跨Tree relation或active
   dependency悬空作为mechanical violation进入Root Reconciler；
 - Done/Canceled Root是否保持terminal、重开或修复只由Root Reconciler决定。
 
@@ -359,7 +359,7 @@ HEAD和checks满足时才能delivery；Root进入`In Review`而不自动`Done`�
 6. Human Action是Root/Cycle直接子Issue，不是DAG执行节点。
 7. Stage Result必须durable后才能进入Root Reconciler delta或fresh bootstrap。
 8. Cycle耗尽先走Root convergence gate，不机械请求用户。
-9. Symphony-authored Timeline/Reply managed body和其`symphony` block不回流为workflow输入；但human在其native thread
+9. Symphony-authored Timeline/Reply managed body和其`json` block不回流为workflow输入；但human在其native thread
    中新增、编辑的comment，或形成新的close/reopen thread-state revision，仍是由Root Reconciler解释的普通Root输入。Timeline
    comment是durable事实的用户叙事；Root Reconciler reply是directive的必需mutation。
 10. Status拥有Issue lifecycle；Result、Resolution、Outcome和Directive records只提供不可变证据或幂等关联，不能拥有

@@ -160,6 +160,46 @@ test("private protocol dispatches an incoming Profile request and correlates its
   void client;
 });
 
+test("private protocol dispatches a pending response while an incoming Profile request is slow", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let releaseProfile: () => void;
+  const profileBlocked = new Promise<void>((resolve) => { releaseProfile = resolve; });
+  let profileStarted: () => void;
+  const profileRunning = new Promise<void>((resolve) => { profileStarted = resolve; });
+  const client = new InheritedProtocolClient(input, output, {
+    async handleRequest(body) {
+      assert.deepEqual(body, { kind: "get_profiles", conductor_id: "conductor-1" });
+      profileStarted();
+      await profileBlocked;
+      return { kind: "profiles", profiles: [] };
+    },
+  });
+
+  const pending = client.request({
+    requestId: "linear-request-1",
+    body: { kind: "resolve_conductor_project", binding_id: "binding-1", conductor_short_hash: "abc123" },
+    timeoutMs: 200,
+  });
+  input.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "profile-request-1",
+    body: { kind: "get_profiles", conductor_id: "conductor-1" },
+  })}\n`);
+  await profileRunning;
+  input.write(`${JSON.stringify({
+    protocol_version: "1",
+    request_id: "linear-request-1",
+    body: { kind: "unbound" },
+  })}\n`);
+
+  try {
+    assert.deepEqual(await pending, { kind: "unbound" });
+  } finally {
+    releaseProfile!();
+  }
+});
+
 test("private protocol accepts the shutdown acknowledgement result", async () => {
   const input = new PassThrough();
   const output = new PassThrough();

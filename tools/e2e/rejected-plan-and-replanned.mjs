@@ -8,13 +8,15 @@ export async function runRejectedPlanAndReplannedCase({ definition, human, rootC
 
   const rootKey = definition.rootTopology[0].rootKey;
   const rejection = frozenRejection(definition);
-  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation });
+  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation, ...(signal ? { signal } : {}) });
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_rejected_root_create_invalid");
   }
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
 
   const initialAction = await waitForAction({ human, rootIssueId: root.rootIssueId, signal });
-  const comment = await human.createComment({ issueId: initialAction.actionIssueId, body: rejection.body });
+  const comment = await human.createComment({ issueId: initialAction.actionIssueId, body: rejection.body, ...(signal ? { signal } : {}) });
   if (!identifier(comment?.commentId) || comment.issueId !== initialAction.actionIssueId) {
     throw stableError("foreground_e2e_rejected_reason_comment_invalid");
   }
@@ -22,6 +24,7 @@ export async function runRejectedPlanAndReplannedCase({ definition, human, rootC
     issueId: initialAction.actionIssueId,
     terminalStatus: "Rejected",
     stateId: initialAction.terminalStatusId,
+    ...(signal ? { signal } : {}),
   });
 
   const replacementAction = await waitForAction({ human, rootIssueId: root.rootIssueId, signal });
@@ -73,6 +76,7 @@ function assertDefinition(definition) {
 
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForPlanReviewAction !== "function" || typeof human.createComment !== "function" ||
       typeof human.setHumanActionTerminalStatus !== "function" || !rootCreation || !identifier(rootCreation.teamId) ||
       !identifier(rootCreation.projectId) || !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||

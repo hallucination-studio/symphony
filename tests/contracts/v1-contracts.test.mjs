@@ -150,6 +150,7 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
   const blocker = schema.$defs.LinearBlockerSnapshot;
 
   assert.ok(root.required.includes("priority"));
+  assert.ok(root.required.includes("is_delegated_to_symphony"));
   assert.ok(root.required.includes("blockers"));
   assert.ok(root.required.includes("root_managed_comments"));
   assert.equal(root.properties.priority.$ref, "#/$defs/LinearPriority");
@@ -550,6 +551,11 @@ test("TypeScript, Python, and Rust reject the same invalid fixtures", async () =
     { env: { ...process.env, CARGO_TARGET_DIR: cargoTarget } },
   );
   assert.equal(rust.status, 0, rust.stderr);
+});
+
+test("TypeScript validator uses canonical fixtures when directories are omitted", () => {
+  const typescript = run("npm", ["run", "contracts:validate:typescript"]);
+  assert.equal(typescript.status, 0, typescript.stderr);
 });
 
 test("all generated decoders count string bounds by Unicode code point", async () => {

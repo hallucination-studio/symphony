@@ -176,18 +176,18 @@ Clarification description列出明确问题、为什么需要、期望内容和�
 ## 之后会发生什么
 <每个合法terminal status对应的Root Reconciler下一步边界，不承诺尚未发生的结果>
 
-```symphony
+```json
 {"kind":"workflow_issue","version":1,"issue_key":"...","root_issue_id":"...","parent_issue_id":"...","issue_kind":"human"}
 ```
 ````
 
-renderer按Action kind省略不适用状态，不显示空section。description中的唯一`symphony` block严格是
+renderer按Action kind省略不适用状态，不显示空section。description中的唯一`json` block严格是
 `WorkflowIssueRecord`，只承载Issue identity、kind和parent scope；source directive reference与完整immutable proposal
 只写入`HumanActionRequestRecord` comment，避免description编辑成为第二份directive、resolution或approval事实。
 
-description与用户comment可以使用普通Markdown的heading、列表、引用、链接和非`symphony` code block来说明提案、
+description与用户comment可以使用普通Markdown的heading、列表、引用、链接和非`json` code block来说明提案、
 证据或用户需要提供的信息；这不会改变machine record规则。任何Symphony创建的description仍恰有一个位于末尾的
-`symphony` block，且其中持久化JSON字段使用[契约与接口边界](contracts.md)定义的snake_case wire shape。
+`json` block，且其中持久化JSON字段使用[契约与接口边界](contracts.md)定义的snake_case wire shape。
 
 Action必须让用户无需阅读Provider transcript即可做决定。description不能包含secret、raw reasoning、内部command
 或要求用户输入机器标识。内容超过bound时，Root Reconciler必须缩小请求；仍不合法则directive失败并写matching
@@ -214,7 +214,7 @@ expected_parent_remote_version
 created_at
 ```
 
-canonical record写在Action Issue managed comment的唯一`symphony` code block。Root waiting status由matching active Action机械约束；Root Control
+canonical record写在Action Issue managed comment的唯一`json` code block。Root waiting status由matching active Action机械约束；Root Control
 Record Comment不复制Action identity、status或resolution。
 
 ### 7.2 HumanActionResolutionRecord

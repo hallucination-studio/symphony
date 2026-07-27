@@ -40,8 +40,7 @@ const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
 const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
-const MAX_ROOT_TITLE_LENGTH = 256;
-const MAX_ROOT_DESCRIPTION_LENGTH = 16_384;
+const DEVELOPMENT_TOKEN_ORGANIZATION_REQUEST_TIMEOUT_MS = 30_000;
 const SYMPHONY_RECEIPT_EMOJI = {
   check: "✅",
   cross: "❌",
@@ -246,6 +245,76 @@ const WORKFLOW_ISSUE_TREE_RELATIONS_PAGE_QUERY = `
     }
   }
 `;
+const PROJECT_POOL_PREFLIGHT_QUERY = `
+  query SymphonyProjectPoolPreflight($projectId: String!, $memberNames: [String!]!, $rootCursor: String) {
+    organization { id }
+    project(id: $projectId) {
+      id updatedAt
+      labels(first: 65, includeArchived: false, filter: { name: { startsWith: "symphony:conductor/" } }) {
+        nodes { name isGroup archivedAt retiredBy { id } }
+        pageInfo { hasNextPage }
+      }
+      issues(first: 250, after: $rootCursor, includeArchived: false) {
+        nodes {
+          id project { id } parent { id } state { name }
+          labels(first: 3, includeArchived: false, filter: { name: { startsWith: "symphony:conductor/" } }) {
+            nodes { name }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    projectLabels(first: 129, includeArchived: false, filter: { name: { in: $memberNames }, isGroup: { eq: false } }) {
+      nodes {
+        id name isGroup archivedAt retiredBy { id }
+        projects(first: 2) {
+          nodes { id }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { hasNextPage }
+    }
+  }
+`;
+const PROJECT_POOL_ROOTS_QUERY = `
+  query SymphonyProjectPoolRoots($projectId: String!, $rootCursor: String!) {
+    project(id: $projectId) {
+      id
+      issues(first: 250, after: $rootCursor, includeArchived: false) {
+        nodes {
+          id project { id } parent { id } state { name }
+          labels(first: 3, includeArchived: false, filter: { name: { startsWith: "symphony:conductor/" } }) {
+            nodes { name }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
+const PROJECT_RESOLUTION_QUERY = `
+  query SymphonyProjectResolution($labelName: String!) {
+    organization { id }
+    projectLabels(first: 3, includeArchived: false, filter: { name: { eq: $labelName }, isGroup: { eq: false } }) {
+      nodes {
+        id name isGroup archivedAt retiredBy { id }
+        projects(first: 2) {
+          nodes {
+            id updatedAt
+            labels(first: 65, includeArchived: false, filter: { name: { startsWith: "symphony:conductor/" } }) {
+              nodes { name }
+              pageInfo { hasNextPage }
+            }
+          }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { hasNextPage }
+    }
+  }
+`;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
 export type LinearSdkCredential =
@@ -352,6 +421,81 @@ interface IssueTreeChildrenData {
   };
 }
 
+interface ProjectPoolPageInfo {
+  hasNextPage?: boolean;
+  endCursor?: string | null;
+}
+
+interface ProjectPoolLabel {
+  id?: string;
+  name?: string;
+  isGroup?: boolean;
+  archivedAt?: string | null;
+  retiredBy?: { id?: string } | null;
+}
+
+interface ProjectPoolIssue {
+  id?: string;
+  project?: { id?: string } | null;
+  parent?: { id?: string } | null;
+  state?: { name?: string } | null;
+  labels?: {
+    nodes?: Array<{ name?: string }>;
+    pageInfo?: ProjectPoolPageInfo;
+  } | null;
+}
+
+interface ProjectPoolProject {
+  id?: string;
+  updatedAt?: string;
+  labels?: {
+    nodes?: ProjectPoolLabel[];
+    pageInfo?: ProjectPoolPageInfo;
+  } | null;
+  issues?: {
+    nodes?: ProjectPoolIssue[];
+    pageInfo?: ProjectPoolPageInfo;
+  } | null;
+}
+
+interface ProjectPoolPreflightData {
+  organization?: { id?: string } | null;
+  project?: ProjectPoolProject | null;
+  projectLabels?: {
+    nodes?: Array<ProjectPoolLabel & {
+      projects?: { nodes?: Array<{ id?: string }>; pageInfo?: ProjectPoolPageInfo } | null;
+    }>;
+    pageInfo?: ProjectPoolPageInfo;
+  } | null;
+}
+
+interface ProjectPoolRootsData {
+  project?: Pick<ProjectPoolProject, "id" | "issues"> | null;
+}
+
+interface ProjectPoolRootInput {
+  issueId: string;
+  state: string;
+  labels: string[];
+}
+
+interface ProjectResolutionData {
+  organization?: { id?: string } | null;
+  projectLabels?: {
+    nodes?: Array<ProjectPoolLabel & {
+      projects?: {
+        nodes?: Array<{
+          id?: string;
+          updatedAt?: string;
+          labels?: { nodes?: Array<{ name?: string }>; pageInfo?: ProjectPoolPageInfo } | null;
+        }>;
+        pageInfo?: ProjectPoolPageInfo;
+      } | null;
+    }>;
+    pageInfo?: ProjectPoolPageInfo;
+  } | null;
+}
+
 type WorkflowStatusCatalogEntry = {
   statusId: string;
   name: string;
@@ -402,6 +546,7 @@ export class LinearSdkImpl implements LinearClientInterface {
             observe,
           }
         : undefined,
+      AbortSignal.timeout(DEVELOPMENT_TOKEN_ORGANIZATION_REQUEST_TIMEOUT_MS),
     );
     const organization = await client.organization;
     if (!organization.id) throw new Error("linear_organization_missing");
@@ -508,123 +653,6 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
   }
 
-  async createRootIssue(input: {
-    projectId: string;
-    conductorShortHash: string;
-    title: string;
-    description: string;
-    priority?: LinearPriority;
-  }) {
-    const plan = await this.#preflightRootCreation(input);
-    const fresh = await this.#preflightRootCreation(input);
-    if (fresh.fingerprint !== plan.fingerprint) {
-      throw new Error("linear_root_creation_precondition_conflict");
-    }
-    const payload = await this.#client.createIssue({
-      teamId: plan.teamId,
-      projectId: plan.projectId,
-      labelIds: [plan.issueLabelId],
-      ...(this.#delegateActorId === undefined ? {} : { delegateId: this.#delegateActorId }),
-      ...(input.priority === undefined ? {} : { priority: linearPriorityValue(input.priority) }),
-      title: input.title,
-      description: input.description,
-    });
-    if (!payload.success || !payload.issueId) {
-      throw new Error("linear_root_issue_create_failed");
-    }
-    const issue = await this.#client.issue(payload.issueId);
-    const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
-    const routeLabels = labels.filter(({ name }) => name.startsWith(CONDUCTOR_LABEL_PREFIX));
-    if (
-      issue.id !== payload.issueId ||
-      issue.projectId !== plan.projectId ||
-      issue.parentId !== undefined && issue.parentId !== null ||
-      issue.title !== input.title ||
-      issue.description !== input.description ||
-      input.priority !== undefined && issue.priority !== linearPriorityValue(input.priority) ||
-      this.#delegateActorId !== undefined && issue.delegateId !== this.#delegateActorId ||
-      routeLabels.length !== 1 ||
-      routeLabels[0]?.id !== plan.issueLabelId ||
-      routeLabels[0]?.name !== plan.issueLabelName
-    ) {
-      throw ambiguousError("linear_root_issue_read_back_failed");
-    }
-    if (!SAFE_ID.test(issue.identifier)) {
-      throw new Error("linear_root_identifier_invalid");
-    }
-    return {
-      rootIssueId: issue.id,
-      identifier: issue.identifier,
-      projectId: issue.projectId,
-    };
-  }
-
-  async #preflightRootCreation(input: {
-    projectId: string;
-    conductorShortHash: string;
-    title: string;
-    description: string;
-  }) {
-    if (
-      !SAFE_ID.test(input.projectId) ||
-      !/^[a-f0-9]{12}$/u.test(input.conductorShortHash) ||
-      !boundedRootText(input.title, MAX_ROOT_TITLE_LENGTH) ||
-      !boundedRootText(input.description, MAX_ROOT_DESCRIPTION_LENGTH)
-    ) {
-      throw new Error("linear_root_creation_input_invalid");
-    }
-    const organization = await this.#client.organization;
-    if (organization.id !== this.organizationId) {
-      throw new Error("linear_root_creation_organization_mismatch");
-    }
-    const project = await this.#client.project(input.projectId);
-    if (!project || project.id !== input.projectId || !(project.updatedAt instanceof Date)) {
-      throw new Error("linear_root_creation_project_invalid");
-    }
-    const projectLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
-    const pool = conductorPoolFromLabels(projectLabels
-      .filter(({ isGroup, archivedAt, retiredById }) => !isGroup && !archivedAt && !retiredById)
-      .map(({ name }) => name));
-    if (!pool.some(({ conductorShortHash }) => conductorShortHash === input.conductorShortHash)) {
-      throw new Error("linear_root_creation_conductor_not_in_pool");
-    }
-    const teams = await allNodes(project.teams({ first: 64 }), 64);
-    if (teams.length !== 1 || !SAFE_ID.test(teams[0]!.id)) {
-      throw new Error("linear_root_creation_team_ambiguous");
-    }
-    const labelName = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
-    const labels = await allNodes(this.#client.issueLabels({
-      first: 3,
-      includeArchived: false,
-      filter: { name: { eq: labelName }, isGroup: { eq: false } },
-    }), 3);
-    const matches = labels.filter(({ id, name, isGroup, archivedAt, retiredById, teamId }) =>
-      SAFE_ID.test(id) && name === labelName && !isGroup && !archivedAt && !retiredById &&
-      (teamId === undefined || teamId === teams[0]!.id));
-    if (matches.length !== 1) {
-      throw new Error(matches.length === 0
-        ? "linear_root_creation_issue_label_missing"
-        : "linear_root_creation_issue_label_ambiguous");
-    }
-    const labelOrganization = await matches[0]!.organization;
-    if (labelOrganization.id !== this.organizationId) {
-      throw new Error("linear_root_creation_label_organization_mismatch");
-    }
-    const plan = {
-      projectId: input.projectId,
-      expectedProjectUpdatedAt: project.updatedAt.toISOString(),
-      teamId: teams[0]!.id,
-      issueLabelId: matches[0]!.id,
-      issueLabelName: labelName,
-      conductorShortHash: input.conductorShortHash,
-      fingerprint: "",
-    };
-    return {
-      ...plan,
-      fingerprint: createHash("sha256").update(JSON.stringify(plan)).digest("hex"),
-    };
-  }
-
   async preflightConductorProjectPool(input: {
     projectId: string;
     desiredMembers: readonly string[];
@@ -636,54 +664,85 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (!desiredMembers) {
       return { kind: "blocked" as const, projectId: input.projectId, reason: "desired_members_invalid" as const };
     }
-    const organization = await this.#client.organization;
-    if (organization.id !== this.organizationId) {
+    const initial = await this.#compactRawRequest<ProjectPoolPreflightData, {
+      projectId: string;
+      memberNames: string[];
+      rootCursor: undefined;
+    }>(PROJECT_POOL_PREFLIGHT_QUERY, {
+      projectId: input.projectId,
+      memberNames: desiredMembers.map((member) => `${CONDUCTOR_LABEL_PREFIX}${member}`),
+      rootCursor: undefined,
+    });
+    if (initial.organization?.id !== this.organizationId) {
       return { kind: "blocked" as const, projectId: input.projectId, reason: "project_invalid" as const };
     }
-    const project = await this.#client.project(input.projectId);
-    if (!project || project.id !== input.projectId || !(project.updatedAt instanceof Date)) {
+    const project = initial.project;
+    if (!project || project.id !== input.projectId || typeof project.updatedAt !== "string") {
       return { kind: "blocked" as const, projectId: input.projectId, reason: "project_invalid" as const };
     }
-    const projectLabels = await allNodes(project.labels({ first: PAGE_LIMIT }), 64);
-    const conductorLabels = projectLabels.filter(({ name, isGroup, archivedAt, retiredById }) =>
-      typeof name === "string" && name.startsWith(CONDUCTOR_LABEL_PREFIX) &&
-      !isGroup && !archivedAt && !retiredById,
-    );
+    const conductorLabels = this.#activeProjectPoolLabels(project.labels);
+    if (!conductorLabels) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+    }
     const currentMembers = normalizePoolMembers(
-      conductorLabels.map(({ name }) => name.slice(CONDUCTOR_LABEL_PREFIX.length)),
+      conductorLabels.map(({ name }) => name!.slice(CONDUCTOR_LABEL_PREFIX.length)),
+      true,
     );
     if (!currentMembers) {
       return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
     }
+    const namedLabels = initial.projectLabels;
+    if (!namedLabels || namedLabels.pageInfo?.hasNextPage !== false || !Array.isArray(namedLabels.nodes)) {
+      return { kind: "blocked" as const, projectId: input.projectId, reason: "member_label_ambiguous" as const };
+    }
     for (const member of desiredMembers) {
-      const matches = await this.#projectLabelsNamed(`${CONDUCTOR_LABEL_PREFIX}${member}`);
+      const name = `${CONDUCTOR_LABEL_PREFIX}${member}`;
+      const matches = namedLabels.nodes.filter((label) =>
+        label.name === name && !label.isGroup && !label.archivedAt && !label.retiredBy,
+      );
       if (matches.length > 1) {
         return { kind: "blocked" as const, projectId: input.projectId, reason: "member_label_ambiguous" as const };
       }
       if (matches[0]) {
-        const assignedProjects = await allNodes(matches[0].projects({ first: PAGE_LIMIT }), 64);
-        if (assignedProjects.some(({ id }) => id !== input.projectId)) {
+        const assignedProjects = matches[0].projects;
+        if (
+          !assignedProjects ||
+          assignedProjects.pageInfo?.hasNextPage !== false ||
+          !Array.isArray(assignedProjects.nodes) ||
+          assignedProjects.nodes.some(({ id }) => id !== input.projectId)
+        ) {
           return { kind: "blocked" as const, projectId: input.projectId, reason: "member_label_owned_by_other_project" as const };
         }
       }
     }
-    let roots: RootIssueValue[];
-    try {
-      roots = await this.#allRootIssuesForPool(input.projectId);
-    } catch {
+    const roots = this.#projectPoolRootPage(project.issues, input.projectId);
+    let cursor = this.#nextProjectPoolCursor(project.issues?.pageInfo);
+    if (!roots || cursor === null) {
       return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+    }
+    while (cursor) {
+      const page = await this.#compactRawRequest<ProjectPoolRootsData, {
+        projectId: string;
+        rootCursor: string;
+      }>(PROJECT_POOL_ROOTS_QUERY, { projectId: input.projectId, rootCursor: cursor });
+      if (page.project?.id !== input.projectId) {
+        return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+      }
+      const nextRoots = this.#projectPoolRootPage(page.project.issues, input.projectId);
+      const nextCursor = this.#nextProjectPoolCursor(page.project.issues?.pageInfo);
+      if (!nextRoots || nextCursor === null || roots.length + nextRoots.length > 512) {
+        return { kind: "blocked" as const, projectId: input.projectId, reason: "project_roots_invalid" as const };
+      }
+      roots.push(...nextRoots);
+      cursor = nextCursor;
     }
     let policy;
     try {
       policy = planProjectConductorPoolMutation({
-        project: { projectId: input.projectId, updatedAt: project.updatedAt.toISOString() },
+        project: { projectId: input.projectId, updatedAt: project.updatedAt },
         currentMembers,
         desiredMembers,
-        roots: roots.map((root) => ({
-          issueId: root.issue.issueId,
-          state: root.issue.state ?? "Draft",
-          labels: root.rootConductorLabels.map(({ conductorShortHash }) => conductorShortHash),
-        })),
+        roots,
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : "";
@@ -752,7 +811,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const finalPlan = await this.preflightConductorProjectPool({
       projectId: plan.projectId,
       desiredMembers: plan.desiredMembers,
-    }).catch(() => undefined);
+    });
     const exactMembers = finalPlan?.kind === "ready" &&
       sameMembers(finalPlan.currentMembers, plan.desiredMembers);
     const exactRoutes = finalPlan?.kind === "ready" && finalPlan.routeRoots.length === 0;
@@ -769,17 +828,62 @@ export class LinearSdkImpl implements LinearClientInterface {
     };
   }
 
-  async #allRootIssuesForPool(projectId: string): Promise<RootIssueValue[]> {
-    const roots: RootIssueValue[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.listRootIssues({ projectId, ...(cursor ? { cursor } : {}), limit: PAGE_LIMIT });
-      roots.push(...page.items);
-      if (roots.length > 512) throw new Error("linear_root_collection_too_large");
-      cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : undefined;
-      if (page.pageInfo.hasNextPage && !cursor) throw new Error("linear_pagination_cursor_missing");
-    } while (cursor);
+  async #compactRawRequest<TData, TVariables extends Record<string, unknown>>(
+    query: string,
+    variables: TVariables,
+  ): Promise<TData> {
+    const rawRequest = this.#client.client?.rawRequest?.bind(this.#client.client);
+    if (!rawRequest) throw new Error("linear_compact_query_raw_request_unavailable");
+    const response = await rawRequest<TData, TVariables>(query, variables);
+    if (!response.data) throw new Error("linear_compact_query_data_missing");
+    return response.data;
+  }
+
+  #activeProjectPoolLabels(
+    labels: ProjectPoolProject["labels"],
+  ): ProjectPoolLabel[] | undefined {
+    if (!labels || labels.pageInfo?.hasNextPage !== false || !Array.isArray(labels.nodes)) return undefined;
+    return labels.nodes.filter((label) =>
+      typeof label.name === "string" && label.name.startsWith(CONDUCTOR_LABEL_PREFIX) &&
+      !label.isGroup && !label.archivedAt && !label.retiredBy,
+    );
+  }
+
+  #projectPoolRootPage(
+    issues: ProjectPoolProject["issues"],
+    projectId: string,
+  ): ProjectPoolRootInput[] | undefined {
+    if (!issues || !Array.isArray(issues.nodes)) return undefined;
+    const roots: ProjectPoolRootInput[] = [];
+    for (const issue of issues.nodes) {
+      if (issue.project?.id !== projectId || !SAFE_ID.test(issue.id ?? "")) return undefined;
+      if (issue.parent) continue;
+      const labels = issue.labels;
+      if (
+        !labels ||
+        labels.pageInfo?.hasNextPage !== false ||
+        !Array.isArray(labels.nodes) ||
+        labels.nodes.some((label) => typeof label.name !== "string") ||
+        (issue.state !== null && issue.state !== undefined && typeof issue.state.name !== "string")
+      ) {
+        return undefined;
+      }
+      roots.push({
+        issueId: issue.id!,
+        state: issue.state?.name ?? "Draft",
+        labels: conductorPoolFromLabels(labels.nodes.map((label) => label.name!))
+          .map(({ conductorShortHash }) => conductorShortHash),
+      });
+    }
     return roots;
+  }
+
+  #nextProjectPoolCursor(pageInfo: ProjectPoolPageInfo | undefined): string | undefined | null {
+    if (!pageInfo || typeof pageInfo.hasNextPage !== "boolean") return null;
+    if (!pageInfo.hasNextPage) return undefined;
+    return typeof pageInfo.endCursor === "string" && pageInfo.endCursor.length > 0
+      ? pageInfo.endCursor
+      : null;
   }
 
   async #ensureRootConductorLabel(input: {
@@ -1072,28 +1176,50 @@ export class LinearSdkImpl implements LinearClientInterface {
     conductorShortHash: string;
   }): ReturnType<LinearClientInterface["readProjectResolution"]> {
     const name = `${CONDUCTOR_LABEL_PREFIX}${input.conductorShortHash}`;
-    const labels = await this.#projectLabelsNamed(name);
+    const data = await this.#compactRawRequest<ProjectResolutionData, { labelName: string }>(
+      PROJECT_RESOLUTION_QUERY,
+      { labelName: name },
+    );
+    if (data.organization?.id !== this.organizationId) {
+      throw new Error("linear_project_resolution_organization_mismatch");
+    }
+    const projectLabels = data.projectLabels;
+    if (!projectLabels || !Array.isArray(projectLabels.nodes)) {
+      throw new Error("linear_project_resolution_invalid");
+    }
+    const labels = projectLabels.nodes.filter((label) =>
+      label.name === name && !label.isGroup && !label.archivedAt && !label.retiredBy,
+    );
     if (labels.length === 0) return { kind: "unbound" };
-    if (labels.length !== 1) return { kind: "conflict" };
-    const projects = await allNodes(
-      labels[0]!.projects({ first: PAGE_LIMIT }),
-      2,
-    );
+    if (labels.length !== 1 || projectLabels.pageInfo?.hasNextPage !== false) return { kind: "conflict" };
+    const assignments = labels[0]!.projects;
+    if (!assignments || !Array.isArray(assignments.nodes)) {
+      throw new Error("linear_project_resolution_invalid");
+    }
+    const projects = assignments.nodes;
     if (projects.length === 0) return { kind: "unbound" };
-    if (projects.length !== 1) return { kind: "ambiguous" };
+    if (projects.length !== 1 || assignments.pageInfo?.hasNextPage !== false) return { kind: "ambiguous" };
     const project = projects[0]!;
-    const projectLabels = await allNodes(
-      project.labels({ first: PAGE_LIMIT }),
-      64,
-    );
-    const conductorPool = conductorPoolFromLabels(projectLabels.map(({ name }) => name));
+    if (!SAFE_ID.test(project.id ?? "") || typeof project.updatedAt !== "string") {
+      throw new Error("linear_project_resolution_invalid");
+    }
+    const poolLabels = project.labels;
+    if (
+      !poolLabels ||
+      poolLabels.pageInfo?.hasNextPage !== false ||
+      !Array.isArray(poolLabels.nodes) ||
+      poolLabels.nodes.some((label) => typeof label.name !== "string")
+    ) {
+      throw new Error("linear_project_resolution_pool_invalid");
+    }
+    const conductorPool = conductorPoolFromLabels(poolLabels.nodes.map((label) => label.name!));
     if (!conductorPool.some(({ conductorShortHash }) => conductorShortHash === input.conductorShortHash)) {
       return { kind: "conflict" };
     }
     return {
       kind: "resolved",
-      projectId: project.id,
-      updatedAt: project.updatedAt.toISOString(),
+      projectId: project.id!,
+      updatedAt: project.updatedAt,
       conductorPool,
     };
   }
@@ -1103,12 +1229,16 @@ export class LinearSdkImpl implements LinearClientInterface {
     cursor?: string;
     limit: number;
   }): Promise<{ items: RootIssueValue[]; pageInfo: PageInfo }> {
+    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
+    if (!SAFE_ID.test(delegateActorId)) throw new Error("linear_delegate_actor_invalid");
     const project = await this.#client.project(input.projectId);
     const page = await project.issues({
       first: input.limit,
+      includeArchived: false,
       ...(input.cursor ? { after: input.cursor } : {}),
     });
     const roots = page.nodes.flatMap((issue) => {
+      if (issue.archivedAt !== null && issue.archivedAt !== undefined) return [];
       if (issue.projectId !== input.projectId) {
         throw new Error("linear_root_project_mismatch");
       }
@@ -1116,7 +1246,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         ? []
         : [{ issue, priority: linearPriority(issue.priority) }];
     });
-    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const items = await mapConcurrent(
       roots,
       ROOT_READ_CONCURRENCY,
@@ -1329,7 +1458,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const issueIds = [...new Set([
       command.rootIssueId,
       ...(command.kind === "create_workflow_issue" ? [command.parentIssueId]
-          : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
+          : command.kind === "create_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
           : [command.target.targetIssueId]),
     ])];
     const response = await rawRequest(`query WorkflowMutationPreflight {
@@ -1438,16 +1567,27 @@ export class LinearSdkImpl implements LinearClientInterface {
         return;
       }
       case "update_workflow_issue": {
-        const fact = preflight?.get(command.target.targetIssueId);
-        const issue = fact ? undefined : await this.#client.issue(command.target.targetIssueId);
-        if ((fact?.project?.id ?? issue?.projectId) !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
-        if (issue) await this.#workflowStatusId(issue, command.statusId);
+        const issue = await this.#client.issue(command.target.targetIssueId);
+        if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
+        const currentArchived = issue.archivedAt !== null && issue.archivedAt !== undefined;
+        if (!command.isArchived && currentArchived) {
+          const restored = await issue.unarchive();
+          if (!restored.success) throw new Error("linear_workflow_issue_restore_failed");
+        }
+        await this.#workflowStatusId(issue, command.statusId);
         await this.#client.updateIssue(command.target.targetIssueId, {
           title: command.title,
           description: command.description,
           stateId: command.statusId,
+          ...(command.parentAssignment.mode === "set"
+            ? { parentId: command.parentAssignment.parentIssueId }
+            : command.parentAssignment.mode === "clear" ? { parentId: null } : {}),
           ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
         });
+        if (command.isArchived && !currentArchived) {
+          const archived = await issue.archive();
+          if (!archived.success) throw new Error("linear_workflow_issue_archive_failed");
+        }
         return;
       }
       case "append_workflow_comment": {
@@ -1455,28 +1595,6 @@ export class LinearSdkImpl implements LinearClientInterface {
           issueId: command.target.targetIssueId,
           body: command.body,
         });
-        return;
-      }
-      case "archive_workflow_issue":
-      case "restore_workflow_issue": {
-        const issue = await this.#client.issue(command.target.targetIssueId);
-        if (issue.projectId !== command.expectedProjectId) {
-          throw new Error("linear_workflow_target_project_invalid");
-        }
-        const expectedArchived = command.kind === "archive_workflow_issue";
-        const currentArchived = issue.archivedAt !== null && issue.archivedAt !== undefined;
-        if (command.target.expectedIsArchived !== undefined &&
-            currentArchived !== command.target.expectedIsArchived) {
-          throw preconditionConflictError();
-        }
-        const payload = expectedArchived
-          ? await issue.archive()
-          : await issue.unarchive();
-        if (!payload.success) {
-          throw new Error(expectedArchived
-            ? "linear_workflow_issue_archive_failed"
-            : "linear_workflow_issue_restore_failed");
-        }
         return;
       }
       case "create_workflow_relation": {
@@ -1496,20 +1614,29 @@ export class LinearSdkImpl implements LinearClientInterface {
           ? command.sourceIssueId : command.targetIssueId;
         const relatedIssueId = command.relationKind === "blocks" || command.relationKind === "relates_to"
           ? command.targetIssueId : command.sourceIssueId;
-        const payload = await this.#client.createIssueRelation({
-          issueId,
-          relatedIssueId,
-          type: (command.relationKind === "relates_to" ? "related" : "blocks") as Parameters<LinearClient["createIssueRelation"]>[0]["type"],
-        });
-        if (!payload.success) throw new Error("linear_workflow_relation_create_failed");
-        return;
-      }
-      case "remove_workflow_relation": {
-        const relation = await this.#client.issueRelation(command.relationId);
-        const expectedIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
-        const expectedRelatedIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
-        const expectedType = command.relationKind === "relates_to" ? "related" : "blocks";
-        if (relation.issueId !== expectedIssueId || relation.relatedIssueId !== expectedRelatedIssueId || relation.type !== expectedType) {
+        if (command.relationState === "present") {
+          const payload = await this.#client.createIssueRelation({
+            issueId,
+            relatedIssueId,
+            type: (command.relationKind === "relates_to" ? "related" : "blocks") as Parameters<LinearClient["createIssueRelation"]>[0]["type"],
+          });
+          if (!payload.success) throw new Error("linear_workflow_relation_create_failed");
+          return;
+        }
+        const existing = preflight
+          ? workflowPreflightRelation(preflight, command)
+          : undefined;
+        const existingRelationId = existing?.id ?? (await this.getWorkflowIssueTree({
+          projectId: command.expectedProjectId,
+          rootIssueId: command.rootIssueId,
+        })).relations.find((candidate) =>
+          candidate.relationKind === (command.relationKind === "blocked_by" ? "blocks" : command.relationKind) &&
+          candidate.sourceIssueId === issueId && candidate.targetIssueId === relatedIssueId,
+        )?.relationId;
+        if (!existingRelationId) return;
+        const relation = await this.#client.issueRelation(existingRelationId);
+        if (relation.issueId !== issueId || relation.relatedIssueId !== relatedIssueId ||
+            relation.type !== (command.relationKind === "relates_to" ? "related" : "blocks")) {
           throw new Error("linear_workflow_relation_invalid");
         }
         const payload = await relation.delete();
@@ -1616,7 +1743,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     const targetIds = command.kind === "create_workflow_issue"
       ? [command.parentIssueId]
-      : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
+      : command.kind === "create_workflow_relation"
         ? [command.sourceIssueId, command.targetIssueId]
         : [command.target.targetIssueId];
     if (targetIds.length > 1) {
@@ -1717,7 +1844,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     const outcomeTargetId = command.kind === "create_workflow_issue"
       ? command.parentIssueId
-      : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation"
+      : command.kind === "create_workflow_relation"
         ? command.sourceIssueId
         : command.target.targetIssueId;
     const hasRawRequest = Boolean(this.#client.client?.rawRequest);
@@ -1769,6 +1896,8 @@ export class LinearSdkImpl implements LinearClientInterface {
       return issue && issue.projectId === command.expectedProjectId &&
         issue.statusId === command.statusId && issue.title === command.title &&
         issue.description === command.description &&
+        issue.isArchived === command.isArchived &&
+        workflowParentAssignmentMatches(issue.parentIssueId, command.parentAssignment) &&
         (command.order === undefined || issue.order === command.order) &&
         (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId)
         ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
@@ -1791,21 +1920,7 @@ export class LinearSdkImpl implements LinearClientInterface {
           issueVersions: [{ issueId: command.target.targetIssueId, remoteVersion: issue.updatedAt.toISOString() }] }
         : undefined;
     }
-    if (command.kind === "archive_workflow_issue" || command.kind === "restore_workflow_issue") {
-      const compact = await this.#readCompactWorkflowTarget(
-        command.target.targetIssueId, command.expectedProjectId, command.rootIssueId,
-      );
-      const issue = compact ?? await this.#client.issue(command.target.targetIssueId)
-        .then((value) => workflowMutationTargetValue(value));
-      const desiredArchived = command.kind === "archive_workflow_issue";
-      return issue && issue.projectId === command.expectedProjectId &&
-        issue.isArchived === desiredArchived &&
-        (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId)
-        ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
-          issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
-        : undefined;
-    }
-    if (command.kind !== "create_workflow_relation" && command.kind !== "remove_workflow_relation") return undefined;
+    if (command.kind !== "create_workflow_relation") return undefined;
     const compactRelation = await this.#readCompactWorkflowRelationOutcome(command);
     if (compactRelation.available) return compactRelation.value;
     const tree = await this.getWorkflowIssueTree({
@@ -1822,25 +1937,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         ? value.sourceIssueId === sourceIssueId && value.targetIssueId === targetIssueId
         : false,
     );
-    if (command.kind === "remove_workflow_relation") {
-      if (relation) return undefined;
-      const source = tree.issues.find((value) => value.issueId === command.sourceIssueId);
-      const target = tree.issues.find((value) => value.issueId === command.targetIssueId);
-      const root = tree.issues.find((value) => value.issueId === command.rootIssueId);
-      return source && target && root
-        ? {
-            writeId: command.writeId,
-            targetIssueId: command.sourceIssueId,
-            remoteVersion: source.updatedAt,
-            issueVersions: [
-              { issueId: command.sourceIssueId, remoteVersion: source.updatedAt },
-              { issueId: command.targetIssueId, remoteVersion: target.updatedAt },
-              { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
-            ],
-          }
-        : undefined;
-    }
-    if (!relation) return undefined;
+    if ((command.relationState === "present") !== Boolean(relation)) return undefined;
     const source = tree.issues.find((value) => value.issueId === command.sourceIssueId);
     const target = tree.issues.find((value) => value.issueId === command.targetIssueId);
     const root = tree.issues.find((value) => value.issueId === command.rootIssueId);
@@ -1915,7 +2012,7 @@ export class LinearSdkImpl implements LinearClientInterface {
   }
 
   async #readCompactWorkflowRelationOutcome(
-    command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" | "remove_workflow_relation" }>,
+    command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" }>,
   ): Promise<{
     available: boolean;
     value: import("../types.js").WorkflowMutationReadBack | undefined;
@@ -1964,7 +2061,8 @@ export class LinearSdkImpl implements LinearClientInterface {
     const targetVersion = latestRemoteVersion(issue.updatedAt, matchedRelation?.relatedIssue?.updatedAt);
     const commandSourceVersion = command.relationKind === "blocked_by" ? targetVersion : sourceVersion;
     const commandTargetVersion = command.relationKind === "blocked_by" ? sourceVersion : targetVersion;
-    const readBack = matchedRelation
+    const matchesDesiredState = (command.relationState === "present") === Boolean(matchedRelation);
+    const readBack = matchesDesiredState
       ? commandSourceVersion && commandTargetVersion && root.updatedAt
         ? {
             writeId: command.writeId,
@@ -1979,20 +2077,7 @@ export class LinearSdkImpl implements LinearClientInterface {
             ].map((version) => [version.issueId, version])).values()]
           }
         : (() => { throw new Error("linear_workflow_relation_version_missing"); })()
-      : command.kind === "remove_workflow_relation" && commandSourceVersion && commandTargetVersion && root.updatedAt
-        ? {
-            writeId: command.writeId,
-            targetIssueId: command.sourceIssueId,
-            remoteVersion: commandSourceVersion,
-            issueVersions: [...new Map([
-              { issueId: command.sourceIssueId, remoteVersion: commandSourceVersion },
-              { issueId: command.targetIssueId, remoteVersion: commandTargetVersion },
-              ...workflowAncestryVersions(source, command.expectedProjectId, command.rootIssueId).slice(1),
-              ...workflowAncestryVersions(issue, command.expectedProjectId, command.rootIssueId).slice(1),
-              { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
-            ].map((version) => [version.issueId, version])).values()]
-          }
-        : undefined;
+      : undefined;
     return {
       available: true,
       value: readBack,
@@ -2206,8 +2291,12 @@ function quoteGraphql(value: string): string {
 function observedClient(
   credential: LinearSdkCredential,
   observation: LinearRequestObservationOptions | undefined,
+  signal?: AbortSignal,
 ): LinearClient {
-  const client = new LinearClient(clientOptions(credential));
+  const client = new LinearClient({
+    ...clientOptions(credential),
+    ...(signal ? { signal } : {}),
+  });
   if (!observation) return client;
   const graphQLClient = client.client;
   const rawRequest = graphQLClient.rawRequest.bind(graphQLClient);
@@ -2649,16 +2738,11 @@ function workflowPreflightOutcome(
     const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
     return target.statusId === command.statusId && target.title === command.title &&
       target.description === command.description &&
+      target.isArchived === command.isArchived &&
+      workflowParentAssignmentMatches(target.parentIssueId, command.parentAssignment) &&
       (command.order === undefined || target.order === command.order) &&
       (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId)
       ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt } : undefined;
-  }
-  if (command.kind === "archive_workflow_issue" || command.kind === "restore_workflow_issue") {
-    const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
-    const desiredArchived = command.kind === "archive_workflow_issue";
-    return target.isArchived === desiredArchived
-      ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt }
-      : undefined;
   }
   if (command.kind === "append_workflow_comment") {
     const comments = facts.get(command.target.targetIssueId)?.comments;
@@ -2672,7 +2756,7 @@ function workflowPreflightOutcome(
       ? { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: matches[0].updatedAt }
       : undefined;
   }
-  if (command.kind !== "create_workflow_relation" && command.kind !== "remove_workflow_relation") return undefined;
+  if (command.kind !== "create_workflow_relation") return undefined;
   const sourceIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
   const targetIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
   const relations = facts.get(targetIssueId)?.inverseRelations;
@@ -2681,42 +2765,35 @@ function workflowPreflightOutcome(
   }
   const relation = relations.nodes.find((value) =>
     value.type === (command.relationKind === "relates_to" ? "related" : "blocks") &&
-    value.issue?.id === sourceIssueId && value.relatedIssue?.id === targetIssueId &&
-    (command.kind !== "remove_workflow_relation" || value.id === command.relationId));
-  if (command.kind === "remove_workflow_relation") {
-    if (relation) return undefined;
-    const source = facts.get(command.sourceIssueId);
-    const target = facts.get(command.targetIssueId);
-    const root = facts.get(command.rootIssueId);
-    return source && target && root && typeof source.updatedAt === "string" && typeof target.updatedAt === "string" && typeof root.updatedAt === "string"
-      ? {
-          writeId: command.writeId,
-          targetIssueId: command.sourceIssueId,
-          remoteVersion: source.updatedAt,
-          issueVersions: [
-            { issueId: command.sourceIssueId, remoteVersion: source.updatedAt },
-            { issueId: command.targetIssueId, remoteVersion: target.updatedAt },
-            { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
-          ],
-        }
-      : undefined;
-  }
-  return relation?.issue?.updatedAt
-    ? { writeId: command.writeId, targetIssueId: command.sourceIssueId, remoteVersion: relation.issue.updatedAt }
+    value.issue?.id === sourceIssueId && value.relatedIssue?.id === targetIssueId);
+  if ((command.relationState === "present") !== Boolean(relation)) return undefined;
+  const source = facts.get(command.sourceIssueId);
+  const target = facts.get(command.targetIssueId);
+  const root = facts.get(command.rootIssueId);
+  return source && target && root && typeof source.updatedAt === "string" && typeof target.updatedAt === "string" && typeof root.updatedAt === "string"
+    ? {
+        writeId: command.writeId,
+        targetIssueId: command.sourceIssueId,
+        remoteVersion: source.updatedAt,
+        issueVersions: [
+          { issueId: command.sourceIssueId, remoteVersion: source.updatedAt },
+          { issueId: command.targetIssueId, remoteVersion: target.updatedAt },
+          { issueId: command.rootIssueId, remoteVersion: root.updatedAt },
+        ],
+      }
     : undefined;
 }
 
 function workflowPreflightRelation(
   facts: ReadonlyMap<string, WorkflowPreflightIssue>,
-  command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" | "remove_workflow_relation" }>,
+  command: Extract<import("../types.js").WorkflowMutationCommand, { kind: "create_workflow_relation" }>,
 ) {
   const sourceIssueId = command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId;
   const targetIssueId = command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId;
   const expectedType = command.relationKind === "relates_to" ? "related" : "blocks";
   return [...facts.values()].flatMap((fact) => fact.inverseRelations?.nodes ?? []).find((relation) =>
     relation.type === expectedType && relation.issue?.id === sourceIssueId &&
-    relation.relatedIssue?.id === targetIssueId &&
-    (command.kind !== "remove_workflow_relation" || relation.id === command.relationId));
+    relation.relatedIssue?.id === targetIssueId);
 }
 
 function workflowPreconditionMismatch(
@@ -2725,7 +2802,7 @@ function workflowPreconditionMismatch(
 ): string | undefined {
   if (isNativeCommentMutation(command)) return "native_comment_command";
   const targets = command.kind === "create_workflow_issue" ? [command.parentIssueId]
-    : command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
+    : command.kind === "create_workflow_relation" ? [command.sourceIssueId, command.targetIssueId]
       : [command.target.targetIssueId];
   if ([command.rootIssueId, ...targets].some((id) => {
     const issue = facts.get(id);
@@ -2744,11 +2821,6 @@ function workflowPreconditionMismatch(
     if (facts.get(command.sourceIssueId)?.updatedAt !== command.sourceExpectedRemoteVersion) return "relation_source_remote_version";
     return facts.get(command.targetIssueId)?.updatedAt === command.targetExpectedRemoteVersion
       ? undefined : "relation_target_remote_version";
-  }
-  if (command.kind === "remove_workflow_relation") {
-    if (facts.get(command.sourceIssueId)?.updatedAt !== command.sourceExpectedRemoteVersion) return "relation_source_remote_version";
-    if (facts.get(command.targetIssueId)?.updatedAt !== command.targetExpectedRemoteVersion) return "relation_target_remote_version";
-    return workflowPreflightRelation(facts, command) ? undefined : "relation_missing";
   }
   const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
   if (target.updatedAt !== command.target.expectedRemoteVersion) return "target_remote_version";
@@ -2876,6 +2948,15 @@ function workflowLabelsMatch(observed: string[], expected: readonly string[]): b
   const observedNames = workflowIssueLabelNames(observed.map((name) => ({ name }))).sort();
   return expectedNames.length === observedNames.length &&
     expectedNames.every((name, index) => observedNames[index] === name);
+}
+
+function workflowParentAssignmentMatches(
+  parentIssueId: string | undefined,
+  assignment: Extract<WorkflowMutationCommand, { kind: "update_workflow_issue" }>["parentAssignment"],
+): boolean {
+  if (assignment.mode === "retain") return true;
+  if (assignment.mode === "clear") return parentIssueId === undefined;
+  return parentIssueId === assignment.parentIssueId;
 }
 
 function compareTreeFacts(left: IssueTreeFact, right: IssueTreeFact): number {
@@ -3026,16 +3107,6 @@ function linearPriority(value: number): LinearPriority {
   }
 }
 
-function linearPriorityValue(value: LinearPriority): number {
-  switch (value) {
-    case "no_priority": return 0;
-    case "urgent": return 1;
-    case "high": return 2;
-    case "normal": return 3;
-    case "low": return 4;
-  }
-}
-
 function conductorPoolFromLabels(labels: readonly string[]): ConductorPoolValue[] {
   const pool: ConductorPoolValue[] = [];
   const seen = new Set<string>();
@@ -3055,16 +3126,12 @@ function conductorPoolFromLabels(labels: readonly string[]): ConductorPoolValue[
   return pool;
 }
 
-function normalizePoolMembers(values: readonly string[]): string[] | undefined {
-  if (values.length === 0 || values.length > 64) return undefined;
+function normalizePoolMembers(values: readonly string[], allowEmpty = false): string[] | undefined {
+  if ((values.length === 0 && !allowEmpty) || values.length > 64) return undefined;
   const result = [...values];
   if (result.some((value) => !/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(value))) return undefined;
   if (new Set(result).size !== result.length) return undefined;
   return result;
-}
-
-function boundedRootText(value: string, maximum: number): boolean {
-  return typeof value === "string" && value.length > 0 && value.length <= maximum;
 }
 
 function projectPoolFingerprint(input: {

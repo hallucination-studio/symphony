@@ -563,9 +563,15 @@ test("reads a fresh tree after every Tree patch and supports reorder, dependency
     "update_workflow_issue",
     "update_workflow_issue",
     "update_workflow_issue",
-    "remove_workflow_relation",
+    "create_workflow_relation",
     "create_workflow_relation",
   ]);
+  assert.deepEqual(
+    linear.mutations
+      .filter((mutation) => mutation.kind === "create_workflow_relation")
+      .map((mutation) => mutation.relationState),
+    ["absent", "present"],
+  );
   assert.equal(linear.tree.relations.length, 1);
   assert.equal(linear.tree.relations[0]?.relation_kind, "relates_to");
 });
@@ -622,11 +628,11 @@ function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {
       updatedAt: "2026-07-23T00:00:00Z",
       projectId: "project-1",
       parentIssueId: null,
-      isDelegatedToSymphony: true,
       priority: "normal",
       order: 0,
       blockers: [],
       rootConductorLabels: [{ conductorShortHash: "abc123" }],
+      isDelegatedToSymphony: true,
     },
     tree,
     git: {
@@ -712,6 +718,12 @@ class FakeLinear {
       target.status_position = status.position;
       target.title = command.title;
       target.description = command.description;
+      target.is_archived = command.isArchived;
+      if (command.parentAssignment.mode === "set") {
+        target.parent_issue_id = command.parentAssignment.parentIssueId;
+      } else if (command.parentAssignment.mode === "clear") {
+        delete target.parent_issue_id;
+      }
       if (command.order !== undefined) target.order = command.order;
       target.remote_version = `${target.remote_version}:updated`;
     } else if (command.kind === "create_workflow_issue") {
@@ -741,16 +753,20 @@ class FakeLinear {
       });
       parent.remote_version = `${parent.remote_version}:updated`;
     } else if (command.kind === "create_workflow_relation") {
-      this.tree.relations.push({
-        relation_id: command.writeId,
-        relation_kind: command.relationKind,
-        source_issue_id: command.sourceIssueId,
-        target_issue_id: command.targetIssueId,
-      });
-      this.issue(command.sourceIssueId).remote_version += ":updated";
-      this.issue(command.targetIssueId).remote_version += ":updated";
-    } else if (command.kind === "remove_workflow_relation") {
-      this.tree.relations = this.tree.relations.filter(({ relation_id }) => relation_id !== command.relationId);
+      if (command.relationState === "present") {
+        this.tree.relations.push({
+          relation_id: command.writeId,
+          relation_kind: command.relationKind,
+          source_issue_id: command.sourceIssueId,
+          target_issue_id: command.targetIssueId,
+        });
+      } else {
+        this.tree.relations = this.tree.relations.filter((relation) => !(
+          relation.relation_kind === command.relationKind &&
+          relation.source_issue_id === command.sourceIssueId &&
+          relation.target_issue_id === command.targetIssueId
+        ));
+      }
       this.issue(command.sourceIssueId).remote_version += ":updated";
       this.issue(command.targetIssueId).remote_version += ":updated";
     } else if (command.kind === "append_workflow_comment") {

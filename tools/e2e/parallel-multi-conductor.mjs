@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -15,12 +17,21 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
       projectId: creation.projectId,
       routingLabelId: creation.routingLabelId,
       rootStatusId: creation.rootStatusId,
+      ...(signal ? { signal } : {}),
     });
     if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
       throw stableError("foreground_e2e_parallel_root_create_invalid");
     }
     return Object.freeze({ topology, creation, root });
   }));
+  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
+  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
 
   const actions = await Promise.all(roots.map(async ({ root }) => {
     const action = await human.waitForPlanReviewAction({
@@ -37,6 +48,7 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
     issueId: action.actionIssueId,
     terminalStatus: "Approved",
     stateId: action.terminalStatusId,
+    ...(signal ? { signal } : {}),
   })));
 
   return Object.freeze({
@@ -53,7 +65,7 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
           routingLabelId: creation.routingLabelId,
           conductorId: creation.conductorId,
           performerProfileId: creation.performerProfileId,
-          repositoryRoot: creation.repositoryRoot,
+          repositoryRoot: path.join(creation.worktreeDirectory, root.rootIssueId),
         }))),
       }),
     }),
@@ -71,6 +83,7 @@ function assertDefinition(definition) {
 
 function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForPlanReviewAction !== "function" || typeof human.setHumanActionTerminalStatus !== "function" ||
       !rootCreationsByRootKey || typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
       signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
@@ -86,7 +99,7 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
       new Set([...creations.values()].map(({ routingLabelId }) => routingLabelId)).size !== rootKeys.length ||
       new Set([...creations.values()].map(({ conductorId }) => conductorId)).size !== rootKeys.length ||
       new Set([...creations.values()].map(({ performerProfileId }) => performerProfileId)).size !== rootKeys.length ||
-      new Set([...creations.values()].map(({ repositoryRoot }) => repositoryRoot)).size !== rootKeys.length) {
+      new Set([...creations.values()].map(({ worktreeDirectory }) => worktreeDirectory)).size !== rootKeys.length) {
     throw stableError("foreground_e2e_parallel_case_input_invalid");
   }
   return creations;
@@ -95,7 +108,7 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
 function validRootCreation(value) {
   if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.routingLabelId) ||
       !identifier(value.rootStatusId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
-      !repositoryRoot(value.repositoryRoot)) {
+      !worktreeDirectory(value.worktreeDirectory)) {
     return undefined;
   }
   return Object.freeze({
@@ -105,7 +118,7 @@ function validRootCreation(value) {
     rootStatusId: value.rootStatusId,
     conductorId: value.conductorId,
     performerProfileId: value.performerProfileId,
-    repositoryRoot: value.repositoryRoot,
+    worktreeDirectory: value.worktreeDirectory,
   });
 }
 
@@ -113,7 +126,7 @@ function identifier(value) {
   return typeof value === "string" && IDENTIFIER.test(value);
 }
 
-function repositoryRoot(value) {
+function worktreeDirectory(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 4_096 && !value.includes("\u0000");
 }
 

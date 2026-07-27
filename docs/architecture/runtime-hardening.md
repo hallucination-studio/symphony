@@ -110,6 +110,12 @@ Gateway protocol request与physical Linear HTTP request分别观测。Podium tra
 显式query记录sanitized operation、correlation ID、latency、status、request-window及complexity-window
 计数；不记录credential、header、variables、query text、Issue内容或response body。
 
+Project Pool preflight和Conductor Project resolution必须使用只选择判定所需字段、明确分页边界的紧凑
+GraphQL query；不得通过SDK model relation或其默认fragment读取`ProjectLabel.projects`、`Project.issues`
+或等价的全量对象。每个紧凑query都必须验证返回的Project、label ownership、Root routing和pageInfo；缺页或
+缺cursor fail closed。SDK报告的rate-limit/network/internal failure必须保持为脱敏、可重试的Linear runtime
+failure，不能降级为Project、Root或routing业务事实无效。
+
 broker按installation在内存中分配physical request和GraphQL complexity permits。unchanged background
 runtime在当前两个窗口中最多消耗25%，至少保留50%给control、mutation和ambiguous-write read-back；
 窗口信息不足时background fail closed或延后。control和mutation read-back高于background observation，

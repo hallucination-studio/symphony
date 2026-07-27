@@ -48,7 +48,8 @@ E2E 是并行的用户行为模拟器和外部事实验证器，不是 Symphony 
 E2E 创建环境
 -> 启动未修改的生产进程
 -> 用户通过 Linear 创建不可变需求
--> Symphony 自主 admission、reconcile、plan、work、verify 和 delivery
+-> 用户在Linear原生delegate Root给Symphony，并对delegate read-back
+-> Symphony 对已delegate Root自主admission、reconcile、plan、work、verify 和 delivery
 -> 用户通过 Linear 响应真实 Human Action
 -> E2E 从 Linear 和 Git fresh read 最终事实
 -> E2E 计算 transient verdict
@@ -157,6 +158,11 @@ Campaign 恢复，也没有第二条 `final` 或 fallback 完成路径。
 6. 创建新的临时 `podium.db`、Conductor data roots、Profiles、Provider sessions 和 Git repositories；
 7. 通过正式产品配置边界建立本轮多个 Conductor，并等待全部 ready。
 
+Project Issue、routing label、label ownership、team 和 active-label-use 的 reset read 必须使用显式字段受限的
+Linear GraphQL query 并完整分页；不得使用会展开 SDK relation fragment 的查询或 relation fallback。任何 query、
+archive、retire、remove 或 read-back 失败都必须以闭集脱敏 reason code 停止 Campaign，不能被归一化为空集合或
+通用成功。
+
 已归档 Issue 不恢复、不遍历、不参与调度、Case 定位或 verdict。Case final evidence 在本轮结束后保留，
 直到下一轮 Campaign 启动时成为 active baseline reset 的输入。
 
@@ -217,6 +223,19 @@ Root 创建后，除 `root_revision_and_comment` 的预声明 revision，以及
 一个 Case 的失败、超时或 Human Action 等待不能取消其他 Case。需要多个 Root 或共享 Conductor 的 Case
 必须显式声明 coordination group；该协调只约束用户操作时序，不能指定产品调度结果。
 
+每个Case先由Human Actor创建一个未delegate Root，并以完整的Linear fresh read断言它没有Symphony actor写入、ownership
+record、status变化、Root/Cycle timeline、Root descendant、Git worktree或Performer-derived result。只有该断言成立后，
+Human Actor才通过Linear原生delegate mutation把同一Root交给本轮Binding的Symphony actor并read-back。E2E不得把
+delegation藏在Root create payload、Conductor配置、internal ownership record或任何测试专用控制面里。
+
+调度覆盖必须同时证明三条黑盒事实：更高Linear priority先于低priority成为下一次可执行Root；同一priority下较新的
+`updatedAt`先执行；已经in-flight的Stage不会被抢占中断。Case声明必须显式指定每个Root的priority，禁止以统一默认值
+掩盖priority tier。
+
+Human Actor 的每一次真实 Linear read 或 write 都必须绑定所属 Case 的 `AbortSignal`；并发 Case 不能复用或
+覆盖同一个 SDK Client 的 request signal。Case cancel/deadline 时，挂起的 Human 请求必须有界结算为脱敏稳定
+failure code，停止后续用户操作；它不产生 retry、补偿、workflow mutation 或 pass evidence。
+
 至少三个真实 Conductor 同时在线并拥有不同 Binding、full `conductor_id`、Profile、`CODEX_HOME`、
 repository context 和 routing label。至少两个不同 Conductor 的 Stage interval 必须在 durable Linear facts
 上重叠。
@@ -266,7 +285,7 @@ polling observation 变成 predicate。
 | `information_requested_and_answered` | 1 个 Root，1 个独占 repository | Answered Action 之后的 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
 | `root_revision_and_comment` | 1 个 Root，1 个独占 repository | 旧 Cycle 已 terminal，successor Cycle 有 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
 | `parallel_multi_conductor` | 至少 2 个 Root，分别路由到不同 Conductor 与独占 repository | 每个 Root 都 `In Review` 且交付；至少一对跨 Conductor durable Stage interval overlap |
-| `same_conductor_preemption` | 3 个同 Priority Root，路由到同一 Conductor、各自独占 repository | 三个 Root 都 `In Review` 且交付；被 touch 的 ready Root 在下一调度边界首先进入 Stage |
+| `same_conductor_preemption` | 3 个同为 `High` 的 Root 和 1 个 `Low` Root，均路由到同一 Conductor、各自独占 repository | 四个 Root 都 `In Review` 且交付；High tier 先于 Low 开始，且被 touch 的 High ready Root 在下一调度边界首先进入 Stage |
 | `conductor_restart_recovery` | 至少 2 个 Root：1 个受影响 Root 与至少 1 个运行在另一 Conductor 的连续 Root | 受影响 Root 从 fresh execution 恢复至 `In Review`/delivery；连续 Root 也完成交付 |
 
 ### 9.2 Assertion identity and outcome rules
@@ -341,7 +360,7 @@ comment requirement。
 | `information_requested_and_answered` | `information_action_actionable`; `answer_consumed_and_receipted`; `answer_drives_fresh_plan`; `boundary_fresh_plan_review` | `missing_answer_assumed`; `test_unblocks_or_mutates_stage` | 已提交 Answer 但无法关联 accepted input、reply/reaction 或 fresh Plan/Contract/Action。 |
 | `root_revision_and_comment` | `ordinary_inputs_consumed_once`; `thread_transitions_receipted`; `revision_supersedes_cycle`; `boundary_successor_plan_review` | `system_comment_treated_as_input`; `thread_history_lost`; `undeclared_revision_or_conductor_interpretation` | 任一预声明 description/comment/edit/resolve/reopen delta 没有独立 accepted input；description 缺少 matching RootDirective consumption，或 comment/thread 缺少 reply/reaction/thread action，或缺少 successor/continue evidence。 |
 | `parallel_multi_conductor` | `root_ownership_and_workspace_isolated`; `independent_delivery_chains`; `cross_conductor_stage_overlap`; `boundary_all_roots_delivered` | `cross_conductor_takeover`; `shared_workspace_writer`; `telemetry_substitutes_overlap` | 缺少任何 Root ownership、execution/result interval、timestamp 或 delivery coverage。 |
-| `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 缺少任何 Root header Priority、唯一 ownership、native activity 或 Stage execution/result interval，或它们不能形成严格且无并列的下一调度顺序。 |
+| `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `higher_priority_roots_run_before_lower_priority_root`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 缺少任何 Root header Priority、唯一 ownership、native activity 或 Stage execution/result interval，或它们不能形成严格且无并列的 tier 与同-tier下一调度顺序。 |
 | `conductor_restart_recovery` | `old_execution_terminal_once`; `recovery_uses_fresh_execution`; `ownership_persists`; `unaffected_root_continues`; `boundary_recovered_and_continuous_delivered` | `late_old_session_success`; `checkpoint_or_linear_rewrite`; `unaffected_conductor_reconfigured` | 无法唯一关联被杀旧 execution、其 terminal result、fresh replacement、unchanged ownership 和连续 Root。 |
 
 ### 9.2.1 Case-specific assertion-condition matrix
@@ -360,6 +379,7 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 | Assertion ID | Normative durable condition |
 |---|---|
 | `plan_approval_precedes_work` | 唯一 active Plan Contract 与 matching Plan Result 创建一个 Plan Review Action；该 Action 的 `Approved` read-back 必须严格早于每个 matching Work execution 的开始。 |
+| `cycle_plan_work_verify_tree_materialized` | final active/archived Linear Tree 必须同时证明 Root 直接拥有 Cycle，Cycle 直接拥有 Plan、每个 Work、Verify 和 matching Plan Review Action；每个 node 的 native `parentId` 必须与 matching `WorkflowIssueRecord.parent_issue_id` 相同。仅有 managed record、Stage Result 或 timeline 而没有该原生 Issue Tree 时不得通过。 |
 | `stage_chain_delivered` | 此 Contract 的 Plan、全部 required Work、唯一 passed Verify、delivery 和 Git revision 形成一条无断链的 matching lineage。 |
 | `turn_usage_aggregated` | Plan、每个 Work 与 Verify Issue 都有 model name 和 usage；Cycle usage 等于该 Cycle 的全部 model turns 之和，Root usage 等于所有 Cycle usage 加 Root Reconciler turns，且每个 turn 只计一次。 |
 | `boundary_in_review_delivery` | Root 为 `In Review`，唯一 passed Verify Result、delivery 与 Git revision 相互 matching。 |
@@ -420,8 +440,9 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 |---|---|
 | `inflight_stage_completes` | 三个同 Priority Root 并发创建后，唯一已选 in-flight Stage execution 正常 terminal；它不因 touch 被 cancel 或 replace。 |
 | `latest_ready_root_runs_next` | touch 在 in-flight execution terminal 前发生；在该调度边界，touched Root 与 remaining Root 有唯一且相同的 Conductor ownership、同 Priority 且 ready，二者在该 terminal 前均不得开始 Stage execution。native activity 必须证明 touch 是 touched Root 当时严格最新的 Root update；不能用后续 delivery 改写后的 Root header `updatedAt` 倒推该顺序。随后第一个开始的候选 Root Stage 必须属于 touched Root，且 execution/result interval 不得并列。 |
+| `higher_priority_roots_run_before_lower_priority_root` | 三个 High Root 与一个同 Conductor、同一初始 ready boundary 的 Low Root 都有唯一 ownership 和可读 Priority；每个 High Root 的首个 matching Stage execution 必须严格早于 Low Root 的首个 matching Stage execution。这个结论只能使用 Linear header 和 matching Stage Execution/Result 时间戳，不能用 polling、log、进程状态或测试操作推断。 |
 | `remaining_ready_root_progresses` | 在 touched Root 首个后续 Stage 之后，remaining Root 在不改变 ownership 的前提下形成自身终端 delivery chain；不存在 starvation。 |
-| `boundary_all_roots_delivered` | in-flight、touched 和 remaining 三个 Root 都为 `In Review`，各有 matching passed Verify、delivery 与 Git revision。 |
+| `boundary_all_roots_delivered` | in-flight、touched、remaining 和 Low 四个 Root 都为 `In Review`，各有 matching passed Verify、delivery 与 Git revision。 |
 | `inflight_turn_interrupted` | 不存在被 touch 影响而取消、失败或被 replacement 的原 in-flight execution。 |
 | `test_selects_next_root` | 除 catalog 预声明的 non-semantic touch 外，不存在 E2E scheduler command、priority/status mutation 或 direct Stage/Workflow mutation。 |
 | `semantic_requirement_touch` | touched Root 的目标和 acceptance criteria hash 未变；native activity 只证明预声明 scheduling note 更新。 |
@@ -552,15 +573,15 @@ Conductor 的 matching Stage Execution/Result interval 满足上述 overlap 公�
 
 ### 9.8 `same_conductor_preemption`
 
-用户行为：以相同 Priority 并发创建三个路由到同一 Conductor 的 Root。driver 只在下列冻结、有限的选择规则
+用户行为：并发创建三个同为 `High`、以及一个 `Low`、均路由到同一 Conductor 的 Root。driver 只在下列冻结、有限的选择规则
 成立后操作：
 
-1. 等待其中恰好一个 Root 有 in-flight Stage execution，另两个 Root 均仍属于同一 Conductor、同 Priority 且 ready；
+1. 只从三个 High Root 中等待恰好一个 Root 有 in-flight Stage execution，另两个 High Root 均仍属于同一 Conductor、同 Priority 且 ready；Low Root 不是同-tier角色候选；
 2. 在两个 ready Root 中按 frozen `root_key` 顺序选择第一个，使用其预声明 non-semantic description delta，使其
    `updatedAt` 严格最新；
 3. 在不批准 in-flight Root 新产生的 Plan Review Action 前，等待该 touched Root 成为 in-flight execution terminal 后
    的第一个 candidate Stage；
-4. 此顺序已被 durable facts 固定后，对三个 Root 各自产品创建的 Plan Review Action 恰好一次地设为 `Approved`，
+4. 此顺序已被 durable facts 固定后，对四个 Root 各自产品创建的 Plan Review Action 恰好一次地设为 `Approved`，
    并等待产品自主完成其余链路。
 
 上述 identity binding 只决定哪个已声明 description delta 和 Action response 应被执行；它不是对 scheduler 的命令。
@@ -570,12 +591,13 @@ Conductor 的 matching Stage Execution/Result interval 满足上述 overlap 公�
 
 - in-flight Stage 正常完成，不被抢占取消；
 - 下一调度边界选择同 Priority 中 `updatedAt` 最新的 ready Root；
+- 三个 High Root 的首个 Stage execution 都严格早于 Low Root 的首个 Stage execution；
 - native activity 证明 touch 的 actor、时间和顺序；
 - 其他 ready Root 后续仍被调度，没有 starvation 或 ownership 变化。
 
-验证边界：in-flight Root、被 touch Root 与另一 ready Root 均达到 `In Review` 并有 matching delivery。由 native
+验证边界：三个 High Root 与 Low Root 均达到 `In Review` 并有 matching delivery。由 native
 activity、Stage Execution 和 Result 建立严格顺序：in-flight Stage 先完成；随后被 touch Root 先开始 Stage；最后一个
-ready Root 随后完成。三者必须保持同一 Conductor ownership。
+High ready Root 随后完成；Low Root 只能在三个 High Root 均已开始后开始。四者必须保持同一 Conductor ownership。
 
 禁止事实：中断当前 turn、并发写同一 workspace、测试指定 next Root、改变目标或验收要求来制造更新时间。
 
@@ -644,7 +666,14 @@ Root deadline 仍按 [Root Reconciliation](root-reconciliation.md) 在首次 adm
 - 周期 heartbeat、elapsed time 和剩余 deadline；
 - signal handling、子进程退出和 cleanup outcome。
 
-这些值仅是当前进程的观察文本，不可恢复、不写产品存储，也不能参与 pass predicate。
+当 Conductor 子进程输出已知的结构化 runtime 日志时，reporter 还可以输出一条仅供诊断的
+`foreground_e2e_runtime_diagnostic`。它只允许输出固定的 `component`、Conductor identity、level、
+runtime event kind，以及可选的 Root identity、reason、failure code 和 phase；原始日志行、异常文本、
+Issue 内容、未知字段和 credential 必须丢弃。未知、损坏或字段非法的 Conductor 日志只能产生一次固定、
+脱敏的诊断 reason code，不能静默 drain，也不能形成无界前台输出。
+
+这些值仅是当前进程的观察文本，不可恢复、不写产品存储，也不能参与 pass predicate、Case 用户操作、
+final evidence、assertion 或 verdict。
 
 ## 12. 实现硬切换与复杂度约束
 

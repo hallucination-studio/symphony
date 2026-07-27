@@ -86,6 +86,8 @@ reply write identity、target remote version及相关thread/reaction preconditio
 `none`只删除同一source comment上由Symphony写入的matching receipt，绝不修改human或其他actor的reaction。它们不接受任意emoji、
 顶层reply、comment rewrite或Workflow语义字段。其他Root/Issue mutation同样携带binding、Project pool、Root
 routing/ownership、explicit target、expected remote version、expected status/archive/parent和stable write ID。
+`UpdateWorkflowIssueCommand`是完整的目标状态：必须同时声明目标status、title、description、`is_archived`及
+`parent_assignment`。它以Linear原生archive/unarchive实现归档目标，但协议中不存在独立的archive或restore command。
 `CreateWorkflowRelationCommand`以`relation_state: present | absent`收敛指定source、target和kind之间的relation，
 因此不存在第二个remove relation command或隐式删除路径。没有arbitrary
 GraphQL、JSON mutation或SDK passthrough。
@@ -123,7 +125,7 @@ WorkflowTimelineEvent = RootTimelineEvent | CycleTimelineEvent
 携带并通过`RootReconcilerReplyWriterInterface`完成必需Linear write。Timeline字段由
 [Workflow Timeline](workflow-timeline.md)定义；reply字段由[Root Reconciliation](root-reconciliation.md)定义。
 每个timeline event只materialize一条Linear comment；comment同时包含closed renderer生成的用户Markdown和一个
-machine-readable `symphony` fenced code block。两个Interface都使用closed materialized/failed Result，只有matching
+machine-readable `json` fenced code block。两个Interface都使用closed materialized/failed Result，只有matching
 Linear comment及其code block read-back、strict decode和stable identity校验成功后才成功；
 不提供queued、accepted或fire-and-forget variant。
 
@@ -231,27 +233,27 @@ Symphony stable write correlation，二者都不能用旧`version`别名、本�
 current lifecycle、pending state或另一套恢复锚点。
 
 每个durable managed comment和Symphony创建的Root descendant Issue description都使用Markdown + 唯一
-`symphony` block；两者的record shape不同，不能把comment的`record_id`模板复制到Issue description：
+`json` block；两者的record shape不同，不能把comment的`record_id`模板复制到Issue description：
 
 ````text
 Managed comment
 
-<closed renderer生成的bounded用户Markdown；允许普通Markdown和非symphony fenced code block>
+<closed renderer生成的bounded用户Markdown；允许普通Markdown和非-json fenced code block>
 
-```symphony
+```json
 {"kind":"<closed record kind>","version":1,"record_id":"<stable id>",...}
 ```
 
 Managed Root descendant Issue description
 
-<closed renderer生成的bounded用户Markdown；允许普通Markdown和非symphony fenced code block>
+<closed renderer生成的bounded用户Markdown；允许普通Markdown和非-json fenced code block>
 
-```symphony
+```json
 {"kind":"workflow_issue","version":1,"issue_key":"<stable key>","root_issue_id":"<Root>","parent_issue_id":"<parent>","issue_kind":"cycle | plan | work | verify | human"}
 ```
 ````
 
-一条managed comment或managed Issue description必须恰有一个`info string = symphony`的fenced code block，且该block
+一条managed comment或managed Issue description必须恰有一个`info string = json`的fenced code block，且该block
 必须位于正文末尾，闭合后只允许trailing whitespace。该block必须是strict JSON、使用closed versioned schema、拒绝
 unknown字段，并携带stable identity与source references。managed comment身份只在以下条件全部成立时成立：
 
@@ -275,7 +277,7 @@ identity加上validated Symphony actor和strict decode定位该宿主comment，�
 identity field。
 
 代码块与Linear原生当前事实有严格边界。所有Symphony-owned、restart-required workflow record必须只在上述strict
-`symphony` block中持久化；普通Markdown、HTML、local file、queue、checkpoint或数据库不能保存其替代状态。反过来，
+`json` block中持久化；普通Markdown、HTML、local file、queue、checkpoint或数据库不能保存其替代状态。反过来，
 Issue status/archive/parent/relation，以及comment body、native resolved/unresolved thread state和reaction set是Linear
 原生当前事实，必须由fresh Linear read-back取得，不能再镜像为`StatusRecord`、`ThreadStateRecord`、reaction record
 或Markdown状态约定。唯一例外是严格managed record对这些原生事实的immutable evidence reference；它不拥有、覆盖或
@@ -287,7 +289,7 @@ kind label、parent scope和fresh remote version一致。它不得加入source d
 Conductor静默恢复。
 
 human actor写入相同code block、普通文本声称自己是Symphony、作者显示名相同或comment位于第一条，都不能伪造managed
-record。Symphony actor写出的缺失、重复或无效`symphony` block是mechanical violation，也不能降级成另一种旧marker。
+record。Symphony actor写出的缺失、重复或无效`json` block是mechanical violation，也不能降级成另一种旧marker。
 所有旧`<!-- symphony ... -->`HTML marker、`managed_marker`字段、reader、writer和兼容union均被硬删除；没有迁移、
 dual read、fallback或legacy root恢复路径。
 
@@ -313,4 +315,4 @@ dual read、fallback或legacy root恢复路径。
 8. SDK、database、transport handle、raw thread和secrets不跨public interface。
 9. 不为旧短Stage、第二Provider或任意metadata保留compatibility variant。
 10. Root delta不拥有业务状态；advance contract不允许完整snapshot或旧协议兼容variant。
-11. 所有restart-required managed事实只存在于Linear中strict `symphony` code block；不存在HTML marker或第二record格式。
+11. 所有restart-required managed事实只存在于Linear中strict `json` code block；不存在HTML marker、`symphony` info string或第二record格式。

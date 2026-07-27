@@ -328,11 +328,11 @@ function discoveredRoot() {
     updatedAt: now,
     projectId,
     parentIssueId: null,
-    isDelegatedToSymphony: true,
     priority: "high" as const,
     order: 0,
     blockers: [],
     rootConductorLabels: [],
+    isDelegatedToSymphony: true,
   };
 }
 

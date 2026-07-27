@@ -137,10 +137,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
           updatedAt: issue.updated_at,
           projectId: issue.project_id,
           parentIssueId: issue.parent_issue_id ?? null,
-          isDelegatedToSymphony: boolean(
-            item.is_delegated_to_symphony,
-            "linear_delegation_invalid",
-          ),
+          isDelegatedToSymphony: boolean(item.is_delegated_to_symphony, "linear_root_delegation_invalid"),
           priority: linearPriority(item.priority),
           order: issue.order,
           blockers: array(item.blockers, "linear_blockers_invalid").map(
@@ -541,7 +538,7 @@ function workflowIssueRecord(
 ): WorkflowIssueRecord | undefined {
   const parsed = parseManagedRecord(issue.description);
   if (!parsed.ok) {
-    if (issue.description.includes("```symphony")) {
+    if (parsed.error !== "managed_record_block_missing") {
       throw new Error(`linear_workflow_issue_record_invalid:${parsed.error}`);
     }
     return undefined;
@@ -643,8 +640,6 @@ function workflowMutationBody(
       };
     case "update_workflow_issue":
     case "append_workflow_comment":
-    case "archive_workflow_issue":
-    case "restore_workflow_issue":
       return {
         ...common,
         kind: input.kind,
@@ -660,6 +655,10 @@ function workflowMutationBody(
             status_id: input.statusId,
             title: input.title,
             description: input.description,
+            is_archived: input.isArchived,
+            parent_assignment: input.parentAssignment.mode === "set"
+              ? { mode: "set", parent_issue_id: input.parentAssignment.parentIssueId }
+              : { mode: input.parentAssignment.mode },
             ...(input.order === undefined ? {} : { order: input.order }),
           }
           : input.kind === "append_workflow_comment" ? { body: input.body } : {}),
@@ -705,17 +704,7 @@ function workflowMutationBody(
         target_issue_id: input.targetIssueId,
         target_expected_remote_version: input.targetExpectedRemoteVersion,
         relation_kind: input.relationKind,
-      };
-    case "remove_workflow_relation":
-      return {
-        ...common,
-        kind: input.kind,
-        relation_id: input.relationId,
-        source_issue_id: input.sourceIssueId,
-        source_expected_remote_version: input.sourceExpectedRemoteVersion,
-        target_issue_id: input.targetIssueId,
-        target_expected_remote_version: input.targetExpectedRemoteVersion,
-        relation_kind: input.relationKind,
+        relation_state: input.relationState,
       };
   }
 }

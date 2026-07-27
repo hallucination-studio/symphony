@@ -3,6 +3,7 @@ import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 const CASE_ASSERTION_INDEX = Object.freeze({
   approved_happy_path: Object.freeze([
     ["plan_approval_precedes_work", "required", "ordered"],
+    ["cycle_plan_work_verify_tree_materialized", "required", "linked"],
     ["stage_chain_delivered", "required", "linked"],
     ["turn_usage_aggregated", "required", "aggregate"],
     ["boundary_in_review_delivery", "boundary", "linked"],
@@ -48,6 +49,7 @@ const CASE_ASSERTION_INDEX = Object.freeze({
   same_conductor_preemption: Object.freeze([
     ["inflight_stage_completes", "required", "ordered"],
     ["latest_ready_root_runs_next", "required", "ordered"],
+    ["higher_priority_roots_run_before_lower_priority_root", "required", "ordered"],
     ["remaining_ready_root_progresses", "required", "ordered"],
     ["boundary_all_roots_delivered", "boundary", "aggregate"],
     ["inflight_turn_interrupted", "prohibited", "equals"],
@@ -143,34 +145,52 @@ export async function runForegroundE2ECases({ definitions, runCase, readFinalEvi
     if (!scope || scope.caseId !== definition.caseId || !scope.signal || typeof scope.signal.aborted !== "boolean") {
       throw stableError("foreground_e2e_case_scope_invalid");
     }
-    observe(reporter, { caseId: definition.caseId, observation: "creating-root" });
-    let driverResult;
     try {
-      observe(reporter, { caseId: definition.caseId, observation: "running" });
-      driverResult = await runCase({ definition, scope });
-    } catch {}
-    observe(reporter, { caseId: definition.caseId, observation: "final-reading" });
-    let evidence;
-    let finalReadError;
-    try {
-      evidence = await readFinalEvidence({ definition, scope });
-    } catch (error) {
-      finalReadError = error;
+      observe(reporter, { caseId: definition.caseId, observation: "creating-root" });
+      let driverResult;
+      let driverFailureCode;
+      try {
+        observe(reporter, { caseId: definition.caseId, observation: "running" });
+        driverResult = await runWithinCaseScope(
+          () => runCase({ definition, scope }),
+          scope,
+        );
+      } catch (error) {
+        driverFailureCode = caseDriverFailureCode(error);
+        observe(reporter, {
+          caseId: definition.caseId,
+          observation: "failed",
+          detail: driverFailureCode,
+        });
+      }
+      observe(reporter, { caseId: definition.caseId, observation: "final-reading" });
+      let finalRead;
+      let finalReadError;
+      try {
+        finalRead = await readFinalEvidence({ definition, scope, driverResult });
+      } catch (error) {
+        finalReadError = error;
+      }
+      const evidence = finalRead?.evidence ?? finalRead;
+      const context = finalRead?.context ?? driverResult?.context;
+      const assertions = finalReadError
+        ? missingCoverageAssertions(definition)
+        : evaluateForegroundE2EAssertions({ definition, evidence, context });
+      const outcome = deriveForegroundE2EVerdict(assertions, {
+        deadlineExceeded: driverResult?.deadlineExceeded === true || scope.deadlineExceeded?.() === true,
+      });
+      observe(reporter, { caseId: definition.caseId, observation: outcome.verdict });
+      return Object.freeze({
+        caseId: definition.caseId,
+        verdict: outcome.verdict,
+        reasonCodes: outcome.reasonCodes,
+        assertions,
+        elapsedMs: elapsedMilliseconds(started, timestamp(now())),
+        ...(driverFailureCode ? { driverFailureCode } : {}),
+      });
+    } finally {
+      scope.dispose?.();
     }
-    const assertions = finalReadError
-      ? missingCoverageAssertions(definition)
-      : evaluateForegroundE2EAssertions({ definition, evidence, context: driverResult?.context });
-    const outcome = deriveForegroundE2EVerdict(assertions, {
-      deadlineExceeded: driverResult?.deadlineExceeded === true,
-    });
-    observe(reporter, { caseId: definition.caseId, observation: outcome.verdict });
-    return Object.freeze({
-      caseId: definition.caseId,
-      verdict: outcome.verdict,
-      reasonCodes: outcome.reasonCodes,
-      assertions,
-      elapsedMs: elapsedMilliseconds(started, timestamp(now())),
-    });
   }));
   const cases = settlements.map((settlement, index) => {
     if (settlement.status === "fulfilled") return settlement.value;
@@ -224,6 +244,7 @@ const COMMON_HANDLERS = Object.freeze({
 const CASE_HANDLERS = Object.freeze({
   approved_happy_path: Object.freeze({
     plan_approval_precedes_work: (facts) => facts.approvedPlan().everyWorkStartsAfterApproval ? "satisfied" : "contradicted",
+    cycle_plan_work_verify_tree_materialized: (facts) => facts.deliveryChain().treeMaterialized ? "satisfied" : "contradicted",
     stage_chain_delivered: (facts) => facts.deliveryChain().complete ? "satisfied" : "contradicted",
     turn_usage_aggregated: (facts) => facts.usage().complete ? "satisfied" : "contradicted",
     boundary_in_review_delivery: (facts) => facts.deliveryChain().rootInReview ? "satisfied" : "contradicted",
@@ -269,6 +290,7 @@ const CASE_HANDLERS = Object.freeze({
   same_conductor_preemption: Object.freeze({
     inflight_stage_completes: (facts) => facts.preemption().inflightCompletes ? "satisfied" : "contradicted",
     latest_ready_root_runs_next: (facts) => facts.preemption().latestRunsNext ? "satisfied" : "contradicted",
+    higher_priority_roots_run_before_lower_priority_root: (facts) => facts.preemption().higherPriorityRunsFirst ? "satisfied" : "contradicted",
     remaining_ready_root_progresses: (facts) => facts.preemption().remainingProgresses ? "satisfied" : "contradicted",
     boundary_all_roots_delivered: (facts) => facts.preemption().allDelivered ? "satisfied" : "contradicted",
     inflight_turn_interrupted: (facts) => facts.preemption().inflightInterrupted ? "contradicted" : "satisfied",
@@ -376,7 +398,26 @@ function deliveryChainFacts(facts, rootIssueId = onlyRootId(facts)) {
     verifyResults.some(({ record: result }) => result.verified_revision === record.verified_revision) && git.some(({ headRevision }) => headRevision === record.verified_revision));
   const rootInReview = root?.state?.name === "In Review" && Boolean(matchingDelivery) && verifies.length === 1 &&
     workIssues.every(({ record }) => workResults.some(({ record: result }) => result.node_issue_id === record.issue_key));
-  return { complete: cycles.length > 0 && rootInReview, rootInReview, matchingDelivery };
+  const treeMaterialized = materializedCycleTree(facts, rootIssueId);
+  return { complete: cycles.length > 0 && rootInReview, rootInReview, matchingDelivery, treeMaterialized };
+}
+
+function materializedCycleTree(facts, rootIssueId) {
+  const nodes = facts.recordsOf("workflow_issue", rootIssueId);
+  const cycle = only(nodes.filter(({ record }) => record.issue_kind === "cycle"));
+  const plan = only(nodes.filter(({ record }) => record.issue_kind === "plan"));
+  const work = nodes.filter(({ record }) => record.issue_kind === "work");
+  const verify = only(nodes.filter(({ record }) => record.issue_kind === "verify"));
+  const action = only(nodes.filter(({ record }) => record.issue_kind === "human"));
+  const request = only(facts.recordsOf("human_action_request", rootIssueId)
+    .filter(({ record }) => record.action_kind === "plan_review"));
+  if (!cycle || !plan || work.length === 0 || !verify || !action || !request ||
+      action.record.issue_key !== request.record.action_issue_id) return false;
+  const directChild = (entry, parentIssueId) =>
+    entry.record.parent_issue_id === parentIssueId && facts.issue(entry.record.issue_key)?.parentId === parentIssueId;
+  return directChild(cycle, rootIssueId) && directChild(plan, cycle.record.issue_key) &&
+    work.every((entry) => directChild(entry, cycle.record.issue_key)) && directChild(verify, cycle.record.issue_key) &&
+    directChild(action, cycle.record.issue_key);
 }
 
 function usageFacts(facts) {
@@ -1125,7 +1166,8 @@ function validGitFact(value) {
 function preemptionFacts(facts) {
   const binding = facts.context.preemption;
   if (!validPreemptionBinding(binding)) return preemptionFailureFacts();
-  const rootIds = [binding.inflightRootId, binding.touchedRootId, binding.remainingRootId];
+  const highPriorityRootIds = [binding.inflightRootId, binding.touchedRootId, binding.remainingRootId];
+  const rootIds = [...highPriorityRootIds, binding.lowPriorityRootId];
   if (new Set(rootIds).size !== rootIds.length) return preemptionFailureFacts();
   const rootIssues = rootIds.map((rootIssueId) => facts.rootIssue(rootIssueId));
   const executions = facts.recordsOf("stage_execution").filter(({ record }) => rootIds.includes(record.root_issue_id));
@@ -1149,8 +1191,19 @@ function preemptionFacts(facts) {
   const owners = rootIds.map((rootIssueId) => facts.recordsOf("root_ownership", rootIssueId).map(({ record }) => record));
   const ownerCoverageComplete = owners.every((records) => records.length === 1 && validRootOwnership(records[0]));
   const sameOwner = owners.every((records) => records.length === 1 && records[0].conductor_id === binding.conductorId);
-  const samePriority = rootIssues.every((root) => Number.isFinite(root?.priority)) &&
-    new Set(rootIssues.map(({ priority }) => priority)).size === 1;
+  const highPriorityRoots = highPriorityRootIds.map((rootIssueId) => facts.rootIssue(rootIssueId));
+  const lowPriorityRoot = facts.rootIssue(binding.lowPriorityRootId);
+  const samePriority = highPriorityRoots.every((root) => Number.isFinite(root?.priority)) &&
+    new Set(highPriorityRoots.map(({ priority }) => priority)).size === 1;
+  const firstStart = (rootIssueId) => Math.min(...executions
+    .filter(({ record }) => record.root_issue_id === rootIssueId)
+    .map(({ record }) => parseTime(record.started_at))
+    .filter((startedAt) => startedAt !== undefined));
+  const highPriorityStarts = highPriorityRootIds.map(firstStart);
+  const lowPriorityStart = firstStart(binding.lowPriorityRootId);
+  const higherPriorityRunsFirst = sameOwner && samePriority &&
+    highPriorityRoots.every(({ priority }) => Number.isFinite(priority) && priority < lowPriorityRoot?.priority) &&
+    highPriorityStarts.every((startedAt) => Number.isFinite(startedAt) && startedAt < lowPriorityStart);
   const activeAtTouch = executions.filter(({ record }) => {
     const startedAt = parseTime(record.started_at);
     const result = only(matchingStageResults(results, record.stage_execution_id, record.root_issue_id));
@@ -1174,6 +1227,7 @@ function preemptionFacts(facts) {
     parseTime(inflightExecutions[0]?.record.started_at) !== undefined && executions
       .filter(({ record }) => [binding.touchedRootId, binding.remainingRootId].includes(record.root_issue_id))
       .every(({ record }) => parseTime(record.started_at) !== undefined) &&
+    highPriorityStarts.every(Number.isFinite) && Number.isFinite(lowPriorityStart) &&
     Boolean(touchActivity && touchedExecution && firstCandidate && earliestCandidateStart !== undefined && latestRemainingActivity);
   return {
     coverageComplete,
@@ -1182,6 +1236,7 @@ function preemptionFacts(facts) {
       activeAtTouch.length === 1 && activeAtTouch[0].record.stage_execution_id === binding.inflightExecutionId && readyBeforeTouch && readyAtTerminal &&
       !candidateStartTie && firstCandidate?.record.stage_execution_id === binding.touchedExecutionId &&
       touchedExecution?.record.stage_execution_id === binding.touchedExecutionId && touchedRoot && remainingRoot),
+    higherPriorityRunsFirst: Boolean(higherPriorityRunsFirst),
     remainingProgresses: sameOwner && deliveryChainFacts(facts, binding.remainingRootId).complete,
     allDelivered: rootIds.every((rootId) => deliveryChainFacts(facts, rootId).rootInReview),
     inflightInterrupted: inflightResults.some(({ record }) => TERMINAL_STAGE_OUTCOMES.has(record.outcome_kind)),
@@ -1195,7 +1250,7 @@ function preemptionFacts(facts) {
 function validPreemptionBinding(value) {
   return value && identifier(value.inflightRootId) && identifier(value.touchedRootId) && identifier(value.remainingRootId) &&
     identifier(value.inflightExecutionId) && identifier(value.touchedExecutionId) && identifier(value.touchedRootKey) &&
-    identifier(value.touchActivityId) && identifier(value.conductorId);
+    identifier(value.touchActivityId) && identifier(value.conductorId) && identifier(value.lowPriorityRootId);
 }
 
 function preemptionFailureFacts() {
@@ -1203,6 +1258,7 @@ function preemptionFailureFacts() {
     coverageComplete: false,
     inflightCompletes: false,
     latestRunsNext: false,
+    higherPriorityRunsFirst: false,
     remainingProgresses: false,
     allDelivered: false,
     inflightInterrupted: false,
@@ -1455,6 +1511,38 @@ function observe(reporter, observation) {
   } catch {
     // Reporter output is diagnostic only and cannot suppress a required final read.
   }
+}
+
+function caseDriverFailureCode(error) {
+  return identifier(error?.code) ? error.code : "foreground_e2e_case_driver_failed";
+}
+
+function runWithinCaseScope(operation, scope) {
+  if (scope.signal.aborted) return Promise.reject(caseScopeAbortError(scope));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete, value) => {
+      if (settled) return;
+      settled = true;
+      scope.signal.removeEventListener("abort", onAbort);
+      complete(value);
+    };
+    const onAbort = () => finish(reject, caseScopeAbortError(scope));
+    scope.signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => {
+      if (settled) return undefined;
+      return operation();
+    }).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function caseScopeAbortError(scope) {
+  return stableError(scope.deadlineExceeded?.() === true
+    ? "foreground_e2e_case_deadline_exceeded"
+    : "foreground_e2e_case_aborted");
 }
 
 function validateDefinition(definition) {

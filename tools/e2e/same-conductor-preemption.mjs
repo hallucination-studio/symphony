@@ -1,6 +1,8 @@
 import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "./cases.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const CORE_ROOT_KEYS = Object.freeze(["inflight-root", "touched-root", "remaining-root"]);
+const LOW_PRIORITY_ROOT_KEY = "low-priority-root";
 
 export async function runSameConductorPreemptionCase({ definition, human, rootCreationsByRootKey, signal } = {}) {
   assertDefinition(definition);
@@ -15,17 +17,26 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
       projectId: creation.projectId,
       routingLabelId: creation.routingLabelId,
       rootStatusId: creation.rootStatusId,
+      ...(signal ? { signal } : {}),
     });
     if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
       throw stableError("foreground_e2e_preemption_root_create_invalid");
     }
     return Object.freeze({ topology, root });
   }));
+  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
+  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
+    rootIssueId: root.rootIssueId,
+    ...(signal ? { signal } : {}),
+  })));
 
   const rootIssueIdsByKey = Object.freeze(Object.fromEntries(roots.map(({ topology, root }) => [topology.rootKey, root.rootIssueId])));
   const admission = assertAdmission(
-    await human.waitForSameConductorPreemptionAdmission(waitInput({ rootIssueIds: roots.map(({ root }) => root.rootIssueId), signal })),
-    rootIssueIdsByKey,
+    await human.waitForSameConductorPreemptionAdmission(waitInput({ rootIssueIds: CORE_ROOT_KEYS.map((rootKey) => rootIssueIdsByKey[rootKey]), signal })),
+    Object.fromEntries(CORE_ROOT_KEYS.map((rootKey) => [rootKey, rootIssueIdsByKey[rootKey]])),
   );
   const roles = bindSameConductorPreemptionRoles({
     inflightRootKeys: [rootKeyFor(rootIssueIdsByKey, admission.inflightRootIssueId)],
@@ -34,6 +45,7 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
   const touch = await human.updateRootDescription({
     rootIssueId: rootIssueIdsByKey[roles.touchedRootKey],
     description: roles.touchDescription,
+    ...(signal ? { signal } : {}),
   });
   assertTouch(touch);
 
@@ -65,6 +77,7 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
     issueId: action.actionIssueId,
     terminalStatus: "Approved",
     stateId: action.terminalStatusId,
+    ...(signal ? { signal } : {}),
   })));
 
   return deepFreeze({
@@ -80,6 +93,7 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
         touchedRootKey: roles.touchedRootKey,
         touchActivityId: candidate.touchActivityId,
         conductorId: rootCreations.get(roles.inflightRootKey).conductorId,
+        lowPriorityRootId: rootIssueIdsByKey[LOW_PRIORITY_ROOT_KEY],
       },
     },
   });
@@ -87,15 +101,18 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
 
 function assertDefinition(definition) {
   const canonical = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
-  if (definition !== canonical || definition.rootTopology.length !== 3 ||
+  if (definition !== canonical || definition.rootTopology.length !== 4 ||
       new Set(definition.rootTopology.map(({ conductorRef }) => conductorRef)).size !== 1 ||
-      new Set(definition.rootTopology.map(({ repositoryRef }) => repositoryRef)).size !== definition.rootTopology.length) {
+      new Set(definition.rootTopology.map(({ repositoryRef }) => repositoryRef)).size !== definition.rootTopology.length ||
+      !CORE_ROOT_KEYS.every((rootKey) => definition.rootCreationInputs.find((input) => input.rootKey === rootKey)?.priority === "high") ||
+      definition.rootCreationInputs.find((input) => input.rootKey === LOW_PRIORITY_ROOT_KEY)?.priority !== "low") {
     throw stableError("foreground_e2e_preemption_case_definition_invalid");
   }
 }
 
 function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForSameConductorPreemptionAdmission !== "function" || typeof human.updateRootDescription !== "function" ||
       typeof human.waitForSameConductorPreemptionCandidate !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
       typeof human.setHumanActionTerminalStatus !== "function" || !rootCreationsByRootKey ||

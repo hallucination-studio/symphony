@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
 import { LinearClient } from "@linear/sdk";
-import { parseSymphonyRecordBlock } from "@symphony/contracts/managed-record";
+import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
 
 import { readAllLinearNodes } from "./linear-environment.mjs";
 
@@ -372,7 +372,7 @@ function collectManagedRecords({ issues, comments, rootIssueId, coverage }) {
 
 function addManagedRecord({ body, source, issueId, rootIssueId, coverage, records }) {
   if (body === null) return;
-  const parsed = parseSymphonyRecordBlock(body);
+  const parsed = parseManagedRecordBlock(body);
   if (!parsed.ok) {
     if (parsed.error !== "managed_record_block_missing") {
       coverage.add({ rootIssueId, sourceId: source.id, scope: "managed_record", code: "foreground_e2e_evidence_managed_record_invalid" });

@@ -8,6 +8,7 @@ import type { PodiumDesktopHostPorts } from "../../public/PodiumDesktopHostPorts
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import { ConductorBindingUseCase } from "../conductor-bindings/ConductorBindingUseCase.js";
 import { PodiumDesktopViewImpl } from "../desktop-views/PodiumDesktopViewImpl.js";
+import { PodiumError, podiumError } from "../errors.js";
 import { LinearAuthImpl } from "../linear-auth/LinearAuthImpl.js";
 import { LinearOAuthHttpClientImpl } from "../linear-auth/LinearOAuthHttpClientImpl.js";
 import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
@@ -20,6 +21,7 @@ type Body = Record<string, JsonValue> & { kind: string };
 
 export class PodiumClientServicesImpl implements PodiumClientServices {
   readonly #view = new PodiumDesktopViewImpl();
+  readonly #targetWorkflowInitializations = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: PodiumClientStoreInterface,
@@ -154,29 +156,36 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   async #createConductor(body: Body): Promise<JsonValue> {
     const installation = this.store.getOnlyLinearCredential();
     if (!installation) throw new Error("linear_installation_missing");
+    const projectId = requiredString(body.project_id, "project_id_missing");
     const repositoryBody = record(body.repository, "repository_selection_invalid");
     const repositoryHandle = requiredString(
       repositoryBody.repository_handle,
       "repository_handle_missing",
     );
-    const repository = await this.host.resolveRepository(
-      repositoryHandle,
-      requiredString(repositoryBody.base_branch, "repository_base_branch_missing"),
+    const repository = await createConductorStep(
+      () => this.host.resolveRepository(
+        repositoryHandle,
+        requiredString(repositoryBody.base_branch, "repository_base_branch_missing"),
+      ),
+      "conductor_repository_resolution_failed",
     );
     const sdk = this.createLinearSdk(installation);
-    await sdk.initializeTargetTeamWorkflow({
-      projectId: requiredString(body.project_id, "project_id_missing"),
-      authorized: true,
-    });
-    const binding = await new ConductorBindingUseCase(this.store, sdk, {
-      createBindingId: randomUUID,
-      createConductorId: randomUUID,
-    }).create({
-      installationId: installation.installationId,
-      projectId: requiredString(body.project_id, "project_id_missing"),
-      repositoryContext: repository,
-    });
-    this.store.setConductorDesiredState(binding.bindingId, "stopped");
+    await this.#initializeTargetWorkflow(projectId, sdk);
+    const binding = await createConductorStep(
+      () => new ConductorBindingUseCase(this.store, sdk, {
+        createBindingId: randomUUID,
+        createConductorId: randomUUID,
+      }).create({
+        installationId: installation.installationId,
+        projectId,
+        repositoryContext: repository,
+      }),
+      "conductor_binding_creation_failed",
+    );
+    await createConductorStep(
+      async () => this.store.setConductorDesiredState(binding.bindingId, "stopped"),
+      "conductor_initial_desired_state_persistence_failed",
+    );
     return {
       kind: "conductor_created",
       conductor_id: binding.conductorId,
@@ -184,6 +193,29 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       conductor_short_hash: binding.conductorShortHash,
       repository_identity: binding.repositoryContext.repositoryIdentity,
     };
+  }
+
+  async #initializeTargetWorkflow(
+    projectId: string,
+    sdk: LinearClientInterface,
+  ): Promise<void> {
+    const existing = this.#targetWorkflowInitializations.get(projectId);
+    if (existing) return existing;
+    const initialization = createConductorStep(
+      async () => {
+        await sdk.initializeTargetTeamWorkflow({ projectId, authorized: true });
+      },
+      "conductor_target_workflow_initialization_failed",
+    );
+    this.#targetWorkflowInitializations.set(projectId, initialization);
+    try {
+      await initialization;
+    } catch (error) {
+      if (this.#targetWorkflowInitializations.get(projectId) === initialization) {
+        this.#targetWorkflowInitializations.delete(projectId);
+      }
+      throw error;
+    }
   }
 
   async #controlConductor(body: Body): Promise<JsonValue> {
@@ -319,6 +351,21 @@ function profileCommand(body: Body) {
       return { ...body, kind: "activate_profile" };
     default:
       throw new Error("profile_command_invalid");
+  }
+}
+
+async function createConductorStep<T>(
+  operation: () => Promise<T>,
+  failureCode: string,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof PodiumError) throw error;
+    throw podiumError(failureCode, failureCode, {
+      actionRequired: "retry_request",
+      nextAction: "Resolve the reported Conductor setup problem and retry the request.",
+    });
   }
 }
 

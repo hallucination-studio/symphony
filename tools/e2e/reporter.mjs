@@ -17,6 +17,46 @@ const CASE_OBSERVATIONS = new Set([
   "incomplete",
 ]);
 
+const RUNTIME_DIAGNOSTIC_LEVELS = new Set(["info", "warning", "error"]);
+const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
+  "private_ipc_failed",
+  "root_project_unavailable",
+  "root_admission_blocked",
+  "root_profile_missing",
+  "root_safety_blocked",
+  "root_reconciliation_failed",
+  "root_reconciler_failure_barrier",
+  "root_reconciler_failure_recorded",
+  "root_directive_materialization_failed",
+  "root_stage_result_linear_write_threw",
+  "workflow_timeline_materialization_failed",
+]);
+const KNOWN_CONDUCTOR_RUNTIME_LOG_EVENTS = new Set([
+  ...FORWARDED_CONDUCTOR_RUNTIME_EVENTS,
+  "root_discovery_evidence",
+  "root_directive_received",
+  "root_stage_result_linear_write_started",
+  "root_stage_result_linear_write_outcome",
+]);
+const CONDUCTOR_RUNTIME_DIAGNOSTIC_EVENTS = new Set([
+  ...FORWARDED_CONDUCTOR_RUNTIME_EVENTS,
+  "conductor_runtime_log_unknown_event",
+  "conductor_runtime_log_invalid_json",
+  "conductor_runtime_log_invalid_fields",
+]);
+
+export function isForegroundE2EConductorRuntimeEvent(value) {
+  return typeof value === "string" && CONDUCTOR_RUNTIME_DIAGNOSTIC_EVENTS.has(value);
+}
+
+export function isForwardableConductorRuntimeEvent(value) {
+  return typeof value === "string" && FORWARDED_CONDUCTOR_RUNTIME_EVENTS.has(value);
+}
+
+export function isKnownConductorRuntimeLogEvent(value) {
+  return typeof value === "string" && KNOWN_CONDUCTOR_RUNTIME_LOG_EVENTS.has(value);
+}
+
 export function createForegroundReporter({
   campaignId,
   secrets = [],
@@ -67,6 +107,60 @@ export function createForegroundReporter({
         throw stableError("foreground_e2e_reporter_child_invalid");
       }
       emit({ event: "foreground_e2e_child_exit", component, reason_code: reasonCode });
+    },
+    failure({ component, reasonCode } = {}) {
+      if (!identifier(component) || !identifier(reasonCode)) {
+        throw stableError("foreground_e2e_reporter_failure_invalid");
+      }
+      emit({ event: "foreground_e2e_failure", component, reason_code: reasonCode });
+    },
+    runtimeDiagnostic({
+      component,
+      conductorId,
+      level,
+      runtimeEvent,
+      rootIssueId,
+      reason,
+      failureCode,
+      phase,
+    } = {}) {
+      if (component !== "conductor" || !identifier(conductorId) || !RUNTIME_DIAGNOSTIC_LEVELS.has(level) ||
+          !isForegroundE2EConductorRuntimeEvent(runtimeEvent) ||
+          rootIssueId !== undefined && !identifier(rootIssueId) ||
+          reason !== undefined && !safeRuntimeCode(reason) ||
+          failureCode !== undefined && !safeRuntimeCode(failureCode) ||
+          phase !== undefined && !safeRuntimeCode(phase)) {
+        throw stableError("foreground_e2e_reporter_runtime_diagnostic_invalid");
+      }
+      emit({
+        event: "foreground_e2e_runtime_diagnostic",
+        component,
+        conductor_id: conductorId,
+        level,
+        runtime_event: runtimeEvent,
+        ...(rootIssueId === undefined ? {} : { root_issue_id: rootIssueId }),
+        ...(reason === undefined ? {} : { reason }),
+        ...(failureCode === undefined ? {} : { failure_code: failureCode }),
+        ...(phase === undefined ? {} : { phase }),
+      });
+    },
+    summary({ exitCode, cases } = {}) {
+      if ((exitCode !== 0 && exitCode !== 1) || !Array.isArray(cases) || cases.length === 0 ||
+          cases.some((item) => !identifier(item?.caseId) || !["passed", "failed", "incomplete"].includes(item.verdict) ||
+            !Array.isArray(item.reasonCodes) || item.reasonCodes.some((code) => !identifier(code)) ||
+            !Number.isSafeInteger(item.elapsedMs) || item.elapsedMs < 0)) {
+        throw stableError("foreground_e2e_reporter_summary_invalid");
+      }
+      emit({
+        event: "foreground_e2e_summary",
+        exit_code: exitCode,
+        cases: cases.map(({ caseId, verdict, reasonCodes, elapsedMs }) => ({
+          case_id: caseId,
+          verdict,
+          reason_codes: [...reasonCodes],
+          elapsed_ms: elapsedMs,
+        })),
+      });
     },
     startHeartbeat(intervalMs) {
       if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || heartbeat !== undefined) {
@@ -123,6 +217,10 @@ function timestamp(value) {
 
 function identifier(value) {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
+}
+
+function safeRuntimeCode(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value);
 }
 
 function stableError(code) {

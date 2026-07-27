@@ -30,6 +30,7 @@ export async function createForegroundE2EEnvironment({
     reporter.phase("ready");
     return Object.freeze({
       project: Object.freeze({ ...project }),
+      actors: Object.freeze({ humanActorId: actors.humanActorId }),
       resources: Object.freeze({ directory: resources.directory }),
       runtime: Object.freeze({
         conductors: Object.freeze([...(runtime.conductors ?? [])]),

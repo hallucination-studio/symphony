@@ -10,6 +10,8 @@
       "depth": 0,
       "title": "Root",
       "description": "Root description",
+      "labels": [],
+      "is_archived": false,
       "updated_at": "2026-07-19T00:00:00Z"
     },
     "is_delegated_to_symphony": true,
@@ -21,6 +23,8 @@
         "target_state": "Done",
         "sdk_relation": {}
       }
-    ]
+    ],
+    "root_conductor_labels": [],
+    "root_managed_comments": []
   }
 }

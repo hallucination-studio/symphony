@@ -25,8 +25,8 @@ test("Cycle events write one structured comment, use only Stage usage, and dedup
   assert.match(body, /\nObserved\n- Work Turn Completed\n/u);
   assert.match(body, /\nUsage\n- This turn: Work · gpt-5 · 5 tokens\n- Cycle cumulative \(complete\): Work · gpt-5 · 5 tokens\n/u);
   assert.match(body, /"occurred_at":"2026-07-25T00:00:03Z"/u);
-  assert.match(body, /```symphony\n[\s\S]+\n```$/u);
-  assert.equal((body.match(/```symphony/gmu) ?? []).length, 1);
+  assert.match(body, /```json\n[\s\S]+\n```$/u);
+  assert.equal((body.match(/```json/gmu) ?? []).length, 1);
 
   assert.deepEqual(await publisher.publish(event), first);
   assert.equal(linear.mutations.length, 1);

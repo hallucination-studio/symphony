@@ -131,7 +131,7 @@ test("Podium scopes an appended workflow comment at the physical Linear request 
     write_id: "write-1", expected_project_id: "project-1", root_issue_id: "root-1",
     expected_root_remote_version: "root-version",
     target: { target_issue_id: "cycle-1", expected_remote_version: "cycle-version" },
-    body: "## Timeline\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+    body: "## Timeline\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
   });
 
   assert.deepEqual(physicalScope, {
@@ -140,7 +140,7 @@ test("Podium scopes an appended workflow comment at the physical Linear request 
       command_kind: "append_workflow_comment",
       write_id: "write-1",
       target_issue_id: "cycle-1",
-      body: "## Timeline\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+      body: "## Timeline\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
     },
   });
   assert.equal(requestScope(), undefined);
@@ -227,7 +227,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
         ? {
             items: [{
               issue: issue("root-2", "project-1"),
-              isDelegatedToSymphony: false,
+              isDelegatedToSymphony: true,
               priority: "low",
               blockers: [],
               rootConductorLabels: [],
@@ -720,7 +720,7 @@ function v3PrimaryComment() {
   return ["Symphony", "Conductor: conductor-1", "Performer profile: profile-1",
     "Conversation: active", "Activity: none", "Evidence: current Linear and Git read-back",
     "Observed at: none", "Branch: symphony/runs/root-1", "Pull request: none",
-    "Current problem: none", "", "```symphony",
+    "Current problem: none", "", "```json",
     "{\"kind\":\"root_ownership\",\"version\":1,\"root_issue_id\":\"root-1\",\"conductor_id\":\"conductor-1\",\"performer_profile_id\":\"profile-1\",\"delivery_branch\":\"symphony/runs/root-1\",\"owner_generation\":\"owner-1\"}",
     "```"].join("\n");
 }

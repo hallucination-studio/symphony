@@ -90,7 +90,7 @@ remote precondition。修改已有Issue、Comment或Label时还携带目标对�
 fail closed，不执行mutation，并返回封闭conflict Result供Conductor重新读取。
 
 Podium不解释✅/❌、resolve/reopen或用户reaction的Workflow含义。它只执行closed Linear native operation并返回
-fresh read-back；managed comment身份由validated actor、strict `symphony` code block和stable write correlation证明，
+fresh read-back；managed comment身份由validated actor、strict `json` code block和stable write correlation证明，
 不存在HTML marker或`managed_marker`字段。
 
 ## 4. Credential

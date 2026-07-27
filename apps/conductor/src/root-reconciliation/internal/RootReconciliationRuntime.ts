@@ -559,6 +559,8 @@ export class RootReconciliationRuntime {
       statusId: status.status_id,
       title: target.title,
       description: target.description,
+      isArchived: target.is_archived,
+      parentAssignment: { mode: "retain" },
       order: target.order,
     };
     setPhase(`persist_${role}_${phaseSuffix}_linear_write`);

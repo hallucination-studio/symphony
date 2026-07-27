@@ -56,7 +56,7 @@ apps/conductor/src/
 
 | 模块 | 职责 |
 |---|---|
-| `root-discovery` | Project、Root routing、ownership和header discovery |
+| `root-discovery` | Project、Root routing、native user delegation、ownership和header discovery；未委派Root零副作用 |
 | `root-scheduling` | blocker eligibility、Priority和`updatedAt`抢占排序；不拥有capacity或Root语义 |
 | `root-reconciliation` | deterministic host、diff、safety validation和convergence gate；不产生业务下一步 |
 | `root-reconciler-client` | open时发送一次bootstrap，advance时只发送delta，并调用Root Reconciler |

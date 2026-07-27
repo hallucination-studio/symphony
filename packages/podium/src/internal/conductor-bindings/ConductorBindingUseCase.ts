@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 
-import { podiumError } from "../errors.js";
+import { PodiumError, podiumError } from "../errors.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
+import { classifyLinearFailure } from "../linear-gateway/LinearFailure.js";
 import type {
   ConductorBinding,
   RepositoryContext,
@@ -96,14 +97,52 @@ export class ConductorBindingUseCase {
   }
 
   async #ensureProjectPool(projectId: string, conductorShortHash: string): Promise<void> {
-    const current = await this.client.readConductorProjectPool({ projectId });
+    const current = await projectPoolStep(
+      () => this.client.readConductorProjectPool({ projectId }),
+      "conductor_project_pool_read_failed",
+    );
     const desiredMembers = [...new Set([...current.members, conductorShortHash])];
-    const plan = await this.client.preflightConductorProjectPool({ projectId, desiredMembers });
-    if (plan.kind !== "ready") throw new Error(`linear_project_pool_${plan.reason}`);
-    const result = await this.client.reconcileConductorProjectPool({ plan, authorized: true });
+    const plan = await projectPoolStep(
+      () => this.client.preflightConductorProjectPool({ projectId, desiredMembers }),
+      "conductor_project_pool_preflight_failed",
+    );
+    if (plan.kind !== "ready") {
+      const code = `linear_project_pool_${plan.reason}`;
+      throw podiumError(code, code, {
+        actionRequired: "retry_request",
+        nextAction: "Resolve the reported Linear Project pool problem and retry the request.",
+      });
+    }
+    const result = await projectPoolStep(
+      () => this.client.reconcileConductorProjectPool({ plan, authorized: true }),
+      "conductor_project_pool_reconciliation_failed",
+    );
     if (result.kind === "dry_run" || !result.members.includes(conductorShortHash)) {
       throw new Error("linear_project_pool_read_back_failed");
     }
+  }
+}
+
+async function projectPoolStep<T>(
+  operation: () => Promise<T>,
+  failureCode: string,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof PodiumError) throw error;
+    const linearFailure = classifyLinearFailure(error);
+    if (linearFailure) {
+      throw podiumError(linearFailure.code, linearFailure.sanitizedReason, {
+        retryable: linearFailure.retryable,
+        actionRequired: "retry_request",
+        nextAction: "Retry the request after Linear is available.",
+      });
+    }
+    throw podiumError(failureCode, failureCode, {
+      actionRequired: "retry_request",
+      nextAction: "Resolve the reported Linear Project pool problem and retry the request.",
+    });
   }
 }
 

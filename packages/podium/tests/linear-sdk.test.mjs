@@ -3,6 +3,25 @@ import test from "node:test";
 
 import { LinearSdkImpl } from "../dist/internal/linear-gateway/internal/LinearSdkImpl.js";
 
+test("development-token organization discovery bounds the official SDK request", async (t) => {
+  const timeoutSignal = AbortSignal.abort(new DOMException("request timed out", "TimeoutError"));
+  let suppliedSignal;
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    assert.equal(milliseconds, 30_000);
+    return timeoutSignal;
+  });
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    suppliedSignal = init.signal;
+    throw timeoutSignal.reason;
+  });
+
+  await assert.rejects(
+    LinearSdkImpl.discoverDevelopmentTokenOrganizationId("development-token"),
+  );
+
+  assert.equal(suppliedSignal, timeoutSignal);
+});
+
 function connection(nodes) {
   return {
     nodes,
@@ -223,25 +242,6 @@ test("physical SDK transport sends requests without an installation permit", asy
   assert.equal(fetches, 2);
 });
 
-test("development-token SDK uses the persisted app user for Root delegation", async () => {
-  const root = issue({ id: "root-1", delegateId: "app-user" });
-  const sdk = {
-    viewer: Promise.resolve({ id: "human-viewer" }),
-    project: async () => ({
-      issues: async () => connection([root]),
-    }),
-  };
-  const adapter = new LinearSdkImpl({
-    kind: "development_token",
-    token: "token",
-    delegateActorId: "app-user",
-  }, "organization-1", sdk);
-
-  const roots = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
-  assert.equal(roots.items[0].isDelegatedToSymphony, true);
-});
-
-
 test("Root header snapshots map every Linear priority and retain Linear node order", async () => {
   const roots = [0, 1, 2, 3, 4].map((priority) => issue({
     id: `root-${priority}`,
@@ -277,6 +277,27 @@ test("Root header snapshots map every Linear priority and retain Linear node ord
       { order: 14.5, priority: "low", blockers: [] },
     ],
   );
+});
+
+test("Root snapshots project only native delegation to the verified Symphony actor", async () => {
+  const sdk = {
+    viewer: Promise.resolve({ id: "symphony-actor" }),
+    project: async () => ({ issues: async () => connection([
+      issue({ id: "undelegated-root", delegateId: "another-actor" }),
+      issue({ id: "delegated-root", delegateId: "symphony-actor" }),
+    ]) }),
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+
+  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+
+  assert.deepEqual(result.items.map((root) => ({
+    issueId: root.issue.issueId,
+    isDelegatedToSymphony: root.isDelegatedToSymphony,
+  })), [
+    { issueId: "undelegated-root", isDelegatedToSymphony: false },
+    { issueId: "delegated-root", isDelegatedToSymphony: true },
+  ]);
 });
 
 test("Root scheduling reads one and 250 Root headers without interpreting managed records", async () => {
@@ -333,8 +354,158 @@ test("Root scheduling reads one and 250 Root headers without interpreting manage
   }
 });
 
+test("Root scheduling excludes archived Issues from active Root candidates", async () => {
+  const activeRoot = issue({ id: "active-root", priority: 2 });
+  const archivedRoot = issue({ id: "archived-root", priority: 5 });
+  archivedRoot.archivedAt = new Date("2026-07-15T00:00:00Z");
+  archivedRoot.state = Promise.resolve({ id: "obsolete-state", name: "Obsolete" });
+  const issueQueries = [];
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({
+      issues: async (input) => {
+        issueQueries.push(input);
+        return connection([archivedRoot, activeRoot]);
+      },
+    }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+
+  assert.deepEqual(result.items.map(({ issue: root }) => root.issueId), ["active-root"]);
+  assert.deepEqual(issueQueries, [{ first: 250, includeArchived: false }]);
+});
+
+test("Project Pool preflight uses one compact query for an empty Project", async () => {
+  const requests = [];
+  const sdk = {
+    client: {
+      async rawRequest(document, variables) {
+        requests.push({ document, variables });
+        return {
+          data: {
+            organization: { id: "organization-1" },
+            project: {
+              id: "project-1",
+              updatedAt: "2026-07-16T00:00:00.000Z",
+              labels: connection([]),
+              issues: connection([]),
+            },
+            projectLabels: connection([]),
+          },
+        };
+      },
+    },
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const plan = await adapter.preflightConductorProjectPool({
+    projectId: "project-1",
+    desiredMembers: ["abc123def456"],
+  });
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].variables, {
+    projectId: "project-1",
+    memberNames: ["symphony:conductor/abc123def456"],
+    rootCursor: undefined,
+  });
+  assert.match(requests[0].document, /query SymphonyProjectPoolPreflight/u);
+  assert.match(requests[0].document, /projectLabels\(first: 129/u);
+  assert.match(requests[0].document, /projects\(first: 2\)/u);
+  assert.match(requests[0].document, /issues\(first: 250/u);
+  assert.doesNotMatch(requests[0].document, /fragment Project/u);
+  assert.doesNotMatch(requests[0].document, /description/u);
+  assert.deepEqual(plan, {
+    kind: "ready",
+    projectId: "project-1",
+    expectedProjectUpdatedAt: "2026-07-16T00:00:00.000Z",
+    fingerprint: plan.fingerprint,
+    currentMembers: [],
+    desiredMembers: ["abc123def456"],
+    addMembers: ["abc123def456"],
+    removeMembers: [],
+    routeRoots: [],
+  });
+  assert.match(plan.fingerprint, /^[a-f0-9]{64}$/u);
+});
+
+test("Project resolution uses one compact query without SDK relation fragments", async () => {
+  const requests = [];
+  const sdk = {
+    client: {
+      async rawRequest(document, variables) {
+        requests.push({ document, variables });
+        return {
+          data: {
+            organization: { id: "organization-1" },
+            projectLabels: {
+              nodes: [{
+                id: "project-label-1",
+                name: "symphony:conductor/abc123def456",
+                isGroup: false,
+                archivedAt: null,
+                retiredBy: null,
+                projects: {
+                  nodes: [{
+                    id: "project-1",
+                    updatedAt: "2026-07-16T00:00:00.000Z",
+                    labels: connection([
+                      { name: "symphony:conductor/abc123def456" },
+                      { name: "symphony:conductor/def456abc123" },
+                    ]),
+                  }],
+                  pageInfo: { hasNextPage: false },
+                },
+              }],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        };
+      },
+    },
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const resolution = await adapter.readProjectResolution({
+    conductorShortHash: "abc123def456",
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "resolved",
+    projectId: "project-1",
+    updatedAt: "2026-07-16T00:00:00.000Z",
+    conductorPool: [
+      { conductorShortHash: "abc123def456" },
+      { conductorShortHash: "def456abc123" },
+    ],
+  });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].variables, {
+    labelName: "symphony:conductor/abc123def456",
+  });
+  assert.match(requests[0].document, /query SymphonyProjectResolution/u);
+  assert.match(requests[0].document, /projects\(first: 2\)/u);
+  assert.match(requests[0].document, /labels\(first: 65/u);
+  assert.doesNotMatch(requests[0].document, /fragment Project/u);
+  assert.doesNotMatch(requests[0].document, /description/u);
+});
+
 test("Root scheduling passes Symphony-authored comments as native Linear facts", async () => {
-  const primary = "Root ownership recorded.\n\n```symphony\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
+  const primary = "Root ownership recorded.\n\n```json\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
   const root = issue({ id: "root-1", priority: 2, order: 3 });
   root.delegateId = "app-user";
   root.comments = async () => connection([{
@@ -388,14 +559,13 @@ test("Root scheduling passes Symphony-authored comments as native Linear facts",
 
   const result = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
 
-  assert.equal(result.items[0].isDelegatedToSymphony, true);
   assert.equal(result.items[0].issue.state, "Todo");
   assert.equal(result.items[0].rootManagedComments[0].body, primary);
   assert.deepEqual(result.items[0].blockers, []);
 });
 
 test("Root scheduling leaves ownership record interpretation to Conductor", async () => {
-  const ownership = 'Root ownership recorded.\n\n```symphony\n{"kind":"root_ownership","version":1}\n```';
+  const ownership = 'Root ownership recorded.\n\n```json\n{"kind":"root_ownership","version":1}\n```';
   const root = issue({ id: "root-1", priority: 2, order: 3 });
   root.comments = async () => connection([{
     id: "ownership-1", body: ownership, createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z",
@@ -587,7 +757,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
-      id: "comment-work", body: "Progress\n\n```symphony\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
+      id: "comment-work", body: "Progress\n\n```json\n{\"kind\":\"workflow_timeline\",\"version\":1}\n```",
       createdAt: "2026-07-16T00:00:02Z", updatedAt: "2026-07-16T00:00:03Z",
       user: { id: "symphony-bot" }, issue: { id: "work-1" }, parent: { id: "comment-root" },
       resolvedAt: "2026-07-16T00:00:04Z",
@@ -794,97 +964,6 @@ test("target project configuration is read as a closed Podium value", async () =
   assert.equal(JSON.stringify(result).includes("token"), false);
 });
 
-test("official SDK adapter creates a delegated routed top-level Root and proves read-back", async () => {
-  let createdInput;
-  let created;
-  const issueLabel = {
-    id: "issue-label-1",
-    name: "symphony:conductor/abc123def456",
-    isGroup: false,
-    archivedAt: null,
-    retiredById: null,
-    teamId: "team-1",
-    organization: Promise.resolve({ id: "organization-1" }),
-  };
-  const project = {
-    id: "project-1",
-    updatedAt: new Date("2026-07-22T00:00:00Z"),
-    async labels() {
-      return connection([{ name: "symphony:conductor/abc123def456", isGroup: false, archivedAt: null, retiredById: null }]);
-    },
-    async teams() {
-      return connection([{ id: "team-1" }]);
-    },
-  };
-  const sdk = {
-    organization: Promise.resolve({ id: "organization-1" }),
-    async project() { return project; },
-    async issueLabels() { return connection([issueLabel]); },
-    async createIssue(input) {
-      createdInput = input;
-      created = issue({
-        id: "root-1",
-        identifier: "SYM-1",
-        title: input.title,
-        description: input.description,
-        delegateId: input.delegateId,
-        priority: input.priority,
-      });
-      created.labels = async () => connection([issueLabel]);
-      return { success: true, issueId: "root-1" };
-    },
-    async issue() { return created; },
-  };
-  const adapter = new LinearSdkImpl(
-    { kind: "development_token", token: "token", delegateActorId: "app-user-1" },
-    "organization-1",
-    sdk,
-  );
-
-  const result = await adapter.createRootIssue({
-    projectId: "project-1",
-    conductorShortHash: "abc123def456",
-    title: "Routed Root",
-    description: "A user-owned Root.",
-    priority: "urgent",
-  });
-
-  assert.deepEqual(result, { rootIssueId: "root-1", identifier: "SYM-1", projectId: "project-1" });
-  assert.deepEqual(createdInput.labelIds, ["issue-label-1"]);
-  assert.equal(createdInput.delegateId, "app-user-1");
-  assert.equal(createdInput.parentId, undefined);
-  assert.equal(createdInput.stateId, undefined);
-  assert.equal(createdInput.priority, 1);
-});
-
-test("Root creation rejects an out-of-pool member before issueCreate", async () => {
-  let createCalls = 0;
-  const sdk = {
-    organization: Promise.resolve({ id: "organization-1" }),
-    async project() {
-      return {
-        id: "project-1",
-        updatedAt: new Date("2026-07-22T00:00:00Z"),
-        async labels() { return connection([{ name: "symphony:conductor/abc123def456", isGroup: false, archivedAt: null, retiredById: null }]); },
-        async teams() { return connection([{ id: "team-1" }]); },
-      };
-    },
-    async createIssue() { createCalls += 1; return { success: true, issueId: "never" }; },
-  };
-  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
-
-  await assert.rejects(
-    adapter.createRootIssue({
-      projectId: "project-1",
-      conductorShortHash: "def456abc123",
-      title: "Rejected",
-      description: "Must fail closed.",
-    }),
-    /linear_root_creation_conductor_not_in_pool/u,
-  );
-  assert.equal(createCalls, 0);
-});
-
 test("workflow SDK mutations preserve the supplied description and use explicit status and relation inputs", async () => {
   const parent = issue({ id: "root-1" });
   let createdInput;
@@ -933,7 +1012,7 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
   assert.equal(commentInput.issueId, "root-1");
   assert.equal(commentInput.body, "Progress");
 
-  const managedRecord = "Root ownership recorded.\n\n```symphony\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
+  const managedRecord = "Root ownership recorded.\n\n```json\n{\"kind\":\"root_ownership\",\"version\":1}\n```";
   await adapter.executeWorkflowMutation({
     kind: "append_workflow_comment", writeId: "write-record", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
@@ -945,13 +1024,13 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
     kind: "create_workflow_relation", writeId: "write-3", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     sourceIssueId: "work-1", sourceExpectedRemoteVersion: "work-version",
-    targetIssueId: "root-1", targetExpectedRemoteVersion: "root-version", relationKind: "blocks",
+    targetIssueId: "root-1", targetExpectedRemoteVersion: "root-version", relationKind: "blocks", relationState: "present",
   });
   assert.deepEqual(relationInput, { issueId: "work-1", relatedIssueId: "root-1", type: "blocks" });
 
   const targetIssue = issue({
     id: "work-1", parentId: "root-1", title: "Work",
-    description: "Work description\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```",
+    description: "Work description\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```",
   });
   const targetRootIssue = issue({ id: "root-1" });
   targetRootIssue.team = Promise.resolve({
@@ -976,6 +1055,7 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt },
     statusId: "state-todo", title: "Updated work", description: "Updated description",
+    isArchived: false, parentAssignment: { mode: "retain" },
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.equal(updatedInput.description, "Updated description");
@@ -1166,7 +1246,7 @@ test("workflow issue creation rejects unknown and duplicate label names", async 
   );
 });
 
-test("workflow SDK archive mutations use native Linear calls and preserve archive preconditions", async () => {
+test("workflow SDK update mutations use native Linear archive state", async () => {
   const root = issue({ id: "root-1" });
   const target = issue({ id: "work-1", parentId: "root-1" });
   let archiveCalls = 0;
@@ -1181,37 +1261,94 @@ test("workflow SDK archive mutations use native Linear calls and preserve archiv
     target.archivedAt = null;
     return { success: true };
   };
+  let updateInput;
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async (issueId) => issueId === "root-1" ? root : target,
+    async updateIssue(_issueId, input) {
+      updateInput = input;
+      target.title = input.title;
+      target.description = input.description;
+    },
   });
   const command = {
-    kind: "archive_workflow_issue", writeId: "write-archive", conductorShortHash: "abc123",
+    kind: "update_workflow_issue", writeId: "write-archive", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt.toISOString(),
     target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: false },
+    statusId: "state-todo", title: "Archived work", description: "Archived description",
+    isArchived: true, parentAssignment: { mode: "retain" },
   };
 
   await adapter.executeWorkflowMutation(command);
   assert.equal(archiveCalls, 1);
   assert.equal(restoreCalls, 0);
+  assert.deepEqual(updateInput, {
+    title: "Archived work", description: "Archived description", stateId: "state-todo",
+  });
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
     writeId: "write-archive", targetIssueId: "work-1", remoteVersion: target.updatedAt.toISOString(),
     issueVersions: [{ issueId: "work-1", remoteVersion: target.updatedAt.toISOString() }],
   });
 
-  await assert.rejects(
-    adapter.executeWorkflowMutation(command),
-    /linear_precondition_conflict/u,
-  );
-  assert.equal(archiveCalls, 1);
-
   await adapter.executeWorkflowMutation({
     ...command,
-    kind: "restore_workflow_issue",
     writeId: "write-restore",
     target: { ...command.target, expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: true },
+    isArchived: false,
   });
   assert.equal(restoreCalls, 1);
   assert.equal(target.archivedAt, null);
+});
+
+test("workflow relation state absent deletes the matching native Linear relation", async () => {
+  let deletes = 0;
+  const command = {
+    kind: "create_workflow_relation", writeId: "remove-relation", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    sourceIssueId: "source-1", sourceExpectedRemoteVersion: "source-version",
+    targetIssueId: "target-1", targetExpectedRemoteVersion: "target-version",
+    relationKind: "blocks", relationState: "absent",
+  };
+  const root = {
+    id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null,
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const source = {
+    id: "source-1", updatedAt: "source-version", project: { id: "project-1" },
+    parent: { id: "root-1", project: { id: "project-1" }, parent: null },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+  };
+  const target = {
+    id: "target-1", updatedAt: "target-version", project: { id: "project-1" },
+    parent: { id: "root-1", project: { id: "project-1" }, parent: null },
+    inverseRelations: {
+      nodes: [{
+        id: "relation-1", type: "blocks",
+        issue: { id: "source-1", updatedAt: "source-version", project: { id: "project-1" } },
+        relatedIssue: { id: "target-1", updatedAt: "target-version", project: { id: "project-1" } },
+      }],
+      pageInfo: { hasNextPage: false },
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    client: {
+      async rawRequest(query) {
+        assert.match(query, /WorkflowMutationPreflight/u);
+        return { data: { issues: { nodes: [root, source, target] } } };
+      },
+    },
+    async issueRelation(id) {
+      assert.equal(id, "relation-1");
+      return {
+        issueId: "source-1", relatedIssueId: "target-1", type: "blocks",
+        async delete() { deletes += 1; return { success: true }; },
+      };
+    },
+  });
+
+  assert.deepEqual(await adapter.preflightWorkflowMutation(command), { kind: "ready" });
+  await adapter.executeWorkflowMutation(command);
+
+  assert.equal(deletes, 1);
 });
 
 test("workflow relation compact read-back returns the source Issue updatedAt", async () => {
@@ -1222,7 +1359,7 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
     kind: "create_workflow_relation", writeId: "write-relation", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
     sourceIssueId: "source-1", sourceExpectedRemoteVersion: source.updatedAt,
-    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks",
+    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks", relationState: "present",
   };
   const rawOperations = [];
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
@@ -1273,10 +1410,10 @@ test("workflow relation compact read-back returns the source Issue updatedAt", a
 
 test("workflow relation removal read-back confirms the relation is absent", async () => {
   const command = {
-    kind: "remove_workflow_relation", writeId: "remove-relation", conductorShortHash: "abc123",
+    kind: "create_workflow_relation", writeId: "remove-relation", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "2026-07-16T00:00:06Z",
-    relationId: "relation-1", sourceIssueId: "source-1", sourceExpectedRemoteVersion: "2026-07-16T00:00:04Z",
-    targetIssueId: "target-1", targetExpectedRemoteVersion: "2026-07-16T00:00:05Z", relationKind: "blocks",
+    sourceIssueId: "source-1", sourceExpectedRemoteVersion: "2026-07-16T00:00:04Z",
+    targetIssueId: "target-1", targetExpectedRemoteVersion: "2026-07-16T00:00:05Z", relationKind: "blocks", relationState: "absent",
   };
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     client: {
@@ -1313,7 +1450,7 @@ test("workflow blocked_by read-back maps Linear relation versions to command end
     kind: "create_workflow_relation", writeId: "write-blocked-by", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
     sourceIssueId: "blocked-1", sourceExpectedRemoteVersion: blocked.updatedAt,
-    targetIssueId: "dependency-1", targetExpectedRemoteVersion: dependency.updatedAt, relationKind: "blocked_by",
+    targetIssueId: "dependency-1", targetExpectedRemoteVersion: dependency.updatedAt, relationKind: "blocked_by", relationState: "present",
   };
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async (id) => id === "root-1" ? root : id === "blocked-1" ? blocked : dependency,
@@ -1375,7 +1512,7 @@ test("workflow relation mutation batches source and target scope ancestry", asyn
     kind: "create_workflow_relation", writeId: "write-batch", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt,
     sourceIssueId: "source-1", sourceExpectedRemoteVersion: source.updatedAt,
-    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks",
+    targetIssueId: "target-1", targetExpectedRemoteVersion: target.updatedAt, relationKind: "blocks", relationState: "present",
   });
   assert.equal(rawQueries.length, 1);
   assert.equal(writes, 1);
@@ -1383,7 +1520,7 @@ test("workflow relation mutation batches source and target scope ancestry", asyn
 
 test("workflow issue read-back batches child status facts", async () => {
   const parent = issue({ id: "root-1" });
-  const childDescription = "Implement\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
+  const childDescription = "Implement\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
   const rawQueries = [];
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     issue: async () => parent,
@@ -1432,7 +1569,7 @@ test("workflow issue read-back batches child status facts", async () => {
 
 test("workflow SDK compact preflight validates all update facts in one physical request", async () => {
   const rawQueries = [];
-  const description = "Existing\n\n```symphony\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
+  const description = "Existing\n\n```json\n{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"work-marker\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}\n```";
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
     client: { async rawRequest(query) {
       rawQueries.push(query);
@@ -1462,6 +1599,7 @@ test("workflow SDK compact preflight validates all update facts in one physical 
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1" },
     statusId: "status-progress", title: "Updated", description: "Updated description",
+    isArchived: false, parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "ready" });
@@ -1486,6 +1624,7 @@ test("workflow SDK mutations reject targets outside the requested Root tree", as
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
     target: { targetIssueId: "foreign-1", expectedRemoteVersion: "foreign-version" },
     statusId: "state-todo", title: "Updated", description: "Description",
+    isArchived: false, parentAssignment: { mode: "retain" },
   };
   await assert.rejects(
     adapter.executeWorkflowMutation(command),

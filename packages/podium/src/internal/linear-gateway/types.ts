@@ -203,6 +203,11 @@ export type WorkflowMutationCommand =
       statusId: string;
       title: string;
       description: string;
+      isArchived: boolean;
+      parentAssignment:
+        | { mode: "retain" }
+        | { mode: "set"; parentIssueId: string }
+        | { mode: "clear" };
       order?: number;
     })
   | (WorkflowMutationBase & {
@@ -243,31 +248,13 @@ export type WorkflowMutationCommand =
       threadState: "resolved" | "unresolved";
     })
   | (WorkflowMutationBase & {
-      kind: "archive_workflow_issue" | "restore_workflow_issue";
-      target: {
-        targetIssueId: string;
-        expectedRemoteVersion: string;
-        expectedStatusId?: string;
-        expectedParentIssueId?: string;
-        expectedIsArchived?: boolean;
-      };
-    })
-  | (WorkflowMutationBase & {
       kind: "create_workflow_relation";
       sourceIssueId: string;
       sourceExpectedRemoteVersion: string;
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
       relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
-    })
-  | (WorkflowMutationBase & {
-      kind: "remove_workflow_relation";
-      relationId: string;
-      sourceIssueId: string;
-      sourceExpectedRemoteVersion: string;
-      targetIssueId: string;
-      targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+      relationState: "present" | "absent";
     });
 
 export interface WorkflowMutationReadBack {

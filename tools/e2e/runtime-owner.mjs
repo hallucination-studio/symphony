@@ -7,10 +7,16 @@ import { promisify } from "node:util";
 
 import { bootstrapDevelopmentTokenInstallation } from "@symphony/podium";
 
+import {
+  isForwardableConductorRuntimeEvent,
+  isKnownConductorRuntimeLogEvent,
+} from "./reporter.mjs";
+
 const execFile = promisify(execFileCallback);
 const REPOSITORY_COUNT = 3;
 const MAX_FRAME_BYTES = 1_048_576;
 const PROFILE_READINESS_ATTEMPTS = 10;
+const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 
 export function createPodiumEnvironment({ config, resources, environment = process.env } = {}) {
   assertRuntimeInput({ config, resources });
@@ -72,12 +78,13 @@ export async function startForegroundProductionRuntime({
   if (!project || !identifier(project.projectId) || !identifier(project.delegateActorId) ||
       typeof project.name !== "string" || project.name.length === 0 || !timestamp(project.updatedAt) ||
       typeof bootstrap !== "function" || typeof spawn !== "function" || typeof wait !== "function" ||
-      reporter !== undefined && typeof reporter.childExit !== "function") {
+      reporter !== undefined && (typeof reporter.childExit !== "function" || typeof reporter.failure !== "function")) {
     throw stableError("foreground_e2e_runtime_input_invalid");
   }
   const databasePath = path.join(resources.podiumDataRoot, "podium.db");
   let podium;
   let host;
+  let conductors = [];
   let closed = false;
   try {
     const installation = await bootstrap({
@@ -105,22 +112,16 @@ export async function startForegroundProductionRuntime({
       reporter,
     });
     podium.hostChannel.setHandler(host.handle);
-    const conductors = [];
-    for (const repository of resources.repositories) {
-      const created = await podium.client.command({
-        kind: "create_conductor",
-        project_id: project.projectId,
-        repository: {
-          repository_handle: repository.repositoryHandle,
-          display_name: repository.repositoryDisplayName,
-          base_branch: repository.baseBranch,
-        },
-      });
-      const conductor = createdConductor(created, repository, installation);
-      await podium.client.command({ kind: "start_conductor", conductor_id: conductor.conductorId });
-      await provisionProfile({ client: podium.client, conductor, config, wait });
-      conductors.push(conductor);
-    }
+    conductors = await startConfiguredConductors({
+      repositories: resources.repositories,
+      client: podium.client,
+      host,
+      projectId: project.projectId,
+      installation,
+      config,
+      wait,
+      onRunning: (conductor) => conductors.push(conductor),
+    });
     return Object.freeze({
       conductors: Object.freeze(conductors),
       async killAndRestartConductor({ conductorId } = {}) {
@@ -135,14 +136,76 @@ export async function startForegroundProductionRuntime({
       async close() {
         if (closed) return;
         closed = true;
-        await closeRuntime({ podium, host, conductors, reporter });
+        await closeForegroundProductionRuntime({ podium, host, conductors, reporter });
       },
     });
   } catch (error) {
-    await closeRuntime({ podium, host, conductors: [], reporter });
+    reporter?.failure({ component: "runtime", reasonCode: runtimeFailureReason(error) });
+    await closeForegroundProductionRuntime({ podium, host, conductors, reporter });
     if (error?.code?.startsWith("foreground_e2e_")) throw error;
     throw stableError("foreground_e2e_runtime_start_failed");
   }
+}
+
+export async function startConfiguredConductors({
+  repositories,
+  client,
+  host,
+  projectId,
+  installation,
+  config,
+  wait = delay,
+  provision = provisionProfile,
+  onRunning,
+} = {}) {
+  if (!Array.isArray(repositories) || repositories.length !== REPOSITORY_COUNT ||
+      !repositories.every((repository) => repository && identifier(repository.repositoryHandle) &&
+        typeof repository.repositoryIdentity === "string" && boundedPath(repository.repositoryRoot) &&
+        branch(repository.baseBranch) && typeof repository.repositoryDisplayName === "string") ||
+      !client || typeof client.command !== "function" || !host || typeof host.runningConductor !== "function" ||
+      !identifier(projectId) || !installation || !identifier(installation.installationId) ||
+      !identifier(installation.organizationId) || !config || typeof config !== "object" ||
+      typeof wait !== "function" || typeof provision !== "function" ||
+      onRunning !== undefined && typeof onRunning !== "function") {
+    throw stableError("foreground_e2e_conductor_start_input_invalid");
+  }
+
+  const bindings = [];
+  for (const repository of repositories) {
+    const created = await client.command({
+      kind: "create_conductor",
+      project_id: projectId,
+      repository: {
+        repository_handle: repository.repositoryHandle,
+        display_name: repository.repositoryDisplayName,
+        base_branch: repository.baseBranch,
+      },
+    });
+    bindings.push(createdConductor(created, repository, installation));
+  }
+
+  const running = await Promise.all(bindings.map(async (conductor) => {
+    const started = await client.command({ kind: "start_conductor", conductor_id: conductor.conductorId });
+    if (!started || typeof started !== "object" || started.kind !== "conductor_command_completed" ||
+        started.conductor_id !== conductor.conductorId || started.command_kind !== "start_conductor") {
+      throw stableError("foreground_e2e_conductor_start_invalid");
+    }
+    const active = host.runningConductor({ conductorId: conductor.conductorId });
+    if (!active || !boundedPath(active.dataRoot)) {
+      throw stableError("foreground_e2e_conductor_start_invalid");
+    }
+    const value = Object.freeze({ ...conductor, dataRoot: active.dataRoot });
+    onRunning?.(value);
+    return value;
+  }));
+  const profiles = await Promise.all(running.map((conductor) => provision({ client, conductor, config, wait })));
+  return Object.freeze(running.map((conductor, index) => {
+    const profile = profiles[index];
+    if (!profile || !identifier(profile.profileId)) {
+      throw stableError("foreground_e2e_profile_activation_invalid");
+    }
+    return Object.freeze({ ...conductor, profileId: profile.profileId });
+  }));
 }
 
 export async function closeOwnedProcess(child, { timeoutMs = 5_000 } = {}) {
@@ -228,7 +291,7 @@ async function startPodiumBackend({ config, resources, environment, spawn, repor
     await closeOwnedProcess(child);
     throw stableError("foreground_e2e_podium_process_invalid");
   }
-  drain(child.stderr);
+  const stderrReason = collectSanitizedChildReason(child.stderr, "process_exited");
   const close = async () => {
     client.close();
     hostChannel.close();
@@ -237,8 +300,11 @@ async function startPodiumBackend({ config, resources, environment, spawn, repor
   };
   const client = createPodiumClient({ input: child.stdout, output: child.stdin });
   const hostChannel = createFramedChannel({ stream: child.stdio[4] });
-  const conductorChannel = createConductorMultiplexer({ stream: child.stdio[3] });
-  child.once("exit", () => reporter?.childExit({ component: "podium", reasonCode: "process_exited" }));
+  const conductorChannel = createConductorMultiplexer({
+    stream: child.stdio[3],
+    onFailure: (reasonCode) => reporter?.failure({ component: "conductor-multiplexer", reasonCode }),
+  });
+  child.once("exit", () => reporter?.childExit({ component: "podium", reasonCode: stderrReason() }));
   child.once("error", () => reporter?.childExit({ component: "podium", reasonCode: "process_start_failed" }));
   return Object.freeze({ child, client, hostChannel, conductorChannel, close });
 }
@@ -309,13 +375,26 @@ function createDesktopHost({
             stdio: ["ignore", "pipe", "pipe", "pipe"],
           });
           const channel = child.stdio?.[3];
-          if (!channel) {
+          if (!channel || !child.stdout || !child.stderr) {
             await closeOwnedProcess(child);
             return protocolFailure("conductor_start_invalid");
           }
-          drain(child.stdout);
-          drain(child.stderr);
-          const active = { conductor, instanceId, child, channel, exitReported: false, exitReportPromise: undefined, exitReason: undefined };
+          const runtimeLogs = createConductorRuntimeLogForwarder({
+            conductorId: conductor.conductorId,
+            stdout: child.stdout,
+            stderr: child.stderr,
+            reporter,
+          });
+          const active = {
+            conductor,
+            instanceId,
+            child,
+            channel,
+            runtimeLogs,
+            exitReported: false,
+            exitReportPromise: undefined,
+            exitReason: undefined,
+          };
           conductors.set(conductor.conductorId, active);
           podiumChannel.add(active);
           child.once("exit", () => {
@@ -324,6 +403,7 @@ function createDesktopHost({
             reporter?.childExit({ component: "conductor", reasonCode: "process_exited" });
             void reportExit(active, active.exitReason ?? "conductor_process_exited").catch(() => undefined);
           });
+          child.once("close", () => runtimeLogs.close());
           child.once("error", () => reporter?.childExit({ component: "conductor", reasonCode: "process_start_failed" }));
           return { kind: "host_operation_completed", operation: "start_conductor" };
         }
@@ -364,7 +444,14 @@ function createDesktopHost({
     conductors.clear();
     await Promise.allSettled(active.map((entry) => stop(entry, "conductor_process_cleanup")));
   };
-  return Object.freeze({ handle, close, killAndObserveConductor });
+  return Object.freeze({ handle, close, killAndObserveConductor, runningConductor });
+
+  function runningConductor({ conductorId } = {}) {
+    if (!identifier(conductorId)) throw stableError("foreground_e2e_runtime_conductor_lookup_invalid");
+    const active = conductors.get(conductorId);
+    if (!active) throw stableError("foreground_e2e_runtime_conductor_lookup_invalid");
+    return active.conductor;
+  }
 
   async function stop(active, reasonCode) {
     podiumChannel.remove(active);
@@ -414,7 +501,13 @@ function createPodiumClient({ input, output }) {
           });
       }).then((response) => {
         if (response && typeof response === "object" && typeof response.code === "string") {
-          throw stableError("foreground_e2e_podium_command_failed");
+          const command = safeReasonCode(body?.kind) ? body.kind : "unknown";
+          const reason = safeReasonCode(response.sanitized_reason)
+            ? response.sanitized_reason
+            : safeReasonCode(response.code)
+              ? response.code
+              : "podium_command_failed";
+          throw stableError(`foreground_e2e_podium_${command}_${reason}`.slice(0, 121));
         }
         return response;
       });
@@ -495,27 +588,39 @@ export function createFramedChannel({ stream }) {
   }
 }
 
-function createConductorMultiplexer({ stream }) {
+export function createConductorMultiplexer({ stream, onFailure } = {}) {
   const byConductorId = new Map();
-  const pending = new Map();
+  const pendingConductorRequests = new Map();
+  const pendingPodiumRequests = new Map();
   const serial = createSerialWriter(stream);
   let closed = false;
   let podiumReader;
-  const fail = () => {
+  const fail = (error) => {
     if (closed) return;
     closed = true;
+    onFailure?.(multiplexerFailureReason(error));
     podiumReader?.close();
     for (const active of byConductorId.values()) active.reader.close();
     byConductorId.clear();
-    pending.clear();
+    pendingConductorRequests.clear();
+    pendingPodiumRequests.clear();
   };
   podiumReader = createFrameReader(stream, async (frame) => {
-    const target = pending.get(frame.message.request_id) ??
+    const pending = pendingConductorRequests.get(frame.message.request_id);
+    const target = pending?.active ??
       (typeof frame.message.body?.conductor_id === "string"
         ? byConductorId.get(frame.message.body.conductor_id)
         : undefined);
     if (!target) throw stableError("foreground_e2e_conductor_route_missing");
-    pending.delete(frame.message.request_id);
+    if (pending) {
+      pendingConductorRequests.delete(frame.message.request_id);
+      await writeFrame(target.channel, {
+        ...frame.message,
+        request_id: pending.conductorRequestId,
+      }, frame.secret);
+      return;
+    }
+    pendingPodiumRequests.set(conductorRouteKey(target.conductor.conductorId, frame.message.request_id), target);
     await writeFrame(target.channel, frame.message, frame.secret);
   }, fail);
   return Object.freeze({
@@ -525,8 +630,17 @@ function createConductorMultiplexer({ stream }) {
         throw stableError("foreground_e2e_conductor_route_invalid");
       }
       const reader = createFrameReader(active.channel, async (frame) => {
-        pending.set(frame.message.request_id, active);
-        await serial.write(frame.message, frame.secret);
+        const responseRoute = conductorRouteKey(active.conductor.conductorId, frame.message.request_id);
+        if (pendingPodiumRequests.delete(responseRoute)) {
+          await serial.write(frame.message, frame.secret);
+          return;
+        }
+        const transportRequestId = `e2e-route-${randomUUID()}`;
+        pendingConductorRequests.set(transportRequestId, {
+          active,
+          conductorRequestId: frame.message.request_id,
+        });
+        await serial.write({ ...frame.message, request_id: transportRequestId }, frame.secret);
       }, fail);
       byConductorId.set(active.conductor.conductorId, { ...active, reader });
     },
@@ -535,14 +649,29 @@ function createConductorMultiplexer({ stream }) {
       if (!current) return;
       current.reader.close();
       byConductorId.delete(active.conductor.conductorId);
-      for (const [requestId, target] of pending) {
-        if (target === active || target.child === active.child) pending.delete(requestId);
+      for (const [requestId, pending] of pendingConductorRequests) {
+        if (pending.active === active || pending.active.child === active.child) {
+          pendingConductorRequests.delete(requestId);
+        }
+      }
+      for (const [route, target] of pendingPodiumRequests) {
+        if (target === active || target.child === active.child) pendingPodiumRequests.delete(route);
       }
     },
     close() {
       fail();
     },
   });
+}
+
+function conductorRouteKey(conductorId, requestId) {
+  return `${conductorId}\u0000${requestId}`;
+}
+
+function multiplexerFailureReason(error) {
+  return error?.code?.startsWith("foreground_e2e_")
+    ? error.code
+    : "foreground_e2e_conductor_multiplexer_failed";
 }
 
 function createFrameReader(stream, onFrame, onFailure = () => {}) {
@@ -631,18 +760,62 @@ function createSerialWriter(stream) {
   });
 }
 
-async function closeRuntime({ podium, host, conductors, reporter }) {
+export async function closeForegroundProductionRuntime({
+  podium,
+  host,
+  conductors,
+  reporter,
+  timeoutMs = GRACEFUL_STOP_TIMEOUT_MS,
+} = {}) {
   if (!podium) return;
+  if (!podium.client || typeof podium.client.command !== "function" || typeof podium.close !== "function" ||
+      host !== undefined && typeof host.close !== "function" || !Array.isArray(conductors) ||
+      conductors.some(({ conductorId }) => !identifier(conductorId)) ||
+      reporter !== undefined && typeof reporter.childExit !== "function" ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw stableError("foreground_e2e_runtime_cleanup_input_invalid");
+  }
   try {
-    for (const conductor of conductors) {
-      await podium.client.command({ kind: "stop_conductor", conductor_id: conductor.conductorId });
-    }
+    await bounded(
+      Promise.all(conductors.map((conductor) => podium.client.command({
+        kind: "stop_conductor",
+        conductor_id: conductor.conductorId,
+      }))),
+      timeoutMs,
+    );
   } catch {
     reporter?.childExit({ component: "podium", reasonCode: "graceful_stop_failed" });
   } finally {
-    await host?.close?.();
-    await podium.close();
+    let hostError;
+    try {
+      await bounded(host?.close?.(), timeoutMs);
+    } catch (error) {
+      hostError = error;
+    }
+    let podiumError;
+    try {
+      await bounded(podium.close(), timeoutMs);
+    } catch (error) {
+      podiumError = error;
+    }
+    if (hostError || podiumError) throw stableError("foreground_e2e_runtime_cleanup_failed");
   }
+}
+
+function bounded(operation, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(stableError("foreground_e2e_graceful_stop_timeout")), timeoutMs);
+    Promise.resolve(operation).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function createdConductor(value, repository, installation) {
@@ -726,6 +899,7 @@ async function provisionProfile({ client, conductor, config, wait }) {
   if (!activated.isActive || activated.profileId !== created.profileId || activated.readiness !== "ready") {
     throw stableError("foreground_e2e_profile_activation_invalid");
   }
+  return activated;
 }
 
 function profile(value) {
@@ -773,8 +947,143 @@ function secretLengthFor(body) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 16_384 ? value : 0;
 }
 
-function drain(stream) {
-  stream?.on?.("data", () => {});
+export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr, reporter } = {}) {
+  if (!identifier(conductorId) || !readableStream(stdout) || !readableStream(stderr) ||
+      reporter !== undefined && typeof reporter.runtimeDiagnostic !== "function") {
+    throw stableError("foreground_e2e_conductor_log_forwarder_input_invalid");
+  }
+  let closed = false;
+  let invalidJsonReported = false;
+  let invalidFieldsReported = false;
+  let unknownEventReported = false;
+  const readStdout = createRuntimeLogReader((line) => forward(line));
+  const readStderr = createRuntimeLogReader((line) => forward(line));
+  stdout.on("data", readStdout);
+  stderr.on("data", readStderr);
+  return Object.freeze({
+    close() {
+      if (closed) return;
+      closed = true;
+      removeDataListener(stdout, readStdout);
+      removeDataListener(stderr, readStderr);
+    },
+  });
+
+  function forward(line) {
+    if (closed || reporter === undefined) return;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      if (!invalidJsonReported) {
+        invalidJsonReported = true;
+        reporter.runtimeDiagnostic({
+          component: "conductor",
+          conductorId,
+          level: "error",
+          runtimeEvent: "conductor_runtime_log_invalid_json",
+          reason: "invalid_json",
+        });
+      }
+      return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      reportInvalidFields();
+      return;
+    }
+    if (!isKnownConductorRuntimeLogEvent(value.event)) {
+      if (!unknownEventReported) {
+        unknownEventReported = true;
+        reporter.runtimeDiagnostic({
+          component: "conductor",
+          conductorId,
+          level: value.level === "error" ? "error" : "warning",
+          runtimeEvent: "conductor_runtime_log_unknown_event",
+          reason: "unknown_event",
+        });
+      }
+      return;
+    }
+    if (!isForwardableConductorRuntimeEvent(value.event)) return;
+    const diagnostic = {
+      component: "conductor",
+      conductorId,
+      level: value.level,
+      runtimeEvent: value.event,
+      ...(value.root_issue_id === undefined ? {} : { rootIssueId: value.root_issue_id }),
+      ...(value.reason === undefined && value.sanitized_reason === undefined
+        ? {}
+        : { reason: value.reason ?? value.sanitized_reason }),
+      ...(value.failure_code === undefined ? {} : { failureCode: value.failure_code }),
+      ...(value.phase === undefined ? {} : { phase: value.phase }),
+    };
+    if (!runtimeLogDiagnostic(diagnostic)) {
+      reportInvalidFields();
+      return;
+    }
+    reporter.runtimeDiagnostic(diagnostic);
+
+    function reportInvalidFields() {
+      if (invalidFieldsReported) return;
+      invalidFieldsReported = true;
+      reporter.runtimeDiagnostic({
+        component: "conductor",
+        conductorId,
+        level: "error",
+        runtimeEvent: "conductor_runtime_log_invalid_fields",
+        reason: "invalid_fields",
+      });
+    }
+  }
+}
+
+function createRuntimeLogReader(onLine) {
+  let buffer = "";
+  return (chunk) => {
+    buffer = `${buffer}${Buffer.from(chunk).toString("utf8")}`.slice(-16_384);
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.length > 0) onLine(line);
+    }
+  };
+}
+
+function readableStream(value) {
+  return value && typeof value.on === "function" &&
+    (typeof value.off === "function" || typeof value.removeListener === "function");
+}
+
+function removeDataListener(stream, listener) {
+  if (typeof stream.off === "function") stream.off("data", listener);
+  else stream.removeListener("data", listener);
+}
+
+function runtimeLogDiagnostic(value) {
+  return value.component === "conductor" && identifier(value.conductorId) &&
+    (value.level === "info" || value.level === "warning" || value.level === "error") &&
+    isForwardableConductorRuntimeEvent(value.runtimeEvent) &&
+    (value.rootIssueId === undefined || identifier(value.rootIssueId)) &&
+    (value.reason === undefined || safeReasonCode(value.reason)) &&
+    (value.failureCode === undefined || safeReasonCode(value.failureCode)) &&
+    (value.phase === undefined || safeReasonCode(value.phase));
+}
+
+function collectSanitizedChildReason(stream, fallback) {
+  let reason = fallback;
+  let buffer = "";
+  stream?.on?.("data", (chunk) => {
+    buffer = `${buffer}${Buffer.from(chunk).toString("utf8")}`.slice(-8_192);
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      try {
+        const value = JSON.parse(line);
+        if (safeReasonCode(value?.sanitized_reason)) reason = value.sanitized_reason;
+      } catch {}
+    }
+  });
+  return () => reason;
 }
 
 function baseChildEnvironment(environment) {
@@ -914,6 +1223,14 @@ function branch(value) {
 
 function identifier(value) {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
+}
+
+function safeReasonCode(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value);
+}
+
+function runtimeFailureReason(error) {
+  return safeReasonCode(error?.code) ? error.code : "foreground_e2e_runtime_start_failed";
 }
 
 function shortHash(value) {

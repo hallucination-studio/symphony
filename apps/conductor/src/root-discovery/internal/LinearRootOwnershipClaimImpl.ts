@@ -65,6 +65,8 @@ export class LinearRootOwnershipClaimImpl implements RootOwnershipClaimInterface
         statusId: status.status_id,
         title: root.title,
         description: root.description,
+        isArchived: root.is_archived,
+        parentAssignment: { mode: "retain" },
       });
       requireApplied(outcome, "root_ownership_state_write_failed");
       tree = await this.dependencies.linear.readWorkflowIssueTree(input.root.issueId);

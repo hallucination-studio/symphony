@@ -39,7 +39,7 @@ import {
   decodeConductorPerformerRootReconcilerFailureRecord,
   type JsonValue,
 } from "@symphony/contracts";
-import { parseSymphonyRecordBlock } from "@symphony/contracts/managed-record";
+import { parseManagedRecordBlock } from "@symphony/contracts/managed-record";
 import type { RootDirective, UserCommentReplySource } from "../api/RootReconciliationContracts.js";
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -55,7 +55,7 @@ class InvalidRecord extends Error {
 
 export function parseManagedRecord(source: string): ParseResult<ManagedRecord> {
   try {
-    const block = parseSymphonyRecordBlock(source);
+    const block = parseManagedRecordBlock(source);
     if (!block.ok) return block;
     return { ok: true, value: decodeRecord(block.record) };
   } catch (error) {
@@ -64,7 +64,7 @@ export function parseManagedRecord(source: string): ParseResult<ManagedRecord> {
 }
 
 export function managedMarkdown(source: string): string {
-  const block = parseSymphonyRecordBlock(source);
+  const block = parseManagedRecordBlock(source);
   if (!block.ok) throw new Error(block.error);
   return block.markdown;
 }
@@ -75,7 +75,7 @@ export function serializeManagedRecord(record: unknown, markdown?: string): stri
     const decoded = decodeRecord(payload);
     if (decoded.kind !== (record as { kind?: unknown }).kind) fail("managed_record_kind_invalid");
     const rendered = markdown === undefined ? managedRecordSummary(decoded.kind) : renderedMarkdown(markdown);
-    return `${rendered}\n\n\`\`\`symphony\n${JSON.stringify(payload)}\n\`\`\``;
+    return `${rendered}\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``;
   } catch (error) {
     if (error instanceof InvalidRecord) throw new Error(error.code);
     throw new Error("managed_record_payload_invalid");

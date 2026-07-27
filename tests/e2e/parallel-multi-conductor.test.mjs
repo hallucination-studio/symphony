@@ -14,6 +14,12 @@ test("parallel Case concurrently creates its frozen routed Roots and approves on
       calls.push({ kind: "create_root", input });
       return new Promise((resolve) => { pendingRootCreates.push(resolve); });
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForPlanReviewAction(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return {
@@ -44,6 +50,10 @@ test("parallel Case concurrently creates its frozen routed Roots and approves on
   assert.deepEqual(calls, [
     { kind: "create_root", input: rootCreateInput("parallel-a-root", rootCreationsByRootKey["parallel-a-root"]) },
     { kind: "create_root", input: rootCreateInput("parallel-b-root", rootCreationsByRootKey["parallel-b-root"]) },
+    { kind: "assert_undelegated", input: { rootIssueId: "parallel-a-root-id" } },
+    { kind: "assert_undelegated", input: { rootIssueId: "parallel-b-root-id" } },
+    { kind: "delegate_root", input: { rootIssueId: "parallel-a-root-id" } },
+    { kind: "delegate_root", input: { rootIssueId: "parallel-b-root-id" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-a-root-id", terminalStatus: "Approved" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-b-root-id", terminalStatus: "Approved" } },
     { kind: "approve_plan_review", input: { issueId: "parallel-a-action", terminalStatus: "Approved", stateId: "approved-state" } },
@@ -71,6 +81,8 @@ test("parallel Case rejects noncanonical definitions, incomplete topology bindin
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "approved-state" }; },
     async setHumanActionTerminalStatus() {},
   };
@@ -93,7 +105,7 @@ test("parallel Case rejects noncanonical definitions, incomplete topology bindin
   );
 });
 
-test("parallel Case forwards cancellation only to the independent Plan Review waits", async () => {
+test("parallel Case forwards cancellation to every independent Linear Human operation", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "parallel_multi_conductor");
   const abortController = new AbortController();
   const waits = [];
@@ -104,6 +116,8 @@ test("parallel Case forwards cancellation only to the independent Plan Review wa
         ? { rootIssueId: "parallel-a-root-id", identifier: "ENG-1" }
         : { rootIssueId: "parallel-b-root-id", identifier: "ENG-2" };
     },
+    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
+    async delegateRootIssue(input) { waits.push(input); },
     async waitForPlanReviewAction(input) {
       waits.push(input);
       return { actionIssueId: `${input.rootIssueId}-action`, terminalStatusId: "approved-state" };
@@ -122,13 +136,17 @@ test("parallel Case forwards cancellation only to the independent Plan Review wa
   });
 
   assert.deepEqual(waits, [
+    { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
+    { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
+    { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
+    { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
     { rootIssueId: "parallel-a-root-id", terminalStatus: "Approved", signal: abortController.signal },
     { rootIssueId: "parallel-b-root-id", terminalStatus: "Approved", signal: abortController.signal },
   ]);
 });
 
-function rootCreation(routingLabelId, conductorId, performerProfileId, repositoryRoot) {
-  return { teamId: "team-1", projectId: "project-1", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, repositoryRoot };
+function rootCreation(routingLabelId, conductorId, performerProfileId, worktreeDirectory) {
+  return { teamId: "team-1", projectId: "project-1", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
 }
 
 function rootCreateInput(rootKey, { teamId, projectId, routingLabelId, rootStatusId }) {
@@ -139,9 +157,19 @@ function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, planRev
   routingLabelId,
   conductorId,
   performerProfileId,
-  repositoryRoot,
+  worktreeDirectory,
 }) {
-  return { rootKey, conductorRef, repositoryRef, rootIssueId, planReviewActionIssueId, routingLabelId, conductorId, performerProfileId, repositoryRoot };
+  return {
+    rootKey,
+    conductorRef,
+    repositoryRef,
+    rootIssueId,
+    planReviewActionIssueId,
+    routingLabelId,
+    conductorId,
+    performerProfileId,
+    repositoryRoot: `${worktreeDirectory}/${rootIssueId}`,
+  };
 }
 
 function hasCode(code) {

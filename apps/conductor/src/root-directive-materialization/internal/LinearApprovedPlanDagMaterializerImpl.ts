@@ -190,6 +190,7 @@ export class LinearApprovedPlanDagMaterializerImpl {
       targetIssueId: target.issue_id,
       targetExpectedRemoteVersion: target.remote_version,
       relationKind,
+      relationState: "present",
     });
     if (outcome.kind !== "applied" && outcome.kind !== "already_applied") return `approved_plan_dag_relation_${outcome.kind}`;
     const view = await refreshView(this.linear, initialView);
@@ -226,6 +227,8 @@ export class LinearApprovedPlanDagMaterializerImpl {
       statusId: status.status_id,
       title: target.title,
       description: target.description,
+      isArchived: target.is_archived,
+      parentAssignment: { mode: "retain" },
       order: target.order,
     };
     const outcome = await this.linear.mutateWorkflow(command);

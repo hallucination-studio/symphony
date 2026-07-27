@@ -34,6 +34,13 @@ Conductor分页读取routed Root headers，包括带ownership record的terminal 
 或其他status就使该修改绕过Root Reconciler。Header包含Priority、规范化的`updatedAt`、blockers、routing和bounded
 ownership/source identity，不包含完整Cycle descendants或任何current Cycle/ready node副本。
 
+Root首次进入候选集还有一个独立且必须先满足的原生准入条件：用户已经在Linear将该Root的`delegate_id`设置为
+当前Binding验证过的Symphony actor。Podium只投影为`is_delegated_to_symphony`，Conductor只消费该闭合事实，不能
+创建、补偿或推断delegation。没有matching ownership record的undelegated Root必须被发现阶段排除；因此它不得被claim、
+不得变更status、不得写managed record/timeline/reply、不得创建Git workspace，也不得打开或调用Performer。已拥有
+matching ownership的Root可继续恢复，即使随后native delegation已被用户撤销；撤销本身作为owned Root的普通当前事实
+进入Root Reconciler，而不是将它重新解释为未准入。
+
 blocker是eligibility gate，不是可排序的priority：存在unresolved blocker或Root dependency cycle的Root不进入本次
 admission候选。其余候选的唯一排序为：
 
@@ -83,7 +90,8 @@ actor kind，并在可证明时提供Symphony stable write correlation；coverag
 ```text
 wake / periodic poll
 -> resolve Project and current pool
--> list and order routed Root headers
+-> list routed Root headers and discard unowned Roots not natively delegated by the user
+-> order the remaining eligible headers
 -> lazily read candidate complete Trees + Git
 -> reject only ownership-unsafe, out-of-scope or incomplete candidates
 -> establish barrier for every Root with pending user inputs
@@ -143,7 +151,7 @@ archive/restore使用Linear原生archive API和explicit precondition。归档后
 ## 8. Timeline comment materialization
 
 业务mutation和accepted Result read-back后发布typed timeline event。Root/Cycle comment subscriber通过Linear
-Gateway创建对应Issue comment。每个event生成一条同时包含用户Markdown和唯一`symphony` code block的comment。
+Gateway创建对应Issue comment。每个event生成一条同时包含用户Markdown和唯一`json` code block的comment。
 Root Reconciler对普通human comment的reply由matching `RootDirective`
 materializer写回原Issue。业务模块不直接拼接comment；任何required comment create/read-back失败都停止当前Root，
 记录correlated error，并在恢复后按同一stable ID重试，成功前不推进下一动作。规则见

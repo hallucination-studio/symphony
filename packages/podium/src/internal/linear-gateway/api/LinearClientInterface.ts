@@ -110,18 +110,6 @@ export interface LinearClientInterface {
     projectId: string;
   }): Promise<ConductorProjectPoolValue>;
 
-  createRootIssue(input: {
-    projectId: string;
-    conductorShortHash: string;
-    title: string;
-    description: string;
-    priority?: LinearPriority;
-  }): Promise<{
-    rootIssueId: string;
-    identifier: string;
-    projectId: string;
-  }>;
-
   reconcileConductorProjectPool(input: {
     plan: Extract<ConductorProjectPoolPlan, { kind: "ready" }>;
     authorized: boolean;

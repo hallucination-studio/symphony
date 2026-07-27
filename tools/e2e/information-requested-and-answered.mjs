@@ -8,13 +8,15 @@ export async function runInformationRequestedAndAnsweredCase({ definition, human
 
   const rootKey = definition.rootTopology[0].rootKey;
   const answer = frozenAnswer(definition);
-  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation });
+  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation, ...(signal ? { signal } : {}) });
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_information_root_create_invalid");
   }
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
 
   const action = await waitForClarification({ human, rootIssueId: root.rootIssueId, signal });
-  const comment = await human.createComment({ issueId: action.actionIssueId, body: answer.body });
+  const comment = await human.createComment({ issueId: action.actionIssueId, body: answer.body, ...(signal ? { signal } : {}) });
   if (!identifier(comment?.commentId) || comment.issueId !== action.actionIssueId) {
     throw stableError("foreground_e2e_information_answer_comment_invalid");
   }
@@ -22,6 +24,7 @@ export async function runInformationRequestedAndAnsweredCase({ definition, human
     issueId: action.actionIssueId,
     terminalStatus: "Answered",
     stateId: action.terminalStatusId,
+    ...(signal ? { signal } : {}),
   });
 
   const replacementAction = await waitForPlanReview({ human, rootIssueId: root.rootIssueId, signal });
@@ -85,6 +88,7 @@ function assertDefinition(definition) {
 
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForClarificationAction !== "function" || typeof human.createComment !== "function" ||
       typeof human.setHumanActionTerminalStatus !== "function" || typeof human.waitForPlanReviewAction !== "function" ||
       !rootCreation || !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||

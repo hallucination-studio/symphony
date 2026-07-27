@@ -125,11 +125,11 @@ function root(
     updatedAt,
     projectId: "project-1",
     parentIssueId: null,
-    isDelegatedToSymphony: true,
     priority,
     order,
     blockers,
     rootConductorLabels: [],
+    isDelegatedToSymphony: true,
   };
 }
 

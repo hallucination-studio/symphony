@@ -489,6 +489,12 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
     deadlineMs: 30_000,
   });
   const input = openInput();
+  input.bootstrap.sourceManifest.push({
+    sourceKind: "linear_status_catalog",
+    sourceId: "status-catalog-1",
+    sourceVersion: "status-catalog-v1",
+    actorKind: "linear_integration",
+  });
 
   const opened = await client.openRootReconciler(input);
   assert.equal(opened.initialResult.kind, "directive");
@@ -504,6 +510,12 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   const convergence = root.convergence as Record<string, unknown>;
   assert.equal((convergence.policy as Record<string, unknown>).policy_id, "root-convergence-policy-1");
   assert.equal((convergence.view as Record<string, unknown>).active_cycle_repair_attempts, 0);
+  assert.deepEqual((sent.bootstrap as Record<string, unknown>).source_manifest, [{
+    source_kind: "linear_status_catalog",
+    source_id: "status-catalog-1",
+    source_version: "status-catalog-v1",
+    actor_kind: "linear_integration",
+  }]);
 });
 
 test("agent client decodes a closed Root Reconciler failure without retaining a session", async () => {

@@ -111,6 +111,7 @@ test("every frozen condition has a durable contradictory fixture", () => {
 test("the scheduler starts every Case, preserves all settlements, and final-reads failed Cases", async () => {
   const started = [];
   const finalReads = [];
+  const observations = [];
   const scopes = new Map();
   const definitionById = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, definition]));
 
@@ -127,6 +128,11 @@ test("the scheduler starts every Case, preserves all settlements, and final-read
       assert.equal(scope, scopes.get(definition.caseId));
       return incompleteEvidence(definition.caseId, [`root-${definition.caseId}`]);
     },
+    reporter: {
+      caseObservation(input) {
+        observations.push(input);
+      },
+    },
     now: sequencedClock(),
   });
 
@@ -134,7 +140,15 @@ test("the scheduler starts every Case, preserves all settlements, and final-read
   assert.deepEqual(finalReads.sort(), started.sort());
   assert.equal(summary.exitCode, 1);
   assert.equal(summary.cases.length, FOREGROUND_E2E_CASES.length);
-  assert.equal(summary.cases.find(({ caseId }) => caseId === "plan_rejected_and_replanned").verdict, "incomplete");
+  const rejectedPlan = summary.cases.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
+  assert.equal(rejectedPlan.verdict, "incomplete");
+  assert.equal(rejectedPlan.driverFailureCode, "driver_failed");
+  assert.deepEqual(observations.find(({ caseId, observation }) =>
+    caseId === "plan_rejected_and_replanned" && observation === "failed"), {
+    caseId: "plan_rejected_and_replanned",
+    observation: "failed",
+    detail: "driver_failed",
+  });
   assert.equal(new Set(scopes.values()).size, FOREGROUND_E2E_CASES.length);
   assert.ok([...scopes.values()].every(({ signal }) => signal.aborted === false));
   for (const item of summary.cases) {
@@ -142,6 +156,43 @@ test("the scheduler starts every Case, preserves all settlements, and final-read
     assert.ok(["passed", "failed", "incomplete"].includes(item.verdict));
     assert.equal(Array.isArray(item.assertions), true);
   }
+});
+
+test("the scheduler settles an unresponsive Case driver when its scope deadline aborts", async () => {
+  const controllers = [];
+  const finalReads = [];
+  const pending = runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    runCase: () => new Promise(() => {}),
+    readFinalEvidence: async ({ definition }) => {
+      finalReads.push(definition.caseId);
+      return incompleteEvidence(definition.caseId, [`root-${definition.caseId}`]);
+    },
+    createCaseScope: ({ definition }) => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      queueMicrotask(() => controller.abort("deadline"));
+      return {
+        caseId: definition.caseId,
+        signal: controller.signal,
+        deadlineExceeded: () => true,
+        dispose() {},
+      };
+    },
+    now: sequencedClock(),
+  });
+
+  const outcome = await Promise.race([
+    pending.then((summary) => ({ kind: "settled", summary })),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "timed_out" }), 50)),
+  ]);
+
+  assert.equal(outcome.kind, "settled");
+  assert.equal(outcome.summary.exitCode, 1);
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASE_IDS.slice().sort());
+  assert.ok(outcome.summary.cases.every((item) =>
+    item.verdict === "incomplete" && item.driverFailureCode === "foreground_e2e_case_deadline_exceeded"));
+  assert.ok(controllers.every((controller) => controller.signal.aborted));
 });
 
 test("a Case deadline cannot turn complete evidence into success", async () => {
@@ -523,6 +574,9 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
     case "work_before_approval":
       findRecord(root, "stage_execution", (record) => record.stage === "work").record.started_at = at(1);
       return value;
+    case "cycle_plan_work_verify_tree_materialized":
+      root.issues.find(({ id }) => id === "plan-issue").parentId = root.rootIssueId;
+      return value;
     case "duplicate_or_synthetic_completion":
       appendRecord(root, structuredClone(findRecord(root, "delivery").record));
       return value;
@@ -595,6 +649,11 @@ function contradictoryFixture(definition, assertionId, fixtureInput) {
     case "latest_ready_root_runs_next": {
       const remaining = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.preemption?.remainingRootId);
       findRecord(remaining, "stage_execution", (record) => record.stage === "plan").record.started_at = at(30);
+      return value;
+    }
+    case "higher_priority_roots_run_before_lower_priority_root": {
+      const low = evidence.roots.find(({ rootIssueId }) => rootIssueId === value.context.preemption?.lowPriorityRootId);
+      findRecord(low, "stage_execution", (record) => record.stage === "plan").record.started_at = at(0);
       return value;
     }
     case "remaining_ready_root_progresses": {
@@ -871,9 +930,9 @@ function preemptionFixture(definition) {
   const byKey = Object.fromEntries(definition.rootTopology.map(({ rootKey }, index) => [rootKey, `preemption-root-${index + 1}`]));
   const roots = definition.rootTopology.map(({ rootKey }) => deliveredRoot(definition, rootKey, byKey[rootKey], {
     conductorId: "shared-conductor",
-    started: rootKey === "inflight-root" ? 1 : rootKey === "remaining-root" ? 30 : 60,
-    completed: rootKey === "inflight-root" ? 20 : rootKey === "remaining-root" ? 50 : 80,
-    rootUpdatedAt: at(rootKey === "remaining-root" ? 25 : rootKey === "touched-root" ? 24 : 22),
+    started: rootKey === "inflight-root" ? 1 : rootKey === "remaining-root" ? 30 : rootKey === "touched-root" ? 60 : 90,
+    completed: rootKey === "inflight-root" ? 20 : rootKey === "remaining-root" ? 50 : rootKey === "touched-root" ? 80 : 110,
+    rootUpdatedAt: at(rootKey === "remaining-root" ? 25 : rootKey === "touched-root" ? 24 : rootKey === "inflight-root" ? 22 : 21),
   }));
   const inflight = roots.find(({ id }) => id === byKey["inflight-root"]);
   const touched = roots.find(({ id }) => id === byKey["remaining-root"]);
@@ -897,6 +956,7 @@ function preemptionFixture(definition) {
       touchedRootKey: "remaining-root",
       touchActivityId: "touch-activity",
       conductorId: "shared-conductor",
+      lowPriorityRootId: byKey["low-priority-root"],
     },
   });
 }
@@ -934,15 +994,15 @@ function deliveredRoot(definition, rootKey, rootId, {
 } = {}) {
   const root = rootFacts(definition, rootKey, rootId, { rootStatus: "In Review", rootUpdatedAt });
   const cycle = addIssue(root, "cycle-id", "Succeeded");
-  const plan = addIssue(root, "plan-issue", "Succeeded");
-  const work = addIssue(root, "work-issue", "Succeeded");
-  const verify = addIssue(root, "verify-issue", "Succeeded");
-  const action = addIssue(root, `plan-review-${rootId}`, "Approved");
+  const plan = addIssue(root, "plan-issue", "Succeeded", { parentId: cycle, depth: 2 });
+  const work = addIssue(root, "work-issue", "Succeeded", { parentId: cycle, depth: 2 });
+  const verify = addIssue(root, "verify-issue", "Succeeded", { parentId: cycle, depth: 2 });
+  const action = addIssue(root, `plan-review-${rootId}`, "Approved", { parentId: cycle, depth: 2 });
   addWorkflowIssue(root, cycle, "cycle");
-  addWorkflowIssue(root, plan, "plan");
-  addWorkflowIssue(root, work, "work");
-  addWorkflowIssue(root, verify, "verify");
-  addWorkflowIssue(root, action, "human");
+  addWorkflowIssue(root, plan, "plan", cycle);
+  addWorkflowIssue(root, work, "work", cycle);
+  addWorkflowIssue(root, verify, "verify", cycle);
+  addWorkflowIssue(root, action, "human", cycle);
   addRecord(root, rootOwnership(root.id, conductorId));
   addRecord(root, rootDirective(root.id, [], 5));
   addRecord(root, planContract(root.id, cycle, "contract-id"), { sourceIssueId: plan });
@@ -976,7 +1036,12 @@ function rootFacts(definition, rootKey, id, {
   const root = {
     id,
     rootIssueId: id,
-    issues: [issue(id, id, rootStatus, { depth: 0, description: description ?? input.description, updatedAt: rootUpdatedAt })],
+    issues: [issue(id, id, rootStatus, {
+      depth: 0,
+      description: description ?? input.description,
+      priority: linearPriority(input.priority),
+      updatedAt: rootUpdatedAt,
+    })],
     comments: [], relations: [], activity: [], managedRecords: [],
   };
   return root;
@@ -1003,12 +1068,12 @@ function fixture(definition, roots, extraContext = {}) {
 }
 
 function addIssue(root, id, stateName, options = {}) {
-  root.issues.push(issue(id, root.id, stateName, { depth: 1, ...options }));
+  root.issues.push(issue(id, root.id, stateName, { depth: 1, parentId: root.id, ...options }));
   return id;
 }
 
-function addWorkflowIssue(root, issueKey, issueKind) {
-  addRecord(root, { kind: "workflow_issue", version: 1, issue_key: issueKey, root_issue_id: root.id, parent_issue_id: root.id, issue_kind: issueKind });
+function addWorkflowIssue(root, issueKey, issueKind, parentIssueId = root.id) {
+  addRecord(root, { kind: "workflow_issue", version: 1, issue_key: issueKey, root_issue_id: root.id, parent_issue_id: parentIssueId, issue_kind: issueKind });
 }
 
 function addHumanComment(root, id, body, options = {}) {
@@ -1034,8 +1099,18 @@ function addRecord(root, record, { archived = false, sourceIssueId = root.id, ma
   });
 }
 
-function issue(id, rootIssueId, stateName, { depth, description = "", archivedAt = null, updatedAt = DATE, priority = 2 } = {}) {
-  return { id, identifier: id, rootIssueId, parentId: depth === 0 ? null : rootIssueId, projectId: "project", teamId: "team", creatorId: depth === 0 ? "human" : "symphony", title: id, description, priority, state: { id: `state-${stateName}`, name: stateName, type: "started" }, archivedAt, createdAt: DATE, updatedAt, remoteVersion: updatedAt, depth };
+function issue(id, rootIssueId, stateName, { depth, parentId = depth === 0 ? null : rootIssueId, description = "", archivedAt = null, updatedAt = DATE, priority = 2 } = {}) {
+  return { id, identifier: id, rootIssueId, parentId, projectId: "project", teamId: "team", creatorId: depth === 0 ? "human" : "symphony", title: id, description, priority, state: { id: `state-${stateName}`, name: stateName, type: "started" }, archivedAt, createdAt: DATE, updatedAt, remoteVersion: updatedAt, depth };
+}
+
+function linearPriority(priority) {
+  return {
+    no_priority: 0,
+    urgent: 1,
+    high: 2,
+    normal: 3,
+    low: 4,
+  }[priority];
 }
 
 function rootOwnership(rootIssueId, conductorId) {

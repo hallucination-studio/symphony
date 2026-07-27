@@ -346,7 +346,7 @@ identity、Root/Cycle/target、`invocation_state: confirmed | ambiguous`、model
 time。`confirmed`表示Performer确认Provider invocation已开始；跨进程丢失导致是否开始无法证明时使用`ambiguous +
 UnavailableTurnUsage`并使累计不完整。明确在Provider边界前被schema、coverage或precondition拒绝的request只写普通
 execution failure，不伪造ModelTurnRecord或token使用。Stage Result record把matching
-`ModelTurnRecord`作为closed nested object写在Plan/Work/Verify Issue同一managed comment的唯一`symphony` block中，
+`ModelTurnRecord`作为closed nested object写在Plan/Work/Verify Issue同一managed comment的唯一`json` block中，
 不是第二个block或第二条usage comment；Root Reconciler accepted `RootDirectiveRecord`或
 `RootReconcilerFailureRecord`也各自nested一个matching `ModelTurnRecord`。模型不能自行报告这些字段；Performer从
 实际SDK调用设置和SDK usage填充。

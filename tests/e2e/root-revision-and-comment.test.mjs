@@ -30,6 +30,12 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
       calls.push({ kind: "create_root", input });
       return { rootIssueId: "root-1", identifier: "ENG-1" };
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForPlanContractAndPlanReviewAction(input) {
       calls.push({ kind: "wait_for_initial_plan", input });
       return {
@@ -97,6 +103,8 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
 
   assert.deepEqual(calls, [
     { kind: "create_root", input: { caseId: "root_revision_and_comment", rootKey: "revision-root", teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" } },
+    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
+    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_initial_plan", input: { rootIssueId: "root-1" } },
     { kind: "update_description", input: { rootIssueId: "root-1", description: "Replace the uppercase helper with a lowercase identifier helper and focused tests." } },
     { kind: "wait_for_description_receipt", input: { rootIssueId: "root-1", inputReference: revisionInput("revision-description", "description") } },
@@ -144,6 +152,8 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForPlanContractAndPlanReviewAction() { return { cycleIssueId: "cycle-1", planIssueId: "plan-1", planContractDigest: "contract-1", planContractSourceCommentId: "contract-comment-1", planReviewActionIssueId: "review-1" }; },
     async updateRootDescription() { return revisionInput("description", "description"); },
     async waitForRootDescriptionReceipt() {},
@@ -167,7 +177,7 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
   );
 });
 
-test("revision Case forwards cancellation only to its Linear read and receipt waits", async () => {
+test("revision Case forwards cancellation to every Linear Human operation", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
   const abortController = new AbortController();
   const waits = [];
@@ -180,6 +190,8 @@ test("revision Case forwards cancellation only to its Linear read and receipt wa
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
+    async delegateRootIssue(input) { waits.push(input); },
     async waitForPlanContractAndPlanReviewAction(input) { waits.push(input); return planGate("cycle-1", "plan-1", "contract-1", "contract-comment-1", "review-1"); },
     async updateRootDescription() { return description; },
     async waitForRootDescriptionReceipt(input) { waits.push(input); },
@@ -199,7 +211,7 @@ test("revision Case forwards cancellation only to its Linear read and receipt wa
     rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
   });
 
-  assert.equal(waits.length, 7);
+  assert.equal(waits.length, 9);
   assert.ok(waits.every(({ signal }) => signal === abortController.signal));
 });
 

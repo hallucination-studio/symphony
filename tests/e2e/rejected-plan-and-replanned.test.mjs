@@ -13,6 +13,12 @@ test("rejected Plan Case writes its frozen reason on the product Action, rejects
       calls.push({ kind: "create_root", input });
       return { rootIssueId: "root-1", identifier: "ENG-1" };
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForPlanReviewAction(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return calls.filter(({ kind }) => kind === "wait_for_plan_review").length === 1
@@ -51,6 +57,8 @@ test("rejected Plan Case writes its frozen reason on the product Action, rejects
         rootStatusId: "todo-state",
       },
     },
+    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
+    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "root-1", terminalStatus: "Rejected" } },
     {
       kind: "create_comment",
@@ -81,6 +89,8 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForPlanReviewAction() { return { actionIssueId: "action-1", terminalStatusId: "rejected-state" }; },
     async createComment() { return { commentId: "comment-1", issueId: "action-1" }; },
     async setHumanActionTerminalStatus() {},

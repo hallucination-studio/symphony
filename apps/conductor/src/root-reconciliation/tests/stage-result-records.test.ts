@@ -28,7 +28,7 @@ test("stage result records round-trip as closed managed records", () => {
   assert.deepEqual(parseManagedRecord(serializeManagedRecord(record)), { ok: true, value: record });
 });
 
-test("managed records require exactly one strict symphony code block", () => {
+test("managed records require exactly one strict JSON code block", () => {
   const record = {
     kind: "stage_result" as const,
     version: 1 as const,
@@ -51,25 +51,25 @@ test("managed records require exactly one strict symphony code block", () => {
   };
   const rendered = serializeManagedRecord(record);
 
-  assert.match(rendered, /```symphony\n\{.*\}\n```$/u);
+  assert.match(rendered, /```json\n\{.*\}\n```$/u);
   assert.deepEqual(parseManagedRecord(rendered), { ok: true, value: record });
   assert.deepEqual(
     parseManagedRecord(`<!-- ${"symphony"} managed-record\n${JSON.stringify(record)}\n-->`),
-    { ok: false, error: "managed_record_block_missing" },
+    { ok: false, error: "managed_record_block_legacy_format" },
   );
   assert.deepEqual(
-    parseManagedRecord(`\`\`\`json\n${JSON.stringify(record)}\n\`\`\``),
-    { ok: false, error: "managed_record_block_missing" },
+    parseManagedRecord(`\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\``),
+    { ok: false, error: "managed_record_block_legacy_format" },
   );
   assert.deepEqual(
-    parseManagedRecord(`\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\`\n\n\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\``),
+    parseManagedRecord(`\`\`\`json\n${JSON.stringify(record)}\n\`\`\`\n\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\``),
     { ok: false, error: "managed_record_block_ambiguous" },
   );
 });
 
 test("retired node marker records cannot be decoded or recovered", () => {
   assert.deepEqual(
-    parseManagedRecord(`\`\`\`symphony\n${JSON.stringify({ kind: ["node", "marker"].join("_"), version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_key: "work:one", node_kind: "work", plan_contract_digest: "contract-1" })}\n\`\`\``),
+    parseManagedRecord(`\`\`\`json\n${JSON.stringify({ kind: ["node", "marker"].join("_"), version: 1, root_issue_id: "root-1", cycle_issue_id: "cycle-1", node_key: "work:one", node_kind: "work", plan_contract_digest: "contract-1" })}\n\`\`\``),
     { ok: false, error: "managed_record_kind_invalid" },
   );
 });

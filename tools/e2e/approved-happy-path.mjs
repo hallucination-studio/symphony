@@ -10,10 +10,13 @@ export async function runApprovedHappyPathCase({ definition, human, rootCreation
     caseId: definition.caseId,
     rootKey: definition.rootTopology[0].rootKey,
     ...rootCreation,
+    ...(signal ? { signal } : {}),
   });
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_approved_root_create_invalid");
   }
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
   const action = await human.waitForPlanReviewAction({
     rootIssueId: root.rootIssueId,
     terminalStatus: "Approved",
@@ -26,6 +29,7 @@ export async function runApprovedHappyPathCase({ definition, human, rootCreation
     issueId: action.actionIssueId,
     terminalStatus: "Approved",
     stateId: action.terminalStatusId,
+    ...(signal ? { signal } : {}),
   });
 
   return Object.freeze({
@@ -43,6 +47,7 @@ function assertDefinition(definition) {
 
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForPlanReviewAction !== "function" || typeof human.setHumanActionTerminalStatus !== "function" ||
       !rootCreation || !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId)) {

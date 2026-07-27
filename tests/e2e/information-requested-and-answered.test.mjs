@@ -13,6 +13,12 @@ test("information Case writes its frozen answer on the product Clarification Act
       calls.push({ kind: "create_root", input });
       return { rootIssueId: "root-1", identifier: "ENG-1" };
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForClarificationAction(input) {
       calls.push({ kind: "wait_for_clarification", input });
       return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" };
@@ -53,6 +59,8 @@ test("information Case writes its frozen answer on the product Clarification Act
         rootStatusId: "todo-state",
       },
     },
+    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
+    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_clarification", input: { rootIssueId: "root-1", terminalStatus: "Answered" } },
     {
       kind: "create_comment",
@@ -80,6 +88,8 @@ test("information Case rejects a noncanonical definition or a Human boundary out
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForClarificationAction() { return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" }; },
     async createComment() { return { commentId: "answer-comment", issueId: "clarification-action" }; },
     async setHumanActionTerminalStatus() {},
@@ -111,6 +121,8 @@ test("information Case forwards cancellation only to its Clarification and Plan 
   const human = {
     actorId: "human-1",
     async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
+    async delegateRootIssue(input) { waits.push(input); },
     async waitForClarificationAction(input) {
       waits.push(input);
       return { actionIssueId: "clarification-action", terminalStatusId: "answered-state" };
@@ -131,6 +143,8 @@ test("information Case forwards cancellation only to its Clarification and Plan 
   });
 
   assert.deepEqual(waits, [
+    { rootIssueId: "root-1", signal: abortController.signal },
+    { rootIssueId: "root-1", signal: abortController.signal },
     { rootIssueId: "root-1", terminalStatus: "Answered", signal: abortController.signal },
     { rootIssueId: "root-1", terminalStatus: "Approved", signal: abortController.signal },
   ]);

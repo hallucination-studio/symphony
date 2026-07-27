@@ -59,7 +59,12 @@ export class ConductorProfileRelayHandler {
         });
         return {
           kind: "profile_saved",
-          profile: await this.#summary(profile.profileId),
+          profile: await this.#summary(
+            profile.profileId,
+            profile,
+            undefined,
+            "login-required",
+          ),
         };
       }
       case "update_profile": {
@@ -122,14 +127,17 @@ export class ConductorProfileRelayHandler {
     profileId: string,
     knownProfile?: PerformerProfile,
     knownActiveProfileId?: string,
+    readinessOverride?: Readiness,
   ): Promise<JsonValue> {
     const file = knownProfile ? undefined : await this.profiles.list();
     const profile =
       knownProfile ??
       file?.profiles.find(({ profileId: candidate }) => candidate === profileId);
     if (!profile) throw new Error("profile_not_found");
-    const status = await this.control.status(profileId);
-    const readiness = parseReadiness(status.readiness);
+    const status = readinessOverride === undefined
+      ? await this.control.status(profileId)
+      : undefined;
+    const readiness = readinessOverride ?? parseReadiness(status!.readiness);
     return {
       profile_id: profile.profileId,
       display_name: profile.displayName,
@@ -153,7 +161,7 @@ export class ConductorProfileRelayHandler {
       readiness,
       is_active:
         (knownActiveProfileId ?? file?.activeProfileId) === profile.profileId,
-      ...(typeof status.sanitized_account_label === "string"
+      ...(typeof status?.sanitized_account_label === "string"
         ? { sanitized_account_label: status.sanitized_account_label }
         : {}),
       observed_at: this.now(),

@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { FOREGROUND_E2E_CASE_IDS } from "../../tools/e2e/cases.mjs";
-import { runForegroundE2ECampaign } from "../../tools/e2e/foreground-campaign.mjs";
+import { FOREGROUND_E2E_CASE_IDS, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
+import { runForegroundE2ECampaign, sanitizeForegroundE2ECampaignFailure } from "../../tools/e2e/foreground-campaign.mjs";
 
 const campaignCli = "tools/e2e/run-foreground-campaign.mjs";
 
@@ -27,7 +27,7 @@ test("foreground E2E command keeps one .env-loaded foreground entrypoint", () =>
   assert.match(makefile, /^e2e:\n\tnpm run e2e$/mu);
 });
 
-test("foreground E2E skeleton fixes the seven mandatory Cases", () => {
+test("foreground E2E Campaign fixes the seven mandatory Cases", () => {
   assert.deepEqual(FOREGROUND_E2E_CASE_IDS, [
     "approved_happy_path",
     "plan_rejected_and_replanned",
@@ -62,38 +62,132 @@ test("foreground E2E CLI fails closed with sanitized configuration errors", () =
   assert.doesNotMatch(result.stderr, /must-not-appear/u);
 });
 
-test("foreground E2E skeleton never converts complete configuration into synthetic success", () => {
-  const result = runCampaignCli(validEnvironment());
+test("foreground E2E CLI preserves the closed Project reset failure code without SDK detail", () => {
+  const error = new Error("authorization=linear-token");
+  error.code = "foreground_e2e_project_label_read_failed";
 
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, "");
-  assert.deepEqual(JSON.parse(result.stderr), {
+  assert.deepEqual(sanitizeForegroundE2ECampaignFailure(error), {
     status: "failed",
-    reason_code: "foreground_e2e_environment_unavailable",
+    reason_code: "foreground_e2e_project_label_read_failed",
     issues: [],
   });
-  assert.doesNotMatch(result.stderr, /symphony-token|human-token|client-secret|codex-key/u);
 });
 
-test("Campaign enters the Case scheduler only after its environment is ready and closes it after the summary", async () => {
+test("Campaign composes the real seven-Case lifecycle after readiness and reads each created Root before cleanup", async () => {
   const events = [];
+  const completedDrivers = [];
+  const finalReads = [];
+  const config = validConfig();
+  const rootsByCase = Object.fromEntries(FOREGROUND_E2E_CASES.map(({ caseId, rootTopology }) => [caseId, rootTopology.map(({ rootKey }) => ({
+    rootKey,
+    rootIssueId: `${caseId}-${rootKey}`,
+  }))]));
   const summary = await runForegroundE2ECampaign({
     environment: validEnvironment(),
-    runEnvironment: async ({ config }) => {
-      events.push(`ready:${config.codex.model}`);
-      return {
-        environmentId: "foreground-runtime",
-        async close() { events.push("closed"); },
-      };
-    },
-    runCases: async ({ config, runtime }) => {
-      events.push(`running:${runtime.environmentId}:${config.linear.projectSlugId}`);
-      return { exitCode: 1, cases: [] };
+    dependencies: {
+      loadConfig: () => config,
+      createReporter: () => ({
+        phase: (phase) => events.push(`phase:${phase}`),
+        startHeartbeat: () => events.push("heartbeat"),
+        close: () => events.push("reporter-closed"),
+        caseObservation: () => {},
+        signal: () => {},
+        failure: () => {},
+        summary: () => events.push("summary"),
+      }),
+      createEnvironment: async ({ config: received }) => {
+        assert.equal(received, config);
+        events.push("ready");
+        return {
+          project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
+          actors: { humanActorId: "human-1" },
+          runtime: { conductors: conductorRuntime() },
+          async close() { events.push("closed"); },
+        };
+      },
+      createHuman: async ({ apiKey, expectedActorId, delegateActorId }) => {
+        assert.equal(apiKey, config.secrets.linearHumanApiKey);
+        assert.equal(expectedActorId, "human-1");
+        assert.equal(delegateActorId, "symphony-actor");
+        return {
+          actorId: "human-1",
+          async resolveRootCreationBindings(input) {
+            assert.equal(input.projectId, "project-1");
+            assert.equal(input.teamId, "team-1");
+            return Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) =>
+              rootTopology.map(({ rootKey }) => [rootKey, rootCreation()])),
+            );
+          },
+          createdRootsForCase: ({ caseId }) => rootsByCase[caseId] ?? [],
+        };
+      },
+      runCaseDriver: async ({ definition }) => {
+        completedDrivers.push(definition.caseId);
+        return { context: { humanActorId: "human-1", rootIssueIdsByKey: Object.fromEntries(rootsByCase[definition.caseId].map(({ rootKey, rootIssueId }) => [rootKey, rootIssueId])) } };
+      },
+      readFinalEvidence: async ({ caseId, rootIssueIds, repositories }) => {
+        finalReads.push({ caseId, rootIssueIds, repositories });
+        return { caseId, rootIssueIds, repositories };
+      },
+      runCases: async ({ definitions, runCase, readFinalEvidence }) => {
+        await Promise.all(definitions.map(async (definition) => {
+          const driver = await runCase({ definition, scope: { caseId: definition.caseId, signal: new AbortController().signal } });
+          await readFinalEvidence({ definition, scope: { caseId: definition.caseId }, driverResult: driver });
+        }));
+        return { exitCode: 0, cases: definitions.map(({ caseId }) => ({ caseId, verdict: "passed" })) };
+      },
+      installSignalCleanup: () => ({ dispose() { events.push("signals-disposed"); } }),
+      randomUUID: () => "campaign-1",
+      now: () => 0,
     },
   });
 
-  assert.deepEqual(events, ["ready:gpt-5-codex", "running:foreground-runtime:project-slug", "closed"]);
-  assert.deepEqual(summary, { exitCode: 1, cases: [] });
+  assert.deepEqual(completedDrivers, FOREGROUND_E2E_CASE_IDS);
+  assert.equal(finalReads.length, FOREGROUND_E2E_CASE_IDS.length);
+  assert.ok(finalReads.every(({ caseId, rootIssueIds, repositories }) => {
+    const expected = FOREGROUND_E2E_CASES.find((definition) => definition.caseId === caseId).rootTopology.length;
+    return rootIssueIds.length === expected && repositories.length === expected;
+  }));
+  assert.deepEqual(events, ["heartbeat", "phase:starting", "ready", "phase:running", "closed", "signals-disposed", "summary", "reporter-closed"]);
+  assert.deepEqual(summary, {
+    exitCode: 0,
+    cases: FOREGROUND_E2E_CASE_IDS.map((caseId) => ({ caseId, verdict: "passed" })),
+  });
+});
+
+test("Campaign closes its Reporter when environment cleanup fails", async () => {
+  let reporterClosed = false;
+  await assert.rejects(
+    runForegroundE2ECampaign({
+      environment: validEnvironment(),
+      dependencies: {
+        loadConfig: () => validConfig(),
+        createReporter: () => ({
+          startHeartbeat() {},
+          phase() {},
+          close() { reporterClosed = true; },
+          failure() {},
+        }),
+        createEnvironment: async () => ({
+          project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
+          actors: { humanActorId: "human-1" },
+          runtime: { conductors: [] },
+          async close() { throw codedError("foreground_e2e_environment_cleanup_failed"); },
+        }),
+        createHuman: async () => { throw codedError("foreground_e2e_human_actor_identity_invalid"); },
+        runCases: async () => ({ exitCode: 0, cases: [] }),
+        readFinalEvidence: async () => ({}),
+        installSignalCleanup: () => ({ dispose() {} }),
+        runCaseDriver: async () => ({}),
+        randomUUID: () => "campaign-1",
+        now: () => 0,
+        setTimeout,
+        clearTimeout,
+      },
+    }),
+    hasCode("foreground_e2e_environment_cleanup_failed"),
+  );
+  assert.equal(reporterClosed, true);
 });
 
 function runCampaignCli(environment) {
@@ -116,4 +210,48 @@ function validEnvironment() {
     SYMPHONY_E2E_CODEX_BASE_URL: "https://example.test",
     SYMPHONY_E2E_CODEX_MODEL: "gpt-5-codex",
   };
+}
+
+function validConfig() {
+  return {
+    linear: { clientId: "client-id", projectSlugId: "project-slug", setupAuthorized: true },
+    secrets: {
+      linearDevToken: "symphony-token",
+      linearHumanApiKey: "human-token",
+      linearClientSecret: "client-secret",
+      codexApiKey: "codex-key",
+    },
+    codex: { baseUrl: "https://example.test", model: "gpt-5-codex" },
+  };
+}
+
+function conductorRuntime() {
+  return ["a", "b", "c"].map((suffix) => ({
+    conductorId: `conductor-${suffix}`,
+    conductorShortHash: `${suffix}`.repeat(12),
+    profileId: `profile-${suffix}`,
+    dataRoot: `/runtime/${suffix}`,
+  }));
+}
+
+function rootCreation() {
+  return {
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-1",
+    rootStatusId: "todo-1",
+    conductorId: "conductor-a",
+    performerProfileId: "profile-a",
+    worktreeDirectory: "/runtime/a/worktrees",
+  };
+}
+
+function codedError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function hasCode(code) {
+  return (error) => error?.code === code;
 }

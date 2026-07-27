@@ -8,20 +8,23 @@ export async function runRootRevisionAndCommentCase({ definition, human, rootCre
 
   const rootKey = definition.rootTopology[0].rootKey;
   const interactions = frozenInteractions(definition);
-  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation });
+  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation, ...(signal ? { signal } : {}) });
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_revision_root_create_invalid");
   }
+  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
+  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
 
   const initialPlan = await waitForInitialPlan({ human, rootIssueId: root.rootIssueId, signal });
   const description = await human.updateRootDescription({
     rootIssueId: root.rootIssueId,
     description: interactions.description.description,
+    ...(signal ? { signal } : {}),
   });
   const descriptionInput = assertInputReference(description, "description", "foreground_e2e_revision_description_invalid");
   await human.waitForRootDescriptionReceipt(waitInput({ rootIssueId: root.rootIssueId, inputReference: descriptionInput, signal }));
 
-  const created = await human.createComment({ issueId: root.rootIssueId, body: interactions.comment.body });
+  const created = await human.createComment({ issueId: root.rootIssueId, body: interactions.comment.body, ...(signal ? { signal } : {}) });
   const createdInput = assertCommentInput(created, root.rootIssueId, "foreground_e2e_revision_comment_create_invalid");
   await human.waitForCommentReceipt(waitInput({ issueId: root.rootIssueId, inputReference: createdInput, signal }));
 
@@ -29,16 +32,17 @@ export async function runRootRevisionAndCommentCase({ definition, human, rootCre
     issueId: root.rootIssueId,
     commentId: created.commentId,
     body: interactions.edit.body,
+    ...(signal ? { signal } : {}),
   });
   const editedInput = assertCommentInput(edited, root.rootIssueId, "foreground_e2e_revision_comment_edit_invalid");
   if (edited.commentId !== created.commentId) throw stableError("foreground_e2e_revision_comment_edit_invalid");
   await human.waitForCommentReceipt(waitInput({ issueId: root.rootIssueId, inputReference: editedInput, signal }));
 
-  const resolved = await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
+  const resolved = await human.resolveCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId, ...(signal ? { signal } : {}) });
   const resolvedInput = assertThreadInput(resolved, created.commentId, "resolved", "foreground_e2e_revision_thread_resolve_invalid");
   await human.waitForCommentThreadReceipt(waitInput({ issueId: root.rootIssueId, inputReference: resolvedInput, signal }));
 
-  const reopened = await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId });
+  const reopened = await human.reopenCommentThread({ issueId: root.rootIssueId, threadRootCommentId: created.commentId, ...(signal ? { signal } : {}) });
   const reopenedInput = assertThreadInput(reopened, created.commentId, "unresolved", "foreground_e2e_revision_thread_reopen_invalid");
   await human.waitForCommentThreadReceipt(waitInput({ issueId: root.rootIssueId, inputReference: reopenedInput, signal }));
 
@@ -161,6 +165,7 @@ function assertDefinition(definition) {
 
 function assertInput({ human, rootCreation, signal }) {
   if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
+      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
       typeof human.waitForPlanContractAndPlanReviewAction !== "function" || typeof human.updateRootDescription !== "function" ||
       typeof human.waitForRootDescriptionReceipt !== "function" || typeof human.createComment !== "function" ||
       typeof human.waitForCommentReceipt !== "function" || typeof human.editComment !== "function" ||

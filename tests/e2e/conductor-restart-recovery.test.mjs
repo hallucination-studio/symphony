@@ -17,6 +17,12 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
         ? { rootIssueId: "affected-root-id", identifier: "ENG-1" }
         : { rootIssueId: "continuous-root-id", identifier: "ENG-2" };
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForRestartRecoveryAdmission(input) {
       calls.push({ kind: "wait_for_admission", input });
       return { affectedRootIssueId: "affected-root-id", oldStageExecutionId: "old-execution" };
@@ -45,6 +51,10 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
   assert.deepEqual(calls, [
     { kind: "create_root", input: rootCreateInput("affected-root", rootCreationsByRootKey["affected-root"]) },
     { kind: "create_root", input: rootCreateInput("continuous-root", rootCreationsByRootKey["continuous-root"]) },
+    { kind: "assert_undelegated", input: { rootIssueId: "affected-root-id" } },
+    { kind: "assert_undelegated", input: { rootIssueId: "continuous-root-id" } },
+    { kind: "delegate_root", input: { rootIssueId: "affected-root-id" } },
+    { kind: "delegate_root", input: { rootIssueId: "continuous-root-id" } },
     {
       kind: "wait_for_admission",
       input: { affectedRootIssueId: "affected-root-id", continuousRootIssueId: "continuous-root-id" },
@@ -72,8 +82,8 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
         continuousRoutingLabelId: "route-b",
         affectedPerformerProfileId: "profile-a",
         continuousPerformerProfileId: "profile-b",
-        affectedRepositoryRoot: "/repositories/a",
-        continuousRepositoryRoot: "/repositories/b",
+        affectedRepositoryRoot: "/repositories/a/affected-root-id",
+        continuousRepositoryRoot: "/repositories/b/continuous-root-id",
       },
     },
   });
@@ -84,6 +94,8 @@ test("restart recovery Case rejects noncanonical topology, non-owning runtime fa
   const human = {
     actorId: "human-1",
     async createRootIssue({ rootKey }) { return { rootIssueId: `${rootKey}-id`, identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForRestartRecoveryAdmission() {
       return { affectedRootIssueId: "continuous-root-id", oldStageExecutionId: "old-execution" };
     },
@@ -129,8 +141,8 @@ test("owned recovery fault sends SIGKILL without graceful termination", { skip: 
   }
 });
 
-function rootCreation(routingLabelId, conductorId, performerProfileId, repositoryRoot) {
-  return { teamId: "team-1", projectId: "project-1", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, repositoryRoot };
+function rootCreation(routingLabelId, conductorId, performerProfileId, worktreeDirectory) {
+  return { teamId: "team-1", projectId: "project-1", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
 }
 
 function rootCreateInput(rootKey, { teamId, projectId, routingLabelId, rootStatusId }) {

@@ -6,7 +6,7 @@ import { serializeManagedRecord } from "../../root-reconciliation/api/index.js";
 
 const now = "2026-07-21T09:00:00Z";
 
-test("gateway resolves the project and discovers delegated Roots", async () => {
+test("gateway resolves the project and discovers routed Roots", async () => {
   const requests: Record<string, unknown>[] = [];
   const gateway = createGateway(async (body) => {
     requests.push(body);
@@ -24,7 +24,8 @@ test("gateway resolves the project and discovers delegated Roots", async () => {
   });
   assert.deepEqual(await gateway.listRoots("project-1"), [{
     issueId: "root-1", identifier: "SYM-1", state: "In Progress", title: "Root", description: "Build it",
-    updatedAt: now, projectId: "project-1", parentIssueId: null, isDelegatedToSymphony: true,
+    updatedAt: now, projectId: "project-1", parentIssueId: null,
+    isDelegatedToSymphony: true,
     priority: "high", order: 0, blockers: [],
     rootConductorLabels: [{ conductorShortHash: "abc123" }],
   }]);
@@ -88,6 +89,7 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
     kind: "update_workflow_issue", writeId: "write-1", expectedProjectId: "project-1", rootIssueId: "root-1",
     expectedRootRemoteVersion: now, target: { targetIssueId: "work-1", expectedRemoteVersion: now },
     statusId: "status-progress", title: "Updated", description: "Description",
+    isArchived: false, parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "applied", readBack: { writeId: "write-1", targetIssueId: "work-1", remoteVersion: "v2" } });
@@ -96,6 +98,7 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
     expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
     target: { target_issue_id: "work-1", expected_remote_version: now },
     status_id: "status-progress", title: "Updated", description: "Description",
+    is_archived: false, parent_assignment: { mode: "retain" },
   });
 });
 
@@ -120,7 +123,7 @@ test("workflow tree derives descendant kind only from a strict WorkflowIssueReco
     work.description = [
       "Implement it",
       "",
-      "```symphony",
+      "```json",
       "{\"kind\":\"workflow_issue\",\"version\":1,\"issue_key\":\"directive-1:work\",\"root_issue_id\":\"root-1\",\"parent_issue_id\":\"root-1\",\"issue_kind\":\"work\"}",
       "```",
     ].join("\n");

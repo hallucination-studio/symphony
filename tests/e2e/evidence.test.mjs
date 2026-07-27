@@ -73,7 +73,7 @@ test("fresh evidence reader reads only exact Roots with active and archived fact
 test("evidence reader records pagination, managed-block, and Git coverage omissions without a runtime fallback", async () => {
   const fixture = createLinearFixture({
     childrenPageInfo: { hasNextPage: true, endCursor: "again" },
-    commentBody: "```symphony\n{not json}\n```",
+    commentBody: "```json\n{not json}\n```",
     gitFailure: true,
   });
   const evidence = await readForegroundE2EFinalEvidence({
@@ -135,7 +135,7 @@ test("evidence reader records native label pagination failures as coverage omiss
 
 function createLinearFixture({
   childrenPageInfo = { hasNextPage: false },
-  commentBody = `Stage result\n\n\`\`\`symphony\n${JSON.stringify({ kind: "stage_result", version: 1, result_id: "result-1" })}\n\`\`\``,
+  commentBody = `Stage result\n\n\`\`\`json\n${JSON.stringify({ kind: "stage_result", version: 1, result_id: "result-1" })}\n\`\`\``,
   gitFailure = false,
   labelsPageInfo = { hasNextPage: false },
   rootCommentParentId = null,
@@ -213,7 +213,7 @@ function createLinearFixture({
     id: "work-1",
     identifier: "SYM-2",
     title: "Archived work",
-    description: `Work description\n\n\`\`\`symphony\n${JSON.stringify({ kind: "workflow_issue", version: 1, issue_key: "work-1" })}\n\`\`\``,
+    description: `Work description\n\n\`\`\`json\n${JSON.stringify({ kind: "workflow_issue", version: 1, issue_key: "work-1" })}\n\`\`\``,
     projectId: "project-1",
     teamId: "team-1",
     parentId: "root-1",

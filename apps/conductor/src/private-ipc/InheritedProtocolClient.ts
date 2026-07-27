@@ -179,7 +179,11 @@ export class InheritedProtocolClient {
           ? Buffer.from(this.#buffer.subarray(newline + 1, frameLength))
           : undefined;
       this.#buffer = this.#buffer.subarray(frameLength);
-      await this.#receive(message, secret);
+      void this.#receive(message, secret).catch((error) => this.#close(
+        new Error(privateIpcFailureCode(error)),
+        undefined,
+        privateIpcFailureSchemaPath(error),
+      ));
     }
   }
 

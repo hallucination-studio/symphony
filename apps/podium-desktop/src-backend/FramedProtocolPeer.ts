@@ -137,17 +137,24 @@ export class FramedProtocolPeer {
         secret?.fill(0);
         continue;
       }
-      try {
-        const body = await this.options.handleRequest(message.body, secret);
-        const response = this.#decode({
-          protocol_version: "1",
-          request_id: message.request_id,
-          body,
-        });
-        await write(this.output, Buffer.from(`${JSON.stringify(response)}\n`));
-      } finally {
-        secret?.fill(0);
-      }
+      void this.#dispatchRequest(message, secret).catch((error) => this.#fail(
+        error instanceof Error ? error : new Error("private_peer_request_failed"),
+      ));
+    }
+  }
+
+  async #dispatchRequest(message: Message, secret?: Buffer): Promise<void> {
+    try {
+      const body = await this.options.handleRequest!(message.body, secret);
+      if (this.#closed) return;
+      const response = this.#decode({
+        protocol_version: "1",
+        request_id: message.request_id,
+        body,
+      });
+      await write(this.output, Buffer.from(`${JSON.stringify(response)}\n`));
+    } finally {
+      secret?.fill(0);
     }
   }
 

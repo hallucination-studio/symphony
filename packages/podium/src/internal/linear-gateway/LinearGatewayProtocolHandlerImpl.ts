@@ -1,5 +1,6 @@
 import type { ProtocolError } from "../errors.js";
 import type { LinearClientInterface } from "./api/LinearClientInterface.js";
+import { classifyLinearFailure } from "./LinearFailure.js";
 import { isTargetWorkflowStatusName } from "../../public/TargetWorkflowCatalog.js";
 import type {
   WorkflowMutationCommand,
@@ -26,48 +27,11 @@ function errorRecord(error: unknown): Record<string, unknown> {
     : {};
 }
 
-const retryableLinearErrors = new Set([
-  "NetworkLinearError",
-  "InternalLinearError",
-]);
-const ambiguousLinearErrors = new Set([
-  "NetworkLinearError",
-  "InternalLinearError",
-]);
-
-const officialLinearFailures = new Map([
-  [
-    "RatelimitedLinearError",
-    {
-      code: "linear_rate_limited",
-      sanitizedReason: "Linear rate limit exceeded.",
-    },
-  ],
-  [
-    "NetworkLinearError",
-    {
-      code: "linear_network_failed",
-      sanitizedReason: "Linear network request failed.",
-    },
-  ],
-  [
-    "InternalLinearError",
-    {
-      code: "linear_internal_failed",
-      sanitizedReason: "Linear internal request failed.",
-    },
-  ],
-]);
-
-function errorClass(error: unknown): string {
-  return error instanceof Error ? error.constructor.name : "";
-}
-
 function normalizedFailure(error: unknown): {
   code: string;
   sanitizedReason: string;
 } {
-  const official = officialLinearFailures.get(errorClass(error));
+  const official = classifyLinearFailure(error);
   if (official) return official;
   if (
     error instanceof Error &&
@@ -83,11 +47,12 @@ function normalizedFailure(error: unknown): {
 
 function protocolFailure(error: unknown): ProtocolError {
   const normalized = normalizedFailure(error);
+  const classified = classifyLinearFailure(error);
   return {
     code: normalized.code,
     category: "linear",
     sanitizedReason: normalized.sanitizedReason,
-    retryable: false,
+    retryable: classified?.retryable ?? false,
     actionRequired: "block_root",
     nextAction: "Resolve the Linear error, then retry the Root.",
   };
@@ -346,9 +311,9 @@ export class LinearGatewayProtocolHandlerImpl {
         if (record.preconditionConflict === true) {
           return { kind: "precondition_conflict" };
         }
-        const classification = errorClass(error);
-        const isRetryable = record.retryable === true || retryableLinearErrors.has(classification);
-        const isAmbiguous = record.ambiguous === true || ambiguousLinearErrors.has(classification);
+        const classified = classifyLinearFailure(error);
+        const isRetryable = record.retryable === true || classified?.retryable === true;
+        const isAmbiguous = record.ambiguous === true || classified?.ambiguous === true;
         if (isAmbiguous && mutationAttempted) {
           readBackBeforeRetry = true;
           try {
@@ -419,7 +384,7 @@ export class LinearGatewayProtocolHandlerImpl {
       ) && parent?.statusId === command.parentExpectedStatusId
         ? undefined : { kind: "precondition_conflict" };
     }
-    if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") {
+    if (command.kind === "create_workflow_relation") {
       const source = await this.client.readWorkflowMutationTarget(command.sourceIssueId);
       const target = await this.client.readWorkflowMutationTarget(command.targetIssueId);
       return workflowTargetMatches(source, command.expectedProjectId, command.sourceIssueId, command.sourceExpectedRemoteVersion) &&
@@ -493,7 +458,7 @@ function workflowTargetMatches(
 function workflowReadBackIssueId(command: WorkflowMutationCommand): string {
   if (isNativeCommentMutation(command)) return command.rootIssueId;
   if (command.kind === "create_workflow_issue") return command.parentIssueId;
-  if (command.kind === "create_workflow_relation" || command.kind === "remove_workflow_relation") return command.sourceIssueId;
+  if (command.kind === "create_workflow_relation") return command.sourceIssueId;
   return command.target.targetIssueId;
 }
 

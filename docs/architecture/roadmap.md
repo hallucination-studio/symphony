@@ -21,7 +21,7 @@
 - 定义Root Reconciler bootstrap/delta/directive、用户input/comment reply schemas；
 - 定义Plan、Work、Verify request/result schemas；
 - 定义Human Action专用statuses、labels、request/resolution records；
-- 定义Root/Cycle timeline events以及一个event、一条Markdown + `symphony` block comment的materialization contract；
+- 定义Root/Cycle timeline events以及一个event、一条Markdown + `json` block comment的materialization contract；
 - 定义native comment thread resolve/reopen、reaction回执、actual model和required Turn Usage contracts；
 - 生成TypeScript/Python/Rust types及cross-language fixtures。
 
@@ -74,7 +74,7 @@ R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任�
 
 - 业务模块发布typed event，不直接渲染comment；
 - Root subscriber只写Root Timeline；Cycle subscriber只写Cycle Timeline；
-- 一个event只写一条同时包含结构化用户Markdown和唯一`symphony` code block的comment；
+- 一个event只写一条同时包含结构化用户Markdown和唯一`json` code block的comment；
 - comment结构覆盖Observed、Decision/Result、Evidence、model/usage和Next；
 - 用户comment使用native child reply、✅/❌回执和resolve/reopen，reaction不表达审批status；
 - deterministic event ID支持duplicate、ambiguous write和crash backfill；
@@ -136,7 +136,7 @@ R8的topology、actor隔离、Case matrix、证据和verdict只由
 5. Cycle budget耗尽后Root Reconciler选择successor或Human Action；Root gate只机械允许或拒绝该directive。
 6. process/session重启只靠Linear/Git恢复并拒绝旧output。
 7. Root/Cycle timeline comments从events幂等materialize并可在crash后补齐；每个event恰有一条同时包含用户Markdown和
-   strict `symphony` code block的comment，tracked surface不存在HTML marker reader/writer或第二timeline record。
+   strict `json` code block的comment，tracked surface不存在HTML marker reader/writer或第二timeline record。
 8. [并行黑盒端到端验收](black-box-e2e.md)的全部mandatory Cases通过，包括delivery与Root `In Review`一致、
    三Conductor topology、durable overlap、restart isolation、Human/revision和successor事实；不存在另一套E2E或Workflow
    completion路径。

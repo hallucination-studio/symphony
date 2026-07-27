@@ -14,6 +14,12 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
       calls.push({ kind: "create_root", input });
       return new Promise((resolve) => { pendingRootCreates.push(resolve); });
     },
+    async assertRootUndelegatedAndInactive(input) {
+      calls.push({ kind: "assert_undelegated", input });
+    },
+    async delegateRootIssue(input) {
+      calls.push({ kind: "delegate_root", input });
+    },
     async waitForSameConductorPreemptionAdmission(input) {
       calls.push({ kind: "wait_for_admission", input });
       return {
@@ -54,11 +60,14 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
   pendingRootCreates[0]({ rootIssueId: "inflight-root-id", identifier: "ENG-1" });
   pendingRootCreates[1]({ rootIssueId: "touched-root-id", identifier: "ENG-2" });
   pendingRootCreates[2]({ rootIssueId: "remaining-root-id", identifier: "ENG-3" });
+  pendingRootCreates[3]({ rootIssueId: "low-priority-root-id", identifier: "ENG-4" });
   const result = await running;
 
   const touch = definition.declaredUserInteractions.find(({ kind }) => kind === "touch_bound_root_description");
   assert.deepEqual(calls, [
     ...definition.rootTopology.map(({ rootKey }) => ({ kind: "create_root", input: rootCreateInput(rootKey, rootCreation) })),
+    ...["inflight-root-id", "touched-root-id", "remaining-root-id", "low-priority-root-id"].map((rootIssueId) => ({ kind: "assert_undelegated", input: { rootIssueId } })),
+    ...["inflight-root-id", "touched-root-id", "remaining-root-id", "low-priority-root-id"].map((rootIssueId) => ({ kind: "delegate_root", input: { rootIssueId } })),
     {
       kind: "wait_for_admission",
       input: { rootIssueIds: ["inflight-root-id", "touched-root-id", "remaining-root-id"] },
@@ -78,9 +87,11 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
     { kind: "wait_for_plan_review", input: { rootIssueId: "inflight-root-id", terminalStatus: "Approved" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "touched-root-id", terminalStatus: "Approved" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "remaining-root-id", terminalStatus: "Approved" } },
+    { kind: "wait_for_plan_review", input: { rootIssueId: "low-priority-root-id", terminalStatus: "Approved" } },
     { kind: "approve_plan_review", input: { issueId: "inflight-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
     { kind: "approve_plan_review", input: { issueId: "touched-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
     { kind: "approve_plan_review", input: { issueId: "remaining-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
+    { kind: "approve_plan_review", input: { issueId: "low-priority-root-id-action", terminalStatus: "Approved", stateId: "approved-state" } },
   ]);
   assert.deepEqual(result, {
     context: {
@@ -89,6 +100,7 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
         "inflight-root": "inflight-root-id",
         "touched-root": "touched-root-id",
         "remaining-root": "remaining-root-id",
+        "low-priority-root": "low-priority-root-id",
       },
       preemption: {
         inflightRootId: "inflight-root-id",
@@ -99,6 +111,7 @@ test("preemption Case creates frozen Roots concurrently, touches only the bound 
         touchedRootKey: "remaining-root",
         touchActivityId: "touch-activity",
         conductorId: "conductor-a-id",
+        lowPriorityRootId: "low-priority-root-id",
       },
     },
   });
@@ -109,6 +122,8 @@ test("preemption Case rejects noncanonical definitions, incomplete same-Conducto
   const human = {
     actorId: "human-1",
     async createRootIssue({ rootKey }) { return { rootIssueId: `${rootKey}-id`, identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive() {},
+    async delegateRootIssue() {},
     async waitForSameConductorPreemptionAdmission() {
       return { inflightRootIssueId: "inflight-root-id", inflightStageExecutionId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
     },
@@ -137,13 +152,15 @@ test("preemption Case rejects noncanonical definitions, incomplete same-Conducto
   );
 });
 
-test("preemption Case forwards cancellation only to native Linear read waits", async () => {
+test("preemption Case forwards cancellation to every native Linear Human operation", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "same_conductor_preemption");
   const abortController = new AbortController();
   const waits = [];
   const human = {
     actorId: "human-1",
     async createRootIssue({ rootKey }) { return { rootIssueId: `${rootKey}-id`, identifier: "ENG-1" }; },
+    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
+    async delegateRootIssue(input) { waits.push(input); },
     async waitForSameConductorPreemptionAdmission(input) {
       waits.push(input);
       return { inflightRootIssueId: "inflight-root-id", inflightStageExecutionId: "inflight-execution", readyRootIssueIds: ["remaining-root-id", "touched-root-id"] };
@@ -169,7 +186,7 @@ test("preemption Case forwards cancellation only to native Linear read waits", a
     }),
   });
 
-  assert.equal(waits.length, 5);
+  assert.equal(waits.length, 14);
   assert.ok(waits.every(({ signal }) => signal === abortController.signal));
 });
 

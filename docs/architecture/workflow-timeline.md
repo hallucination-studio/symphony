@@ -32,7 +32,7 @@ business mutation / accepted Result
 -> semantic read-back
 -> publish WorkflowTimelineEvent
 -> matching subscriber validates event
--> render stable human-readable Markdown + one symphony code block
+-> render stable human-readable Markdown + one `json` code block
 -> append exactly one comment to Root or Cycle Issue
 -> read back and strict-decode the complete comment
 ```
@@ -56,7 +56,7 @@ WorkflowTimelineMaterializationResult =
   TimelineMaterializationFailedResult
 ```
 
-`TimelineMaterializedResult`只有在matching Linear comment、用户Markdown和唯一`symphony` code block都read-back，
+`TimelineMaterializedResult`只有在matching Linear comment、用户Markdown和唯一`json` code block都read-back，
 且code block通过closed schema和stable identity校验后才能返回。publish、render、create或read-back任一步失败都返回
 closed failure；调用方打印correlated error并停止当前Root。接口没有
 `accepted`、`queued`或fire-and-forget成功variant。
@@ -76,7 +76,7 @@ consistency或可选写入。唯一durable结果是Linear中成功read-back的�
 timeline_event_id = stable event kind + root/cycle identity + source durable record identity
 ```
 
-Timeline comment底部唯一`symphony` code block包含：
+Timeline comment底部唯一`json` code block包含：
 
 ```text
 WorkflowTimelineRecord
@@ -276,9 +276,9 @@ Plan、Work和Verify Issue上的canonical Stage Result comment不属于时间轴
 
 - event contract保存语义字段，renderer负责Markdown，不让业务模块提供任意完整comment；
 - 一个event恰好生成一条comment；该event的两个输出层只能是同一comment上半部分的用户Markdown和底部恰好一个
-  `symphony` block中的`WorkflowTimelineRecord`。两部分作为一次required Linear materialization共同read-back，不能
+  `json` block中的`WorkflowTimelineRecord`。两部分作为一次required Linear materialization共同read-back，不能
   拆成两条comment、两次write或两种可恢复事实；
-- 用户Markdown允许bounded普通fenced code block；只有info string精确为`symphony`的block参与managed decode；
+- 用户Markdown允许bounded普通fenced code block；只有info string精确为`json`的block参与managed decode；
 - Issue、Cycle、Action、Result和Git revision使用可点击引用；
 - status、directive kind、outcome使用用户可理解名称，不暴露内部enum作为正文；
 - reason必须来自accepted Root Reconciler rationale或deterministic Root gate facts；
@@ -287,8 +287,8 @@ Plan、Work和Verify Issue上的canonical Stage Result comment不属于时间轴
 - comment有严格byte bound；超限时保留结论和source links，省略项数量必须可见；
 - renderer按`rendered_schema_version`演进，旧comment不回写重排。
 
-renderer可以使用heading、表格、列表、链接、引用和非`symphony` code block，让用户区分输入、已验证事实、影响和下一步。
-无论可见Markdown多丰富，每个event仍只产生一个comment，且该comment的最后一个且唯一`symphony` block才承载
+renderer可以使用heading、表格、列表、链接、引用和非`json` code block，让用户区分输入、已验证事实、影响和下一步。
+无论可见Markdown多丰富，每个event仍只产生一个comment，且该comment的最后一个且唯一`json` block才承载
 `WorkflowTimelineRecord`；普通Markdown或HTML不能保存重启后需要的Workflow事实。
 
 Timeline subscriber不为timeline comment写✅/❌ receipt。用户comment的source receipt、child reply以及原生thread

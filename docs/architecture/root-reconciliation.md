@@ -117,7 +117,9 @@ RootReconcilerOpenedResult
 ```
 
 bootstrap必须包含Root下全部active和archived Cycles、Issues、relations、managed records、用户comments和Git事实。
-`root.ownership`必须引用已read-back的Root ownership managed record；尚未claim的Root不得打开Reconciler。
+`root.ownership`必须引用已read-back的Root ownership managed record；尚未claim的Root不得打开Reconciler。首次claim
+前，Conductor还必须从Podium投影验证该Root的原生`delegate_id`等于当前Binding验证过的Symphony actor；delegation
+由用户在Linear完成，Conductor、Podium workflow boundary和Performer都不能创建或模拟它。
 `delivery`是已read-back的DeliveryRecord reference，尚无delivery时为`null`，不能使用虚构的`none` record、local
 checkpoint或Markdown placeholder表达缺失。
 任何bootstrap/delta或Stage context中的`RecordReference`都必须包含实际record的`record_id`、`record_kind`、
@@ -351,9 +353,9 @@ comment author推断。
 - Finding、budget、convergence和delivery records；
 - Symphony bot、Linear integration或其他automation actor创建的comment。
 
-Symphony managed comment只依据validated Symphony actor、唯一strict `symphony` code block、stable identity和owned
+Symphony managed comment只依据validated Symphony actor、唯一strict `json` code block、stable identity和owned
 scope识别，不依据“第一条comment”、作者显示名、文本前缀或HTML marker。即使Root Control Record Comment不再是
-第一条也必须排除；用户创建的第一条普通comment以及human actor粘贴的任意`symphony` block必须保留为用户输入。
+第一条也必须排除；用户创建的第一条普通comment以及human actor粘贴的任意`json` block必须保留为用户输入。
 Symphony actor产生但code block缺失、重复或schema无效的comment形成mechanical violation，不能退回旧marker reader。
 
 ```text
@@ -461,8 +463,8 @@ receipt target。`NativeCommentThreadStateInput`没有用户comment body可标�
 reaction的原生事实属性：它仍不能驱动Action status、Root/Cycle lifecycle或任何下一步。
 
 reply renderer只能从这些bounded字段生成结构化用户Markdown。它可以使用heading、强调、列表、链接、引用和非
-`symphony` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
-唯一末尾`symphony` block之外放置restart-required事实。
+`json` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
+唯一末尾`json` block之外放置restart-required事实。
 
 closed renderer使用固定用户结构，不把模型原文直接当comment：
 
@@ -478,7 +480,7 @@ closed renderer使用固定用户结构，不把模型原文直接当comment：
 **下一步**
 <next_step>
 
-```symphony
+```json
 {"kind":"root_reconciler_reply","version":1,"record_id":"...",...}
 ```
 ````
@@ -506,7 +508,7 @@ state都fresh read-back后才算materialized；只有child reply存在不能视�
 
 回复是accepted `RootDirective`的必需Linear materialization，不是timeline event。Conductor在matching directive及其
 必要mutation read-back后，把回复作为原生child reply写入source comment thread，并在同一comment底部写唯一
-`symphony` block承载`RootReconcilerReplyRecord`：
+`json` block承载`RootReconcilerReplyRecord`：
 
 ```text
 RootReconcilerReplyRecord
@@ -949,7 +951,9 @@ Cycle内用户修改由Root Reconciler结合Approved Plan Contract判断：无�
 ### 9.1 初始Cycle
 
 ```text
-owned Root has no Cycle
+user-delegated Root with no ownership and no Cycle
+-> Conductor claims only after native delegation is fresh read-back
+-> owned Root has no Cycle
 -> Conductor validates ownership, complete coverage and convergence
 -> open Root Reconciler session with the empty-Cycle fact
 -> Reconciler returns create_cycle(reason=initial)
@@ -990,7 +994,7 @@ accepted但未完成directive按stable write ID继续materialize。Root Reconcil
 
 - Timeline由typed event subscriber写入Root或matching Cycle Issue；
 - comment reply由`RootDirective`携带并作为该directive的必需Linear mutation写回原Issue；
-- 两者都使用closed renderer、唯一`symphony` code block和deterministic ID，不由业务模块拼任意Markdown；
+- 两者都使用closed renderer、唯一`json` code block和deterministic ID，不由业务模块拼任意Markdown；
 - reply还必须materialize matching native reaction和thread action；任一写入或read-back失败都会停止当前Root推进并记录correlated error；
 - 不存在Linear之外的pending reply/timeline状态。恢复只根据Linear source record与matching managed comment是否
   存在继续同一写入；timeline/reply automation body不会作为新的用户输入，但human在其thread中新增comment或形成新的
@@ -1016,7 +1020,7 @@ Reconciler有Root级turn/token/deadline limits；Stage仍有Cycle/turn budgets�
    `RootDelta`，并返回一个closed `RootReconcilerTurnResult`。只有其directive variant可包含一个下一步动作；failure
    variant必须先durable read-back并等待新的用户input，且不推进session baseline。
 5. 所有用户status、content、archive、parent、relation和普通comment变化都作为pending inputs进入Root Reconciler；
-   managed/system comments按validated actor和strict `symphony` code block排除。
+   managed/system comments按validated actor和strict `json` code block排除。
 6. 每个处理过且仍存在的用户comment body version或non-Symphony thread-state revision都有matching consumed input和
    read-back后回复；comment tombstone只消费不回复，其他缺少回复时Root停止推进。
 7. 每个input identity最多被一个accepted directive消费；delta没有独立业务状态，Symphony自身mutation不作为新的

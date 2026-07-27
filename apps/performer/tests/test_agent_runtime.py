@@ -506,6 +506,23 @@ def test_host_reports_root_directive_contract_failure():
     assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
 
 
+def test_host_accepts_linear_status_catalog_in_root_bootstrap_manifest():
+    request = open_root_request()
+    bootstrap = request["bootstrap"]
+    assert isinstance(bootstrap, dict)
+    bootstrap["source_manifest"] = [{
+        "source_kind": "linear_status_catalog",
+        "source_id": "status-catalog-1",
+        "source_version": "status-catalog-v1",
+        "actor_kind": "linear_integration",
+    }]
+
+    result = AgentProtocolHost(FakeBackend()).handle(request)
+
+    assert result["kind"] == "root_reconciler_opened"
+    assert result["initial_result"]["action"]["kind"] == "wait"
+
+
 def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
     backend = FakeBackend()
     host = AgentProtocolHost(backend, workspace_root=tmp_path)

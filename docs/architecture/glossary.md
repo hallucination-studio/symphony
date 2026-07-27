@@ -68,7 +68,7 @@ baseBranch
 
 | Canonical Term | 代码类型/字段 | 定义 |
 |---|---|---|
-| Root Issue | `RootIssueSnapshot` | 被delegated给Symphony的顶层Linear Issue |
+| Root Issue | `RootIssueSnapshot` | 带有有效 Conductor routing label 的顶层 Linear Issue |
 | Root Run | 领域概念 | Symphony对一个Root Issue的完整处理生命周期 |
 | Root Workflow State | `RootWorkflowState` | Root允许的Todo、In Progress、Needs Approval、Needs Info、In Review、Done或Canceled Linear status |
 | Root Reconciliation View | `RootReconciliationView` | 从fresh active/archived Linear Tree和Git事实重建的当前内存视图 |
@@ -79,7 +79,7 @@ baseBranch
 | Agent Execution Policy | `AgentExecutionPolicy` | Profile保存的sandbox mode和有界command allowlist/denylist；作为Stage policy输入由Provider Backend映射 |
 | Root Managed Comment | 领域概念 | Symphony在Root下管理的用户可见comment，包括Control Record、Timeline和Reconciler Reply |
 | Root Control Record Comment | `RootControlRecordCommentSnapshot` | claim时创建的Symphony-managed Root comment；只承载ownership、fixed Profile等明确Root records，不保存status、current Cycle、ready node、activity或runtime observation |
-| Root Timeline Comment | `LinearCommentSnapshot` | Root timeline event subscriber写到Root Issue的Markdown + `symphony` block comment |
+| Root Timeline Comment | `LinearCommentSnapshot` | Root timeline event subscriber写到Root Issue的Markdown + `json` block comment |
 | User Comment Input | `UserCommentInput` | human actor创建/修改的comment body version，或non-Symphony native thread-state revision；后者是当前state快照而非历史event，reaction不是pending input |
 | Root Reconciler Reply | `RootReconcilerReplyRecord` | matching RootDirective处理用户comment后写入原生thread并read-back的reply、reaction和thread action |
 
@@ -119,7 +119,7 @@ header summary，Action status/comment和closed resolution是用户交互事实�
 
 | Canonical Term | 代码类型/字段 | 定义 |
 |---|---|---|
-| Symphony Managed Comment | `SymphonyManagedComment` | validated Symphony actor写入、包含用户Markdown和唯一strict `symphony` code block的Linear comment |
+| Symphony Managed Comment | `SymphonyManagedComment` | validated Symphony actor写入、包含用户Markdown和唯一strict `json` code block的Linear comment |
 | Workflow Issue Record | `WorkflowIssueRecord` | Symphony创建的每个Root descendant Issue description中唯一的stable issue key、Root/parent scope和kind记录；不拥有lifecycle、proposal、Result或usage |
 | Plan Contract Record | `PlanContractRecord` | immutable Plan execution contract、Root/Cycle和Git baseline；只在managed comment中持久化 |
 | Stage Execution Record | `StageExecutionRecord` | 一个Stage invocation的closed execution correlation、context、limits与repository revision；不拥有terminal Result、Issue lifecycle或下一步 |
@@ -134,7 +134,7 @@ header summary，Action status/comment和closed resolution是用户交互事实�
 | Root Reconciler Reply Record | `RootReconcilerReplyRecord` | source human comment version到read-back后Linear thread reply、reaction和thread action的幂等关联 |
 | Performer Profile ID | `PerformerProfileId` / `performer_profile_id` | Root固定使用的Performer Profile身份 |
 
-所有restart-required managed事实都在strict `symphony` code block中。旧HTML marker、`ManagedMarker`、
+所有restart-required managed事实都在strict `json` code block中。旧HTML marker、`ManagedMarker`、
 `managed_marker`和dual reader不是canonical term，也没有兼容语义。
 
 ## 7. Linear Gateway
@@ -163,7 +163,7 @@ LinearGatewayInterface
 | 代码类型 | 定义 |
 |---|---|
 | `LinearProjectSnapshot` | Gateway读取到的Project外部事实副本 |
-| `RootIssueSnapshot` | Root header、delegation、Priority、blockers和bounded Control Record外部事实副本；不含完整Tree |
+| `RootIssueSnapshot` | Root header、routing label、Priority、blockers和bounded Control Record外部事实副本；不含完整Tree |
 | `WorkflowRootTreeSnapshot` | 一个Root的完整descendant tree副本 |
 | `LinearIssueNodeSnapshot` | Tree中的单个Issue节点副本 |
 | `LinearCommentSnapshot` | Linear Comment外部事实副本 |
