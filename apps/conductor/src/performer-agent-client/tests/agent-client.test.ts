@@ -669,12 +669,14 @@ test("agent client carries native Plan Issue and convergence facts in Root boots
 test("agent client reuses one Profile channel for a Root session lifecycle", async () => {
   let openedChannels = 0;
   const requestKinds: string[] = [];
+  const closeReasons: string[] = [];
   const channelFactory: PerformerAgentChannelFactory = {
     open() {
       openedChannels += 1;
       return {
         async request({ requestId, body }) {
           requestKinds.push(String(body.kind));
+          if (body.kind === "close_root_reconciler") closeReasons.push(String(body.reason));
           return (body.kind === "open_root_reconciler"
             ? {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
@@ -696,9 +698,15 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
     deadlineMs: 30_000,
   });
   await client.openRootReconciler(openInput("open-request"));
-  await client.closeRootReconciler({ requestId: "close-request", rootIssueId: "root-1", sessionId: "session-1" });
+  await client.closeRootReconciler({
+    requestId: "close-request",
+    rootIssueId: "root-1",
+    sessionId: "session-1",
+    reason: "root_terminal",
+  });
   assert.equal(openedChannels, 1);
   assert.deepEqual(requestKinds, ["open_root_reconciler", "close_root_reconciler"]);
+  assert.deepEqual(closeReasons, ["root_terminal"]);
 });
 
 test("agent client decodes direct role-specific results", async () => {

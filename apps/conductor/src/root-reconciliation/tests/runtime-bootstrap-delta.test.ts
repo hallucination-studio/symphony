@@ -488,6 +488,40 @@ test("Root runtime reports each fresh Reconciler failure without writing machine
   assert.deepEqual(tree.comments, commentsBefore);
 });
 
+test("Root runtime closes retained failed opens before starting a fresh session", async () => {
+  const tree = workflowTree();
+  let opens = 0;
+  let closes = 0;
+  const dependencies = failureDependencies({
+    tree,
+    onOpen: (input) => {
+      opens += 1;
+      return {
+        ...failureFor(input),
+        continuity: {
+          kind: "retained",
+          appendOutcome: "accepted",
+          providerVisibleContextDigest: input.bootstrap.rootDigest,
+        },
+      };
+    },
+    onClose: (reason) => {
+      assert.equal(reason, "turn_failed");
+      closes += 1;
+    },
+    logs: [],
+  });
+  const runtime = new RootReconciliationRuntime(dependencies);
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(opens, 1);
+  assert.equal(closes, 1);
+
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.equal(opens, 2);
+  assert.equal(closes, 2);
+});
+
 test("native thread-state inputs require their matching reply without relying on a legacy comment version", () => {
   const source = workflowComment({
     commentId: "comment-1",
@@ -607,6 +641,7 @@ function validWorktreeGateInspection() {
 function failureDependencies(input: {
   tree: LinearWorkflowTreeSnapshot;
   onOpen(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["open"]>[0]): RootReconcilerFailure;
+  onClose?(reason: "root_terminal" | "turn_failed"): void;
   logs: Array<{ event: string; fields: Record<string, string> }>;
 }): RootReconciliationRuntimeDependencies {
   const root = {
@@ -643,7 +678,10 @@ function failureDependencies(input: {
         };
       },
       async advance() { throw new Error("advance_unexpected"); },
-      async close() { throw new Error("close_unexpected"); },
+      async close(closeInput) {
+        if (!input.onClose) throw new Error("close_unexpected");
+        input.onClose(closeInput.reason);
+      },
     },
     performer: {} as never,
     materializer: { async materialize() { throw new Error("materializer_unexpected"); } },

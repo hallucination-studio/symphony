@@ -14,5 +14,5 @@ export interface RootReconcilerClientInterface {
     observedAt: string;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
-  close(input: { requestId: string; sessionId: string }): Promise<void>;
+  close(input: { requestId: string; sessionId: string; reason: "root_terminal" | "turn_failed" }): Promise<void>;
 }

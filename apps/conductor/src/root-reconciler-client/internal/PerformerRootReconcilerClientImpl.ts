@@ -15,7 +15,12 @@ interface RootReconcilerTransport {
     observedAt: string;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
-  closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void>;
+  closeRootReconciler(input: {
+    requestId: string;
+    rootIssueId: string;
+    sessionId: string;
+    reason: "root_terminal" | "turn_failed";
+  }): Promise<void>;
 }
 
 export class PerformerRootReconcilerClientImpl implements RootReconcilerClientInterface {
@@ -25,7 +30,10 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
 
   async open(input: RootReconcilerOpenInput): Promise<RootReconcilerOpenResult> {
     const result = await this.transport.openRootReconciler(input);
-    if (result.initialResult.kind === "directive") {
+    if (
+      result.initialResult.kind === "directive" ||
+      result.initialResult.failure.continuity.kind === "retained"
+    ) {
       this.rootsBySession.set(result.sessionId, input.rootIssueId);
     }
     return result;
@@ -39,11 +47,17 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
     const result = await this.transport.advanceRootReconciler(input);
-    if (result.kind === "failed") this.rootsBySession.delete(input.sessionId);
+    if (result.kind === "failed" && result.failure.continuity.kind === "closed") {
+      this.rootsBySession.delete(input.sessionId);
+    }
     return result;
   }
 
-  async close(input: { requestId: string; sessionId: string }): Promise<void> {
+  async close(input: {
+    requestId: string;
+    sessionId: string;
+    reason: "root_terminal" | "turn_failed";
+  }): Promise<void> {
     const rootIssueId = this.rootsBySession.get(input.sessionId);
     if (!rootIssueId) throw new Error("root_reconciler_session_unknown");
     await this.transport.closeRootReconciler({ ...input, rootIssueId });

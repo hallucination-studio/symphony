@@ -639,6 +639,26 @@ def test_host_reports_root_directive_contract_failure():
     assert host._root._baselines["root-session"].root_digest == fragment_digest(root_manifest())
 
 
+def test_retained_failed_root_open_can_be_closed_before_a_fresh_open():
+    host = AgentProtocolHost(InvalidRootDirectiveBackend())
+
+    failed = host.handle(open_root_request())
+    assert failed["initial_result"]["failure"]["continuity"]["kind"] == "retained"
+
+    closed = host.handle({
+        "protocol_version": "1",
+        "request_id": "close",
+        "kind": "close_root_reconciler",
+        "root_issue_id": "root-1",
+        "reason": "turn_failed",
+    })
+    assert closed["kind"] == "root_reconciler_closed"
+
+    reopened = host.handle(open_root_request("reopen", "root-session-2", "turn-2"))
+    assert reopened["kind"] == "root_reconciler_opened"
+    assert reopened["reconciler_session_id"] == "root-session-2"
+
+
 def test_root_not_accepted_failure_retains_the_confirmed_base():
     backend = RootAppendFailureBackend("not_accepted")
     host = AgentProtocolHost(backend)

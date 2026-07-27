@@ -170,12 +170,17 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     }
   }
 
-  async closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void> {
+  async closeRootReconciler(input: {
+    requestId: string;
+    rootIssueId: string;
+    sessionId: string;
+    reason: "root_terminal" | "turn_failed";
+  }): Promise<void> {
     const profileId = this.profileByRootSession.get(input.sessionId);
     if (!profileId) throw new Error("root_reconciler_session_profile_unknown");
     await this.invoke(input.requestId, profileId, {
       protocol_version: "1", request_id: input.requestId, kind: "close_root_reconciler",
-      root_issue_id: input.rootIssueId, reason: "root_terminal",
+      root_issue_id: input.rootIssueId, reason: input.reason,
     }, decodeConductorPerformerCloseRootReconcilerResult, "root_reconciler_close_response_contract_invalid");
     this.profileByRootSession.delete(input.sessionId);
     this.profileByRoot.delete(input.rootIssueId);

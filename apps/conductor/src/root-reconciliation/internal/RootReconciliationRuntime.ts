@@ -333,6 +333,9 @@ export class RootReconciliationRuntime {
         attemptedInputIds,
       });
       if (failureValidation) throw new Error(failureValidation);
+      if (result.failure.continuity.kind === "retained") {
+        await this.dependencies.reconciler.close({ requestId: randomUUID(), sessionId, reason: "turn_failed" });
+      }
       this.sessions.delete(root.issueId);
       this.dependencies.log("root_reconciler_failed", {
         root_issue_id: root.issueId,
@@ -726,7 +729,7 @@ export class RootReconciliationRuntime {
       });
     }
     if (action.kind === "conclude_root" || action.kind === "cancel_root") {
-      await this.dependencies.reconciler.close({ requestId: randomUUID(), sessionId });
+      await this.dependencies.reconciler.close({ requestId: randomUUID(), sessionId, reason: "root_terminal" });
       this.sessions.delete(root.issueId);
     }
   }

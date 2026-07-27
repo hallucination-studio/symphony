@@ -21,7 +21,7 @@ function rootModelTurn(): RootDirective["modelTurn"] {
 }
 
 test("root reconciler client owns session-to-root close correlation", async () => {
-  const calls: Array<{ kind: string; rootIssueId?: string; sessionId?: string }> = [];
+  const calls: Array<{ kind: string; rootIssueId?: string; sessionId?: string; reason?: string }> = [];
   const client = new PerformerRootReconcilerClientImpl({
     async openRootReconciler(input) {
       calls.push({ kind: "open", rootIssueId: input.rootIssueId });
@@ -37,7 +37,7 @@ test("root reconciler client owns session-to-root close correlation", async () =
       throw new Error("not exercised");
     },
     async closeRootReconciler(input) {
-      calls.push({ kind: "close", rootIssueId: input.rootIssueId, sessionId: input.sessionId });
+      calls.push({ kind: "close", rootIssueId: input.rootIssueId, sessionId: input.sessionId, reason: input.reason });
     },
   });
 
@@ -51,15 +51,15 @@ test("root reconciler client owns session-to-root close correlation", async () =
     bootstrap: {} as never,
     limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
   });
-  await client.close({ requestId: "request-2", sessionId: opened.sessionId });
+  await client.close({ requestId: "request-2", sessionId: opened.sessionId, reason: "root_terminal" });
   assert.deepEqual(calls, [
     { kind: "open", rootIssueId: "root-1" },
-    { kind: "close", rootIssueId: "root-1", sessionId: "session-1" },
+    { kind: "close", rootIssueId: "root-1", sessionId: "session-1", reason: "root_terminal" },
   ]);
-  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
+  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1", reason: "root_terminal" }), /root_reconciler_session_unknown/u);
 });
 
-test("root reconciler client does not retain a failed bootstrap session", async () => {
+test("root reconciler client retains close correlation for a retained bootstrap failure", async () => {
   let closeCalls = 0;
   const client = new PerformerRootReconcilerClientImpl({
     async openRootReconciler() {
@@ -67,7 +67,11 @@ test("root reconciler client does not retain a failed bootstrap session", async 
         kind: "opened" as const,
         sessionId: "session-1",
         bootstrapRootDigest: "root-1",
-        initialResult: { kind: "failed" as const, failure: failureRecord() },
+        initialResult: { kind: "failed" as const, failure: failureRecord({
+          kind: "retained",
+          appendOutcome: "accepted",
+          providerVisibleContextDigest: "root-1",
+        }) },
       };
     },
     async advanceRootReconciler() { throw new Error("not exercised"); },
@@ -86,8 +90,9 @@ test("root reconciler client does not retain a failed bootstrap session", async 
   });
 
   assert.equal(opened.initialResult.kind, "failed");
-  await assert.rejects(() => client.close({ requestId: "request-2", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
-  assert.equal(closeCalls, 0);
+  await client.close({ requestId: "request-2", sessionId: "session-1", reason: "turn_failed" });
+  assert.equal(closeCalls, 1);
+  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1", reason: "turn_failed" }), /root_reconciler_session_unknown/u);
 });
 
 test("root reconciler client discards an advance session after a closed failure", async () => {
@@ -125,10 +130,12 @@ test("root reconciler client discards an advance session after a closed failure"
   });
 
   assert.equal(result.kind, "failed");
-  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1" }), /root_reconciler_session_unknown/u);
+  await assert.rejects(() => client.close({ requestId: "request-3", sessionId: "session-1", reason: "turn_failed" }), /root_reconciler_session_unknown/u);
 });
 
-function failureRecord(): RootReconcilerFailure {
+function failureRecord(
+  continuity: RootReconcilerFailure["continuity"] = { kind: "closed", appendOutcome: "session_lost" },
+): RootReconcilerFailure {
   return {
     failureId: "root-1:turn-1:failure",
     reconcilerSessionId: "session-1",
@@ -149,7 +156,7 @@ function failureRecord(): RootReconcilerFailure {
     },
     category: "schema_invalid",
     sanitizedReason: "The Root Reconciler response was invalid.",
-    continuity: { kind: "closed", appendOutcome: "session_lost" },
+    continuity,
     failedAt: "2026-07-23T00:00:01Z",
   };
 }
