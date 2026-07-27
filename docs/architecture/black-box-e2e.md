@@ -45,7 +45,8 @@ deferred_ideas
 E2E 是并行的用户行为模拟器和外部事实验证器，不是 Symphony 的测试版控制面。
 
 ```text
-E2E 创建环境
+E2E 构建当前候选 production artifact
+-> 创建环境
 -> 启动未修改的生产进程
 -> 用户通过 Linear 创建不可变需求
 -> 用户在Linear原生delegate Root给Symphony，并对delegate read-back
@@ -94,6 +95,10 @@ npm run e2e
 ```bash
 node --env-file-if-exists=.env <campaign-entrypoint>
 ```
+
+在进入环境 reset 前，入口必须从当前 HEAD 编译它实际启动的 Podium、Conductor 和 Podium Desktop backend artifact。
+这个本地构建不读取或写入 Linear/Git Workflow facts，不是另一个产品入口或测试控制面；它只禁止 Campaign 误用
+stale `dist` artifact。
 
 现有 `.env` 配置名称和语义保持不变：
 

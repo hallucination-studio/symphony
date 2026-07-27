@@ -14,7 +14,11 @@ test("foreground E2E command keeps one .env-loaded foreground entrypoint", () =>
 
   assert.equal(
     manifest.scripts.e2e,
-    "node --env-file-if-exists=.env tools/e2e/run-foreground-campaign.mjs",
+    "npm run build:e2e-runtime && node --env-file-if-exists=.env tools/e2e/run-foreground-campaign.mjs",
+  );
+  assert.equal(
+    manifest.scripts["build:e2e-runtime"],
+    "npm run build -w @symphony/podium && npm run build -w @symphony/conductor && npm run build:backend -w @symphony/podium-desktop",
   );
   assert.equal(manifest.scripts["test:e2e:runner"], "node --test tests/e2e/*.test.mjs");
   assert.equal(manifest.scripts["desktop-shell-smoke:build"], "node tools/desktop-smoke/build.mjs");
