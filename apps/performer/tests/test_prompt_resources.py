@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from shutil import copytree
+import subprocess
+import sys
 
 import pytest
 
+from performer import prompt_resources
+from performer.prompt_resources import PromptResourceError, load_role_prompt_catalog
+
 
 PROMPT_DIRECTORY = Path(__file__).resolve().parents[1] / "src" / "performer" / "prompts"
+PERFORMER_DIRECTORY = PROMPT_DIRECTORY.parents[2]
 
 ROLE_RESOURCES = {
     "root_reconciler": "root-reconciler.md",
@@ -62,28 +69,129 @@ def test_role_prompt_resources_preserve_the_current_english_base_instructions() 
     assert _read_resources(PROMPT_DIRECTORY) == EXPECTED_PROMPTS
 
 
+def test_loader_eagerly_returns_the_complete_immutable_role_catalog() -> None:
+    catalog = load_role_prompt_catalog()
+
+    assert {role: catalog.for_role(role) for role in ROLE_RESOURCES} == EXPECTED_PROMPTS
+    with pytest.raises(TypeError):
+        catalog._prompts["plan"] = "replacement"  # type: ignore[index]
+
+
+def test_loader_rejects_an_unknown_role() -> None:
+    catalog = load_role_prompt_catalog()
+
+    with pytest.raises(PromptResourceError, match="performer_prompt_role_unknown"):
+        catalog.for_role("other")
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
         ("missing", "performer_prompt_resource_missing"),
+        ("unreadable", "performer_prompt_resource_unreadable"),
         ("empty", "performer_prompt_resource_empty"),
         ("duplicate", "performer_prompt_resource_duplicate"),
         ("non_english", "performer_prompt_resource_not_english"),
         ("role_mismatch", "performer_prompt_resource_role_mismatch"),
         ("unexpected", "performer_prompt_resource_set_invalid"),
+        ("nested", "performer_prompt_resource_set_invalid"),
     ],
 )
 def test_role_prompt_resource_validation_rejects_invalid_resource_sets(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mutation: str,
     code: str,
 ) -> None:
-    resource_directory = tmp_path / "prompts"
+    resource_directory = tmp_path / "package" / "prompts"
     copytree(PROMPT_DIRECTORY, resource_directory)
-    _mutate(resource_directory, mutation)
+    monkeypatch.setattr(prompt_resources, "files", lambda _: resource_directory.parent)
+    if mutation == "unreadable":
+        original_read_text = Path.read_text
 
-    with pytest.raises(ValueError, match=code):
-        _read_resources(resource_directory)
+        def unreadable(path: Path, *args: object, **kwargs: object) -> str:
+            if path == resource_directory / ROLE_RESOURCES["plan"]:
+                raise OSError("denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    else:
+        _mutate(resource_directory, mutation)
+
+    with pytest.raises(PromptResourceError, match=code):
+        load_role_prompt_catalog()
+
+
+def test_process_composition_eagerly_validates_the_prompt_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from performer import __main__ as performer_main
+
+    loaded: list[object] = []
+
+    class Host:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def iter_lines(self, *_: object) -> tuple[()]:
+            return ()
+
+        def cancel(self) -> None:
+            pass
+
+    monkeypatch.setattr(performer_main, "load_role_prompt_catalog", lambda: loaded.append(object()))
+    monkeypatch.setattr(performer_main, "create_sdk", lambda: object())
+    monkeypatch.setattr(performer_main, "AgentProtocolHost", Host)
+    monkeypatch.setattr(performer_main.signal, "signal", lambda *_: None)
+    monkeypatch.setattr(performer_main.sys, "argv", ["performer", "--agent"])
+    monkeypatch.setattr(performer_main.sys, "stdin", type("Input", (), {"buffer": object()})())
+
+    performer_main.main()
+
+    assert len(loaded) == 1
+
+
+def test_built_wheel_loads_prompt_resources_outside_the_source_checkout(tmp_path: Path) -> None:
+    wheel_directory = tmp_path / "wheel"
+    installed_directory = tmp_path / "installed"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--no-build-isolation",
+            "--wheel-dir",
+            str(wheel_directory),
+            str(PERFORMER_DIRECTORY),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(wheel_directory.glob("symphony_performer-*.whl"))
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(installed_directory), str(wheel)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    environment = {**os.environ, "PYTHONPATH": str(installed_directory)}
+    probe = (
+        "from pathlib import Path\n"
+        "import performer\n"
+        "from performer.prompt_resources import load_role_prompt_catalog\n"
+        f"installed = Path({str(installed_directory)!r}).resolve()\n"
+        "assert Path(performer.__file__).resolve().is_relative_to(installed)\n"
+        "assert load_role_prompt_catalog().for_role('verify').startswith('You are the Symphony Verify role.')\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _read_resources(resource_directory: Path) -> dict[str, str]:
@@ -125,5 +233,9 @@ def _mutate(resource_directory: Path, mutation: str) -> None:
         plan.write_text("You are the Symphony Other role.", encoding="utf-8")
     elif mutation == "unexpected":
         (resource_directory / "other.md").write_text("You are the Symphony Other role.", encoding="utf-8")
+    elif mutation == "nested":
+        nested = resource_directory / "nested"
+        nested.mkdir()
+        (nested / "other.md").write_text("You are the Symphony Other role.", encoding="utf-8")
     else:
         raise AssertionError(f"Unknown mutation: {mutation}")

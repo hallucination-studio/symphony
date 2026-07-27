@@ -9,6 +9,7 @@ from threading import Event
 
 from performer.agent_protocol.host import AgentProtocolHost
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl, create_sdk
+from performer.prompt_resources import load_role_prompt_catalog
 from performer.profile_control.host import ProfileControlHost
 
 
@@ -19,6 +20,7 @@ def main() -> None:
     parser.add_argument("--workspace-root", type=Path)
     args = parser.parse_args()
     try:
+        load_role_prompt_catalog()
         sdk = create_sdk()
     except ValueError as error:
         raise SystemExit(str(error)) from None
