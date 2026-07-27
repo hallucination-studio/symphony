@@ -29,11 +29,16 @@ description；不存在Spec Issue、contract record或repository task file。
 
 ## 2. Issue kind与身份
 
-每个workflow Issue恰有一个primary kind label：
+每个workflow Issue恰有一个primary kind label。业务kind与native Linear Issue Label使用以下唯一映射；不接受裸业务名label：
 
-```text
-Root | Cycle | Plan | Work | Verify | Finding
-```
+| business kind | native Issue Label |
+|---|---|
+| `Root` | `symphony:kind/root` |
+| `Cycle` | `symphony:kind/cycle` |
+| `Plan` | `symphony:kind/plan` |
+| `Work` | `symphony:kind/work` |
+| `Verify` | `symphony:kind/verify` |
+| `Finding` | `symphony:kind/finding` |
 
 Issue identity只使用Linear native ID。kind必须同时满足primary label和parent topology；缺label、多个primary kind labels、
 非法parent或跨Root relation使Root fail closed。title、description文本和创建顺序都不是identity。

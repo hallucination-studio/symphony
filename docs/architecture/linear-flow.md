@@ -114,7 +114,7 @@ read-back和internal decision只进入runtime logs/metrics。
 
 ## 9. End-to-end flow
 
-1. Human在Linear创建Root，填写description、Project、Root和routing labels。
+1. Human在Linear创建Root，填写description、Project、`symphony:kind/root`和routing labels。
 2. Human native-delegates Root给Symphony actor。
 3. Podium header query发现candidate；Conductor获得进程内`RootIterationGuard`并fresh验证routing/process generation。
 4. Conductor读取完整native graph与Git，并执行worktree gate。

@@ -162,7 +162,8 @@ Conductor Label；移除member前，不得存在仍route到该member的非终态
 任一条件不满足都fail closed，不做partial pool mutation。
 
 Target Workflow Setup只初始化并read-back目标Team的workflow status catalog、六个primary kind Issue Labels
-（`Root`、`Cycle`、`Plan`、`Work`、`Verify`、`Finding`）、Human Action Issue Labels、Project配置和当前Project
+（`symphony:kind/root`、`symphony:kind/cycle`、`symphony:kind/plan`、`symphony:kind/work`、
+`symphony:kind/verify`、`symphony:kind/finding`）、Human Action Issue Labels、Project配置和当前Project
 Conductor Pool。每个workflow label必须是该Team唯一、active且非group的native Issue Label；缺失时setup创建，重复或read-back
 不完整时fail closed。它绝不创建、rebind、加入或移除任何Conductor Project Label。Conductor Binding是Project Conductor Pool
 唯一的写入者。这样workflow初始化不能借由临时Conductor identity改变已有Root的routing；Binding创建后的pool read-back只要求
