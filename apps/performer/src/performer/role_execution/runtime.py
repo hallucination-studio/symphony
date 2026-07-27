@@ -79,7 +79,7 @@ class RoleExecutionRuntime:
                 "error_code": "provider_append_acceptance_unknown",
                 "sanitized_reason": error.sanitized_reason,
                 "retryable": True,
-                "failure_category": "canceled",
+                **({"failure_category": "canceled"} if role == "root_reconciler" else {}),
             }
         except ProviderTurnDeadlineExpired as error:
             continuity = _error_continuity(error, record, request)
@@ -88,7 +88,7 @@ class RoleExecutionRuntime:
                 "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The turn deadline expired.",
                 "retryable": False,
-                "failure_category": "timed_out",
+                **({"failure_category": "timed_out"} if role == "root_reconciler" else {}),
             }
         except ProviderBackendError as error:
             continuity = _error_continuity(error, record, request)
@@ -97,7 +97,7 @@ class RoleExecutionRuntime:
                 "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": error.sanitized_reason,
                 "retryable": error.retryable,
-                "failure_category": "transport_failed",
+                **({"failure_category": "transport_failed"} if role == "root_reconciler" else {}),
             }
         except (KeyError, TypeError, ValueError, SessionError) as error:
             continuity = _error_continuity(error, record, request, accepted=output is not None)
@@ -106,7 +106,7 @@ class RoleExecutionRuntime:
                 "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The Performer could not validate the turn result.",
                 "retryable": False,
-                "failure_category": "schema_invalid",
+                **({"failure_category": "schema_invalid"} if role == "root_reconciler" else {}),
             }
         except Exception as error:
             continuity = _error_continuity(error, record, request, accepted=output is not None)
@@ -115,7 +115,7 @@ class RoleExecutionRuntime:
                 "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The Performer could not complete the turn.",
                 "retryable": False,
-                "failure_category": "transport_failed",
+                **({"failure_category": "transport_failed"} if role == "root_reconciler" else {}),
             }
         if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed"}:
             result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."}
