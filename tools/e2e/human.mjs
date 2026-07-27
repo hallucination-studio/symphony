@@ -27,6 +27,67 @@ const PREEMPTION_CORE_ROOT_KEYS = new Set(
     ?.declaredUserInteractions.find(({ kind }) => kind === "bind_preemption_roles")?.rootKeys ?? [],
 );
 export const HUMAN_ACTION_POLL_INTERVAL_MS = 5_000;
+export const HUMAN_LINEAR_REQUEST_INTERVAL_MS = 250;
+
+export function createHumanLinearRequestBudget({
+  now = () => Date.now(),
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  if (typeof now !== "function" || typeof wait !== "function") {
+    throw stableError("foreground_e2e_human_request_budget_input_invalid");
+  }
+  let tail = Promise.resolve();
+  let nextRequestAt = Number.NEGATIVE_INFINITY;
+  return Object.freeze({
+    execute(operation, signal = undefined) {
+      if (typeof operation !== "function" || signal !== undefined && !abortSignal(signal)) {
+        return Promise.reject(stableError("foreground_e2e_human_request_budget_input_invalid"));
+      }
+      const request = tail.then(async () => {
+        if (signal?.aborted) throw abortedRequestError();
+        const currentTime = now();
+        if (!Number.isFinite(currentTime)) throw stableError("foreground_e2e_human_request_budget_clock_invalid");
+        const waitMilliseconds = Math.max(0, nextRequestAt - currentTime);
+        if (waitMilliseconds > 0) await abortable(() => wait(waitMilliseconds), signal);
+        if (signal?.aborted) throw abortedRequestError();
+        const startTime = now();
+        if (!Number.isFinite(startTime)) throw stableError("foreground_e2e_human_request_budget_clock_invalid");
+        nextRequestAt = startTime + HUMAN_LINEAR_REQUEST_INTERVAL_MS;
+        return abortable(operation, signal);
+      });
+      tail = request.then(() => undefined, () => undefined);
+      return request;
+    },
+  });
+}
+
+function budgetHumanLinearClient(client, requestBudget, signal = undefined) {
+  if (!client || typeof client !== "object") {
+    throw stableError("foreground_e2e_human_actor_client_invalid");
+  }
+  return budgetHumanLinearValue(client, requestBudget, signal, new WeakMap());
+}
+
+function budgetHumanLinearValue(value, requestBudget, signal, wrappers) {
+  if (value === null || typeof value !== "object" || value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map((item) => budgetHumanLinearValue(item, requestBudget, signal, wrappers));
+  const existing = wrappers.get(value);
+  if (existing) return existing;
+  const wrapper = new Proxy(value, {
+    get(target, property, receiver) {
+      const member = Reflect.get(target, property, receiver);
+      if (typeof member !== "function") {
+        return budgetHumanLinearValue(member, requestBudget, signal, wrappers);
+      }
+      return (...arguments_) => requestBudget.execute(
+        async () => budgetHumanLinearValue(await member.apply(target, arguments_), requestBudget, signal, wrappers),
+        signal,
+      );
+    },
+  });
+  wrappers.set(value, wrapper);
+  return wrapper;
+}
 
 export async function createForegroundE2EHumanActor({
   apiKey,
@@ -37,20 +98,22 @@ export async function createForegroundE2EHumanActor({
   if (!token(apiKey) || !identifier(expectedActorId) || typeof createClient !== "function") {
     throw stableError("foreground_e2e_human_actor_input_invalid");
   }
-  let client;
+  const requestBudget = createHumanLinearRequestBudget();
+  let rawClient;
   try {
-    client = createClient({ apiKey });
+    rawClient = createClient({ apiKey });
   } catch {
     throw stableError("foreground_e2e_human_actor_client_invalid");
   }
-  const actorId = await readActorId(client);
+  const actorId = await readActorId(rawClient);
   if (actorId !== expectedActorId) throw stableError("foreground_e2e_human_actor_identity_invalid");
+  const client = budgetHumanLinearClient(rawClient, requestBudget);
   const clientForCase = (signal) => {
     if (signal === undefined) return client;
     if (!abortSignal(signal)) throw stableError("foreground_e2e_human_operation_input_invalid");
     if (signal.aborted) throw stableError("foreground_e2e_human_linear_request_aborted");
     try {
-      return createClient({ apiKey, signal });
+      return budgetHumanLinearClient(createClient({ apiKey, signal }), requestBudget, signal);
     } catch {
       throw stableError("foreground_e2e_human_actor_client_invalid");
     }

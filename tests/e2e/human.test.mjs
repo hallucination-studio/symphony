@@ -5,12 +5,104 @@ import { RatelimitedLinearError } from "@linear/sdk";
 
 import { bindSameConductorPreemptionRoles, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import {
+  createHumanLinearRequestBudget,
   createForegroundE2EHumanActor,
   HUMAN_ACTION_POLL_INTERVAL_MS,
+  HUMAN_LINEAR_REQUEST_INTERVAL_MS,
 } from "../../tools/e2e/human.mjs";
 
-test("Human Actor bounds concurrent Case polling below the Linear request burst threshold", () => {
+test("Human Actor uses a stable polling interval", () => {
   assert.equal(HUMAN_ACTION_POLL_INTERVAL_MS, 5_000);
+});
+
+test("Human Actor globally serializes concurrent Case Linear requests at a bounded cadence", async () => {
+  let now = 0;
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  let releaseFirst;
+  const starts = [];
+  const waits = [];
+  const budget = createHumanLinearRequestBudget({
+    now: () => now,
+    wait: async (milliseconds) => {
+      waits.push(milliseconds);
+      now += milliseconds;
+    },
+  });
+
+  const first = budget.execute(async () => {
+    starts.push(now);
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    await new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    inFlight -= 1;
+  });
+  const second = budget.execute(async () => {
+    starts.push(now);
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    inFlight -= 1;
+  });
+  const third = budget.execute(async () => {
+    starts.push(now);
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    inFlight -= 1;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [0]);
+  releaseFirst();
+  await Promise.all([first, second, third]);
+
+  assert.equal(maximumInFlight, 1);
+  assert.deepEqual(starts, [0, HUMAN_LINEAR_REQUEST_INTERVAL_MS, HUMAN_LINEAR_REQUEST_INTERVAL_MS * 2]);
+  assert.deepEqual(waits, [HUMAN_LINEAR_REQUEST_INTERVAL_MS, HUMAN_LINEAR_REQUEST_INTERVAL_MS]);
+});
+
+test("Human Actor applies the shared request budget to concurrent Case Linear mutations", async () => {
+  const fixture = createLinearFixture();
+  const originalCreateIssue = fixture.client.createIssue.bind(fixture.client);
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  let releaseFirst;
+  fixture.client.createIssue = async (input) => {
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    if (releaseFirst === undefined) {
+      await new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    inFlight -= 1;
+    return originalCreateIssue(input);
+  };
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+
+  const creations = [
+    ["approved_happy_path", "approved-root"],
+    ["plan_rejected_and_replanned", "rejected-plan-root"],
+    ["information_requested_and_answered", "information-root"],
+  ].map(([caseId, rootKey]) => human.createRootIssue({
+    caseId,
+    rootKey,
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  }));
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximumInFlight, 1);
+  releaseFirst();
+  await Promise.all(creations);
+  assert.equal(maximumInFlight, 1);
 });
 
 test("Human Actor performs only catalog-compatible user mutations with Linear read-back", async () => {
