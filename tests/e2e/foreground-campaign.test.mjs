@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
@@ -194,6 +195,65 @@ test("Campaign closes its Reporter when environment cleanup fails", async () => 
   assert.equal(reporterClosed, true);
 });
 
+test("Campaign bounds interrupted Case settlement before cleaning owned resources", async () => {
+  const signals = new EventEmitter();
+  let runCasesStarted;
+  let environmentClosed = 0;
+  let reporterClosed = 0;
+  const campaign = runForegroundE2ECampaign({
+    environment: validEnvironment(),
+    signals,
+    dependencies: interruptedCampaignDependencies({
+      runCases: async () => {
+        runCasesStarted();
+        return new Promise(() => {});
+      },
+      onEnvironmentClose: () => { environmentClosed += 1; },
+      onReporterClose: () => { reporterClosed += 1; },
+      setTimeout: (callback) => {
+        queueMicrotask(callback);
+        return {};
+      },
+      clearTimeout() {},
+    }),
+  });
+  await new Promise((resolve) => { runCasesStarted = resolve; });
+  signals.emit("SIGINT");
+
+  const outcome = await Promise.race([
+    campaign.then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "timeout" }), 50)),
+  ]);
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(outcome.error?.code, "foreground_e2e_campaign_interrupted");
+  assert.equal(environmentClosed, 1);
+  assert.equal(reporterClosed, 1);
+});
+
+test("Campaign cannot return a successful summary after SIGINT", async () => {
+  const signals = new EventEmitter();
+  let runCasesStarted;
+  let resolveCases;
+  const campaign = runForegroundE2ECampaign({
+    environment: validEnvironment(),
+    signals,
+    dependencies: interruptedCampaignDependencies({
+      runCases: async () => {
+        runCasesStarted();
+        return new Promise((resolve) => { resolveCases = resolve; });
+      },
+    }),
+  });
+  await new Promise((resolve) => { runCasesStarted = resolve; });
+  signals.emit("SIGINT");
+  resolveCases({ exitCode: 0, cases: [] });
+
+  await assert.rejects(campaign, hasCode("foreground_e2e_campaign_interrupted"));
+});
+
 function runCampaignCli(environment) {
   return spawnSync(process.execPath, [campaignCli], {
     cwd: process.cwd(),
@@ -247,6 +307,39 @@ function rootCreation() {
     conductorId: "conductor-a",
     performerProfileId: "profile-a",
     worktreeDirectory: "/runtime/a/worktrees",
+  };
+}
+
+function interruptedCampaignDependencies({ runCases, onEnvironmentClose, onReporterClose, setTimeout, clearTimeout }) {
+  return {
+    loadConfig: () => validConfig(),
+    createReporter: () => ({
+      startHeartbeat() {},
+      phase() {},
+      close() { onReporterClose?.(); },
+      signal() {},
+      failure() {},
+    }),
+    createEnvironment: async () => ({
+      project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
+      actors: { humanActorId: "human-1" },
+      runtime: { conductors: conductorRuntime() },
+      async close() { onEnvironmentClose?.(); },
+    }),
+    createHuman: async () => ({
+      actorId: "human-1",
+      resolveRootCreationBindings: async () => Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) =>
+        rootTopology.map(({ rootKey }) => [rootKey, rootCreation()])),
+      ),
+      createdRootsForCase: () => [],
+    }),
+    runCases,
+    readFinalEvidence: async () => ({}),
+    runCaseDriver: async () => ({}),
+    randomUUID: () => "campaign-1",
+    now: () => 0,
+    ...(typeof setTimeout === "function" ? { setTimeout } : {}),
+    ...(typeof clearTimeout === "function" ? { clearTimeout } : {}),
   };
 }
 

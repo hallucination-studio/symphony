@@ -17,6 +17,7 @@ import { runSameConductorPreemptionCase } from "./same-conductor-preemption.mjs"
 import { runForegroundE2ECases } from "./verdict.mjs";
 
 const CAMPAIGN_DEADLINE_MS = 15 * 60_000;
+const INTERRUPTED_CASE_SETTLE_GRACE_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const CONDUCTOR_REFERENCES = Object.freeze(["conductor-a", "conductor-b", "conductor-c"]);
 
@@ -102,24 +103,29 @@ export async function runForegroundE2ECampaign({
       deadlineMs: campaignDeadlineMs,
     });
     reporter.phase("running");
-    summary = await operations.runCases({
-      definitions: FOREGROUND_E2E_CASES,
-      reporter,
-      createCaseScope,
-      runCase: ({ definition, scope }) => operations.runCaseDriver({
-        definition,
-        human,
-        runtime: activeEnvironment.runtime,
-        rootCreationsByRootKey,
-        signal: scope.signal,
-      }),
-      readFinalEvidence: async ({ definition, driverResult }) => readCaseFinalEvidence({
-        definition,
-        driverResult,
-        human,
-        rootCreationsByRootKey,
-        accessToken: config.secrets.linearDevToken,
-        readFinalEvidence: operations.readFinalEvidence,
+    summary = await settleInterruptedCases({
+      signal: abortController.signal,
+      setTimeout: operations.setTimeout,
+      clearTimeout: operations.clearTimeout,
+      run: () => operations.runCases({
+        definitions: FOREGROUND_E2E_CASES,
+        reporter,
+        createCaseScope,
+        runCase: ({ definition, scope }) => operations.runCaseDriver({
+          definition,
+          human,
+          runtime: activeEnvironment.runtime,
+          rootCreationsByRootKey,
+          signal: scope.signal,
+        }),
+        readFinalEvidence: async ({ definition, driverResult }) => readCaseFinalEvidence({
+          definition,
+          driverResult,
+          human,
+          rootCreationsByRootKey,
+          accessToken: config.secrets.linearDevToken,
+          readFinalEvidence: operations.readFinalEvidence,
+        }),
       }),
     });
     return summary;
@@ -285,6 +291,26 @@ function createCampaignCaseScopeFactory({ parentSignal, now, setTimeout, clearTi
       deadline,
     });
   };
+}
+
+async function settleInterruptedCases({ signal, setTimeout, clearTimeout, run }) {
+  let timer;
+  let onAbort;
+  const interrupted = new Promise((_, reject) => {
+    onAbort = () => {
+      timer = setTimeout(() => reject(stableError("foreground_e2e_campaign_interrupted")), INTERRUPTED_CASE_SETTLE_GRACE_MS);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const result = await Promise.race([Promise.resolve().then(run), interrupted]);
+    if (signal.aborted) throw stableError("foreground_e2e_campaign_interrupted");
+    return result;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function assertInput({ environment, operations, signals, campaignDeadlineMs }) {
