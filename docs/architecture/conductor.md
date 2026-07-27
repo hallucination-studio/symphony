@@ -1,36 +1,30 @@
 # Conductor职责与模块边界
 
-状态：目标架构提案。本文定义Conductor的角色和模块边界。Root与Cycle控制算法、用户comment处理和
-Root Reconciler协议由[Root Reconciliation](root-reconciliation.md)定义。
+状态：目标架构提案。本文定义Conductor角色和模块边界。Root语义由
+[Root Reconciliation](root-reconciliation.md)定义；恢复由
+[Workflow Authority与恢复](workflow-authority-recovery.md)定义。
 
 ## 1. 职责
 
 Conductor负责：
 
-- 通过`LinearGatewayInterface`解析Project、routing、ownership和完整Root Tree；
+- 通过`LinearGatewayInterface`解析Project、routing、delegation和完整native Root object graph；
 - 运行不调用模型的Root Reconciliation host；
-- 显式读取active和archived Cycle children；
-- 验证status catalog、完整coverage、remote version、budget、capability和Git preconditions；
-- 把lifecycle、DAG和Tree矛盾计算为`mechanical_violations[]`，不自行修正或决定业务后果；
-- 新Root Reconciler session构造一次完整bootstrap，后续从fresh完整读取与session baseline计算delta；
-- 主动调用Performer Root Reconciler，并保证已有session只接收delta；
-- 校验closed `RootReconcilerTurnResult`：持久化并materialize accepted `RootDirective`，或strict-write/read-back
-  `RootReconcilerFailureRecord`后停止；
-- 构造Plan/Work/Verify强类型request并调用对应Performer role thread；
-- 验证和持久化Stage Results，再交给Root Reconciler；
-- 根据directive materialize Root Human Action request comment，把thread reply/state作为用户输入，并根据directive持久化resolution；
-- 过滤普通human comment，并把matching reply作为accepted directive的required Linear materialization；
-- 管理Root worktree、commit、delivery和Root convergence；
-- 发布typed workflow timeline events。
+- 验证active/archived coverage、status catalog、actor、remote preconditions、capability和Git facts；
+- 把topology/lifecycle/Git矛盾作为mechanical violations交给Root Reconciler，不自行选择修复；
+- 调用Performer Root Reconciler与Plan/Work/Verify roles；
+- 验证transient typed Result并materialize为native Linear/Git facts；
+- materialize Human Action Root comment threads及ordinary human receipts/replies；
+- 管理Root branch/worktree、immutable revision、PR和delivery；
+- 输出sanitized structured logs/metrics。
 
 Conductor不负责：
 
-- Provider SDK、模型prompt loop、thread或transcript；
-- 解释Plan/Work/Verify Result并自行选择Cycle下一步；
-- 解释、接受、拒绝、回滚或修正用户对Linear status、content、archive、parent、relation和comment的修改；
-- 保存Workflow DB、DAG mirror、Queue、checkpoint或durable event bus；
-- 直接拼接Root/Cycle用户时间轴comment；
-- Linear OAuth、Token、SDK或GraphQL实现。
+- Provider SDK、model prompt loop或transcript；
+- 解释Stage Result或human input来选择下一步；
+- 保存workflow DB、DAG mirror、queue、checkpoint或durable command log；
+- 写Root/Cycle event stream、机器JSON comment或内部receipt；
+- Linear OAuth、token、SDK或GraphQL implementation。
 
 ## 2. 模块
 
@@ -42,13 +36,11 @@ apps/conductor/src/
   root-scheduling/
   root-reconciliation/
   root-reconciler-client/
-  root-directive-materialization/
+  root-action-materialization/
   performer-agent-client/
   human-actions/
   git-workspaces/
   root-delivery/
-  workflow-events/
-  timeline-comments/
   performer-profiles/
   runtime-logs/
   private-ipc/
@@ -56,69 +48,43 @@ apps/conductor/src/
 
 | 模块 | 职责 |
 |---|---|
-| `root-discovery` | Project、Root routing、native user delegation、ownership和header discovery；未委派Root零副作用 |
-| `root-scheduling` | blocker eligibility、Priority和`updatedAt`抢占排序；不拥有capacity或Root语义 |
-| `root-reconciliation` | deterministic host、diff、safety validation和convergence gate；不产生业务下一步 |
-| `root-reconciler-client` | open时发送一次bootstrap，advance时只发送delta，并调用Root Reconciler |
-| `root-directive-materialization` | 校验、幂等执行和read-back Root directive、required user replies及Reconciler failure record |
-| `performer-agent-client` | Root Reconciler和三个Stage role session/turn transport |
-| `human-actions` | Root request/resolution comment materialization、actor/thread validation和Root waiting summary |
-| `workflow-events` | 发布closed timeline events |
-| `timeline-comments` | Root/Cycle timeline comment subscriber和closed renderer |
+| `root-discovery` | Project、routing、native delegation与header discovery；未委派Root零副作用 |
+| `root-scheduling` | eligibility、Priority和runtime single-owner lease；不拥有Root语义 |
+| `root-reconciliation` | current view、coverage、diff、safety validation和mechanical limits |
+| `root-reconciler-client` | fresh bootstrap/live delta transport与Root Reconciler调用 |
+| `root-action-materialization` | 验证并收敛one RootNextAction及required human dispositions |
+| `performer-agent-client` | Root Reconciler与Stage session/turn transport |
+| `human-actions` | Root request thread、actor、reply/reaction/thread-state materialization与Root summary |
 | `git-workspaces` | Root branch/worktree、commit和Git facts |
-| `root-delivery` | PR/branch delivery |
+| `root-delivery` | push、PR/link和Root `In Review` delivery gate |
 
-`root-reconciliation`不能import Provider或Agent SDK。`timeline-comments`不能决定workflow mutation。
-`root-reconciler-client`不能materialize directive；`root-directive-materialization`不能调用模型。
+`root-reconciliation`不能import Provider SDK；`root-reconciler-client`不能materialize action；
+`root-action-materialization`不能调用模型。
 
 ## 3. 可重建View
 
 ```text
 RootReconciliationView
-  root
-  routing_and_ownership
-  ordered_cycles[]
-    cycle
-    is_archived
-    complete_tree
-  root_human_actions[]
-  convergence_policy_and_view
-  performer_profile
-  git_workspace
-  delivery
+  root_header
+  complete_active_and_archived_object_graph
+  human_comment_threads
+  mechanical_violations
+  current_project_and_profile_limits
+  git_workspace_and_delivery_facts
 ```
 
-View是单次reconciliation内存对象，不持久化。Linear SDK默认省略archived Issues时，gateway必须使用明确的
-include-archived读取并分页到完整；无法证明完整时fail closed。
+View只存在于单次runtime iteration。Podium/Linear coverage不完整时fail closed；不得从旧View、webhook cache或Provider
+conversation补齐。
 
-## 4. 调用和materialization
+## 4. 调用与materialization
 
-```text
-fresh view
--> validate ownership, coverage, schema, safety and convergence constraints
--> derive mechanical violations without choosing a correction
--> if an accepted directive is incomplete: finish the same materialization
--> else if no usable session baseline: open with one complete bootstrap
--> otherwise compute and send only RootDelta
--> obtain one closed RootReconcilerTurnResult
--> directive: validate/persist, materialize, semantic read-back, write required replies and publish its typed timeline event
--> failure: write and strict-read-back RootReconcilerFailureRecord, then stop at the durable retry barrier
--> discard view
-```
+Conductor首先执行Workflow Authority文档的worktree gate，再打开或推进Root Reconciler。live session可以使用delta；session
+丢失或baseline不连续时fresh bootstrap。该transport优化不改变每轮都以current Linear/Git facts验证materialization的要求。
 
-Conductor每轮都可以在内存中完整读取Root Tree，但不能把完整Tree放入已有session的advance request。session
-baseline snapshot、source manifest和digest只存在于runtime memory；丢失或不连续时直接关闭旧session并fresh
-bootstrap，不保存checkpoint或提供兼容路径。
+Root Reconciler返回一个closed `RootNextAction`或failure。Conductor不持久化output object：它验证preconditions，收敛一个
+bounded native postcondition，fresh read-back后丢弃output。partial/ambiguous mutation重新读取current state；不回放旧action。
 
-Convergence settings are validated public Conductor launch configuration for
-new Root claims. Claim snapshots the resulting policy once into Linear; the
-runtime thereafter reads policy and assessments only from Linear/Git. This is
-operator configuration, not a Desktop workflow mutation, a Podium workflow
-store, or a local per-Root policy cache. The Root convergence algorithm is
-owned by [Root Reconciliation](root-reconciliation.md).
-
-所有mutation使用stable write/directive/execution ID和remote preconditions。一次directive可以描述一个领域级
-Tree patch；其内部多条Linear mutation必须幂等收敛，不能在partial failure后要求模型重新生成另一份patch。
+Stage Result同样只在当前call中存在，并按[Root Issue工作流](root-issue.md)转成native facts。
 
 ## 5. Session client
 
@@ -133,52 +99,38 @@ PerformerAgentClientInterface
   closeRootReconciler(input)
 ```
 
-Conductor拥有process/channel和cancellation。opaque session handle只存在于runtime内存，不进入Linear或公共
-业务contract。handle丢失时使用完整durable facts重新open，不恢复raw Provider pointer。
+Conductor拥有process/channel/cancellation。opaque Provider/session handle只存在runtime memory，不进入Linear或public business
+contract。late output必须通过session/turn/digest validation拒绝。
 
 ## 6. Human Action
 
-Human Action不是Issue。Conductor只materialize Root Reconciler accepted directive所要求的Root request/resolution
-managed comments，并从全部active requests确定性派生Root waiting summary；它不能自行创建request、resolution或
-选择Human Action后的业务动作。comment/thread、并发、actor和恢复规则全部由
-[Human Action](human-actions.md)定义，本文不维护第二份lifecycle。
+Conductor只materialize Root Reconciler提出的Root request comment和resolution consequences，并验证author、target mentions、
+human actor、replies、reactions和thread state。它不能自行创建request或解释human选择。完整模型只见
+[Human Action](human-actions.md)。
 
-## 7. Timeline事件
+## 7. Git与delivery
 
-业务模块在durable read-back后发布`WorkflowTimelineEvent`。Root和Cycle subscriber分别把matching comment写入
-Linear并read-back。create/read-back失败时当前Root停止推进并记录correlated error；恢复后从Linear source record
-重试同一deterministic event ID，成功前不调用模型或执行下一动作。完整机制由
-[Workflow Timeline](workflow-timeline.md)定义。
+一个Root固定一个active branch/worktree。Work只能修改workspace；Conductor独占commit、Git topology、push、PR和cleanup。
+Verify与delivery绑定same immutable revision。完整mechanics只见
+[Git Worktree与交付](git-worktree-delivery.md)。
 
-## 8. Git与delivery
+## 8. 错误与恢复
 
-一个Root固定一个branch/worktree，所有Cycles复用。Work Performer可以修改授予的workspace，但commit、Git
-topology和delivery只由Conductor执行。Verify绑定immutable revision；delivery要求matching passed Verify和
-verified HEAD。
+- malformed/stale Root action或Stage Result不materialize；
+- process crash不恢复memory decision，按Workflow Authority文档fresh converge；
+- target `In Progress`在process loss后不能重新dispatch；
+- routing/process generation/profile/worktree无法验证时取消matching sessions并拒绝late output；
+- required native mutation/read-back失败时停止Root并记录sanitized actionable error；
+- 只有用户需要采取行动时才写一条human-readable comment；内部细节只进入logs/metrics；
+- Project discovery transient failure进入bounded degraded/backoff，不终止其他Bindings。
 
-## 9. 错误与恢复
+## 9. 不变量
 
-- malformed/stale directive或Result不materialize；Reconciler失败写`RootReconcilerFailureRecord`，Stage失败写matching
-  execution record，并materialize required timeline；
-  read-back后下一轮只从该Linear事实处理；
-- process crash后不恢复内存decision，从Linear/Git重建；
-- duplicate webhook只wake，同一stable ID不会产生重复mutation/comment；
-- ownership/Profile不可验证时立即取消matching sessions并拒绝late output；用户修改Root terminal status时只建立与
-  其他用户输入相同的execution barrier，业务取消或修复必须来自Root Reconciler；
-- 任何required Linear mutation、Reconciler reply或timeline comment写入/read-back失败时停止当前Root并记录错误；
-- Project Root Index的transient discovery失败进入bounded degraded/backoff并停止matching Binding的新admission，不得逃出
-  runtime cycle终止整个Conductor；configuration、authorization、schema或coverage失败继续fail closed并暴露correlated Problem；
-- 所有用户可见错误必须sanitized、actionable并有source correlation。
-
-## 10. 不变量
-
-1. Conductor运行确定性Root Reconciliation host，不运行模型或Agent SDK。
-2. Root和Cycle下一步语义只来自Root Reconciler turn result的directive variant；failure variant只留下
-   durable evidence并阻止继续调用，不能形成第二条决策路径。
-3. Conductor是Linear/Git workflow副作用和Performer调用的唯一owner。
-4. active和archived Issues都必须读取；只有active DAG可dispatch。
-5. 每次accepted Result先durable，再交给Root Reconciler。
-6. 时间轴通过event subscriber解耦；用户comment reply属于RootDirective materialization，两者都必须Linear read-back。
-7. Conductor不保存Workflow数据库、durable Queue或Providerconversation pointer。
-8. Conductor safety policy只能返回安全/完整性结果与`mechanical_violations[]`，不能返回status correction、Stage、
-   Human Action、DAG、Cycle或delivery动作。
+1. Conductor运行deterministic host，不运行模型或Provider SDK。
+2. workflow next step只来自Root Reconciler transient result。
+3. Conductor是Linear/Git副作用和Performer调用的唯一owner。
+4. active和archived descendants都必须读取；只有active `Todo` node可dispatch。
+5. Result materialize为native facts并read-back后才影响下一轮。
+6. Conductor不保存workflow数据库、queue、checkpoint、command log或Provider pointer。
+7. Conductor不发布Root/Cycle comment stream，也不持久化机器payload。
+8. safety policy只返回mechanical findings，不能选择status、Stage、Human Action、DAG、Cycle或delivery动作。

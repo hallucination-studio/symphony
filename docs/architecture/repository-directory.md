@@ -67,28 +67,17 @@ apps/conductor/
     │   │   └── RootReconcilerClientInterface.ts
     │   └── internal/
     │       └── PerformerRootReconcilerClientImpl.ts
-    ├── root-directive-materialization/
+    ├── root-action-materialization/
     │   ├── api/
-    │   │   ├── RootDirectiveMaterializerInterface.ts
-    │   │   ├── RootReconcilerFailureRecordWriterInterface.ts
-    │   │   └── RootReconcilerReplyWriterInterface.ts
+    │   │   └── RootActionMaterializerInterface.ts
     │   └── internal/
-    │       ├── LinearRootDirectiveMaterializerImpl.ts
-    │       ├── LinearRootReconcilerFailureRecordWriterImpl.ts
-    │       └── LinearRootReconcilerReplyWriterImpl.ts
+    │       └── LinearGitRootActionMaterializerImpl.ts
     ├── performer-agent-client/
     │   ├── api/
     │   │   └── PerformerAgentClientInterface.ts
     │   └── internal/
     │       └── SessionPerformerAgentClientImpl.ts
     ├── human-actions/
-    ├── workflow-events/
-    │   └── api/
-    │       └── WorkflowTimelinePublisherInterface.ts
-    ├── timeline-comments/
-    │   └── internal/
-    │       ├── LinearRootTimelineCommentSubscriberImpl.ts
-    │       └── LinearCycleTimelineCommentSubscriberImpl.ts
     ├── performer-profiles/
     │   ├── api/
     │   │   ├── PerformerProfile.ts

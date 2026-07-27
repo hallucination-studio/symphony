@@ -16,6 +16,9 @@ Podium拥有：
 - Conductor online/offline observation和命名明确的Desktop View；
 - 面向Desktop的Performer Profile Command转发和Profile配置View组合。
 
+Podium Backend只接受当前matching Binding authenticated private-channel generation发出的Gateway command。Host replacement或
+channel关闭立即使旧generation失去mutation capability；该runtime fence不写`podium.db`，也不保存Root ownership。
+
 Podium不拥有：
 
 - Workflow Tree解释；
@@ -84,12 +87,12 @@ SDK调用，但不决定调用时机或Workflow含义。`LinearGatewayProtocolHa
 不暴露arbitrary GraphQL、SDK object、Token或Header。
 
 Root discovery必须由`linear-gateway`中的Project-scoped Root Index实现。它使用显式compact GraphQL document读取一页
-Root headers及其bounded routing、delegation、blocker和ownership facts，不得使用Linear SDK model lazy relations逐Root
+Root headers及其bounded routing、delegation、blocker和lease-eligibility facts，不得使用Linear SDK model lazy relations逐Root
 补读。Index先按Binding验证installation/Project scope，再以
 `linear_installation_id + project_id + refresh_generation + page_cursor + page_size`作为共享fresh-read identity；
 startup、Project webhook、matching mutation或idle safety boundary使generation失效，不同Binding和Conductor共享同一
 generation的bounded in-flight/read-through pages。该共享值不写`podium.db`，不能替代candidate完整fresh Tree、mutation
-precondition或completion evidence，并在generation失效或Podium restart后丢弃。字段、coverage、ownership唯一性、批量
+precondition或completion evidence，并在generation失效或Podium restart后丢弃。字段、coverage、routing唯一性、批量
 continuation上限和physical request budget由[Linear端到端流转](linear-flow.md)唯一规定。
 
 每个Project级mutation必须携带`conductor_short_hash + expected_project_id`和Project
@@ -98,9 +101,9 @@ remote precondition。修改已有Issue、Comment或Label时还携带目标对�
 解释status category、Issue kind和allowed transition。任一precondition不匹配时
 fail closed，不执行mutation，并返回封闭conflict Result供Conductor重新读取。
 
-Podium不解释✅/❌、resolve/reopen或用户reaction的Workflow含义。它只执行closed Linear native operation并返回
-fresh read-back；managed comment身份由validated actor、strict `json` code block和stable write correlation证明，
-不存在HTML marker或`managed_marker`字段。
+Podium不解释check/cross reaction、resolve/reopen或用户reply的Workflow含义。它只执行closed Linear native operation并
+返回fresh read-back；Human Action request由Root top-level comment、validated Symphony actor和native thread identity定位。
+Podium不解析description/comment中的Symphony JSON、marker或private metadata。
 
 ## 4. Credential
 
@@ -155,7 +158,7 @@ Resolved Conductor Project。
 
 Project Conductor Pool mutation使用closed desired-member set、fresh current-member set和remote
 precondition。加入第二个member前，所有非终态Root必须已有一个仍在desired set中的唯一Root
-Conductor Label；移除member前，不得存在route或Root Control Record ownership仍指向它的非终态Root。
+Conductor Label；移除member前，不得存在仍route到该member的非终态Root。
 任一条件不满足都fail closed，不做partial pool mutation。
 
 Target Workflow Setup只初始化并read-back目标Team的workflow catalog、Project配置和当前Project Conductor Pool；它绝不
@@ -164,13 +167,13 @@ Target Workflow Setup只初始化并read-back目标Team的workflow catalog、Pro
 重置既有成员集合。
 
 Conductor runtime必须遍历全部Binding。Desktop只显示每个Binding的resolved Project安全名称；Project pool、
-Root routing、ownership和conflict细节只在Linear和Conductor日志中存在，不进入Desktop View。
+Root routing/conflict细节存在于Linear，iteration guard和process fencing细节只在runtime日志中；二者都不进入Desktop View。
 
 创建Root时，调用方可以从Project Conductor Pool中选择一个`conductor_id`。Podium必须在同一
 Root creation boundary fresh读取Project pool和目标 Issue Label：Project pool必须包含且只接受一个
 selected member，目标 Issue Label必须唯一；随后`issueCreate`只能写入对应的
 `symphony:conductor/<short-hash>` Issue Label，并 read-back确认Root仍是顶层、属于目标Project且保留该
-label。Podium不写Root Control Record ownership、Cycle、Node或Workflow evidence。Project只有一个pool member时，
+label。Podium不写Root ownership、Cycle、Node或workflow evidence。Project只有一个pool member时，
 省略Root选择可解析为该唯一member；Project有多个member时省略、指定多个或指定pool外member都必须在
 Root创建边界失败。Project Conductor Label是Project membership，Root Conductor Issue Label是routing，
 两者不能混为ownership或lease。

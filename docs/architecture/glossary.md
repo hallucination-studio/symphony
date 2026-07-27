@@ -1,508 +1,220 @@
 # Symphony架构术语表
 
-状态：目标架构术语唯一事实源。`docs/architecture`中的业务名词、代码类型名和字段名
-必须遵守本文；类型后缀和文件组织遵守[代码模块与命名规范](code-organization.md)。
+状态：目标架构提案。本文只规范canonical vocabulary和代码名称，不复制named concern文档中的字段表、状态迁移或恢复算法。
 
 ## 1. 使用规则
 
-1. 文档第一次出现领域概念时使用本文的Canonical Term。
-2. 代码类型使用本文给出的PascalCase名称，不按作者偏好创建近义类型。
-3. JSON Schema、managed code block和跨语言wire字段使用`lower_snake_case`。
-4. TypeScript文件名与主要类型同名；Python文件使用对应`snake_case`。
-5. UI label可以面向用户翻译，但不能反向成为领域状态或代码enum名称。
-6. `Interface`表达稳定能力，`Impl`表达内部实现；调用方只依赖Interface。
+1. 产品、文档、contracts和代码使用本表canonical term。
+2. 代码类型使用给出的PascalCase；wire字段使用`lower_snake_case`。
+3. Linear description/comment是ordinary Markdown，不存在private wire field naming。
+4. 一个术语的业务规则只在链接的owner文档定义。
 
 ## 2. 产品角色
 
-| Canonical Term | 代码/目录名 | 定义 | 不使用 |
-|---|---|---|---|
-| Symphony | repository/product | 完整产品 | 把四个角色称为四个产品 |
-| Podium Desktop | `apps/podium-desktop` | 用户使用的本地Desktop产品 | Desktop Client、Podium Client |
-| Podium | `packages/podium` | Desktop内部control-plane类库和Linear所有者 | Podium Server、Podium Backend作为领域名 |
-| Conductor | `apps/conductor` | 读取Linear/Git、跨Root排序并materialize RootDirective的TypeScript daemon；不做语义解释 | Scheduler Service、Agent Manager |
-| Performer | `apps/performer` | 承载Root Reconciler和Plan/Work/Verify role threads的Python Agent runtime | Worker Service、Codex Runner |
-
-`Podium Backend`只允许描述Desktop进程拓扑中的Podium宿主，不是独立业务角色。
-
-## 3. Conductor与Project
-
-| Canonical Term | 代码类型/字段 | 定义 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Conductor Identity | `ConductorId` / `conductor_id` | Podium创建的稳定完整身份 |
-| Conductor Short Hash | `ConductorShortHash` / `conductor_short_hash` | 用于Linear Label的短公开标识 |
-| Repository Context | `RepositoryContext` / `repository_context` | repository identity、display、root和base branch的绑定输入 |
-| Conductor Binding | `ConductorBinding` | Podium持久化的Conductor Identity + Repository Context；不包含权威Project或process state |
-| Conductor Project Label | `ConductorProjectLabel` | Linear Project上的`symphony:conductor/<short-hash>`；表示该Conductor是Project Conductor Pool成员 |
-| Project Conductor Pool | `ProjectConductorPool` | 一个Project上全部唯一Conductor Project Labels形成的非空执行成员集合 |
-| Root Conductor Label | `RootConductorLabel` | Root Issue上的唯一`symphony:conductor/<short-hash>`；从Project Conductor Pool中选择该Root的唯一执行者 |
-| Root Routing | `RootRouting` | 由Project Conductor Pool和Root Conductor Label派生的routed、unrouted或conflict路由事实；不是runtime ownership或lease |
-| Resolved Conductor Project | `ResolvedConductorProject` | 当前唯一携带本Conductor Project Label的Project；该Project可以同时携带其他Conductor Project Labels |
-| Project Resolution | `ProjectResolutionResult` | unique、unbound或conflict的解析结果 |
+| Symphony | product | Podium Desktop、Podium、Conductor和Performer组成的一个产品 |
+| Podium Desktop | `@symphony/podium-desktop` | Tauri control-plane UI；不承载workflow UI |
+| Podium | `@symphony/podium` | Linear OAuth、tokens、catalog、Binding、SDK和`podium.db` owner |
+| Conductor | `@symphony/conductor` | deterministic Root host、Linear/Git materializer和Performer caller |
+| Performer | `symphony_performer` | Python Provider runtime和role sessions owner |
+| Root Reconciler | role | 唯一model-driven workflow next-step role |
+| Plan Role | role | 生成Plan proposal，不决定下一步 |
+| Work Role | role | 修改matching Root worktree中的selected Work target |
+| Verify Role | role | 只读验证immutable revision |
 
-禁止使用没有限定的`Project Binding`。需要表达Podium持久化对象时使用
-`Conductor Binding`；需要表达Label解析结果时使用`Resolved Conductor Project`。
+## 3. Project与Binding
 
-TypeScript中的`ConductorBinding`字段固定为：
-
-```text
-bindingId
-conductorId
-conductorShortHash
-linearInstallationId
-organizationId
-repositoryContext
-```
-
-`RepositoryContext`负责承载repository相关字段，不在`ConductorBinding`中重复展开。
-
-TypeScript中的`RepositoryContext`字段固定为：
-
-```text
-repositoryIdentity
-repositoryDisplayName
-repositoryRoot
-baseBranch
-```
-
-## 4. Root Run领域
-
-| Canonical Term | 代码类型/字段 | 定义 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Root Issue | `RootHeader` / `root_issue_id` | 带有有效 Conductor routing label 的顶层 Linear Issue；完整Tree读取前只以header参与discovery |
-| Project Root Index Page | `ProjectRootIndexPage` | Podium一次Project-scoped显式query返回的一页bounded Root headers；对同Project全部Conductor共享，不是durable cache |
-| Root Run | 领域概念 | Symphony对一个Root Issue的完整处理生命周期 |
-| Root DEFINE | Root Reconciler语义phase | 基于fresh Root facts明确objective、scope、constraints、acceptance、verification与delivery instruction，并在需要时通过既有directive更新Root description；不是role、Stage或state |
-| Root REVIEW | Root Reconciler语义phase | terminal `CycleOutcome` read-back后，用完整Root和跨Cycle历史决定successor Cycle、Human Action、terminal handling或SHIP；不是Verify、Review Stage或新Result |
-| Root SHIP | Root Reconciler语义phase | REVIEW满足Root且没有明示manual-delivery instruction时返回`conclude_root(ready_for_delivery)`；Git/Linear交付由Conductor机械执行 |
-| Root Workflow State | `RootWorkflowState` | Root允许的Todo、In Progress、Needs Approval、Needs Info、In Review、Done或Canceled Linear status |
-| Root Reconciliation View | `RootReconciliationView` | 从fresh active/archived Linear Tree和Git事实重建的当前内存视图 |
-| Root Safety Policy | `RootSafetyPolicyInterface` | 只验证ownership、coverage、schema、capability、budget、convergence和mutation preconditions；lifecycle/Tree矛盾只产出bootstrap/delta事实 |
-| Root Directive | `RootDirective` | Root Reconciler基于session baseline和当前bootstrap/delta返回的一个closed语义下一步proposal |
-| Root Bootstrap Snapshot | `RootBootstrapSnapshot` | fresh Root Reconciler session首次接收的完整active/archived Linear/Git事实；普通advance禁止使用 |
-| Root Delta | `RootDelta` | 从matching session baseline到fresh target digest的当前值/tombstone增量；不包含旧值、业务diff或独立lifecycle |
-| Agent Execution Policy | `AgentExecutionPolicy` | Profile保存的sandbox mode和有界command allowlist/denylist；作为Stage policy输入由Provider Backend映射 |
-| Root Managed Comment | 领域概念 | Symphony在Root下管理的用户可见comment，包括Control Record、Timeline和Reconciler Reply |
-| Root Control Record Comment | `RootControlRecordCommentSnapshot` | claim时创建的Symphony-managed Root comment；只承载ownership、fixed Profile等明确Root records，不保存status、current Cycle、ready node、activity或runtime observation |
-| Root Timeline Comment | `LinearCommentSnapshot` | Root timeline event subscriber写到Root Issue的Markdown + `json` block comment |
-| User Comment Input | `UserCommentInput` | human actor创建/修改的comment body version，或non-Symphony native thread-state revision；后者是当前state快照而非历史event，reaction不是pending input |
-| Root Reconciler Reply | `RootReconcilerReplyRecord` | matching RootDirective处理用户comment后写入原生thread并read-back的reply、reaction和thread action |
+| Conductor Binding | `ConductorBinding` | Podium持久化的Conductor、Linear installation、repository和Profile binding |
+| Conductor Project Label | `ConductorProjectLabel` | Root到Binding/Project pool的native Linear routing label |
+| Resolved Conductor Project | `ResolvedConductorProject` | 唯一matching label解析出的Project |
+| Repository Context | `RepositoryContext` | repository identity、root、base branch和delivery policy |
+| Root Iteration Guard | `RootIterationGuard` | 单个Conductor进程内合并matching Root duplicate wake；不是跨进程lease或Linear workflow fact |
+| Binding Process Fence | `BindingProcessFence` | OS-backed exclusive runtime lock + Podium channel generation；证明同Binding旧writer不能再mutation，不是workflow authority |
 
-不使用`Managed Run`作为新架构代码名。历史语义在本架构中统一为`Root Run`；
-持久化Aggregate不存在，代码只使用`RootReconciliationView`。
+`ConductorBinding`包含`bindingId`、`conductorId`、Linear installation/organization和`RepositoryContext`。
+credential、SDK object和process handle不属于该DTO。
 
-## 5. Linear Cycle DAG与节点
+## 4. Workflow authority与恢复
 
-| Canonical Term | 代码类型/字段 | 定义 |
+完整语义只见[Workflow Authority与恢复](workflow-authority-recovery.md)。
+
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Linear Issue Tree | `WorkflowRootTreeSnapshot` | Root Issue的完整active和archived Linear descendant tree |
-| Root Cycle DAG | `RootCycleDagSnapshot` | Root下全部Cycle Issues及其typed nodes、relations和managed outcomes |
-| Cycle Issue | `CycleIssueSnapshot` | Root direct child；一轮bootstrap-to-sealed graph lifecycle的container和结果汇总，不可dispatch |
-| Cycle State | `CycleState` | Cycle authoritative Linear custom status：draft、planning、sealed、executing、verifying、succeeded、changes_required、inconclusive、escalated或canceled |
-| DAG Node | `LinearDagNodeSnapshot` | Cycle direct child；kind closed为plan、work或verify；archive=false时可参与active DAG |
-| Bootstrap Plan Node | `PlanNodeSnapshot` | Cycle创建时唯一存在的Plan Stage target；输出Plan Contract但不由该execution DAG调度 |
-| Plan Contract Digest | `plan_contract_digest` | Conductor对accepted Plan Contract计算的精确digest；sealed Work/Verify Nodes使用它证明共属同一approved graph |
-| Work Node | `WorkNodeSnapshot` | 一个self-contained Work Stage target，可依赖同Cycle其他Work Nodes |
-| Verify Node | `VerifyNodeSnapshot` | 审核本Cycleapproved Plan和全部Work evidence的Stage target |
-| Stage Node State | `StageNodeState` | Plan/Work/Verify允许的todo、in_progress、in_review、done、failed或canceled Linear status子集 |
-| Node Readiness | `NodeReadiness` | 每次从fresh Linear DAG、approval和matching execution record派生的blocked、ready或executing内存值；不持久化 |
-| Verify Conclusion | `VerifyConclusion` | successful Verify execution形成的passed、changes_required、inconclusive或escalate_human结论 |
-| Finding Record | `FindingRecordSnapshot` | Verify针对固定artifact revision提出并由Conductor接受的scope内证据与remediation |
-| Finding Disposition Record | `FindingDispositionRecord` | 后续Verify对immutable Finding记录still_open、resolved或Human-approved waived |
-| Root Convergence Policy | `RootConvergencePolicy` | Root级cycle、open Finding persistence、no-progress、token、deadline与kill-switch约束 |
-| Root Convergence View | `RootConvergenceView` | 从完整Linear Root历史重建、用于机械熔断的一次性内存计算 |
-| Native Archive Membership | `is_archived` | Linear原生archive flag；决定Issue是否属于active DAG，同时保留完整历史 |
+| Native Root Object Graph | `NativeRootObjectGraphSnapshot` | Root及全部active/archived descendants、native fields、comments和Activity的fresh snapshot |
+| Root Reconstruction Set | `RootReconstructionSet` | worktree loss后用于fresh generation的Root current facts与repository base facts |
+| Root Reconciliation View | `RootReconciliationView` | native graph + Git派生的单次runtime view |
+| Worktree Gate | `RootWorktreeGateResult` | 任何恢复前验证expected worktree existence与identity的closed result |
+| Execution Generation | domain term | 一个Root worktree与其Cycle/Stage execution descendants；worktree loss使当前generation失效 |
+| Normal Convergence | domain term | worktree有效时从current native facts选择one next action |
+| Full Execution-tree Rebuild | domain term | worktree与required Git execution facts都不可恢复时，逐action archive old tree并创建fresh branch/worktree/tasks |
+| Native Activity | Linear object | status、label、description、relation、comment/thread变化的actor/timestamp history |
 
-`Sub Issue`只用于说明Linear的parent/child产品形态。业务逻辑不使用`Task`或`Work Item`；统一使用
-Cycle Issue、Plan Node、Work Node或Verify Node。
+## 5. Root与DAG
 
-Human Action不是Issue或DAG节点；其canonical术语和完整语义只见
-[Human Action](human-actions.md)。
+具体status和topology只见[Root Issue工作流](root-issue.md)。
 
-## 6. Managed Linear数据
-
-| Canonical Term | 代码类型/字段 | 定义 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Symphony Managed Comment | `SymphonyManagedComment` | validated Symphony actor写入、包含用户Markdown和唯一strict `json` code block的Linear comment |
-| Workflow Issue Record | `WorkflowIssueRecord` | Symphony创建的每个Root descendant Issue description中唯一的stable issue key、Root/parent scope和kind记录；不拥有lifecycle、proposal、Result或usage |
-| Plan Contract Record | `PlanContractRecord` | immutable Plan execution contract、Root/Cycle和Git baseline；只在managed comment中持久化 |
-| Stage Execution Record | `StageExecutionRecord` | 一个Stage invocation的closed execution correlation、context、limits与repository revision；不拥有terminal Result、Issue lifecycle或下一步 |
-| Stage Result | `PlanResult`、`WorkResult`或`VerifyResult` | matching Stage Issue canonical managed comment中的唯一execution事实，嵌套唯一`ModelTurnRecord` |
-| Cycle Outcome | `CycleOutcome` | 一个Cycle的immutable terminal conclusion、evidence与unresolved Finding引用；不拥有Root下一步或successor选择 |
-| Progress Assessment | `ProgressAssessment` | Cycle间prior Finding的精确resolution或passed acceptance/check key真超集 |
-| Human Action Request Comment | `HumanActionRequestRecord` | Root顶层special managed comment和thread root；可以表达Root或Cycle scope |
-| Human Action Resolution Comment | `HumanActionResolutionRecord` | matching request thread内的Symphony managed terminal reply |
-| Active Human Action Request | 派生事实 | 有valid request且没有matching valid resolution；一个Root可同时有多个 |
-| Root Reconciler Failure Record | `RootReconcilerFailureRecord` | matching Reconciler turn的transport、timeout、schema或stale-output失败证据与usage；不含下一步 |
-| Model Turn Record | `ModelTurnRecord` | 一次Root Reconciler/Plan/Work/Verify Provider调用的actual model、outcome和required Turn Usage |
-| Workflow Timeline Record | `WorkflowTimelineRecord` | deterministic event ID到Root/Cycle Linear comment的幂等关联；不拥有Workflow状态 |
-| Root Reconciler Reply Record | `RootReconcilerReplyRecord` | source human comment version到read-back后Linear thread reply、reaction和thread action的幂等关联 |
-| Delivery Record | `DeliveryRecord` | exact verified revision完成PR、remote branch或local branch交付后的immutable Linear managed fact；不是pending delivery、workflow state或第二种receipt |
-| Performer Profile ID | `PerformerProfileId` / `performer_profile_id` | Root固定使用的Performer Profile身份 |
+| Root Issue | `RootHeader` / `root_issue_id` | matching routing/delegation的top-level Linear Issue |
+| Root Run | domain term | Symphony处理一个Root的完整lifecycle |
+| Cycle Issue | `CycleIssueSnapshot` | Root direct child；一轮Plan/Build/Verify attempt container |
+| Plan Node | `PlanNodeSnapshot` | Plan Stage native Issue |
+| Work Node | `WorkNodeSnapshot` | 一个self-contained Work target native Issue |
+| Verify Node | `VerifyNodeSnapshot` | immutable target verification native Issue |
+| Finding Issue | `FindingIssueSnapshot` | Verify发现的native Cycle child Issue |
+| Native Archive Membership | `is_archived` | 是否参与active DAG；archived object仍属于Root history |
+| Node Readiness | `NodeReadiness` | 从current status/dependencies/Git派生的runtime值 |
+| Predecessor Relation | native relation | Cycle或attempt lineage |
+| Replacement Relation | native relation | fresh Issue替代terminal/invalidated target |
 
-所有restart-required managed事实都在strict `json` code block中。旧HTML marker、`ManagedMarker`、
-`managed_marker`和dual reader不是canonical term，也没有兼容语义。
+`Todo`是唯一dispatchable node state。`Interrupted`、`Done`、`Failed`和`Canceled`是terminal attempt states。
 
-## 7. Linear Gateway
+## 6. Root Reconciliation
 
-### 7.1 Interface与实现
+具体contract只见[Root Reconciliation](root-reconciliation.md)。
 
-```text
-LinearGatewayInterface
-  <- PodiumLinearGatewayClientImpl
-     -> LinearGatewayProtocol
-        -> LinearGatewayProtocolHandlerImpl
-           -> LinearClientInterface
-              <- LinearSdkImpl
-```
+| Canonical term | 代码名 | 定义 |
+|---|---|---|
+| Root DEFINE | semantic phase | 收敛Root current description |
+| Root REVIEW | semantic phase | terminal Cycle后判断successor、human input或delivery |
+| Root SHIP | semantic phase | 提出ready-for-delivery；Git操作仍由Conductor完成 |
+| Root Next Action | `RootNextAction` | 当前turn的one bounded transient semantic output |
+| Root Bootstrap Snapshot | `RootBootstrapSnapshot` | fresh session首次接收的完整current projection |
+| Root Delta | `RootDelta` | live session current-value/replacement/tombstone transport optimization |
+| Root Digest | `RootDigest` | 当前runtime stale-output correlation；不持久化 |
+| Mechanical Violation | `MechanicalViolation` | coverage/topology/lifecycle/actor/Git safety finding；不选择业务修复 |
 
-| 名称 | 责任 |
+禁止使用持久化next-action object、accepted command log或replay cursor。需要泛指runtime output时使用`RootNextAction`。
+
+## 7. Human interaction
+
+完整语义只见[Human Action](human-actions.md)。
+
+| Canonical term | 代码名 | 定义 |
+|---|---|---|
+| Human Action Request | `HumanActionRequestThreadSnapshot` | Root top-level Symphony-authored native comment thread |
+| Human Reply | `HumanCommentInput` | authorized human在matching thread中的ordinary Markdown reply |
+| Human Resolution Reply | `HumanResolutionReply` | target consequence read-back后写入同thread的concise Symphony reply |
+| Comment Receipt | `CommentReceiptDisposition` | Symphony check/cross reaction；只表示body已处理 |
+| Active Human Action | derived fact | 业务resolution尚未materialize的request thread |
+| Plan Approval | domain term | exact mentioned Plan的人类批准，不跨replacement target继承 |
+
+Human Action不是Issue、private payload或Desktop View。native thread resolved state和reaction本身不表示approval。
+
+## 8. Stage contracts
+
+完整语义只见[Performer Stage Contracts](stage-orchestration.md)。
+
+| Canonical term | 代码名 | 定义 |
+|---|---|---|
+| Stage Turn Request | `PlanTurnRequest` / `WorkTurnRequest` / `VerifyTurnRequest` | closed transient role input |
+| Stage Result | `PlanResult` / `WorkResult` / `VerifyResult` | closed transient role output；必须materialize为native facts |
+| Stage Role Session | `StageRoleSession` | Cycle-scoped Provider runtime continuity |
+| Runtime Model Observation | `RuntimeModelObservation` | actual model/usage日志观测；不写Linear |
+| Immutable Verify Target | `immutable_target_revision` | Verify与delivery共同绑定的Git commit |
+
+Stage Result、execution correlation、approved Plan和model observation都不得命名成durable private object。
+
+## 9. Linear Gateway
+
+| Canonical term | 代码名 | 定义 |
+|---|---|---|
+| Linear Gateway | `LinearGatewayInterface` | Conductor定义的bounded native Linear能力边界 |
+| Project Root Index Page | `ProjectRootIndexPage` | bounded Root header page；不是durable cache |
+| Root Header | `RootHeader` | admission/scheduling所需bounded native facts |
+| Native Linear Mutation | `WorkflowMutationCommand` | explicit target/preconditions/desired native state |
+| Mutation Read-back | `WorkflowMutationResult` | fresh semantic postcondition或closed failure |
+| Source Coverage | `WorkflowSourceCoverage` | complete/omissions证明 |
+
+`LinearGatewayInterface <- PodiumLinearGatewayClientImpl -> LinearGatewayProtocol -> LinearGatewayProtocolHandlerImpl ->
+LinearClientInterface <- LinearSdkImpl`。只有最后一层可以使用Linear SDK。
+
+## 10. Conductor modules
+
+| Module | Canonical responsibility |
 |---|---|
-| `LinearGatewayInterface` | Conductor定义的业务能力边界 |
-| `PodiumLinearGatewayClientImpl` | Conductor内部private protocol client |
-| `LinearGatewayProtocolHandlerImpl` | Podium内部generated protocol handler |
-| `LinearClientInterface` | Podium内部最小Linear SDK能力边界 |
-| `LinearSdkImpl` | 唯一Linear SDK实现 |
+| `root-discovery` | Project/routing/delegation/header discovery |
+| `root-scheduling` | eligibility、fairness和进程内`RootIterationGuard` |
+| `root-reconciliation` | current view、coverage、delta与mechanical safety |
+| `root-reconciler-client` | Root Reconciler session transport |
+| `root-action-materialization` | RootNextAction native postcondition convergence |
+| `performer-agent-client` | Reconciler/Stage request-response transport |
+| `human-actions` | Root request thread与human dispositions |
+| `performer-profiles` | Profile store/control |
+| `git-workspaces` | Root worktree、branch和commit mechanics |
+| `root-delivery` | push、PR/link和Root delivery gate |
+| `runtime-logs` | sanitized logs/metrics |
 
-### 7.2 Snapshot与Result
+## 11. Performer与Profile
 
-| 代码类型 | 定义 |
-|---|---|
-| `LinearProjectSnapshot` | Gateway读取到的Project外部事实副本 |
-| `ProjectRootIndexPage` | 一个Project page的完整Root discovery外部事实；physical读取可跨Conductor共享，不含完整Tree |
-| `RootHeader` | Root routing、Priority、`updatedAt`、blockers、native delegation和bounded ownership identity；不含完整Tree |
-| `WorkflowRootTreeSnapshot` | 一个Root的完整descendant tree副本 |
-| `LinearIssueNodeSnapshot` | Tree中的单个Issue节点副本 |
-| `LinearCommentSnapshot` | Linear Comment外部事实副本 |
-| `LinearBlockerSnapshot` | Root blocker relation外部事实副本 |
-| `ProjectResolutionResult` | unique、unbound或conflict的Project解析结果 |
-| `WorkflowMutationResult` | 一个closed Workflow mutation的执行结果 |
-| `ProtocolError` | 跨进程Protocol统一使用的结构化、脱敏失败 |
-
-### 7.3 Query
-
-```text
-ResolveConductorProjectQuery
-ListProjectRootIndexPageQuery
-GetWorkflowIssueTreeQuery
-```
-
-### 7.4 Command
-
-```text
-WorkflowMutationCommand
-  = CreateWorkflowIssueCommand
-  | UpdateWorkflowIssueCommand
-  | AppendWorkflowCommentCommand
-  | CreateCommentReplyCommand
-  | SetCommentReceiptReactionCommand
-  | SetCommentThreadStateCommand
-  | CreateWorkflowRelationCommand
-```
-
-不使用含义不完整的`RootProjectionCommand`或只有字符串variant的
-`LinearIssueMutationCommand`作为public contract。完整的command precondition、native Linear含义和read-back
-规则只由[Contracts](contracts.md)定义；不存在`ProjectRootCommentCommand`、另一条Root comment writer或
-compatibility command。
-
-## 8. Conductor模块与能力
-
-| Module | 拥有或依赖的Interface | 主要行为 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| `linear-gateway` | 拥有`LinearGatewayInterface` | 通过Podium读取和修改封闭Linear事实 |
-| `root-discovery` | 依赖`LinearGatewayInterface` | 发现Root Issue和读取调度输入 |
-| `root-scheduling` | 拥有`RootSchedulingPolicyInterface` | 在多个runnable Roots中选择一个 |
-| `root-reconciliation` | 拥有`RootSafetyPolicyInterface` | 从fresh facts验证安全边界、计算delta和机械矛盾；不选择业务下一步 |
-| `root-reconciler-client` | 拥有`RootReconcilerClientInterface` | open发送一次bootstrap，advance只发送delta，并调用Performer Reconciler |
-| `root-directive-materialization` | 拥有`RootDirectiveMaterializerInterface` | 验证、幂等执行和read-back directive |
-| `performer-agent-client` | 拥有`PerformerAgentClientInterface` | 驱动Reconciler及三个Stage role session/turn request-response |
-| `workflow-events` | 拥有`WorkflowTimelinePublisherInterface` | 发布typed Root/Cycle timeline event |
-| `timeline-comments` | timeline comment subscribers | 渲染并写入Root/Cycle Linear timeline comments |
-| `performer-profiles` | 拥有`PerformerProfileStoreInterface`和`PerformerProfileControlInterface` | 保存Profile并通过Performer SDK执行登录/status |
-| `git-workspaces` | 拥有`GitWorkspaceInterface` | 创建、恢复、提交Root Git Workspace |
-| `root-delivery` | 拥有`RootDeliveryInterface` | push并交付PR、remote branch或local branch |
-| `runtime-logs` | 拥有`RuntimeLogPublisherInterface` | 只向Podium发布脱敏process/Profile日志；online/offline由Podium观察channel |
-
-实现名称：
-
-```text
-PerformerAgentClientInterface
-  <- SessionPerformerAgentClientImpl
-
-GitWorkspaceInterface
-  <- NativeGitWorkspaceImpl
-
-RootDeliveryInterface
-  <- GitRootDeliveryImpl
-
-RuntimeLogPublisherInterface
-  <- PodiumRuntimeLogPublisherImpl
-
-RootSchedulingPolicyInterface
-  <- LinearPriorityRootSchedulingPolicyImpl
-
-PerformerProfileStoreInterface
-  <- FilePerformerProfileStoreImpl
-
-PerformerProfileControlInterface
-  <- SubprocessPerformerProfileControlImpl
-
-PerformerProfileProtocolHandlerImpl
-  -> PerformerProfileStoreInterface
-  -> PerformerProfileControlInterface
-```
-
-内部编排和纯规则使用：
-
-| 代码类型 | 定义 |
-|---|---|
-| `ReconcileRootUseCase` | 为一个已admit Root执行一个fresh-derived bounded decision |
-| `LinearPriorityPolicy` | `root-scheduling`内部的Linear Priority比较规则 |
-
-不使用`PullRequestInterface`，因为交付能力不只包含PR；不使用没有所有者的
-`RuntimeReportInterface`。
-
-## 9. Performer
-
-| Canonical Term | 代码类型 | 定义 |
-|---|---|---|
-| Root Reconciler Session | `RootReconcilerSession` | 一个Root专属、跨Cycles的模型ReAct role thread；只返回RootDirective |
-| Role Session | `RoleSession` | Root Reconciler或一个Cycle内Plan、Work、Verify的隔离Provider thread runtime |
-| Stage Turn | `StageTurn` | Conductor在Plan/Work/Verify role session上发起的一次有界调用 |
-| Stage Turn Request Envelope | `StageTurnRequestEnvelope` | role/session/turn、target、instructions、facts、policy和limits的closed request |
-| Stage Instruction Bundle | `StageInstructionBundle` | trusted Symphony Stage instructions、output schema和适用repository instructions |
-| Plan Turn Context | `PlanTurnContext` | Root Contract、Cycle trigger、prior Plan/Findings/Human resolutions和Git facts |
-| Work Turn Context | `WorkTurnContext` | approved Contract、current DAG、selected Work、dependencies和workspace baseline |
-| Verify Turn Context | `VerifyTurnContext` | approved Contract、complete evidence、archived nodes和固定Git artifact |
-| Stage Event | `StageEvent` | best-effort实时观察，不参与Workflow |
-| Stage Result | `PlanResult` / `WorkResult` / `VerifyResult` | matching role turn的唯一terminal typed outcome |
-| Stage Limits | `StageLimits` | context、wall time、tool和message的有界运行限制 |
-| Turn Usage | `TurnUsage` | Root Reconciler或Stage调用的measured五维token usage，或显式unavailable原因 |
 | Provider Backend | `ProviderBackendInterface` | Performer内部Provider能力边界 |
-| Codex Backend | `CodexBackendImpl` | 当前唯一Provider实现 |
-
-Plan、Work、Verify request/result语义只由[Stage Contracts](stage-orchestration.md)定义；Root Reconciler语义只由
-[Root Reconciliation](root-reconciliation.md)定义。当前不设计role内部sub-agents或第二Provider。
-
-### 9.1 Performer Profile
-
-| Canonical Term | 代码类型 | 定义 |
-|---|---|---|
-| Performer Profile | `PerformerProfile` | Conductor保存的一组Codex登录上下文和Turn设置 |
-| Active Performer Profile | `activeProfileId` | Conductor为新Root选择的Profile |
-| Codex Home | `CODEX_HOME` | Codex SDK拥有的auth、session和runtime state根目录 |
-| Codex Turn Settings | `CodexTurnSettings` | model、reasoning effort和Fast设置；V1 reasoning闭合集为none、minimal、low、medium、high、xhigh |
+| Codex Backend | `CodexBackendImpl` | 当前唯一Provider implementation |
+| Performer Profile | `PerformerProfile` | Conductor保存的Codex login context和turn settings |
+| Active Performer Profile | `activeProfileId` | 新Root使用的Profile |
+| Root Profile Label | native Linear label | Root首次执行前固定matching Performer Profile；不使用comment payload |
+| Codex Home | `CODEX_HOME` | Codex SDK-owned auth/session/runtime root |
+| Codex Turn Settings | `CodexTurnSettings` | model、reasoning effort、speed和execution policy |
 | Profile Readiness | `PerformerProfileReadiness` | login-required、ready或invalid |
-| Usage Aggregate Snapshot | `UsageAggregateSnapshot` | 从Linear immutable ModelTurnRecords派生的Stage Issue、Cycle或Root累计与completeness；不是ledger |
 
-一个Profile对应一个独立`CODEX_HOME`。Conductor只保存`PerformerProfile`和
-`activeProfileId`；Codex-owned文件只由`CodexBackendImpl`通过官方SDK访问。
-Profile的`backendKind`和`authenticationMethod`创建后不可修改；切换登录方式使用新
-Profile。
-每个role turn携带一次当前`CodexTurnSettings`快照；它是closed产品DTO，不是SDK
-config。
+## 12. Git与delivery
 
-Profile Command/Query：
+完整语义只见[Git Worktree与交付](git-worktree-delivery.md)。
 
-```text
-GetPerformerProfilesQuery
-GetPerformerProfileStatusQuery
-CreatePerformerProfileCommand
-UpdatePerformerProfileCommand
-StartCodexChatGPTLoginCommand
-SetCodexApiKeyCommand
-ActivatePerformerProfileCommand
-```
-
-Profile Result/Event：
-
-```text
-PerformerProfileCommandResult
-  = PerformerProfileSavedResult
-  | PerformerProfileActivatedResult
-  | CodexLoginStartedResult
-
-CodexLoginPendingEvent
-CodexLoginSucceededEvent
-CodexLoginFailedEvent
-```
-
-`CodexLoginStartedResult`只表示登录流程已被Conductor接受。认证成功必须由
-`CodexLoginSucceededEvent`或后续`GetPerformerProfileStatusQuery`确认。
-
-## 10. Git与交付
-
-| Canonical Term | 代码类型 | 定义 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Git Workspace | `GitWorkspaceSnapshot` | 一个Root的deterministic branch + worktree |
-| Delivery Branch | `DeliveryBranch` | `symphony/runs/<root-identifier-lower>` |
-| Root Delivery | `RootDeliveryResult` | pull request、remote branch或local branch交付结果 |
-| Pull Request Delivery | `PullRequestDeliveryResult` | 已创建或复用PR |
-| Remote Branch Delivery | `RemoteBranchDeliveryResult` | 已push但没有PR |
-| Local Branch Delivery | `LocalBranchDeliveryResult` | 无法push时保留local branch |
+| Git Workspace | `GitWorkspaceSnapshot` | deterministic Root branch + worktree |
+| Delivery Branch | `DeliveryBranch` | Root-scoped Git branch |
+| Root Delivery Result | `RootDeliveryResult` | current call的transient PR/branch delivery output |
+| Pull Request Link | native attachment/relation | Root到SCM PR的durable Linear reference |
 
-不使用独立于`DeliveryRecord`的`Delivery Receipt`、delivery checkpoint或queue；Git证明repository事实，
-`DeliveryRecord`证明matching交付已经read-back，Linear Root status只表达Workflow lifecycle。
+Git/SCM current facts和Root native status/link共同证明delivery；不存在Delivery Record或receipt。
 
-## 11. Podium与Desktop
+## 13. Podium与Desktop
 
-### 11.1 Protocol
-
-| 代码类型 | 定义 |
-|---|---|
-| `PodiumClientProtocol` | React与Podium Backend之间的closed Command/Query/View协议 |
-| `DesktopHostProtocol` | Podium Backend与Tauri Host之间的本地Host能力协议 |
-| `ConductorRuntimeProtocol` | Podium与Conductor之间的handshake、health和shutdown协议 |
-| `LinearGatewayProtocol` | Conductor经Podium执行closed Linear Query/Command的协议 |
-| `PerformerProfileProtocol` | Podium经private channel管理Conductor Performer Profiles的协议 |
-| `PerformerProfileControlProtocol` | Conductor调用Performer SDK登录和account/status的协议 |
-
-`*Protocol`只命名跨进程closed wire边界，不代替业务`*Interface`。
-
-### 11.2 Podium接口
-
-```text
-PodiumDesktopInterface
-  <- PodiumDesktopImpl
-
-DesktopViewInterface
-  <- PodiumDesktopViewImpl
-
-SqlitePodiumStoreImpl
-  -> LinearInstallationStoreInterface
-  -> ConductorBindingStoreInterface
-
-PerformerProfileRelayInterface
-  <- ConductorPerformerProfileRelayImpl
-```
-
-`PodiumDesktopInterface`是Desktop组合Podium用例的公开入口；
-`DesktopViewInterface`只查询named Desktop Views。禁止使用含义过宽的`PodiumRuntimeInterface`和
-`OperatorViewInterface`。
-
-Podium的持久化Interface由事实所有者定义，不使用含义过宽的`PodiumStoreInterface`。
-`SqlitePodiumStoreImpl`可以同时实现多个小Interface。
-`PerformerProfileRelayInterface`只转发Profile Protocol，不持久化Profile或secret。
-active Profile只有在Conductor接受`ActivatePerformerProfileCommand`后才改变，Podium
-不拥有或乐观提交该事实。
-
-### 11.3 Desktop Command
-
-```text
-ConnectLinearCommand
-ReconnectLinearCommand
-CreateConductorCommand
-StartConductorCommand
-StopConductorCommand
-RestartConductorCommand
-CreatePerformerProfileCommand
-UpdatePerformerProfileCommand
-StartCodexChatGPTLoginCommand
-SetCodexApiKeyCommand
-ActivatePerformerProfileCommand
-```
-
-这些Command只改变Desktop control-plane状态，不编辑Linear Workflow。
-
-### 11.4 Desktop View
-
-```text
-DesktopOverviewView
-LinearConnectionView
-ConductorSummaryView
-ConductorDetailView
-ConductorPresenceView
-RuntimeLogView
-PerformerProfileSummaryView
-PerformerProfileDetailView
-ApplicationInfoView
-```
-
-Desktop View不得包含Workflow事实，是可丢弃查询结果而不是数据库事实。文档不使用没有具体类型名的
-`安全View`、`Runtime View`或`Operator View`代替代码名称。
-
-## 12. 黑盒端到端验收
-
-| Canonical Term | 代码类型/字段 | 定义 |
+| Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Parallel Black-Box E2E Campaign | runner内存中的foreground execution | 创建隔离环境、并行模拟多个真实用户Cases、fresh-read最终证据并有界清理的test-only transient进程；不是产品control plane |
-| E2E Case | runner内存中的immutable Case definition | 一组预声明用户输入、真实Linear交互和正向/负向/coverage predicates；不是Root、Cycle或Workflow lifecycle |
-| E2E Human Actor | test-only actor configuration | 使用独立Linear identity和credential执行真实用户操作的外部测试actor |
-| Final Evidence Snapshot | runner内存中的fresh read value | Case settle后丢弃缓存并fresh-read的完整Linear/Git事实；不是managed record或completion marker |
-| E2E Case Verdict | runner内存中的`passed | failed | incomplete` | 根据Final Evidence Snapshot产生的临时CI分类；不写Linear/Git且不参与恢复 |
+| Podium Client Protocol | `PodiumClientProtocol` | React与Podium backend的closed protocol |
+| Desktop Host Protocol | `DesktopHostProtocol` | Podium backend与Tauri host的local protocol |
+| Conductor Runtime Protocol | `ConductorRuntimeProtocol` | handshake、health和shutdown protocol |
+| Desktop View | `PodiumView` | connection/process/Profile control read model；不含workflow state |
 
-完整拓扑、actor边界、Case断言和判定规则只由
-[并行黑盒端到端验收](black-box-e2e.md)定义。这些术语不能进入产品cross-process contracts、managed comments或
-Linear status catalog。
+## 14. E2E
 
-## 13. 状态名称
-
-### 13.1 领域状态
-
-- `RootDirective`使用closed semantic variants：`execute_plan`、`execute_work`、`execute_verify`、`rerun_stage`、
-  `revise_root_tree`、`replan_current_cycle`、`supersede_cycle`、
-  `create_cycle`、`request_human_action`、`conclude_cycle`、
-  `conclude_root`、`cancel_root`、`wait`和`acknowledge`。
-- `RootWorkflowState`使用：`todo`、`in_progress`、`needs_approval`、`needs_info`、`in_review`、
-  `done`、`canceled`。
-- `CycleState`使用：`draft`、`planning`、`sealed`、`executing`、`verifying`、`succeeded`、
-  `changes_required`、`inconclusive`、`escalated`、`canceled`。
-- `StageNodeState`使用：`todo`、`in_progress`、`in_review`、`done`、`failed`、`canceled`；
-  Plan/Work/Verify各自只允许其中明确子集。
-- Human Action没有Issue status lifecycle；request、resolution和Root waiting summary只由
-  [Human Action](human-actions.md)定义。
-- `StageNodeState`是Linear lifecycle；`NodeReadiness`是每次重算的内存值；`VerifyConclusion`是Result evidence。
-  三者不能互相替代或另行持久化。
-- `VerifyConclusion`使用：`passed`、`changes_required`、`inconclusive`、
-  `escalate_human`；suspended和execution failure属于Stage execution outcome，不是Verify conclusion或
-  terminal Cycle outcome。
-- Linear display status使用Title Case；contract enum使用`UPPER_SNAKE_CASE`。完整display/category/enum
-  映射只由[Root Issue工作流](root-issue.md)定义。
-- Desktop公开连接状态只使用`LinearConnection: connected | disconnected`和
-  `ConductorPresence: online | offline`；不得增加daemon lifecycle或Workflow派生状态。
-- `PerformerProfileReadiness`使用：
-  `login-required`、`ready`、`invalid`。
-
-### 13.2 UI label
-
-Desktop的连接与daemon状态只显示Connected、Disconnected、Online和Offline；Profile页面可以显示配置/认证Result，
-但不能把它组合成新的daemon或Workflow状态。Workflow用户语言只出现在Linear comments和statuses。
-
-## 14. 后缀引用
-
-后缀含义和文件组织只由
-[代码模块与命名规范](code-organization.md)定义。本文为每个领域概念指定完整代码
-类型名；其他文档不得去掉后缀、替换为近义后缀，或把`Snapshot`、`View`和持久化事实
-混为一类。
-
-## 15. 禁止的模糊名称
-
-| 不使用 | 改用 |
+| Canonical term | 定义 |
 |---|---|
-| Project Binding | Conductor Binding或Resolved Conductor Project |
-| Managed Run | Root Run / RootReconciliationView |
-| Task | Cycle Issue或Plan/Work/Verify Node |
-| Agent Config、Agent Profile（代码类型） | Performer Profile |
-| Human Node、Plan Approval Node、Human Action Issue | Human Action Request Comment |
-| Root Gate Node、Verify Gate | Verify Node |
-| Desktop Workflow/next action View | 不提供；在Linear查看 |
-| safe/runtime/operator view（代码类型） | 具体`*View`名称 |
-| `PullRequestInterface` | `RootDeliveryInterface` |
-| `RuntimeReportInterface` | `RuntimeLogPublisherInterface` |
-| `OperatorViewInterface` | `DesktopViewInterface` |
-| `PodiumRuntimeInterface` | `PodiumDesktopInterface` |
-| `SubprocessPerformerImpl` | `SessionPerformerAgentClientImpl` |
-| `NativeGitWorktreeImpl` | `NativeGitWorkspaceImpl` |
-| `GhPullRequestImpl` | `GitRootDeliveryImpl` |
-| `PodiumRuntimeReportImpl` | `PodiumRuntimeLogPublisherImpl` |
-| Manager、Service、Helper、Utils | 表达真实能力或行为的领域名称 |
+| Parallel Black-Box E2E Campaign | test-only foreground runner；不是product control plane |
+| E2E Human Actor | 独立Linear human identity |
+| Final Evidence Snapshot | settle后fresh-read的native Linear/Git facts |
+| E2E Case Verdict | runner内存`passed | failed | incomplete`；不写产品系统 |
+
+完整语义只见[并行黑盒端到端验收](black-box-e2e.md)。
+
+## 15. 禁止的旧术语
+
+以下概念不属于目标架构：
+
+```text
+comment/description中的private machine payload
+durable ownership、next-action、Stage Result或delivery object
+persisted model-turn或usage aggregate
+generated Root/Cycle event comment stream
+把Human Action建成descendant Issue
+workflow DB / checkpoint / replay cursor
+```
+
+看到这些名称应删除或改为本表对应的native/transient概念，不能增加compatibility alias。
 
 ## 16. 文档审阅规则
 
-新增或修改架构文档时：
-
-1. 先在本文查找现有概念；
-2. 没有合适名称时，先判断是否真的出现了新业务概念；
-3. 新跨模块类型必须同时说明owner、consumer和suffix；
-4. 同一个概念不得同时拥有业务别名和代码别名；
-5. UI文案与代码enum分开记录；
-6. 搜索本文“禁止的模糊名称”，确保没有重新引入。
+- 状态与tree规则引用`root-issue.md`；
+- durable/recovery规则引用`workflow-authority-recovery.md`；
+- Human comment规则引用`human-actions.md`；
+- Stage wire规则引用`stage-orchestration.md`；
+- Git规则引用`git-worktree-delivery.md`；
+- public schema规则引用`contracts.md`；
+- glossary只命名，不定义第二套行为。

@@ -1,152 +1,117 @@
 # Symphony架构实施Roadmap
 
-状态：目标架构实施顺序。本文定义可验收增量，不声明当前实现已满足目标，也不建立旧短Stage架构兼容路径。
+状态：目标架构实施顺序。本文定义可验收增量，不声明当前实现已满足目标，也不提供旧持久化设计的迁移或兼容路径。
 
 ## 1. 实施原则
 
-1. Linear/Git始终是durable authority；Provider thread只提供runtime continuity。
-2. 先固定closed bootstrap/delta contracts和Conductor侧完整Tree读取，再实现Agent session。
-3. Conductor host保持确定性；Root与Cycle语义只由Root Reconciler模型决定。
-4. 每个增量可以从fresh Linear/Git facts恢复。
-5. 旧的一次性Stage client、per-Work新thread和Conductor semantic policy不属于目标架构，不保留切换、并行或回退路径。
-6. 每个实现任务先写失败测试，并在真实cross-process/Linear边界提供证据。
-7. 最终交付前必须以架构文档逐项审计contracts、generated bindings、production code、tests、fixtures和真实Linear
-   evidence；发现的平行结果来源、平行lifecycle或旧路径必须删除后重新审计，不能以说明、adapter或兼容分支保留。
+1. [Workflow Authority与恢复](workflow-authority-recovery.md)是native Linear + Git recovery的唯一规格。
+2. 每个功能点只有一个named concern owner；其他文档、代码注释和测试只引用。
+3. Conductor保持deterministic；Root Reconciler是唯一model-driven next-step role。
+4. 每个增量都能从fresh current Linear/Git facts收敛，不依赖旧command或process memory。
+5. 删除旧surface和实现replacement属于同一次hard cut；不加dual-read、adapter、flag、backfill或fallback。
+6. 每个实现slice先写失败测试，并在真实cross-process/Linear/Git边界提供证据。
 
-## 2. R0：完整Tree与contracts
+## 2. R0：Native object graph与contracts
 
-- Podium-Conductor支持`include_archived`完整Root/Cycle Tree读取；
-- Linear当前Issue、comment、relation和managed record是唯一Workflow事实；不建立Linear revision、mutation或change
-  event生命周期；
-- 定义Root Reconciler bootstrap/delta/directive、用户input/comment reply schemas；
-- 定义Plan、Work、Verify request/result schemas；
-- 定义Root Human Action request/resolution comment records与materialization boundary；
-- 定义Root/Cycle timeline events以及一个event、一条Markdown + `json` block comment的materialization contract；
-- 定义native comment thread resolve/reopen、reaction回执、actual model和required Turn Usage contracts；
-- 生成TypeScript/Python/Rust types及cross-language fixtures。
+- Podium-Conductor支持完整active/archived Root object graph分页；
+- snapshot覆盖Issues、statuses、labels、parents、relations、archive、comments、threads、reactions、attachments和Activity；
+- Linear mutation只暴露bounded native commands与fresh semantic read-back；
+- Conductor-Performer定义RootNextAction和Plan/Work/Verify transient typed contracts；
+- transport JSON不进入Linear content；
+- 删除comment/description machine payload parser、writer和schema。
 
-R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任意Linear mutation。
+## 3. R1：Root discovery、process fencing与recovery host
 
-## 3. R1：Root Reconciliation host
+- 未delegate Root零副作用；
+- Project header discovery与完整graph读取分层；
+- Root使用唯一native routing label；Host保证每Binding一个live process，Conductor只使用进程内iteration guard；
+- 每次Root iteration先执行worktree gate；
+- 实现normal state convergence、`In Progress -> Interrupted`和terminal no-dispatch；
+- 实现worktree missing时的Git-authority判断：branch可验证则rematerialize，Git execution facts无效才fresh rebuild；
+- Conductor中不存在model、Agent SDK、workflow DB、queue、checkpoint或command log。
 
-- 实现Root discovery、routing、ownership和complete Tree validation；
-- 实现ownership、coverage、schema、capability和convergence gates；lifecycle/Tree矛盾只作为Reconciler输入；
-- 实现一个reconciliation最多一个bounded call/mutation；
-- 实现crash后从Linear/Git重建；
-- Conductor中不存在model或Agent SDK。
+## 4. R2：Root Reconciler与Human comments
 
-## 4. R2：Root Reconciler
+- 每Root一个Reconciler thread，fresh session完整bootstrap，live session可用delta；
+- session/delta/digest只在runtime，baseline丢失直接fresh-open；
+- Root Reconciler每turn返回one bounded RootNextAction；
+- Conductor把action收敛为native Linear/Git facts后丢弃transport object；
+- Human Action硬切为Root native comment threads，无JSON；
+- ordinary human comments使用native reply/check/cross receipt；
+- requirement-changing answer在thread resolve前进入Root description；
+- 删除Root/Cycle event stream、publisher和subscriber。
 
-- Performer创建每Root独立Reconciler thread并跨Cycles复用；
-- Conductor只在session open时发送完整active+archived bootstrap，后续advance严格发送delta；
-- Conductor每轮可以在内存中完整读取并按source version/hash计算fresh diff，但完整Tree只属于Conductor内存；已有session的advance
-  request不得携带完整Tree、完整manifest、旧值/新值对或activity history；description/comment变化只发送新的完整当前值；
-- 只有新建、丢失或无法证明baseline的session才重新发送一次`RootBootstrapSnapshot`；普通用户修改本身不触发Conductor
-  重建session；
-- delta只是跨进程turn输入，不创建Linear revision/event lifecycle；session丢失或baseline无法证明时丢弃旧session并重新bootstrap；
-- Root Reconciler返回一个closed `RootReconcilerTurnResult`；只有directive variant拥有下一步语义，failure variant先
-  durable write/read-back后停在其Root Reconciliation retry barrier；
-- Conductor校验Tree digest，并对directive或failure执行其各自规定的persist/read-back；
-- 支持Stage选择、rerun、replan、active Cycle supersede、terminal predecessor successor和Tree patch；
-- 过滤普通human comment body及non-Symphony当前thread-state revision，并在处理后写回matching reply；不得创建可恢复的
-  thread-change event、webhook history或本地状态账本；
-- thread丢失或baseline mismatch后使用完整Root Tree打开fresh Reconciler session，不兼容或补猜缺失delta。
+## 5. R3：Plan、Work、Verify native materialization
 
-## 5. R3：Plan、Work、Verify role threads
+- 每Cycle创建隔离Plan、Work、Verify threads；Work thread跨多个Work Issues复用；
+- Plan/Verify read-only，Work仅获matching worktree-write capability；
+- Plan Result渲染为Plan description与status，approval使用Root Human Action thread；
+- Work Result转成Work status、Git/check evidence和必要comment；
+- Verify Result转成Verify status/conclusion label、native Finding Issues和Git evidence；
+- Stage process loss使attempt terminal/interrupted，fresh successor使用new Issue identity；
+- actual model/usage只进入sanitized logs/metrics，不写Linear。
 
-- 每Cycle创建与Root Reconciler隔离的Plan、Work、Verify threads；
-- Plan/Verify read-only，Work workspace-write；
-- Work thread跨多个Work Issues和turn复用；
-- Work turn内部可以诊断普通错误、修改和重试；
-- Result先durable，再进入下一份Root delta；
-- Verify绑定immutable revision且不继承Work conversation。
+## 6. R4：DAG、convergence与worktree generations
 
-## 6. R4：Human Action与DAG演进
+- initial DAG只使用native Issue IDs、kind labels、parent和relations；
+- approved Plan immutable；replan创建fresh Plan并supersede旧Plan；
+- retry/rerun创建fresh Issue和predecessor/replacement relation，不重开terminal Issue；
+- attempts、progress和limits从native tree/timestamps/current policy推导；
+- worktree和required Git execution facts都不可恢复时归档旧execution descendants，fresh branch/worktree和fresh Cycle从
+  Root Reconstruction Set开始；
+- old approvals、Done nodes和Git branch不为fresh generation提供authority。
 
-- 按[Human Action](human-actions.md)一次硬切为Root special managed comment threads；
-- Root Reconciler是request与resolution的唯一语义producer，Conductor只做closed materialization；
-- 删除Human Action Issue、labels、专用statuses、parent/relation/archive和全部兼容路径；
-- E2E只在产品创建的request thread中模拟matching human reply。
+## 7. R5：Git与delivery
 
-## 7. R5：Timeline event comments
+- 一个active Root一个deterministic branch/worktree；
+- Work不commit，Conductor独占commit/push/PR/cleanup；
+- Verify绑定immutable revision；内容变化要求fresh Verify；
+- delivery由Git/SCM read-back、native PR attachment/relation和Root `In Review`表达；
+- 删除delivery payload/receipt和internal completion comment。
 
-- 业务模块发布typed event，不直接渲染comment；
-- Root subscriber只写Root Timeline；Cycle subscriber只写Cycle Timeline；
-- 一个event只写一条同时包含结构化用户Markdown和唯一`json` code block的comment；
-- comment结构覆盖Observed、Decision/Result、Evidence、model/usage和Next；
-- 用户comment使用native child reply、✅/❌回执和resolve/reopen，reaction不表达审批status；
-- deterministic event ID支持duplicate、ambiguous write和crash backfill；
-- heartbeat/tool progress不进入Linear timeline。
+## 8. R6：Hard-cut inventory与架构审计
 
-## 8. R6：Convergence与delivery
+审计production code、contracts、generated bindings、tests、fixtures和docs，要求以下retired surfaces零reachable reference：
 
-- Cycle `repair_required/exhausted`进入Root convergence gate；
-- Root Reconciler选择successor或Root Human Action，gate只机械允许或拒绝matching directive；
-- passed Cycle和matching verified Git revision完成PR/branch delivery；
-- waiting Human释放runtime capacity；
-- architecture guards拒绝旧的每Stage新thread不变量重新出现。
+- projected Root/Cycle comment stream；
+- comment/description machine JSON；
+- ownership/next-action/result/execution/usage/delivery/failure persisted objects；
+- local workflow state、replay cursor或Provider pointer；
+- 把Human Action建成descendant Issue的替代模型；
+- legacy parser、writer、compatibility fixture或dual path。
 
-## 9. R7：架构一致性与单一状态机审计
+每个finding是独立修复项，标明唯一architecture owner、删除范围、acceptance和verification。不得用allowlist、baseline或waiver
+保留reachable旧路径。
 
-在真实边界验收前后各做一次fresh-context audit。审计以本目录的named concern文档为唯一规格，对照schema、generated
-types、production code、tests、fixtures和E2E证据；task文件、日志、runtime memory或旧实现不具备解释权。
+## 9. R7：真实边界验收
 
-- 每个架构invariant必须有一个可定位的实现、验证和证据；没有对应实现的目标项必须保持明确未完成，不能由相邻功能
-  推断已满足；
-- `docs/architecture/`自身也必须只有一个named concern owner：审计拒绝同一Issue identity、durable Result、usage aggregate、
-  timeline/reply或lifecycle在两个文档中出现不同record、字段表、transition或恢复语义；修复时删除冲突描述，不以备注
-  声称两种定义都有效；
-- 对每个持久化或跨进程对象确认唯一职责：Issue custom status + archive拥有lifecycle；Stage Result拥有execution
-  事实；`ModelTurnRecord`拥有usage事实；directive/resolution拥有接受的意图或用户选择证据；timeline/reply/reaction
-  只拥有叙事或回执；native thread state只作为comment当前值派生的Root输入或回复write read-back，不拥有历史event、
-  lifecycle或恢复账本；`RootDelta`只拥有单次传输；
-- 明确拒绝三类双路径：从timeline/reply恢复或重计Stage Result/usage、由reaction/thread/record/delta驱动Issue
-  lifecycle、由thread-change history/webhook cache/local state重放Root输入，以及任何HTML marker/managed-marker/
-  revision-event/compatibility reader、writer或fallback；
-- E2E审计必须验证实现只遵守[并行黑盒端到端验收](black-box-e2e.md)这一处测试拓扑、证据和verdict权威；
-- 每个finding必须成为一个有architecture source、删除范围、验收条件和验证命令的独立修复项。修复后重跑完整audit，
-  直到零finding；不得以waiver关闭。
+- 使用真实Linear Project、Podium SDK boundary、Git repository和Performer process；
+- 至少三个Conductor实例并发启动，以唯一routing、Host process fencing和fresh mutation precondition证明同Root single writer；
+- 独立E2E Human Actor只通过Linear公开surface操作；
+- all-settled后丢弃poll cache，fresh-read Linear/Git Final Evidence Snapshot；
+- 验证normal restart不重跑Done，process loss创建fresh successor；
+- 验证missing worktree在Git完整时rematerialize、Git execution authority无效时才触发fresh generation；
+- 验证Plan approval、information answer、rejection和Finding waiver不丢失且不跨target继承；
+- 验证Linear中没有机器JSON或自动event comments。
 
-## 10. 真实边界验收
+完整Case topology和verdict只由[并行黑盒端到端验收](black-box-e2e.md)定义。
 
-### 10.1 R8：并行黑盒E2E Campaign
+## 10. Final acceptance
 
-- 硬切删除串行scenario runner、产品`internal` import、direct Store write和Symphony actor代替human actor的路径；
-- 在同一真实Project provision至少三个独立Conductor，并通过start barrier并发启动；
-- 使用独立E2E Human Actor并行执行全部mandatory Cases；
-- all-settled后丢弃polling cache，从Linear/Git生成每个Case的Final Evidence Snapshot；
-- 用durable Stage execution/result interval证明至少两个不同Conductor真正overlap；
-- architecture guards拒绝任何旧runner、synthetic completion或第二套Case lifecycle重新出现。
-
-R8的topology、actor隔离、Case matrix、证据和verdict只由
-[并行黑盒端到端验收](black-box-e2e.md)定义。本Roadmap只拥有实施顺序，不复制runner contract。
-
-### 10.2 Acceptance
-
-最终必须证明：
-
-1. Podium真实Linear SDK能完整读取active/archived Tree并执行archive/restore和带precondition mutation。
-2. Conductor通过真实session protocol驱动Root Reconciler和每Cycle三个隔离Stage threads；每次Provider调用在Linear
-   中留下actual model与required Turn Usage，Cycle/Root累计可从immutable turn records重新计算且完全一致。
-3. Work thread跨至少两个Work Issues连续执行，普通错误在turn内恢复。
-4. Root Reconciler依据Result、普通用户comment body和当前close/reopen thread-state revision调整DAG、replan、创建successor或Human Action，并以native child reply、
-   ✅/❌ receipt或no-terminal reaction以及resolve/keep-open结果回复用户；reaction不替代Human Action request/resolution facts。
-5. Cycle budget耗尽后Root Reconciler选择successor或Human Action；Root gate只机械允许或拒绝该directive。
-6. process/session重启只靠Linear/Git恢复并拒绝旧output。
-7. Root/Cycle timeline comments从events幂等materialize并可在crash后补齐；每个event恰有一条同时包含用户Markdown和
-   strict `json` code block的comment，tracked surface不存在HTML marker reader/writer或第二timeline record。
-8. [并行黑盒端到端验收](black-box-e2e.md)的全部mandatory Cases通过，包括delivery与Root `In Review`一致、
-   三Conductor topology、durable overlap、restart isolation、Human/revision和successor事实；不存在另一套E2E或Workflow
-   completion路径。
+1. 完整native Root object graph与Git足以从cold restart推导current state。
+2. `Todo`是唯一dispatchable Node；所有terminal attempts保持不可重跑。
+3. worktree存在或可从valid branch重建时保留current tasks；Git execution facts也无效时new identities组成fresh task tree。
+4. Human confirmations保存在Root threads/Activity和materialized Root/target facts；Root requirement重建不丢信息。
+5. Stage/Root transport results不落盘，native postconditionsfresh read-back后才推进。
+6. Linear可见内容只包含用户需求、计划、任务、Findings、直接交互和有意义结论。
+7. hard-cut inventory无retired reachable surface；没有compatibility code。
+8. 全部mandatory black-box Cases通过。
 
 ## 11. 明确延期
 
 - role thread内部sub-agents或fan-out/fan-in；
 - 第二Provider；
 - 同一Root多个active Cycles或并行workspace writers；
-- durable Provider transcript、vector memory或Workflow数据库；
-- 任何Desktop Workflow、Root/Stage/Human Action View或Agent transcript；
-- authoritative monetary cost gate。
-- load、soak、随机revision fuzz或无界Conductor chaos Campaign。
-
-这些能力需要独立授权，不能通过预留任意variant或metadata进入当前contracts。
+- durable Provider transcript、vector memory或workflow database；
+- Desktop Workflow、Root/Stage/Human Action View或approval control；
+- 精确cross-restart token/cost accounting。

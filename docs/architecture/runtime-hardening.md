@@ -52,10 +52,10 @@ HeartbeatObservation
 ShutdownDeadline
 ```
 
-这些对象可以在crash后全部丢失。它们不能保存或推导current Work、Root/Cycle/Node status、accepted
-Result、pending Human request、authoritative retry attempt或下一Root。恢复需要的turn execution identity、
-lease expiry、execution attempt、token reservation、Finding、progress、retry decision和deadline只写Linear managed
-comments。重启后：
+这些对象可以在crash后全部丢失。它们不能保存或推导current Work、Root/Cycle/Node status、pending Human request、
+authoritative retry attempt或下一Root。跨重启事实只来自native Linear Root graph与Git：execution identity使用Issue native
+ID，attempt使用predecessor/replacement relations，Finding使用native Issue，progress/deadline从statuses/timestamps推导。
+iteration guard、permit和token reservation不恢复，也不写Linear。重启后：
 
 ```text
 read Conductor Bindings
@@ -65,8 +65,8 @@ read Conductor Bindings
 -> assess and schedule Roots normally
 ```
 
-Desktop runtime observation只能回答Linear connected/disconnected和Conductor online/offline。资源、限流和Workflow
-细节只进入Conductor内部脱敏日志或Linear timeline，不能扩展Desktop公开状态。
+Desktop runtime observation只能回答Linear connected/disconnected和Conductor online/offline。资源、限流和内部Workflow
+细节只进入Conductor脱敏日志/metrics；只有用户需采取行动的业务事实才进入Linear，不能扩展Desktop公开状态。
 
 ## 3. Multi-Binding process ownership
 
@@ -78,13 +78,19 @@ Stop -> bounded shutdown -> prove process tree exited -> offline
 heartbeat/channel loss -> offline + sanitized log
 ```
 
-每个generation有runtime ID、PID/process identity、start time和health channel，这些只存在于Host内存。Generation ID只允许作为
-turn lease fencing字段写入matching execution managed comment，不是Root ownership或Workflow cursor，也不进入Root
-Control Record Comment。Host必须证明旧process tree已经退出，才能启动replacement。
+Host为每个Binding取得一个OS-backed advisory `BindingProcessFence`，并让matching Conductor process继承其live handle。
+fence identity使用本机runtime目录中的Binding ID，但文件内容不保存workflow、Root或generation state；OS在全部持有进程
+退出时释放lock。新generation只有成功取得exclusive fence、确认旧private channel失效并完成fresh handshake后才能online。
+无法取得fence表示旧writer仍可能存活，replacement fail closed。
 
-Conductor先通过Project Conductor Pool和Root Conductor Label判断routing eligibility，再通过Binding stable
-identity和Root full `conductor_id`判断ownership；generation ID不能接管或
-迁移Root。
+每个generation有runtime ID、PID/process identity、start time和health channel，这些只存在于runtime。Podium Backend把每个
+Linear mutation绑定到当前authenticated private channel generation；channel关闭或被replacement撤销后拒绝旧generation的
+mutation和late output。Generation ID只用于process/channel/turn fencing，不写Linear，也不是Root ownership或workflow
+cursor。
+
+Conductor先通过Project Conductor Pool和Root Conductor Label把Root唯一route到matching Binding；`BindingProcessFence`和
+Podium channel fencing排除同一Binding的第二个writer，Conductor的memory-only `RootIterationGuard`只合并本进程的
+duplicate wake。不存在跨独立Conductor进程共享的Root lease；generation ID不能接管、迁移或形成durable Root事实。
 
 ## 4. Agent session/turn runtime boundary
 
@@ -93,14 +99,16 @@ Root Reconciler/Plan/Work/Verify session、turn lifecycle、Human等待、deadli
 
 Runtime Hardening只允许permit、process/connection handle、opaque role session mapping和普通heartbeat存在于
 memory。live Provider thread可以提供同一Cycle role的上下文连续性，但不能成为workflow authority；丢失后从
-Linear/Git打开fresh session。参与crash fencing的bounded turn lease写Linear。
+Linear/Git打开fresh session。crash fencing依赖process identity、channel、session/turn correlation和native target
+preconditions，不写private lease payload到Linear。只有exclusive `BindingProcessFence`已取得且旧channel已失效，runtime才可
+把旧process视为不能再materialize output；heartbeat超时或看不到PID本身不构成该证明。
 
 ## 5. Linear request broker
 
 Podium拥有Linear SDK和全installation rate-limit视图。Conductor requests通过共享broker分类：
 
 ```text
-control: Project resolution, Root ownership/terminal checks
+control: Project resolution, Root routing/process-fence/terminal checks
 workflow-read: Root/Tree/comments/relations
 mutation: Root-scoped writes and semantic read-back
 observation: connection health and internal telemetry
@@ -145,7 +153,7 @@ completion，也不能替代last-responsible-point fresh precondition和semantic
 Project discovery transient network、429和5xx失败不得逃出主cycle并终止整个Conductor。matching Binding进入不调度新
 Root的memory-only degraded/backoff状态，已有Root也不能基于不完整Index继续推进；下一次bounded wake重新读取。
 authorization、schema、Binding和coverage失败保持fail closed并产生actionable correlated Problem，不进行busy retry。
-单个Root的routing/ownership shape非法只隔离该Root或其page，不能被解释成普通空结果，也不能终止其他Project的runtime。
+单个Root的routing shape非法只隔离该Root或其page，不能被解释成普通空结果，也不能终止其他Project的runtime。
 
 ## 6. Error、Problem与日志
 
@@ -162,8 +170,8 @@ RuntimeProblem
 ```
 
 `RuntimeProblem`是当前Podium/Desktop process observation，可过期、覆盖或在restart后重新发现，只描述连接、process
-或Profile控制失败。Root/Stage错误不进入Desktop View；需要用户理解的Workflow事实写Linear timeline。heartbeat loss
-和tool progress不写Linear timeline。
+或Profile控制失败。Root/Stage错误不进入Desktop View；需要用户理解的Workflow事实写matching Linear Issue的bounded
+comment或status。heartbeat loss和tool progress只进入logs/metrics。
 
 Desktop可见日志只使用binding/profile correlation IDs，不记录Root、Issue、Stage、Token、cookie、Authorization header、API
 Key、raw Profile credential、Provider transcript、SDK object或不受限Issue内容。绝对Profile path在UI和
@@ -226,10 +234,10 @@ test-only daemon mutation。
 
 | 故障 | Runtime动作 | Workflow恢复 |
 |---|---|---|
-| role session/turn启动失败 | 释放permit，记录Problem | 写attempt terminal record并进入Root delta或fresh bootstrap |
+| role session/turn启动失败 | 释放permit，记录Problem | matching Issue收敛为`Failed`或`Interrupted`，再从fresh facts进入Root delta或bootstrap |
 | Linear mutation上限到达 | 拒绝mutation，结束turn后释放permit、read-back | 从fresh Linear/Git重建并继续 |
-| heartbeat停止/硬wall-time耗尽 | cancel active turn、terminate、read-back | 保留reservation并把事实交给Root Reconciler |
-| transport在terminal Result前中断 | 终止turn、释放permit、read-back | 使用已持久化事实或fresh role session |
+| heartbeat停止/硬wall-time耗尽 | cancel active turn、terminate、释放permit、read-back | matching Issue收敛为`Interrupted`并把native facts交给Root Reconciler |
+| transport在terminal Result前中断 | 终止turn、释放permit、read-back | 使用native current facts或fresh role session |
 | terminal Result重复/迟到 | 以execution identity与precondition拒绝旧Result | Workflow facts不变 |
 | Linear 429 | bounded backoff，释放超时permit | 下次full-read继续 |
 | mutation unconfirmed | semantic read-back | 以read-back事实继续 |
@@ -243,22 +251,24 @@ test-only daemon mutation。
 1. 每个running Binding恰好一个current Conductor generation。
 2. capacity单位是active Root Reconciler/Stage turn；Root仍是全局admission与workspace单位。
 3. turn绑定execution identity和fresh precondition；旧Context/Result不能修改新事实。
-4. launch、heartbeat、turn limits、cancel和child-process cleanup有界；Provider token按validated Result结算。
+4. launch、heartbeat、turn limits、cancel和child-process cleanup有界；Provider usage只进入runtime observation。
 5. 同一Root同时最多一个workspace writer。
 6. Linear request遵守rate-limit，ambiguous write先read-back。
 7. runtime observations不参与Root scheduling或Workflow恢复。
 8. upgrade不原地覆盖binary，失败可回到上一个完整bundle。
 9. shutdown停止新admission并确认process tree/connection退出。
 10. cleanup只删除经过完整identity和dirty-state证明的worktree。
-11. crash后不恢复permit、process、raw thread或Result；status/attempt/lease/token/Finding/directive从Linear重建。
+11. crash后不恢复permit、process、raw thread、Result、iteration guard或token observation；status、attempt和Finding从native Linear
+    重建，code/delivery从Git重建。
 12. physical Linear request和protocol request分别观测，background最多使用request与complexity窗口的25%。
 
 ## 12. 不变量
 
 1. Runtime hardening不能创建第二套Workflow authority。
 2. Root是顶层排序、admission、workspace和恢复单位；active model turn是capacity单位。
-3. 所有runtime handles、permits、普通progress heartbeats和Problems都可丢弃；recovery lease写Linear。
+3. 所有runtime handles、iteration guards、permits、普通progress heartbeats和Problems都可丢弃，不写Linear recovery payload。
 4. Linear/Git事实修复后Root自然恢复，不需要operation resume API。
 5. Root Reconciler与Stage protocol只由[Root Reconciliation](root-reconciliation.md)和
    [Stage Contracts](stage-orchestration.md)定义。
-6. 当前runtime不预建role内部sub-agent、durable memory或Provider-specific capacity控制面。
+6. 当前runtime不预建role内部sub-agent、workflow memory store或Provider-specific capacity控制面；live Provider memory仍按
+   [Performer](performer.md#51-provider注入分层)维护。

@@ -23,8 +23,10 @@ This file contains the repository-wide working rules for coding agents.
   Conductor, and Performer.
 - Podium Desktop, Podium, and Conductor target TypeScript; Performer remains a
   Python process; the Desktop host uses Tauri/Rust.
-- Linear custom statuses, native archive flags, Issue Tree, and managed records
-  are workflow authority. Conductor must not introduce a workflow database,
+- The complete native Linear Root object graph is workflow authority, and Git
+  is code and delivery authority. Linear descriptions and comments must not
+  contain Symphony machine JSON, hidden markers, or generated Root/Cycle event
+  comment streams. Conductor must not introduce a workflow database,
   queue, checkpoint store, or mirrored Work Node state.
 - Podium owns Linear OAuth, tokens, project catalog, bindings, the Linear SDK,
   and `podium.db`. Linear SDK types and credentials must not cross into
@@ -32,28 +34,35 @@ This file contains the repository-wide working rules for coding agents.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
   root state from active and archived Linear facts plus Git, hosts Root
   Reconciliation, manages one Git worktree per Root, and materializes closed
-  Root Reconciler directives. It does not run a model or interpret Stage
+  Root Reconciler next actions. It does not run a model or interpret Stage
   Results and user comments to choose the next action.
 - Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
-  Team workflow. Findings, attempts, budgets, progress, and Human overrides
-  are durable Linear facts; Root-level convergence limits are mechanical and
-  survive every Conductor or Performer restart.
+  Team workflow. Findings and Human overrides are native Linear facts;
+  attempts, budgets, and progress are derived from native Linear/Git facts.
+  Root-level convergence limits are mechanical and survive every Conductor or
+  Performer restart.
 - Conductor is always the Performer caller. Performer exclusively owns
   Provider SDK integrations and gives each Root one Reconciler thread plus
   isolated Plan, Work, and Verify threads per Cycle; the Work thread spans
   multiple Work Issues and turns in that Cycle. Performer never calls
   Conductor, and Provider threads are runtime continuity rather than durable
   workflow authority.
+- Provider memory uses five injection layers. Fresh sessions receive stable
+  instructions and role-scoped initial context once; live turns append only
+  the current command and new/replacement/tombstone context fragments. Root,
+  Plan, Work, and Verify maintain isolated Provider-visible baselines and
+  opaque continuations.
 - Root Reconciler is the only model-driven workflow next-step decision role.
   It reads the complete active and archived Root Tree, handles ordinary human
-  comments with durable replies, and returns one closed, versioned directive.
+  comments with native replies/receipts, and returns one closed, versioned
+  next action.
   Plan, Work, and Verify return strong typed Results and do not mutate the DAG
   or create Human Actions directly.
-- Root and Cycle user timelines are projected to their corresponding Linear
-  Issue comments by typed event subscribers after durable read-back. Business
-  workflow modules do not render timeline comments directly. Required Linear
-  timeline or Reconciler reply writes must read back successfully before the
-  Root can advance; failures stop that Root and emit correlated sanitized logs.
+- Human Action stays in Root-hosted native comment threads. Symphony writes
+  comments only for direct human requests, replies, or meaningful failure,
+  verification, and delivery explanations; native Linear Activity provides
+  lifecycle history. Required native mutations and human replies must read
+  back successfully before the Root can advance.
 - Podium Desktop is a control-plane and observability surface only. It must not
   expose or mutate Root, Cycle, Stage, Human Action, Result, Finding, delivery,
   or workflow-next-step state. Workflow interaction stays in Linear; Desktop

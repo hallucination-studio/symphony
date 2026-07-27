@@ -13,11 +13,11 @@ Profiles，以及Conductor、Performer和Codex SDK之间的所有权边界。
 - Symphony不读取、复制、解析或改写`auth.json`、`config.toml`或其他Codex-owned文件；
 - Desktop通过Podium发出Profile Command；Podium只做瞬时转发和View组合，active Profile由
   Conductor验证并持久化；
-- Profile切换不重启Conductor，下一次Root claim立即使用新active Profile；
+- Profile切换不重启Conductor，下一次Root admission立即使用新active Profile；
 - Root固定使用claim时的Profile；每个Root创建Reconciler thread，每个Cycle创建隔离Plan、Work、Verify threads；
 - model、reasoning effort和Fast由Conductor保存为产品设置，并由Performer映射为SDK参数；
 - sandbox mode和command allowlist/denylist由Conductor保存，并由Performer映射为Provider-native策略；
-- Token使用量来自validated Root Reconciler/Stage Result中的Codex SDK usage；完成数量来自Linear Root事实。
+- actual model/Token usage由Performer从Codex SDK采集为runtime logs/metrics；完成数量只来自Linear Root事实。
 
 ## 2. Canonical模型
 
@@ -300,110 +300,43 @@ Update在持久化前验证closed字段、认证方式约束和当前Backend ada
 Readiness由Conductor通过Performer SDK account/status重新读取，不是Podium事实。
 Conductor启动后刷新所有已保存Profile的状态；`GetPerformerProfilesQuery`也会刷新
 status后再返回View。readiness和account label只存在于当前进程内，重启时重新读取。
-active Profile未确认ready前不claim新的Root。
+active Profile未确认ready前不admit新的Root。
 
 ## 10. Active Profile与Agent调用
 
-Conductor在`profiles.json`保存一个`activeProfileId`。新Root claim时把ready active Profile固定到
-Root Control Record Comment；切换active Profile只影响之后claim的Root，不抢占active turn。
+Conductor在`profiles.json`保存一个`activeProfileId`。Root首次进入执行前，Conductor把ready active Profile映射为一个native
+Root Profile Label并fresh read-back；该Root后续只解析这个label。切换active Profile只影响尚未固定Profile的Roots，不抢占
+active turn。缺失、重复或指向unavailable Profile的Root label使Root fail closed，不写comment补偿。
 
 Root Reconciler以及每个Cycle的Plan、Work和Verify role都使用该Profile的`CODEX_HOME`创建互相隔离的
 Provider thread。Profile复用认证、Provider设置和SDK cache；Root Reconciler thread只在matching Root内复用，
 Stage thread只在matching Cycle内复用，且都不能成为durable authority。契约由
 [Root Reconciliation](root-reconciliation.md)和[Stage Contracts](stage-orchestration.md)定义。
 
-## 11. Token usage
+## 11. Model与usage observability
 
-本节是model identity、单turn token usage以及Stage/Cycle/Root聚合的唯一事实源。Performer为每次实际Provider调用记录
-准确发送给Provider的`model`；不能从当前Profile配置倒推历史turn，也不能用model alias、Profile ID或Root结束时的
-当前设置覆盖已经发生的调用。
-
-Performer把Codex SDK的Turn usage归一化为closed union：
+本节是actual model和Provider usage runtime observation的唯一事实源。Performer从实际SDK调用设置和SDK response采集：
 
 ```text
-TurnUsage =
-  MeasuredTurnUsage
-    status: measured
-    input_tokens
-    cached_input_tokens
-    output_tokens
-    reasoning_output_tokens
-    total_tokens
-  | UnavailableTurnUsage
-    status: unavailable
-    reason: provider_omitted | transport_lost | process_lost | invalid_provider_usage
+RuntimeModelObservation
+  role
+  root/cycle/target correlation
+  model
+  outcome
+  usage: measured fields | unavailable reason
+  started_at
+  completed_at
 ```
 
-`cached_input_tokens`是`input_tokens`的子集，`reasoning_output_tokens`可以是`output_tokens`的子集；聚合时五个字段
-分别求和，不能把cached或reasoning重复加进`total_tokens`。`total_tokens`使用Provider归一化后的本次总量，不能在
-Conductor中从其他维度重新推算。Provider明确报告零才可写零；无法取得实际usage时必须使用`unavailable`，不能省略
-字段、伪造零或用reservation代替实际消耗。
+该对象不属于模型structured output，只进入sanitized structured logs/metrics和当前cross-process response。它不写Linear、
+Git workflow file、Podium DB或Desktop workflow view，也不参与restart、dispatch、Cycle conclusion或Root delivery。
 
-每次已经进入Provider invocation边界的Root Reconciler、Plan、Work或Verify调用必须产生一个immutable
-`ModelTurnRecord`，无论结果是succeeded、blocked、
-failed、canceled、timed out、budget exhausted、schema invalid、retry、rerun或replan。record至少包含role、turn/execution
-identity、Root/Cycle/target、`invocation_state: confirmed | ambiguous`、model、outcome、`TurnUsage`和completed/failed
-time。`confirmed`表示Performer确认Provider invocation已开始；跨进程丢失导致是否开始无法证明时使用`ambiguous +
-UnavailableTurnUsage`并使累计不完整。明确在Provider边界前被schema、coverage或precondition拒绝的request只写普通
-execution failure，不伪造ModelTurnRecord或token使用。Stage Result record把matching
-`ModelTurnRecord`作为closed nested object写在Plan/Work/Verify Issue同一managed comment的唯一`json` block中，
-不是第二个block或第二条usage comment；Root Reconciler accepted `RootDirectiveRecord`或
-`RootReconcilerFailureRecord`也各自nested一个matching `ModelTurnRecord`。模型不能自行报告这些字段；Performer从
-实际SDK调用设置和SDK usage填充。
+usage字段存在时遵循Provider语义；cached/reasoning子集不得重复计入total。Provider未返回、transport丢失或process crash时
+记录`unavailable`，不能伪造零。operator telemetry不宣称账单、ChatGPT credits或货币成本精度。
 
-Conductor只从Linear中immutable `ModelTurnRecord`重建累计值。execution identity防止同一个turn重复计算；Timeline和
-aggregate snapshot，以及terminal `CycleOutcome.budget_usage`，都只是带source digest的派生证明或显示，不是第二份usage
-ledger，也不得再次计数。每次fresh read必须能从同一组turn records逐字段重建并校验这些派生值。没有本地counter、usage数据库、
-Control Record副本或Desktop计数器。
-
-聚合范围固定为：
-
-| Linear位置 | 用户可见累计值 | 唯一输入集合 |
-|---|---|---|
-| Plan/Work/Verify Issue | 该Issue全部初次、retry和rerun turn，按model分组 | target为该Issue的Stage `ModelTurnRecord` |
-| Cycle Issue | 该Cycle全部Plan、Work和Verify usage，按stage和model分组 | matching Cycle的Stage `ModelTurnRecord` |
-| Root Issue | 全部Cycle Stage usage加全部Root Reconciler usage，按Cycle/role/model分组 | Root下全部`ModelTurnRecord` |
-
-Cycle累计不包含Root Reconciler turn。Root累计的公式唯一为`sum(all Cycle Stage turns) + sum(all Root Reconciler turns)`；
-任何把Reconciler turn同时计入Cycle再汇总Root的实现都会双计，必须拒绝。每个累计snapshot携带source record count、
-canonical source digest、`is_complete`和`unknown_turn_count`。只要任一input record为`unavailable`，累计仍展示所有已知
-维度，但必须`is_complete: false`并明确未知turn数量，不能显示为精确总量。
-
-用户可见的展示位置固定，且只渲染同一次fresh Linear派生的snapshot：
-
-| Linear位置 | 必须展示 |
-|---|---|
-| Plan/Work/Verify Issue的canonical Stage Result comment | 本turn的实际`model`、本turn usage或明确unavailable原因、该Issue按model分组的累计值与完整性 |
-| Cycle Issue的timeline comment | 触发该event的Stage实际`model`与usage（如有），以及该Cycle仅含Plan/Work/Verify的按stage/model累计值与完整性 |
-| Root Issue的Root Reconciliation timeline comment | 触发该event的Root Reconciler实际`model`与usage（如有），以及全部Cycle Stage turn加全部Root Reconciler turn的按Cycle/role/model累计值与完整性 |
-
-这三个位置是同一组immutable `ModelTurnRecord`的不同范围展示，不是三个usage ledger、更不是第二个Stage Result。
-Stage、Cycle和Root renderer只消费source record identity和fresh snapshot；它们不接受模型、event producer、description
-或本地counter提供的aggregate。累计值从fresh Linear事实计算并随matching event comment一起read-back，不通过修改Issue
-description或单独维护可变summary record实现。
-
-为保证同一`timeline_event_id`在重试或重复投递时始终生成相同的Markdown，Cycle/Root timeline的累计snapshot以
-[Workflow Timeline](workflow-timeline.md)定义的source `occurred_at`为闭合边界：只计入`terminal_at`早于该时刻的turn，
-以及`source_record_ids[]`所解析出的同刻`ModelTurnRecord`；之后或同刻但不属于event source的turn不属于该event。边界
-不能取Tree观察时间、comment server创建时间或本地materialization时钟。它只约束fresh Linear records的派生集合，不保存
-usage snapshot、ledger或第二个恢复记录。
-
-首次创建canonical Stage Result comment时，Conductor可把已经通过Result correlation校验、即将与该comment原子写入的
-本次`StageResultRecord`作为同一个纯aggregate derivation的prospective source，并与此前fresh Linear sources共同渲染。
-这只解决“本次record尚未存在而comment必须同时展示本次累计”的写入顺序，不是本地usage事实、ledger或E2E证据：append后
-必须只从fresh read-back的strict records重新派生同一aggregate并逐字段相等，否则当前Root停止。Cycle、Root timeline和
-任何恢复/E2E路径绝不接受prospective source；它们只读取fresh Linear records。
-
-Result应用时先完成最新Linear/Git read-back和全部correlation校验，再结算usage并重新评估Root。
-model/usage record或累计comment写入、strict decode、聚合校验或read-back失败时当前Root停止，turn启动前的Linear token
-reservation继续全额计入，不能因少计而绕过Root
-convergence gate。Workflow gate只读取execution settlements和open reservations。
-
-SDK actual usage是operator-facing observation，不是账单；Root token budget correctness由保守reservation保证：
-
-- Performer在SDK usage返回前崩溃时写`UnavailableTurnUsage`，reservation不释放；
-- 货币成本、ChatGPT credits或Fast multiplier只可作为telemetry，不参与Workflow gate；
-- actual usage可以降低reservation后的charged amount，但不能增加Root token budget或覆盖deadline/cycle breaker。
+目标架构不提供跨重启的精确token累计或Root token ledger。每次调用仍受Profile的`max_output_tokens`、wall time、tool calls
+和context bounds限制；跨重启convergence只使用Linear可重建的Cycle/attempt counts、timestamps和current Project/Profile
+policy。丢失model/usage observation不得改变workflow结果。
 
 ## 12. Desktop
 
@@ -437,7 +370,7 @@ Desktop只显示Profile配置和认证操作的真实Result，不显示当前Roo
 | 已保存设置升级后不再支持 | Profile `invalid`，等待用户Edit |
 | Profile目录不可读 | `performer_profile_home_unavailable` |
 | Root固定Profile被移除 | Root blocked，不静默改用active Profile |
-| usage无法取得 | 写`unavailable`并使Cycle/Root累计不完整；reservation不释放，禁止静默少计 |
+| usage无法取得 | runtime observation写`unavailable`；不伪造零，也不改变workflow事实 |
 
 本轮不提供删除Profile Command，因此不会正常产生“固定Profile被移除”；该错误只防御
 磁盘损坏或人工删除。
@@ -452,15 +385,15 @@ Desktop只显示Profile配置和认证操作的真实Result，不显示当前Roo
 6. API Key只通过secret pipe进入Performer SDK。
 7. 只有ready Profile可以处理新Root。
 8. active Profile切换不抢占active turn，也不迁移已有Root Profile。
-9. 同一Root固定一个`performer_profile_id`；Reconciler thread只在该Root复用，三个Stage threads只在各自Cycle复用。
+9. 同一Root由一个native Root Profile Label固定Profile；Reconciler thread只在该Root复用，三个Stage threads只在各自Cycle复用。
 10. model、reasoning和Fast只通过SDK public API生效。
 11. sandbox和command policy只通过SDK public API生效，Symphony不实现动态授权引擎。
-12. SDK usage不宣称账单精度；Root token budget只由Linear reservation与validated settlement机械执行。
+12. SDK usage不宣称账单精度，只进入runtime logs/metrics；workflow不依赖跨重启token ledger。
 13. 当前只允许`backendKind: codex`。
 14. `backendKind`和`authenticationMethod`创建后不可修改。
 15. Podium发起或转发active选择，但只有Conductor可以提交active Profile事实。
-16. 每个模型调用都有Linear `ModelTurnRecord`；model和usage不能是optional，也不能只存在于日志或runtime。
-17. Stage、Cycle和Root累计只从immutable turn records派生；不存在usage ledger、可变counter或双重计数路径。
+16. actual model和usage是runtime observability，不写Linear，也不形成workflow authority。
+17. exact cross-restart usage aggregate被删除；convergence只使用native可重建facts。
 
 ## 15. 官方技术依据
 

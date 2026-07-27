@@ -1,105 +1,87 @@
 # Git Worktree与Root交付
 
-状态：目标架构提案。Symphony只接受Git repository；一个Root对应一个deterministic branch和worktree。
+状态：目标架构提案。本文是Root worktree validation、immutable revision、PR和delivery mechanics的唯一事实源。
+恢复分支选择、worktree rematerialization与invalid-generation rebuild只由
+[Workflow Authority与恢复](workflow-authority-recovery.md)定义。
 
 ## 1. 固定模型
 
+每个active Root恰有：
+
 ```text
-Linear Root
-  -> symphony/runs/<root-identifier-lower> branch
-  -> <conductor-data-root>/worktrees/<root-issue-id> worktree
-  -> all Cycle Work Nodes edit the same worktree
-  -> latest Cycle Verify Node
-  -> PR when gh is usable, otherwise branch delivery
+one repository context
+one deterministic delivery branch
+one deterministic Git worktree path
+at most one active delivery PR
 ```
 
-不存在非Git目录模式、per-Leaf branch/worktree或把修改复制回普通目录。
+Performer Work只能修改授予的worktree capability。Plan和Verify只读；Conductor独占worktree创建、branch、commit、push、
+PR、cleanup和Git topology mutation。
 
 ## 2. Repository Context
 
-Conductor Binding保存用户选择的local Git repository和base branch。Conductor启动时验证repository
-identity、Git binary、base branch、deterministic run branch和worktree identity。原工作目录中的
-未提交修改不进入Root worktree，也不被Conductor清理或覆盖。
+Repository Context由Project Binding提供repository identity、local path、base branch、remote和delivery policy。Root可以在
+description中覆盖明确允许的delivery instruction；不得从comment机器payload或Provider output改变repository identity。
 
-Branch和worktree名称只从稳定Root identity推导，不使用Issue title、Comment或Agent输出：
+Root branch/path由repository identity和Root native ID确定性派生。不得使用title或本地自增序号。
 
-```text
-branch:   symphony/runs/<root-identifier-lower>
-worktree: <conductor-data-root>/worktrees/<root-issue-id>
-```
+## 3. 创建与验证
 
-## 3. Agent integration边界
+Conductor在首次执行前：
 
-Work turn对workspace的权限、Work Result提交、Verify和delivery eligibility只由
-[Performer Stage Contracts](stage-orchestration.md)定义。
+1. 验证repository、remote和base revision；
+2. 确认没有其他Root占用matching branch/path；
+3. 创建fresh delivery branch和worktree；
+4. 通过`git worktree list`、branch、HEAD和repository identity fresh read-back；
+5. 只有全部postconditions成立才dispatch Stage。
 
-本文只补充Git所有权：Conductor拥有branch/worktree lifecycle、checks、commit、push、PR和delivery；
-Performer不能commit、修改Git topology、push、调用`gh`或执行delivery。
+每次process恢复先执行同样的existence与identity gate。存在但identity、branch或repository不一致时fail closed，保留现场；
+不能reset、clean、move或猜测修复。worktree不存在时先按Git authority验证existing branch/commits：可证明时从该branch
+重建worktree；Git execution facts也不可证明时才进入
+[invalid-generation convergence](workflow-authority-recovery.md#6-worktree丢失时的rematerialization与invalid-generation-rebuild)。
 
-## 4. 创建与恢复
+## 4. Work与immutable Verify target
 
-首次claim Root时，Conductor验证repository/base branch并创建或验证deterministic branch/worktree。branch identity由
-Root identity和固定命名规则重新计算并向Git read-back，不写入第二份Linear branch状态。Crash/restart复用matching
-worktree，保留未提交修改；identity冲突使matching Root fail closed并写Linear timeline，不得reset/clean猜测恢复。
+Work不commit或push。全部required Work完成后，Conductor：
 
-## 5. In Review之后
+1. 验证worktree没有越界路径或未预期Git topology变化；
+2. 运行mechanical required checks；
+3. 创建一个可read-back的immutable target commit；
+4. 记录commit SHA、tree和diff facts到当前runtime request；
+5. Verify只读检查该exact revision。
 
-Root In Review表示代码已经以PR或branch交付。只有用户或外部SCM/Linear automation把Root置为Done。
+Verify后任何内容变化都会产生new revision，并要求fresh Verify Issue。旧Verify approval或Finding conclusion不适用于new
+revision。
 
-Root/Work内容没有变化时不继续修改branch。外部review changes、新工作或verified HEAD失效作为下一份Root delta；
-Root Reconciler决定保持状态、回到In Progress、创建Cycle、重新Plan或请求Human Action。若directive继续执行，仍
-复用同一branch/worktree，并在matching Cycle中完成Plan、审批、Work和Verify后重新delivery。
+## 5. Delivery
 
-Done/Canceled Root不能由Conductor自动重开；保持terminal、重开或修复必须来自Root Reconciler directive。
+Root只有在以下native事实同时成立时进入`In Review`：
 
-### 5.1 REVIEW后的自动SHIP
+- matching Cycle为`Succeeded`；
+- matching Verify为`Done + Passed`；
+- Verify检查的commit仍是delivery branch exact target；
+- required checks通过；
+- delivery policy要求的push/PR已完成并从Git/SCM fresh read-back；
+- Root存在native PR attachment/relation，或direct-delivery policy有可验证remote revision；
+- Root status `In Review` mutation已经fresh read-back。
 
-Root Reconciler在terminal Cycle的`CycleOutcome` read-back后执行Root REVIEW。全部Root acceptance和delivery
-eligibility都有fresh evidence，且用户没有明示禁止自动交付时，它返回
-`conclude_root(conclusion=ready_for_delivery)`；自动SHIP是默认行为，不需要人工二次确认。用户明示要求manual
-delivery，或交付需要无法由现有事实安全决定的人类判断时，Reconciler必须先选择matching Root Human Action或`wait`，
-不能返回`conclude_root`后再让Conductor猜测用户意图。
+这些事实本身就是delivery authority，不再创建parallel delivery object、receipt comment或machine JSON。用户可见comment只在交付结果或
+失败需要解释时写一次简短摘要；native SCM link提供详细证据。
 
-Conductor只机械执行accepted `conclude_root`，不解释review summary、不执行模型生成的Git command，也不让模型决定
-commit数量或改写history。用于Verify的immutable target commit已在Verify调用前通过`GitWorkspaceInterface`机械准备并
-read-back。SHIP从fresh Git、Linear、matching Plan/Verify和directive preconditions重新验证eligible revision；交付对象
-必须正是Verify绑定的commit，不能在SHIP中创建新commit或改变已验证内容。push/PR操作属于`RootDeliveryInterface`
-实现，不进入prompt output。
-
-```mermaid
-flowchart TD
-    A["Accepted conclude_root ready_for_delivery"] --> B["Fresh-read Linear, Git, Verify and delivery preconditions"]
-    B --> C{"Are all gates valid, is HEAD the exact verified commit, and is it not already delivered?"}
-    C -- "No" --> C1["Stop this Root and publish correlated sanitized failure evidence"]
-    C -- "Yes" --> E["Push deterministic delivery branch"]
-    E --> F{"Is gh usable for this repository?"}
-    F -- "Yes" --> G["Create or reuse the matching pull request"]
-    F -- "No" --> H["Deliver the remote branch or bounded local branch fallback"]
-    G --> I["Write and fresh-read the matching DeliveryRecord"]
-    H --> I
-    I --> J["Move Root to In Review and read it back"]
-    J --> K["Keep the Root worktree for review feedback"]
-```
-
-任一步失败都保持Root未交付或停在可证明的部分事实边界，输出correlated sanitized failure，并在恢复时从Git和Linear
-read-back判断缺少的机械步骤。只有matching `DeliveryRecord`和Root `In Review`都read-back后SHIP才完成；PR交付时record
-必须引用已创建或复用的matching PR。`DeliveryRecord`是现有交付managed fact，不再增加另一种Delivery Receipt、queue、
-checkpoint或模型状态。
+Root `Done`只能由用户或SCM接受事实触发。`In Review`不自动cleanup worktree，review changes创建fresh Cycle或fresh Work
+Issue，不能重新派发旧`Done`节点。
 
 ## 6. Cleanup
 
-cleanup不是Root完成条件。只有Root Done/Canceled或用户明确请求，且没有live process或writer、
-worktree identity完全匹配、没有未提交/未push/未交付修改时才能删除。任何证明不足都停止并显示原因。
+只在Root `Done`或`Canceled`且没有live Stage、uncommitted changes、unreadable Git state或pending delivery时cleanup。
+cleanup必须先验证exact Root path、repository和branch，再使用Git-aware worktree removal。失败保留现场并记录sanitized log；
+不得递归删除宽泛路径。
 
 ## 7. 不变量
 
-1. Symphony只处理Git repository。
-2. 一个Root只有一个deterministic branch和worktree。
-3. Stage retry和successor Cycle不创建第二branch/worktree。
-4. Performer不能直接修改Git topology或delivery。
-5. Conductor在Verify前准备immutable target commit；accepted `conclude_root`后只交付并read-back该exact commit。
-6. Verify通过前不交付；Root不自动Done。
-7. Git、Linear和matching `DeliveryRecord`足以重建代码/交付状态；不保存第二种Delivery Receipt或Leaf checkpoint。
-8. Stage retry保留worktree、commits和未提交修改。
-9. Verify绑定immutable target commit；验证期间HEAD变化使Result失效且禁止delivery。
-10. worktree在Root `In Review`期间保留；只有Done/Canceled或满足第6节显式安全请求时才cleanup。
+1. 一个active Root一个branch和worktree；Git facts由Git fresh read-back。
+2. Work只改文件，Conductor独占commit/push/PR/worktree mutation。
+3. Verify和delivery绑定同一immutable revision。
+4. delivery由Git/SCM facts加Linear native status/link表达，不保存私有record。
+5. worktree missing的行为只由Workflow Authority文档定义，本文件不复制恢复算法。
+6. ambiguous或mismatched workspace永不自动reset/clean。

@@ -91,11 +91,9 @@ root-discovery
 root-scheduling
 root-reconciliation
 root-reconciler-client
-root-directive-materialization
+root-action-materialization
 performer-agent-client
 human-actions
-workflow-events
-timeline-comments
 performer-profiles
 git-workspaces
 root-delivery
@@ -105,15 +103,14 @@ runtime-logs
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
 `RootReconciliationView`和`WorkflowRootTreeSnapshot`只存在于内存。
 
-`root-reconciliation`拥有只验证ownership、coverage、schema、capability、budget和convergence边界的
+`root-reconciliation`拥有只验证routing、process fence、iteration guard、coverage、schema、capability、budget和convergence边界的
 `RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
 `root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
-`root-directive-materialization`验证和执行closed directive，并以独立strict writer持久化Root Reconciler failure record；
-`performer-agent-client`拥有Root Reconciler和三个Stage role session/turn
-transport。`workflow-events`只发布typed timeline event，`timeline-comments`只渲染和写Root/Cycle timeline；
-用户comment reply由`root-directive-materialization`通过closed writer完成。
-完整边界分别由[Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和
-[Workflow Timeline](workflow-timeline.md)定义。
+`root-action-materialization`验证transient RootNextAction并收敛native Linear/Git postcondition；
+`performer-agent-client`拥有Root Reconciler和三个Stage role session/turn transport；Human Action reply由
+`human-actions`和`root-action-materialization`完成。完整边界分别由
+[Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和
+[Human Action](human-actions.md)定义。
 
 Conductor可以保存`PerformerProfile`明文配置文件，但不能读取或修改Profile
 `CODEX_HOME`中的Codex-owned文件。Profile配置文件不是数据库。
@@ -193,10 +190,8 @@ TypeScript：
 LinearGatewayInterface.ts
 RootSafetyPolicyInterface.ts
 RootReconcilerClientInterface.ts
-RootDirectiveMaterializerInterface.ts
-RootReconcilerReplyWriterInterface.ts
+RootActionMaterializerInterface.ts
 PerformerAgentClientInterface.ts
-WorkflowTimelinePublisherInterface.ts
 PodiumLinearGatewayClientImpl.ts
 LinearGatewayProtocolHandlerImpl.ts
 GetWorkflowIssueTreeQuery.ts
@@ -219,8 +214,7 @@ root_reconciler_runtime.py
 
 - TypeScript业务对象和View使用`camelCase`；
 - Python内部对象使用`snake_case`；
-- generated JSON Schema、跨进程wire和Linear managed code block字段统一使用
-  `lower_snake_case`；
+- generated JSON Schema和跨进程wire字段统一使用`lower_snake_case`；
 - 不为了TypeScript方便修改wire字段，也不把wire字段风格扩散到TypeScript业务对象。
 
 ## 7. 依赖方向

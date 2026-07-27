@@ -42,7 +42,7 @@ Settings
 | Conductors | Binding、repository、Profile配置、在线性、版本和运行日志 | Create、Start、Stop、Restart、Configure Profile |
 | Settings | Linear连接和Desktop应用信息 | Connect或Reconnect Linear |
 
-Desktop不提供Root列表、当前工作、当前Stage、Workflow状态、Timeline、Human Action、审批入口、Next Action、Token
+Desktop不提供Root列表、当前工作、当前Stage、Workflow状态、执行历史、Human Action、审批入口、Next Action、Token
 usage、Finding、Verify、交付摘要或`Open Root in Linear`快捷动作。用户从Linear本身进入这些对象。
 
 ## 3. Setup
@@ -167,7 +167,7 @@ ConductorPresenceView
   sanitized_error?
 ```
 
-View不包含Root identity、Issue、Tree、status、directive、Human Action、Stage、Result、Finding、delivery、Git revision、
+View不包含Root identity、Issue、Tree、status、next action、Human Action、Stage、Result、Finding、delivery、Git revision、
 token usage、Provider session或Workflow next action。View是当前查询结果，不写入`podium.db`，不支持从旧View恢复。
 
 ## 8. 进程拓扑

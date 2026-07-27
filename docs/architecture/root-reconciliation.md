@@ -1,210 +1,92 @@
 # Root Reconciliation
 
-状态：目标架构提案。本文是Root Reconciler语义角色、Conductor reconciliation host、Linear authoritative facts、Root bootstrap/delta、
-全部用户Linear输入与回复、Root/Cycle修改、`RootDirective`以及跨Cycle恢复的唯一事实源。Plan、Work、Verify
-执行contract由[Performer Stage Contracts](stage-orchestration.md)定义；Human Action生命周期由
-[Human Action](human-actions.md)定义；用户可见时间轴由[Workflow Timeline](workflow-timeline.md)定义。
+状态：目标架构提案。本文是Root inputs、Root Reconciler语义决策和one-action materialization的唯一事实源。
+durable authority、restart和worktree-loss规则只见
+[Workflow Authority与恢复](workflow-authority-recovery.md)。
 
 ## 1. 决定
 
-每个Root只有一个语义决策者：运行在Performer中的Root Reconciler。它跨当前Root的全部Cycles持续追求Root
-目标，观察Linear/Git durable facts，解释用户普通comment和Stage Results。每个已进入Provider的turn返回一个closed、
-versioned `RootReconcilerTurnResult`：成功variant是告诉Conductor下一步的`RootDirective`；failure variant是
-`RootReconcilerTurnFailure`，其中只携带必须持久化的`RootReconcilerFailureRecord`，没有下一步语义。
-
-Linear是唯一的Workflow状态模型。用户直接修改Issue的status、description、archive、parent、relation或comment，
-这些当前值由Root Reconciler解释；Conductor不把它们改写成另一套Linear mutation、revision或change-event状态机。
-Conductor只在单轮内存中按稳定source version或canonical hash与Root Reconciler session baseline比较，生成一次性
-`RootDelta`传输输入。Linear中的当前Issue、comment、relation、managed record及其read-back结果才是durable事实。
-
-Cycle不是独立自治workflow或语义决策边界，而是Root Reconciler管理的一次有预算执行尝试；
-Cycle的Plan、Work、Verify、DAG、Human Actions和status都是Root reconciliation state的一部分。
+每个Root只有一个model-driven workflow decision role：Root Reconciler。
 
 ```text
-Root
-├── Root Reconciler Session       # one semantic role across all Cycles
-├── Cycle 1
-│   ├── Plan Session
-│   ├── Work Session
-│   └── Verify Session
-├── Cycle 2
-│   ├── Plan Session
-│   ├── Work Session
-│   └── Verify Session
-└── Root Human Actions
+complete current native Linear/Git facts
+-> Root Reconciler returns one closed RootNextAction or failure
+-> Conductor validates and materializes one bounded change
+-> fresh read-back
+-> repeat from current reality
 ```
 
-Conductor仍是唯一caller和副作用owner。它确定性地读取、建立执行屏障、校验边界、materialize、read-back和恢复，
-但不解释任何用户status、title、description、archive、parent、relation或comment变化，不选择下一个Stage，也不
-自行修正用户变化或判断replan、successor Cycle和Human Action。
+Conductor host不解释Plan/Work/Verify output或human comment来选择下一步。Plan、Work和Verify只报告matching execution事实；
+Root Reconciler决定是否执行Stage、创建Human Action、调整DAG、结束Cycle、创建successor或交付。
 
-## 2. 一个Reconciliation，两种职责
+`RootNextAction`是一次Conductor-Performer调用的transient typed output，不持久化到Linear。不存在持久化next-action、accepted
+command log或replay cursor。
 
-Root Reconciliation是一个产品控制机制，由两个不能互相替代的执行边界组成：
+## 2. 职责
 
-| 边界 | owner | 职责 |
+Root Reconciler同时承担：
+
+- `DEFINE`：把用户需求和已确认信息收敛到Root current description；
+- `PLAN CONTROL`：请求fresh Plan、解释Plan outcome并创建Plan Approval；
+- `BUILD CONTROL`：选择ready Work、处理attempt结果并演进DAG；
+- `VERIFY CONTROL`：选择immutable revision、解释Verify与Findings；
+- `REVIEW`：在terminal Cycle后检查完整Root requirement是否满足；
+- `SHIP DECISION`：满足条件时请求Conductor执行mechanical delivery；
+- `HUMAN INPUT`：处理普通comments及Human Action current facts。
+
+REVIEW不是第四个Stage，SHIP也不允许模型直接执行Git command。Conductor仍独占机械validation、Linear mutation、Git
+topology和delivery。
+
+## 3. Session与输入边界
+
+Performer为每个Root维护至多一个live Root Reconciler thread。fresh session接收完整current Root projection；live且baseline
+连续时可接收bounded current-value delta以减少context。session、delta baseline和Provider history都是runtime continuity，
+不能参与restart authority。
+
+fresh projection覆盖[Workflow Authority与恢复](workflow-authority-recovery.md)定义的完整native Root object graph、Git
+facts、mechanical violations和当前Project/Profile limits。Conductor必须完成active/archived分页和required activity coverage；
+coverage不完整不调用模型。
+
+`root_digest`只用于当前runtime调用的stale-output rejection。它可以覆盖canonical current facts，但不写入Linear、comment、
+description或本地checkpoint。baseline无法证明时关闭session并fresh-open，不能补猜delta或重放旧turn。
+
+Root Reconciler不接收Linear SDK object、credentials、raw Provider transcript、Desktop state或其他Root facts。
+
+### 3.1 Root Provider memory与冻结观察批次
+
+五层Provider注入方式只由[Performer](performer.md#51-provider注入分层)定义。本文件只定义Root role的context projection：
+
+- fresh Root session只注入一次完整Root bootstrap；
+- live session每turn注入current command，以及从已确认Provider-visible baseline到fresh observation的changes；
+- 一个reconciliation turn冻结一份完整observation；同一批中的多个Issue、comment、Activity和Git changes可以共享一个turn；
+- 每个change仍保留独立source identity、version、actor、input identity和reply/disposition coverage；
+- turn执行期间到达的新事实不能修改当前request，只进入下一批。
+
+Root change是逻辑context fragment，不要求一个fragment对应一个Provider SDK item。backend可以把同一冻结批次编码为一个或
+多个bounded incremental items，但不能丢失fragment correlation，也不能重新序列化完整baseline。
+
+Provider history只append：new source使用current-value fragment，更新source使用带旧source identity/version的replacement，
+删除或脱离scope使用tombstone。已经进入conversation的old fragment不修改、不摘要替换，也不在后续turn重新注入。
+
+### 3.2 Provider-visible baseline与durable disposition
+
+Root session必须严格分开两类状态：
+
+| 状态 | 作用 | 生命周期 |
 |---|---|---|
-| Reconciliation host | Conductor TypeScript | wake、执行屏障、fresh read、安全gate、调用、materialize、read-back、恢复 |
-| Root Reconciler role | Performer Python | 从一次完整bootstrap和后续增量事实解释Root并选择唯一下一步 |
+| Provider-visible fact baseline | 证明Provider已经看过哪些fragments，决定下一turn注入什么 | live session memory |
+| Human input disposition | 证明comment body是否已采用/拒绝/转成Human Action，以及target consequence是否成立 | native Linear reactions/replies/target facts |
 
-这不是两个语义loop。只有Root Reconciler决定业务下一步；Conductor只实施不可由模型绕过的安全、ownership、
-完整性、schema、staleness、capability、budget、convergence和write precondition约束。可读取的lifecycle、DAG或
-Tree不一致是bootstrap/delta中的事实，不是Conductor在调用模型前修正或拒绝的业务结论。
-Root Reconciler不能调用Linear/Git/Conductor，不能直接执行Plan/Work/Verify，也不能返回任意GraphQL、shell
-command或callback。Conductor不包含Agent SDK或Provider兼容逻辑。
+Performer能够证明matching append进入opaque Provider continuation后，fact baseline可以推进，即使本turn随后返回closed failure或
+RootNextAction validation失败。这只表示模型已经看过facts，不表示human input已处理或workflow已推进。尚无native
+disposition的input identity继续出现在下一turn current command中；其正文已经存在于同一live Provider history时不得重复注入。
 
-```text
-wake on durable change
--> establish one Root execution barrier
--> settle or cancel any in-flight Stage turn without assigning business meaning
--> Conductor reads fresh complete Root Tree, Linear input sources and Git facts internally
--> enforce ownership, coverage, schema and execution-safety gates
--> open a fresh session with one bootstrap, or compute one RootDelta from the session baseline
--> obtain one RootReconcilerTurnResult from that bootstrap turn or delta turn
--> directive: validate, persist, materialize one semantic action and required replies/events
--> failure: persist the typed failure record, read it back, then wait for a new durable user input
--> discard transient view
-```
+若append是否进入Provider history、opaque continuation或baseline连续性无法证明，立即关闭session并从fresh Linear/Git
+facts创建new session和一次initial bootstrap。不能在同一thread补发、猜测或重建完整messages transcript。
 
-Root Reconciliation是fact-driven的，不是持续消耗token的poll loop。Webhook、poll和process wake只表示“重新
-读取”，不是durable业务event或第二套状态机。没有新的未消费Root input、Stage/Runtime事实、未materialize
-directive或到期机械deadline时，不调用模型。
+### 3.3 Root initial/delta transient contract
 
-### 2.1 Root Reconciler决策循环
-
-Root Run对用户呈现`DEFINE -> PLAN -> BUILD -> VERIFY -> REVIEW -> SHIP`生命周期。`DEFINE`、terminal
-Cycle后的`REVIEW`和`SHIP`决策都是Root Reconciler内部语义步骤，不是新role、Issue kind、
-Provider thread、Result或持久化状态。`PLAN`、`BUILD`和`VERIFY`分别对应现有Plan、Work和Verify
-Stage。Root Reconciler的英文Markdown prompt必须包含下图及等价的显式规则。图只组织本文件
-已定义的facts、Results和closed directives，不新增第二套状态机：
-
-```mermaid
-flowchart TD
-    A["Receive fresh Root facts and pending inputs"] --> B["DEFINE: assess objective, scope, constraints, acceptance, verification and delivery instructions"]
-    B --> C{"Is the Root requirement complete, current and evidence-supported?"}
-    C -- "No" --> C1{"Can it be normalized without inventing requirements?"}
-    C1 -- "Yes" --> C2["Return revise_root_tree to update the Root description"]
-    C1 -- "No" --> C3["Return request_human_action, wait or acknowledge"]
-    C2 --> A
-    C3 --> A
-    C -- "Yes" --> D{"Does an active Cycle exist?"}
-    D -- "Yes" --> E{"Is a complete, feasible Plan available and approved?"}
-    E -- "No" --> E1["Return execute_plan, rerun_stage, replan or Plan-review action"]
-    E -- "Yes" --> F{"Is a mechanically ready Work Issue unfinished?"}
-    F -- "Yes" --> F1["Return execute_work or rerun_stage"]
-    F -- "No" --> G{"Is current durable Verify evidence available?"}
-    G -- "No" --> G1["Return execute_verify"]
-    G -- "Yes" --> H{"Does the Cycle evidence support a terminal CycleOutcome?"}
-    H -- "No" --> H1["Return repair, replan, Human Action, wait or terminal failure handling"]
-    H -- "Yes" --> H2["Return conclude_cycle"]
-    E1 --> A
-    F1 --> A
-    G1 --> A
-    H1 --> A
-    H2 --> A
-    D -- "No" --> I{"Is there a terminal CycleOutcome to REVIEW for the current Root requirement?"}
-    I -- "No" --> I1["Return create_cycle with reason initial"]
-    I -- "Yes" --> J["REVIEW the Cycle against the complete Root and prior Cycle history"]
-    J --> K{"Are all Root acceptance and delivery-readiness conditions satisfied?"}
-    K -- "No" --> L{"Can a bounded successor Cycle requirement be stated?"}
-    L -- "Yes" --> L1["Return create_cycle with explicit plan_trigger and inherited evidence"]
-    L -- "No" --> L2["Return request_human_action, wait or supported terminal handling"]
-    K -- "Yes" --> K1{"Is this exact verified revision already delivered and read back?"}
-    K1 -- "Yes" --> K2["Return acknowledge or evidence-backed wait"]
-    K1 -- "No" --> M{"Did the user explicitly require manual delivery?"}
-    M -- "Yes" --> M1["Return request_human_action or wait"]
-    M -- "No" --> M2["SHIP: return conclude_root ready_for_delivery"]
-    I1 --> A
-    L1 --> A
-    L2 --> A
-    K2 --> A
-    M1 --> A
-    M2 --> A
-```
-
-每个turn只执行一次图中的评估并返回一个matching closed result。Root Reconciler不得轮询Stage状态、直接调用
-Plan/Work/Verify、创建Provider子任务、运行命令或修改Linear/Git。进度只在Conductor把新事实或validated Stage Result
-持久化、read-back并通过bootstrap/delta重新交给同一语义角色后推进。
-
-详细任务拆解属于Plan role。Root Reconciler负责判断何时请求Plan，并在收到durable Plan Result后检查它是否覆盖
-Root objective、included/excluded scope、constraints、acceptance criteria、verification requirements、独立Work单元、
-依赖顺序、风险、权限和缺失信息。缺少这些内容、内部冲突、不可行或无法由evidence支持的Plan不能被当作可批准Plan；
-Reconciler必须使用现有rerun、replan、Human Action、wait或Cycle恢复directive，而不是凭空补全Work DAG。
-
-同样，`work_completed`不自动授权Verify，`verify_passed`不自动表示Cycle或Root完成，
-`CycleOutcome.conclusion=succeeded`也只说明该Cycle满足matching Plan Contract。Root Reconciler必须根据完整fresh facts
-复核matching target、Plan binding、dependency evidence、required checks、acceptance results、unresolved findings、
-Human resolutions、Git revision和convergence gate。失败、超时、blocked、inconclusive、stale或schema-invalid输出不能
-被解释为成功；schema-invalid输出在Performer/Conductor机械边界被拒绝，不产生替代directive。
-
-### 2.2 DEFINE Root requirement
-
-DEFINE的产物是Root Issue description中当前、明确、可验收的用户需求，而不是新Spec Issue或managed
-Root Contract。Root Reconciler必须从Root description和未消费的用户输入中明确objective、included/excluded
-scope、constraints、acceptance criteria、verification requirements和明示delivery instruction。没有明示禁止
-自动交付时，delivery默认为automatic。
-
-DEFINE、Plan、REVIEW和SHIP产生的需求、计划、审阅、决策和交付workflow文档只进入matching Linear Issue
-description、managed records、Human Action或timeline/reply，不写入Root Git worktree。不得创建`SPEC.md`、`PLAN.md`、
-repository task checklist、review report、delivery note或其他repository文件作为workflow authority。用户需求本身明确要求修改项目
-documentation时，该文档修改仍只能作为matching Work Issue的产品交付内容，不能承载Symphony workflow state。
-
-如果现有facts足以在不新增业务假设的前提下将需求规范化，Reconciler使用`revise_root_tree`的
-matching `update_node` operation保留用户意图并更新Root description。写入必须由Conductor按remote-version
-precondition materialize并read-back；在下一turn看到该fresh fact前DEFINE不得被视为完成。如果需求
-缺失、冲突或需要用户决策，必须创建matching Human Action或有证据地wait，不能用模型假设填补。
-
-### 2.3 terminal Cycle后的Root REVIEW
-
-每个Cycle必须先产生immutable `CycleOutcome`并read-back为terminal fact，Root Reconciler才能在后续turn执行
-Root REVIEW。REVIEW对比当前Root requirement、完整active/archived Cycle历史、matching Plan Contract、Work/Verify
-Results、Findings及dispositions、`ProgressAssessment`、Git revision和`RootConvergenceView`，判断是否已满足
-Root，而不是重复Verify的Stage级结论。
-
-机器审阅结果由该turn的accepted `RootDirective`本身承载：`rationale`是bounded review summary，
-`evidence_refs[]`引用被审阅的Root/Cycle/Result/Finding/Git facts，`action`则是review decision。这不创建
-`ReviewResult`、Review Issue、Review thread或第二份状态。用户可见timeline在directive read-back后展示该summary和
-evidence，不使用raw chain-of-thought。
-
-需要successor Cycle时，`create_cycle.plan_trigger`必须明确下一Cycle要解决的未满足Root criteria、
-open Findings、scope边界、必需outcome和verification方向；`inherited_fact_refs[]`只引用可复用的前序证据。
-禁止使用“继续完善”、“修复问题”或类似无法Plan和验收的模糊目标。无法安全形成下一Cycle要求时
-必须请求Human Action、wait或选择matching terminal handling，不得无界重试。
-
-### 2.4 REVIEW后的SHIP
-
-当REVIEW证明全部Root acceptance criteria、matching Verify evidence、Findings、Git revision、checks、budget和blocker
-条件均满足，且没有用户明示的manual-delivery instruction时，Root Reconciler默认返回
-`conclude_root(conclusion=ready_for_delivery)`。这是SHIP的唯一模型语义决策；Conductor随后在fresh
-preconditions下机械执行已验证commit的push/PR或branch delivery和read-back。用于Verify的immutable target commit必须
-在Verify调用前由Conductor通过Git workspace边界准备并read-back；SHIP不能再创建commit或改写该revision。Root Reconciler
-不生成或执行Git shell command，也不选择commit history。
-
-如果matching `DeliveryRecord`已经证明同一Cycle、Verify Result和exact verified revision完成交付，REVIEW不得再次返回
-`conclude_root`。没有fresh feedback或其他pending input时应由Conductor保持Root静默；存在需要处理的输入时Reconciler
-只能返回matching acknowledge、wait、Human Action或fresh Cycle动作。
-
-用户明示禁止自动SHIP、要求手工交付或存在必须由人决定的delivery风险时，Root Reconciler创建Root级
-Human Action或有证据地wait。Conductor不从comment keyword、status或自有policy推断是否交付。交付和
-`DeliveryRecord`成功read-back后Root进入`In Review`；不自动进入`Done`。
-
-## 3. Session与角色隔离
-
-- 每个owned Root最多一个Root Reconciler session；它可以跨多个Cycles和turn复用；
-- 每个Cycle最多一个Plan、一个Work和一个Verify role session，三个session互相隔离；
-- Root Reconciler session不能兼任Plan、Work或Verify；
-- Cycle结束时关闭该Cycle的三个Stage sessions，successor Cycle使用fresh Stage sessions；
-- Root Reconciler thread只提供runtime continuity，不是durable authority；丢失后从Linear/Git打开fresh session；
-- fresh session只在open时接收一次完整`RootBootstrapSnapshot`；fresh只指新建session、session丢失或baseline无法证明；
-  已打开且baseline可证明的session后续只接收严格连续的`RootDelta`；
-- Provider thread中的既有上下文不能覆盖新delta，也不能为了构造下一turn而重写、替换或重新展开；
-- session分别维护Provider已经确认看过的Root fact baseline，以及accepted directive已经消费的`input_id`集合。
-  前者只决定下一次注入哪些新事实，后者只决定哪些用户输入仍待处理；二者不得合并成一个checkpoint；
-- Provider上下文连续性或fact baseline digest无法证明时必须丢弃session并重新bootstrap。
-
-## 4. Bootstrap与Delta contract
-
-### 4.1 新Session bootstrap
+Root Reconciler跨进程输入只有两种closed shape，不能在同一request中混用：
 
 ```text
 OpenRootReconcilerRequest
@@ -213,22 +95,24 @@ OpenRootReconcilerRequest
   reconciler_session_id
   reconciler_turn_id
   observed_at
+  command
+    trigger
+    pending_input_refs[]
+    expected_output_contract
   bootstrap
-    root_snapshot
+    root_projection
       root
-      cycles[]
-      issues[]
+      active_and_archived_descendants[]
       relations[]
-      managed_records[]
-      user_comments[]
-      user_comment_thread_states[]
+      attachments[]
+      human_comments[]
+      human_action_threads[]
+      native_activity[]
       git_facts
-      delivery
       mechanical_violations[]
     source_manifest[]
     coverage
-    root_digest
-    pending_input_ids[]
+    target_root_digest
   limits
 
 RootReconcilerOpenedResult
@@ -237,37 +121,10 @@ RootReconcilerOpenedResult
   initial_result: RootReconcilerTurnResult
 ```
 
-bootstrap必须包含Root下全部active和archived Cycles、Issues、relations、managed records、用户comments和Git事实。
-`root.ownership`必须引用已read-back的Root ownership managed record；尚未claim的Root不得打开Reconciler。首次claim
-前，Conductor还必须从Podium投影验证该Root的原生`delegate_id`等于当前Binding验证过的Symphony actor；delegation
-由用户在Linear完成，Conductor、Podium workflow boundary和Performer都不能创建或模拟它。
-`delivery`是已read-back的DeliveryRecord reference，尚无delivery时为`null`，不能使用虚构的`none` record、local
-checkpoint或Markdown placeholder表达缺失。
-任何bootstrap/delta或Stage context中的`RecordReference`都必须包含实际record的`record_id`、`record_kind`、
-`record_version`和`write_id`，并与fresh strict-decoded host comment一致；旧`version`字段、synthetic identity或
-宿主comment remote version均不构成reference。reference的缺失或不一致是protocol validation failure，不是让
-Reconciler猜测的业务输入。
-其中用户comment事实包括human-authored body versions和non-Symphony native thread-state revisions，即使thread target是
-Symphony timeline或reply comment。body version由canonical body digest识别；thread-state revision是comment当前
-`resolved`/`unresolved`值连同该comment remote version和thread root comment identity的快照。两者不能共用一个version，因为
-close/reopen可以改变remote version但不改变正文。thread-state revision不假设Linear提供可重放action history；两次fresh read之间的多次close/reopen
-只合并为最新当前值。
-reaction current set只用于回执read-back和审计，不成为Root pending input。
-`user_comment_thread_states[]`只是从matching Linear `linear_comment` snapshot导出的typed transport view，不能成为第二个
-source、managed record或恢复索引；其comment identity、source version和current state必须与同一snapshot完全一致。
-其中Linear source manifest必须覆盖active与archived Issue、comment、relation和status catalog，并为每个source提供稳定
-identity、version和actor kind；`coverage.is_complete`为false或存在未解释的required omission时，Conductor不得调用
-Reconciler。Linear读取必须分页到完整并使用include-archived能力。它只允许用于新建Root Reconciler session，或原session丢失、
-baseline mismatch、context无法继续可信使用后的fresh session；普通advance不得携带完整snapshot。Conductor不得因为普通
-用户修改而主动重建session；只有无法继续证明当前session baseline时才触发Bootstrap。
-open本身执行首个ReAct turn并返回`initial_result`，不能再发送空delta来取得第一步。这个结果是directive时，
-Conductor才可以持久化并materialize下一步；结果是failure时，Conductor必须先持久化该failure record并停在其
-durable retry barrier，不能把open失败降级成空directive、通用成功或一次空advance。
-
-所有Linear文本和Provider输出都是untrusted data。每个source保留identity、actor kind、remote version或digest
-和长度边界。未知字段、required source被静默截断、Tree digest不匹配或coverage不完整时不得调用Reconciler。
-
-### 4.2 已有Session delta
+`open`把stable base instructions、一次完整Root role initial context和首轮command送入fresh Provider session，并执行首个
+turn；不能再用空delta取得第一步。完整projection必须覆盖active/archived分页和required Activity/Git facts，
+`coverage`不完整时不得调用Performer。`expected_output_contract`只携带contract identity；matching structured-output schema
+仍是独立Provider request metadata，不展开进command或initial context。
 
 ```text
 AdvanceRootReconcilerRequest
@@ -276,915 +133,210 @@ AdvanceRootReconcilerRequest
   reconciler_session_id
   reconciler_turn_id
   observed_at
+  command
+    trigger
+    pending_input_refs[]
+    expected_output_contract
   delta
     base_root_digest
     target_root_digest
-    changes[]
-    pending_input_ids[]
+    changes[]: RootContextChange
   limits
 
-RootDeltaChange =
-  IssueCurrentValue |
-  IssueDetached |
-  CommentCurrentValue |
-  CommentThreadStateCurrentValue |
-  CommentRemoved |
-  RelationCurrentValue |
-  RelationRemoved |
-  ManagedRecordCurrentValue |
-  ManagedRecordRemoved |
-  PlanContractCurrentValue |
-  PlanCompletedResultCurrentValue |
-  PlanContractRemoved |
-  PlanCompletedResultRemoved |
-  GitFactsCurrentValue |
-  MechanicalViolationsCurrentValue
+RootContextChange
+  source_kind: issue | comment | comment_thread | activity | relation | attachment | git | mechanical_violation
+  source_identity
+  source_version_or_digest
+  actor_kind
+  value:
+    RootContextCurrentValue |
+    RootContextReplacement { replaces_source_version_or_digest, current_value } |
+    RootContextTombstone
+
+PendingRootInputRef
+  source_kind: comment_body | comment_thread_state | issue_activity
+  native_source_identity
+  source_version_or_digest
 ```
 
-#### 4.2.1 Provider可见的冻结观察批次
+`pending_input_refs[]`只引用本轮仍需处理的native source identity和current version/digest。它从comment receipt/reply、
+target consequence和native Activity现算，不是私有consumed-input ID，也不写入Linear。已经进入同一live Provider history但
+尚无durable disposition的input只在后续command再次引用；其body/current value不得作为change重复注入。
 
-`RootDeltaChange`是可独立关联的model-visible context fragment，不天然等于一次Provider turn。Conductor在开始
-reconciliation时冻结一份完整fresh observation，计算从该session已确认Provider-visible fact baseline到该观察结果的
-一组changes，并用一个turn提交整组变化。一次扫描中新增的多个comment、Issue修改、Result或Git事实可以共享同一turn，
-但每个change和matching Root input仍保留自己的source identity、version、`input_id`、correlation以及必需的消费和
-reply/disposition覆盖；批处理不能把它们合成一个无独立identity的摘要。
+`base_root_digest`必须等于该session已确认的Provider-visible baseline；`target_root_digest`覆盖本轮完整fresh observation。
+每个change只携带matching source的current value、带被替换source version的replacement或明确tombstone，不携带人为生成的
+before/after diff。advance不得包含完整Root projection、完整source manifest、旧transcript或另一个role context。
 
-Provider turn执行期间到达的comment或其他变化不修改当前请求，也不追加到正在执行的turn；它们等待下一次fresh
-observation，并只作为下一批新changes注入。这样turn是冻结的执行边界，而comment/change是边界内的独立输入片段。
+Conductor可以每轮完整读取Linear/Git来证明coverage、计算diff和验证precondition，但完整读取不等于完整传输。只有fresh
+session、session丢失或continuation/baseline无法证明时，才关闭旧session并重新发送一次`OpenRootReconcilerRequest`。
+这些request、digest、manifest、changes和pending refs全是transient runtime data，不进入Linear、Git、workflow database、
+queue、checkpoint或replay log。
 
-Provider-visible Root history只允许append：
+## 4. Root inputs
 
-- 新增的immutable fact追加一个current-value fragment；
-- 已知source发生更新时追加一个显式replacement fragment，携带新current value和被替换的source identity/version；
-- source被删除、archive后脱离matching范围或relation消失时追加一个显式tombstone；
-- 不修改已经进入Provider conversation的旧fragment，也不在后续turn重新序列化完整Root baseline。
+Root input包括：
 
-replacement和tombstone用于让角色解释最新事实，不创建可恢复revision log。Performer可以在runtime内维护“Provider已经
-看过什么”的baseline以构造下一次增量调用，但Linear/Git当前事实和accepted managed records仍是唯一durable authority。
-session丢失后不重放这些fragments；Conductor从durable facts建立一个fresh role-scoped bootstrap。
+- Root current description、status、labels、relations、attachments和Activity；
+- 全部active/archived descendants及其current native fields；
+- human-authored comments、edits和thread changes；
+- Human Action Root threads和Finding Issues；
+- Git/worktree/branch/commit/diff/check/PR facts；
+- structural、lifecycle、coverage和actor violations。
 
-每个change只携带该source的当前bounded值或明确tombstone，不携带旧值、自然语言diff、业务影响或建议动作。
-description变化发送新的完整description；comment新增、编辑或close/reopen发送新的完整body与current native thread state；
-reaction-only变化不进入Root delta；status、archive、parent和relation
-发送新的当前值。每个change携带source identity、source version、actor kind和observed time；删除或脱离Tree使用
-明确tombstone。`base_root_digest`必须精确等于该session已确认baseline，`target_root_digest`必须等于Conductor本轮
-fresh完整读取计算出的digest。delta本身必须足以把session内的base facts严格推进到target facts，不发送完整target
-source manifest。
+Symphony-authored comments不是用户input。普通human comment的current body在以下任一条件成立时pending：
 
-`PlanContractCurrentValue`携带canonical immutable Contract和它所属Plan Issue；`PlanCompletedResultCurrentValue`
-携带完整Plan Result、proposed DAG、risk、permission和evidence。它们让Root Reconciler能够在不读取Linear、也不依赖
-仅有record reference的情况下判断Plan review和后续directive。对应comment仍同时以`ManagedRecordCurrentValue`
-作为通用record identity进入snapshot；这不是两份durable fact，而是同一Linear comment的reference和closed semantic value，
-必须具有相同source identity/version。comment消失时，两个Plan tombstone按各自identity删除对应baseline facts。
+- 没有matching Symphony native receipt；
+- human edit Activity晚于现有receipt；
+- receipt所表示的处理结果与Root current facts矛盾。
 
-Conductor每轮仍完整读取Linear/Git，但完整Tree只在Conductor内存中用于coverage、按source version/hash计算diff和
-precondition校验；正常advance只把`RootDelta`发送给Performer。Provider-visible fact baseline snapshot和source manifest
-只存在于runtime memory，不写workflow DB、checkpoint或Linear镜像。Performer能够证明matching request已经作为
-Provider history的严格append被接受后，该fact baseline推进到`target_root_digest`；这只表示模型已经看过这些事实，不表示
-任何用户输入已消费、directive已接受或workflow已经推进。只有合法directive中的`consumed_input_ids[]`才推进输入消费事实。
-
-因此，已进入Provider并返回closed failure的turn不会在同一live thread中重新注入同一批current values；未消费的
-`input_id`继续列在后续turn command中，模型从既有conversation读取其内容。Provider transport、schema或continuation
-failure导致“该append是否进入history”无法证明时，关闭旧session并从fresh完整事实重新bootstrap，不猜测、不在同一
-thread补发，也不尝试改写Provider history。directive invalid但Provider append可证明时，事实baseline仍可推进，
-输入保持未消费，并由durable retry barrier决定何时允许下一turn。
-
-因此，完整读取和完整传输是两个不同的边界：Conductor可以每轮从Linear重建完整事实来保证diff正确，但Performer
-已有session永远只看到从已确认baseline到新target的当前值/tombstone增量。任何把完整Tree塞入advance request的实现都
-违反本架构，即使它同时附带了delta或声称只是为了安全校验。
-
-增量按来源携带当前值，不携带人为构造的旧值/新值对：description变化传送新的完整description，comment新增、编辑或
-close/reopen传送新的完整comment business value及其当前thread state，reaction-only变化明确排除；status、archive、parent和relation传送新的当前值，
-删除或脱离Tree传送明确tombstone。source
-version/hash只用于证明基线、去重和连续性，不拥有用户可见的业务生命周期。
-
-### 4.3 Delta不是第二套状态模型
-
-`RootDelta`是一次Root Reconciler turn的传输输入，不是Linear revision、change event或独立的业务状态对象。它没有
-自己的创建、确认、重试、完成、失效或恢复生命周期；Conductor不得把delta写入Linear、Workflow DB、queue、checkpoint
-或本地revision store。Conductor只在本轮内存中将fresh Linear/Git facts与当前session baseline比较，生成一份delta；
-Performer在能够证明matching append已经进入Provider history后，仅推进自己的Provider-visible runtime baseline；
-accepted directive中的`consumed_input_ids[]`独立推进业务输入消费，两者都不成为durable checkpoint。
-
-delta传输失败、过期、不连续、schema无效或session丢失时，不补发旧delta、不猜测缺失变化、不引入revision事件状态机。
-Conductor关闭不可证明的session，从新的完整Linear/Git事实发送一次`RootBootstrapSnapshot`。Linear中实际存在的Issue、
-comment、relation、managed record和accepted directive仍是唯一durable事实；delta只是把这些事实交给同一个Root
-Reconciler session的增量边界。
-
-`RootBootstrapSnapshot.pending_input_ids[]`从全部fresh、未被accepted directive消费的当前输入派生；已有session的
-`RootDelta.pending_input_ids[]`列出本轮必须处理的全部未消费input identity，其中新identity必须有matching delta
-current-value/tombstone fragment，先前turn已经注入但因closed failure或invalid directive尚未消费的identity可以只按ID
-再次列出，不能重复其正文或完整source value。单独body edit导致的remote version变化不能伪造thread-state input；
-对应state current value未进入Provider-visible baseline时，它也不得进入pending list。
-
-`root_digest`只覆盖canonical Root Reconciler Fact Set：业务Issue当前值、relations、业务managed records、普通human
-comment body versions、non-Symphony comment thread-state revisions、Git/delivery事实和mechanical violations。Timeline/Reconciler
-reply等automation comment body不属于该fact set，但human或unknown actor对其产生的current thread-state revision属于；
-Symphony自身的reply/reaction/resolve write按stable correlation排除。Raw SDK对象、transport heartbeat和其他明确排除的
-automation content不改变digest或触发模型。
-fresh bootstrap和每份delta必须使用同一canonicalization/schema version。
-
-### 4.4 唯一发送边界
-
-Root Reconciler跨进程输入只有以下两种，二者不能在同一个请求中混用：
-
-| session条件 | Conductor到Performer的输入 | 允许携带完整Root Tree |
-|---|---|---:|
-| 新建、丢失或baseline无法证明 | `OpenRootReconcilerRequest.bootstrap.root_snapshot` | 是，仅一次 |
-| session存在且baseline严格连续 | `AdvanceRootReconcilerRequest.delta` | 否 |
-
-Conductor可以为了安全校验和diff计算读取完整的active/archived Tree，但这只是本轮内存输入，不是对Performer的
-advance传输。普通用户修改、Stage Result或Human Action resolution只会导致下一份delta；只有session连续性无法证明时，
-才关闭旧session并用同一份fresh source read建立一次新的bootstrap。任何实现都不得把完整Tree、完整manifest或
-before/after diff作为advance的隐藏字段、可选字段或兼容字段。
-
-### 4.5 Revision、Delta与Linear写入的唯一分层
-
-本架构不定义`LinearRevision`、`LinearChangeEvent`或其创建、确认、重试、完成和失效状态机。Linear当前资源本身是
-唯一事实；Conductor只使用每个source的remote version或canonical hash证明新鲜度、去重和delta连续性。这个version/hash
-不是用户可见状态，也不能驱动独立的业务流转。
-
-三种数据边界必须保持分离：
-
-| 数据 | 作用 | 生命周期 | 是否进入Linear |
-|---|---|---|---:|
-| source version/hash | 证明当前Linear/Git source身份和连续性 | fresh read与session内存 | 否 |
-| `RootDelta` | 把source当前值或tombstone增量传给已有Root Reconciler session | 单次transport turn | 否 |
-| accepted `RootDirective`及managed record | 记录Root Reconciler已接受的决策、consumed inputs和恢复锚点 | durable业务事实 | 是 |
-
-`LinearMutation`只表示Conductor为accepted directive执行的一次受限Linear写入；它不是用户revision、不是Root状态、不是
-pending queue，也不能被Root Reconciler或用户直接提交。每次写入都必须带directive/write identity和remote precondition，
-并在Linear read-back后才算完成。写入失败就停止当前Root并记录错误，不创建另一份“待写入”或“待确认”状态。
-
-唯一的数据流是：
+Root Reconciler为每个pending comment返回一个disposition：
 
 ```text
-fresh Linear/Git facts + source versions/hashes
-  -> Conductor in-memory diff
-  -> RootDelta (existing session) or RootBootstrapSnapshot (fresh session)
-  -> Root Reconciler RootDirective
-  -> closed directive materialization
-  -> Linear/Git read-back durable facts
+applied          -> materialize native consequence, then add check reaction
+not_applied      -> add cross reaction and concise human-readable reason
+needs_response   -> create Human Action Root thread and add concise reply
+answer_only      -> write one direct reply; no workflow mutation
 ```
 
-所有用户的status、description、archive、parent、relation和普通comment修改都沿这条Root输入路径处理。Conductor不能
-把用户修改先转换成自己的revision/mutation状态，再由另一套逻辑解释；也不能因修改字段不同而绕过Root Reconciler。
+reaction只表示comment body已处理，不表达approval、permission、Finding waiver或Issue lifecycle。human edit后必须按native
+Activity重新处理。无需回复的状态变化不生成comment。
 
-`MechanicalViolationsCurrentValue`只陈述从fresh facts计算出的可验证矛盾，例如多个nonterminal Cycles、Canceled Root仍有
-active Cycle、active dependency指向archived Node或无matching Result的Done Stage。它们必须交给Root Reconciler
-选择接受、修复、取消、replan、supersede或请求Human Action。只有无法证明ownership、读取不完整、schema无法
-安全解析或目标越出owned Root时，Conductor才可以在调用模型前fail closed。
+## 5. DEFINE Root requirement
 
-## 5. Root输入
+Root Reconciler可以基于Root description和pending human inputs提出更新Root description，但必须：
 
-每个用户对owned Root Tree的修改都必须进入Root Reconciler，包括status、title、description、archive/restore、
-parent、relation、普通comment以及Root Human Action request thread中的reply/thread-state变化。用户不需要创建结构化change request、选择mutation
-类型或理解Symphony协议。
+- 保留用户明示objective、scope、constraints和acceptance criteria；
+- 只归一化已经存在或已由human确认的内容；
+- 对无法推导的业务选择创建Information Human Action；
+- 在同一bounded action中声明source human comments的receipt disposition；
+- fresh read-back description后才把matching Information Action置为answered。
 
-Conductor把需要Root Reconciler解释的用户变化统一为一个很小的closed input union，并作为matching delta change
-的identity传输：
+不得创建`SPEC.md`、`PLAN.md`、Root contract record或第二个Spec Issue。destructive requirement change如何影响current Cycle
+由Root Reconciler显式决定，不能由Conductor字符串比较自动执行。
+
+## 6. Closed RootNextAction
 
 ```text
-RootInput =
-  UserIssueInput |
-  UserCommentInput |
-  UserRelationInput
-
-RootInputIdentity
-  input_id
-  actor_kind: human | external_automation | unknown
-  root_issue_id
-  source_id
-  source_version
-  observed_at
+RootNextAction =
+  | UpdateRootRequirementAction
+  | CreateCycleAction
+  | CreateRootWorkspaceAction
+  | RecordStageInterruptionAction
+  | InvalidateExecutionGenerationAction
+  | ExecuteStageAction
+  | MaterializePlanNodeAction
+  | PatchCycleTreeAction
+  | CreateHumanActionAction
+  | SupersedeTargetAction
+  | ConcludeCycleAction
+  | DeliverRootAction
+  | ReplyToHumanAction
+  | WaitAction
+  | EscalateAction
 ```
 
-`input_id`优先使用Linear activity/comment/version的稳定identity；没有独立activity identity时，使用source identity和
-remote version生成。它只用于去重、stale detection和把directive绑定到已观察输入，不保存旧值、字段diff、业务
-分类或处理状态。
+公共字段至少包含protocol version、Root/session/turn correlation、observed current digest、evidence native IDs、bounded
+preconditions和comment dispositions。字段是transient wire contract，只用于本次validation/materialization。
 
-Issue输入携带该version的当前bounded Issue内容；Relation输入携带当前relation事实；Comment输入携带完整当前body。
-删除、detachment或relation removal使用matching tombstone input，不伪造空值。是否改变业务语义只能由Root
-Reconciler结合thread baseline和本轮delta判断。delta不拥有独立业务生命周期。
+每个action必须closed且只表达一个语义目的。Issue create action一次最多创建一个Issue；创建后设置matching parent、relation和
+status的writes可以构成同一bounded convergence target。跨多个Issue的DAG、generation rebuild或delivery步骤必须由fresh
+Root Reconciler基于read-back current facts逐轮选择，不能藏在一个可持久化command sequence中。
 
-每个accepted `RootDirectiveRecord`直接保存`consumed_input_ids[]`。Conductor从Linear当前非Symphony source versions
-减去accepted directive已经消费的identity，派生`pending_input_ids[]`；不创建本地checkpoint，也不创建另一份input lifecycle。
-Symphony自身带matching stable write ID且已经read-back的mutation会进入后续delta，但不作为新的用户输入再次
-触发语义判断。accepted directive尚未完成时，Conductor只恢复同一materialization，不调用模型。
+Root Reconciler不能返回arbitrary GraphQL、Git shell、Linear SDK payload、raw Markdown comment或unbounded metadata。
 
-### 5.1 用户comment与过滤
+## 7. Materialization
 
-用户可以在Root、Cycle、Plan、Work或Verify Issue下用普通自然语言comment改变、纠正或询问执行，也可以在Root上的
-Human Action request thread中回复；不需要JSON、command、directive ID或结构化change request。例如：
+Conductor对每个RootNextAction执行：
 
-```text
-这个Plan漏了数据库迁移，请重新规划。
-当前实现方向不合理，改成事件驱动。
-测试环境刚才有问题，请重新跑Verify。
-认证暂时不做，先完成只读查询。
-```
+1. fresh-read action引用的native facts；
+2. 验证Root binding、worktree gate、digest、actor、status、archive、parent、relation和Git preconditions；
+3. 计算一个closed native postcondition；
+4. 执行必要的Linear/Git mutations；
+5. fresh-read完整postcondition；
+6. 只在成功后处理matching comment receipt并进入下一轮。
 
-pending comment input不是持久集合。Conductor每次从完整Linear comments及其当前thread-state revisions减去accepted
-directive中的`consumed_input_ids[]`后派生。comment body version和thread-state revision是两个closed input variant；
-thread-state revision以source comment的当前remote version、thread root comment identity和state构成identity，而不是由
-Conductor、webhook或进程内存保存历史action。Linear能暴露state actor时才使用该actor；否则actor kind为`unknown`，绝不从
-comment author推断。
-因此用户可以reopen Symphony timeline/reply thread而不被错误过滤。reaction不是pending input。
+部分写入、timeout或ambiguous response不会触发command replay。Conductor重新读取current tree；若postcondition已经成立则
+接受；若remote明确确认未发生且precondition仍成立才可重试；若出现竞争对象或语义不明确则停止当前Root，并把closed
+mechanical violation交给fresh Root Reconciler。Conductor不能自行选择`Escalated`或另一业务状态。完整原则只由Workflow
+Authority文档定义。
 
-下列排除只适用于Symphony-authored managed **body version**，不排除用户或unknown actor改变其原生thread state所产生的
-`NativeCommentThreadStateInput`。后者仍是同一comment snapshot的当前Linear事实，必须经Root Reconciler处理；不能以
-`ThreadStateRecord`、comment Markdown或本地历史复制为第二套状态。必须排除：
+用户可见comment只用于直接回复、阻塞原因、验证结论或delivery结果。不得写ownership、decision accepted、Stage started、
+read-back succeeded、usage或内部correlation receipts。
 
-- Root Control Record Comment；
-- Root/Cycle Timeline comments；
-- Root Reconciler directive和reply records；
-- Plan/Work/Verify Result records；
-- Human Action request/resolution records；
-- Finding、budget、convergence和delivery records；
-- Symphony bot、Linear integration或其他automation actor创建的comment。
+## 8. Stage执行
 
-Symphony managed comment只依据validated Symphony actor、唯一strict `json` code block、stable identity和owned
-scope识别，不依据“第一条comment”、作者显示名、文本前缀或HTML marker。即使Root Control Record Comment不再是
-第一条也必须排除；用户创建的第一条普通comment以及human actor粘贴的任意`json` block必须保留为用户输入。
-Symphony actor产生但code block缺失、重复或schema无效的comment形成mechanical violation，不能退回旧marker reader。
+`ExecuteStageAction`只能选择matching kind的active `Todo` Issue。Conductor先将其置`In Progress`并read-back，再调用matching
+Plan/Work/Verify thread。
 
-```text
-UserCommentInput =
-  HumanCommentBodyInput
-    comment_id
-    comment_body_digest
-    issue_id
-    issue_kind: root | cycle | plan | work | verify
-    cycle_issue_id?
-    author_kind: human
-    author_id
-    author_user_id
-    body
-    thread_root_comment_id
-    thread_state: resolved | unresolved
-    created_at
-    updated_at
-  | NativeCommentThreadStateInput
-    comment_id
-    comment_remote_version
-    thread_root_comment_id
-    issue_id
-    issue_kind: root | cycle | plan | work | verify
-    cycle_issue_id?
-    thread_state: resolved | unresolved
-    actor_kind: human | external_automation | unknown
-    resolved_at?
-    observed_at
-```
+Stage返回closed transient Result后，Conductor验证correlation与evidence，并把结果materialize为
+[Root Issue工作流](root-issue.md)定义的native facts。只有native postcondition和required Git factsread-back后，Root
+Reconciler才能看到结果。
 
-body input identity是`comment_body + comment_id + canonical_body_digest`；其中wire field固定为
-`comment_body_digest`，它是canonical body digest而不是Linear remote version、递增revision或本地计数器。thread-state input identity是
-`comment_thread_state + comment_id + comment_remote_version + thread_root_comment_id + thread_state`。每个identity最多处理一次。human body及所有non-Symphony thread-state
-revision（包括无法由Linear归属的`unknown`）进入pending input；matching Symphony reply/reaction/resolve writes按stable
-write correlation排除。reaction不机械映射为approval、rejection或任何status，也不作为模型控制通道。
-编辑后的comment version是新的输入；
+Provider/process loss的证明、恢复和terminal no-dispatch只见
+[Workflow Authority与恢复](workflow-authority-recovery.md)。本模块只接收已证明的mechanical fact，并允许fresh Root
+Reconciler返回matching `RecordStageInterruptionAction`；它不维护第二份process-loss算法。
 
-新comment初始的`unresolved`且`created_at == updated_at`只是Linear当前事实，不是用户close/reopen revision，不能单独
-变成pending Root input。`resolved`，或创建后`updated_at`已变化的`unresolved`，才是可消费的current state revision。
-每次fresh fact derivation还必须排除全部已accepted `RootDirective.consumed_input_ids[]`；新body digest或新thread-state
-identity不会被旧directive消费。这样不需要本地last-seen state、revision队列或第二个pending store。
-已经materialize的旧comment决定不会因删除或编辑自动回滚，用户必须通过新version或新comment明确纠正。
+## 9. Plan approval与DAG演进
 
-当前thread state不是独立的Linear revision、event或历史记录。Conductor可以用webhook/poll唤醒fresh read，但不能把
-webhook payload、last-seen state、actor猜测或本地序列号保存为可恢复事实。若用户在两次fresh read之间连续close/reopen，
-Root Reconciler只接收最终可从Linear读回的state revision；若没有新的source version，则没有新的Root input。
-同样地，正文输入只比较canonical body digest：用户在两次fresh read之间编辑后又改回已经消费过的相同正文时，不伪造一次
-历史body input。需要重新表达该意图时，用户创建新的comment或写入新的正文；Conductor不得为此保存本地comment edit
-history、revision序列或重放队列。
+Plan completed后，Conductor将human-readable Plan写入Plan description并置`In Review`。Root Reconciler创建related Plan
+Approval Human Action；只有matching human批准且target内容未变化时，才可返回`MaterializePlanNodeAction`。
 
-Human Action request thread中的用户reply既保留为完整上下文，也只有在
-[Human Action](human-actions.md)定义的actor、thread、proposal和question-coverage条件成立后，Root Reconciler才能
-通过directive形成`HumanActionResolutionRecord`；Conductor不能把普通comment、thread state或reaction解释成
-approval、rejection、answer或cancel。
+initial DAG按`MaterializePlanNodeAction`逐Issue创建Work/Verify及matching relations。每次fresh read-back后Root Reconciler比较
+approved human-readable Plan与current topology，再选择下一个缺失节点；全部节点和relations存在后才把Plan置`Done`、Cycle置
+`Sealed`。Plan不得包含两个native postcondition不可区分的节点，架构不承诺create exactly-once；ambiguous create停止并进入
+fresh reconciliation或Human Action，不能盲目创建duplicate。
 
-### 5.2 reconciliation barrier与并发
+approved scope内可以`PatchCycleTreeAction`创建或archive节点、调整relations。触碰objective、scope、constraints、acceptance
+criteria或verification requirements必须supersede旧Plan并创建fresh Plan/Approval，不能原地编辑approved Plan。
 
-任何pending用户输入都会建立同一种Root execution barrier并阻止新的Stage dispatch。Conductor不按field、status
-或comment内容决定屏障强度，也不猜测业务影响。它先请求当前in-flight Stage turn在安全边界停止，持久化并
-read-back真实attempt/Git事实，再构造稳定的fresh target facts和delta。late Result不能跨该barrier被接受。
+## 10. Human、Finding与failure
 
-Root Reconciler随后决定continue、fresh rerun、replan、Tree patch、supersede、cancel或Human Action。即使输入只是
-普通讨论，也必须由Root Reconciler返回`acknowledge`或其他directive后才能重新dispatch；barrier前的turn不能跨
-旧Tree digest复用。
+Human Action rules只见[Human Action](human-actions.md)。Root Reconciler可以提出create、reply、supersede或根据已验证human
+mutation继续；不能把reaction、thread resolve或沉默解释为批准。
 
-## 6. 用户comment回复contract
+Verify发现的问题materialize为native Finding Issues。Root Reconciler根据severity、evidence和approved waiver决定repair、
+fresh Verify、Cycle conclusion或Human Action。Finding不嵌入Verify机器Result。
 
-每个被消费且target thread/comment仍存在的用户comment body或thread-state input必须由同一个
-`RootDirective`给出用户可见回复。多个输入表达同一意图时可以共享一个action，但每个现存target input仍必须有matching
-reply。用户删除comment产生tombstone input并被
-directive消费，但已经不存在可回复target，因此不生成reply。
+schema-invalid output、Provider failure、budget exhaustion或mechanical mutation failure不会写private failure payload。Conductor
+只保留sanitized correlated logs并生成closed mechanical fact。只有已验证的terminal Stage Result可按其closed variant把matching
+Node置`Failed`或`Canceled`；无terminal Result的process loss必须先完成runtime fencing，再由
+`RecordStageInterruptionAction`置为`Interrupted`。Cycle/Root escalation、用户comment和后续动作全部由fresh Root Reconciler
+选择；Conductor不能根据错误字符串或本地retry结果运行另一套failure lifecycle。
 
-```text
-UserCommentReply
-  source_input_id
-  source:
-    CommentBodyVersionReplySource
-      comment_id
-      comment_body_digest
-    | CommentThreadStateReplySource
-      comment_id
-      comment_remote_version
-      thread_root_comment_id
-      thread_state
-  acknowledgement
-  interpreted_request
-  decided_action
-  next_step
-  disposition: accepted | not_applied | follow_up_required
-  reaction: check | cross | none
-  thread_action: resolve | keep_open | reopen
-```
+## 11. Cycle conclusion、REVIEW与delivery
 
-这些字段是bounded自然语言，不包含raw reasoning、transcript、secret、内部ID要求或未经read-back的成功声明。
-其中`next_step`只是写给用户的说明文字，不是Conductor命令、Stage选择、Linear状态迁移或另一套决策协议；唯一的
-语义控制面是本节定义的closed `RootDirective.action` union。
-`accepted + check`固定映射Linear native ✅；`not_applied + cross`固定映射Linear native ❌，表示已经理解但明确未应用；
-`follow_up_required + none`表示仍需用户补充或执行状态操作。reaction只是输入处理回执，不是Human Action lifecycle、
-Plan approval或Workflow command。
+Cycle conclusion只通过Cycle native terminal status、Finding states、Issue topology和Git evidence表达，不保存parallel
+outcome object。
 
-`check`和`cross`只允许用于`HumanCommentBodyInput`，并由Symphony写在该输入的source comment上。这样用户能在自己
-写下的请求、reason或answer上看到已采纳或未采纳的回执；child reply只承载结构化解释与其managed record，绝不成为
-receipt target。`NativeCommentThreadStateInput`没有用户comment body可标记，reaction固定为`none`。这项展示规则不改变
-reaction的原生事实属性：它仍不能驱动Human Action request/resolution、Root/Cycle lifecycle或任何下一步。
+terminal Cycle后，Root Reconciler REVIEW完整Root requirement：
 
-reply renderer只能从这些bounded字段生成结构化用户Markdown。它可以使用heading、强调、列表、链接、引用和非
-`json` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
-唯一末尾`json` block之外放置restart-required事实。
+- 已满足且exact revision可交付：`DeliverRootAction`；
+- 需要repair或新方案：创建successor Cycle；
+- 需要human选择：创建Root-scope Human Action；
+- 明确无法完成：Root `Escalated`或`Canceled`。
 
-closed renderer使用固定用户结构，不把模型原文直接当comment：
+delivery mechanics和Root `In Review` gate只见[Git Worktree与交付](git-worktree-delivery.md)。Root Reconciler不push、不创建
+PR、不把Root直接设为`Done`。
 
-````markdown
-## <✅ 已接受 | ❌ 未应用 | 需要你继续处理>
+## 12. Convergence与budget
 
-**我理解的请求**
-<interpreted_request>
+机械limits来自Project/Profile当前配置，并从native timestamps、Cycle count、attempt relation chains、terminal statuses和
+Finding states重算。Conductor可以拒绝超过hard limit的action，但不能选择替代业务动作。
 
-**处理结果**
-<decided_action以及已经read-back的事实；不得把proposal写成完成>
+progress只从current DAG和Git facts推导。model/token usage是runtime observability，不进入RootNextAction、Linear或跨重启
+limit authority。
 
-**下一步**
-<next_step>
+## 13. Recovery引用
 
-```json
-{"kind":"root_reconciler_reply","version":1,"record_id":"...",...}
-```
-````
+process restart、session loss、normal no-replay、worktree gate和missing-worktree full rebuild全部只由
+[Workflow Authority与恢复](workflow-authority-recovery.md)定义。本文件不维护第二份recovery algorithm。
 
-`follow_up_required`不得显示✅或❌；其thread保持open或被reopen。`accepted`和`not_applied`只有在matching业务mutation
-已经read-back后才可分别显示✅或❌并resolve thread。
+## 14. 不变量
 
-`thread_action`只映射到source comment所属的**原生Linear thread**，不是Symphony记录、Action状态或另一条
-comment生命周期。它的含义固定如下：
-
-| directive值 | 原生Linear效果 | 成功判定 |
-|---|---|---|
-| `resolve` | 将source thread收敛为`resolved` | fresh read-back显示同一thread为`resolved` |
-| `keep_open` | 不写thread状态 | fresh read-back必须显示同一thread仍为`unresolved` |
-| `reopen` | 将source thread收敛为`unresolved` | fresh read-back显示同一thread为`unresolved` |
-
-因此，处理已关闭thread但仍需要用户操作的输入必须返回`reopen`，不能以`keep_open`悄悄接受已关闭状态。用户在
-Linear中点击resolve或reopen只改变这个原生当前事实；它形成下一份thread-state Root input，由Root Reconciler解释，
-但绝不直接批准、拒绝、完成或重开任何Workflow节点。
-
-同一个source thread在同一directive中同时有body和thread-state input时，两条reply必须指定相同的
-`thread_action`；冲突directive fail closed。Conductor确定性地先materialize thread-state reply、再materialize body
-reply，以保持state source的当前remote-version precondition。两条reply、source receipt（仅body）和source thread最终
-state都fresh read-back后才算materialized；只有child reply存在不能视为完成，也不能跳过崩溃恢复。
-
-回复是accepted `RootDirective`的必需Linear materialization，不是timeline event。Conductor在matching directive及其
-必要mutation read-back后，把回复作为原生child reply写入source comment thread，并在同一comment底部写唯一
-`json` block承载`RootReconcilerReplyRecord`：
-
-```text
-RootReconcilerReplyRecord
-  reply_id
-  root_directive_id
-  source_input_id
-  source:
-    CommentBodyVersionRecordSource
-      comment_id
-      comment_body_digest
-    | CommentThreadStateRecordSource
-      comment_id
-      comment_remote_version
-      thread_root_comment_id
-      thread_state
-  target_issue_id
-  disposition
-  reaction
-  thread_action
-  materialized_outcome_refs[]
-  rendered_schema_version
-  replied_at
-```
-
-宿主reply comment的Linear ID与remote version属于外层comment snapshot，不属于record正文：服务端在首次创建comment后
-才生成它们。reply materializer在fresh read-back中以validated Symphony actor、`reply_id`和`reply_write_id`严格定位
-宿主comment；随后receipt mutation使用source comment自身的fresh外层事实，thread mutation使用source thread root的
-fresh外层事实，三者都不能预填、猜测或另写一份record。
-
-固定materialization顺序是reply create/read-back、source comment receipt create/delete/read-back、thread
-resolve/reopen read-back。source receipt write必须重新验证source comment的expected remote version；state-only input
-没有receipt write。`RootReconcilerReplyWriterInterface`只在matching reply comment及其code block、需要时的source
-reaction和thread action全部read-back后返回success；不存在queued或accepted中间成功。失败返回closed error并触发相同的
-Root停止语义。
-
-reply comment由closed renderer生成；validated Symphony actor和`RootReconcilerReplyRecord`使它永远不会重新进入
-pending inputs。accepted directive
-一经durable，该comment version即绑定到该directive，不得再次交给模型。reply create或read-back失败时，当前
-Root reconciliation立即停止，打印包含Root/directive/reply correlation的sanitized structured error log，不得dispatch
-下一个Stage或接受另一个directive。恢复后Conductor从Linear中accepted directive和缺失的matching reply继续
-materialize同一`reply_id`；ambiguous write先查询，不能盲目追加，也不能重新调用模型。
-
-## 7. RootDirective contract
-
-```text
-RootDirective
-  protocol_version
-  request_id
-  root_directive_id
-  reconciler_session_id
-  reconciler_turn_id
-  model_turn: ModelTurnRecord
-  based_on_target_root_digest
-  consumed_input_ids[]
-  rationale
-  evidence_refs[]
-  comment_replies[]
-  human_action_resolutions[]
-  action:
-    ExecutePlanDirective |
-    ExecuteWorkDirective |
-    ExecuteVerifyDirective |
-    RerunStageDirective |
-    MaterializeApprovedPlanDagDirective |
-    ReviseRootTreeDirective |
-    ReplanCurrentCycleDirective |
-    SupersedeCycleDirective |
-    CreateCycleDirective |
-    RequestHumanActionDirective |
-    ConcludeCycleDirective |
-    ConcludeRootDirective |
-    CancelRootDirective |
-    WaitDirective |
-    AcknowledgeDirective
-```
-
-没有产生可接受directive的turn必须写Linear failure evidence：
-
-```text
-RootReconcilerFailureRecord
-  failure_id
-  reconciler_session_id
-  reconciler_turn_id
-  target_root_digest
-  attempted_input_ids[]
-  model_turn: ModelTurnRecord
-  category: transport_failed | timed_out | schema_invalid | stale_output | canceled
-  sanitized_reason
-  failed_at
-```
-
-`model_turn`由Performer根据实际Provider调用填充，不属于模型structured output；accepted、canceled、timeout、
-schema-invalid和其他失败turn都必须记录。accepted directive与`RootReconcilerFailureRecord`各自只包含一个nested
-`ModelTurnRecord`，其中的`model`和`usage`是唯一的turn事实，不能在directive或failure record顶层重复。nested object让
-Root聚合只读取一种turn事实；它不是第二个comment或第二个managed block。该record只参与retry/budget计数和用户时间轴，不拥有Root/Cycle status或下一步。写入并read-back失败时matching Root
-立即停止；不得把失败只记在memory/log后继续调用模型。
-
-`attempted_input_ids[]`精确复制该Provider invocation的bootstrap或delta中的pending input identities；它只证明
-本次失败turn看过哪些用户输入，绝不表示输入已经被directive消费或已经获得reply。Conductor从fresh Linear Tree重建
-当前pending inputs后，只有发现至少一个不在最新matching failure record的`attempted_input_ids[]`中的输入，才能为该
-Root再次调用Reconciler。failure record本身、它的timeline comment和任何Symphony写入都不能解除这个barrier；没有新
-Linear用户输入时Root停在该failure事实处。该判定只读strict-decoded Linear records和当前input identities，不保存
-本地retry counter、timer、checkpoint或revision状态机。failure record由
-`RootReconcilerFailureRecordWriterInterface`写入Root managed comment，并且只有该comment的strict decode和fresh
-read-back成功后才能认为Root已停在这个barrier；writer不解释用户输入、决定retry或写timeline。
-
-这里的“latest matching failure”是matching Root的最新Reconciler terminal managed record：Conductor按fresh Linear
-comment creation order比较`RootDirectiveRecord`与`RootReconcilerFailureRecord`。最新terminal record仍是failure时才应用
-上述barrier；在failure之后已经read-back的accepted directive只可能来自允许的新input，因而证明该barrier已经越过。
-这不是failure的mutable resolved state、status或第二份记录，也不授权Conductor选择恢复动作；下一步仍只来自该后续
-directive。
-
-Root turn的跨进程终端结果是closed `RootReconcilerTurnResult = RootDirective | RootReconcilerTurnFailure`。
-后者携带`root_issue_id`和完整`RootReconcilerFailureRecord`；它是调用失败的transport terminal result，不是第二个
-业务Result、directive、lifecycle或retry state。`RootReconcilerOpenedResult.initial_result`与
-`AdvanceRootReconcilerRequest`的response都使用这个同一union。通用Protocol error只表示Provider invocation前的
-request/session/precondition拒绝或无法形成并验证该closed result；已经进入Provider边界的turn绝不能降级为通用error。
-
-所有variants是closed、versioned、`additionalProperties: false`的discriminated union。每个turn最多返回一个
-directive；需要多个Linear/Git writes的单一领域动作共享一个stable directive ID，Conductor按明确顺序幂等
-materialize并read-back，不能在partial success后重新询问模型制造第二份逻辑动作。
-
-`consumed_input_ids[]`必须精确覆盖本轮bootstrap或delta中的pending inputs，不能遗漏，也不能引用本轮request
-中不存在的输入。
-`comment_replies[]`必须精确覆盖其中全部target仍存在的用户comment body/thread-state inputs，并排除comment
-tombstones。无业务影响时也返回`acknowledge`并消费输入，不创建另一份disposition状态。
-`human_action_resolutions[]`可以在同一turn terminalize多个独立request，但每项都必须满足
-[Human Action](human-actions.md)定义的request、thread、actor、proposal和reply coverage；Conductor只验证并
-materialize，不能自行生成request或resolution。
-
-### 7.0 Root convergence policy and gate
-
-`RootConvergencePolicy` is the one immutable Root managed record that snapshots
-the public Conductor convergence configuration at successful Root claim:
-
-```text
-RootConvergencePolicy
-  policy_id
-  root_issue_id
-  max_cycles_per_root
-  max_same_open_finding_cycles
-  max_consecutive_no_progress
-  max_total_tokens
-  max_cycle_repair_attempts
-  deadline_at
-```
-
-The public configuration is operator configuration for newly claimed Roots,
-not a Desktop workflow control and not a user-editable Root field. The configured
-Root deadline is a duration, not a launch-time absolute timestamp: only after
-Profile readiness, native `In Progress` read-back, and deterministic workspace
-proof does Conductor calculate `deadline_at` and write the policy. Process launch,
-Profile provisioning, and unadmitted waiting never consume that budget. Conductor
-strictly validates the static limits before claim, writes one policy comment on
-the Root, and reads it back before it writes the Root ownership record. An
-unowned Root with one matching policy may resume that interrupted claim, retaining
-its persisted `deadline_at` while validating the currently configured static
-limits. Once ownership exists,
-the Root must have exactly one policy whose complete content matches the policy
-it was claimed with. Missing, duplicate, foreign, malformed, mismatched, or
-unreadable policies stop the Root; Conductor never rewrites an existing policy
-or keeps a local replacement. Admission of an owned Root reads and validates
-only that Root's persisted policy; a later launch configuration applies only to
-new claims and cannot invalidate an already owned Root.
-
-`RootConvergenceView` is an in-memory calculation over the complete active and
-archived Root Tree, immutable turn records, Finding dispositions, and current
-native Root status. It contains the policy, total Cycle count, open-Finding
-persistence, consecutive no-progress count, settled tokens, open token
-reservations, current Cycle repair-attempt count, deadline result, and native
-Root cancellation fact. It is sent in the initial Root bootstrap and as a
-typed delta only when its canonical value changes. It is never a checkpoint,
-queue, mutable ledger, or second lifecycle state.
-
-When the View reaches a non-allowing limit, Conductor writes one immutable,
-strictly read-back `ConvergenceRecord` on the Root before another Reconciler
-turn:
-
-```text
-ConvergenceRecord
-  convergence_record_id
-  root_issue_id
-  policy_id
-  policy
-  view
-  trigger:
-    root_canceled | deadline_exceeded | max_cycles_per_root |
-    max_same_open_finding_cycles | max_consecutive_no_progress |
-    token_budget | max_cycle_repair_attempts
-```
-
-`convergence_record_id` is derived from `root_issue_id`, `policy_id`, the
-canonical View, and `trigger`; the same fact has one write identity across
-restart. Allowing Views are transmitted but do not create assessment comments.
-The record is evidence of a mechanical constraint, not a directive, Human
-Action, status, or replacement for the current View.
-
-The gate cannot select a business next step. A Root-level trigger blocks new
-Cycle and Stage execution. A `max_cycle_repair_attempts` trigger blocks further
-Plan, Work, Verify, or rerun execution in that Cycle while still permitting a
-Reconciler-proposed `conclude_cycle(exhausted)` and a valid exhausted
-successor. The Root Reconciler receives the typed View/record and chooses the
-closed directive. Conductor validates that directive against the same fresh
-View; it does not create a Human Action, terminalize a Cycle, or create a
-successor by itself.
-
-`max_cycles_per_root` permits the one active Cycle whose `cycle_count` equals
-the limit to finish. At that same count with no active Cycle it blocks a
-successor; if an active Cycle already makes `cycle_count` exceed the limit, it
-blocks every Stage in that over-cap Cycle as well.
-
-### 7.1 Stage执行与重跑
-
-```text
-ExecutePlanDirective
-  kind: execute_plan
-  cycle_issue_id
-  plan_issue_id
-  plan_goal
-  required_outputs[]
-  prior_plan_result_ids[]
-  human_resolution_ids[]
-
-ExecuteWorkDirective
-  kind: execute_work
-  cycle_issue_id
-  work_issue_id
-  execution_goal
-  required_checks[]
-  dependency_evidence_refs[]
-
-ExecuteVerifyDirective
-  kind: execute_verify
-  cycle_issue_id
-  verify_issue_id
-  target_git_revision
-  required_evidence_refs[]
-
-RerunStageDirective
-  kind: rerun_stage
-  cycle_issue_id
-  role: plan | work | verify
-  target_issue_id
-  invalidated_execution_ids[]
-  reason
-  preserved_evidence_refs[]
-```
-
-Conductor机械验证Cycle active、target membership、ready conditions、Plan Contract、Git revision、budget和
-capability。rerun总是创建fresh execution/turn；不能恢复旧turn或只改status伪造重跑。
-
-### 7.1.1 已批准Plan的DAG materialization
-
-```text
-MaterializeApprovedPlanDagDirective
-  kind: materialize_approved_plan_dag
-  cycle_issue_id
-  plan_issue_id
-  plan_contract_digest
-  approval_action_id
-  approval_resolution_id
-```
-
-它只能引用同一directive中由Root Reconciler接受的`plan_review/approved` resolution。Conductor从已read-back的
-Plan Contract、Plan completed Result、Plan Review Request/Resolution和Plan relation机械验证所有identity、scope和digest，
-随后创建Contract的Work/Verify DAG、dependency/Plan relations和每个节点唯一的`WorkflowIssueRecord`，并逐步read-back。
-Work/Verify与已批准Contract的binding只由该directive、immutable `PlanContractRecord`和matching Plan relation共同证明；
-`WorkflowIssueRecord`不承载Contract digest、status、Result或next step。只有完整DAG durable后才能把Plan转为`Done`、
-Cycle转为`Sealed`。缺少、stale、rejected、canceled或wrong-digest resolution，以及
-任何未绑定或冲突的existing Work/Verify节点都会fail closed；该directive本身不dispatch Work。
-
-### 7.2 Root Tree patch
-
-```text
-ReviseRootTreeDirective
-  kind: revise_root_tree
-  reason
-  operations[]:
-    CreateNodeOperation |
-    UpdateNodeOperation |
-    ArchiveNodeOperation |
-    RestoreNodeOperation |
-    ReorderNodesOperation |
-    ReplaceDependenciesOperation |
-    CreateRelationOperation |
-    RemoveRelationOperation
-```
-
-该variant是Root Reconciler接受、修正或重组现有Root Tree的唯一通用patch，不限于“非法lifecycle”或Cycle DAG。
-它可以处理用户status、content、archive、parent、relation和DAG变化，也可以修复bootstrap/delta中的机械矛盾。
-每个operation携带matching target remote version、status、archive、parent和relation preconditions。语义delete使用
-Linear原生archive flag；archived Issue仍进入后续delta和fresh bootstrap。Conductor只检查operation安全和precondition，
-不能自行生成该directive或替换其中的requested outcome。
-
-### 7.3 当前Cycle replan
-
-```text
-ReplanCurrentCycleDirective
-  kind: replan_current_cycle
-  cycle_issue_id
-  reason
-  superseded_plan_contract_ids[]
-  invalidate_execution_ids[]
-  preserve_evidence_refs[]
-  archive_or_restore_operations[]
-  plan_issue_id
-  fresh_plan_goal
-```
-
-Root目标和contract未发生实质变化，但当前Plan错误、假设失效或执行方案需要重构时，可以在当前Cycle内
-replan。旧Plan Contract immutable并通过`PlanContractSupersessionRecord`失效；fresh Plan turn产生新Contract。
-`superseded_plan_contract_ids`必须非空且无重复：每项都必须对应matching Plan Issue内唯一、同Root同Cycle的旧Contract。
-Conductor须先写入并fresh read-back全部supersession records；任何验证、写入或read-back失败都不得改变Cycle或Plan状态。
-旧Work evidence只有被新Plan显式引用时才可复用。
-
-### 7.4 结束当前Cycle并创建successor
-
-```text
-SupersedeCycleDirective
-  kind: supersede_cycle
-  current_cycle_issue_id
-  reason: root_contract_changed | cycle_change_not_absorbable | no_safe_replan
-  invalidated_execution_ids[]
-  unresolved_finding_ids[]
-  preserved_evidence_refs[]
-  successor
-    create: true
-    plan_trigger
-    inherited_fact_refs[]
-```
-
-Root objective、scope、acceptance criteria或protected constraints发生实质变化时，旧Cycle不能继续声称满足最新
-Root contract。Conductor结束当前Cycle、通过Root convergence gate、创建successor Cycle，并使用fresh Plan、
-Work、Verify sessions。当前Cycle写`CycleOutcome.conclusion=superseded`并进入`Changes Required`；旧Cycle和Git
-成果保留为provenance，不默认满足新Plan。
-
-终态Cycle永远不能被该variant修改。最新Cycle已经terminal但Root仍需继续时，使用独立successor directive：
-
-```text
-CreateCycleDirective
-  kind: create_cycle
-  predecessor_cycle_issue_id?
-  reason:
-    initial | root_contract_changed | repair_required | exhausted |
-    user_requested_retry | unresolved_findings
-  plan_trigger
-  inherited_fact_refs[]
-  invalidated_delivery_refs[]
-```
-
-`initial`只允许Root尚无Cycle时使用；其他reason必须携带matching predecessor。Conductor机械验证不存在另一个
-nonterminal active Cycle、Root仍可运行、convergence允许且predecessor保持terminal，再创建fresh Cycle和三个fresh
-Stage sessions。`invalidated_delivery_refs`引用Git中的旧PR、branch或commit，说明其
-不再匹配最新Root contract；不删除或复制这些Git事实。
-
-### 7.5 Human、conclusion与wait
-
-`RequestHumanActionDirective`只能提出一个由Root Reconciler决定的typed request；其scope、structured questions、
-proposal、actor binding、deduplication、Root comment materialization和resolution全部由
-[Human Action](human-actions.md)定义。本文不复制该directive的字段表或Action lifecycle。
-
-```text
-ConcludeCycleDirective
-  kind: conclude_cycle
-  cycle_issue_id
-  conclusion: succeeded | repair_required | exhausted | canceled
-  completed_work_ids[]
-  unresolved_finding_ids[]
-  attempted_approach_refs[]
-  verification_evidence_refs[]
-  successor_recommendation?
-
-ConcludeRootDirective
-  kind: conclude_root
-  conclusion: ready_for_delivery
-  evidence_refs[]
-
-CancelRootDirective
-  kind: cancel_root
-  reason
-  active_cycle_issue_id?
-  invalidated_execution_ids[]
-  preserved_fact_refs[]
-
-WaitDirective
-  kind: wait
-  reason_code
-  blocking_fact_refs[]
-
-AcknowledgeDirective
-  kind: acknowledge
-  reason
-```
-
-`cancel_root`是把用户取消意图收敛为durable Root终止事实的唯一语义动作。Conductor验证ownership和remote
-preconditions后停止matching executions、将nonterminal Cycle以`canceled` outcome收敛、关闭Root/Cycle sessions并
-保持Root `Canceled`；用户已经直接修改Root status时不得重复回滚或重写该选择。
-
-`acknowledge`消费无业务影响的pending inputs并写matching comment replies。barrier前的Stage turn已经settle或cancel；
-继续执行时Root Reconciler必须在下一轮基于fresh digest返回新的execute/rerun directive，不能复用旧turn。
-
-`wait`必须对应active Human Action、外部事实或有界runtime condition，不能制造无deadline等待。Cycle budget、
-Root convergence、passed Verify和delivery gates始终由Conductor机械验证。
-
-## 8. 用户修改的业务语义
-
-Root Reconciler根据用户comment、Issue field/status、archive和relation变化判断业务影响，而不是要求用户创建
-结构化change request。
-
-| 用户变化 | 默认语义 | 允许结果 |
-|---|---|---|
-| Root `Canceled` | 可能表达放弃整个目标 | `cancel_root`、修复状态或请求澄清 |
-| Root requirement实质变化 | 旧Cycle contract失效 | supersede当前Cycle并创建successor、或请求澄清 |
-| Plan错误但Root contract未变 | 当前执行方案失效 | 当前Cycle replan |
-| Work内容、顺序或依赖调整 | 可能仍在Contract内 | continue、rerun、DAG patch、replan |
-| Verify环境或要求变化 | 当前证据可能失效 | rerun Verify、replan、successor或Human Action |
-| 用户手工修改managed Issue status | status是lifecycle事实，但不自动伪造Result | 接受合法lifecycle意图、拒绝无证据完成或请求澄清 |
-| 普通讨论或无执行含义comment | 不改变workflow | acknowledge并继续 |
-
-Root Reconciler负责全部业务语义分类。Conductor对任何用户输入都先建立相同屏障，不能因为观察到`Canceled`、
-`Done`或其他status而自行完成取消、回滚或重开。没有matching Result不能把Work/Verify手工`Done`作为Stage成功证据，
-没有passed Verify不能materialize delivery；这些是directive执行precondition，不是Conductor对用户意图的解释。
-
-### 8.1 Root contract变化所在阶段
-
-| 当前事实 | 实质Root requirement变化后的处理 |
-|---|---|
-| 尚无Cycle | 新需求成为initial Cycle的Plan输入，不制造空的superseded Cycle |
-| 已有nonterminal Cycle | 当前Cycle `superseded` terminal，创建successor Cycle并fresh Plan |
-| 最新Cycle已terminal、Root仍active | 不改写terminal Cycle；`create_cycle`并fresh Plan |
-| Root `In Review` | 旧delivery保留但不再匹配最新Root contract；Root回到`In Progress`并`create_cycle` |
-| Root `Done`或`Canceled` | Root Reconciler结合全部输入决定保持terminal、重开、修复或请求澄清 |
-
-### 8.2 Cycle内修改的结果
-
-Cycle内用户修改由Root Reconciler结合Approved Plan Contract判断：无影响则acknowledge/continue；Contract内执行
-变化使用rerun或DAG patch；Plan错误但Root contract未变使用当前Cycle replan；修改破坏Root contract或无法在
-当前Cycle安全收敛时使用supersede并创建successor。Conductor不按field name或comment关键词机械选择结果。
-
-## 9. Lifecycle与恢复
-
-### 9.1 初始Cycle
-
-```text
-user-delegated Root with no ownership and no Cycle
--> Conductor claims only after native delegation is fresh read-back
--> owned Root has no Cycle
--> Conductor validates ownership, complete coverage and convergence
--> open Root Reconciler session with the empty-Cycle fact
--> Reconciler returns create_cycle(reason=initial)
--> Conductor materializes and reads back initial Cycle
--> next Reconciler turn requests Plan
-```
-
-### 9.2 Stage Result
-
-```text
-Stage Result returned
--> validate role/session/turn/context/Git preconditions
--> persist immutable Result
--> read back
--> fresh read and derive RootDelta from the session baseline
--> Root Reconciler chooses the next directive
-```
-
-Result不能直接映射为下一Stage。Provider crash、schema failure和business blocked是不同durable facts；普通Work
-错误应先在Work tool loop预算内自行诊断和重试。
-
-### 9.3 Human Action
-
-Human Action thread的reply和thread-state事实经Conductor做actor、source version、scope和schema验证后作为pending
-inputs进入下一份`RootDelta`。Root Reconciler决定它们是否形成`HumanActionResolutionRecord`以及随后继续、replan、
-调整Tree、successor或fresh request；Conductor不硬编码任何resolution后的业务动作。完整规则只见
-[Human Action](human-actions.md)。
-
-### 9.4 process与session恢复
-
-Conductor不保存workflow DB、Queue、checkpoint或durableProvider pointer。重启后从Linear/Git重建Root；任何
-accepted但未完成directive按stable write ID继续materialize。Root Reconciler session丢失时使用fresh完整facts进行
-一次bootstrap；正常session advance始终只发送delta。旧session output失效。
-
-输入是否已经处理只由Linear中的accepted `RootDirectiveRecord.consumed_input_ids[]`证明。输入和delta不拥有独立
-业务lifecycle；恢复时从fresh source versions、accepted directives和未完成materialization直接收敛。
-
-## 10. Timeline与comment reply区别
-
-- Timeline由typed event subscriber写入Root或matching Cycle Issue；
-- comment reply由`RootDirective`携带并作为该directive的必需Linear mutation写回原Issue；
-- 两者都使用closed renderer、唯一`json` code block和deterministic ID，不由业务模块拼任意Markdown；
-- reply还必须materialize matching native reaction和thread action；任一写入或read-back失败都会停止当前Root推进并记录correlated error；
-- 不存在Linear之外的pending reply/timeline状态。恢复只根据Linear source record与matching managed comment是否
-  存在继续同一写入；timeline/reply automation body不会作为新的用户输入，但human在其thread中新增comment或形成新的
-  close/reopen state revision仍形成正常pending input。
-
-## 11. Budget与性能
-
-Root Reconciler只在durable Linear/Git边界调用：新用户输入、Stage Result、Human resolution、Tree变化、
-execution failure、Cycle conclusion或到期deadline。heartbeat、token stream、tool progress和重复webhook不调用模型。
-accepted directive缺少required reply或timeline comment时也不调用模型；Conductor先完成同一Linear
-materialization，成功read-back后才能继续。
-
-Reconciler有Root级turn/token/deadline limits；Stage仍有Cycle/turn budgets。bootstrap或delta超出context bound时必须
-通过closed coverage明确缺失并使matching Root fail closed，或使用由durable source支持的bounded history view；
-不能静默截断或让旧transcript补全事实。
-
-## 12. 不变量
-
-1. 每个Root只有一个模型驱动的Root Reconciler语义角色；Cycle没有独立语义决策角色。
-2. Conductor始终调用Performer；Performer从不回调Conductor或直接修改Linear/Git。
-3. Root Reconciler session跨Cycles；Plan、Work、Verify sessions按Cycle隔离且不跨Cycle复用。
-4. 新Root Reconciler session接收一次完整active和archived bootstrap；后续turn只接收从matching baseline严格连续的
-   `RootDelta`，并返回一个closed `RootReconcilerTurnResult`。只有其directive variant可包含一个下一步动作；failure
-   variant必须先durable read-back并等待新的用户input，且不推进session baseline。
-5. 所有用户status、content、archive、parent、relation和普通comment变化都作为pending inputs进入Root Reconciler；
-   managed/system comments按validated actor和strict `json` code block排除。
-6. 每个处理过且仍存在的用户comment body version或non-Symphony thread-state revision都有matching consumed input和
-   read-back后回复；comment tombstone只消费不回复，其他缺少回复时Root停止推进。
-7. 每个input identity最多被一个accepted directive消费；delta没有独立业务状态，Symphony自身mutation不作为新的
-   用户输入回流。
-8. Root requirement实质变化不能继续沿用旧Cycle成功声明；必须successor或澄清。
-9. Plan错误但Root contract未变可以在当前Cycle内replan；Contract内执行变化可以修改DAG或rerun。
-10. Stage Result必须durable并read-back后才能进入下一次Root reconciliation。
-11. Linear/Git是durable authority；Provider thread、timeline和reply都不是恢复authority。
-12. 每个Root Reconciler turn都必须记录实际model和`TurnUsage`；不存在日志-only usage或optional usage路径。
-13. Root Reconciler按本文件的评估、Plan审核、Stage派发、Result验收和恢复循环选择动作，但每turn仍只返回一个既有
-    closed directive；该循环不是第二套状态机。
-14. 详细Work DAG由Plan Result提出；Root Reconciler必须拒绝不完整、冲突或不可验证的Plan，不得自行替代Plan补全任务。
-15. Stage成功variant只是durable输入；只有matching Plan、dependency、checks、verification和Root acceptance evidence
-    全部成立时，Root Reconciler才能推进Cycle或Root conclusion。
+1. Root Reconciler是唯一model-driven next-step role；Conductor只机械validate/materialize。
+2. RootNextAction与Stage Result都是transient typed outputs，不是Linear durable facts。
+3. 每轮只收敛一个bounded semantic action，并fresh read-back。
+4. comments只处理human communication，不形成workflow event log。
+5. Stage只dispatch `Todo`；terminal attempts永不重跑。
+6. Plan approval、Human resolution、Finding和delivery都由native Linear/Git facts证明。
+7. live Provider memory遵守incremental injection；session/delta/digest丢失后fresh bootstrap，restart不回放command。
