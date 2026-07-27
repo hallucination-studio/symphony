@@ -26,7 +26,7 @@ export async function createForegroundE2EEnvironment({
     resources = await operations.createLocalResources({ config, project, signal });
     assertOwner(resources, "foreground_e2e_local_resources_invalid");
     runtime = await operations.startProductionRuntime({ config, project, resources, signal, reporter });
-    assertOwner(runtime, "foreground_e2e_runtime_invalid");
+    assertRuntime(runtime, "foreground_e2e_runtime_invalid");
     reporter.phase("ready");
     return Object.freeze({
       project: Object.freeze({ ...project }),
@@ -34,6 +34,12 @@ export async function createForegroundE2EEnvironment({
       resources: Object.freeze({ directory: resources.directory }),
       runtime: Object.freeze({
         conductors: Object.freeze([...(runtime.conductors ?? [])]),
+        assertProjectRootIndexRequestBudget() {
+          return runtime.assertProjectRootIndexRequestBudget();
+        },
+        subscribeUnexpectedExit(listener) {
+          return runtime.subscribeUnexpectedExit(listener);
+        },
         killAndRestartConductor: runtime.killAndRestartConductor,
       }),
       async close() {
@@ -148,6 +154,14 @@ function assertProject(value) {
 
 function assertOwner(value, code) {
   if (!value || typeof value.close !== "function") throw stableError(code);
+}
+
+function assertRuntime(value, code) {
+  if (!value || typeof value.close !== "function" ||
+      typeof value.assertProjectRootIndexRequestBudget !== "function" ||
+      typeof value.subscribeUnexpectedExit !== "function") {
+    throw stableError(code);
+  }
 }
 
 function identifier(value) {

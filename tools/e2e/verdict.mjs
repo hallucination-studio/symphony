@@ -113,16 +113,32 @@ export function evaluateForegroundE2EAssertions({ definition, evidence, context 
   return Object.freeze(definition.assertions.map((assertion) => evaluateAssertion(assertion, facts)));
 }
 
-export function deriveForegroundE2EVerdict(assertions, { deadlineExceeded = false } = {}) {
+export function deriveForegroundE2EVerdict(assertions, { deadlineExceeded = false, processFault = undefined } = {}) {
   if (!Array.isArray(assertions) || assertions.length === 0 || assertions.some((item) => !validAssertionOutcome(item))) {
     throw stableError("foreground_e2e_verdict_input_invalid");
   }
+  if (processFault !== undefined && !identifier(processFault)) {
+    throw stableError("foreground_e2e_verdict_input_invalid");
+  }
   if (assertions.some(({ outcome }) => outcome === "contradicted")) {
-    return Object.freeze({ verdict: "failed", reasonCodes: failureCodes(assertions, "contradicted") });
+    return Object.freeze({
+      verdict: "failed",
+      reasonCodes: Object.freeze([
+        ...failureCodes(assertions, "contradicted"),
+        ...(processFault === undefined ? [] : [processFault]),
+      ]),
+    });
   }
   if (deadlineExceeded || assertions.some(({ outcome }) => outcome === "coverage_missing")) {
-    return Object.freeze({ verdict: "incomplete", reasonCodes: failureCodes(assertions, "coverage_missing") });
+    return Object.freeze({
+      verdict: "incomplete",
+      reasonCodes: Object.freeze([
+        ...failureCodes(assertions, "coverage_missing"),
+        ...(processFault === undefined ? [] : [processFault]),
+      ]),
+    });
   }
+  if (processFault !== undefined) return Object.freeze({ verdict: "failed", reasonCodes: Object.freeze([processFault]) });
   return Object.freeze({ verdict: "passed", reasonCodes: Object.freeze([]) });
 }
 
@@ -178,6 +194,7 @@ export async function runForegroundE2ECases({ definitions, runCase, readFinalEvi
         : evaluateForegroundE2EAssertions({ definition, evidence, context });
       const outcome = deriveForegroundE2EVerdict(assertions, {
         deadlineExceeded: driverResult?.deadlineExceeded === true || scope.deadlineExceeded?.() === true,
+        processFault: scope.processFault?.(),
       });
       observe(reporter, { caseId: definition.caseId, observation: outcome.verdict });
       return Object.freeze({
@@ -1540,6 +1557,8 @@ function runWithinCaseScope(operation, scope) {
 }
 
 function caseScopeAbortError(scope) {
+  const processFault = scope.processFault?.();
+  if (identifier(processFault)) return stableError(processFault);
   return stableError(scope.deadlineExceeded?.() === true
     ? "foreground_e2e_case_deadline_exceeded"
     : "foreground_e2e_case_aborted");

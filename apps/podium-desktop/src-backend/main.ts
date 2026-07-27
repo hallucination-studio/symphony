@@ -183,9 +183,22 @@ async function createProductionComposition({
     databasePath: path.join(dataRoot, "podium.db"),
     presence,
     observeLinearRequest: (observation) => {
+      const {
+        correlationId,
+        durationMs,
+        installationId,
+        projectId,
+        requestClass,
+        ...physical
+      } = observation;
       process.stderr.write(`${JSON.stringify({
         event: "linear_physical_request",
-        ...observation,
+        ...physical,
+        correlation_id: correlationId,
+        duration_ms: durationMs,
+        ...(installationId ? { installation_id: installationId } : {}),
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(requestClass ? { request_class: requestClass } : {}),
       })}\n`);
     },
   });

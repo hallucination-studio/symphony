@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import path from "node:path";
 
 import { FOREGROUND_E2E_CASE_IDS, FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { runForegroundE2ECampaign, sanitizeForegroundE2ECampaignFailure } from "../../tools/e2e/foreground-campaign.mjs";
@@ -106,7 +107,11 @@ test("Campaign composes the real seven-Case lifecycle after readiness and reads 
         return {
           project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
           actors: { humanActorId: "human-1" },
-          runtime: { conductors: conductorRuntime() },
+          runtime: {
+            conductors: conductorRuntime(),
+            assertProjectRootIndexRequestBudget() {},
+            subscribeUnexpectedExit() { return () => {}; },
+          },
           async close() { events.push("closed"); },
         };
       },
@@ -160,6 +165,124 @@ test("Campaign composes the real seven-Case lifecycle after readiness and reads 
   });
 });
 
+test("Campaign routes a runtime process fault only to its bound Cases, final-reads every Case, and cannot succeed", async () => {
+  const listeners = new Set();
+  const finalReads = [];
+  const releases = new Map();
+  const bindings = rootCreationBindings();
+  const rootsByCase = createdRootsByCase();
+  let resolveAllDriversStarted;
+  const allDriversStarted = new Promise((resolve) => { resolveAllDriversStarted = resolve; });
+  let driversStarted = 0;
+
+  const campaign = runForegroundE2ECampaign({
+    environment: validEnvironment(),
+    dependencies: {
+      loadConfig: () => validConfig(),
+      createReporter: () => quietReporter(),
+      createEnvironment: async () => ({
+        project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
+        actors: { humanActorId: "human-1" },
+        runtime: {
+          conductors: conductorRuntime(),
+          assertProjectRootIndexRequestBudget() {},
+          subscribeUnexpectedExit(listener) {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+        },
+        async close() {},
+      }),
+      createHuman: async () => humanFor({ bindings, rootsByCase }),
+      runCaseDriver: ({ definition }) => new Promise((resolve) => {
+        releases.set(definition.caseId, resolve);
+        driversStarted += 1;
+        if (driversStarted === FOREGROUND_E2E_CASES.length) resolveAllDriversStarted();
+      }),
+      readFinalEvidence: async ({ caseId, rootIssueIds }) => {
+        finalReads.push(caseId);
+        return { coverage: { isComplete: false }, roots: [], rootIssueIds };
+      },
+      installSignalCleanup: () => ({ dispose() {} }),
+      randomUUID: () => "campaign-1",
+      now: () => 0,
+    },
+  });
+
+  await allDriversStarted;
+  for (const listener of listeners) {
+    listener({
+      component: "conductor",
+      conductorId: "conductor-a",
+      reasonCode: "foreground_e2e_process_conductor_exited",
+    });
+  }
+  for (const release of releases.values()) release({ context: {} });
+
+  const summary = await campaign;
+  const affectedCases = new Set(FOREGROUND_E2E_CASES
+    .filter(({ rootTopology }) => rootTopology.some(({ conductorRef }) => conductorRef === "conductor-a"))
+    .map(({ caseId }) => caseId));
+  assert.equal(summary.exitCode, 1);
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASE_IDS.slice().sort());
+  for (const item of summary.cases) {
+    assert.equal(
+      item.reasonCodes.includes("foreground_e2e_process_conductor_exited"),
+      affectedCases.has(item.caseId),
+      item.caseId,
+    );
+  }
+  assert.equal(listeners.size, 0);
+});
+
+test("Campaign rejects a physical Root Index budget failure after final reads without emitting success summary", async () => {
+  const bindings = rootCreationBindings();
+  const rootsByCase = createdRootsByCase();
+  const finalReads = [];
+  let summaries = 0;
+
+  await assert.rejects(
+    runForegroundE2ECampaign({
+      environment: validEnvironment(),
+      dependencies: {
+        loadConfig: () => validConfig(),
+        createReporter: () => ({ ...quietReporter(), summary() { summaries += 1; } }),
+        createEnvironment: async () => ({
+          project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
+          actors: { humanActorId: "human-1" },
+          runtime: {
+            conductors: conductorRuntime(),
+            assertProjectRootIndexRequestBudget() {
+              throw codedError("foreground_e2e_project_root_index_request_budget_exceeded");
+            },
+            subscribeUnexpectedExit() { return () => {}; },
+          },
+          async close() {},
+        }),
+        createHuman: async () => humanFor({ bindings, rootsByCase }),
+        runCases: async ({ definitions, readFinalEvidence }) => {
+          for (const definition of definitions) {
+            await readFinalEvidence({ definition, driverResult: { context: {} } });
+          }
+          return { exitCode: 0, cases: definitions.map(({ caseId }) => ({ caseId, verdict: "passed" })) };
+        },
+        readFinalEvidence: async ({ caseId, rootIssueIds }) => {
+          finalReads.push(caseId);
+          return { coverage: { isComplete: false }, roots: [], rootIssueIds };
+        },
+        installSignalCleanup: () => ({ dispose() {} }),
+        runCaseDriver: async () => ({ context: {} }),
+        randomUUID: () => "campaign-1",
+        now: () => 0,
+      },
+    }),
+    hasCode("foreground_e2e_project_root_index_request_budget_exceeded"),
+  );
+
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASE_IDS.slice().sort());
+  assert.equal(summaries, 0);
+});
+
 test("Campaign closes its Reporter when environment cleanup fails", async () => {
   let reporterClosed = false;
   await assert.rejects(
@@ -176,7 +299,11 @@ test("Campaign closes its Reporter when environment cleanup fails", async () => 
         createEnvironment: async () => ({
           project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
           actors: { humanActorId: "human-1" },
-          runtime: { conductors: [] },
+          runtime: {
+            conductors: [],
+            assertProjectRootIndexRequestBudget() {},
+            subscribeUnexpectedExit() { return () => {}; },
+          },
           async close() { throw codedError("foreground_e2e_environment_cleanup_failed"); },
         }),
         createHuman: async () => { throw codedError("foreground_e2e_human_actor_identity_invalid"); },
@@ -310,6 +437,53 @@ function rootCreation() {
   };
 }
 
+function rootCreationBindings() {
+  const conductorsByReference = new Map([
+    ["conductor-a", conductorRuntime()[0]],
+    ["conductor-b", conductorRuntime()[1]],
+    ["conductor-c", conductorRuntime()[2]],
+  ]);
+  return Object.freeze(Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) => rootTopology.map((topology) => {
+    const conductor = conductorsByReference.get(topology.conductorRef);
+    return [topology.rootKey, Object.freeze({
+      teamId: "team-1",
+      projectId: "project-1",
+      routingLabelId: `route-${conductor.conductorId}`,
+      rootStatusId: "todo-1",
+      conductorId: conductor.conductorId,
+      performerProfileId: conductor.profileId,
+      worktreeDirectory: path.join(conductor.dataRoot, "worktrees"),
+    })];
+  }))));
+}
+
+function createdRootsByCase() {
+  return Object.freeze(Object.fromEntries(FOREGROUND_E2E_CASES.map(({ caseId, rootTopology }) => [caseId, Object.freeze(rootTopology.map(({ rootKey }) => Object.freeze({
+    rootKey,
+    rootIssueId: `${caseId}-${rootKey}`,
+  })))])));
+}
+
+function humanFor({ bindings, rootsByCase }) {
+  return Object.freeze({
+    actorId: "human-1",
+    async resolveRootCreationBindings() { return bindings; },
+    createdRootsForCase({ caseId }) { return rootsByCase[caseId] ?? []; },
+  });
+}
+
+function quietReporter() {
+  return {
+    startHeartbeat() {},
+    phase() {},
+    close() {},
+    caseObservation() {},
+    signal() {},
+    failure() {},
+    summary() {},
+  };
+}
+
 function interruptedCampaignDependencies({ runCases, onEnvironmentClose, onReporterClose, setTimeout, clearTimeout }) {
   return {
     loadConfig: () => validConfig(),
@@ -323,7 +497,11 @@ function interruptedCampaignDependencies({ runCases, onEnvironmentClose, onRepor
     createEnvironment: async () => ({
       project: { projectId: "project-1", teamId: "team-1", delegateActorId: "symphony-actor" },
       actors: { humanActorId: "human-1" },
-      runtime: { conductors: conductorRuntime() },
+      runtime: {
+        conductors: conductorRuntime(),
+        assertProjectRootIndexRequestBudget() {},
+        subscribeUnexpectedExit() { return () => {}; },
+      },
       async close() { onEnvironmentClose?.(); },
     }),
     createHuman: async () => ({

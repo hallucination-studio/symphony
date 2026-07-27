@@ -17,12 +17,18 @@ import type { LinearInstallation } from "../models.js";
 import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
+type PhysicalRequestContext = {
+  installationId: string;
+  requestClass: InstallationRequestClass;
+  projectId?: string;
+};
 
 const MAX_LINEAR_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export class PodiumConductorServicesImpl implements PodiumConductorServices {
   readonly #activeInstances = new Map<string, string>();
   readonly #physicalRequestScope = new AsyncLocalStorage<LinearWorkflowMutationRequestScope | undefined>();
+  readonly #physicalRequestContext = new AsyncLocalStorage<PhysicalRequestContext | undefined>();
   readonly #linearRequests: LinearRequestBrokerImpl;
   readonly #linearGateways = new Map<InstallationRequestClass, {
     installation: LinearInstallation;
@@ -40,6 +46,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         observe: (observation: LinearPhysicalRequestObservation) => void,
         requestScope: () => LinearWorkflowMutationRequestScope | undefined,
       ): LinearClientInterface;
+      observeLinearRequest?(observation: LinearPhysicalRequestObservation): void;
       linearRequestObserver?: LinearRequestObserverImpl;
     },
   ) {
@@ -87,28 +94,31 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const classification = requestClass(body.kind);
     const gateway = this.#linearGateway(installation, classification);
     const scopedMutation = workflowMutationScope(body);
-    return this.#linearRequests.run(classification, async () => this.#physicalRequestScope.run(scopedMutation?.scope, async () => {
-      switch (body.kind) {
-      case "resolve_conductor_project":
-        return this.#resolveProject(gateway, body);
-      case "list_project_root_index_page":
-        return this.#listProjectRootIndexPage(gateway, body);
-      case "get_workflow_issue_tree":
-        return this.#getWorkflowTree(gateway, body);
-      case "create_workflow_issue":
-      case "update_workflow_issue":
-      case "append_workflow_comment":
-      case "create_comment_reply":
-      case "set_comment_receipt_reaction":
-      case "set_comment_thread_state":
-      case "create_workflow_relation":
-        return workflowMutationResult(
-          await gateway.mutateWorkflow(scopedMutation?.command ?? workflowMutationCommand(body)),
-        ) as unknown as JsonValue;
-      default:
-        throw new Error("conductor_request_unsupported");
-      }
-    }), {
+    return this.#linearRequests.run(classification, async () => this.#physicalRequestContext.run(
+      physicalRequestContext(body, installation, classification),
+      async () => this.#physicalRequestScope.run(scopedMutation?.scope, async () => {
+        switch (body.kind) {
+        case "resolve_conductor_project":
+          return this.#resolveProject(gateway, body);
+        case "list_project_root_index_page":
+          return this.#listProjectRootIndexPage(gateway, body);
+        case "get_workflow_issue_tree":
+          return this.#getWorkflowTree(gateway, body);
+        case "create_workflow_issue":
+        case "update_workflow_issue":
+        case "append_workflow_comment":
+        case "create_comment_reply":
+        case "set_comment_receipt_reaction":
+        case "set_comment_thread_state":
+        case "create_workflow_relation":
+          return workflowMutationResult(
+            await gateway.mutateWorkflow(scopedMutation?.command ?? workflowMutationCommand(body)),
+          ) as unknown as JsonValue;
+        default:
+          throw new Error("conductor_request_unsupported");
+        }
+      }),
+    ), {
       deadlineAtMs: Date.now() + MAX_LINEAR_REQUEST_TIMEOUT_MS,
       ...(classification === "mutation" ? {} : {
         coalesceKey: linearReadCoalesceKey(body, installation),
@@ -131,6 +141,8 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const gateway = new LinearGatewayProtocolHandlerImpl(
       this.options.createLinearSdk(installation, (observation) => {
         this.#linearRequests.observe(observation);
+        const context = this.#physicalRequestContext.getStore();
+        if (context) this.options.observeLinearRequest?.({ ...observation, ...context });
       }, () => this.#physicalRequestScope.getStore()),
       {
         maxAttempts: 4,
@@ -420,6 +432,18 @@ function requestClass(kind: string): InstallationRequestClass {
   if (kind === "resolve_conductor_project") return "control";
   if (kind === "get_workflow_issue_tree" || kind === "list_project_root_index_page") return "workflow";
   return "mutation";
+}
+
+function physicalRequestContext(
+  body: Body,
+  installation: LinearInstallation,
+  classification: InstallationRequestClass,
+): PhysicalRequestContext {
+  return {
+    installationId: installation.installationId,
+    requestClass: classification,
+    ...(typeof body.expected_project_id === "string" ? { projectId: body.expected_project_id } : {}),
+  };
 }
 
 function linearReadCoalesceKey(body: Body, installation: LinearInstallation): string {

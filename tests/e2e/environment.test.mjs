@@ -19,6 +19,7 @@ import {
   createConductorEnvironment,
   createFramedChannel,
   createForegroundLocalResources,
+  createProjectRootIndexRequestBudget,
   createPodiumEnvironment,
   createConductorRuntimeLogForwarder,
   startConfiguredConductors,
@@ -44,6 +45,8 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
   ]);
   let projectReads = 0;
   let localCreated = false;
+  let budgetAssertions = 0;
+  let runtimeFaultListener;
   const client = {
     client: {
       async rawRequest(query, variables) {
@@ -104,7 +107,18 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
           return { directory: temporaryDirectory, async close() {} };
         },
         async startProductionRuntime() {
-          return { conductors: [], async close() {} };
+          return {
+            conductors: [],
+            assertProjectRootIndexRequestBudget() {
+              budgetAssertions += 1;
+              return { normalPhysicalRequests: 1, fallbackPhysicalRequests: 0 };
+            },
+            subscribeUnexpectedExit(listener) {
+              runtimeFaultListener = listener;
+              return () => { runtimeFaultListener = undefined; };
+            },
+            async close() {},
+          };
         },
       },
     });
@@ -112,6 +126,16 @@ test("environment archives every active Project Issue flatly and fresh-reads an 
     assert.equal(projectReads, 3);
     assert.deepEqual([...active.values()], [false, false, false]);
     assert.deepEqual(environment.actors, { humanActorId: "human-actor" });
+    assert.deepEqual(environment.runtime.assertProjectRootIndexRequestBudget(), {
+      normalPhysicalRequests: 1,
+      fallbackPhysicalRequests: 0,
+    });
+    let observedFault;
+    const unsubscribe = environment.runtime.subscribeUnexpectedExit((fault) => { observedFault = fault; });
+    runtimeFaultListener({ component: "podium", reasonCode: "process_exited" });
+    unsubscribe();
+    assert.equal(budgetAssertions, 1);
+    assert.deepEqual(observedFault, { component: "podium", reasonCode: "process_exited" });
     assert.deepEqual(events.map(({ phase }) => phase), ["resetting", "starting", "ready"]);
     await environment.close();
     assert.deepEqual(events.map(({ phase }) => phase), ["resetting", "starting", "ready", "cleaning"]);
@@ -335,6 +359,8 @@ test("environment failure and normal close reap a real owned child and remove it
           });
           return {
             conductors: [],
+            assertProjectRootIndexRequestBudget() {},
+            subscribeUnexpectedExit() { return () => {}; },
             async close() {
               await closeOwnedProcess(child, { timeoutMs: 1_000 });
             },
@@ -667,6 +693,85 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
   forwarder.close();
   stdout.emit("data", Buffer.from('{"level":"error","event":"root_profile_missing"}\n', "utf8"));
   assert.equal(diagnostics.length, 3);
+});
+
+test("production Root Index transport observations enforce the one-request normal budget and one-request fallback budget", () => {
+  const budget = createProjectRootIndexRequestBudget({
+    installationId: "installation-1",
+    projectId: "project-1",
+  });
+
+  budget.observe({
+    event: "linear_physical_request",
+    operation: "SymphonyProjectRootIndex",
+    correlation_id: "request-1",
+    installation_id: "installation-1",
+    project_id: "project-1",
+  });
+  assert.deepEqual(budget.snapshot(), {
+    normalPhysicalRequests: 1,
+    fallbackPhysicalRequests: 0,
+  });
+  assert.doesNotThrow(() => budget.assertWithinBudget());
+
+  budget.observe({
+    event: "linear_physical_request",
+    operation: "SymphonyProjectRootIndex",
+    correlation_id: "request-2",
+    installation_id: "installation-1",
+    project_id: "project-1",
+  });
+  assert.throws(
+    () => budget.assertWithinBudget(),
+    hasCode("foreground_e2e_project_root_index_request_budget_exceeded"),
+  );
+
+  const fallback = createProjectRootIndexRequestBudget({
+    installationId: "installation-1",
+    projectId: "project-1",
+  });
+  fallback.observe({
+    event: "linear_physical_request",
+    operation: "SymphonyProjectRootIndex",
+    correlation_id: "request-1",
+    installation_id: "installation-1",
+    project_id: "project-1",
+  });
+  fallback.observe({
+    event: "linear_physical_request",
+    operation: "SymphonyProjectRootIndexContinuation",
+    correlation_id: "request-2",
+    installation_id: "installation-1",
+    project_id: "project-1",
+  });
+  assert.doesNotThrow(() => fallback.assertWithinBudget());
+});
+
+test("a reported Performer process exit is forwarded as a scoped runtime fault", () => {
+  const stdout = new EventEmitter();
+  const faults = [];
+  const forwarder = createConductorRuntimeLogForwarder({
+    conductorId: "conductor-1",
+    stdout,
+    stderr: new EventEmitter(),
+    onUnexpectedExit: (fault) => faults.push(fault),
+  });
+
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "error",
+    event: "root_reconciliation_failed",
+    root_issue_id: "root-1",
+    reason: "performer_agent_process_exited",
+    failure_code: "performer_agent_process_exited",
+  })}\n`, "utf8"));
+
+  assert.deepEqual(faults, [{
+    component: "performer",
+    conductorId: "conductor-1",
+    rootIssueId: "root-1",
+    reasonCode: "performer_agent_process_exited",
+  }]);
+  forwarder.close();
 });
 
 test("framed host channel fails pending requests immediately when its transport fails", async () => {

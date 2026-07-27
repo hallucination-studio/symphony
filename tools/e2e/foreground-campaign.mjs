@@ -101,9 +101,11 @@ export async function runForegroundE2ECampaign({
       setTimeout: operations.setTimeout,
       clearTimeout: operations.clearTimeout,
       deadlineMs: campaignDeadlineMs,
+      rootCreationsByRootKey,
+      subscribeUnexpectedExit: activeEnvironment.runtime.subscribeUnexpectedExit,
     });
     reporter.phase("running");
-    summary = await settleInterruptedCases({
+    const candidateSummary = await settleInterruptedCases({
       signal: abortController.signal,
       setTimeout: operations.setTimeout,
       clearTimeout: operations.clearTimeout,
@@ -128,6 +130,8 @@ export async function runForegroundE2ECampaign({
         }),
       }),
     });
+    activeEnvironment.runtime.assertProjectRootIndexRequestBudget();
+    summary = candidateSummary;
     return summary;
   } finally {
     let cleanupError;
@@ -268,10 +272,20 @@ function exactRootIdentityMap(definition, createdRoots) {
   return Object.freeze(Object.fromEntries(definition.rootTopology.map(({ rootKey }) => [rootKey, byKey.get(rootKey)])));
 }
 
-function createCampaignCaseScopeFactory({ parentSignal, now, setTimeout, clearTimeout, deadlineMs }) {
+function createCampaignCaseScopeFactory({
+  parentSignal,
+  now,
+  setTimeout,
+  clearTimeout,
+  deadlineMs,
+  rootCreationsByRootKey,
+  subscribeUnexpectedExit,
+}) {
   return ({ definition }) => {
     const controller = new AbortController();
     let deadlineExceeded = false;
+    let processFault;
+    const conductorIds = caseConductorIds(definition, rootCreationsByRootKey);
     const onParentAbort = () => controller.abort(parentSignal.reason);
     if (parentSignal.aborted) onParentAbort();
     else parentSignal.addEventListener("abort", onParentAbort, { once: true });
@@ -280,17 +294,43 @@ function createCampaignCaseScopeFactory({ parentSignal, now, setTimeout, clearTi
       deadlineExceeded = true;
       controller.abort("deadline");
     }, deadlineMs);
+    const unsubscribe = subscribeUnexpectedExit((fault) => {
+      if (processFault !== undefined || !faultAppliesToCase(fault, conductorIds)) return;
+      processFault = fault.reasonCode;
+      controller.abort("process_fault");
+    });
+    if (typeof unsubscribe !== "function") {
+      clearTimeout(timer);
+      parentSignal.removeEventListener?.("abort", onParentAbort);
+      throw stableError("foreground_e2e_process_fault_subscription_invalid");
+    }
     return Object.freeze({
       caseId: definition.caseId,
       signal: controller.signal,
       deadlineExceeded: () => deadlineExceeded,
+      processFault: () => processFault,
       dispose() {
         clearTimeout(timer);
         parentSignal.removeEventListener?.("abort", onParentAbort);
+        unsubscribe();
       },
       deadline,
     });
   };
+}
+
+function caseConductorIds(definition, rootCreationsByRootKey) {
+  const ids = definition.rootTopology.map(({ rootKey }) => rootCreationsByRootKey[rootKey]?.conductorId);
+  if (ids.some((value) => !identifier(value))) {
+    throw stableError("foreground_e2e_case_bindings_invalid");
+  }
+  return new Set(ids);
+}
+
+function faultAppliesToCase(fault, conductorIds) {
+  if (!fault || typeof fault !== "object" || !identifier(fault.reasonCode)) return false;
+  if (fault.component === "podium") return fault.conductorId === undefined && fault.rootIssueId === undefined;
+  return (fault.component === "conductor" || fault.component === "performer") && conductorIds.has(fault.conductorId);
 }
 
 async function settleInterruptedCases({ signal, setTimeout, clearTimeout, run }) {
@@ -327,7 +367,9 @@ function assertInput({ environment, operations, signals, campaignDeadlineMs }) {
 
 function assertEnvironment(value) {
   if (!value || !identifier(value.project?.projectId) || !identifier(value.project?.teamId) || !identifier(value.project?.delegateActorId) ||
-      !identifier(value.actors?.humanActorId) || !Array.isArray(value.runtime?.conductors) || typeof value.close !== "function") {
+      !identifier(value.actors?.humanActorId) || !Array.isArray(value.runtime?.conductors) ||
+      typeof value.runtime?.assertProjectRootIndexRequestBudget !== "function" ||
+      typeof value.runtime?.subscribeUnexpectedExit !== "function" || typeof value.close !== "function") {
     throw stableError("foreground_e2e_case_bindings_invalid");
   }
 }

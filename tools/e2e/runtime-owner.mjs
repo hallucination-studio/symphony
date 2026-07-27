@@ -17,6 +17,48 @@ const REPOSITORY_COUNT = 3;
 const MAX_FRAME_BYTES = 1_048_576;
 const PROFILE_READINESS_ATTEMPTS = 10;
 const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
+const PROJECT_ROOT_INDEX_OPERATION = "SymphonyProjectRootIndex";
+const PROJECT_ROOT_INDEX_CONTINUATION_OPERATION = "SymphonyProjectRootIndexContinuation";
+
+export function createProjectRootIndexRequestBudget({ installationId, projectId } = {}) {
+  if (!identifier(installationId) || !identifier(projectId)) {
+    throw stableError("foreground_e2e_project_root_index_request_budget_input_invalid");
+  }
+  let normalPhysicalRequests = 0;
+  let fallbackPhysicalRequests = 0;
+  let observationInvalid = false;
+  const correlations = new Set();
+  return Object.freeze({
+    observe(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.event !== "linear_physical_request") return;
+      if (value.operation !== PROJECT_ROOT_INDEX_OPERATION && value.operation !== PROJECT_ROOT_INDEX_CONTINUATION_OPERATION) return;
+      if (!identifier(value.correlation_id) || !identifier(value.installation_id) || !identifier(value.project_id)) {
+        observationInvalid = true;
+        return;
+      }
+      if (value.installation_id !== installationId || value.project_id !== projectId) return;
+      if (correlations.has(value.correlation_id)) {
+        observationInvalid = true;
+        return;
+      }
+      correlations.add(value.correlation_id);
+      if (value.operation === PROJECT_ROOT_INDEX_OPERATION) normalPhysicalRequests += 1;
+      else fallbackPhysicalRequests += 1;
+    },
+    snapshot() {
+      return Object.freeze({ normalPhysicalRequests, fallbackPhysicalRequests });
+    },
+    assertWithinBudget() {
+      if (observationInvalid || normalPhysicalRequests === 0) {
+        throw stableError("foreground_e2e_project_root_index_request_observation_incomplete");
+      }
+      if (normalPhysicalRequests > 1 || fallbackPhysicalRequests > 1) {
+        throw stableError("foreground_e2e_project_root_index_request_budget_exceeded");
+      }
+      return this.snapshot();
+    },
+  });
+}
 
 export function createPodiumEnvironment({ config, resources, environment = process.env } = {}) {
   assertRuntimeInput({ config, resources });
@@ -85,6 +127,7 @@ export async function startForegroundProductionRuntime({
   let host;
   let conductors = [];
   let closed = false;
+  const unexpectedExits = createUnexpectedExitRegistry();
   try {
     const installation = await bootstrap({
       databasePath,
@@ -99,7 +142,16 @@ export async function startForegroundProductionRuntime({
     if (!installation || !identifier(installation.installationId) || !identifier(installation.organizationId)) {
       throw stableError("foreground_e2e_installation_invalid");
     }
-    podium = await startPodiumBackend({ config, resources, environment, spawn, reporter });
+    podium = await startPodiumBackend({
+      config,
+      project,
+      installation,
+      resources,
+      environment,
+      spawn,
+      reporter,
+      onUnexpectedExit: unexpectedExits.report,
+    });
     host = createDesktopHost({
       podiumChannel: podium.conductorChannel,
       hostChannel: podium.hostChannel,
@@ -109,6 +161,7 @@ export async function startForegroundProductionRuntime({
       environment,
       spawn,
       reporter,
+      onUnexpectedExit: unexpectedExits.report,
     });
     podium.hostChannel.setHandler(host.handle);
     conductors = await startConfiguredConductors({
@@ -123,6 +176,12 @@ export async function startForegroundProductionRuntime({
     });
     return Object.freeze({
       conductors: Object.freeze(conductors),
+      assertProjectRootIndexRequestBudget() {
+        return podium.requestBudget.assertWithinBudget();
+      },
+      subscribeUnexpectedExit(listener) {
+        return unexpectedExits.subscribe(listener);
+      },
       async killAndRestartConductor({ conductorId } = {}) {
         if (!identifier(conductorId)) throw stableError("foreground_e2e_recovery_restart_input_invalid");
         await host.killAndObserveConductor({ conductorId });
@@ -279,7 +338,16 @@ export async function createForegroundLocalResources({
   }
 }
 
-async function startPodiumBackend({ config, resources, environment, spawn, reporter }) {
+async function startPodiumBackend({
+  config,
+  project,
+  installation,
+  resources,
+  environment,
+  spawn,
+  reporter,
+  onUnexpectedExit,
+}) {
   const child = spawn(process.execPath, [resources.podiumBackend], {
     cwd: resources.sourceRoot,
     env: createPodiumEnvironment({ config, resources, environment }),
@@ -290,8 +358,18 @@ async function startPodiumBackend({ config, resources, environment, spawn, repor
     await closeOwnedProcess(child);
     throw stableError("foreground_e2e_podium_process_invalid");
   }
-  const stderrReason = collectSanitizedChildReason(child.stderr, "process_exited");
+  const requestBudget = createProjectRootIndexRequestBudget({
+    installationId: installation.installationId,
+    projectId: project.projectId,
+  });
+  const stderrReason = collectSanitizedChildReason(
+    child.stderr,
+    "process_exited",
+    (observation) => requestBudget.observe(observation),
+  );
+  let closing = false;
   const close = async () => {
+    closing = true;
     client.close();
     hostChannel.close();
     conductorChannel.close();
@@ -303,9 +381,16 @@ async function startPodiumBackend({ config, resources, environment, spawn, repor
     stream: child.stdio[3],
     onFailure: (reasonCode) => reporter?.failure({ component: "conductor-multiplexer", reasonCode }),
   });
-  child.once("exit", () => reporter?.childExit({ component: "podium", reasonCode: stderrReason() }));
-  child.once("error", () => reporter?.childExit({ component: "podium", reasonCode: "process_start_failed" }));
-  return Object.freeze({ child, client, hostChannel, conductorChannel, close });
+  child.once("exit", () => {
+    const reasonCode = stderrReason();
+    reporter?.childExit({ component: "podium", reasonCode });
+    if (!closing) onUnexpectedExit?.({ component: "podium", reasonCode });
+  });
+  child.once("error", () => {
+    reporter?.childExit({ component: "podium", reasonCode: "process_start_failed" });
+    if (!closing) onUnexpectedExit?.({ component: "podium", reasonCode: "process_start_failed" });
+  });
+  return Object.freeze({ child, client, hostChannel, conductorChannel, requestBudget, close });
 }
 
 function createDesktopHost({
@@ -317,6 +402,7 @@ function createDesktopHost({
   environment,
   spawn,
   reporter,
+  onUnexpectedExit,
 }) {
   const repositories = new Map(resources.repositories.map((repository) => [repository.repositoryHandle, repository]));
   const conductors = new Map();
@@ -383,6 +469,7 @@ function createDesktopHost({
             stdout: child.stdout,
             stderr: child.stderr,
             reporter,
+            onUnexpectedExit,
           });
           const active = {
             conductor,
@@ -390,6 +477,7 @@ function createDesktopHost({
             child,
             channel,
             runtimeLogs,
+            expectedExit: false,
             exitReported: false,
             exitReportPromise: undefined,
             exitReason: undefined,
@@ -400,6 +488,13 @@ function createDesktopHost({
             podiumChannel.remove(active);
             conductors.delete(conductor.conductorId);
             reporter?.childExit({ component: "conductor", reasonCode: "process_exited" });
+            if (!active.expectedExit) {
+              onUnexpectedExit?.({
+                component: "conductor",
+                conductorId: conductor.conductorId,
+                reasonCode: active.exitReason ?? "conductor_process_exited",
+              });
+            }
             void reportExit(active, active.exitReason ?? "conductor_process_exited").catch(() => undefined);
           });
           child.once("close", () => runtimeLogs.close());
@@ -456,6 +551,7 @@ function createDesktopHost({
     podiumChannel.remove(active);
     conductors.delete(active.conductor.conductorId);
     active.exitReason ??= reasonCode;
+    active.expectedExit = true;
     await closeOwnedProcess(active.child);
     await reportExit(active, active.exitReason);
   }
@@ -467,6 +563,7 @@ function createDesktopHost({
     podiumChannel.remove(active);
     conductors.delete(conductorId);
     active.exitReason ??= "conductor_process_sigkill";
+    active.expectedExit = true;
     await forceKillOwnedProcess(active.child);
     await reportExit(active, active.exitReason);
   }
@@ -946,9 +1043,10 @@ function secretLengthFor(body) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 16_384 ? value : 0;
 }
 
-export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr, reporter } = {}) {
+export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr, reporter, onUnexpectedExit } = {}) {
   if (!identifier(conductorId) || !readableStream(stdout) || !readableStream(stderr) ||
-      reporter !== undefined && typeof reporter.runtimeDiagnostic !== "function") {
+      reporter !== undefined && typeof reporter.runtimeDiagnostic !== "function" ||
+      onUnexpectedExit !== undefined && typeof onUnexpectedExit !== "function") {
     throw stableError("foreground_e2e_conductor_log_forwarder_input_invalid");
   }
   let closed = false;
@@ -969,14 +1067,14 @@ export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr
   });
 
   function forward(line) {
-    if (closed || reporter === undefined) return;
+    if (closed) return;
     let value;
     try {
       value = JSON.parse(line);
     } catch {
       if (!invalidJsonReported) {
         invalidJsonReported = true;
-        reporter.runtimeDiagnostic({
+        reporter?.runtimeDiagnostic({
           component: "conductor",
           conductorId,
           level: "error",
@@ -993,7 +1091,7 @@ export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr
     if (!isKnownConductorRuntimeLogEvent(value.event)) {
       if (!unknownEventReported) {
         unknownEventReported = true;
-        reporter.runtimeDiagnostic({
+        reporter?.runtimeDiagnostic({
           component: "conductor",
           conductorId,
           level: value.level === "error" ? "error" : "warning",
@@ -1020,12 +1118,21 @@ export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr
       reportInvalidFields();
       return;
     }
-    reporter.runtimeDiagnostic(diagnostic);
+    reporter?.runtimeDiagnostic(diagnostic);
+    if (diagnostic.runtimeEvent === "root_reconciliation_failed" &&
+        diagnostic.reason === "performer_agent_process_exited") {
+      onUnexpectedExit?.({
+        component: "performer",
+        conductorId,
+        ...(diagnostic.rootIssueId ? { rootIssueId: diagnostic.rootIssueId } : {}),
+        reasonCode: "performer_agent_process_exited",
+      });
+    }
 
     function reportInvalidFields() {
       if (invalidFieldsReported) return;
       invalidFieldsReported = true;
-      reporter.runtimeDiagnostic({
+      reporter?.runtimeDiagnostic({
         component: "conductor",
         conductorId,
         level: "error",
@@ -1068,7 +1175,7 @@ function runtimeLogDiagnostic(value) {
     (value.phase === undefined || safeReasonCode(value.phase));
 }
 
-function collectSanitizedChildReason(stream, fallback) {
+function collectSanitizedChildReason(stream, fallback, observe) {
   let reason = fallback;
   let buffer = "";
   stream?.on?.("data", (chunk) => {
@@ -1079,10 +1186,41 @@ function collectSanitizedChildReason(stream, fallback) {
       try {
         const value = JSON.parse(line);
         if (safeReasonCode(value?.sanitized_reason)) reason = value.sanitized_reason;
+        observe?.(value);
       } catch {}
     }
   });
   return () => reason;
+}
+
+function createUnexpectedExitRegistry() {
+  const faults = [];
+  const listeners = new Set();
+  const keys = new Set();
+  return Object.freeze({
+    report(fault) {
+      if (!unexpectedExitFault(fault)) return;
+      const key = [fault.component, fault.conductorId ?? "", fault.rootIssueId ?? "", fault.reasonCode].join("\0");
+      if (keys.has(key)) return;
+      keys.add(key);
+      const value = Object.freeze({ ...fault });
+      faults.push(value);
+      for (const listener of [...listeners]) listener(value);
+    },
+    subscribe(listener) {
+      if (typeof listener !== "function") throw stableError("foreground_e2e_process_fault_listener_invalid");
+      for (const fault of faults) listener(fault);
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  });
+}
+
+function unexpectedExitFault(value) {
+  if (!value || typeof value !== "object" || !["podium", "conductor", "performer"].includes(value.component) ||
+      !safeReasonCode(value.reasonCode)) return false;
+  if (value.component === "podium") return value.conductorId === undefined && value.rootIssueId === undefined;
+  return identifier(value.conductorId) && (value.rootIssueId === undefined || identifier(value.rootIssueId));
 }
 
 function baseChildEnvironment(environment) {

@@ -195,6 +195,45 @@ test("the scheduler settles an unresponsive Case driver when its scope deadline 
   assert.ok(controllers.every((controller) => controller.signal.aborted));
 });
 
+test("an unexpected required process exit releases the affected driver, final-reads it, and cannot become success", async () => {
+  const fixtures = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, satisfiedFixture(definition)]));
+  const controllers = [];
+  const finalReads = [];
+  const summary = await runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    runCase: ({ definition }) => {
+      if (definition.caseId !== "approved_happy_path") return fixtures.get(definition.caseId).context;
+      queueMicrotask(() => controllers[0].abort());
+      return new Promise(() => {});
+    },
+    readFinalEvidence: async ({ definition }) => {
+      finalReads.push(definition.caseId);
+      return fixtures.get(definition.caseId);
+    },
+    createCaseScope: ({ definition }) => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      return {
+        caseId: definition.caseId,
+        signal: controller.signal,
+        deadlineExceeded: () => false,
+        processFault: () => definition.caseId === "approved_happy_path"
+          ? "foreground_e2e_process_conductor_exited"
+          : undefined,
+        dispose() {},
+      };
+    },
+    now: sequencedClock(),
+  });
+
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASE_IDS.slice().sort());
+  const affected = summary.cases.find(({ caseId }) => caseId === "approved_happy_path");
+  assert.equal(affected.verdict, "failed");
+  assert.deepEqual(affected.reasonCodes, ["foreground_e2e_process_conductor_exited"]);
+  assert.equal(affected.driverFailureCode, "foreground_e2e_process_conductor_exited");
+  assert.equal(summary.exitCode, 1);
+});
+
 test("a Case deadline cannot turn complete evidence into success", async () => {
   const fixtures = new Map(FOREGROUND_E2E_CASES.map((definition) => [definition.caseId, satisfiedFixture(definition)]));
   const summary = await runForegroundE2ECases({

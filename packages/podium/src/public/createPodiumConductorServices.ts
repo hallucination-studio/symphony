@@ -48,7 +48,6 @@ export function createPodiumConductorServices(input: {
           now: Date.now,
           observe: (observation) => {
             observe(observation);
-            input.observeLinearRequest?.(observation);
           },
           ...(input.linearPhysicalRequestGate
             ? {
@@ -64,6 +63,7 @@ export function createPodiumConductorServices(input: {
         },
       ),
       ...(observer ? { linearRequestObserver: observer } : {}),
+      ...(input.observeLinearRequest ? { observeLinearRequest: input.observeLinearRequest } : {}),
     }),
     close: () => store.close(),
   };

@@ -362,6 +362,9 @@ export interface LinearPhysicalRequestObservation {
   status?: number;
   requestWindow?: LinearRequestWindowObservation;
   complexityWindow?: LinearRequestWindowObservation;
+  installationId?: string;
+  projectId?: string;
+  requestClass?: "control" | "workflow" | "mutation" | "read-back" | "background";
 }
 
 export interface LinearRequestObservationOptions {

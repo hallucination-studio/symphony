@@ -19,6 +19,7 @@ async function createConductorServices(
   onLinearObserver = () => undefined,
   onRequestScope = () => undefined,
   bindings = [conductorBinding()],
+  observeLinearRequest = () => undefined,
 ) {
   const services = new PodiumConductorServicesImpl(
     {
@@ -41,6 +42,7 @@ async function createConductorServices(
         onRequestScope(requestScope);
         return linearSdk;
       },
+      observeLinearRequest,
     },
   );
   await Promise.all(bindings.map(async (entry, index) => await services.handle({
@@ -136,6 +138,53 @@ test("Project Root Index coalesces concurrent reads from three Conductors sharin
   assert.equal(pages.length, 3);
   assert.ok(pages.every((page) => page.kind === "project_root_index_page" && page.page.headers.length === 12));
   assert.equal(physicalReads, 1);
+});
+
+test("Project Root Index physical observations retain the production installation and Project scope", async () => {
+  let physicalReads = 0;
+  let observePhysical;
+  const observations = [];
+  const bindings = [
+    conductorBinding(),
+    conductorBinding({ bindingId: "binding-2", conductorId: "conductor-2", conductorShortHash: "def456" }),
+    conductorBinding({ bindingId: "binding-3", conductorId: "conductor-3", conductorShortHash: "ghi789" }),
+  ];
+  const services = await createConductorServices({
+    async listProjectRootIndexPage() {
+      physicalReads += 1;
+      observePhysical({
+        operation: "SymphonyProjectRootIndex",
+        correlationId: "request-1",
+        durationMs: 12,
+        status: 200,
+      });
+      return {
+        headers: Array.from({ length: 12 }, (_unused, index) => rootHeader({
+          rootIssueId: `root-${index + 1}`,
+          identifier: `SYM-${index + 1}`,
+        })),
+        pageInfo: { hasNextPage: false },
+      };
+    },
+  }, (observe) => { observePhysical = observe; }, undefined, bindings, (observation) => observations.push(observation));
+
+  await Promise.all(bindings.map(({ bindingId }) => services.handle({
+    kind: "list_project_root_index_page",
+    binding_id: bindingId,
+    expected_project_id: "project-1",
+    page: { limit: 250 },
+  })));
+
+  assert.equal(physicalReads, 1);
+  assert.deepEqual(observations, [{
+    operation: "SymphonyProjectRootIndex",
+    correlationId: "request-1",
+    durationMs: 12,
+    status: 200,
+    installationId: "installation-1",
+    projectId: "project-1",
+    requestClass: "workflow",
+  }]);
 });
 
 test("Podium reuses one Linear gateway for sequential requests in the same class", async () => {
