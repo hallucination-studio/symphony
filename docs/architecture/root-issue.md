@@ -1,6 +1,6 @@
 # Root Issue工作流事实
 
-状态：目标架构提案。本文定义Root、Cycle、Plan/Work/Verify/Human Issue Tree、Linear status、archive和durable
+状态：目标架构提案。本文定义Root、Cycle、Plan/Work/Verify Issue Tree、Linear status、archive和durable
 records。Root与Cycle语义、用户comment和控制算法统一由
 [Root Reconciliation](root-reconciliation.md)定义。
 
@@ -13,19 +13,26 @@ Root Issue
 ├── Cycle Issue 1
 │   ├── Plan Issue
 │   ├── Work Issues
-│   ├── Verify Issue
-│   └── Human Action Issues
+│   └── Verify Issue
 ├── Cycle Issue 2
 │   └── ...
-└── Root Human Action Issues
+
+Root comments
+└── Human Action request/resolution threads
 ```
 
 一个Root对应一个固定Performer Profile、一个delivery branch和一个worktree。Cycle是Root直接子Issue；Plan、
-Work、Verify和Cycle Human Action都是Cycle直接子Issue。Root Human Action只处理Root级convergence、delivery或
-全局用户决定。
+Work和Verify都是Cycle直接子Issue。Human Action无论语义scope属于Root还是Cycle，都只使用Root顶层special managed
+comment thread；完整交互由[Root Human Action Comment](human-actions.md)定义。
 
-Plan/Work/Verify是DAG执行节点。Human Action不参与DAG execution，只通过relations链接相关节点。一个Root同时
-最多一个nonterminal、nonarchived Cycle。
+Root Issue description是Root `DEFINE`后明确用户需求的唯一durable正文surface。Root Reconciler只能基于fresh Root
+description和未消费的用户输入，在不发明需求的前提下用现有`revise_root_tree/update_node`规范化objective、
+included/excluded scope、constraints、acceptance criteria、verification requirements和明示delivery instruction；
+具体语义和read-back规则由[Root Reconciliation](root-reconciliation.md)定义。不存在第二份Spec Issue、Root Contract
+record或task文件作为需求authority。
+
+Plan/Work/Verify是DAG执行节点。Human Action不是Issue或DAG node，通过request record中的typed references关联目标。
+一个Root同时最多一个nonterminal、nonarchived Cycle。
 
 ## 2. Linear status catalog
 
@@ -37,8 +44,8 @@ Linear status按Team配置。Project初始化必须验证以下display statuses�
 | Unstarted | `Todo` |
 | Started | `Planning`, `Sealed`, `Executing`, `Verifying`, `In Progress`, `In Review` |
 | Started | `Needs Approval`, `Needs Info`, `Inconclusive`, `Escalated` |
-| Completed | `Succeeded`, `Changes Required`, `Done`, `Approved`, `Answered` |
-| Canceled | `Canceled`, `Failed`, `Rejected` |
+| Completed | `Succeeded`, `Changes Required`, `Done` |
+| Canceled | `Canceled`, `Failed` |
 
 Symphony通过Issue description中strict `json` code block承载的唯一`WorkflowIssueRecord`和matching primary kind label
 限制每类Issue允许的status子集。`WorkflowIssueRecord`只证明后代Issue的stable identity、scope和kind，不表达lifecycle；
@@ -67,19 +74,23 @@ Todo | In Progress | Needs Approval | Needs Info | In Review -> Canceled
 |---|---|
 | `Todo` | 尚未claim |
 | `In Progress` | Root Reconciliation可以推进当前Cycle或Root mutation |
-| `Needs Approval` | 存在matching active approval Human Action |
-| `Needs Info` | 存在matching active Clarification Human Action |
-| `In Review` | 最新passed Cycle对应revision已经交付 |
+| `Needs Approval` | [Human Action](human-actions.md)从全部active Root requests派生的approval summary |
+| `Needs Info` | [Human Action](human-actions.md)从全部active Root requests派生的clarification summary |
+| `In Review` | matching terminal Cycle经Root REVIEW通过，且exact verified revision与`DeliveryRecord`已经交付并read-back |
 | `Done` | 用户或SCM确认接受 |
 | `Canceled` | Root terminal；所有active sessions和late outputs失效 |
 
-Root waiting status是Root header summary；canonical Action和resolution仍在完整Tree。Root不能在没有matching active
-Action时保持waiting，也不能在有阻塞Action时继续dispatch。
+`Needs Approval`与`Needs Info`的precedence、active-request derivation和dispatch影响不在本文重复定义，只由
+[Human Action](human-actions.md)控制。
+
+Root不能仅因`verify_passed`、`CycleOutcome.succeeded`或`conclude_root`被接受就进入`In Review`。只有Conductor完成
+matching SHIP机械流程、fresh read-back `DeliveryRecord`并确认Root status写入后才成立；进入`In Review`不表示用户已接受，
+也不触发worktree cleanup或自动`Done`。
 
 这些图只定义各自Linear Issue的原生custom-status lifecycle，不是彼此的投影或第二套状态机：Root status属于Root
-Issue，Cycle status属于Cycle Issue，Node status属于Plan/Work/Verify Issue，Action status属于Human Action Issue。任何
-derived view、timeline、reply、reaction、thread state、directive或record都不得保存、推断或推进其中任一status；它们只能由
-accepted directive materialize后从Linear read-back确认。
+Issue，Cycle status属于Cycle Issue，Node status属于Plan/Work/Verify Issue。Human Action不是Issue，其lifecycle只见
+[Human Action](human-actions.md)。任何derived view、timeline、reply、reaction、thread state、directive或record都不得
+保存、推断或推进Root/Cycle/Node status；它们只能由accepted directive materialize后从Linear read-back确认。
 
 ## 4. Cycle state
 
@@ -100,14 +111,14 @@ any nonterminal -> Canceled
 | `Executing` | Root Reconciler正在推进和调整Work DAG |
 | `Verifying` | Verify thread针对固定revision运行 |
 | `Inconclusive` | Verify证据不足，Root Reconciler需要决定下一步 |
-| `Escalated` | matching Human Action或已持久化execution failure阻止继续 |
+| `Escalated` | matching active Human Action Comment或已持久化execution failure阻止继续 |
 | `Succeeded` | Cycle成功terminal |
 | `Changes Required` | Cycle非成功terminal；outcome说明repair或exhausted |
 | `Canceled` | 用户或Root取消导致terminal |
 
 `Sealed`只保护Approved Plan Contract，不表示Execution DAG永久不变。Root Reconciler可在Contract范围内提出
 create/update/archive/restore/reorder/dependency patch；Conductor验证并materialize。触碰目标、scope、acceptance
-criteria或protected constraint时必须走fresh Plan/Human Action，而不能伪装成DAG patch。
+criteria或protected constraint时必须走fresh Plan/Human Action Comment，而不能伪装成DAG patch。
 
 ## 5. Node状态
 
@@ -118,9 +129,8 @@ Verify: Todo -> In Progress -> Done | Failed | Canceled
 ```
 
 Plan/Work/Verify的status只记录durable执行生命周期；重试次数和turn identity来自matching execution records。
-Human Action使用同一status catalog中的专用display status，但其允许迁移、用户操作、comment/thread交互和resolution
-只由[Human Action](human-actions.md)定义。本文不复制Action transition，避免status catalog变成第二套Action
-lifecycle定义。
+Human Action没有专用display status、label或Issue lifecycle；Root summary与comment thread规则只由
+[Root Human Action Comment](human-actions.md)定义。
 
 每次`execute_plan`、`execute_work`、`execute_verify`或`rerun_stage`在调用Performer前，Conductor必须先把matching
 active Node写为`In Progress`并read-back。它只在matching Stage Result已经durable写入和read-back后，才按closed
@@ -144,7 +154,6 @@ archive规则：
 - archived Node不参与ready、dependency satisfaction或Verify required set；
 - active Node不能依赖archived Node，除非同一accepted patch重写依赖；
 - restore必须显式设置允许的active status并创建fresh execution，不能恢复旧Provider turn；
-- archived Human Action不是resolution；restore不能重放旧approval/answer；
 - 完整Root/Cycle读取始终包含archived Issues。
 
 ## 6. DAG与Plan Contract
@@ -163,8 +172,7 @@ materialization directive，Conductor创建initial graph：
 Cycle(Sealed/Executing)
 ├── Plan(Done, plan_contract_digest)
 ├── Work*(plan_contract_digest, active or archived)
-├── Verify(plan_contract_digest, active or archived)
-└── Human Action*(not a DAG node)
+└── Verify(plan_contract_digest, active or archived)
 ```
 
 规则：
@@ -190,6 +198,7 @@ RootConvergencePolicy
 RootDirectiveRecord
 RootReconcilerFailureRecord
 RootReconcilerReplyRecord
+DeliveryRecord
 ModelTurnRecord
 PlanContractRecord
 PlanContractSupersessionRecord
@@ -239,7 +248,7 @@ runtime session只做内存correlation；恢复不能依赖Provider conversation
 
 | 类别 | 拥有内容 | 明确不拥有 |
 |---|---|---|
-| Issue custom status + native archive flag | Root/Cycle/Node/Action lifecycle与active membership | Result payload、下一步语义 |
+| Issue custom status + native archive flag | Root/Cycle/Node lifecycle与active membership | Result payload、Human Action lifecycle、下一步语义 |
 | Result、Resolution、Outcome、Finding、Failure records | immutable execution、用户决定或失败证据 | current status、ready node、下一步 |
 | RootDirectiveRecord | Root Reconciler已接受的一个语义意图和幂等mutation identity | materialization成功声明、后续directive |
 | Control/Timeline/Reply comments | ownership/Profile事实或用户叙事与回复、native thread/reaction回执 | Workflow lifecycle、调度cursor |
@@ -254,9 +263,7 @@ runtime session只做内存correlation；恢复不能依赖Provider conversation
 
 - Node terminal status与matching terminal Result不一致时形成mechanical violation并进入Root Reconciler；只有已接受
   directive的同一execution materialization不完整时，Conductor才机械补齐；
-- Human Action terminal status只有在matching `HumanActionResolutionRecord`成立后才产生workflow后果；缺reason/answer时
-  保留用户选择的Linear status并交给Root Reconciler决定回复、请求澄清或其他动作，Conductor不能伪造resolution或
-  回滚status；
+- Human Action一致性约束只由[Human Action](human-actions.md)定义；本文只消费其read-back records；
 - Cycle terminal status与matching `CycleOutcome`不一致时形成mechanical violation并进入Root Reconciler；
 - `RootDirectiveRecord`只证明directive已接受，不证明其mutation、reply或timeline已经完成；
 - Timeline/Reply code block只证明matching Linear comment存在，不证明Workflow进入新状态；reaction和thread resolved
@@ -334,7 +341,8 @@ status、Tree和matching managed records读取。
 - Root目标、scope或acceptance变化使旧Tree digest和相关directive失效；
 - 用户修改pending Work内容后，Root Reconciler重新评估；
 - 用户archive/restore managed Node后，Conductor把当前值和由此形成的DAG violation交给Root Reconciler；
-- Human Action status/comment作为用户input交给Root Reconciler，由directive决定是否形成resolution；
+- Human Action thread reply和native thread-state revision作为用户input交给Root Reconciler，由directive决定是否形成
+  resolution、继续同thread追问或supersede request；
 - human actor创建、编辑comment，或产生新的当前native thread-state revision，进入pending input，并在处理后收到matching reply；
 - 用户粘贴`json` code block仍是普通输入；伪造actor/stable identity或试图扩大owned Root范围时安全gate fail closed；可读取的非法status、跨Tree relation或active
   dependency悬空作为mechanical violation进入Root Reconciler；
@@ -356,7 +364,7 @@ HEAD和checks满足时才能delivery；Root进入`In Review`而不自动`Done`�
 3. Root同时最多一个nonterminal active Cycle。
 4. 每个Root有一个Reconciler thread；每个Cycle有隔离Plan、Work、Verify三个Stage role thread。
 5. Approved Plan Contract immutable；Execution DAG可以通过accepted Root directive patch演进。
-6. Human Action是Root/Cycle直接子Issue，不是DAG执行节点。
+6. Human Action只存在于Root special managed comment threads，不是Issue或DAG执行节点。
 7. Stage Result必须durable后才能进入Root Reconciler delta或fresh bootstrap。
 8. Cycle耗尽先走Root convergence gate，不机械请求用户。
 9. Symphony-authored Timeline/Reply managed body和其`json` block不回流为workflow输入；但human在其native thread

@@ -1,334 +1,342 @@
-# Human Action交互与恢复
+# Root Human Action Comment交互与恢复
 
-状态：目标架构提案。本文是Human Action Issue层级、labels、用户交互、状态、resolution和恢复语义的唯一
-事实源。Cycle和Root Action内容、后续语义与materialization由
-[Root Reconciliation](root-reconciliation.md)控制。
+状态：目标架构提案。本文是Human Action Comment、用户交互、并发active requests、resolution和恢复语义的唯一
+事实源。Human Action不再是Linear Issue。Root/Cycle后续语义与materialization由
+[Root Reconciliation](root-reconciliation.md)控制，cross-process closed schema由
+[契约与接口边界](contracts.md)控制。
 
-## 1. 目标
+## 1. 决定与目标
 
-Human Action把Agent无法自行决定的业务问题变成真实、可分配、可流转、可审计的Linear Issue。用户只需要
-阅读请求、写普通评论并改变Action状态，不输入JSON、command、action ID或digest，也不直接操作内部
-Plan/Work/Verify状态。
+Human Action使用Root Issue下的特殊managed comment thread承载。每个request是一条Root顶层comment，也是该次交互
+唯一thread root；用户在同一thread回复，Symphony在同一thread写resolution或继续追问。这样用户始终在Root页面完成
+审批、拒绝、补充信息、权限决定、Finding waiver和convergence override，不需要进入额外Sub-issue或修改专用status。
+
+去掉的是Human Action Issue，不是Human Action的typed durable facts：
+
+- `HumanActionRequestRecord`仍是每次请求的immutable authority；
+- `HumanActionResolutionRecord`仍是一次terminal语义结果的immutable authority；
+- visible Markdown、native thread state、reaction和Root waiting status都不能替代上述records；
+- 用户只写普通Markdown reply，不输入JSON、command、action ID、digest或机器字段；
+- Human Action只能由Root Reconciler返回的accepted `request_human_action` directive产生；Conductor、Plan、Work、Verify、
+  E2E和timeline subscriber都不能自行创建。
 
 Human Action覆盖：
 
 - Plan review批准或拒绝；
-- 补充信息；
+- DEFINE或执行中的结构化补充信息；
 - 授予或拒绝精确权限；
 - Finding waiver；
 - convergence override；
-- 用户主动改变目标、scope或执行要求后的确认与恢复。
+- 用户改变目标、scope、交付或执行要求后的确认与恢复。
 
-## 2. Issue层级与links
+## 2. Root assignee与响应权限
 
-Human Action是独立Issue，不是Plan/Work/Verify的child，也不是可执行DAG node：
+Root必须同时满足两个不同的原生Linear事实：
+
+- `delegate_id`指向Symphony actor，授权Symphony执行Root；
+- `assignee_user_id`指向一个natural human，作为Human Action的通知和响应主体。
+
+两者不能互相替代。Podium完整Root读取和Root header必须提供closed assignee snapshot，包括stable user ID、actor kind和
+用于展示的bounded display value。没有natural human assignee的Root不能成功admit；Conductor不能把Symphony actor、
+unknown actor、comment author、Project member或最近回复者猜成assignee。
+
+创建Human Action时，Conductor从accepted directive所基于的fresh Root version冻结当前
+`requested_actor_user_id`，并通过Linear支持的mention rendering在visible Markdown中`@mention`该用户。mention只负责
+通知和可读性；授权始终由record中的stable user ID和fresh reply author identity证明，不能从显示名或`@text`解析。
+
+只有matching `requested_actor_user_id`创建的human reply可以形成human resolution。其他human在thread中的回复仍是普通
+Root input，可以收到说明，但不能批准、拒绝、回答或取消该request。Root assignee变化是fresh Root fact和execution
+barrier；Root Reconciler必须用typed `superseded` resolution关闭仍指向旧assignee的active requests，再按需要为新
+assignee产生fresh requests。Conductor不得静默改写request actor或让新旧assignee共享一个审批窗口。
+
+## 3. Comment与并发模型
+
+一个Root可以同时拥有多个active Human Action Comment threads。每个thread必须有不同的`action_id`，并独立绑定：
 
 ```text
-Root Issue
-├── Cycle Issue
-│   ├── Plan Issue
-│   ├── Work Issues
-│   ├── Verify Issue
-│   └── Human Action Issues
-└── Root Human Action Issues
+HumanActionRequestComment
+  host: Root Issue top-level comment
+  body: user Markdown + exactly one HumanActionRequestRecord json block
+  thread_root_comment_id: its own Linear comment ID after read-back
+  requested actor: frozen Root natural-human assignee
+  replies: ordinary human comments
+  terminal Symphony reply: HumanActionResolutionComment
 ```
-
-- Cycle相关Action是Cycle直接子Issue，并通过relation链接相关Plan、Work或Verify；
-- Root全局Action是Root直接子Issue；
-- Action拥有自己的assignee、description、comments、status、archive flag和审计历史；
-- Action不参与Work DAG ready/dependency计算，不被Plan/Work/Verify executor dispatch；
-- archived Action仍属于完整Root Tree；已有session通过delta获知，fresh session通过bootstrap获知。
-
-## 3. Labels与Project初始化
-
-Project初始化必须创建并验证以下managed labels：
-
-```text
-Cycle
-Plan
-Work
-Verify
-Human Action
-Plan Review
-Clarification
-Permission
-Finding Waiver
-Convergence Override
-```
-
-每个Root descendant必须有且只有一个主kind label：Cycle使用`Cycle`，Plan使用`Plan`，Work使用`Work`，Verify使用
-`Verify`，Human Action使用`Human Action`。每个Action还必须恰有一个Action kind label。Label只表达Issue/action kind，
-不表达生命周期或resolution；生命周期只由Action status和原生archive flag表达。用户造成的缺失、重复或错误kind label作为
-mechanical violation进入Root Reconciler；Conductor不能根据title猜测类型或主动修正。
 
 ## 4. 状态模型
 
-### 4.1 Approval Action
+active状态只从fresh Linear facts派生：存在一个valid request record，且不存在matching valid resolution record。native
+thread `unresolved`是active request的必需一致性事实，但不是active authority；用户手工resolve thread不能批准或取消请求。
+Conductor fresh read发现active request的thread被手工resolve时，把该thread-state revision交给Root Reconciler；matching
+directive必须解释并reopen或terminalize该request，不能把close动作猜成同意。
+
+多个active requests可以属于不同action kind或scope，但不得重复同一`action_kind + scope + proposal_digest`。每条
+request独立回答、resolution和resolve；一个reply不能同时解决两个threads。Root Reconciler一个turn仍只返回一个closed
+action，但`human_action_resolutions[]`可以同时terminalize本轮facts支持的多个requests。
+
+Root waiting status只是全部active requests的header summary：
 
 ```text
-Todo -> In Progress -> Approved | Rejected | Canceled
-Todo -> Approved | Rejected | Canceled
+one or more active clarification requests -> Root Needs Info
+otherwise one or more active requests     -> Root Needs Approval
+no active requests                        -> Root status follows the accepted next directive
 ```
 
-适用于`plan_review`、`permission`、`finding_waiver`和`convergence_override`。
+`Needs Info`优先于`Needs Approval`只为让单一Root status确定化，不表达Action优先级或resolution。存在任何active request
+时，该Root不dispatch新的Stage turn；Root Reconciler仍可处理reply、assignee变化、Root revision和其他pending inputs。
 
-| status | 用户含义 |
-|---|---|
-| `Todo` | 尚未处理 |
-| `In Progress` | 已认领或正在评估 |
-| `Approved` | 无条件接受description中的精确提案 |
-| `Rejected` | 明确拒绝提案；必须有fresh reason comment |
-| `Canceled` | 请求已失效或无需继续，不等于批准或拒绝 |
+## 5. DEFINE批量提问规则
 
-### 4.2 Clarification Action
+DEFINE不得采用“一次问一个问题、收到回答后再问下一个已知问题”的对话方式。Root Reconciler在请求clarification前必须
+一次检查objective、included scope、excluded scope、constraints、acceptance criteria、verification requirements和delivery
+instruction，把当前facts下所有可识别的缺失、冲突和必须由用户选择的内容合并为一个结构化question set。
 
 ```text
-Todo -> In Progress -> Answered | Canceled
-Todo -> Answered | Canceled
+DefineQuestion
+  question_id
+  category:
+    objective | included_scope | excluded_scope | constraint |
+    acceptance | verification | delivery
+  question
+  why_needed
+  answer_format
+  choices[]
+  required
 ```
 
-| status | 用户含义 |
-|---|---|
-| `Answered` | comment中已经提供请求的信息 |
-| `Canceled` | 无法或不再需要提供信息 |
+`question_id`在该request内唯一且稳定；`choices[]`只在确有closed options时使用，不能用伪选项限制用户原始意图。
+`answer_format`是给人的简短提示，不是parser grammar。所有当前已知问题必须在同一个clarification request中，按category
+分组并编号。Root Reconciler不能为了减少单次输出、节省token或维持对话而故意延后已知问题。
 
-`Approved`、`Rejected`、`Answered`和`Canceled`都是terminal Action lifecycle。恢复旧terminal Action不恢复旧
-workflow；需要新的交互时创建新Action。原生archive flag独立于status：archive保留terminal或当前status，
-但使Action退出active Tree membership；restore后仍需Root Reconciler决定是否创建新Action，不能隐式重放旧结果。
+用户可以用一个reply回答全部问题，也可以在同一thread追加reply。只有全部required `question_id`都有明确、互不冲突的
+回答时，Root Reconciler才能形成`answered` resolution；partial reply只得到结构化缺项说明，原request保持active，不能
+为剩余旧问题创建新Human Action。旧request resolved后，只有新用户事实、repository evidence或回答本身暴露了此前
+不可知的新缺口，才允许创建新的clarification request；新request必须引用新缺口evidence，不能重复已回答问题。
 
-Action comment使用Linear原生thread resolve/reopen。thread lifecycle只表示该段对话是否仍需跟进，不改变Action
-status、resolution或Root/Cycle lifecycle。用户reopen、编辑已处理comment或新增reply都会作为新的Root Reconciler输入；
-Symphony的✅/❌只表示matching comment input是否被采纳，不是审批按钮。
+## 6. Visible Markdown contract
 
-这里的“关闭评论”是把Linear原生comment thread设为`resolved`；“重新打开评论”是把同一原生thread设为
-`unresolved`。两者不创建Action子状态、comment revision record或本地历史。只有matching Root Reconciler reply在
-必要业务mutation read-back后才可在用户自己的reason、answer或普通输入comment上写Symphony自身的✅或❌receipt；
-child reply本身不承载该receipt。它不能修改用户reaction、也不能代替`Approved`、
-`Rejected`、`Answered`或`Canceled`状态。
-
-## 5. 用户如何操作
-
-### 5.1 Approved
-
-用户阅读description中的完整提案，将Action移到`Approved`。comment可选；`Approved`表示接受原提案，评论
-不能附加条件或悄悄改变scope。有条件同意应使用`Rejected`并写清希望如何修改，由Root Reconciler基于reason
-形成新的Plan、DAG patch或Action。
-
-### 5.2 Rejected
-
-用户先写普通comment说明原因，再将Action移到`Rejected`。用户不需要结构化reason。
-
-若Action已进入`Rejected`但没有符合时序和author要求的reason comment：
-
-```text
-preserve original Action as Rejected
--> do not approve, supersede Plan or advance Work
--> pass missing-reason fact to Root Reconciler
--> Root Reconciler normally requests a linked Clarification Action
--> Root remains waiting until a valid resolution path is durable
-```
-
-Conductor不能从title、其他Issue comment或模型猜测拒绝原因。
-
-若用户已经提供reason但Action仍为`Todo`或`In Progress`，该comment可以被Root Reconciler消费并收到“还需要把Action
-移到Rejected”的原生thread reply，但thread保持unresolved、不添加terminal reaction，也不形成resolution。只有
-matching `Rejected` status、fresh reason和accepted `HumanActionResolutionRecord`全部成立后，用户的原reason comment才收到
-✅并resolve；若reason明确不被采纳则在同一source comment使用❌并说明原因。reaction永远不代替Action status。
-
-### 5.3 Answered
-
-Clarification description列出明确问题、为什么需要、期望内容和回答后的影响。用户在Action下写普通comment，
-再将其移到`Answered`。没有fresh answer comment的`Answered`不产生answer resolution，并按missing-answer fact
-交给Root Reconciler处理。
-
-### 5.4 Canceled
-
-`Canceled`表示本次请求已失效或用户无法完成，不等于`Rejected`。后续由Root Reconciler决定：
-可以换方法、创建新Action、调整DAG或结束Cycle。Root convergence Action被取消后，Root gate继续生效，
-不能自动恢复执行。
-
-## 6. Action description contract
-
-`RequestHumanActionDirective`必须提供足够语义，Conductor再以固定模板渲染description：
+Conductor从closed directive和fresh assignee snapshot确定性渲染comment。Root Reconciler提供结构化内容，不输出任意
+mention syntax、HTML、machine IDs或managed JSON。clarification request使用以下用户层：
 
 ````markdown
-# <需要审批 | 需要信息 | 需要权限 | 需要确认>
+@<Root assignee>
 
-<一句话说明用户现在需要决定或提供什么>
+# 需要你补充信息
 
-## 审核内容
-<精确proposal、问题或权限边界，以及Root/Cycle和linked Plan/Work/Verify>
+<一句话说明为什么当前Root暂时不能继续>
 
-## 依据与风险
-- <bounded evidence links>
-- <批准、拒绝或缺少信息的影响>
+## 相关范围
+- Root: <Linear link>
+- Cycle / Plan / Work / Verify: <只列matching links>
 
-## 你需要做什么
-1. <需要comment时，明确列出必须回答的问题或reason>
-2. 将Action移动到`Approved`、`Rejected`、`Answered`或`Canceled`中的合法目标状态。
+## 请一次回答以下问题
 
-## 状态含义
-- `Approved`: <无条件接受什么>
-- `Rejected`: <拒绝什么；是否要求reason>
-- `Answered`: <哪些问题必须已回答>
-- `Canceled`: <为什么不等于拒绝或批准>
+### Q1 · <category>
+**问题**：<question>
 
-## 之后会发生什么
-<每个合法terminal status对应的Root Reconciler下一步边界，不承诺尚未发生的结果>
+**为什么需要**：<why_needed>
+
+**建议回答方式**：<answer_format>
+
+**可选项**：<只有closed choices存在时显示>
+
+### Q2 · <category>
+...
+
+## 如何回复
+请直接在这个comment thread中回复，并保留`Q1`、`Q2`编号。你不需要修改Root status或输入任何机器字段。
+
+## 回复之后
+Symphony会一次检查全部回答；仍缺少内容时会在本thread列出未回答的问题，不会为同一批问题重复创建comment。
 
 ```json
-{"kind":"workflow_issue","version":1,"issue_key":"...","root_issue_id":"...","parent_issue_id":"...","issue_kind":"human"}
+{"kind":"human_action_request","version":1,"action_id":"..."}
 ```
 ````
 
-renderer按Action kind省略不适用状态，不显示空section。description中的唯一`json` block严格是
-`WorkflowIssueRecord`，只承载Issue identity、kind和parent scope；source directive reference与完整immutable proposal
-只写入`HumanActionRequestRecord` comment，避免description编辑成为第二份directive、resolution或approval事实。
+approval、permission、finding waiver和convergence override使用同一整体结构，但把“请一次回答以下问题”替换为精确
+proposal、evidence/risk、closed options和reply要求。每种option必须说明接受后的边界；有条件批准应回复reject/deny并
+写明条件，由Root Reconciler产生fresh proposal，不能把附加条件偷偷并入approved outcome。
 
-description与用户comment可以使用普通Markdown的heading、列表、引用、链接和非`json` code block来说明提案、
-证据或用户需要提供的信息；这不会改变machine record规则。任何Symphony创建的description仍恰有一个位于末尾的
-`json` block，且其中持久化JSON字段使用[契约与接口边界](contracts.md)定义的snake_case wire shape。
-
-Action必须让用户无需阅读Provider transcript即可做决定。description不能包含secret、raw reasoning、内部command
-或要求用户输入机器标识。内容超过bound时，Root Reconciler必须缩小请求；仍不合法则directive失败并写matching
-Linear managed failure record。Conductor不能创建内容
-不完整的审批。
+Markdown必须短、可扫描、无空section，并在唯一`json` block前结束。不得包含secret、raw reasoning、Provider transcript、
+Git command、内部path或要求用户读取另一个workflow文档。内容超过bound时，Root Reconciler必须合并重复问题和缩小
+上下文，但不能丢弃required问题；仍超限则directive fail closed。
 
 ## 7. Durable records
 
 ### 7.1 HumanActionRequestRecord
 
 ```text
-action_id
-action_issue_id
-action_kind
-parent_scope: root | cycle
-root_issue_id
-cycle_issue_id?
-related_issue_ids[]
-source_root_directive_id?
-source_root_convergence_record_id?
-based_on_tree_digest?
-proposal_digest
-expected_parent_remote_version
-created_at
+HumanActionRequestRecord
+  kind: human_action_request
+  version
+  action_id
+  root_issue_id
+  scope_kind: root | cycle
+  cycle_issue_id?
+  action_kind:
+    plan_review | clarification | permission |
+    finding_waiver | convergence_override
+  related_issue_ids[]
+  source_root_directive_id?
+  source_root_convergence_record_id?
+  based_on_root_digest
+  proposal_digest
+  requested_actor_user_id
+  requested_actor_root_version
+  title
+  description
+  requested_decision?
+  options[]
+  questions[]
+  evidence_refs[]
+  created_at
 ```
 
-canonical record写在Action Issue managed comment的唯一`json` code block。Root waiting status由matching active Action机械约束；Root Control
-Record Comment不复制Action identity、status或resolution。
+record位于request comment的唯一strict `json` block。host `comment_id`、remote version、thread root identity和stable
+write correlation来自fresh outer Linear comment snapshot，不预填进创建前的record，也不复制为第二份identity。
+`clarification`必须有非空`questions[]`且不使用decision options；其他action kind必须有明确
+`requested_decision + options[]`，只有确需附带解释的问题才允许questions。所有variants都要求human reply；删除旧的
+`comment_required`开关。
 
 ### 7.2 HumanActionResolutionRecord
 
 ```text
-resolution_id
-action_id
-action_issue_id
-action_kind
-outcome:
-  approved | rejected | answered | canceled |
-  granted | denied | waived | override_applied | override_rejected
-terminal_status
-terminal_remote_version
-source_comment_ids[]
-source_comment_versions[]
-actor_kind: human
-proposal_digest
-resolved_at
+HumanActionResolutionRecord
+  kind: human_action_resolution
+  version
+  resolution_id
+  action_id
+  root_issue_id
+  request_comment_id
+  request_comment_remote_version
+  action_kind
+  outcome:
+    approved | rejected | answered | canceled |
+    granted | denied | waived |
+    override_applied | override_rejected | superseded
+  proposal_digest
+  source:
+    HumanReplyResolutionSource
+      responder_user_id
+      reply_comment_ids[]
+      reply_body_digests[]
+      normalized_answers[]
+        question_id
+        bounded_answer
+        source_comment_ids[]
+    | SupersededResolutionSource
+      reason: assignee_changed | root_revised | target_terminal | proposal_replaced
+      evidence_refs[]
+  source_root_directive_id
+  resolved_at
 ```
 
-Conductor从fresh Linear facts验证actor、source version、Action scope和schema，再把status/comment及proposal事实
-作为delta交给Root Reconciler。Root Reconciler通过`RootDirective.human_action_resolutions[]`决定是否形成record；
-Conductor只验证matching status、comment requirement、proposal digest和无既有resolution后写入并read-back。
-同一Action最多一个resolution；status本身是用户选择事实，resolution是Root Reconciler接受该输入的不可变证据。
+human source要求所有reply都属于matching request thread、author kind为human且stable user ID等于request冻结的actor。
+`normalized_answers[]`只用于clarification且必须覆盖全部required question IDs；它是Root Reconciler基于引用reply形成的
+bounded结构化结果，不替代原始human comments。Conductor验证identity、coverage、proposal digest、source versions和
+无既有resolution，但不解释自然语言。
 
-Action下的普通human comment也会按Root Reconciliation规则得到reply，但在matching terminal status和
-`HumanActionResolutionRecord`成立前，Root Reconciler不能仅凭评论文本产生Approved、Rejected或Answered后果。
+`superseded`只能由Root Reconciler基于fresh assignee/Root/target/proposal facts产生，不能伪装成人类决定。一个action
+最多一个resolution。resolution record位于同一request thread中的Symphony managed reply；其outer comment identity在
+create/read-back后获得。
 
-## 8. Materialization与Root Reconciler恢复
+## 8. Request materialization
 
-### 8.1 创建Cycle Action
-
-```text
-Root Reconciler returns request_human_action directive
--> Conductor validates parent scope, links, labels and description completeness
--> create Human Action as direct child of Cycle
--> create relations to relevant Plan/Work/Verify
--> append HumanActionRequestRecord
--> read back Issue, labels, relations, status and HumanActionRequestRecord code block
--> the active Action becomes the durable waiting fact; materialize a Root/Cycle
-   waiting-status mutation only when the accepted directive explicitly requires it,
-   then read it back from Linear
--> stop dispatching the blocked Cycle path
+```mermaid
+flowchart TD
+    A["Root Reconciler returns request_human_action"] --> B["Conductor validates Root digest, scope, proposal and current human assignee"]
+    B --> C{"Does an equivalent active request already exist?"}
+    C -- "Yes" --> C1["Reject duplicate directive and fresh-read Root facts"]
+    C -- "No" --> D["Render structured Markdown and native assignee mention"]
+    D --> E["Create one top-level Root managed comment"]
+    E --> F["Fresh-read host comment, request record, mention, thread and write correlation"]
+    F --> G["Set Root summary to Needs Info or Needs Approval"]
+    G --> H["Fresh-read Root status and all active requests"]
+    H --> I["Stop Stage dispatch and release execution lane"]
 ```
 
-Cycle Action只能来自matching Root Reconciler directive。Plan、Work和Verify只能返回typed需要事实，
-不能直接创建Action或提供未经Root Reconciler选择的用户交互。
+Cycle-scoped requests still live on the Root comment surface; `cycle_issue_id` and `related_issue_ids[]` preserve exact context.
+Conductor does not create Cycle comments, relations, child Issues, labels or archive facts for Human Action. Any required create,
+status or comment read-back failure stops that Root and resumes from the same deterministic action/write IDs after fresh Linear read.
 
-### 8.2 处理结果
+## 9. Reply、resolution与继续执行
 
-```text
-user changes Action status/comments
--> webhook wakes Root Reconciliation
--> fresh read complete Action and Root Tree, including archived Issues
--> derive delta from the current session baseline
--> advance the same Root Reconciler thread with delta, or bootstrap a fresh one after recovery
--> Root Reconciler chooses the next directive
--> if valid, materialize and read back HumanActionResolutionRecord with the directive
+```mermaid
+flowchart TD
+    A["Human replies in a Human Action request thread"] --> B["Webhook wakes a fresh complete Root read"]
+    B --> C{"Does author ID match the request's frozen actor?"}
+    C -- "No" --> C1["Treat as ordinary Root input; never resolve the action"]
+    C -- "Yes" --> D["Send reply facts and all active requests to Root Reconciler"]
+    D --> E{"Is the response explicit and complete?"}
+    E -- "No" --> E1["Return structured missing or ambiguous items"]
+    E1 --> E2["Write normal reply, keep request active and thread unresolved"]
+    E -- "Yes" --> F["Return typed HumanActionResolution plus one closed next action"]
+    F --> G["Write resolution as managed reply and fresh-read it"]
+    G --> H["Apply receipt to source replies and fresh-read it"]
+    H --> I["Resolve request thread and fresh-read it"]
+    I --> J["Materialize the directive's one next action"]
+    J --> K["Recompute Root summary from all remaining active requests"]
 ```
 
-Conductor不硬编码“Approved后执行Work”或“Rejected后replan”。具体下一步必须由Root Reconciler基于thread baseline
-和本轮delta决定，但Conductor仍机械执行Plan Contract、permission、budget和status schema约束。
+一个turn可以消费同一request的多个reply，也可以resolution多个独立requests；每个source input仍必须出现在
+`consumed_input_ids[]`，每个resolution必须独立引用自己的thread和source replies。resolution成功路径不再额外创建一条
+`RootReconcilerReplyRecord`回复同一source input：同thread的HumanActionResolutionComment就是该输入的用户可见typed
+reply。partial、ambiguous、unauthorized或普通讨论仍使用现有Root Reconciler reply contract。
 
-## 9. Plan review durable facts
+固定materialization顺序是resolution reply create/read-back、source reply receipt read-back、request thread resolve
+read-back、business action materialization、Root summary recompute/read-back。任一步失败都从Linear current facts识别同一
+directive尚缺的步骤继续；不能回滚已read-back的resolution、生成替代resolution或再次调用模型猜测结果。
 
-Plan Contract immutable。Plan Thread每次completed turn产生新的Plan Result和Contract digest；Root Reconciler决定是否
-请求review。
+## 10. Action kind与结果规则
 
-```text
-Plan Result durable
--> Root Reconciler requests Plan Review Action
--> Conductor creates Cycle child Action linked to Plan
+- `plan_review`：`approved`无条件接受exact proposal digest；`rejected`必须有明确reason。带条件同意按rejected处理。
+- `clarification`：只有全部required questions有明确回答时才`answered`；partial answer保持active。
+- `permission`：`granted`只覆盖request中的resource、operation、scope和有效边界；`denied`不产生capability。
+- `finding_waiver`：`waived`必须明确matching Finding和风险；拒绝使用`denied`。
+- `convergence_override`：`override_applied`只覆盖request中的exact gate proposal；拒绝使用`override_rejected`。
+- `canceled`：requested actor明确表示本次请求不再处理，不等于reject、deny或answer。
+- `superseded`：仅用于fresh facts证明旧request已失效，不是human choice。
 
-Approved resolution durable
--> resolution enters the next Root delta
--> Root Reconciler may materialize proposed DAG and continue Work
+Root Reconciler决定resolution之后的replan、DAG mutation、rerun、successor、wait或terminal handling。Conductor不能
+硬编码approved后执行Work、rejected后replan或answered后继续Plan，但仍机械验证Plan Contract、permission、budget、
+convergence、Git和directive preconditions。
 
-Rejected resolution with reason durable
--> resolution enters the next Root delta
--> Root Reconciler may supersede old Contract and request a fresh Plan turn
--> fresh Plan Result has new execution ID and Contract digest
--> any new review uses a new Action
-```
+## 11. Edit、delete、resolve、reopen与恢复
 
-旧Contract、旧Action、reason、supersession和所有Result永久保留。原生archive可以把不再active的Plan/Action
-移出active Tree，但archive/current value必须进入下一份delta；fresh session bootstrap仍包含它们。
+- human reply新body digest是新的pending input；已经accepted的resolution不会因reply edit/delete自动回滚；
+- request comment由Symphony创建且immutable；缺失、被编辑、重复record或schema-invalid时形成mechanical violation；
+- 用户手工resolve active request thread不形成resolution；Root Reconciler可以解释并reopen；
+- 用户reopen已resolved request不撤销immutable resolution；若表达新意图，Root Reconciler回复说明并按需产生fresh action；
+- reaction只表示matching reply是否被采纳，不是approval、rejection、answer或cancel按钮；
+- duplicate/stale resolution、旧proposal digest、错误thread、非matching actor和不完整question coverage全部fail closed；
+- complete Root read必须包含全部Human Action request/resolution comments和thread replies，无论resolved或unresolved；
+- restart只从Root comments、outer comment versions、managed records、Root status和accepted directives恢复，不保存本地
+  action table、comment cursor、poll checkpoint或Provider transcript。
 
-## 10. Permission与capability
+## 12. Hard cut删除边界
 
-Permission Action description必须定义resource、operation、scope、有效边界、风险和拒绝影响。批准只产生
-closed grant；不能扩大产品本身不支持的capability、读取secret或变成任意shell/tool许可。
+实现按一个原子hard cut替换，不做migration、dual-read、dual-write、adapter、feature flag、fallback或旧数据修复：
 
-Permission resolution进入下一份delta后由Root Reconciler选择下一步。Conductor只在matching turn request中授予精确
-capability，并再次验证当前Root/Cycle/target和grant digest。
+- 删除`human_action` Issue kind、`HumanActionIssueSnapshot`和所有Action Issue create/read/materializer；
+- 删除`Human Action`、`Plan Review`、`Clarification`、`Permission`、`Finding Waiver`、`Convergence Override` labels；
+- 删除Action专用`Approved`、`Rejected`、`Answered` lifecycle与Project status要求；
+- 删除Action parent/relation/archive/restore/status parser、guards、fixtures和E2E操作；
+- closed schemas和generated types直接替换`action_issue_id`、`terminal_status`、`terminal_remote_version`等Issue字段；
+- production readers只识别Root-hosted request/resolution managed comments；没有旧Issue fallback或HTML/Markdown marker；
+- 含旧Human Action Issue/record的既有Root不迁移、不自动转换，按unsupported target fact fail closed；部署前由operator在
+  专用Project执行明确reset或使用fresh Project，产品代码不内置迁移路径。
 
-## 11. Archive、stale与冲突
+## 13. 不变量
 
-- archived Action和linked archived targets始终进入Conductor完整读取、Root delta或fresh bootstrap；
-- archive不是resolution，不能把Todo/In Progress视为Canceled；
-- restore不是reopen，不能重放旧resolution；
-- stale status/comment、非Human actor、旧proposal digest、重复terminal transition不推进workflow；
-- 用户修改Root/Cycle/DAG或Action期间产生的旧Root directive在digest检查时被拒绝；
-- relation或parent冲突使matching Root fail closed并发布typed timeline event；对应subscriber成功写入并read-back
-  Linear timeline comment前，不能按title或时间猜测target或继续推进。
-
-## 12. 不变量
-
-1. Cycle Human Action是Cycle直接子Issue，只link相关Plan/Work/Verify。
-2. Root全局Human Action是Root直接子Issue。
-3. 用户用专用status表达结果，用普通comment提供reason或answer。
-4. Project初始化创建并验证Human Action kind labels和专用statuses。
-5. Cycle和Root Action内容及后续语义由Root Reconciler决定；Conductor拥有materialization和校验。
-6. Rejected必须有reason，Answered必须有answer，Approved不要求comment。
-7. 原生archive flag不删除Action、comment、resolution或links；完整Tree始终包含archived facts。
-8. Human Action不能绕过Plan Contract、Root convergence gate或产品capability。
-9. Native comment resolve/reopen和reaction不拥有Action lifecycle；只有专用Linear status表达审批结果。
+1. Human Action不是Issue、DAG node、timeline event、workflow status或Desktop object。
+2. 每个Human Action request是Root顶层special managed comment和唯一thread root。
+3. 一个Root可以有多个active requests；每个独立identity、scope、actor、reply和resolution。
+4. Human Action只能由Root Reconciler的accepted `request_human_action` directive产生。
+5. DEFINE必须一次提出当前可知的全部结构化问题；partial answer继续同一thread。
+6. natural human Root assignee是冻结响应人；mention不拥有授权语义。
+7. active/resolved由request/resolution records派生；thread state、reaction和Root status都不是Action lifecycle。
+8. Root `Needs Info`/`Needs Approval`只汇总active requests，不能替代逐Action事实。
+9. 用户只回复普通Markdown；Root Reconciler解释语义，Conductor验证closed identity和preconditions。
+10. 所有request、resolution、reply、receipt、thread和Root status写入必须fresh read-back后才能推进。
+11. 不存在Human Action Issue兼容reader、迁移器、dual contract或runtime fallback。

@@ -181,12 +181,11 @@ E2E Human Actor 只能执行真实 Linear 用户可执行的操作：
 - 仅对本 Case 已创建的 Root 写入 catalog 预声明的 description delta；它只能用于 business revision 或不改变
   目标和验收标准的 scheduling touch，不能修改 title、status、routing、relation、dependency 或任何 descendant；
 - 写入或编辑普通 Markdown comment，包括 fenced code block；
-- 处理产品创建的 Human Action Issue；
-- 设置 Human Action 的正式 terminal status；
+- 等待产品创建的 Root Human Action request comment，并在其exact thread中回复；
 - 对原生 comment thread 执行 resolve 或 reopen；
 - 在产品协议允许时添加 reaction。
 
-测试不能创建 Human Action，也不能代替产品写 managed reply、timeline 或 reaction disposition。
+测试不能创建 Human Action request/resolution record，也不能代替产品写 managed reply、timeline 或 reaction disposition。
 
 每个 Case 在启动前固定：
 
@@ -286,9 +285,9 @@ polling observation 变成 predicate。
 | Case | 最小 Root 拓扑 | 固定验证边界 |
 |---|---|---|
 | `approved_happy_path` | 1 个 Root，1 个独占 repository | Root `In Review`、matching delivery 与唯一 passed Verify Result |
-| `plan_rejected_and_replanned` | 1 个 Root，1 个独占 repository | 同一 Root 上 fresh Plan execution/Contract 与 fresh active Plan Review Human Action；它仍等待用户审批 |
-| `information_requested_and_answered` | 1 个 Root，1 个独占 repository | Answered Action 之后的 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
-| `root_revision_and_comment` | 1 个 Root，1 个独占 repository | 旧 Cycle 已 terminal，successor Cycle 有 fresh Plan execution/Contract 与 fresh active Plan Review Human Action |
+| `plan_rejected_and_replanned` | 1 个 Root，1 个独占 repository | 同一 Root 上 fresh Plan execution/Contract 与 fresh active Plan Review request；它仍等待用户审批 |
+| `information_requested_and_answered` | 1 个 Root，1 个独占 repository | answered clarification request之后的fresh Plan execution/Contract与fresh active Plan Review request |
+| `root_revision_and_comment` | 1 个 Root，1 个独占 repository | 旧Cycle已terminal，successor Cycle有fresh Plan execution/Contract与fresh active Plan Review request |
 | `parallel_multi_conductor` | 至少 2 个 Root，分别路由到不同 Conductor 与独占 repository | 每个 Root 都 `In Review` 且交付；至少一对跨 Conductor durable Stage interval overlap |
 | `same_conductor_preemption` | 3 个同为 `High` 的 Root 和 1 个 `Low` Root，均路由到同一 Conductor、各自独占 repository | 四个 Root 都 `In Review` 且交付；High tier 先于 Low 开始，且被 touch 的 High ready Root 在下一调度边界首先进入 Stage |
 | `conductor_restart_recovery` | 至少 2 个 Root：1 个受影响 Root 与至少 1 个运行在另一 Conductor 的连续 Root | 受影响 Root 从 fresh execution 恢复至 `In Review`/delivery；连续 Root 也完成交付 |
@@ -333,12 +332,11 @@ condition.
 时机；这种观察只决定是否执行已声明的真实用户操作，永远不改变 catalog，也不构成 assertion evidence。Campaign
 settle 后必须丢弃该观察并重新读取 final evidence。
 
-当冻结操作需要为 Human Action 的 terminal resolution 提供 reason 或 answer 时，driver 必须将普通用户 comment
-写在该次已观察并绑定的 Action Issue 下；Root Issue comment 不能代替 Action comment，也不能解除 Action 的
-comment requirement。
+当冻结操作需要为 Human Action resolution 提供reason或answer时，driver必须把普通用户reply写在该次已观察并绑定的
+Root request comment exact thread中；另建Root顶层comment或回复其他thread都不能解除该request。
 
 一个已声明操作可以在有限、冻结的 Root 集合中绑定一个由产品事实决定的 identity，例如已进入 Stage 的 Root、
-该 Root 之外处于 ready 的候选 Root，或某个 Root 创建的 Plan Review Action。绑定规则、候选集合、选择排序、
+该Root之外处于ready的候选Root，或某个Root创建的Plan Review request。绑定规则、候选集合、选择排序、
 后续操作和可验证的 Linear condition 都必须在 Case catalog 中预声明。它只能等待或响应既有产品事实，不能新增
 需求、改写目标、选择产品下一步、扩大候选集合或把 polling observation 作为 final evidence。对有限
 `root_topology` 中每个 matching Human Action 执行一次同一 terminal response 是一个冻结的 quantified 操作；
@@ -361,8 +359,8 @@ comment requirement。
 | Case | `required` / `boundary` assertions | `prohibited` assertions | `coverage_missing` condition |
 |---|---|---|---|
 | `approved_happy_path` | `plan_approval_precedes_work`; `stage_chain_delivered`; `turn_usage_aggregated`; `boundary_in_review_delivery` | `work_before_approval`; `duplicate_or_synthetic_completion`; `usage_missing_or_double_counted` | 任何 approval、stage/result、delivery、usage、timeline/reply 或 Git read-back 缺失。 |
-| `plan_rejected_and_replanned` | `rejection_consumed_and_replied`; `rejected_lineage_retained`; `rejected_contract_superseded`; `boundary_fresh_plan_review` | `work_against_rejected_contract`; `contract_overwritten_or_history_deleted`; `test_created_replacement` | 已有 rejection 但无法完整关联旧 Contract、archive/supersession、fresh execution/Contract/Action。 |
-| `information_requested_and_answered` | `information_action_actionable`; `answer_consumed_and_receipted`; `answer_drives_fresh_plan`; `boundary_fresh_plan_review` | `missing_answer_assumed`; `test_unblocks_or_mutates_stage` | 已提交 Answer 但无法关联 accepted input、reply/reaction 或 fresh Plan/Contract/Action。 |
+| `plan_rejected_and_replanned` | `rejection_consumed_and_replied`; `rejected_lineage_retained`; `rejected_contract_superseded`; `boundary_fresh_plan_review` | `work_against_rejected_contract`; `contract_overwritten_or_history_deleted`; `test_created_replacement` | 已有rejection但无法完整关联旧Contract、request/resolution、archive/supersession、fresh execution/Contract/request。 |
+| `information_requested_and_answered` | `information_action_actionable`; `answer_consumed_and_receipted`; `answer_drives_fresh_plan`; `boundary_fresh_plan_review` | `missing_answer_assumed`; `test_unblocks_or_mutates_stage` | 已提交answer但无法关联accepted input、request/resolution或fresh Plan/Contract/request。 |
 | `root_revision_and_comment` | `ordinary_inputs_consumed_once`; `thread_transitions_receipted`; `revision_supersedes_cycle`; `boundary_successor_plan_review` | `system_comment_treated_as_input`; `thread_history_lost`; `undeclared_revision_or_conductor_interpretation` | 任一预声明 description/comment/edit/resolve/reopen delta 没有独立 accepted input；description 缺少 matching RootDirective consumption，或 comment/thread 缺少 reply/reaction/thread action，或缺少 successor/continue evidence。 |
 | `parallel_multi_conductor` | `root_ownership_and_workspace_isolated`; `independent_delivery_chains`; `cross_conductor_stage_overlap`; `boundary_all_roots_delivered` | `cross_conductor_takeover`; `shared_workspace_writer`; `telemetry_substitutes_overlap` | 缺少任何 Root ownership、execution/result interval、timestamp 或 delivery coverage。 |
 | `same_conductor_preemption` | `inflight_stage_completes`; `latest_ready_root_runs_next`; `higher_priority_roots_run_before_lower_priority_root`; `remaining_ready_root_progresses`; `boundary_all_roots_delivered` | `inflight_turn_interrupted`; `test_selects_next_root`; `semantic_requirement_touch` | 缺少任何 Root header Priority、唯一 ownership、native activity 或 Stage execution/result interval，或它们不能形成严格且无并列的 tier 与同-tier下一调度顺序。 |
@@ -383,12 +381,12 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 
 | Assertion ID | Normative durable condition |
 |---|---|
-| `plan_approval_precedes_work` | 唯一 active Plan Contract 与 matching Plan Result 创建一个 Plan Review Action；该 Action 的 `Approved` read-back 必须严格早于每个 matching Work execution 的开始。 |
-| `cycle_plan_work_verify_tree_materialized` | final active/archived Linear Tree 必须同时证明 Root 直接拥有 Cycle，Cycle 直接拥有 Plan、每个 Work、Verify 和 matching Plan Review Action；每个 node 的 native `parentId` 必须与 matching `WorkflowIssueRecord.parent_issue_id` 相同。仅有 managed record、Stage Result 或 timeline 而没有该原生 Issue Tree 时不得通过。 |
+| `plan_approval_precedes_work` | 唯一active Plan Contract与matching Plan Result关联一个Plan Review request；matching `approved` resolution read-back必须严格早于每个matching Work execution开始。 |
+| `cycle_plan_work_verify_tree_materialized` | final active/archived Linear Tree必须同时证明Root直接拥有Cycle，Cycle直接拥有Plan、每个Work和Verify；每个node的native `parentId`必须与matching `WorkflowIssueRecord.parent_issue_id`相同。Plan Review只由Root request/resolution comments证明，不能伪造成descendant Issue。 |
 | `stage_chain_delivered` | 此 Contract 的 Plan、全部 required Work、唯一 passed Verify、delivery 和 Git revision 形成一条无断链的 matching lineage。 |
 | `turn_usage_aggregated` | Plan、每个 Work 与 Verify Issue 都有 model name 和 usage；Cycle usage 等于该 Cycle 的全部 model turns 之和，Root usage 等于所有 Cycle usage 加 Root Reconciler turns，且每个 turn 只计一次。 |
 | `boundary_in_review_delivery` | Root 为 `In Review`，唯一 passed Verify Result、delivery 与 Git revision 相互 matching。 |
-| `work_before_approval` | 不存在任何开始时间早于 matching `Approved` resolution read-back 的 Work execution。 |
+| `work_before_approval` | 不存在任何开始时间早于matching `approved` resolution read-back的Work execution。 |
 | `duplicate_or_synthetic_completion` | 不存在多个 competing terminal completion、E2E writer 产生的 completion/managed record/timeline，或用本地 `final` 替代 delivery。 |
 | `usage_missing_or_double_counted` | 不存在缺失 model/usage、负值或不一致 aggregate，且同一 `ModelTurnRecord` 不属于两个 Stage/Cycle/Root aggregate。 |
 
@@ -396,22 +394,22 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 
 | Assertion ID | Normative durable condition |
 |---|---|
-| `rejection_consumed_and_replied` | 预声明普通用户 reason 必须作为 matching Plan Review Action 下的 comment，与该 Action 的 `Rejected` resolution 一同成为 Root Reconciler input，并各有 matching durable reply。 |
-| `rejected_lineage_retained` | 被拒 Contract、Action、Plan execution 和 Plan Result 保持可 read-back 的历史 identity；需要移除的旧节点使用 native archive。 |
-| `rejected_contract_superseded` | 旧 immutable Contract 有明确 supersession/archive lineage，且同一 Root 产生不同 execution、Contract 与 Action identity 的 fresh replacement。 |
-| `boundary_fresh_plan_review` | fresh Plan execution 形成 fresh immutable Contract，并由产品创建 fresh active Plan Review Action；该 replacement 尚未被本 Case 批准。 |
+| `rejection_consumed_and_replied` | 预声明普通用户reason必须是matching Plan Review request thread中的reply，与matching `rejected` resolution一同成为Root Reconciler input并有durable correlation。 |
+| `rejected_lineage_retained` | 被拒Contract、request/resolution、Plan execution和Plan Result保持可read-back的历史identity；需要移除的旧节点使用native archive。 |
+| `rejected_contract_superseded` | 旧immutable Contract有明确supersession/archive lineage，且同一Root产生不同execution、Contract与request identity的fresh replacement。 |
+| `boundary_fresh_plan_review` | fresh Plan execution形成fresh immutable Contract，并由产品创建fresh active Plan Review request；该replacement尚未被本Case批准。 |
 | `work_against_rejected_contract` | 不存在引用 rejected Contract 的 Work execution 或 Work Result。 |
-| `contract_overwritten_or_history_deleted` | 不存在原地覆盖旧 Contract、物理删除旧 Contract/Action/Result，或以 replacement 抹去旧 audit identity。 |
-| `test_created_replacement` | fresh Contract、execution 与 Action 的 writer 不是 E2E Human Actor，且没有 E2E-managed replacement fact。 |
+| `contract_overwritten_or_history_deleted` | 不存在原地覆盖旧Contract、删除旧Contract/request/resolution/Result，或以replacement抹去旧audit identity。 |
+| `test_created_replacement` | fresh Contract、execution与request的writer不是E2E Human Actor，且没有E2E-managed replacement fact。 |
 
 #### `information_requested_and_answered`
 
 | Assertion ID | Normative durable condition |
 |---|---|
-| `information_action_actionable` | 产品创建的 clarification Action 明确写出问题、所需内容、提交位置和收到答案后的下一步。 |
-| `answer_consumed_and_receipted` | 预声明普通用户 answer 必须作为 matching clarification Action 下的 comment，与该 Action 的 `Answered` resolution 被恰好一次地关联为 accepted input，并各有 matching reply 与协议要求的 reaction disposition。 |
-| `answer_drives_fresh_plan` | fresh Plan execution、Contract 与 Plan Review Action 仅引用该 accepted answer；Contract 记录该 Case answer 所给定的 separator。 |
-| `boundary_fresh_plan_review` | answer consumption 后存在 fresh immutable Contract 和 fresh active Plan Review Action；本 Case 不批准该 Action。 |
+| `information_action_actionable` | 产品创建的clarification request按[Human Action](human-actions.md)一次列出全部当前可知的structured questions。 |
+| `answer_consumed_and_receipted` | 预声明普通用户answer必须位于matching clarification request thread，并与`answered` resolution被恰好一次关联为accepted input。 |
+| `answer_drives_fresh_plan` | fresh Plan execution、Contract与Plan Review request只引用该accepted answer；Contract记录该Case answer所给定的separator。 |
+| `boundary_fresh_plan_review` | answer consumption后存在fresh immutable Contract和fresh active Plan Review request；本Case不批准该request。 |
 | `missing_answer_assumed` | 在 matching accepted answer 前不存在假定缺失值的 Contract、Plan execution 或继续推进事实。 |
 | `test_unblocks_or_mutates_stage` | E2E Human Actor 没有修改 Plan/Work/Verify、managed record 或任何解除阻塞的产品状态。 |
 
@@ -419,10 +417,10 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 
 | Assertion ID | Normative durable condition |
 |---|---|
-| `ordinary_inputs_consumed_once` | 初始 immutable Plan Contract/Plan Review Action 在 destructive revision 前已存在；每个预声明 description version、comment create 与 comment edit 各被恰好一次地记录为 ordinary user input。description 以 matching RootDirective consumption 为 durable receipt；每个 comment body version 另有各自 matching reply/reaction receipt，且 emoji reaction 的 actor 必须与该 reply 的产品 actor 相同。 |
+| `ordinary_inputs_consumed_once` | 初始immutable Plan Contract/Plan Review request在destructive revision前已存在；每个预声明description version、comment create与comment edit各被恰好一次记录为ordinary user input。description以matching RootDirective consumption为durable receipt；每个comment body version另有各自matching reply/reaction receipt，且reaction actor必须与该reply的产品actor相同。 |
 | `thread_transitions_receipted` | 每个预声明 native resolve 与 reopen 依序 read-back，且在下一用户操作前已有针对该 transition 的 matching durable reply/reaction。 |
 | `revision_supersedes_cycle` | destructive description revision 使带初始 Contract 的旧 Cycle 成为 `Changes Required` 或 `Canceled`，保留旧 identity，并创建不同 identity 的 successor Cycle、fresh Plan execution 与 fresh Contract。 |
-| `boundary_successor_plan_review` | successor Cycle 的 fresh immutable Contract 有 matching fresh active Plan Review Action；它不能用旧 Cycle 的 Action 或单独 reply 代替。 |
+| `boundary_successor_plan_review` | successor Cycle的fresh immutable Contract有matching fresh active Plan Review request；它不能用旧Cycle request或单独reply代替。 |
 | `system_comment_treated_as_input` | first system comment、timeline comment 和 strict managed comment 的 identities 不出现在 ordinary user input 集合。 |
 | `thread_history_lost` | comment 的 create/edit version、resolve/reopen activity 与最终 native thread state 全部可读取；当前 body 或最终 state 不能替代历史。 |
 | `undeclared_revision_or_conductor_interpretation` | accepted description/comment input 只来自 frozen declared bodies、versions 和 transitions；Conductor 不得把 timeline、managed comment 或未声明文本解释为 revision。 |
@@ -471,12 +469,12 @@ coverage 的 `coverage_missing`。共同断言 fixture 可以在所有冻结的 
 operation 顺序及 driver wait。它们不是额外 predicate，也不覆盖 section 9.2.1；最终 verdict 只按对应 matrix
 ID 的 `kind`、condition 和 coverage rule 计算。
 
-用户行为：创建一个明确、可在测试 repository 中完成的 Root，等待真实 Plan Review Human Action，按其说明
-将状态流转为 `Approved`。
+用户行为：创建一个明确、可在测试repository中完成的Root，等待真实Plan Review request comment，并由matching
+Root assignee在exact thread中回复无条件批准。
 
 正向断言：
 
-- 存在唯一 active Plan Contract、matching Plan Result 和 `Approved` Human resolution；
+- 存在唯一active Plan Contract、matching Plan Result和`approved` Human resolution；
 - Work 只在 approval durable read-back 后开始，全部 matching Work Issues 和 Results 完成；
 - Verify 有唯一通过 Result，Git revision、checks、delivery 与 Root `In Review` 一致；
 - Plan、Work、Verify Issue 记录各自模型名和 usage；Cycle usage 是该 Cycle 全部 model turns 的聚合；
@@ -492,19 +490,19 @@ boundary 不能由 Root `Done`、local `final` 或单独的 Plan approval 代替
 
 ### 9.4 `plan_rejected_and_replanned`
 
-用户行为：创建 Root，等待真实 Plan Review Human Action；先在该 Action 下写入预声明普通用户 reason，再将同一
-Action 流转为 `Rejected`。
+用户行为：创建Root，等待真实Plan Review request comment；由matching Root assignee在exact thread中回复拒绝和
+预声明reason。
 
 正向断言：
 
-- rejected Human Action、reason、Root Reconciler input 和 durable reply 均可读取；
-- 旧 Plan Contract、Action、Execution 和 Result 保留审计历史；
+- rejected Human Action request/resolution、reason、Root Reconciler input和durable correlation均可读取；
+- 旧Plan Contract、request/resolution、Execution和Result保留审计历史；
 - 旧 Contract 被 supersede，需移除的节点使用 Linear 原生 archive；
-- 产生 fresh Plan execution、fresh Contract 和 fresh Human Action；
+- 产生fresh Plan execution、fresh Contract和fresh Plan Review request；
 - replacement 使用新的 execution/session identity，并保留同一 Root 目标。
 
-验证边界：replacement Plan 已形成 immutable fresh Contract，并由产品创建 fresh active Plan Review Human Action。
-Case 不批准 replacement Action；该等待状态本身连同旧 Contract 的 supersession 是本 Case 的完整验收边界。
+验证边界：replacement Plan已形成immutable fresh Contract，并由产品创建fresh active Plan Review request。
+Case不批准replacement request；该等待状态本身连同旧Contract的supersession是本Case的完整验收边界。
 
 禁止事实：对 rejected Contract 执行 Work、原地覆盖旧 Contract、物理删除历史、E2E 创建 replacement Plan。
 
@@ -512,18 +510,17 @@ Case 不批准 replacement Action；该等待状态本身连同旧 Contract 的 
 
 ### 9.5 `information_requested_and_answered`
 
-用户行为：等待产品创建需要补充信息的 Human Action，按 Action 描述提交预声明答案，并将 Action 流转到
-正式 answered terminal status。
+用户行为：等待产品创建clarification request，按其中一次列出的structured questions在exact thread提交预声明答案。
 
 正向断言：
 
-- Human Action 明确说明问题、需要的内容、提交位置和下一步；
-- 用户答案以该 Human Action 下的普通 comment 存在，Action lifecycle 完整；
+- Human Action request一次列出全部当前可知问题、需要的内容、回答方式和下一步；
+- 用户答案以matching request thread中的普通reply存在，并有matching `answered` resolution；
 - Root Reconciler 消费该输入并产生 matching durable reply；
 - 用户输入得到协议规定的 reaction disposition，Workflow 随后由产品自主继续。
 
 验证边界：Answer 已被 consumption/reply 关联到初始缺失信息，随后出现只引用该 Answer 的 fresh Plan execution、
-fresh Contract 和 fresh active Plan Review Human Action。Case 不替产品批准该 replacement Action，也不接受没有后续
+fresh Contract和fresh active Plan Review request。Case不替产品批准该replacement request，也不接受没有后续
 Plan/Contract 的“已收到”文本作为 continuation。
 
 禁止事实：缺失答案时自动假设、E2E 修改 Plan/Work/Verify、测试直接解除 Workflow 阻塞。
@@ -532,8 +529,8 @@ Plan/Contract 的“已收到”文本作为 continuation。
 
 ### 9.6 `root_revision_and_comment`
 
-用户行为：先等待初始 immutable Plan Contract 与 Plan Review Human Action 均可 read-back，但不批准该
-Action；随后按预声明顺序执行 destructive Root description revision、普通 comment create、comment edit、
+用户行为：先等待初始immutable Plan Contract与Plan Review request均可read-back，但不回复该request；随后按预声明
+顺序执行destructive Root description revision、普通comment create、comment edit、
 resolve、等待 durable response、reopen、再次等待 durable response。每个 comment body、version 和 thread
 transition 都在 Campaign 启动前冻结；上一操作没有自己的 receipt 时不得发出下一操作。
 
@@ -546,7 +543,7 @@ transition 都在 Campaign 启动前冻结；上一操作没有自己的 receipt
 - 若 Case 中包含预声明 non-destructive comment，产品可继续时必须有明确 directive 和审计链。
 
 验证边界：被 revision 取代的 Cycle 为 `Changes Required` 或 `Canceled`，successor Cycle 与旧 Cycle identity 不同，
-并有 fresh Plan execution、fresh Contract 和 fresh active Plan Review Human Action。每次 comment body、edit、resolve
+并有fresh Plan execution、fresh Contract和fresh active Plan Review request。每次comment body、edit、resolve
 和 reopen 都必须在此之前已有自身 matching reply/reaction durable facts，不能被 successor 的存在掩盖。
 
 禁止事实：丢失 resolve/reopen、把当前 comment 值伪造成历史、E2E 临时改写 revision、Conductor 自行解释 revision。
@@ -584,10 +581,10 @@ Conductor 的 matching Stage Execution/Result interval 满足上述 overlap 公�
 1. 只从三个 High Root 中等待恰好一个 Root 有 in-flight Stage execution，另两个 High Root 均仍属于同一 Conductor、同 Priority 且 ready；Low Root 不是同-tier角色候选；
 2. 在两个 ready Root 中按 frozen `root_key` 顺序选择第一个，使用其预声明 non-semantic description delta，使其
    `updatedAt` 严格最新；
-3. 在不批准 in-flight Root 新产生的 Plan Review Action 前，等待该 touched Root 成为 in-flight execution terminal 后
+3. 在不批准in-flight Root新产生的Plan Review request前，等待该touched Root成为in-flight execution terminal后的
    的第一个 candidate Stage；
-4. 此顺序已被 durable facts 固定后，对四个 Root 各自产品创建的 Plan Review Action 恰好一次地设为 `Approved`，
-   并等待产品自主完成其余链路。
+4. 此顺序已被durable facts固定后，由各Root matching assignee对四个产品创建的Plan Review request分别恰好回复一次
+   无条件批准，并等待产品自主完成其余链路。
 
 上述 identity binding 只决定哪个已声明 description delta 和 Action response 应被执行；它不是对 scheduler 的命令。
 若步骤 1--3 不能在 deadline 前形成严格的 Linear 条件，本 Case 为 `incomplete`，不得改选、改 Priority 或重复 touch。

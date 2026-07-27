@@ -153,6 +153,11 @@ apps/performer/
     ├── role_execution/
     ├── session_runtime/
     ├── profile_control/
+    ├── prompts/
+    │   ├── root-reconciler.md
+    │   ├── plan.md
+    │   ├── work.md
+    │   └── verify.md
     └── backends/
         ├── provider_backend_interface.py
         ├── registry.py
@@ -161,7 +166,9 @@ apps/performer/
 ```
 
 Performer app提供Root Reconciler、Plan/Work/Verify role execution和Profile control入口。Provider SDK只允许
-在对应backend目录中导入；session runtime只保存可丢弃的opaque role/thread mapping。
+在对应backend目录中导入；session runtime只保存可丢弃的opaque role/thread mapping。`prompts/`中的四个英文
+Markdown是随Performer打包的只读应用资源，不是Profile或部署配置；role到resource的closed映射和fail-closed加载边界
+由[Performer](performer.md)定义。
 
 ## 5. Podium类库
 

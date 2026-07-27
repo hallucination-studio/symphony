@@ -19,12 +19,13 @@ Cycle Timeline
   -> comments on the matching Cycle Issue
 ```
 
-Plan、Work、Verify和Human Action Issue保留自己的description、用户comments和managed records；面向用户的
-跨节点执行叙事统一写到所属Cycle时间轴。跨Cycle、convergence和delivery叙事统一写到Root时间轴。
+Plan、Work和Verify保留自己的description、用户comments和managed records；面向用户的跨节点执行叙事统一写到所属
+Cycle时间轴。跨Cycle、convergence和delivery叙事统一写到Root时间轴。Human Action special Root threads是独立的
+canonical交互面，不进入timeline；完整边界见[Human Action](human-actions.md)。
 
 ## 2. 解耦机制
 
-Root Reconciliation host、Root Reconciler client、Stage materializer和Human Action materializer只发布closed
+Root Reconciliation host、Root Reconciler client和Stage materializer只发布closed
 timeline event，不直接创建或渲染comment：
 
 ```text
@@ -133,8 +134,8 @@ transcript、secret、credential、任意metadata map或未bounded stdout/stderr
 `timeline_event_id`在崩溃恢复时必须重新生成相同的record与Markdown body；既有comment的target、record或body
 不匹配时fail closed，不能追加第二条comment或以新时间覆盖旧叙事。
 单一source时，event `occurred_at`必须与该source occurrence完全相同；多个source时必须等于它们中最新的occurrence。
-没有`ModelTurnRecord`的source（例如Human Action resolution）仍可materialize其timeline event；它只没有“本次turn”
-展示，累计仍按同一source occurrence边界从fresh Linear `ModelTurnRecord`派生。
+没有`ModelTurnRecord`的timeline source仍可materialize其event；它只没有“本次turn”展示，累计仍按同一source
+occurrence边界从fresh Linear `ModelTurnRecord`派生。Human Action request/resolution不属于timeline source。
 `WorkflowTimelineRecord.occurred_at`保存的也是这个event source timestamp；它不是Linear comment的server
 `created_at`、一次重试的本地时钟或另一份materialization checkpoint。comment的实际创建/更新时间仍只属于Linear
 comment snapshot。这样重启后的同一event能重建相同的record和用户Markdown，而不会把每次写入尝试变成新的durable
@@ -158,8 +159,6 @@ RootTimelineEvent =
   | RootContractChangedEvent
   | CycleCreatedEvent
   | CycleConcludedEvent
-  | RootWaitingHumanEvent
-  | RootHumanResolvedEvent
   | RootConvergenceEvaluatedEvent
   | SuccessorCycleCreatedEvent
   | DeliveryStartedEvent
@@ -222,8 +221,6 @@ CycleTimelineEvent =
   | NodeArchivedEvent
   | NodeRestoredEvent
   | VerifyTurnCompletedEvent
-  | CycleHumanActionRequestedEvent
-  | CycleHumanActionResolvedEvent
   | CycleBudgetUpdatedEvent
   | CycleConclusionProposedEvent
   | CycleExecutionFailureRecordedEvent
@@ -235,7 +232,8 @@ accepted directive进入时间轴。
 
 `RootTreePatchedEvent`和`CycleTreePatchedEvent`只在matching Root Reconciler directive已接受并完成read-back后产生，
 必须列出create/update/archive/restore/reorder/dependency operations及其业务原因。它们不表示Conductor自动修正了
-用户状态；Conductor只能执行directive要求的受限操作。archived Issue使用Linear链接继续可访问。Human Action事件展示请求、用户选择和下一步，不复制用户comment全文。
+用户状态；Conductor只能执行directive要求的受限操作。archived Issue使用Linear链接继续可访问。Human Action request
+与resolution已由Root special thread完整展示，timeline不能复制、摘要或再materialize同一交互。
 `CycleReplannedEvent`与`CycleSupersededEvent`必须区分同Cycle fresh Plan和successor Cycle，不能都显示成
 “重新开始”。
 
@@ -318,8 +316,7 @@ comment恢复Stage结果、以timeline snapshot累计usage，或把同一Stage�
 | Work target与Result | 否 | 是 |
 | Verify Result与Findings | Root只在terminal摘要 | 是 |
 | DAG create/update/archive/restore | Root只在Cycle摘要 | 是 |
-| Cycle Human Action request/resolution | Root只记录waiting/resumed | 是 |
-| Root convergence Human Action | 是 | 否 |
+| Human Action request/resolution | 否；使用Root special thread | 否；使用Root special thread |
 | delivery | 是 | 否 |
 
 ## 9. 噪音控制
@@ -349,3 +346,4 @@ comment恢复Stage结果、以timeline snapshot累计usage，或把同一Stage�
 8. 一个event、一条comment、两层内容是固定契约；不得拆成独立用户comment和machine-state comment。
 9. Stage canonical Result与引用它的Cycle timeline只能分别承担execution事实和用户叙事；后者不得参与恢复、调度、
    usage累计或Root input。
+10. Human Action request/resolution不是timeline event；其Root special thread是唯一用户可见和可恢复交互面。

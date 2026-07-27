@@ -26,6 +26,96 @@ Plan、Work和Verify Result只报告执行事实，不决定下一个Stage、不
 被Conductor持久化并进入下一份Root delta后，Root Reconciler才决定下一步；fresh Reconciler session则从完整
 bootstrap获得该Result。
 
+### 1.1 Role prompt职责
+
+三个英文Markdown prompt必须把以下职责写成明确、可执行的role instructions，但不得新增本文件后续contract中不存在
+的字段或Result variant。Provider structured output、Performer codec和Conductor validation共同机械拒绝缺字段、未知字段、
+错误variant、stale correlation或越权结果；prompt本身不是validation boundary。
+
+每个prompt必须至少包含`Role and Authority`、`Trigger Conditions`、编号`Workflow`、`Anti-Rationalization`、
+`Red Flags`、可验证`Exit Criteria`和`Output Contract`。涉及分支、重试或停止条件时必须使用Mermaid明确表达；
+Plan、Work和Verify三个prompt都包含各自的`flowchart TD`，图只能组织现有request facts、capabilities和Result variants。
+“上下文看起来足够”、“通常可以跳过”、“稍后再补证据”或类似措辞不能放宽contract、required checks或退出条件。
+
+Cycle执行与Root REVIEW的唯一衔接如下。`REVIEW`不是第四个Stage；它只在Cycle已经terminal、immutable
+`CycleOutcome`已经durable read-back后，由Root Reconciler在后续turn执行：
+
+```mermaid
+flowchart TD
+    A["Root Reconciler requests PLAN"] --> B["Plan returns one closed PlanResult"]
+    B --> C{"Is the Plan complete, feasible and approved through durable facts?"}
+    C -- "No" --> C1["Root Reconciler chooses replan, rerun, Human Action or terminal handling"]
+    C1 --> A
+    C -- "Yes" --> D["Conductor materializes the approved Work DAG"]
+    D --> E["Root Reconciler selects one mechanically ready Work Issue"]
+    E --> F["Work performs BUILD and returns one closed WorkResult"]
+    F --> G{"Are required active Work Issues complete?"}
+    G -- "No" --> E
+    G -- "Blocked or invalid" --> G1["Root Reconciler chooses repair, replan, Human Action or terminal handling"]
+    G1 --> A
+    G -- "Yes" --> G2["Conductor prepares and reads back the immutable target commit"]
+    G2 --> H["Verify checks the immutable target and returns one closed VerifyResult"]
+    H --> I{"Does fresh evidence support a terminal Cycle conclusion?"}
+    I -- "No" --> I1["Root Reconciler chooses rerun, repair, replan or Human Action"]
+    I1 --> E
+    I -- "Yes" --> J["Conductor writes and reads back immutable CycleOutcome"]
+    J --> K["Root Reconciler performs REVIEW against the complete Root history"]
+    K --> L{"Is the Root satisfied and ready for delivery?"}
+    L -- "No" --> M["Root Reconciler specifies a bounded successor Cycle requirement or Human Action"]
+    M --> A
+    L -- "Yes" --> N["Root Reconciler chooses SHIP through conclude_root"]
+```
+
+#### Plan
+
+Plan在返回`plan_completed`前必须先完成需求拆解和计划评审：
+
+- 从Root contract提取objective、included/excluded scope、assumptions、constraints、acceptance criteria和verification
+  requirements，不得用猜测填补缺失业务要求；
+- 把工作拆成粒度适中、可独立派发和验收的Work单元。每个`work_node`用现有`title`、`description`、
+  `expected_outcome`和`required_checks[]`明确目标、边界、预期成果与验收方法；只有输入或repository facts支持时才写
+  具体文件路径和参考模式，不能虚构路径；
+- 用每个`work_node.dependency_proposal_keys[]`表达真实依赖和执行顺序，不创建另一个sequence/status字段；
+  `dependency_edges[]`在Plan proposal中必须是空数组，因为materialization前还不存在可引用的Work Issue ID。并行单元
+  不得制造不必要依赖，有依赖的单元必须说明上游成果如何成为下游输入；
+- 证明全部Root acceptance criteria都由Work checks或Verify requirements覆盖，且Verify node可以在immutable target
+  revision上独立判定；
+- 评审可行性、风险、权限、遗漏、scope冲突、假设和历史失败。信息不足时返回`plan_needs_information`，无法形成安全
+  计划时返回`plan_blocked`，不能为了推进流程而返回残缺的`plan_completed`。
+
+Plan只提出Contract和DAG。它不创建Linear Issue、请求Human Action、批准自己的Plan、派发Work或选择workflow下一步。
+Plan也不在Root worktree创建`SPEC.md`、`PLAN.md`、repository task checklist或其他计划文件；Plan Result由Conductor持久化到Linear。
+
+#### Work
+
+Work只完成本轮`selected_work`，遵守approved Plan Contract、dependency evidence、workspace capability和明确scope。
+它应在预算内读取事实、修改授予的worktree、运行required checks、诊断普通失败并修复重试；不得顺带执行另一个Work
+Issue、扩大scope、修改DAG、commit/push或声称整个Cycle完成。完成时返回实际变化、checks、artifacts、discovered facts
+和evidence；假设失效、scope冲突、权限或信息缺失时使用matching现有special/blocked variant，让Root Reconciler决定
+后续动作。
+
+Work不得把DEFINE、Plan、REVIEW、SHIP或执行进度写成repository workflow文档。只有selected Work Issue本身明确要求
+修改项目documentation时，相关文件才属于产品scope；workflow状态和证据仍只通过Work Result进入Linear。
+
+全部required active Work完成后，Conductor通过`GitWorkspaceInterface`机械准备并read-back用于Verify的immutable
+target commit。commit message、数量和Git command不由任何prompt输出决定；HEAD、worktree coverage或read-back不满足时
+不得调用Verify。Verify通过后SHIP只能交付该exact commit，不能在delivery时创建新commit或改变内容。
+
+#### Verify
+
+Verify与Plan、Work和Root Reconciler conversation隔离，并只读检查`immutable_target_revision`。它必须逐项验证approved
+Plan Contract的acceptance criteria和verification requirements，检查matching Work evidence、required checks、Git facts
+及unresolved findings，且每个结论都有可引用evidence。Verify不能修复代码、补做Work、改变Finding或选择下一步；证据
+不足时返回`verify_inconclusive`或`verify_blocked`，发现缺陷时返回`verify_changes_required`或
+`verify_plan_contract_violation`，不得把未运行或无法证明的检查记为passed。
+
+Verify的审阅结论只通过Verify Result进入Linear，不能写入repository report、comment file或task checklist。
+
+三个Stage prompt的退出条件必须绑定matching request、target、capability、evidence和closed Result。任何required
+input缺失、事实冲突、越权需求、未运行required check或无法验证的结论都是red flag；role必须选择matching
+blocked、needs-information、inconclusive、changes-required、contract-violation或execution failure variant，而不是
+输出不完整的success variant。schema-invalid输出由机械边界拒绝，不能通过自然语言解释、重试猜测或fallback推进。
+
 ## 2. 公共wire envelope
 
 三个request共享closed envelope：
@@ -75,6 +165,8 @@ StageTurnResultEnvelope
 `role`是discriminator；context和result variant必须matching。未知字段、未知variant、role/session不匹配、
 source coverage不完整、digest错误或超出bound均fail closed。所有schema使用`additionalProperties: false`，由
 JSON Schema生成各语言的generated codecs；生成语言集合由[契约与接口边界](contracts.md)统一定义。
+`instruction_bundle`携带本轮目标和output contract identity，是validated Stage request data；它不选择、替换或修改
+Performer随应用打包的role Markdown prompt。base prompt resource与本轮request必须同时matching `role`，否则fail closed。
 `model_turn`由Performer根据实际Provider调用填充，不属于模型structured output；它在每个terminal outcome都
 required，且其中的`model`和`usage`是该turn唯一的用量事实，不能在envelope顶层复制。`TurnUsage`及聚合语义只由
 [Performer Profile](performer-profiles.md)定义。
@@ -194,7 +286,8 @@ PlanCompletedResult
 canonical Result计算并持久化，不信任模型自报digest。
 
 `proposed_work_dag.work_nodes[].dependency_proposal_keys[]`是Plan阶段唯一可解析的Work dependency identity；
-Plan尚未materialize时不存在Work Issue ID。Conductor只在matching approved Contract DAG materialization时把这些keys解析为
+Plan尚未materialize时不存在Work Issue ID，因此proposal中的`dependency_edges[]`必须为空。Conductor只在matching
+approved Contract DAG materialization时把这些keys解析为
 `blocks` relations，并为每个created Work/Verify写唯一的`WorkflowIssueRecord`。已批准Contract的digest binding由matching
 `MaterializeApprovedPlanDagDirective`、immutable `PlanContractRecord`和Plan relation证明；不得创建或读取`NodeMarker`、
 description digest marker或第二种Node identity record。
@@ -462,3 +555,6 @@ matching turn/session失效并拒绝late output。
 7. Provider thread不是durable authority；丢失后从Linear/Git facts恢复。
 8. Plan/Verify read-only，Work只能修改授予的Root worktree。
 9. 每个Stage Result都携带实际model和required `TurnUsage`；retry、rerun、cancel和failure不能绕过usage事实。
+10. Plan必须在现有Plan Contract和DAG字段中完整表达任务单元、scope、依赖顺序和验收覆盖；残缺或冲突的
+    `plan_completed`不能推进Plan review或DAG materialization。
+11. Work只执行selected target；Verify只验证immutable target。二者的Result都是Root Reconciler输入，不拥有下一步语义。

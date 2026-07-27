@@ -18,7 +18,7 @@ Conductor负责：
   `RootReconcilerFailureRecord`后停止；
 - 构造Plan/Work/Verify强类型request并调用对应Performer role thread；
 - 验证和持久化Stage Results，再交给Root Reconciler；
-- 根据directive创建Human Action，把Human status/comments作为用户输入，并根据directive持久化resolution；
+- 根据directive materialize Root Human Action request comment，把thread reply/state作为用户输入，并根据directive持久化resolution；
 - 过滤普通human comment，并把matching reply作为accepted directive的required Linear materialization；
 - 管理Root worktree、commit、delivery和Root convergence；
 - 发布typed workflow timeline events。
@@ -62,7 +62,7 @@ apps/conductor/src/
 | `root-reconciler-client` | open时发送一次bootstrap，advance时只发送delta，并调用Root Reconciler |
 | `root-directive-materialization` | 校验、幂等执行和read-back Root directive、required user replies及Reconciler failure record |
 | `performer-agent-client` | Root Reconciler和三个Stage role session/turn transport |
-| `human-actions` | Action Issue、labels、status/comment validation和resolution |
+| `human-actions` | Root request/resolution comment materialization、actor/thread validation和Root waiting summary |
 | `workflow-events` | 发布closed timeline events |
 | `timeline-comments` | Root/Cycle timeline comment subscriber和closed renderer |
 | `git-workspaces` | Root branch/worktree、commit和Git facts |
@@ -138,14 +138,10 @@ Conductor拥有process/channel和cancellation。opaque session handle只存在�
 
 ## 6. Human Action
 
-Root Reconciler通过closed directive请求Cycle或Root Action；Conductor验证后创建matching直接子Issue、kind labels、
-relations、description和managed record。用户Action status/comment变化只经actor、scope、source version和schema
-验证后进入下一份delta；是否形成resolution及其后续由Root Reconciler directive决定。Plan/Work/Verify不能直接创建Action。
-
-Root convergence Action也只能来自Root Reconciler directive。机械Root gate可以拒绝successor或其他超限directive，
-但不能自行创建Action或选择替代动作；Root Reconciler在下一份delta中决定是否请求Action。gate限制不能被
-Reconciler放宽。完整交互由
-[Human Action](human-actions.md)定义。
+Human Action不是Issue。Conductor只materialize Root Reconciler accepted directive所要求的Root request/resolution
+managed comments，并从全部active requests确定性派生Root waiting summary；它不能自行创建request、resolution或
+选择Human Action后的业务动作。comment/thread、并发、actor和恢复规则全部由
+[Human Action](human-actions.md)定义，本文不维护第二份lifecycle。
 
 ## 7. Timeline事件
 

@@ -17,6 +17,7 @@ WorkflowTimelinePublisherInterface     <- InProcessWorkflowTimelinePublisherImpl
 RootTimelineCommentSubscriberInterface <- LinearRootTimelineCommentSubscriberImpl
 CycleTimelineCommentSubscriberInterface <- LinearCycleTimelineCommentSubscriberImpl
 RootReconcilerReplyWriterInterface     <- LinearRootReconcilerReplyWriterImpl
+HumanActionCommentMaterializerInterface <- LinearHumanActionCommentMaterializerImpl
 GitWorkspaceInterface                  <- NativeGitWorkspaceImpl
 RootDeliveryInterface                  <- GitRootDeliveryImpl
 ProviderBackendInterface               <- CodexBackendImpl
@@ -271,7 +272,7 @@ Managed Root descendant Issue description
 <closed renderer生成的bounded用户Markdown；允许普通Markdown和非-json fenced code block>
 
 ```json
-{"kind":"workflow_issue","version":1,"issue_key":"<stable key>","root_issue_id":"<Root>","parent_issue_id":"<parent>","issue_kind":"cycle | plan | work | verify | human"}
+{"kind":"workflow_issue","version":1,"issue_key":"<stable key>","root_issue_id":"<Root>","parent_issue_id":"<parent>","issue_kind":"cycle | plan | work | verify"}
 ```
 ````
 
@@ -293,8 +294,9 @@ identity加上validated Symphony actor和strict decode定位该宿主comment，�
 
 `WorkflowIssueRecord`是Symphony创建的每个Root descendant Issue description中的唯一Issue kind record。它只包含
 `issue_key`、`root_issue_id`、`parent_issue_id`和`issue_kind`，用于stable create/write correlation、scope validation
-和crash recovery；它不表达status、archive、approval、execution result、budget或next step。Cycle、Plan、Work、Verify
-和Human Action的业务事实仍分别由对应managed comment record和Linear Issue事实承担。Conductor从strict decode后的
+和crash recovery；它不表达status、archive、approval、execution result、budget或next step。它的closed Issue kind只
+包含Cycle、Plan、Work和Verify；Human Action不使用`WorkflowIssueRecord`或descendant Issue。Human Action request与
+resolution使用Root-hosted managed comments，完整record语义由[Human Action](human-actions.md)定义。Conductor从strict decode后的
 `WorkflowIssueRecord`派生内部Issue kind；Podium只传递原生description，不能输出marker、预解码Issue kind或第二个
 identity field。
 

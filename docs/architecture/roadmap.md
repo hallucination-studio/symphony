@@ -20,7 +20,7 @@
   event生命周期；
 - 定义Root Reconciler bootstrap/delta/directive、用户input/comment reply schemas；
 - 定义Plan、Work、Verify request/result schemas；
-- 定义Human Action专用statuses、labels、request/resolution records；
+- 定义Root Human Action request/resolution comment records与materialization boundary；
 - 定义Root/Cycle timeline events以及一个event、一条Markdown + `json` block comment的materialization contract；
 - 定义native comment thread resolve/reopen、reaction回执、actual model和required Turn Usage contracts；
 - 生成TypeScript/Python/Rust types及cross-language fixtures。
@@ -63,12 +63,10 @@ R0禁止arbitrary metadata、GraphQL passthrough、raw Provider thread ID和任�
 
 ## 6. R4：Human Action与DAG演进
 
-- Cycle Action是Cycle直接子Issue并link相关节点；Root Action是Root直接子Issue；
-- Project初始化创建和验证Human Action labels/statuses；
-- Root Reconciler生成完整Action proposal，Conductor materialize；
-- 用户status/comment形成closed resolution并返回Root Reconciler；
-- Rejected missing reason和Answered missing answer fail closed并进入Root Reconciler处理；
-- native archive保留全部Issue/Action历史并支持restore。
+- 按[Human Action](human-actions.md)一次硬切为Root special managed comment threads；
+- Root Reconciler是request与resolution的唯一语义producer，Conductor只做closed materialization；
+- 删除Human Action Issue、labels、专用statuses、parent/relation/archive和全部兼容路径；
+- E2E只在产品创建的request thread中模拟matching human reply。
 
 ## 7. R5：Timeline event comments
 
@@ -132,7 +130,7 @@ R8的topology、actor隔离、Case matrix、证据和verdict只由
    中留下actual model与required Turn Usage，Cycle/Root累计可从immutable turn records重新计算且完全一致。
 3. Work thread跨至少两个Work Issues连续执行，普通错误在turn内恢复。
 4. Root Reconciler依据Result、普通用户comment body和当前close/reopen thread-state revision调整DAG、replan、创建successor或Human Action，并以native child reply、
-   ✅/❌ receipt或no-terminal reaction以及resolve/keep-open结果回复用户；reaction不替代Human Action status。
+   ✅/❌ receipt或no-terminal reaction以及resolve/keep-open结果回复用户；reaction不替代Human Action request/resolution facts。
 5. Cycle budget耗尽后Root Reconciler选择successor或Human Action；Root gate只机械允许或拒绝该directive。
 6. process/session重启只靠Linear/Git恢复并拒绝旧output。
 7. Root/Cycle timeline comments从events幂等materialize并可在crash后补齐；每个event恰有一条同时包含用户Markdown和

@@ -55,7 +55,7 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 - 所有用户status、content、archive、parent、relation和comment修改都由Root Reconciler解释，Conductor不主动纠正；
 - Plan、Work、Verify通过强类型request/result contract报告事实，不决定下一步或创建Human Action；
 - Conductor始终是Performer caller；Performer只响应closed command，不反向调用Conductor；
-- Cycle Human Action是Cycle直接子Issue并link目标；Root Action是Root直接子Issue；
+- Human Action只存在于Root special managed comment threads；其scope可以是Root或Cycle；
 - Root Reconciler可以提出create/update/archive/restore/reorder/dependency patch、replan和successor Cycle；
   Conductor验证并materialize；
 - 原生archive flag决定active DAG membership，archived Issues仍完整进入Tree、审计和恢复；
@@ -69,9 +69,8 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
   同一次Linear materialization，不得fan-out为两条comment或两种可恢复事实。
 - 每个Stage Result只在matching Plan、Work或Verify Issue的canonical managed comment中持久化一次，并嵌套唯一的
   `ModelTurnRecord`；Cycle timeline只引用并展示该事实，不能成为第二个Result、usage或Root input来源。
-- Root、Cycle、Node和Human Action的lifecycle只由Linear custom status与native archive flag表达；directive、Result、
-  resolution、timeline、reply、reaction、thread resolve/reopen和`RootDelta`只能提供事实、回执、幂等关联或传输，
-  不得形成并行状态机。
+- Root、Cycle和Node的lifecycle只由Linear custom status与native archive flag表达；Human Action active/resolved只由其
+  Root request/resolution records派生。directive、Result、timeline、reaction和`RootDelta`不得形成并行状态机。
 - 除Linear原生的Issue current facts（status、archive、parent和relation）及comment current facts（body、thread
   state和reaction set）外，任何需要跨重启恢复的Symphony workflow record只能位于strict `json` code block；
   Symphony不得把前述原生事实镜像成第二份managed record、Markdown约定、HTML marker、local checkpoint或状态表。
@@ -91,9 +90,10 @@ thread跨该Cycle多个Work Issues和turn复用；三个Stage roles不能共享t
 | Root initial delegation | Linear native `delegate_id` | Human / Podium read-only projection |
 | Root ownership、Profile和convergence policy | Root managed records | Conductor |
 | Root/Cycle/Node status与archive membership | Linear | Root Reconciler interprets; Conductor materializes directives |
-| Cycle DAG、relations、Plan Contract和Human Action | Linear Issue Tree | Root Reconciler proposes; Conductor writes |
+| Cycle DAG、relations和Plan Contract | Linear Issue Tree | Root Reconciler proposes; Conductor writes |
+| Human Action requests、replies和resolutions | Root managed comment threads | Root Reconciler proposes; Conductor writes |
 | Root directives、Plan/Work/Verify Results、model和turn usage | Linear managed comment code blocks | Conductor validates |
-| Human status/comments/resolutions | Linear | Human / Conductor / Root Reconciler |
+| Human Action replies/resolutions | Linear Root comment threads | Human / Root Reconciler / Conductor |
 | 用户comment input与reply | Linear managed comments | Root Reconciler interprets; directive materializer writes |
 | branch、commits、diff、checks和delivery | Git | Conductor / Performer Work |
 | Provider auth/session runtime | Profile `CODEX_HOME` and live Performer | Codex SDK / Performer |
@@ -160,7 +160,7 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
   closed `RootReconcilerTurnResult`、Root/Cycle用户修改和确定性materialization。
 - [Performer Plan、Work与Verify Contracts](stage-orchestration.md)：三个role thread的强类型request/result。
 - [Root与Cycle Workflow Timeline](workflow-timeline.md)：事件发布、订阅和Linear comment materialization。
-- [Human Action交互与恢复](human-actions.md)：Issue层级、labels、专用状态和resolution。
+- [Human Action交互与恢复](human-actions.md)：Root comment threads、并发requests、structured questions、actor与resolution。
 - [Root Issue工作流](root-issue.md)：Linear status、Cycle Tree、Finding和delivery事实。
 - [Linear端到端流转](linear-flow.md)：Project解析、Root发现、blocker、排序和SDK ownership。
 - [并行黑盒端到端验收](black-box-e2e.md)：前台Campaign、真实用户模拟、并行Case断言和最终Linear/Git证据。
@@ -187,7 +187,7 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 | Sole owner | Fact or behavior |
 |---|---|
 | [Root Issue工作流](root-issue.md) | Linear Root/Cycle/Plan/Work/Verify status catalog and native archive membership |
-| [Human Action](human-actions.md) | Human Action lifecycle, user interaction and resolution requirements |
+| [Human Action](human-actions.md) | Human Action comment/thread model, active-request derivation, DEFINE questions, actor, resolution and recovery |
 | [Root Reconciliation](root-reconciliation.md) | ordinary user input filtering, native comment reply/receipt/thread behavior, bootstrap/delta and closed directives |
 | [Performer Stage Contracts](stage-orchestration.md) | canonical Plan/Work/Verify Result and nested `ModelTurnRecord` materialization |
 | [Performer Profile](performer-profiles.md) | actual model/Turn Usage semantics and Stage/Cycle/Root aggregation scope |
@@ -195,5 +195,5 @@ Cross-process contracts: JSON Schema -> generated TypeScript/Python/Rust types
 | [契约与接口](contracts.md) | cross-process schema and strict managed-record wire format |
 | [并行黑盒端到端验收](black-box-e2e.md) | foreground parallel E2E, immutable user inputs, Case assertions, final evidence and verdict |
 
-一个事实在两处出现时，非owner必须链接到owner，而不是重新定义。例如`root-issue.md`列出Human Action可用的
-display status，但不定义其迁移；`human-actions.md`才定义用户如何批准、拒绝、补充和取消。
+一个事实在两处出现时，非owner必须链接到owner，而不是重新定义。例如其他文档可以说明某个边界消费Human Action
+事实，但comment/thread、并发、提问、actor、resolution和恢复规则只能链接到`human-actions.md`。

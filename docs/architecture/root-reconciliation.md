@@ -70,6 +70,124 @@ Root Reconciliation是fact-driven的，不是持续消耗token的poll loop。Web
 读取”，不是durable业务event或第二套状态机。没有新的未消费Root input、Stage/Runtime事实、未materialize
 directive或到期机械deadline时，不调用模型。
 
+### 2.1 Root Reconciler决策循环
+
+Root Run对用户呈现`DEFINE -> PLAN -> BUILD -> VERIFY -> REVIEW -> SHIP`生命周期。`DEFINE`、terminal
+Cycle后的`REVIEW`和`SHIP`决策都是Root Reconciler内部语义步骤，不是新role、Issue kind、
+Provider thread、Result或持久化状态。`PLAN`、`BUILD`和`VERIFY`分别对应现有Plan、Work和Verify
+Stage。Root Reconciler的英文Markdown prompt必须包含下图及等价的显式规则。图只组织本文件
+已定义的facts、Results和closed directives，不新增第二套状态机：
+
+```mermaid
+flowchart TD
+    A["Receive fresh Root facts and pending inputs"] --> B["DEFINE: assess objective, scope, constraints, acceptance, verification and delivery instructions"]
+    B --> C{"Is the Root requirement complete, current and evidence-supported?"}
+    C -- "No" --> C1{"Can it be normalized without inventing requirements?"}
+    C1 -- "Yes" --> C2["Return revise_root_tree to update the Root description"]
+    C1 -- "No" --> C3["Return request_human_action, wait or acknowledge"]
+    C2 --> A
+    C3 --> A
+    C -- "Yes" --> D{"Does an active Cycle exist?"}
+    D -- "Yes" --> E{"Is a complete, feasible Plan available and approved?"}
+    E -- "No" --> E1["Return execute_plan, rerun_stage, replan or Plan-review action"]
+    E -- "Yes" --> F{"Is a mechanically ready Work Issue unfinished?"}
+    F -- "Yes" --> F1["Return execute_work or rerun_stage"]
+    F -- "No" --> G{"Is current durable Verify evidence available?"}
+    G -- "No" --> G1["Return execute_verify"]
+    G -- "Yes" --> H{"Does the Cycle evidence support a terminal CycleOutcome?"}
+    H -- "No" --> H1["Return repair, replan, Human Action, wait or terminal failure handling"]
+    H -- "Yes" --> H2["Return conclude_cycle"]
+    E1 --> A
+    F1 --> A
+    G1 --> A
+    H1 --> A
+    H2 --> A
+    D -- "No" --> I{"Is there a terminal CycleOutcome to REVIEW for the current Root requirement?"}
+    I -- "No" --> I1["Return create_cycle with reason initial"]
+    I -- "Yes" --> J["REVIEW the Cycle against the complete Root and prior Cycle history"]
+    J --> K{"Are all Root acceptance and delivery-readiness conditions satisfied?"}
+    K -- "No" --> L{"Can a bounded successor Cycle requirement be stated?"}
+    L -- "Yes" --> L1["Return create_cycle with explicit plan_trigger and inherited evidence"]
+    L -- "No" --> L2["Return request_human_action, wait or supported terminal handling"]
+    K -- "Yes" --> K1{"Is this exact verified revision already delivered and read back?"}
+    K1 -- "Yes" --> K2["Return acknowledge or evidence-backed wait"]
+    K1 -- "No" --> M{"Did the user explicitly require manual delivery?"}
+    M -- "Yes" --> M1["Return request_human_action or wait"]
+    M -- "No" --> M2["SHIP: return conclude_root ready_for_delivery"]
+    I1 --> A
+    L1 --> A
+    L2 --> A
+    K2 --> A
+    M1 --> A
+    M2 --> A
+```
+
+每个turn只执行一次图中的评估并返回一个matching closed result。Root Reconciler不得轮询Stage状态、直接调用
+Plan/Work/Verify、创建Provider子任务、运行命令或修改Linear/Git。进度只在Conductor把新事实或validated Stage Result
+持久化、read-back并通过bootstrap/delta重新交给同一语义角色后推进。
+
+详细任务拆解属于Plan role。Root Reconciler负责判断何时请求Plan，并在收到durable Plan Result后检查它是否覆盖
+Root objective、included/excluded scope、constraints、acceptance criteria、verification requirements、独立Work单元、
+依赖顺序、风险、权限和缺失信息。缺少这些内容、内部冲突、不可行或无法由evidence支持的Plan不能被当作可批准Plan；
+Reconciler必须使用现有rerun、replan、Human Action、wait或Cycle恢复directive，而不是凭空补全Work DAG。
+
+同样，`work_completed`不自动授权Verify，`verify_passed`不自动表示Cycle或Root完成，
+`CycleOutcome.conclusion=succeeded`也只说明该Cycle满足matching Plan Contract。Root Reconciler必须根据完整fresh facts
+复核matching target、Plan binding、dependency evidence、required checks、acceptance results、unresolved findings、
+Human resolutions、Git revision和convergence gate。失败、超时、blocked、inconclusive、stale或schema-invalid输出不能
+被解释为成功；schema-invalid输出在Performer/Conductor机械边界被拒绝，不产生替代directive。
+
+### 2.2 DEFINE Root requirement
+
+DEFINE的产物是Root Issue description中当前、明确、可验收的用户需求，而不是新Spec Issue或managed
+Root Contract。Root Reconciler必须从Root description和未消费的用户输入中明确objective、included/excluded
+scope、constraints、acceptance criteria、verification requirements和明示delivery instruction。没有明示禁止
+自动交付时，delivery默认为automatic。
+
+DEFINE、Plan、REVIEW和SHIP产生的需求、计划、审阅、决策和交付workflow文档只进入matching Linear Issue
+description、managed records、Human Action或timeline/reply，不写入Root Git worktree。不得创建`SPEC.md`、`PLAN.md`、
+repository task checklist、review report、delivery note或其他repository文件作为workflow authority。用户需求本身明确要求修改项目
+documentation时，该文档修改仍只能作为matching Work Issue的产品交付内容，不能承载Symphony workflow state。
+
+如果现有facts足以在不新增业务假设的前提下将需求规范化，Reconciler使用`revise_root_tree`的
+matching `update_node` operation保留用户意图并更新Root description。写入必须由Conductor按remote-version
+precondition materialize并read-back；在下一turn看到该fresh fact前DEFINE不得被视为完成。如果需求
+缺失、冲突或需要用户决策，必须创建matching Human Action或有证据地wait，不能用模型假设填补。
+
+### 2.3 terminal Cycle后的Root REVIEW
+
+每个Cycle必须先产生immutable `CycleOutcome`并read-back为terminal fact，Root Reconciler才能在后续turn执行
+Root REVIEW。REVIEW对比当前Root requirement、完整active/archived Cycle历史、matching Plan Contract、Work/Verify
+Results、Findings及dispositions、`ProgressAssessment`、Git revision和`RootConvergenceView`，判断是否已满足
+Root，而不是重复Verify的Stage级结论。
+
+机器审阅结果由该turn的accepted `RootDirective`本身承载：`rationale`是bounded review summary，
+`evidence_refs[]`引用被审阅的Root/Cycle/Result/Finding/Git facts，`action`则是review decision。这不创建
+`ReviewResult`、Review Issue、Review thread或第二份状态。用户可见timeline在directive read-back后展示该summary和
+evidence，不使用raw chain-of-thought。
+
+需要successor Cycle时，`create_cycle.plan_trigger`必须明确下一Cycle要解决的未满足Root criteria、
+open Findings、scope边界、必需outcome和verification方向；`inherited_fact_refs[]`只引用可复用的前序证据。
+禁止使用“继续完善”、“修复问题”或类似无法Plan和验收的模糊目标。无法安全形成下一Cycle要求时
+必须请求Human Action、wait或选择matching terminal handling，不得无界重试。
+
+### 2.4 REVIEW后的SHIP
+
+当REVIEW证明全部Root acceptance criteria、matching Verify evidence、Findings、Git revision、checks、budget和blocker
+条件均满足，且没有用户明示的manual-delivery instruction时，Root Reconciler默认返回
+`conclude_root(conclusion=ready_for_delivery)`。这是SHIP的唯一模型语义决策；Conductor随后在fresh
+preconditions下机械执行已验证commit的push/PR或branch delivery和read-back。用于Verify的immutable target commit必须
+在Verify调用前由Conductor通过Git workspace边界准备并read-back；SHIP不能再创建commit或改写该revision。Root Reconciler
+不生成或执行Git shell command，也不选择commit history。
+
+如果matching `DeliveryRecord`已经证明同一Cycle、Verify Result和exact verified revision完成交付，REVIEW不得再次返回
+`conclude_root`。没有fresh feedback或其他pending input时应由Conductor保持Root静默；存在需要处理的输入时Reconciler
+只能返回matching acknowledge、wait、Human Action或fresh Cycle动作。
+
+用户明示禁止自动SHIP、要求手工交付或存在必须由人决定的delivery风险时，Root Reconciler创建Root级
+Human Action或有证据地wait。Conductor不从comment keyword、status或自有policy推断是否交付。交付和
+`DeliveryRecord`成功read-back后Root进入`In Review`；不自动进入`Done`。
+
 ## 3. Session与角色隔离
 
 - 每个owned Root最多一个Root Reconciler session；它可以跨多个Cycles和turn复用；
@@ -288,7 +406,7 @@ active Cycle、active dependency指向archived Node或无matching Result的Done 
 ## 5. Root输入
 
 每个用户对owned Root Tree的修改都必须进入Root Reconciler，包括status、title、description、archive/restore、
-parent、relation、普通comment以及Human Action的status/comment。用户不需要创建结构化change request、选择mutation
+parent、relation、普通comment以及Root Human Action request thread中的reply/thread-state变化。用户不需要创建结构化change request、选择mutation
 类型或理解Symphony协议。
 
 Conductor把需要Root Reconciler解释的用户变化统一为一个很小的closed input union，并作为matching delta change
@@ -324,8 +442,8 @@ Symphony自身带matching stable write ID且已经read-back的mutation会进入�
 
 ### 5.1 用户comment与过滤
 
-用户可以在Root、Cycle、Plan、Work、Verify或Human Action Issue下用普通自然语言comment改变、纠正或询问
-执行，不需要JSON、command、directive ID或结构化change request。例如：
+用户可以在Root、Cycle、Plan、Work或Verify Issue下用普通自然语言comment改变、纠正或询问执行，也可以在Root上的
+Human Action request thread中回复；不需要JSON、command、directive ID或结构化change request。例如：
 
 ```text
 这个Plan漏了数据库迁移，请重新规划。
@@ -364,7 +482,7 @@ UserCommentInput =
     comment_id
     comment_body_digest
     issue_id
-    issue_kind: root | cycle | plan | work | verify | human_action
+    issue_kind: root | cycle | plan | work | verify
     cycle_issue_id?
     author_kind: human
     author_id
@@ -379,7 +497,7 @@ UserCommentInput =
     comment_remote_version
     thread_root_comment_id
     issue_id
-    issue_kind: root | cycle | plan | work | verify | human_action
+    issue_kind: root | cycle | plan | work | verify
     cycle_issue_id?
     thread_state: resolved | unresolved
     actor_kind: human | external_automation | unknown
@@ -407,10 +525,10 @@ Root Reconciler只接收最终可从Linear读回的state revision；若没有新
 历史body input。需要重新表达该意图时，用户创建新的comment或写入新的正文；Conductor不得为此保存本地comment edit
 history、revision序列或重放队列。
 
-Human Action中的用户comment既保留为完整Action上下文，也只有在matching status和时序事实成立后，Root
-Reconciler才能通过directive形成`HumanActionResolutionRecord`；Conductor不能把普通comment解释成Approved、
-Rejected或Answered。Action
-仍为Todo/In Progress时，reason/answer comment可以收到“等待状态选择”的回复，但不能提前产生审批后果。
+Human Action request thread中的用户reply既保留为完整上下文，也只有在
+[Human Action](human-actions.md)定义的actor、thread、proposal和question-coverage条件成立后，Root Reconciler才能
+通过directive形成`HumanActionResolutionRecord`；Conductor不能把普通comment、thread state或reaction解释成
+approval、rejection、answer或cancel。
 
 ### 5.2 reconciliation barrier与并发
 
@@ -460,7 +578,7 @@ Plan approval或Workflow command。
 `check`和`cross`只允许用于`HumanCommentBodyInput`，并由Symphony写在该输入的source comment上。这样用户能在自己
 写下的请求、reason或answer上看到已采纳或未采纳的回执；child reply只承载结构化解释与其managed record，绝不成为
 receipt target。`NativeCommentThreadStateInput`没有用户comment body可标记，reaction固定为`none`。这项展示规则不改变
-reaction的原生事实属性：它仍不能驱动Action status、Root/Cycle lifecycle或任何下一步。
+reaction的原生事实属性：它仍不能驱动Human Action request/resolution、Root/Cycle lifecycle或任何下一步。
 
 reply renderer只能从这些bounded字段生成结构化用户Markdown。它可以使用heading、强调、列表、链接、引用和非
 `json` code block解释用户要补充什么、已经采用了什么及下一步；不得透传模型原文、用HTML marker保存状态，或在
@@ -634,9 +752,10 @@ materialize并read-back，不能在partial success后重新询问模型制造第
 `consumed_input_ids[]`必须精确覆盖本轮bootstrap或delta中的pending inputs，不能遗漏，也不能引用本轮request
 中不存在的输入。
 `comment_replies[]`必须精确覆盖其中全部target仍存在的用户comment body/thread-state inputs，并排除comment
-tombstones。无业务影响时也
-返回`acknowledge`并消费输入，不创建另一份disposition状态。`human_action_resolutions[]`只在matching Action terminal status、actor、proposal digest和
-所需comment事实成立时出现；Conductor验证并materialize，但不能自行生成resolution。
+tombstones。无业务影响时也返回`acknowledge`并消费输入，不创建另一份disposition状态。
+`human_action_resolutions[]`可以在同一turn terminalize多个独立request，但每项都必须满足
+[Human Action](human-actions.md)定义的request、thread、actor、proposal和reply coverage；Conductor只验证并
+materialize，不能自行生成request或resolution。
 
 ### 7.0 Root convergence policy and gate
 
@@ -767,7 +886,7 @@ MaterializeApprovedPlanDagDirective
   cycle_issue_id
   plan_issue_id
   plan_contract_digest
-  approval_action_issue_id
+  approval_action_id
   approval_resolution_id
 ```
 
@@ -865,8 +984,9 @@ Stage sessions。`invalidated_delivery_refs`引用Git中的旧PR、branch或comm
 
 ### 7.5 Human、conclusion与wait
 
-`RequestHumanActionDirective`提供parent scope、related Issues、requested decision、context、options、comment
-requirement和evidence。Root/Cycle Action层级、status与resolution由Human Action文档定义。
+`RequestHumanActionDirective`只能提出一个由Root Reconciler决定的typed request；其scope、structured questions、
+proposal、actor binding、deduplication、Root comment materialization和resolution全部由
+[Human Action](human-actions.md)定义。本文不复制该directive的字段表或Action lifecycle。
 
 ```text
 ConcludeCycleDirective
@@ -977,9 +1097,10 @@ Result不能直接映射为下一Stage。Provider crash、schema failure和busin
 
 ### 9.3 Human Action
 
-用户status/comment经Conductor做actor、source version、scope和schema验证后作为pending inputs进入下一份
-`RootDelta`。Root Reconciler决定它们是否形成`HumanActionResolutionRecord`以及随后继续、replan、调整Tree、
-successor或新Action；Conductor不硬编码Approved后Work或Rejected后replan。
+Human Action thread的reply和thread-state事实经Conductor做actor、source version、scope和schema验证后作为pending
+inputs进入下一份`RootDelta`。Root Reconciler决定它们是否形成`HumanActionResolutionRecord`以及随后继续、replan、
+调整Tree、successor或fresh request；Conductor不硬编码任何resolution后的业务动作。完整规则只见
+[Human Action](human-actions.md)。
 
 ### 9.4 process与session恢复
 
@@ -1030,3 +1151,8 @@ Reconciler有Root级turn/token/deadline limits；Stage仍有Cycle/turn budgets�
 10. Stage Result必须durable并read-back后才能进入下一次Root reconciliation。
 11. Linear/Git是durable authority；Provider thread、timeline和reply都不是恢复authority。
 12. 每个Root Reconciler turn都必须记录实际model和`TurnUsage`；不存在日志-only usage或optional usage路径。
+13. Root Reconciler按本文件的评估、Plan审核、Stage派发、Result验收和恢复循环选择动作，但每turn仍只返回一个既有
+    closed directive；该循环不是第二套状态机。
+14. 详细Work DAG由Plan Result提出；Root Reconciler必须拒绝不完整、冲突或不可验证的Plan，不得自行替代Plan补全任务。
+15. Stage成功variant只是durable输入；只有matching Plan、dependency、checks、verification和Root acceptance evidence
+    全部成立时，Root Reconciler才能推进Cycle或Root conclusion。

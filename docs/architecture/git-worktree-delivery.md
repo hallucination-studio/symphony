@@ -52,6 +52,40 @@ Root Reconciler决定保持状态、回到In Progress、创建Cycle、重新Plan
 
 Done/Canceled Root不能由Conductor自动重开；保持terminal、重开或修复必须来自Root Reconciler directive。
 
+### 5.1 REVIEW后的自动SHIP
+
+Root Reconciler在terminal Cycle的`CycleOutcome` read-back后执行Root REVIEW。全部Root acceptance和delivery
+eligibility都有fresh evidence，且用户没有明示禁止自动交付时，它返回
+`conclude_root(conclusion=ready_for_delivery)`；自动SHIP是默认行为，不需要人工二次确认。用户明示要求manual
+delivery，或交付需要无法由现有事实安全决定的人类判断时，Reconciler必须先选择matching Root Human Action或`wait`，
+不能返回`conclude_root`后再让Conductor猜测用户意图。
+
+Conductor只机械执行accepted `conclude_root`，不解释review summary、不执行模型生成的Git command，也不让模型决定
+commit数量或改写history。用于Verify的immutable target commit已在Verify调用前通过`GitWorkspaceInterface`机械准备并
+read-back。SHIP从fresh Git、Linear、matching Plan/Verify和directive preconditions重新验证eligible revision；交付对象
+必须正是Verify绑定的commit，不能在SHIP中创建新commit或改变已验证内容。push/PR操作属于`RootDeliveryInterface`
+实现，不进入prompt output。
+
+```mermaid
+flowchart TD
+    A["Accepted conclude_root ready_for_delivery"] --> B["Fresh-read Linear, Git, Verify and delivery preconditions"]
+    B --> C{"Are all gates valid, is HEAD the exact verified commit, and is it not already delivered?"}
+    C -- "No" --> C1["Stop this Root and publish correlated sanitized failure evidence"]
+    C -- "Yes" --> E["Push deterministic delivery branch"]
+    E --> F{"Is gh usable for this repository?"}
+    F -- "Yes" --> G["Create or reuse the matching pull request"]
+    F -- "No" --> H["Deliver the remote branch or bounded local branch fallback"]
+    G --> I["Write and fresh-read the matching DeliveryRecord"]
+    H --> I
+    I --> J["Move Root to In Review and read it back"]
+    J --> K["Keep the Root worktree for review feedback"]
+```
+
+任一步失败都保持Root未交付或停在可证明的部分事实边界，输出correlated sanitized failure，并在恢复时从Git和Linear
+read-back判断缺少的机械步骤。只有matching `DeliveryRecord`和Root `In Review`都read-back后SHIP才完成；PR交付时record
+必须引用已创建或复用的matching PR。`DeliveryRecord`是现有交付managed fact，不再增加另一种Delivery Receipt、queue、
+checkpoint或模型状态。
+
 ## 6. Cleanup
 
 cleanup不是Root完成条件。只有Root Done/Canceled或用户明确请求，且没有live process或writer、
@@ -63,8 +97,9 @@ worktree identity完全匹配、没有未提交/未push/未交付修改时才能
 2. 一个Root只有一个deterministic branch和worktree。
 3. Stage retry和successor Cycle不创建第二branch/worktree。
 4. Performer不能直接修改Git topology或delivery。
-5. commit和delivery由Conductor执行并read-back。
+5. Conductor在Verify前准备immutable target commit；accepted `conclude_root`后只交付并read-back该exact commit。
 6. Verify通过前不交付；Root不自动Done。
-7. Git与Linear足以重建代码/交付状态，不保存Delivery Receipt或Leaf checkpoint。
+7. Git、Linear和matching `DeliveryRecord`足以重建代码/交付状态；不保存第二种Delivery Receipt或Leaf checkpoint。
 8. Stage retry保留worktree、commits和未提交修改。
 9. Verify绑定immutable target commit；验证期间HEAD变化使Result失效且禁止delivery。
+10. worktree在Root `In Review`期间保留；只有Done/Canceled或满足第6节显式安全请求时才cleanup。

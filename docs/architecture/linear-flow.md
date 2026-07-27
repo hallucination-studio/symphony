@@ -33,7 +33,8 @@ Conductor通过自己的Conductor Project Label解析唯一Project。Project上�
 Podium通过一个Project-scoped `ListProjectRootIndexPageQuery`分页读取顶层Root headers；Conductor消费closed、versioned
 `ProjectRootIndexPage`后才按自身routing过滤和排序。Index page包括带ownership record的terminal Roots；不能因为用户把
 Root改成Done、Canceled或其他status就使该修改绕过Root Reconciler。每个`RootHeader`只包含`root_issue_id`、`identifier`、
-`project_id`、当前`state`、`is_archived`、规范化的`updated_at`、`priority`、blockers、routing labels和native delegation。
+`project_id`、当前`state`、`is_archived`、规范化的`updated_at`、`priority`、blockers、routing labels、native delegation和
+[Human Action](human-actions.md)要求的Root assignee snapshot。
 可选`root_ownership`只包含已验证的`conductor_id`、`source_comment_id`和`source_comment_remote_version`；缺失即unowned。
 Header不包含title、description、order、parent、完整Cycle descendants、普通comments或任何current Cycle/ready node副本。
 
@@ -62,8 +63,9 @@ Conductor数无关；仅在前述批量continuation确有必要时允许每page�
 验收fixture时，常态budget是1，fallback budget是2。任何实现把请求数扩展为`O(Roots)`或`O(Conductors)`都违反架构，
 不能通过提高并发、延长timeout或增加rate limit修复。
 
-Root首次进入候选集还有一个独立且必须先满足的原生准入条件：用户已经在Linear将该Root的`delegate_id`设置为
-当前Binding验证过的Symphony actor。Podium只投影为`is_delegated_to_symphony`，Conductor只消费该闭合事实，不能
+Root首次进入候选集还有两个独立且必须先满足的原生准入条件：用户已经在Linear将该Root的`delegate_id`设置为
+当前Binding验证过的Symphony actor，并满足[Human Action](human-actions.md)定义的Root assignee约束。Podium只投影
+closed delegation与assignee facts，Conductor只消费这些闭合事实，不能
 创建、补偿或推断delegation。没有matching ownership record的undelegated Root必须被发现阶段排除；因此它不得被claim、
 不得变更status、不得写managed record/timeline/reply、不得创建Git workspace，也不得打开或调用Performer。已拥有
 matching ownership的Root可继续恢复，即使随后native delegation已被用户撤销；撤销本身作为owned Root的普通当前事实
@@ -196,8 +198,8 @@ Podium configures Linear and Project Conductor Pool
 -> Root Reconciler directs creation of initial Cycle
 -> Root Reconciler requests Plan turn
 -> Plan Result becomes durable
--> Root Reconciler requests Plan Review Human Action
--> user resolution becomes durable
+-> Root Reconciler requests a Plan Review Human Action comment on the Root
+-> user replies in that request thread and the resolution becomes durable
 -> Root Reconciler materializes/adjusts active Work DAG
 -> one Work thread executes selected ready Work Issues across turns
 -> every Work Result returns through durable Root Tree to Root Reconciler

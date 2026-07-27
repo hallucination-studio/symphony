@@ -71,6 +71,9 @@ baseBranch
 | Root Issue | `RootHeader` / `root_issue_id` | 带有有效 Conductor routing label 的顶层 Linear Issue；完整Tree读取前只以header参与discovery |
 | Project Root Index Page | `ProjectRootIndexPage` | Podium一次Project-scoped显式query返回的一页bounded Root headers；对同Project全部Conductor共享，不是durable cache |
 | Root Run | 领域概念 | Symphony对一个Root Issue的完整处理生命周期 |
+| Root DEFINE | Root Reconciler语义phase | 基于fresh Root facts明确objective、scope、constraints、acceptance、verification与delivery instruction，并在需要时通过既有directive更新Root description；不是role、Stage或state |
+| Root REVIEW | Root Reconciler语义phase | terminal `CycleOutcome` read-back后，用完整Root和跨Cycle历史决定successor Cycle、Human Action、terminal handling或SHIP；不是Verify、Review Stage或新Result |
+| Root SHIP | Root Reconciler语义phase | REVIEW满足Root且没有明示manual-delivery instruction时返回`conclude_root(ready_for_delivery)`；Git/Linear交付由Conductor机械执行 |
 | Root Workflow State | `RootWorkflowState` | Root允许的Todo、In Progress、Needs Approval、Needs Info、In Review、Done或Canceled Linear status |
 | Root Reconciliation View | `RootReconciliationView` | 从fresh active/archived Linear Tree和Git事实重建的当前内存视图 |
 | Root Safety Policy | `RootSafetyPolicyInterface` | 只验证ownership、coverage、schema、capability、budget、convergence和mutation preconditions；lifecycle/Tree矛盾只产出bootstrap/delta事实 |
@@ -107,14 +110,13 @@ baseBranch
 | Finding Disposition Record | `FindingDispositionRecord` | 后续Verify对immutable Finding记录still_open、resolved或Human-approved waived |
 | Root Convergence Policy | `RootConvergencePolicy` | Root级cycle、open Finding persistence、no-progress、token、deadline与kill-switch约束 |
 | Root Convergence View | `RootConvergenceView` | 从完整Linear Root历史重建、用于机械熔断的一次性内存计算 |
-| Human Action Issue | `HumanActionIssueSnapshot` | Root或Cycle direct child；用专用status/comment承载用户决定，不是DAG执行节点 |
 | Native Archive Membership | `is_archived` | Linear原生archive flag；决定Issue是否属于active DAG，同时保留完整历史 |
 
 `Sub Issue`只用于说明Linear的parent/child产品形态。业务逻辑不使用`Task`或`Work Item`；统一使用
 Cycle Issue、Plan Node、Work Node或Verify Node。
 
-Cycle Human Action是Cycle direct child并link相关节点；Root Action是Root direct child。Root waiting status只做
-header summary，Action status/comment和closed resolution是用户交互事实。
+Human Action不是Issue或DAG节点；其canonical术语和完整语义只见
+[Human Action](human-actions.md)。
 
 ## 6. Managed Linear数据
 
@@ -127,12 +129,14 @@ header summary，Action status/comment和closed resolution是用户交互事实�
 | Stage Result | `PlanResult`、`WorkResult`或`VerifyResult` | matching Stage Issue canonical managed comment中的唯一execution事实，嵌套唯一`ModelTurnRecord` |
 | Cycle Outcome | `CycleOutcome` | 一个Cycle的immutable terminal conclusion、evidence与unresolved Finding引用；不拥有Root下一步或successor选择 |
 | Progress Assessment | `ProgressAssessment` | Cycle间prior Finding的精确resolution或passed acceptance/check key真超集 |
-| Human Action Request Record | `HumanActionRequestRecord` | Action identity、parent scope、links、proposal digest和source directive |
-| Human Action Resolution Record | `HumanActionResolutionRecord` | validated status/comment、actor、proposal和terminal resolution |
+| Human Action Request Comment | `HumanActionRequestRecord` | Root顶层special managed comment和thread root；可以表达Root或Cycle scope |
+| Human Action Resolution Comment | `HumanActionResolutionRecord` | matching request thread内的Symphony managed terminal reply |
+| Active Human Action Request | 派生事实 | 有valid request且没有matching valid resolution；一个Root可同时有多个 |
 | Root Reconciler Failure Record | `RootReconcilerFailureRecord` | matching Reconciler turn的transport、timeout、schema或stale-output失败证据与usage；不含下一步 |
 | Model Turn Record | `ModelTurnRecord` | 一次Root Reconciler/Plan/Work/Verify Provider调用的actual model、outcome和required Turn Usage |
 | Workflow Timeline Record | `WorkflowTimelineRecord` | deterministic event ID到Root/Cycle Linear comment的幂等关联；不拥有Workflow状态 |
 | Root Reconciler Reply Record | `RootReconcilerReplyRecord` | source human comment version到read-back后Linear thread reply、reaction和thread action的幂等关联 |
+| Delivery Record | `DeliveryRecord` | exact verified revision完成PR、remote branch或local branch交付后的immutable Linear managed fact；不是pending delivery、workflow state或第二种receipt |
 | Performer Profile ID | `PerformerProfileId` / `performer_profile_id` | Root固定使用的Performer Profile身份 |
 
 所有restart-required managed事实都在strict `json` code block中。旧HTML marker、`ManagedMarker`、
@@ -336,7 +340,8 @@ CodexLoginFailedEvent
 | Remote Branch Delivery | `RemoteBranchDeliveryResult` | 已push但没有PR |
 | Local Branch Delivery | `LocalBranchDeliveryResult` | 无法push时保留local branch |
 
-不使用`Delivery Receipt`；交付事实来自Git，Linear Root status只表达Workflow lifecycle。
+不使用独立于`DeliveryRecord`的`Delivery Receipt`、delivery checkpoint或queue；Git证明repository事实，
+`DeliveryRecord`证明matching交付已经read-back，Linear Root status只表达Workflow lifecycle。
 
 ## 11. Podium与Desktop
 
@@ -443,8 +448,8 @@ Linear status catalog。
   `changes_required`、`inconclusive`、`escalated`、`canceled`。
 - `StageNodeState`使用：`todo`、`in_progress`、`in_review`、`done`、`failed`、`canceled`；
   Plan/Work/Verify各自只允许其中明确子集。
-- Approval Human Action使用`todo`、`in_progress`、`approved`、`rejected`、`canceled`；Clarification使用
-  `todo`、`in_progress`、`answered`、`canceled`。
+- Human Action没有Issue status lifecycle；request、resolution和Root waiting summary只由
+  [Human Action](human-actions.md)定义。
 - `StageNodeState`是Linear lifecycle；`NodeReadiness`是每次重算的内存值；`VerifyConclusion`是Result evidence。
   三者不能互相替代或另行持久化。
 - `VerifyConclusion`使用：`passed`、`changes_required`、`inconclusive`、
@@ -477,7 +482,7 @@ Desktop的连接与daemon状态只显示Connected、Disconnected、Online和Offl
 | Managed Run | Root Run / RootReconciliationView |
 | Task | Cycle Issue或Plan/Work/Verify Node |
 | Agent Config、Agent Profile（代码类型） | Performer Profile |
-| Human Node、Plan Approval Node | Human Action Issue |
+| Human Node、Plan Approval Node、Human Action Issue | Human Action Request Comment |
 | Root Gate Node、Verify Gate | Verify Node |
 | Desktop Workflow/next action View | 不提供；在Linear查看 |
 | safe/runtime/operator view（代码类型） | 具体`*View`名称 |
