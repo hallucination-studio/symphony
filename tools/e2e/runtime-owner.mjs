@@ -15,6 +15,7 @@ import {
 const execFile = promisify(execFileCallback);
 const REPOSITORY_COUNT = 3;
 const MAX_FRAME_BYTES = 1_048_576;
+const CONDUCTOR_ONLINE_ATTEMPTS = 20;
 const PROFILE_READINESS_ATTEMPTS = 10;
 const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 const PROJECT_ROOT_INDEX_OPERATION = "SymphonyProjectRootIndex";
@@ -333,6 +334,7 @@ export async function startConfiguredConductors({
     onRunning?.(value);
     return value;
   }));
+  await waitForConductorsOnline({ client, conductors: running, wait });
   const profiles = await Promise.all(running.map((conductor) => provision({ client, conductor, config, wait })));
   return Object.freeze(running.map((conductor, index) => {
     const profile = profiles[index];
@@ -341,6 +343,23 @@ export async function startConfiguredConductors({
     }
     return Object.freeze({ ...conductor, profileId: profile.profileId });
   }));
+}
+
+async function waitForConductorsOnline({ client, conductors, wait }) {
+  const expectedIds = new Set(conductors.map(({ conductorId }) => conductorId));
+  for (let attempt = 1; attempt <= CONDUCTOR_ONLINE_ATTEMPTS; attempt += 1) {
+    const overview = await client.command({ kind: "get_desktop_overview" });
+    if (!overview || typeof overview !== "object" || !Array.isArray(overview.conductors)) {
+      throw stableError("foreground_e2e_conductor_overview_invalid");
+    }
+    const summaries = overview.conductors;
+    const onlineIds = new Set(summaries
+      .filter((summary) => summary && typeof summary === "object" && summary.status === "online")
+      .map((summary) => summary.conductor_id));
+    if ([...expectedIds].every((conductorId) => onlineIds.has(conductorId))) return;
+    if (attempt < CONDUCTOR_ONLINE_ATTEMPTS) await wait(250);
+  }
+  throw stableError("foreground_e2e_conductor_online_timeout");
 }
 
 export async function closeOwnedProcess(child, { timeoutMs = 5_000 } = {}) {

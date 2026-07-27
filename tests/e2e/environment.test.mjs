@@ -528,6 +528,7 @@ test("runtime provisions every Binding before opening one concurrent Conductor s
   }));
   const created = [];
   const startCalls = [];
+  const overviewCalls = [];
   const provisioned = [];
   let startsReleased = false;
   let resolveAllStarts;
@@ -559,6 +560,21 @@ test("runtime provisions every Binding before opening one concurrent Conductor s
           command_kind: "start_conductor",
         };
       }
+      if (body.kind === "get_desktop_overview") {
+        overviewCalls.push(body.kind);
+        return {
+          linear_connection: { status: "connected" },
+          projects: [],
+          conductors: repositories.map((_, index) => ({
+            conductor_id: `conductor-${index}`,
+            display_name: `Repository ${repositories[index].repositoryHandle}`,
+            status: overviewCalls.length === 1 && index === 0 ? "offline" : "online",
+            observed_at: "2026-07-28T00:00:00.000Z",
+          })),
+          recent_logs: [],
+          observed_at: "2026-07-28T00:00:00.000Z",
+        };
+      }
       throw new Error("unexpected_podium_command");
     },
   };
@@ -573,7 +589,9 @@ test("runtime provisions every Binding before opening one concurrent Conductor s
     projectId: "project-1",
     installation: { installationId: "installation-1", organizationId: "organization-1" },
     config,
-    wait: async () => {},
+    wait: async () => {
+      assert.equal(provisioned.length, 0);
+    },
     provision: async ({ conductor }) => {
       assert.equal(startsReleased, true);
       provisioned.push(conductor.conductorId);
@@ -588,6 +606,7 @@ test("runtime provisions every Binding before opening one concurrent Conductor s
   releaseStarts();
 
   const conductors = await started;
+  assert.deepEqual(overviewCalls, ["get_desktop_overview", "get_desktop_overview"]);
   assert.deepEqual(provisioned, ["conductor-0", "conductor-1", "conductor-2"]);
   assert.deepEqual(
     conductors.map(({ conductorId, profileId, dataRoot }) => ({ conductorId, profileId, dataRoot })),
@@ -597,6 +616,68 @@ test("runtime provisions every Binding before opening one concurrent Conductor s
       dataRoot: `/runtime/${conductorId}`,
     })),
   );
+});
+
+test("runtime fails closed before Profile provisioning when a Conductor never becomes online", async () => {
+  const repositories = ["a", "b", "c"].map((suffix) => ({
+    repositoryHandle: `repository-${suffix}`,
+    repositoryIdentity: `remote-${suffix}`,
+    repositoryRoot: `/repositories/${suffix}`,
+    baseBranch: "main",
+    repositoryDisplayName: `Repository ${suffix}`,
+  }));
+  let created = 0;
+  let overviewCalls = 0;
+  let provisionCalls = 0;
+  const client = {
+    async command(body) {
+      if (body.kind === "create_conductor") {
+        const index = created++;
+        return {
+          kind: "conductor_created",
+          binding_id: `binding-${index}`,
+          conductor_id: `conductor-${index}`,
+          conductor_short_hash: `${index + 1}`.repeat(12),
+          repository_identity: repositories[index].repositoryIdentity,
+        };
+      }
+      if (body.kind === "start_conductor") {
+        return {
+          kind: "conductor_command_completed",
+          conductor_id: body.conductor_id,
+          command_kind: "start_conductor",
+        };
+      }
+      if (body.kind === "get_desktop_overview") {
+        overviewCalls += 1;
+        return {
+          conductors: repositories.map((_, index) => ({
+            conductor_id: `conductor-${index}`,
+            status: index === 0 ? "offline" : "online",
+          })),
+        };
+      }
+      throw new Error("unexpected_podium_command");
+    },
+  };
+
+  await assert.rejects(startConfiguredConductors({
+    repositories,
+    client,
+    host: {
+      runningConductor: ({ conductorId }) => ({ dataRoot: `/runtime/${conductorId}` }),
+    },
+    projectId: "project-1",
+    installation: { installationId: "installation-1", organizationId: "organization-1" },
+    config,
+    wait: async () => {},
+    provision: async () => {
+      provisionCalls += 1;
+      return { profileId: "unexpected-profile" };
+    },
+  }), hasCode("foreground_e2e_conductor_online_timeout"));
+  assert.equal(overviewCalls, 20);
+  assert.equal(provisionCalls, 0);
 });
 
 test("runtime cleanup bounds an unresponsive Podium stop before closing all owned resources", async () => {
