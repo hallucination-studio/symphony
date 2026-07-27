@@ -10,11 +10,19 @@ def pending_comment_reply_sources_from_snapshot(
 ) -> list[dict[str, Any]]:
     pending = set(pending_input_ids)
     sources: list[dict[str, Any]] = []
-    for comment in _objects(snapshot.get("user_comments")):
+    user_comments = _objects(snapshot.get("user_comments"))
+    user_comment_ids = {
+        comment_id
+        for comment in user_comments
+        if isinstance(comment_id := comment.get("comment_id"), str)
+    }
+    for comment in user_comments:
         source = _body_source(comment)
         if source is not None and source["source_input_id"] in pending:
             sources.append(source)
     for thread_state in _objects(snapshot.get("user_comment_thread_states")):
+        if thread_state.get("comment_id") not in user_comment_ids:
+            continue
         source = _thread_state_source(thread_state)
         if source is not None and source["source_input_id"] in pending:
             sources.append(source)

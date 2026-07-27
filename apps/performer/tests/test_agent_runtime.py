@@ -591,6 +591,72 @@ def test_host_rejects_unexpected_comment_replies_when_no_comment_input_is_pendin
     assert failure["failure"]["category"] == "schema_invalid"
 
 
+def test_host_does_not_require_a_reply_for_an_automation_comment_thread_state():
+    request = open_root_request()
+    bootstrap = request["bootstrap"]
+    assert isinstance(bootstrap, dict)
+    snapshot = bootstrap["root_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["user_comment_thread_states"] = [{
+        "comment_id": "automation-comment-1",
+        "comment_remote_version": "comment-v1",
+        "thread_root_comment_id": "automation-comment-1",
+        "thread_state": "unresolved",
+        "actor_kind": "unknown",
+        "observed_at": "2026-07-23T00:00:00Z",
+    }]
+    source_input_id = "input:" + sha256(
+        b"comment_thread_state:automation-comment-1:automation-comment-1:unresolved\0comment-v1",
+    ).hexdigest()
+    bootstrap["pending_input_ids"] = [source_input_id]
+
+    result = AgentProtocolHost(FakeBackend()).handle(request)
+
+    assert result["kind"] == "root_reconciler_opened"
+    assert result["initial_result"]["action"]["kind"] == "wait"
+    assert result["initial_result"]["comment_replies"] == []
+
+
+def test_host_requires_a_reply_for_a_pending_user_comment_thread_state():
+    request = open_root_request()
+    bootstrap = request["bootstrap"]
+    assert isinstance(bootstrap, dict)
+    snapshot = bootstrap["root_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["user_comments"] = [{
+        "comment_id": "comment-1",
+        "comment_remote_version": "comment-v1",
+        "issue_id": "root-1",
+        "author_kind": "human",
+        "author_id": "user-1",
+        "body": "Start planning.",
+        "thread_root_comment_id": "comment-1",
+        "thread_state": "resolved",
+        "reactions": [],
+        "created_at": "2026-07-23T00:00:00Z",
+        "updated_at": "2026-07-23T00:00:01Z",
+    }]
+    snapshot["user_comment_thread_states"] = [{
+        "comment_id": "comment-1",
+        "comment_remote_version": "comment-v1",
+        "thread_root_comment_id": "comment-1",
+        "thread_state": "resolved",
+        "actor_kind": "unknown",
+        "observed_at": "2026-07-23T00:00:01Z",
+    }]
+    source_input_id = "input:" + sha256(
+        b"comment_thread_state:comment-1:comment-1:resolved\0comment-v1",
+    ).hexdigest()
+    bootstrap["pending_input_ids"] = [source_input_id]
+
+    result = AgentProtocolHost(MatchingCommentReplyBackend()).handle(request)
+
+    assert result["kind"] == "root_reconciler_opened"
+    reply = result["initial_result"]["comment_replies"][0]
+    assert reply["source_input_id"] == source_input_id
+    assert reply["source"]["kind"] == "comment_thread_state"
+
+
 def test_host_accepts_a_reply_that_matches_the_pending_user_comment_input():
     request = open_root_request()
     bootstrap = request["bootstrap"]
