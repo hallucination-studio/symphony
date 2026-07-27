@@ -129,7 +129,9 @@
           "tests/e2e/target-architecture-runner.test.mjs",
           "tests/integration/linear-boundary-live.test.mjs",
           "tools/e2e/target-architecture.mjs"
-        ]
+        ],
+        "managed_record_block_legacy_format": [],
+        "```symphony": []
       }
     },
     "legacy-turn-usage": {

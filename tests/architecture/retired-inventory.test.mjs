@@ -10,6 +10,8 @@ import {
 const htmlMarker = "<!" + "-- symphony";
 const snakeMarker = "managed_" + "marker";
 const camelMarker = "managed" + "Marker";
+const legacyManagedRecordError = "managed_record_block_" + "legacy_format";
+const legacyInfoFence = "```" + "symphony";
 const stageUsage = "Stage" + "Usage";
 const stageUsageSnapshot = stageUsage + "Snapshot";
 const managedHtmlRecordsScope = "managed-html-" + "records";
@@ -34,6 +36,8 @@ test("hard-cut inventory names every retired comment, timeline, usage, and E2E s
     htmlMarker,
     snakeMarker,
     camelMarker,
+    legacyManagedRecordError,
+    legacyInfoFence,
   ]);
   assert.deepEqual(Object.keys(inventory.scopes[legacyTurnUsageScope].symbols), [
     stageUsage,

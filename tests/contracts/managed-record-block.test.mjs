@@ -20,7 +20,7 @@ test("strict JSON managed-record envelope preserves Markdown and its JSON object
   );
 });
 
-test("strict JSON managed-record envelope rejects missing, duplicate, nonterminal, invalid, and retired blocks", () => {
+test("strict JSON managed-record envelope rejects missing, duplicate, nonterminal, and invalid blocks", () => {
   assert.deepEqual(parseManagedRecordBlock("ordinary comment"), {
     ok: false,
     error: "managed_record_block_missing",
@@ -40,13 +40,5 @@ test("strict JSON managed-record envelope rejects missing, duplicate, nontermina
   assert.deepEqual(parseManagedRecordBlock("```json\n{\"kind\":\"workflow_issue\",\"version\":2}\n```"), {
     ok: false,
     error: "managed_record_version_invalid",
-  });
-  assert.deepEqual(parseManagedRecordBlock(`\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\``), {
-    ok: false,
-    error: "managed_record_block_legacy_format",
-  });
-  assert.deepEqual(parseManagedRecordBlock(`<!-- symphony managed-record\n${JSON.stringify(record)}\n-->`), {
-    ok: false,
-    error: "managed_record_block_legacy_format",
   });
 });

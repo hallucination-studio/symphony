@@ -54,14 +54,6 @@ test("managed records require exactly one strict JSON code block", () => {
   assert.match(rendered, /```json\n\{.*\}\n```$/u);
   assert.deepEqual(parseManagedRecord(rendered), { ok: true, value: record });
   assert.deepEqual(
-    parseManagedRecord(`<!-- ${"symphony"} managed-record\n${JSON.stringify(record)}\n-->`),
-    { ok: false, error: "managed_record_block_legacy_format" },
-  );
-  assert.deepEqual(
-    parseManagedRecord(`\`\`\`symphony\n${JSON.stringify(record)}\n\`\`\``),
-    { ok: false, error: "managed_record_block_legacy_format" },
-  );
-  assert.deepEqual(
     parseManagedRecord(`\`\`\`json\n${JSON.stringify(record)}\n\`\`\`\n\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\``),
     { ok: false, error: "managed_record_block_ambiguous" },
   );
