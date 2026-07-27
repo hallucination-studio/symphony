@@ -50,6 +50,20 @@ test("single-authority audit rejects a parallel lifecycle record", () => {
   }]);
 });
 
+test("single-authority audit rejects dynamically constructed retired HTML markers", () => {
+  const legacyActor = ["sym", "phony"].join("");
+  const source = `const marker = "<!" + "-- ${legacyActor}";`;
+  const findings = inspectSingleAuthority(new Map([
+    ["apps/conductor/src/unsafe.ts", source],
+  ]));
+
+  assert.deepEqual(findings, [{
+    code: "parallel_authority_surface",
+    path: "apps/conductor/src/unsafe.ts",
+    rule: "retired_html_marker_construction",
+  }]);
+});
+
 test("architecture traces require an existing owning document anchor", () => {
   const trace = {
     id: "missing_anchor",

@@ -15,8 +15,6 @@ import type {
 import { parseManagedRecord } from "../../root-reconciliation/internal/ManagedRecordCodec.js";
 import { LinearRootReconcilerReplyWriterImpl } from "../internal/LinearRootReconcilerReplyWriterImpl.js";
 
-const retiredManagedHtmlMarker = "<!" + "-- symphony";
-
 test("reply writer materializes a native child reply and receipts the human source once", async () => {
   const linear = new FakeLinear();
   const candidate = reply();
@@ -38,7 +36,6 @@ test("reply writer materializes a native child reply and receipts the human sour
   assert.equal(created.expectedThreadState, "unresolved");
   assert.match(created.body, /## ✅ 已接受/u);
   assert.match(created.body, /\*\*确认\*\*\nWe received your request\./u);
-  assert.doesNotMatch(created.body, new RegExp(retiredManagedHtmlMarker, "u"));
   const parsed = parseManagedRecord(created.body);
   assert.equal(parsed.ok, true);
   if (!parsed.ok || parsed.value.kind !== "root_reconciler_reply") return;

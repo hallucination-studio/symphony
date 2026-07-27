@@ -147,6 +147,7 @@ const parallelAuthorityRules = [
   ["retired_timeline_projection", /(?:TimelineProjection|timeline-projections|LinearWorkflowTimelinePublisher)/u],
   ["retired_timeline_time_anchor", /(?:materializedAt|materialized_at)/u],
   ["retired_html_record", new RegExp(`(?:${legacyManagedCamel}|${legacyManagedSnake}|${escapeRegExp(legacyHtmlPrefix)}\\s*${symphonyActor})`, "u")],
+  ["retired_html_marker_construction", /["'`]<!["'`]\s*(?:\+\s*|,\s*)["'`]--\s*symphony["'`]/iu],
   ["parallel_lifecycle_record", /\b(?:StatusRecord|WorkflowStateRecord|LifecycleRecord|ThreadStateRecord)\b/u],
   ["parallel_thread_history", /(?:comment_thread_change|webhook_history|last_seen_thread)/u],
 ];

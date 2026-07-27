@@ -311,7 +311,8 @@ dual read、fallback或legacy root恢复路径。
 Shared managed-record parser只搜索唯一terminal strict `json` fenced block。找不到该block时统一返回
 `managed_record_block_missing`，不扫描HTML signature、旧info string或其他retired syntax，也不存在
 `managed_record_block_legacy_format`专用结果。调用方因此只区分“普通Linear文本中没有managed record”和“当前`json`
-block存在但无效”；旧格式不是可识别输入类别。tracked生产代码和测试不得保留旧格式literal、regex、fixture或拒绝分支，
+block存在但无效”；旧格式不是可识别输入类别。tracked生产代码和role测试不得保留旧格式literal、regex、fixture、拒绝分支或
+通过简单字符串拼接重建的marker；architecture audit的隔离negative control仅验证该禁止规则，不能成为workflow兼容行为。
 retired inventory只作为零残留guard，不能把兼容测试登记成允许baseline。
 
 ## 9. Interface ownership
