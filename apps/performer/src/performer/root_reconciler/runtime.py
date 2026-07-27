@@ -142,7 +142,7 @@ class RootReconcilerRuntime:
         closed = self._sessions.close_root(root_issue_id=root_issue_id)
         for session_id in closed:
             self._baselines.pop(session_id, None)
-        return {"root_issue_id": root_issue_id, "closed": True}
+        return {"root_issue_id": root_issue_id}
 
     def _discard(self, session_id: str) -> None:
         self._baselines.pop(session_id, None)

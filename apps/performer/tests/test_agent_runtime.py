@@ -652,7 +652,12 @@ def test_retained_failed_root_open_can_be_closed_before_a_fresh_open():
         "root_issue_id": "root-1",
         "reason": "turn_failed",
     })
-    assert closed["kind"] == "root_reconciler_closed"
+    assert closed == {
+        "protocol_version": "1",
+        "request_id": "close",
+        "kind": "root_reconciler_closed",
+        "root_issue_id": "root-1",
+    }
 
     reopened = host.handle(open_root_request("reopen", "root-session-2", "turn-2"))
     assert reopened["kind"] == "root_reconciler_opened"
