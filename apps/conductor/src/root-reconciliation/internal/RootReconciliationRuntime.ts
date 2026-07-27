@@ -40,6 +40,8 @@ import type { RootRuntimeDisposition } from "../api/RootRuntimeLoop.js";
 import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet } from "./RootFactSet.js";
 import { rootInputId } from "./RootInputIdentity.js";
 
+const PROJECT_ROOT_INDEX_PAGE_SIZE = 8;
+
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
   conductorShortHash: string;
@@ -153,7 +155,7 @@ export class RootReconciliationRuntime {
       try {
         result = await this.dependencies.linear.readProjectRootIndexPage({
           projectId,
-          limit: 250,
+          limit: PROJECT_ROOT_INDEX_PAGE_SIZE,
           ...(cursor ? { cursor } : {}),
         });
       } catch (error) {

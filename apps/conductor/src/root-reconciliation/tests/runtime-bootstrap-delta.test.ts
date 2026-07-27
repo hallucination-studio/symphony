@@ -21,6 +21,7 @@ import {
 test("Root runtime consumes every Index page before scheduling and reads only the selected candidate Tree", async () => {
   const scheduledRoots: string[][] = [];
   const treeReads: string[] = [];
+  const indexPageLimits: number[] = [];
   const root = (issueId: string, priority: "normal" | "high") => ({
     issueId,
     identifier: issueId === "root-high" ? "SYM-2" : "SYM-1",
@@ -42,7 +43,8 @@ test("Root runtime consumes every Index page before scheduling and reads only th
       async resolveProject() {
         return { kind: "resolved" as const, projectId: "project-1", conductorPool: [{ conductorShortHash: "abc123" }] };
       },
-      async readProjectRootIndexPage({ cursor }) {
+      async readProjectRootIndexPage({ cursor, limit }) {
+        indexPageLimits.push(limit);
         if (!cursor) {
           return {
             kind: "page" as const,
@@ -77,6 +79,7 @@ test("Root runtime consumes every Index page before scheduling and reads only th
   } satisfies RootReconciliationRuntimeDependencies);
 
   assert.equal(await runtime.cycle(), "needs-attention");
+  assert.deepEqual(indexPageLimits, [8, 8]);
   assert.deepEqual(scheduledRoots, [["root-normal", "root-high"]]);
   assert.deepEqual(treeReads, ["root-high"]);
 });
