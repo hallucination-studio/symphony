@@ -161,10 +161,12 @@ precondition。加入第二个member前，所有非终态Root必须已有一个�
 Conductor Label；移除member前，不得存在仍route到该member的非终态Root。
 任一条件不满足都fail closed，不做partial pool mutation。
 
-Target Workflow Setup只初始化并read-back目标Team的workflow catalog、Project配置和当前Project Conductor Pool；它绝不
-创建、rebind、加入或移除任何Conductor Project Label。Conductor Binding是Project Conductor Pool唯一的写入者。这样workflow
-初始化不能借由临时Conductor identity改变已有Root的routing；Binding创建后的pool read-back只要求包含新Binding，不要求或允许
-重置既有成员集合。
+Target Workflow Setup只初始化并read-back目标Team的workflow status catalog、六个primary kind Issue Labels
+（`Root`、`Cycle`、`Plan`、`Work`、`Verify`、`Finding`）、Human Action Issue Labels、Project配置和当前Project
+Conductor Pool。每个workflow label必须是该Team唯一、active且非group的native Issue Label；缺失时setup创建，重复或read-back
+不完整时fail closed。它绝不创建、rebind、加入或移除任何Conductor Project Label。Conductor Binding是Project Conductor Pool
+唯一的写入者。这样workflow初始化不能借由临时Conductor identity改变已有Root的routing；Binding创建后的pool read-back只要求
+包含新Binding，不要求或允许重置既有成员集合。
 
 Conductor runtime必须遍历全部Binding。Desktop只显示每个Binding的resolved Project安全名称；Project pool、
 Root routing/conflict细节存在于Linear，iteration guard和process fencing细节只在runtime日志中；二者都不进入Desktop View。
