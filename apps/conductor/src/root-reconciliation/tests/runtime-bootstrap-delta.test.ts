@@ -139,13 +139,13 @@ test("Root worktree gate derives required revisions only from native Verify atta
     {
       issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1",
       status_id: "succeeded", status_name: "Succeeded", status_category: "completed", status_position: 2,
-      order: 1, depth: 1, title: "Cycle", description: "Completed cycle", labels: ["Cycle"], is_archived: false,
+      order: 1, depth: 1, title: "Cycle", description: "Completed cycle", labels: ["symphony:kind/cycle"], is_archived: false,
       issue_kind: "cycle", remote_version: "cycle-v1", created_at: tree.observed_at, updated_at: tree.observed_at,
     },
     {
       issue_id: "verify-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
       status_id: "done", status_name: "Done", status_category: "completed", status_position: 3,
-      order: 1, depth: 2, title: "Verify", description: "Passed", labels: ["Verify", "Passed"], is_archived: false,
+      order: 1, depth: 2, title: "Verify", description: "Passed", labels: ["symphony:kind/verify", "Passed"], is_archived: false,
       issue_kind: "verify", remote_version: "verify-v1", created_at: tree.observed_at, updated_at: tree.observed_at,
     },
   );

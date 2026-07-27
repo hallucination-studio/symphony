@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface, LinearWorkflowMutationCommand } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { workflowKindLabel } from "../../linear-gateway/api/WorkflowKindLabels.js";
 import type { HumanActionMaterializerInterface } from "../../human-actions/api/HumanActionMaterializerInterface.js";
 import type { RootDeliveryInterface } from "../../root-delivery/api/RootDeliveryInterface.js";
 import type {
@@ -287,7 +288,7 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
         title: cycleTitle,
         description: action.planTrigger,
         statusId: status.status_id,
-        labelNames: ["Cycle"],
+        labelNames: [workflowKindLabel("cycle")],
       });
       if (outcome.kind === "failed" || outcome.kind === "precondition_conflict") return failed(directive, `cycle_create_${outcome.kind}`);
       currentView = await refreshView(this.linear, currentView);
@@ -828,9 +829,8 @@ function preservedDescription(
   return markdown;
 }
 
-function primaryIssueLabel(kind: "plan" | "work" | "verify"): "Plan" | "Work" | "Verify" {
-  if (kind === "plan") return "Plan";
-  return kind === "work" ? "Work" : "Verify";
+function primaryIssueLabel(kind: "plan" | "work" | "verify"): string {
+  return workflowKindLabel(kind);
 }
 
 function treeOperationIssueKey(

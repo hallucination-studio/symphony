@@ -22,7 +22,7 @@ test("materializes exactly one approved Plan node and its native relations", asy
   });
   const created = linear.issue("work-1");
   assert.equal(created.description, "Implement the approved change.\n\nRequired check: npm test");
-  assert.deepEqual(created.labels, ["Work"]);
+  assert.deepEqual(created.labels, ["symphony:kind/work"]);
   assert.equal(created.parent_issue_id, "cycle-1");
   assert.equal(created.order, 2);
   assert.equal(created.description.includes("```json"), false);
@@ -224,7 +224,7 @@ function issue(
     ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusId, status_name: statusName, status_category: statusName === "Todo" ? "unstarted" : "started",
     status_position: depth, order, depth, title: issueKind, description: `${issueKind} description`,
-    labels: issueKind === "root" ? [] : [issueKind[0]!.toUpperCase() + issueKind.slice(1)],
+    labels: [`symphony:kind/${issueKind}`],
     is_archived: false, issue_kind: issueKind, remote_version: `${issueId}-v1`,
     created_at: "2026-07-24T00:00:00Z", updated_at: "2026-07-24T00:00:00Z",
   };

@@ -313,13 +313,13 @@ function cycleOutcomeTree(): LinearWorkflowTreeSnapshot {
   workflow.issues.push({
     issue_id: "verify-1", identifier: "SYM-4", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "done", status_name: "Done", status_category: "completed", status_position: 5,
-    order: 3, depth: 2, title: "Verify", description: "Verification found a failure at head-1.", labels: ["Verify", "Changes Required"], is_archived: true,
+    order: 3, depth: 2, title: "Verify", description: "Verification found a failure at head-1.", labels: ["symphony:kind/verify", "Changes Required"], is_archived: true,
     issue_kind: "verify", remote_version: "verify-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
   }, {
     issue_id: "finding-1", identifier: "SYM-5", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "changes-required", status_name: "Changes Required", status_category: "completed", status_position: 4,
     order: 4, depth: 2, title: "Verification failure", description: "Fix the failing verification before retrying.",
-    labels: ["Finding", "High"], is_archived: true, issue_kind: "finding", remote_version: "finding-v1",
+    labels: ["symphony:kind/finding", "High"], is_archived: true, issue_kind: "finding", remote_version: "finding-v1",
     created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
   });
   workflow.relations.push({

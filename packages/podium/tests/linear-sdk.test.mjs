@@ -1628,7 +1628,8 @@ test("Team workflow setup returns a bounded dry-run without explicit authorizati
   assert.equal(result.operations.length, 12);
   assert.equal(result.operations.at(-1)?.name, "Failed");
   assert.deepEqual(result.workflowKindLabels, [
-    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+    "symphony:kind/root", "symphony:kind/cycle", "symphony:kind/plan",
+    "symphony:kind/work", "symphony:kind/verify", "symphony:kind/finding",
   ]);
   assert.deepEqual(result.humanActionLabels, [
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
@@ -1659,11 +1660,13 @@ test("Team workflow setup renames Backlog, creates missing states, and reads bac
     ["Changes Required", "completed"], ["Failed", "canceled"],
   ].map(([name, type]) => ({ name, type })));
   assert.deepEqual(observations.labelCreates, [
-    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+    "symphony:kind/root", "symphony:kind/cycle", "symphony:kind/plan",
+    "symphony:kind/work", "symphony:kind/verify", "symphony:kind/finding",
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
   ]);
   assert.deepEqual(result.workflowKindLabels, [
-    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+    "symphony:kind/root", "symphony:kind/cycle", "symphony:kind/plan",
+    "symphony:kind/work", "symphony:kind/verify", "symphony:kind/finding",
   ]);
   assert.equal(observations.states, 2);
 });
@@ -1738,7 +1741,8 @@ test("Team workflow setup is a no-op after the canonical catalog and labels are 
   ].map(([id, name, type], position) => ({ id, name, type, position }));
   const { sdk, observations } = workflowSetupSdk(states, {
     issueLabelNames: [
-      "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+      "symphony:kind/root", "symphony:kind/cycle", "symphony:kind/plan",
+      "symphony:kind/work", "symphony:kind/verify", "symphony:kind/finding",
       "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
     ],
   });
@@ -1748,7 +1752,8 @@ test("Team workflow setup is a no-op after the canonical catalog and labels are 
 
   assert.equal(result.kind, "already_applied");
   assert.deepEqual(result.workflowKindLabels, [
-    "Root", "Cycle", "Plan", "Work", "Verify", "Finding",
+    "symphony:kind/root", "symphony:kind/cycle", "symphony:kind/plan",
+    "symphony:kind/work", "symphony:kind/verify", "symphony:kind/finding",
   ]);
   assert.deepEqual(result.humanActionLabels, [
     "Human Action", "Plan Review", "Clarification", "Permission", "Finding Waiver", "Convergence Override",
@@ -1760,7 +1765,7 @@ test("Team workflow setup is a no-op after the canonical catalog and labels are 
 
 test("Team workflow setup rejects duplicate primary kind labels", async () => {
   const { sdk } = workflowSetupSdk(retainedWorkflowStates(), {
-    issueLabelNames: ["Root", "Root"],
+    issueLabelNames: ["symphony:kind/root", "symphony:kind/root"],
   });
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
@@ -1772,7 +1777,7 @@ test("Team workflow setup rejects duplicate primary kind labels", async () => {
 
 test("Team workflow setup rejects an incomplete primary kind label read-back", async () => {
   const { sdk } = workflowSetupSdk(retainedWorkflowStates(), {
-    omitCreatedIssueLabelNames: new Set(["Root"]),
+    omitCreatedIssueLabelNames: new Set(["symphony:kind/root"]),
   });
   const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 

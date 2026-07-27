@@ -80,7 +80,7 @@ test("missing-worktree verdict derives fresh generation IDs from the final nativ
   const oldIds = ["cycle-old", "plan-old", "work-old", "verify-old"];
   const freshIds = ["cycle-fresh", "plan-fresh", "work-fresh", "verify-fresh"];
   const invalidIssues = [
-    issue({ id: "root-invalid", identifier: "SYM-20", description: definition.rootCreationInputs[1].description, stateId: "review-state", stateName: "In Review", stateType: "started", depth: 0, labels: [{ id: "route-b", name: "symphony:conductor/b" }], creatorId: "human-1" }),
+    issue({ id: "root-invalid", identifier: "SYM-20", description: definition.rootCreationInputs[1].description, stateId: "review-state", stateName: "In Review", stateType: "started", depth: 0, labels: [label("Root"), { id: "route-b", name: "symphony:conductor/b" }], creatorId: "human-1" }),
     issue({ id: "cycle-old", identifier: "SYM-21", parentId: "root-invalid", description: "Invalid old cycle.", stateId: "canceled-state", stateName: "Canceled", stateType: "canceled", depth: 1, labels: [label("Cycle")] }),
     issue({ id: "plan-old", identifier: "SYM-22", parentId: "cycle-old", description: "Old Plan.", stateId: "done-state", stateName: "Done", stateType: "completed", depth: 2, labels: [label("Plan")] }),
     issue({ id: "work-old", identifier: "SYM-23", parentId: "cycle-old", description: "Old Work.", stateId: "done-state", stateName: "Done", stateType: "completed", depth: 2, labels: [label("Work")] }),
@@ -172,7 +172,7 @@ function approvedFixture() {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "approved_happy_path");
   const rootDescription = definition.rootCreationInputs[0].description;
   const issues = [
-    issue({ id: "root-1", identifier: "SYM-1", description: rootDescription, stateId: "review-state", stateName: "In Review", stateType: "started", depth: 0, labels: [{ id: "route-1", name: "symphony:conductor/a" }], creatorId: "human-1" }),
+    issue({ id: "root-1", identifier: "SYM-1", description: rootDescription, stateId: "review-state", stateName: "In Review", stateType: "started", depth: 0, labels: [label("Root"), { id: "route-1", name: "symphony:conductor/a" }], creatorId: "human-1" }),
     issue({ id: "cycle-1", identifier: "SYM-2", parentId: "root-1", title: "Cycle 1", description: "Execute the approved plan.", stateId: "succeeded-state", stateName: "Succeeded", stateType: "completed", depth: 1, labels: [label("Cycle")] }),
     issue({ id: "plan-1", identifier: "SYM-3", parentId: "cycle-1", title: "Plan", description: "Approved plan with acceptance criteria.", stateId: "done-state", stateName: "Done", stateType: "completed", depth: 2, labels: [label("Plan")] }),
     issue({ id: "work-1", identifier: "SYM-4", parentId: "cycle-1", title: "Implement helper", description: "Implemented and checked at commit-1.", stateId: "done-state", stateName: "Done", stateType: "completed", depth: 2, labels: [label("Work")] }),
@@ -249,7 +249,10 @@ function activity({ id, issueId, fromStateId, toStateId, createdAt }) {
 }
 
 function reaction() { return { id: "receipt-1", emoji: "white_check_mark", actorId: "symphony-1", archivedAt: null, createdAt: DONE, updatedAt: DONE, remoteVersion: DONE }; }
-function label(name) { return { id: `${name.toLowerCase()}-label`, name }; }
+function label(name) {
+  const kind = ["Root", "Cycle", "Plan", "Work", "Verify", "Finding"].includes(name);
+  return { id: `${name.toLowerCase()}-label`, name: kind ? `symphony:kind/${name.toLowerCase()}` : name };
+}
 function statusCatalog() { return [
   { id: "todo-state", name: "Todo", type: "unstarted", position: 1, archivedAt: null, createdAt: DATE, updatedAt: DATE, remoteVersion: DATE },
   { id: "started-state", name: "In Progress", type: "started", position: 2, archivedAt: null, createdAt: DATE, updatedAt: DATE, remoteVersion: DATE },

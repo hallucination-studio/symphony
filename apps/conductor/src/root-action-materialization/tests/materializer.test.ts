@@ -393,13 +393,13 @@ test("reads a fresh tree after every Tree patch and supports reorder, dependency
   linear.tree.issues.push({
     issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-    order: 2, depth: 2, title: "Work", description: workflowDescription("work-1", "cycle-1", "work", "Do work"), labels: ["Work"], is_archived: false,
+    order: 2, depth: 2, title: "Work", description: workflowDescription("work-1", "cycle-1", "work", "Do work"), labels: ["symphony:kind/work"], is_archived: false,
     issue_kind: "work", remote_version: "work-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
   });
   linear.tree.issues.push({
     issue_id: "work-2", identifier: "SYM-4", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-    order: 3, depth: 2, title: "Dependency", description: workflowDescription("work-2", "cycle-1", "work", "Dependency"), labels: ["Work"], is_archived: false,
+    order: 3, depth: 2, title: "Dependency", description: workflowDescription("work-2", "cycle-1", "work", "Dependency"), labels: ["symphony:kind/work"], is_archived: false,
     issue_kind: "work", remote_version: "work-2-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
   });
   linear.tree.relations.push({
@@ -549,7 +549,7 @@ class FakeLinear {
       {
         issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1",
         status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
-        order: 1, depth: 1, title: "Cycle", description: workflowDescription("cycle-1", "root-1", "cycle", "Execute the plan."), labels: ["Cycle"], is_archived: false,
+        order: 1, depth: 1, title: "Cycle", description: workflowDescription("cycle-1", "root-1", "cycle", "Execute the plan."), labels: ["symphony:kind/cycle"], is_archived: false,
         issue_kind: "cycle", remote_version: "cycle-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
       },
     ],
@@ -600,7 +600,9 @@ class FakeLinear {
       const parent = this.issue(command.parentIssueId);
       const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
       if (!status) throw new Error("missing_status");
-      const issueKind = command.labelNames.includes("Cycle") ? "cycle" : command.labelNames.includes("Plan") ? "plan" : "work";
+      const issueKind = command.labelNames.includes("symphony:kind/cycle")
+        ? "cycle"
+        : command.labelNames.includes("symphony:kind/plan") ? "plan" : "work";
       this.tree.issues.push({
         issue_id: command.writeId,
         identifier: `SYM-${this.tree.issues.length + 1}`,
@@ -679,7 +681,7 @@ function addPlan(linear: FakeLinear): void {
   linear.tree.issues.push({
     issue_id: "plan-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
     status_id: "plan-done", status_name: "Done", status_category: "completed", status_position: 4,
-    order: 1, depth: 2, title: "Plan", description: workflowDescription("plan-1", "cycle-1", "plan", "Original Plan."), labels: ["Plan"],
+    order: 1, depth: 2, title: "Plan", description: workflowDescription("plan-1", "cycle-1", "plan", "Original Plan."), labels: ["symphony:kind/plan"],
     is_archived: false, issue_kind: "plan", remote_version: "plan-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
   });
 }

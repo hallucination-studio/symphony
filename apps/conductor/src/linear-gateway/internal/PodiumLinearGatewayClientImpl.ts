@@ -12,6 +12,7 @@ import type {
   ProjectRootIndexPageResult,
 } from "../../root-discovery/api/ProjectRootIndexInterface.js";
 import type { ConductorPoolMember } from "../api/LinearGatewayInterface.js";
+import { workflowIssueKind } from "../api/WorkflowKindLabels.js";
 
 type JsonValue =
   | null
@@ -553,18 +554,9 @@ function workflowTree(
 function primaryIssueKind(
   labels: string[],
 ): "cycle" | "plan" | "work" | "verify" | "finding" {
-  const matches = labels.flatMap((label) => {
-    switch (label) {
-      case "Cycle": return ["cycle" as const];
-      case "Plan": return ["plan" as const];
-      case "Work": return ["work" as const];
-      case "Verify": return ["verify" as const];
-      case "Finding": return ["finding" as const];
-      default: return [];
-    }
-  });
-  if (matches.length !== 1) throw new Error("linear_workflow_issue_kind_invalid");
-  return matches[0]!;
+  const kind = workflowIssueKind(labels);
+  if (!kind || kind === "root") throw new Error("linear_workflow_issue_kind_invalid");
+  return kind;
 }
 
 function workflowStatusCategory(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["status_catalog"][number]["category"] {

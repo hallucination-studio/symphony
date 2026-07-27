@@ -1,6 +1,13 @@
 import { FOREGROUND_E2E_CASES } from "./cases.mjs";
 
-const PRIMARY_KIND_LABELS = Object.freeze(["Cycle", "Plan", "Work", "Verify", "Finding"]);
+const PRIMARY_KIND_BY_LABEL = Object.freeze({
+  "symphony:kind/root": "Root",
+  "symphony:kind/cycle": "Cycle",
+  "symphony:kind/plan": "Plan",
+  "symphony:kind/work": "Work",
+  "symphony:kind/verify": "Verify",
+  "symphony:kind/finding": "Finding",
+});
 const TERMINAL_STATE_TYPES = new Set(["completed", "canceled"]);
 const MACHINE_CONTENT = /(?:```(?:json|yaml)|<!--\s*symphony|"(?:kind|version|root_issue_id|stage_execution_id)"\s*:|workflow_issue_key|managed_record)/iu;
 
@@ -245,8 +252,8 @@ function nativeIdentityConsistent(facts) {
     const ids = new Set(root.issues.map(({ id }) => id));
     if (ids.size !== root.issues.length || !ids.has(root.rootIssueId)) return false;
     for (const issue of root.issues) {
-      const kinds = issue.labels.map(({ name }) => name).filter((name) => PRIMARY_KIND_LABELS.includes(name));
-      if (issue.id === root.rootIssueId ? kinds.length !== 0 : kinds.length !== 1) return false;
+      const kinds = issue.labels.map(({ name }) => PRIMARY_KIND_BY_LABEL[name]).filter(Boolean);
+      if (kinds.length !== 1 || issue.id === root.rootIssueId && kinds[0] !== "Root") return false;
       if (issue.id !== root.rootIssueId && !ids.has(issue.parentId)) return false;
     }
     if (root.relations.some(({ issueId, relatedIssueId }) => !ids.has(issueId) || !ids.has(relatedIssueId))) return false;
@@ -559,8 +566,8 @@ function routingLabels(root) {
 }
 
 function issueKind(issue) {
-  const names = issue?.labels?.map(({ name }) => name).filter((name) => PRIMARY_KIND_LABELS.includes(name)) ?? [];
-  return names.length === 1 ? names[0] : undefined;
+  const kinds = issue?.labels?.map(({ name }) => PRIMARY_KIND_BY_LABEL[name]).filter(Boolean) ?? [];
+  return kinds.length === 1 ? kinds[0] : undefined;
 }
 
 function isTerminal(issue) { return TERMINAL_STATE_TYPES.has(issue?.state?.type); }

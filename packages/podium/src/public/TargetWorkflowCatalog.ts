@@ -33,12 +33,12 @@ export const HUMAN_ACTION_LABEL_NAMES = Object.freeze([
 ] as const);
 
 export const WORKFLOW_KIND_LABEL_NAMES = Object.freeze([
-  "Root",
-  "Cycle",
-  "Plan",
-  "Work",
-  "Verify",
-  "Finding",
+  "symphony:kind/root",
+  "symphony:kind/cycle",
+  "symphony:kind/plan",
+  "symphony:kind/work",
+  "symphony:kind/verify",
+  "symphony:kind/finding",
 ] as const);
 
 export const TARGET_WORKFLOW_LABEL_NAMES = Object.freeze([

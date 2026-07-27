@@ -1,4 +1,5 @@
 import type { LinearGatewayInterface, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { workflowKindLabel } from "../../linear-gateway/api/WorkflowKindLabels.js";
 import type {
   CreateHumanActionAction,
   RootReconciliationView,
@@ -79,7 +80,7 @@ function prepare(
   if (action.actionKind === "plan_approval" && (targets.length !== 1 || targets[0]!.issue_kind !== "plan" || targets[0]!.status_name !== "In Review")) {
     return "human_action_plan_target_invalid";
   }
-  if (action.actionKind === "finding_waiver" && targets.some((target) => !target!.labels.includes("Finding"))) {
+  if (action.actionKind === "finding_waiver" && targets.some((target) => !target!.labels.includes(workflowKindLabel("finding")))) {
     return "human_action_finding_target_invalid";
   }
 

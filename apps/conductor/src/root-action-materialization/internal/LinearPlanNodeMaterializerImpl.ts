@@ -2,6 +2,7 @@ import type {
   LinearGatewayInterface,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { workflowKindLabel } from "../../linear-gateway/api/WorkflowKindLabels.js";
 import type {
   RootDirective,
   RootReconciliationView,
@@ -202,8 +203,8 @@ async function refreshView(linear: LinearGatewayInterface, view: RootReconciliat
   return { ...view, tree, observedAt: tree.observed_at };
 }
 
-function primaryLabel(kind: "work" | "verify"): "Work" | "Verify" {
-  return kind === "work" ? "Work" : "Verify";
+function primaryLabel(kind: "work" | "verify"): string {
+  return workflowKindLabel(kind);
 }
 
 function failed(directive: RootDirective, code: string): RootActionMaterializationResult {

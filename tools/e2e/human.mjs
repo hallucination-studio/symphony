@@ -126,7 +126,7 @@ export async function createForegroundE2EHumanActor({
       const statuses = await readTeamStatuses(client, teamId, "foreground_e2e_human_root_binding_read_failed");
       const todo = statuses.filter((state) => state.name === "Todo" && state.type === "unstarted");
       if (todo.length !== 1) throw stableError("foreground_e2e_human_root_binding_read_failed");
-      const rootLabel = await readIssueLabel({ client, teamId, name: "Root" });
+      const rootLabel = await readIssueLabel({ client, teamId, name: "symphony:kind/root" });
       const labels = new Map();
       for (const conductor of resolvedConductors.values()) {
         labels.set(conductor.conductorRef, await readIssueLabel({
@@ -784,7 +784,8 @@ async function readPreemptionRootSnapshot({ client, root }) {
   const stages = [];
   for (const node of tree.slice(1)) {
     const nodeLabels = await readLabels(node, code);
-    if (!nodeLabels.some(({ name }) => ["Plan", "Work", "Verify"].includes(name))) continue;
+    const issueKind = stageIssueKind(nodeLabels);
+    if (!issueKind) continue;
     const statusName = statusById.get(node.stateId);
     if (!statusName) throw stableError(code);
     const activity = await readIssueHistory(node, code);
@@ -792,7 +793,7 @@ async function readPreemptionRootSnapshot({ client, root }) {
     if (!currentStatusActivity) throw stableError(code);
     stages.push({
       issueId: node.id,
-      issueKind: nodeLabels.find(({ name }) => ["Plan", "Work", "Verify"].includes(name)).name.toLowerCase(),
+      issueKind,
       statusName,
       changedAt: remoteVersion(currentStatusActivity),
     });
@@ -958,7 +959,18 @@ async function activeInformationRequest({ client, rootIssueId, known, productAct
 
 function isPlanIssue(labels) {
   const names = labels.map(({ name }) => name);
-  return names.includes("Plan") && !names.includes("Human Action");
+  return names.includes("symphony:kind/plan") && !names.includes("Human Action");
+}
+
+function stageIssueKind(labels) {
+  const kinds = labels.flatMap(({ name }) => {
+    if (name === "symphony:kind/plan") return ["plan"];
+    if (name === "symphony:kind/work") return ["work"];
+    if (name === "symphony:kind/verify") return ["verify"];
+    return [];
+  });
+  if (kinds.length > 1) throw stableError("foreground_e2e_human_preemption_read_failed");
+  return kinds.length === 1 ? kinds[0] : undefined;
 }
 
 function matchesChildScope(issue, { parentId, known }) {

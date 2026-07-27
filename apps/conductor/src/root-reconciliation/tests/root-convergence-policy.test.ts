@@ -120,7 +120,7 @@ function issue(
     ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusName.toLowerCase().replaceAll(" ", "-"), status_name: statusName,
     status_category: statusCategory, status_position: depth, order: depth, depth,
-    title: issueId, description: issueId, labels: [kind, ...extraLabels], is_archived: isArchived,
+    title: issueId, description: issueId, labels: [`symphony:kind/${kind.toLowerCase()}`, ...extraLabels], is_archived: isArchived,
     remote_version: `${issueId}-v1`, created_at: "2026-07-25T00:00:00.000Z",
     updated_at: "2026-07-25T00:00:00.000Z",
   };

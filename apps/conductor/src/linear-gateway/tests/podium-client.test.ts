@@ -121,7 +121,7 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
   const result = await gateway.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-1", expectedProjectId: "project-1", rootIssueId: "root-1",
     expectedRootRemoteVersion: now, target: { targetIssueId: "work-1", expectedRemoteVersion: now },
-    statusId: "status-progress", title: "Updated", description: "Description", labelNames: ["Work", "Changes Required"],
+    statusId: "status-progress", title: "Updated", description: "Description", labelNames: ["symphony:kind/work", "Changes Required"],
     isArchived: false, parentAssignment: { mode: "retain" },
   });
 
@@ -130,7 +130,7 @@ test("workflow gateway serializes a closed mutation and validates its read-back"
     kind: "update_workflow_issue", binding_id: "binding-1", instance_id: "instance-1", write_id: "write-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
     target: { target_issue_id: "work-1", expected_remote_version: now },
-    status_id: "status-progress", title: "Updated", description: "Description", label_names: ["Work", "Changes Required"],
+    status_id: "status-progress", title: "Updated", description: "Description", label_names: ["symphony:kind/work", "Changes Required"],
     is_archived: false, parent_assignment: { mode: "retain" },
   });
 });
@@ -219,11 +219,23 @@ test("workflow tree rejects a descendant without a primary kind label", async ()
   await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_issue_kind_invalid/u);
 });
 
+test("workflow tree rejects a bare business kind label", async () => {
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    const tree = workflowTree();
+    tree.issues[1]!.labels = ["Work"];
+    return { kind: "workflow_issue_tree", tree };
+  });
+  await gateway.resolveProject();
+
+  await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_issue_kind_invalid/u);
+});
+
 test("workflow tree rejects a descendant with multiple primary kind labels", async () => {
   const gateway = createGateway(async (body) => {
     if (body.kind === "resolve_conductor_project") return resolved();
     const tree = workflowTree();
-    tree.issues[1]!.labels = ["Work", "Verify"];
+    tree.issues[1]!.labels = ["symphony:kind/work", "symphony:kind/verify"];
     return { kind: "workflow_issue_tree", tree };
   });
   await gateway.resolveProject();
@@ -269,8 +281,8 @@ function workflowTree() {
     ],
     issues: [
       { issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "status-progress", status_name: "In Progress", status_category: "started", status_position: 2, order: 0, depth: 0, title: "Root", description: "Build it", labels: [], is_archived: false, remote_version: now, created_at: now, updated_at: now },
-      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: ["Work"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
-      { issue_id: "finding-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 2, depth: 1, title: "Finding", description: "Investigate it", labels: ["Finding", "High"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
+      { issue_id: "work-1", identifier: "SYM-2", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 1, depth: 1, title: "Work", description: "Implement it", labels: ["symphony:kind/work"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
+      { issue_id: "finding-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "root-1", status_id: "status-todo", status_name: "Todo", status_category: "unstarted", status_position: 1, order: 2, depth: 1, title: "Finding", description: "Investigate it", labels: ["symphony:kind/finding", "High"], is_archived: false, remote_version: now, created_at: now, updated_at: now },
     ],
     comments: [], relations: [],
     attachments: [{ attachment_id: "attachment-1", issue_id: "work-1", title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123", source_type: "github", remote_version: now, created_at: now, updated_at: now }],

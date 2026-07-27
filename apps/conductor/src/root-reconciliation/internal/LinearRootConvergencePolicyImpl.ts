@@ -1,4 +1,5 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { workflowIssueKinds } from "../../linear-gateway/api/WorkflowKindLabels.js";
 import type {
   RootConvergencePolicySnapshot,
   RootConvergencePolicyValues,
@@ -11,8 +12,6 @@ import type {
 import type { DiscoveredRoot } from "../api/RootModels.js";
 
 type WorkflowIssue = LinearWorkflowTreeSnapshot["issues"][number];
-
-const PRIMARY_KINDS = ["Root", "Cycle", "Plan", "Work", "Verify", "Finding"] as const;
 
 export class LinearRootConvergencePolicyImpl implements RootConvergencePolicyInterface {
   constructor(
@@ -27,7 +26,7 @@ export class LinearRootConvergencePolicyImpl implements RootConvergencePolicyInt
     tree: LinearWorkflowTreeSnapshot;
   }): RootConvergenceAssessment {
     const rootIssue = input.tree.issues.find(({ issue_id }) => issue_id === input.root.issueId);
-    if (!rootIssue || rootIssue.parent_issue_id !== undefined || issueKind(rootIssue) !== "Root") {
+    if (!rootIssue || rootIssue.parent_issue_id !== undefined || issueKind(rootIssue) !== "root") {
       throw new Error("root_convergence_root_invalid");
     }
     const policy = policySnapshot(this.configured, rootIssue.created_at, this.deadlineDurationMs);
@@ -57,7 +56,7 @@ function convergenceView(
   policy: RootConvergencePolicySnapshot,
 ): RootConvergenceView {
   const cycles = tree.issues.filter((issue) =>
-    issue.parent_issue_id === rootIssue.issue_id && issueKind(issue) === "Cycle",
+    issue.parent_issue_id === rootIssue.issue_id && issueKind(issue) === "cycle",
   );
   const activeCycles = cycles.filter((cycle) => !cycle.is_archived && !terminal(cycle));
   if (activeCycles.length > 1) throw new Error("root_convergence_active_cycle_ambiguous");
@@ -80,9 +79,9 @@ function activeRepairAttempts(tree: LinearWorkflowTreeSnapshot, cycleIssueId: st
   return tree.issues.filter((issue) => {
     if (issue.parent_issue_id !== cycleIssueId) return false;
     const kind = issueKind(issue);
-    if (kind !== "Work" && kind !== "Verify") return false;
+    if (kind !== "work" && kind !== "verify") return false;
     if (issue.status_name === "Failed" || issue.status_name === "Interrupted") return true;
-    return kind === "Verify" && issue.status_name === "Done" && issue.labels.some((label) =>
+    return kind === "verify" && issue.status_name === "Done" && issue.labels.some((label) =>
       label === "Changes Required" || label === "Inconclusive" || label === "Contract Violation",
     );
   }).length;
@@ -94,7 +93,7 @@ function openFindingPersistence(
 ): Array<{ findingId: string; openCycleCount: number }> {
   const cycleIds = new Set(cycles.map(({ issue_id }) => issue_id));
   const findings = tree.issues.filter((issue) =>
-    issue.parent_issue_id !== undefined && cycleIds.has(issue.parent_issue_id) && issueKind(issue) === "Finding",
+    issue.parent_issue_id !== undefined && cycleIds.has(issue.parent_issue_id) && issueKind(issue) === "finding",
   );
   const findingsById = new Map(findings.map((finding) => [finding.issue_id, finding]));
   const adjacent = new Map<string, Set<string>>();
@@ -137,8 +136,8 @@ function cycleHasProgress(tree: LinearWorkflowTreeSnapshot, cycleIssueId: string
   return tree.issues.some((issue) => {
     if (issue.parent_issue_id !== cycleIssueId) return false;
     const kind = issueKind(issue);
-    return (kind === "Work" && issue.status_name === "Done") ||
-      (kind === "Verify" && issue.status_name === "Done" && issue.labels.includes("Passed"));
+    return (kind === "work" && issue.status_name === "Done") ||
+      (kind === "verify" && issue.status_name === "Done" && issue.labels.includes("Passed"));
   });
 }
 
@@ -159,8 +158,8 @@ function convergenceTrigger(policy: RootConvergencePolicySnapshot, view: RootCon
   return "none" as const;
 }
 
-function issueKind(issue: WorkflowIssue): typeof PRIMARY_KINDS[number] | undefined {
-  const matching = PRIMARY_KINDS.filter((kind) => issue.labels.includes(kind));
+function issueKind(issue: WorkflowIssue) {
+  const matching = workflowIssueKinds(issue.labels);
   if (matching.length > 1) throw new Error("root_convergence_issue_kind_ambiguous");
   return matching[0];
 }

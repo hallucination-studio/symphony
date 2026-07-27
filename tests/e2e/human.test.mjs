@@ -248,12 +248,12 @@ function linearFixture() {
       if (receipt) source.reactions.push({ id: `reaction-${id}`, emoji: receipt, userId: "symphony-1" });
     },
     addPlanApproval(rootIssueId, { cycleId, planId, planIdentifier, requestId, resolved = false }) {
-      issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["Cycle"], stateId: "todo-state" }));
+      issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["symphony:kind/cycle"], stateId: "todo-state" }));
       issues.set(planId, makeIssue({
         id: planId,
         identifier: planIdentifier,
         parentId: cycleId,
-        labels: ["Plan"],
+        labels: ["symphony:kind/plan"],
         stateId: "in-review-state",
         description: "Implement the requested behavior and run focused checks.",
       }));
@@ -261,8 +261,8 @@ function linearFixture() {
     },
     addStage(rootIssueId, stageId, kind, stateId, changedAt) {
       const cycleId = `${rootIssueId}-cycle`;
-      if (!issues.has(cycleId)) issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["Cycle"], stateId: "todo-state" }));
-      const stage = makeIssue({ id: stageId, parentId: cycleId, labels: [title(kind)], stateId });
+      if (!issues.has(cycleId)) issues.set(cycleId, makeIssue({ id: cycleId, parentId: rootIssueId, labels: ["symphony:kind/cycle"], stateId: "todo-state" }));
+      const stage = makeIssue({ id: stageId, parentId: cycleId, labels: [workflowKindLabel(kind)], stateId });
       stage.historyEntries.push(activity(stageId, stateId, changedAt));
       stage.updatedAt = new Date(changedAt);
       issues.set(stageId, stage);
@@ -284,7 +284,7 @@ function linearFixture() {
       issues.set(id, makeIssue({
         id,
         identifier: `ENG-${rootSequence}`,
-        labels: input.labelIds.map((labelId) => labelId === "root-label" ? "Root" : "symphony:conductor/abc123def456"),
+        labels: input.labelIds.map((labelId) => labelId === "root-label" ? "symphony:kind/root" : "symphony:conductor/abc123def456"),
         stateId: input.stateId,
         title: input.title,
         description: input.description,
@@ -341,7 +341,7 @@ function linearFixture() {
     async issueLabels({ filter }) {
       const name = filter.name.eq;
       const routeHash = name.match(/^symphony:conductor\/([a-f0-9]{12})$/u)?.[1];
-      return { nodes: [{ id: name === "Root" ? "root-label" : routeHash ? `route-${routeHash}` : "route-label", name, isGroup: false, archivedAt: null, teamId: "team-1" }], pageInfo: { hasNextPage: false } };
+      return { nodes: [{ id: name === "symphony:kind/root" ? "root-label" : routeHash ? `route-${routeHash}` : "route-label", name, isGroup: false, archivedAt: null, teamId: "team-1" }], pageInfo: { hasNextPage: false } };
     },
   };
 
@@ -350,7 +350,7 @@ function linearFixture() {
       id, identifier, parentId, labelsValue: labels, stateId, title, description, priority,
       teamId: "team-1", projectId: "project-1", creatorId: "symphony-1", delegateId: undefined,
       updatedAt: new Date("2026-07-26T00:00:00.000Z"), historyEntries: [],
-      async labels() { return { nodes: this.labelsValue.map((name) => ({ id: name === "symphony:conductor/abc123def456" ? "route-label" : `${name.toLowerCase()}-label`, name })), pageInfo: { hasNextPage: false } }; },
+      async labels() { return { nodes: this.labelsValue.map((name) => ({ id: name === "symphony:conductor/abc123def456" ? "route-label" : name === "symphony:kind/root" ? "root-label" : `${name.toLowerCase()}-label`, name })), pageInfo: { hasNextPage: false } }; },
       async children() { return { nodes: [...issues.values()].filter((candidate) => candidate.parentId === this.id), pageInfo: { hasNextPage: false } }; },
       async comments() { return { nodes: [...comments.values()].filter((candidate) => candidate.issueId === this.id && !candidate.parentId), pageInfo: { hasNextPage: false } }; },
       async history() { return { nodes: this.historyEntries, pageInfo: { hasNextPage: false } }; },
@@ -382,8 +382,14 @@ function activity(issueId, toStateId, at) {
   return { id: `activity-${issueId}-${toStateId}`, issueId, actorId: "symphony-1", toStateId, createdAt: new Date(at), updatedAt: new Date(at) };
 }
 
-function title(value) {
-  return value[0].toUpperCase() + value.slice(1);
+function workflowKindLabel(kind) {
+  const label = {
+    plan: "symphony:kind/plan",
+    work: "symphony:kind/work",
+    verify: "symphony:kind/verify",
+  }[kind];
+  if (!label) throw new Error(`unsupported workflow kind: ${kind}`);
+  return label;
 }
 
 function hasCode(code) {

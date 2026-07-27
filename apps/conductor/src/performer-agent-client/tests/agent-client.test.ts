@@ -450,14 +450,14 @@ function planFacts(): { cycle: RootCycleObservation } {
     ].join("\n"),
     status: "In Review" as const,
     isArchived: false,
-    labels: ["Plan"],
+    labels: ["symphony:kind/plan"],
     remoteVersion: "plan-v1",
   };
   return {
     cycle: {
       cycleIssue: {
         issueId: "cycle-1", issueKind: "cycle", title: "Cycle", description: "Current Cycle",
-        status: "In Progress", isArchived: false, labels: ["Cycle"], remoteVersion: "cycle-v1",
+        status: "In Progress", isArchived: false, labels: ["symphony:kind/cycle"], remoteVersion: "cycle-v1",
       },
       cycleStatus: "In Progress",
       isArchived: false,
