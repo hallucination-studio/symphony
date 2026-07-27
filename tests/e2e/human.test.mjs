@@ -567,6 +567,35 @@ test("Human Actor preserves rate-limit classification without exposing SDK error
   );
 });
 
+test("Human Actor preserves a rate-limited Plan Review read instead of misclassifying the Root", async () => {
+  const fixture = createLinearFixture();
+  const human = await createForegroundE2EHumanActor({
+    apiKey: "human-api-key",
+    expectedActorId: "human-1",
+    createClient: () => fixture.client,
+  });
+  const root = await human.createRootIssue({
+    caseId: "approved_happy_path",
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+  });
+  const rateLimited = new RatelimitedLinearError({ status: 429 });
+  rateLimited.message = "authorization=human-api-key";
+  fixture.client.issue = async () => {
+    throw rateLimited;
+  };
+
+  await assert.rejects(
+    human.waitForPlanReviewAction({ rootIssueId: root.rootIssueId, terminalStatus: "Approved" }),
+    (error) => error?.code === "foreground_e2e_human_linear_rate_limited" &&
+      error.message === "foreground_e2e_human_linear_rate_limited" &&
+      !error.message.includes("human-api-key"),
+  );
+});
+
 test("Human Actor accepts Root description changes only when the Case catalog predeclares the exact delta", async () => {
   const fixture = createLinearFixture();
   const human = await createForegroundE2EHumanActor({

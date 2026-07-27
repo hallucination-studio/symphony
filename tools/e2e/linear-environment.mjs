@@ -265,7 +265,8 @@ function pageConnection(connection) {
   return connection && Array.isArray(connection.nodes) && typeof connection.pageInfo?.hasNextPage === "boolean";
 }
 
-export async function readAllLinearNodes(readPage, code) {
+export async function readAllLinearNodes(readPage, code, classifyFailure = (_error, fallbackCode) => fallbackCode) {
+  if (typeof classifyFailure !== "function") throw stableError(code);
   const nodes = [];
   const cursors = new Set();
   let cursor;
@@ -273,8 +274,8 @@ export async function readAllLinearNodes(readPage, code) {
     let page;
     try {
       page = await readPage(cursor);
-    } catch {
-      throw stableError(code);
+    } catch (error) {
+      throw stableError(classifyFailure(error, code));
     }
     if (!page || !Array.isArray(page.nodes) || !page.pageInfo || typeof page.pageInfo.hasNextPage !== "boolean") {
       throw stableError(code);

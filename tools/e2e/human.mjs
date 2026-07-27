@@ -588,7 +588,7 @@ async function readRoutingLabel({ client, teamId, name }) {
   if (!client || typeof client.issueLabels !== "function" || !identifier(teamId) || !text(name)) {
     throw stableError("foreground_e2e_human_root_binding_read_failed");
   }
-  const labels = await readAllLinearNodes((after) => client.issueLabels({
+  const labels = await readHumanNodes((after) => client.issueLabels({
     first: 64,
     includeArchived: false,
     filter: { name: { eq: name }, isGroup: { eq: false } },
@@ -689,7 +689,7 @@ async function readPreemptionRootSnapshot({ client, root }) {
       if (record) records.push(record);
     }
   }
-  const history = await readAllLinearNodes(
+  const history = await readHumanNodes(
     (after) => issue.history({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
     code,
   );
@@ -998,31 +998,21 @@ async function readActorId(client) {
 
 async function readIssue(client, issueId, code) {
   if (!client || typeof client.issue !== "function") throw stableError(code);
-  let issue;
-  try {
-    issue = await client.issue(issueId);
-  } catch {
-    throw stableError(code);
-  }
+  const issue = await humanRead(() => client.issue(issueId), code);
   if (!issue || issue.id !== issueId) throw stableError(code);
   return issue;
 }
 
 async function readComment(client, commentId, code) {
   if (!client || typeof client.comment !== "function") throw stableError(code);
-  let comment;
-  try {
-    comment = await client.comment({ id: commentId });
-  } catch {
-    throw stableError(code);
-  }
+  const comment = await humanRead(() => client.comment({ id: commentId }), code);
   if (!comment || comment.id !== commentId) throw stableError(code);
   return comment;
 }
 
 async function readIssueComments(issue, code) {
   if (!issue || typeof issue.comments !== "function") throw stableError(code);
-  return readAllLinearNodes((after) => issue.comments({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
+  return readHumanNodes((after) => issue.comments({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
 }
 
 function hasDescriptionDirectiveReceipt(comments, rootIssueId, sourceId, actorId) {
@@ -1037,7 +1027,7 @@ function hasDescriptionDirectiveReceipt(comments, rootIssueId, sourceId, actorId
 
 async function hasCommentReceipt({ source, expected, actorId, threadAction }) {
   if (!source || typeof source.children !== "function") throw stableError("foreground_e2e_human_comment_receipt_read_failed");
-  const comments = await readAllLinearNodes(
+  const comments = await readHumanNodes(
     (after) => source.children({ first: 64, includeArchived: true, ...(after ? { after } : {}) }),
     "foreground_e2e_human_comment_receipt_read_failed",
   );
@@ -1155,33 +1145,35 @@ function timestampValue(value) {
 
 async function readLabels(issue, code) {
   if (!issue || typeof issue.labels !== "function") throw stableError(code);
-  let page;
-  try {
-    page = await issue.labels({ first: 64 });
-  } catch {
-    throw stableError(code);
-  }
+  const page = await humanRead(() => issue.labels({ first: 64 }), code);
   if (!page || !Array.isArray(page.nodes) || page.pageInfo?.hasNextPage !== false) throw stableError(code);
   return page.nodes;
 }
 
 async function readChildren(issue, code) {
   if (!issue || typeof issue.children !== "function") throw stableError(code);
-  return readAllLinearNodes((after) => issue.children({ first: 64, ...(after ? { after } : {}) }), code);
+  return readHumanNodes((after) => issue.children({ first: 64, ...(after ? { after } : {}) }), code);
 }
 
 async function readTeamStatuses(client, teamId, code) {
   if (!client || typeof client.team !== "function" || !identifier(teamId)) throw stableError(code);
-  let team;
-  try {
-    team = await client.team(teamId);
-  } catch {
-    throw stableError(code);
-  }
+  const team = await humanRead(() => client.team(teamId), code);
   if (!team || team.id !== teamId || typeof team.states !== "function") throw stableError(code);
-  const states = await readAllLinearNodes((after) => team.states({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
+  const states = await readHumanNodes((after) => team.states({ first: 64, includeArchived: true, ...(after ? { after } : {}) }), code);
   if (states.some((state) => !state || !identifier(state.id) || typeof state.name !== "string" || typeof state.type !== "string")) throw stableError(code);
   return states;
+}
+
+async function humanRead(operation, code) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw stableError(classifyLinearFailure(error, code));
+  }
+}
+
+function readHumanNodes(readPage, code) {
+  return readAllLinearNodes(readPage, code, classifyLinearFailure);
 }
 
 function assertPlanReviewWaitInput({ terminalStatus, signal }) {
