@@ -21,7 +21,7 @@ import type {
 
 export interface RootFactEntry {
   key: string;
-  change: RootDeltaChange;
+  change: Extract<RootDeltaChange, { kind: "current_value" }>;
 }
 
 export interface RootFactSet {
@@ -45,12 +45,13 @@ export function buildRootFactSet(input: {
   for (const issue of issues) {
     const source = manifest.get(`linear_issue:${issue.issueId}`);
     add(entries, `linear_issue:${issue.issueId}`, {
-      kind: "issue_current_value",
+      kind: "current_value",
+      sourceKind: "issue",
       sourceId: issue.issueId,
-      sourceVersion: source?.source_version ?? issue.remoteVersion,
+      sourceVersionOrDigest: source?.source_version ?? issue.remoteVersion,
       actorKind: source?.actor_kind ?? "unknown",
       observedAt: input.tree.observed_at,
-      issue,
+      value: { kind: "issue", issue },
     });
   }
 
@@ -62,12 +63,13 @@ export function buildRootFactSet(input: {
     userComments.push(current);
     const userInput = toCommentBodyInput(current, issues, input.tree);
     add(entries, `linear_comment_body:${comment.comment_id}`, {
-      kind: "comment_current_value",
+      kind: "current_value",
+      sourceKind: "comment",
       sourceId: comment.comment_id,
-      sourceVersion: userInput.commentBodyDigest,
+      sourceVersionOrDigest: userInput.commentBodyDigest,
       actorKind: source?.actor_kind ?? comment.author_kind,
       observedAt: comment.updated_at,
-      userInput,
+      value: { kind: "comment", userInput },
     });
   }
 
@@ -78,12 +80,13 @@ export function buildRootFactSet(input: {
     const threadState = toCommentThreadState(comment, input.tree.observed_at);
     userCommentThreadStates.push(threadState);
     add(entries, `linear_comment_thread_state:${comment.comment_id}`, {
-      kind: "comment_thread_state_current_value",
+      kind: "current_value",
+      sourceKind: "comment_thread",
       sourceId: comment.comment_id,
-      sourceVersion: threadState.commentRemoteVersion,
+      sourceVersionOrDigest: threadState.commentRemoteVersion,
       actorKind: threadState.actorKind,
       observedAt: threadState.observedAt,
-      threadState,
+      value: { kind: "comment_thread", threadState },
     });
   }
 
@@ -91,39 +94,94 @@ export function buildRootFactSet(input: {
   for (const relation of relations) {
     const source = manifest.get(`linear_relation:${relation.relationId}`);
     add(entries, `linear_relation:${relation.relationId}`, {
-      kind: "relation_current_value",
+      kind: "current_value",
+      sourceKind: "relation",
       sourceId: relation.relationId,
-      sourceVersion: source?.source_version ?? digest(relation),
+      sourceVersionOrDigest: source?.source_version ?? digest(relation),
       actorKind: source?.actor_kind ?? "unknown",
       observedAt: input.tree.observed_at,
-      relation,
+      value: { kind: "relation", relation },
+    });
+  }
+
+  const attachments = input.tree.attachments.map((attachment) => ({
+    attachmentId: attachment.attachment_id,
+    issueId: attachment.issue_id,
+    title: attachment.title,
+    url: attachment.url,
+    sourceType: attachment.source_type,
+    remoteVersion: attachment.remote_version,
+    createdAt: attachment.created_at,
+    updatedAt: attachment.updated_at,
+  }));
+  for (const attachment of attachments) {
+    const source = manifest.get(`linear_attachment:${attachment.attachmentId}`);
+    add(entries, `linear_attachment:${attachment.attachmentId}`, {
+      kind: "current_value",
+      sourceKind: "attachment",
+      sourceId: attachment.attachmentId,
+      sourceVersionOrDigest: source?.source_version ?? attachment.remoteVersion,
+      actorKind: source?.actor_kind ?? "unknown",
+      observedAt: attachment.updatedAt,
+      value: { kind: "attachment", attachment },
+    });
+  }
+
+  const activities = input.tree.activities.map((activity) => ({
+    activityId: activity.activity_id,
+    issueId: activity.issue_id,
+    activityKinds: activity.activity_kinds,
+    actorKind: activity.actor_kind,
+    ...(activity.actor_id === undefined ? {} : { actorId: activity.actor_id }),
+    ...(activity.from_state_id === undefined ? {} : { fromStateId: activity.from_state_id }),
+    ...(activity.to_state_id === undefined ? {} : { toStateId: activity.to_state_id }),
+    ...(activity.updated_description === undefined ? {} : { updatedDescription: activity.updated_description }),
+    ...(activity.archived === undefined ? {} : { archived: activity.archived }),
+    ...(activity.added_label_ids === undefined ? {} : { addedLabelIds: activity.added_label_ids }),
+    ...(activity.removed_label_ids === undefined ? {} : { removedLabelIds: activity.removed_label_ids }),
+    ...(activity.from_parent_id === undefined ? {} : { fromParentId: activity.from_parent_id }),
+    ...(activity.to_parent_id === undefined ? {} : { toParentId: activity.to_parent_id }),
+    ...(activity.from_delegate_id === undefined ? {} : { fromDelegateId: activity.from_delegate_id }),
+    ...(activity.to_delegate_id === undefined ? {} : { toDelegateId: activity.to_delegate_id }),
+    ...(activity.attachment_id === undefined ? {} : { attachmentId: activity.attachment_id }),
+    remoteVersion: activity.remote_version,
+    createdAt: activity.created_at,
+  }));
+  for (const activity of activities) {
+    const source = manifest.get(`linear_activity:${activity.activityId}`);
+    add(entries, `linear_activity:${activity.activityId}`, {
+      kind: "current_value",
+      sourceKind: "activity",
+      sourceId: activity.activityId,
+      sourceVersionOrDigest: source?.source_version ?? activity.remoteVersion,
+      actorKind: source?.actor_kind ?? "unknown",
+      observedAt: activity.createdAt,
+      value: { kind: "activity", activity },
     });
   }
 
   const worktreeGate = input.worktreeGate;
   add(entries, `git:${input.root.issueId}`, {
-    kind: "worktree_gate_current_value",
+    kind: "current_value",
+    sourceKind: "git",
     sourceId: `git:${input.root.issueId}`,
-    sourceVersion: digest(worktreeGate),
+    sourceVersionOrDigest: digest(worktreeGate),
     actorKind: "symphony",
     observedAt: input.tree.observed_at,
-    worktreeGate,
+    value: { kind: "git", worktreeGate },
   });
   add(entries, `mechanical:${input.root.issueId}`, {
-    kind: "mechanical_violations_current_value",
+    kind: "current_value",
+    sourceKind: "mechanical_violation",
     sourceId: `mechanical:${input.root.issueId}`,
-    sourceVersion: digest(input.mechanicalViolations),
+    sourceVersionOrDigest: digest({ mechanicalViolations: input.mechanicalViolations, convergence: input.convergence }),
     actorKind: "symphony",
     observedAt: input.tree.observed_at,
-    mechanicalViolations: input.mechanicalViolations,
-  });
-  add(entries, `convergence:${input.root.issueId}`, {
-    kind: "convergence_current_value",
-    sourceId: input.root.issueId,
-    sourceVersion: digest(input.convergence),
-    actorKind: "symphony",
-    observedAt: input.tree.observed_at,
-    convergence: input.convergence,
+    value: {
+      kind: "mechanical_violation",
+      mechanicalViolations: input.mechanicalViolations,
+      convergence: input.convergence,
+    },
   });
 
   const cycles = input.tree.issues
@@ -146,27 +204,30 @@ export function buildRootFactSet(input: {
     cycles,
     issues,
     relations,
+    attachments,
+    activities,
     userComments,
     userCommentThreadStates,
     worktreeGate,
     mechanicalViolations: input.mechanicalViolations,
   };
-  const sourceManifest = input.tree.source_manifest.map((source) => ({
-    sourceKind: source.source_kind,
-    sourceId: source.source_id,
-    sourceVersion: source.source_version,
-    actorKind: source.actor_kind,
-    ...(source.stable_write_id ? { stableWriteId: source.stable_write_id } : {}),
-  }));
+  const sourceManifest = [...entries.values()]
+    .map(({ change }) => ({
+      sourceKind: change.sourceKind,
+      sourceId: change.sourceId,
+      sourceVersionOrDigest: change.sourceVersionOrDigest,
+      actorKind: change.actorKind,
+    }))
+    .sort((left, right) => `${left.sourceKind}:${left.sourceId}`.localeCompare(`${right.sourceKind}:${right.sourceId}`));
   const receiptedInputIds = new Set(userComments
     .filter((comment) => isNativelyReceipted(comment, input.tree))
     .map((comment) => commentBodyInputId(comment.commentId, bodyDigest(comment.body))));
   const pendingInputIds = [...entries.values()]
     .filter(({ change }) =>
       change.actorKind !== "symphony" &&
-      change.kind !== "worktree_gate_current_value" &&
-      change.kind !== "mechanical_violations_current_value" &&
-      (change.kind !== "comment_thread_state_current_value" || isPendingThreadState(change.threadState, input.tree)) &&
+      change.sourceKind !== "git" &&
+      change.sourceKind !== "mechanical_violation" &&
+      (change.value.kind !== "comment_thread" || isPendingThreadState(change.value.threadState, input.tree)) &&
       !receiptedInputIds.has(inputIdFor(change)),
     )
     .map(({ change }) => inputIdFor(change));
@@ -177,7 +238,7 @@ export function buildRootFactSet(input: {
       isComplete: input.tree.coverage.is_complete,
       omissions: input.tree.coverage.omissions.map(({ source_id, reason }) => ({ sourceId: source_id, reason })),
     },
-    rootDigest: digest([...entries.values()].map(({ key, change }) => ({ key, change }))),
+    rootDigest: rootDigest(sourceManifest),
     pendingInputIds,
   };
   return { bootstrap, entries };
@@ -208,13 +269,19 @@ export function diffRootFactSets(previous: RootFactSet, current: RootFactSet): R
     const before = previous.entries.get(key)?.change;
     const after = current.entries.get(key)?.change;
     if (before && after && unchangedCurrentValue(previous, current, before, after)) continue;
-    if (after) changes.push(after);
+    if (after && before) {
+      changes.push({
+        ...after,
+        kind: "replacement",
+        replacesSourceVersionOrDigest: before.sourceVersionOrDigest,
+      });
+    } else if (after) changes.push(after);
     else if (before) {
       if (
-        before.kind === "comment_thread_state_current_value" &&
-        previous.entries.has(`linear_comment_body:${before.threadState.commentId}`)
+        before.value.kind === "comment_thread" &&
+        previous.entries.has(`linear_comment_body:${before.value.threadState.commentId}`)
       ) continue;
-      changes.push(tombstone(before));
+      changes.push(tombstone(before, current.bootstrap.rootDigest));
     }
   }
   return {
@@ -230,45 +297,52 @@ export function diffRootFactSets(previous: RootFactSet, current: RootFactSet): R
 function unchangedCurrentValue(
   previous: RootFactSet,
   current: RootFactSet,
-  before: RootDeltaChange,
-  after: RootDeltaChange,
+  before: Extract<RootDeltaChange, { kind: "current_value" }>,
+  after: Extract<RootDeltaChange, { kind: "current_value" }>,
 ): boolean {
   if (digest(before) === digest(after)) return true;
-  if (before.kind === "comment_current_value" && after.kind === "comment_current_value") {
-    return before.userInput.kind === "comment_body" && after.userInput.kind === "comment_body" &&
-      before.userInput.commentBodyDigest === after.userInput.commentBodyDigest;
+  if (before.value.kind === "comment" && after.value.kind === "comment") {
+    return before.value.userInput.kind === "comment_body" && after.value.userInput.kind === "comment_body" &&
+      before.value.userInput.commentBodyDigest === after.value.userInput.commentBodyDigest;
   }
-  if (before.kind !== "comment_thread_state_current_value" || after.kind !== "comment_thread_state_current_value") {
+  if (before.value.kind !== "comment_thread" || after.value.kind !== "comment_thread") {
     return false;
   }
   if (
-    before.threadState.threadRootCommentId !== after.threadState.threadRootCommentId ||
-    before.threadState.threadState !== after.threadState.threadState
+    before.value.threadState.threadRootCommentId !== after.value.threadState.threadRootCommentId ||
+    before.value.threadState.threadState !== after.value.threadState.threadState
   ) return false;
 
-  const bodyKey = `linear_comment_body:${before.threadState.commentId}`;
+  const bodyKey = `linear_comment_body:${before.value.threadState.commentId}`;
   const beforeBody = previous.entries.get(bodyKey)?.change;
   const afterBody = current.entries.get(bodyKey)?.change;
-  return beforeBody?.kind === "comment_current_value" && afterBody?.kind === "comment_current_value" &&
-    beforeBody.userInput.kind === "comment_body" && afterBody.userInput.kind === "comment_body" &&
-    beforeBody.userInput.commentBodyDigest !== afterBody.userInput.commentBodyDigest;
+  return beforeBody?.value.kind === "comment" && afterBody?.value.kind === "comment" &&
+    beforeBody.value.userInput.kind === "comment_body" && afterBody.value.userInput.kind === "comment_body" &&
+    beforeBody.value.userInput.commentBodyDigest !== afterBody.value.userInput.commentBodyDigest;
 }
 
-function add(entries: Map<string, RootFactEntry>, key: string, change: RootDeltaChange): void {
+function add(
+  entries: Map<string, RootFactEntry>,
+  key: string,
+  change: Extract<RootDeltaChange, { kind: "current_value" }>,
+): void {
   entries.set(key, { key, change });
 }
 
-function tombstone(change: RootDeltaChange): RootDeltaChange {
-  const base = {
+function tombstone(
+  change: Extract<RootDeltaChange, { kind: "current_value" }>,
+  targetDigest: string,
+): Extract<RootDeltaChange, { kind: "tombstone" }> {
+  return {
+    kind: "tombstone",
+    sourceKind: change.sourceKind,
     sourceId: change.sourceId,
-    sourceVersion: change.sourceVersion,
+    sourceVersionOrDigest: digest({ removed: change.sourceVersionOrDigest, targetDigest }),
+    removesSourceVersionOrDigest: change.sourceVersionOrDigest,
     actorKind: change.actorKind,
     observedAt: change.observedAt,
+    reason: "deleted",
   };
-  if (change.kind.startsWith("issue_")) return { ...base, kind: "issue_detached" };
-  if (change.kind.startsWith("comment_")) return { ...base, kind: "comment_removed" };
-  if (change.kind.startsWith("relation_")) return { ...base, kind: "relation_removed" };
-  return { ...base, kind: "mechanical_violations_current_value", mechanicalViolations: [] };
 }
 
 function toFactIssue(issue: LinearWorkflowTreeSnapshot["issues"][number]): RootFactIssue {
@@ -436,11 +510,11 @@ function cycleObservation(
 }
 
 function inputIdFor(change: RootDeltaChange): string {
-  if (change.kind === "comment_current_value") return change.userInput.inputId;
-  if (change.kind === "comment_thread_state_current_value") {
-    return threadStateInputId(change.threadState);
+  if (change.kind !== "tombstone" && change.value.kind === "comment") return change.value.userInput.inputId;
+  if (change.kind !== "tombstone" && change.value.kind === "comment_thread") {
+    return threadStateInputId(change.value.threadState);
   }
-  return rootInputId(change.sourceId, change.sourceVersion);
+  return rootInputId(change.sourceId, change.sourceVersionOrDigest);
 }
 
 function commentBodyInputId(commentId: string, commentBodyDigest: string): string {
@@ -456,6 +530,12 @@ function threadStateInputId(threadState: RootCommentThreadState): string {
 
 function bodyDigest(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+function rootDigest(manifest: RootBootstrap["sourceManifest"]): string {
+  return digest(manifest
+    .map((entry) => [entry.sourceKind, entry.sourceId, entry.sourceVersionOrDigest, entry.actorKind])
+    .sort((left, right) => `${left[0]}:${left[1]}`.localeCompare(`${right[0]}:${right[1]}`)));
 }
 
 function digest(value: unknown): string {

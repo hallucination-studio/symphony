@@ -100,7 +100,7 @@ function tree(): LinearWorkflowTreeSnapshot {
       issue("root-1", "Root", undefined, "In Progress", "started", false, 0),
       issue("cycle-1", "Cycle", "root-1", "In Progress", "started", false, 1),
     ],
-    comments: [], relations: [], attachments: [], source_manifest: [],
+    comments: [], relations: [], attachments: [], activities: [], source_manifest: [],
     coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-25T12:00:00.000Z",
   };
 }

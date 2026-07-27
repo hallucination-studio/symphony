@@ -149,6 +149,7 @@ function failureRecord(): RootReconcilerFailure {
     },
     category: "schema_invalid",
     sanitizedReason: "The Root Reconciler response was invalid.",
+    continuity: { kind: "closed", appendOutcome: "session_lost" },
     failedAt: "2026-07-23T00:00:01Z",
   };
 }

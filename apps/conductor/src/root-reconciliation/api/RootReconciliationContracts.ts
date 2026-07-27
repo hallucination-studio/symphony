@@ -52,11 +52,10 @@ export interface ReconcilerLimits {
 }
 
 export interface RootSourceManifestEntry {
-  sourceKind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_attachment" | "linear_activity" | "linear_status_catalog";
+  sourceKind: RootContextSourceKind;
   sourceId: string;
-  sourceVersion: string;
+  sourceVersionOrDigest: string;
   actorKind: RootActorKind;
-  stableWriteId?: string;
 }
 
 export interface RootCoverage {
@@ -81,6 +80,41 @@ export interface RootFactRelation {
   relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
   sourceIssueId: string;
   targetIssueId: string;
+}
+
+export interface RootAttachmentFact {
+  attachmentId: string;
+  issueId: string;
+  title: string;
+  url: string;
+  sourceType: string;
+  remoteVersion: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RootActivityFact {
+  activityId: string;
+  issueId: string;
+  activityKinds: Array<
+    "status_changed" | "description_changed" | "archive_changed" | "labels_changed"
+    | "parent_changed" | "delegation_changed" | "attachment_changed"
+  >;
+  actorKind: RootActorKind;
+  actorId?: string;
+  fromStateId?: string;
+  toStateId?: string;
+  updatedDescription?: string;
+  archived?: boolean;
+  addedLabelIds?: string[];
+  removedLabelIds?: string[];
+  fromParentId?: string;
+  toParentId?: string;
+  fromDelegateId?: string;
+  toDelegateId?: string;
+  attachmentId?: string;
+  remoteVersion: string;
+  createdAt: string;
 }
 
 export interface RootFactComment {
@@ -155,6 +189,8 @@ export interface RootBootstrapSnapshot {
   cycles: RootCycleObservation[];
   issues: RootFactIssue[];
   relations: RootFactRelation[];
+  attachments: RootAttachmentFact[];
+  activities: RootActivityFact[];
   userComments: RootFactComment[];
   userCommentThreadStates: RootCommentThreadState[];
   worktreeGate: RootWorktreeGateResult;
@@ -169,24 +205,40 @@ export interface RootBootstrap {
   pendingInputIds: string[];
 }
 
-interface RootDeltaChangeBase {
+export type RootContextSourceKind =
+  | "issue" | "comment" | "comment_thread" | "activity"
+  | "relation" | "attachment" | "git" | "mechanical_violation";
+
+export type RootContextSourceValue =
+  | { kind: "issue"; issue: RootFactIssue }
+  | { kind: "comment"; userInput: UserCommentInput }
+  | { kind: "comment_thread"; threadState: RootCommentThreadState }
+  | { kind: "activity"; activity: RootActivityFact }
+  | { kind: "relation"; relation: RootFactRelation }
+  | { kind: "attachment"; attachment: RootAttachmentFact }
+  | { kind: "git"; worktreeGate: RootWorktreeGateResult }
+  | { kind: "mechanical_violation"; mechanicalViolations: MechanicalViolation[]; convergence: RootConvergenceSnapshot };
+
+interface RootContextChangeBase {
+  sourceKind: RootContextSourceKind;
   sourceId: string;
-  sourceVersion: string;
+  sourceVersionOrDigest: string;
   actorKind: RootActorKind;
   observedAt: string;
 }
 
 export type RootDeltaChange =
-  | (RootDeltaChangeBase & { kind: "issue_current_value"; issue: RootFactIssue })
-  | (RootDeltaChangeBase & { kind: "issue_detached" })
-  | (RootDeltaChangeBase & { kind: "comment_current_value"; userInput: UserCommentInput })
-  | (RootDeltaChangeBase & { kind: "comment_thread_state_current_value"; threadState: RootCommentThreadState })
-  | (RootDeltaChangeBase & { kind: "comment_removed" })
-  | (RootDeltaChangeBase & { kind: "relation_current_value"; relation: RootFactRelation })
-  | (RootDeltaChangeBase & { kind: "relation_removed" })
-  | (RootDeltaChangeBase & { kind: "worktree_gate_current_value"; worktreeGate: RootWorktreeGateResult })
-  | (RootDeltaChangeBase & { kind: "mechanical_violations_current_value"; mechanicalViolations: MechanicalViolation[] })
-  | (RootDeltaChangeBase & { kind: "convergence_current_value"; convergence: RootConvergenceSnapshot });
+  | (RootContextChangeBase & { kind: "current_value"; value: RootContextSourceValue })
+  | (RootContextChangeBase & {
+    kind: "replacement";
+    replacesSourceVersionOrDigest: string;
+    value: RootContextSourceValue;
+  })
+  | (RootContextChangeBase & {
+    kind: "tombstone";
+    removesSourceVersionOrDigest: string;
+    reason: "deleted" | "left_role_scope";
+  });
 
 export interface RootDelta {
   baseRootDigest: string;
@@ -446,8 +498,16 @@ export interface RootReconcilerFailure {
   modelTurn: RootReconcilerModelTurnRecord;
   category: "transport_failed" | "timed_out" | "schema_invalid" | "stale_output" | "canceled";
   sanitizedReason: string;
+  continuity: ProviderTurnContinuity;
   failedAt: string;
 }
+export type ProviderTurnContinuity =
+  | {
+    kind: "retained";
+    appendOutcome: "not_accepted" | "accepted";
+    providerVisibleContextDigest: string;
+  }
+  | { kind: "closed"; appendOutcome: "acceptance_unknown" | "session_lost" };
 export type RootReconcilerTurnResult =
   | { kind: "directive"; directive: RootDirective }
   | { kind: "failed"; failure: RootReconcilerFailure };
@@ -480,7 +540,6 @@ export interface StageTurnInput {
   profileId: string;
   modelSettings: AgentModelSettings;
   observedTreeDigest: string;
-  contextDigest: string;
   executionPolicy: { sandbox_mode: "read_only" | "workspace_write"; workspace_access: "read_only" | "read_write" };
 }
 
@@ -517,5 +576,6 @@ export type StageResult = StageResultBase & {
     findings?: FindingProposal[];
     verifiedRevision?: string;
     errorCode?: string;
+    continuity?: ProviderTurnContinuity;
   };
 };

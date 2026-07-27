@@ -185,6 +185,26 @@ test("workflow tree derives every descendant kind from exactly one primary kind 
   assert.equal(tree.issues.find(({ issue_id }) => issue_id === "work-1")?.issue_kind, "work");
   assert.equal(tree.issues.find(({ issue_id }) => issue_id === "finding-1")?.issue_kind, "finding");
   assert.equal(tree.attachments[0]?.url, "https://github.com/acme/repo/commit/abc123");
+  assert.deepEqual(tree.activities[0], {
+    activity_id: "activity-1",
+    issue_id: "work-1",
+    activity_kinds: ["status_changed", "description_changed"],
+    actor_kind: "human",
+    actor_id: "user-1",
+    from_state_id: "status-todo",
+    to_state_id: "status-progress",
+    updated_description: "Implement the accepted contract",
+    added_label_ids: ["label-ready"],
+    removed_label_ids: ["label-draft"],
+    from_parent_id: "root-1",
+    to_parent_id: "root-1",
+    from_delegate_id: "delegate-old",
+    to_delegate_id: "delegate-new",
+    attachment_id: "attachment-1",
+    archived: false,
+    remote_version: now,
+    created_at: now,
+  });
 });
 
 test("workflow tree rejects a descendant without a primary kind label", async () => {
@@ -254,6 +274,17 @@ function workflowTree() {
     ],
     comments: [], relations: [],
     attachments: [{ attachment_id: "attachment-1", issue_id: "work-1", title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123", source_type: "github", remote_version: now, created_at: now, updated_at: now }],
-    activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
+    activities: [{
+      activity_id: "activity-1", issue_id: "work-1",
+      activity_kinds: ["status_changed", "description_changed"],
+      actor_kind: "human", actor_id: "user-1",
+      from_state_id: "status-todo", to_state_id: "status-progress",
+      updated_description: "Implement the accepted contract",
+      added_label_ids: ["label-ready"], removed_label_ids: ["label-draft"],
+      from_parent_id: "root-1", to_parent_id: "root-1",
+      from_delegate_id: "delegate-old", to_delegate_id: "delegate-new",
+      attachment_id: "attachment-1", archived: false,
+      remote_version: now, created_at: now,
+    }], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: now,
   };
 }

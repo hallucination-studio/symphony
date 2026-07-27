@@ -62,6 +62,29 @@ export interface LinearWorkflowTreeSnapshot {
     created_at: string;
     updated_at: string;
   }>;
+  activities: Array<{
+    activity_id: string;
+    issue_id: string;
+    activity_kinds: Array<
+      "status_changed" | "description_changed" | "archive_changed" | "labels_changed"
+      | "parent_changed" | "delegation_changed" | "attachment_changed"
+    >;
+    actor_kind: "human" | "symphony" | "linear_integration" | "external_automation" | "unknown";
+    actor_id?: string;
+    from_state_id?: string;
+    to_state_id?: string;
+    updated_description?: string;
+    archived?: boolean;
+    added_label_ids?: string[];
+    removed_label_ids?: string[];
+    from_parent_id?: string;
+    to_parent_id?: string;
+    from_delegate_id?: string;
+    to_delegate_id?: string;
+    attachment_id?: string;
+    remote_version: string;
+    created_at: string;
+  }>;
   source_manifest: Array<{
     source_kind: "linear_issue" | "linear_comment" | "linear_relation" | "linear_attachment" | "linear_activity" | "linear_status_catalog";
     source_id: string;

@@ -55,16 +55,19 @@ def pending_comment_reply_sources_from_request(request: dict[str, Any]) -> list[
 
 
 def _delta_source(change: dict[str, Any]) -> dict[str, Any] | None:
-    if change.get("kind") == "comment_current_value":
-        value = change.get("user_input")
-        if not isinstance(value, dict):
-            return None
-        return _body_source(value, input_id=value.get("input_id"))
-    if change.get("kind") == "comment_thread_state_current_value":
-        value = change.get("thread_state")
-        if not isinstance(value, dict):
-            return None
-        return _thread_state_source(value)
+    if change.get("kind") == "tombstone":
+        return None
+    context_value = change.get("value")
+    if not isinstance(context_value, dict):
+        return None
+    if context_value.get("kind") == "comment":
+        value = context_value.get("user_input")
+        if isinstance(value, dict):
+            return _body_source(value, input_id=value.get("input_id"))
+    if context_value.get("kind") == "comment_thread":
+        value = context_value.get("thread_state")
+        if isinstance(value, dict):
+            return _thread_state_source(value)
     return None
 
 

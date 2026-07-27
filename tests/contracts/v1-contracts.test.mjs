@@ -88,7 +88,10 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "RootBootstrapSnapshot",
     "RootDelta",
     "RootConvergenceSnapshot",
-    "ConvergenceCurrentValue",
+    "RootContextCurrentValue",
+    "RootContextReplacement",
+    "RootContextTombstone",
+    "ProviderTurnContinuity",
     "AdvanceRootReconcilerRequest",
     "RootDirective",
     "RootReconcilerTurnFailure",
@@ -123,6 +126,15 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "PlanTurnCommand",
     "WorkTurnCommand",
     "RootGateTurnCommand",
+    "IssueCurrentValue",
+    "IssueDetached",
+    "CommentCurrentValue",
+    "CommentRemoved",
+    "RelationCurrentValue",
+    "RelationRemoved",
+    "WorktreeGateCurrentValue",
+    "MechanicalViolationsCurrentValue",
+    "ConvergenceCurrentValue",
     "PerformerTurnEvent",
     "turn_kind",
     "GetRootScopeQuery",
@@ -352,13 +364,17 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     false,
   );
   assert.deepEqual(schema.$defs.RootDeltaChange.oneOf.map(({ $ref }) => $ref), [
-    "#/$defs/IssueCurrentValue", "#/$defs/IssueDetached",
-    "#/$defs/CommentCurrentValue", "#/$defs/CommentThreadStateCurrentValue", "#/$defs/CommentRemoved",
-    "#/$defs/RelationCurrentValue", "#/$defs/RelationRemoved",
-    "#/$defs/WorktreeGateCurrentValue",
-    "#/$defs/MechanicalViolationsCurrentValue",
-    "#/$defs/ConvergenceCurrentValue",
+    "#/$defs/RootContextCurrentValue",
+    "#/$defs/RootContextReplacement",
+    "#/$defs/RootContextTombstone",
   ]);
+  assert.deepEqual(schema.$defs.RootContextSourceKind.enum, [
+    "issue", "comment", "comment_thread", "activity", "relation",
+    "attachment", "git", "mechanical_violation",
+  ]);
+  assert.ok(schema.$defs.RootContextReplacement.required.includes("replaces_source_version_or_digest"));
+  assert.ok(schema.$defs.RootContextTombstone.required.includes("removes_source_version_or_digest"));
+  assert.equal(Object.hasOwn(schema.$defs.RootContextTombstone.properties, "value"), false);
   assert.deepEqual(schema.$defs.CycleObservation.required, [
     "cycle_issue", "cycle_status", "is_archived", "issues", "relations",
   ]);
@@ -393,6 +409,32 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "human_action_thread_facts", "verification_requirements",
     "immutable_target_revision", "repository_snapshot",
   ]);
+  for (const [requestName, role, initialName, deltaName] of [
+    ["PlanTurnRequest", "plan", "PlanRoleContextInitial", "PlanRoleContextDelta"],
+    ["WorkTurnRequest", "work", "WorkRoleContextInitial", "WorkRoleContextDelta"],
+    ["VerifyTurnRequest", "verify", "VerifyRoleContextInitial", "VerifyRoleContextDelta"],
+  ]) {
+    const request = schema.$defs[requestName];
+    assert.ok(request.required.includes("role_context_update"), requestName);
+    assert.equal(Object.hasOwn(request.properties, "context"), false, requestName);
+    const update = schema.$defs[`${role[0].toUpperCase()}${role.slice(1)}RoleContextUpdate`];
+    assert.deepEqual(update.oneOf.map(({ $ref }) => $ref), [
+      `#/$defs/${initialName}`,
+      `#/$defs/${deltaName}`,
+    ]);
+  }
+  assert.deepEqual(schema.$defs.ProviderTurnContinuity.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/RetainedProviderTurnContinuity",
+    "#/$defs/ClosedProviderTurnContinuity",
+  ]);
+  assert.deepEqual(schema.$defs.RetainedProviderTurnContinuity.properties.append_outcome.enum, [
+    "not_accepted", "accepted",
+  ]);
+  assert.deepEqual(schema.$defs.ClosedProviderTurnContinuity.properties.append_outcome.enum, [
+    "acceptance_unknown", "session_lost",
+  ]);
+  assert.ok(schema.$defs.RootReconcilerFailure.required.includes("continuity"));
+  assert.ok(schema.$defs.StageExecutionFailedResult.required.includes("continuity"));
   for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
     const definition = schema.$defs[name];
     assert.equal(definition.additionalProperties, false, name);

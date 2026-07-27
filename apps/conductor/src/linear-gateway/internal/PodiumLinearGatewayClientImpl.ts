@@ -465,6 +465,42 @@ function workflowTree(
     }
     attachmentIds.add(attachment.attachment_id);
   }
+  const activities = array(value.activities, "linear_workflow_activities_invalid").map((item) => {
+    const activity = record(item);
+    const activityKinds = array(activity.activity_kinds, "linear_workflow_activity_invalid")
+      .map(workflowActivityKind);
+    if (activityKinds.length === 0 || activityKinds.length > 7 || new Set(activityKinds).size !== activityKinds.length) {
+      throw new Error("linear_workflow_activity_invalid");
+    }
+    return {
+      activity_id: string(activity.activity_id, "linear_workflow_activity_invalid"),
+      issue_id: string(activity.issue_id, "linear_workflow_activity_invalid"),
+      activity_kinds: activityKinds,
+      actor_kind: workflowCommentAuthorKind(activity.actor_kind),
+      ...(activity.actor_id === undefined ? {} : { actor_id: string(activity.actor_id, "linear_workflow_activity_invalid") }),
+      ...(activity.from_state_id === undefined ? {} : { from_state_id: string(activity.from_state_id, "linear_workflow_activity_invalid") }),
+      ...(activity.to_state_id === undefined ? {} : { to_state_id: string(activity.to_state_id, "linear_workflow_activity_invalid") }),
+      ...(activity.updated_description === undefined ? {} : { updated_description: string(activity.updated_description, "linear_workflow_activity_invalid") }),
+      ...(activity.archived === undefined ? {} : { archived: boolean(activity.archived, "linear_workflow_activity_invalid") }),
+      ...(activity.added_label_ids === undefined ? {} : { added_label_ids: workflowIdentifierArray(activity.added_label_ids) }),
+      ...(activity.removed_label_ids === undefined ? {} : { removed_label_ids: workflowIdentifierArray(activity.removed_label_ids) }),
+      ...(activity.from_parent_id === undefined ? {} : { from_parent_id: string(activity.from_parent_id, "linear_workflow_activity_invalid") }),
+      ...(activity.to_parent_id === undefined ? {} : { to_parent_id: string(activity.to_parent_id, "linear_workflow_activity_invalid") }),
+      ...(activity.from_delegate_id === undefined ? {} : { from_delegate_id: string(activity.from_delegate_id, "linear_workflow_activity_invalid") }),
+      ...(activity.to_delegate_id === undefined ? {} : { to_delegate_id: string(activity.to_delegate_id, "linear_workflow_activity_invalid") }),
+      ...(activity.attachment_id === undefined ? {} : { attachment_id: string(activity.attachment_id, "linear_workflow_activity_invalid") }),
+      remote_version: string(activity.remote_version, "linear_workflow_activity_invalid"),
+      created_at: string(activity.created_at, "linear_workflow_activity_invalid"),
+    };
+  });
+  if (activities.length > 8_192) throw new Error("linear_workflow_activities_invalid");
+  const activityIds = new Set<string>();
+  for (const activity of activities) {
+    if (activityIds.has(activity.activity_id) || !issueIds.has(activity.issue_id)) {
+      throw new Error("linear_workflow_activity_invalid");
+    }
+    activityIds.add(activity.activity_id);
+  }
   const sourceManifest = array(value.source_manifest, "linear_workflow_source_manifest_invalid").map((item) => {
     const source = record(item);
     return {
@@ -507,6 +543,7 @@ function workflowTree(
     comments,
     relations,
     attachments,
+    activities,
     source_manifest: sourceManifest,
     coverage,
     observed_at: string(value.observed_at, "linear_workflow_tree_invalid"),
@@ -576,6 +613,24 @@ function workflowCommentThreadState(value: JsonValue | undefined): "resolved" | 
 function workflowRelationKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["relations"][number]["relation_kind"] {
   if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
+}
+
+function workflowActivityKind(value: JsonValue): LinearWorkflowTreeSnapshot["activities"][number]["activity_kinds"][number] {
+  if (
+    value === "status_changed" || value === "description_changed" || value === "archive_changed"
+    || value === "labels_changed" || value === "parent_changed" || value === "delegation_changed"
+    || value === "attachment_changed"
+  ) return value;
+  throw new Error("linear_workflow_activity_invalid");
+}
+
+function workflowIdentifierArray(value: JsonValue): string[] {
+  const identifiers = array(value, "linear_workflow_activity_invalid")
+    .map((entry) => string(entry, "linear_workflow_activity_invalid"));
+  if (identifiers.length > 64 || new Set(identifiers).size !== identifiers.length) {
+    throw new Error("linear_workflow_activity_invalid");
+  }
+  return identifiers;
 }
 
 function workflowSourceKind(value: JsonValue | undefined): LinearWorkflowTreeSnapshot["source_manifest"][number]["source_kind"] {

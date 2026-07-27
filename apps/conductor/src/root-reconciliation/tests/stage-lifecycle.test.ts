@@ -510,7 +510,7 @@ function stageResult(input: StageTurnInput, outcomeKind: StageResult["outcome"][
     protocolVersion: 1, resultId: input.stageExecutionId, stageExecutionId: input.stageExecutionId,
     rootIssueId: input.rootIssueId, cycleIssueId: input.cycleIssueId, targetIssueId: input.targetIssueId,
     role: input.role, roleSessionId: input.roleSessionId, roleTurnId: input.roleTurnId,
-    observedTreeDigest: input.observedTreeDigest, contextDigest: input.contextDigest,
+    observedTreeDigest: input.observedTreeDigest, contextDigest: input.observedTreeDigest,
     summary: "The stage finished.", sourceManifest: [], completedAt: "2026-07-24T00:00:02Z",
     modelTurn: stageModelTurn(input, outcomeKind),
     outcome: { kind: outcomeKind, ...(revisionBound ? { verifiedRevision: input.git.head } : {}) },
@@ -663,7 +663,7 @@ class FakeLinear {
         ...(role === "verify" ? [issue("work-1", "work", "cycle-1", "done", "Done", 2)] : []),
         issue("stage-1", role, "cycle-1", "todo", "Todo", 2),
       ],
-      comments: [], relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+      comments: [], relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-24T00:00:00Z",
     };
   }

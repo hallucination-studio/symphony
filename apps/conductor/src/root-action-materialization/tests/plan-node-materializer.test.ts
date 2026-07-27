@@ -190,7 +190,7 @@ function tree(): LinearWorkflowTreeSnapshot {
       issue("dependency-1", "work", "cycle-1", "todo", "Todo", 2, 1),
     ],
     comments: [approvalRequest(), approvalReply()],
-    relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+    relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-24T00:02:00Z",
   };
 }

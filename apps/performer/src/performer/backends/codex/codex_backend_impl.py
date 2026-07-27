@@ -136,16 +136,28 @@ class CodexBackendImpl(ProviderBackendInterface):
         cancel_event: Event,
     ) -> dict[str, Any]:
         settings = session.settings or {}
-        service_tier = self._service_tier(settings)
+        try:
+            service_tier = self._service_tier(settings)
+            prompt = _role_prompt(session.role, request)
+            output_schema = _role_output_schema(session.role, request)
+        except ProviderBackendError:
+            raise
+        except Exception as error:
+            raise ProviderBackendError(
+                "The Performer could not prepare the Provider turn.",
+                code="provider_turn_preparation_failed",
+                retryable=False,
+                append_outcome="not_accepted",
+            ) from error
         try:
             handle = session.provider_handle.turn(
-                _role_prompt(session.role, request),
+                prompt,
                 cwd=str(workspace_root) if workspace_root is not None else None,
                 model=settings.get("model"),
                 effort=settings.get("reasoning_effort"),
                 sandbox=_sandbox_for_role(session.role),
                 service_tier=service_tier,
-                output_schema=_role_output_schema(session.role, request),
+                output_schema=output_schema,
             )
         except Exception as error:
             raise ProviderBackendError(
@@ -220,8 +232,20 @@ class CodexBackendImpl(ProviderBackendInterface):
                 "The Provider did not complete the role turn.",
                 code="provider_turn_incomplete",
                 retryable=True,
+                append_outcome="accepted",
             )
-        return {"output": _role_output(session.role, result.final_response), "usage": _usage(result.usage)}
+        try:
+            return {"output": _role_output(session.role, result.final_response), "usage": _usage(result.usage)}
+        except ProviderBackendError as error:
+            error.append_outcome = "accepted"
+            raise
+        except Exception as error:
+            raise ProviderBackendError(
+                "The Provider returned an invalid role turn result.",
+                code="provider_output_invalid",
+                retryable=False,
+                append_outcome="accepted",
+            ) from error
 
     def interrupt_turn(self, session: ProviderSession) -> None:
         # A turn handle is interrupted by the cancellation watcher. This method
@@ -249,6 +273,7 @@ class CodexBackendImpl(ProviderBackendInterface):
                 code="performer_profile_setting_unsupported",
                 retryable=False,
                 action_required="Disable Fast or use a supported ChatGPT Profile.",
+                append_outcome="not_accepted",
             )
         return "fast" if fast else None
 

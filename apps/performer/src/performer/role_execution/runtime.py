@@ -63,6 +63,7 @@ class RoleExecutionRuntime:
         if deadline is not None and deadline <= self._now():
             return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn deadline expired."}, self._now(), record)
         output: dict[str, Any] | None = None
+        continuity: dict[str, str] | None = None
         try:
             output = self._sessions.execute(
                 record,
@@ -72,42 +73,85 @@ class RoleExecutionRuntime:
             )
             result = _provider_output(output, role)
         except ProviderTurnCanceled as error:
-            result = {"kind": "canceled", "sanitized_reason": error.sanitized_reason}
-        except ProviderTurnDeadlineExpired:
+            continuity = _error_continuity(error, record, request)
             result = {
                 "kind": "execution_failed",
-                "error_code": "turn_deadline_expired",
+                "error_code": "provider_append_acceptance_unknown",
+                "sanitized_reason": error.sanitized_reason,
+                "retryable": True,
+                "failure_category": "canceled",
+            }
+        except ProviderTurnDeadlineExpired as error:
+            continuity = _error_continuity(error, record, request)
+            result = {
+                "kind": "execution_failed",
+                "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The turn deadline expired.",
                 "retryable": False,
                 "failure_category": "timed_out",
             }
         except ProviderBackendError as error:
+            continuity = _error_continuity(error, record, request)
             result = {
                 "kind": "execution_failed",
-                "error_code": error.code,
+                "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": error.sanitized_reason,
                 "retryable": error.retryable,
                 "failure_category": "transport_failed",
             }
-        except (KeyError, TypeError, ValueError, SessionError):
+        except (KeyError, TypeError, ValueError, SessionError) as error:
+            continuity = _error_continuity(error, record, request, accepted=output is not None)
             result = {
                 "kind": "execution_failed",
-                "error_code": "performer_turn_invalid",
+                "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The Performer could not validate the turn result.",
                 "retryable": False,
                 "failure_category": "schema_invalid",
             }
-        except Exception:
+        except Exception as error:
+            continuity = _error_continuity(error, record, request, accepted=output is not None)
             result = {
                 "kind": "execution_failed",
-                "error_code": "performer_turn_failed",
+                "error_code": _continuity_error_code(continuity),
                 "sanitized_reason": "The Performer could not complete the turn.",
                 "retryable": False,
                 "failure_category": "transport_failed",
             }
         if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed"}:
             result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."}
+        if result.get("kind") == "execution_failed":
+            result["continuity"] = continuity or _retained_continuity(record, request, accepted=True)
         return _terminal(request, role, result, self._now(), record, output if isinstance(output, dict) else None)
+
+
+def _error_continuity(
+    error: Exception,
+    record: Any,
+    request: dict[str, Any],
+    *,
+    accepted: bool = False,
+) -> dict[str, str]:
+    value = getattr(error, "continuity", None)
+    if isinstance(value, dict):
+        return value
+    return _retained_continuity(record, request, accepted=accepted)
+
+
+def _retained_continuity(record: Any, request: dict[str, Any], *, accepted: bool) -> dict[str, str]:
+    digest = getattr(record, "provider_visible_context_digest", None)
+    if not isinstance(digest, str) or not digest:
+        digest = _root_target_digest(request) if request.get("kind") == "open_root_reconciler" else str(request.get("context_digest", "unknown"))
+    return {
+        "kind": "retained",
+        "append_outcome": "accepted" if accepted else "not_accepted",
+        "provider_visible_context_digest": digest,
+    }
+
+
+def _continuity_error_code(continuity: dict[str, str]) -> str:
+    if continuity.get("kind") == "closed":
+        return "provider_session_lost" if continuity.get("append_outcome") == "session_lost" else "provider_append_acceptance_unknown"
+    return "provider_output_invalid" if continuity.get("append_outcome") == "accepted" else "provider_append_not_accepted"
 
 
 def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
@@ -140,12 +184,6 @@ def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
         expected_access = "read_write" if role == "work" else "read_only"
         if policy.get("sandbox_mode") != expected or not isinstance(repository_context, dict) or repository_context.get("workspace_access") != expected_access:
             raise ValueError("role_capability_invalid")
-    if role == "work":
-        context = request.get("context")
-        if not isinstance(context, dict) or context.get("workspace_capability") != "workspace_write":
-            raise ValueError("workspace_capability_invalid")
-
-
 def _terminal(
     request: dict[str, Any],
     role: str,
@@ -172,6 +210,7 @@ def _terminal(
                     "model_turn": model_turn,
                     "category": category,
                     "sanitized_reason": result["sanitized_reason"],
+                    "continuity": result.get("continuity") or _retained_continuity(session_record, request, accepted=False),
                     "failed_at": _timestamp(completed_at),
                 },
             }

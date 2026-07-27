@@ -56,10 +56,13 @@ test("fact sets send a bootstrap snapshot and only changed current values afterw
   assert.equal(first.bootstrap.rootSnapshot.issues.length, 1);
   assert.equal(first.bootstrap.rootDigest, delta.baseRootDigest);
   assert.equal(delta.targetRootDigest, second.bootstrap.rootDigest);
-  assert.deepEqual(delta.changes.map((change) => change.kind), ["issue_current_value"]);
+  assert.deepEqual(delta.changes.map((change) => change.kind), ["replacement"]);
   assert.equal("rootSnapshot" in delta, false);
-  assert.equal(delta.changes[0]?.kind, "issue_current_value");
-  if (delta.changes[0]?.kind === "issue_current_value") assert.equal(delta.changes[0].issue.title, "Changed");
+  assert.equal(delta.changes[0]?.kind, "replacement");
+  if (delta.changes[0]?.kind === "replacement" && delta.changes[0].value.kind === "issue") {
+    assert.equal(delta.changes[0].value.issue.title, "Changed");
+    assert.equal(delta.changes[0].replacesSourceVersionOrDigest, "root-v1");
+  }
 });
 
 test("bootstrap includes the current native state for each comment thread", () => {
@@ -107,7 +110,7 @@ test("a body edit produces only the comment body current value", () => {
     buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] }),
   );
 
-  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["comment_current_value"]);
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["replacement"]);
   assert.deepEqual(delta.pendingInputIds, [
     rootInputId("comment_body:comment-1", createHash("sha256").update("Edited user input", "utf8").digest("hex")),
   ]);
@@ -145,7 +148,8 @@ test("a native thread-state change produces only the thread-state current value"
     buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] }),
   );
 
-  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["comment_thread_state_current_value"]);
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["replacement"]);
+  assert.equal(delta.changes[0]?.sourceKind, "comment_thread");
 });
 
 test("a matching native reply thread state does not re-enter as a pending input", () => {
@@ -162,7 +166,9 @@ test("removed source facts become tombstones", () => {
   const first = buildRootFactSet({ root, tree: tree("Root", "root-v1", "comment-v1", true), git: git("head-1"), mechanicalViolations: [] });
   const second = buildRootFactSet({ root, tree: tree("Root", "root-v1", undefined, false), git: git("head-1"), mechanicalViolations: [] });
   const delta = diffRootFactSets(first, second);
-  assert.ok(delta.changes.some((change) => change.kind === "comment_removed"));
+  assert.ok(delta.changes.some((change) =>
+    change.kind === "tombstone" && change.sourceKind === "comment" &&
+    change.removesSourceVersionOrDigest === createHash("sha256").update("User input", "utf8").digest("hex")));
 });
 
 test("a completed Plan enters the next delta only as its native Issue current value", () => {
@@ -172,12 +178,12 @@ test("a completed Plan enters the next delta only as its native Issue current va
   const second = buildRootFactSet({ root, tree: after, git: git("head-1"), mechanicalViolations: [] });
   const delta = diffRootFactSets(first, second);
 
-  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["issue_current_value"]);
+  assert.deepEqual(delta.changes.map(({ kind }) => kind), ["replacement"]);
   const plan = delta.changes[0];
-  assert.equal(plan?.kind, "issue_current_value");
-  if (plan?.kind === "issue_current_value") {
-    assert.equal(plan.issue.issueId, "plan-1");
-    assert.match(plan.issue.description, /Deliver the deployment workflow\./u);
+  assert.equal(plan?.kind, "replacement");
+  if (plan?.kind === "replacement" && plan.value.kind === "issue") {
+    assert.equal(plan.value.issue.issueId, "plan-1");
+    assert.match(plan.value.issue.description, /Deliver the deployment workflow\./u);
   }
 });
 
@@ -224,10 +230,10 @@ function git(head: string) {
 
 function commentBodyInputId(factSet: ReturnType<typeof buildRootFactSet>, commentId: string): string {
   const entry = factSet.entries.get(`linear_comment_body:${commentId}`)?.change;
-  if (entry?.kind !== "comment_current_value" || entry.userInput.kind !== "comment_body") {
+  if (entry?.value.kind !== "comment" || entry.value.userInput.kind !== "comment_body") {
     throw new Error("comment_body_input_missing");
   }
-  return entry.userInput.inputId;
+  return entry.value.userInput.inputId;
 }
 
 function rootInputId(sourceId: string, sourceVersion: string): string {
@@ -252,7 +258,7 @@ function tree(title: string, rootVersion: string, commentVersion?: string, inclu
       remote_version: rootVersion, created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
     }],
     comments: [...(userComment ? [userComment] : [])],
-    relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+    relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:02Z",
   };
 }

@@ -111,6 +111,7 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
       comments: [],
       relations: [],
       attachments: [],
+      activities: [],
       source_manifest: [],
       coverage: { is_complete: true, omissions: [] },
       observed_at: "2026-07-23T00:00:00Z",
@@ -119,7 +120,6 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
     profileId: "profile-1",
     modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
     observedTreeDigest: "tree-1",
-    contextDigest: "context-1",
     executionPolicy: {
       sandbox_mode: role === "work" ? "workspace_write" : "read_only",
       workspace_access: role === "work" ? "read_write" : "read_only",
@@ -127,7 +127,7 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
   };
 }
 
-function directStageResult(role: "plan" | "work" | "verify", requestId: string) {
+function directStageResult(role: "plan" | "work" | "verify", requestId: string, contextDigest = "context-1") {
   return {
     protocol_version: "1",
     request_id: requestId,
@@ -139,10 +139,41 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string) 
     cycle_issue_id: "cycle-1",
     target_issue_id: `${role}-1`,
     observed_tree_digest: "tree-1",
-    context_digest: "context-1",
+    context_digest: contextDigest,
     completed_at: "2026-07-23T00:00:01Z",
     model_turn: stageModelTurn(role, "canceled"),
     outcome: { kind: "canceled", sanitized_reason: "test cancellation" },
+  };
+}
+
+function directStageResultForRequest(body: Record<string, unknown>, closed = false) {
+  const role = body.role as "plan" | "work" | "verify";
+  const result = directStageResult(role, body.request_id as string, body.context_digest as string);
+  const modelTurn = {
+    ...result.model_turn,
+    turn_record_id: `${body.stage_execution_id}:${body.role_turn_id}`,
+    stage_execution_id: body.stage_execution_id,
+    role_session_id: body.role_session_id,
+    role_turn_id: body.role_turn_id,
+    outcome: closed ? "execution_failed" : "canceled",
+  };
+  return {
+    ...result,
+    stage_execution_id: body.stage_execution_id,
+    role_session_id: body.role_session_id,
+    role_turn_id: body.role_turn_id,
+    target_issue_id: body.target_issue_id,
+    observed_tree_digest: body.observed_tree_digest,
+    model_turn: modelTurn,
+    outcome: closed
+      ? {
+        kind: "execution_failed",
+        error_code: "provider_session_lost",
+        sanitized_reason: "The Provider session was lost.",
+        retryable: true,
+        continuity: { kind: "closed", append_outcome: "session_lost" },
+      }
+      : result.outcome,
   };
 }
 
@@ -174,7 +205,7 @@ function stageModelTurn(
   };
 }
 
-function completedPlanResult(requestId: string) {
+function completedPlanResult(requestId: string, contextDigest = "context-1") {
   return {
     protocol_version: "1",
     request_id: requestId,
@@ -186,7 +217,7 @@ function completedPlanResult(requestId: string) {
     cycle_issue_id: "cycle-1",
     target_issue_id: "plan-1",
     observed_tree_digest: "tree-1",
-    context_digest: "context-1",
+    context_digest: contextDigest,
     completed_at: "2026-07-23T00:00:01Z",
     model_turn: stageModelTurn("plan", "plan_completed"),
     outcome: {
@@ -231,7 +262,7 @@ function completedPlanResult(requestId: string) {
   };
 }
 
-function changesRequiredResult(requestId: string) {
+function changesRequiredResult(requestId: string, contextDigest = "context-1") {
   return {
     protocol_version: "1",
     request_id: requestId,
@@ -243,7 +274,7 @@ function changesRequiredResult(requestId: string) {
     cycle_issue_id: "cycle-1",
     target_issue_id: "verify-1",
     observed_tree_digest: "tree-1",
-    context_digest: "context-1",
+    context_digest: contextDigest,
     completed_at: "2026-07-23T00:00:01Z",
     model_turn: stageModelTurn("verify", "verify_changes_required"),
     outcome: {
@@ -313,7 +344,8 @@ function bootstrap() {
           },
         },
       },
-      cycles: [], issues: [issue], relations: [], userComments: [], userCommentThreadStates: [],
+      cycles: [], issues: [issue], relations: [], attachments: [], activities: [],
+      userComments: [], userCommentThreadStates: [],
       worktreeGate: {
         kind: "valid" as const,
         repositoryIdentity: "repository-1",
@@ -395,6 +427,7 @@ function rootFailure(requestId: string, turnId: string, targetRootDigest: string
       },
       category: "schema_invalid",
       sanitized_reason: "The Root Reconciler response was invalid.",
+      continuity: { kind: "closed", append_outcome: "session_lost" },
       failed_at: "2026-07-23T00:00:01Z",
     },
   };
@@ -454,10 +487,10 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   });
   const input = openInput();
   input.bootstrap.sourceManifest.push({
-    sourceKind: "linear_status_catalog",
-    sourceId: "status-catalog-1",
-    sourceVersion: "status-catalog-v1",
-    actorKind: "linear_integration",
+    sourceKind: "issue",
+    sourceId: "root-1",
+    sourceVersionOrDigest: "root-v1",
+    actorKind: "human",
   });
 
   const opened = await client.openRootReconciler(input);
@@ -475,10 +508,10 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal((convergence.policy as Record<string, unknown>).max_cycles_per_root, 3);
   assert.equal((convergence.view as Record<string, unknown>).active_cycle_repair_attempts, 0);
   assert.deepEqual((sent.bootstrap as Record<string, unknown>).source_manifest, [{
-    source_kind: "linear_status_catalog",
-    source_id: "status-catalog-1",
-    source_version: "status-catalog-v1",
-    actor_kind: "linear_integration",
+    source_kind: "issue",
+    source_id: "root-1",
+    source_version_or_digest: "root-v1",
+    actor_kind: "human",
   }]);
 });
 
@@ -595,19 +628,24 @@ test("agent client carries native Plan Issue and convergence facts in Root boots
       targetRootDigest: "tree-2",
       changes: [
         {
-          kind: "issue_current_value", sourceId: "plan-1", sourceVersion: "plan-v2",
+          kind: "replacement", sourceKind: "issue", sourceId: "plan-1", sourceVersionOrDigest: "plan-v2",
+          replacesSourceVersionOrDigest: "plan-v1",
           actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z",
-          issue: { ...facts.cycle.issues[0]!, status: "Approved", remoteVersion: "plan-v2" },
+          value: { kind: "issue", issue: { ...facts.cycle.issues[0]!, status: "Approved", remoteVersion: "plan-v2" } },
         },
         {
-          kind: "convergence_current_value", sourceId: "root-1", sourceVersion: "convergence-v2",
+          kind: "replacement", sourceKind: "mechanical_violation", sourceId: "root-1",
+          sourceVersionOrDigest: "convergence-v2", replacesSourceVersionOrDigest: "convergence-v1",
           actorKind: "symphony", observedAt: "2026-07-23T00:00:01Z",
-          convergence: {
-            ...input.bootstrap.rootSnapshot.root.convergence,
-            view: {
-              ...input.bootstrap.rootSnapshot.root.convergence.view,
-              activeCycleIssueId: "cycle-1",
-              activeCycleRepairAttempts: 1,
+          value: {
+            kind: "mechanical_violation", mechanicalViolations: [],
+            convergence: {
+              ...input.bootstrap.rootSnapshot.root.convergence,
+              view: {
+                ...input.bootstrap.rootSnapshot.root.convergence.view,
+                activeCycleIssueId: "cycle-1",
+                activeCycleRepairAttempts: 1,
+              },
             },
           },
         },
@@ -618,12 +656,12 @@ test("agent client carries native Plan Issue and convergence facts in Root boots
   const delta = calls[1]!.delta as { changes: Array<Record<string, unknown>> };
   assert.equal("root_snapshot" in delta, false);
   assert.deepEqual(delta.changes.map(({ kind }) => kind), [
-    "issue_current_value",
-    "convergence_current_value",
+    "replacement",
+    "replacement",
   ]);
-  assert.equal((delta.changes[0]!.issue as Record<string, unknown>).status, "Approved");
+  assert.equal(((delta.changes[0]!.value as Record<string, unknown>).issue as Record<string, unknown>).status, "Approved");
   assert.equal(
-    (((delta.changes[1]!.convergence as Record<string, unknown>).view as Record<string, unknown>).active_cycle_repair_attempts),
+    (((((delta.changes[1]!.value as Record<string, unknown>).convergence as Record<string, unknown>).view as Record<string, unknown>)).active_cycle_repair_attempts),
     1,
   );
 });
@@ -669,7 +707,7 @@ test("agent client decodes direct role-specific results", async () => {
     if (role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
     if (role === "work") decodeConductorPerformerWorkTurnRequest(body as JsonValue);
     if (role === "verify") decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
-    return directStageResult(role, requestId) as JsonValue;
+    return directStageResult(role, requestId, body.context_digest as string) as JsonValue;
   });
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
@@ -696,7 +734,7 @@ test("agent client preserves every validated completed Plan field", async () => 
     environment: () => ({}),
     channelFactory: channelFactoryFor(({ requestId, body }) => {
       decodeConductorPerformerPlanTurnRequest(body as JsonValue);
-      return completedPlanResult(requestId) as JsonValue;
+      return completedPlanResult(requestId, body.context_digest as string) as JsonValue;
     }),
     deadlineMs: 30_000,
   });
@@ -750,7 +788,7 @@ test("agent client preserves every validated Verify Finding field", async () => 
     environment: () => ({}),
     channelFactory: channelFactoryFor(({ requestId, body }) => {
       decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
-      return changesRequiredResult(requestId) as JsonValue;
+      return changesRequiredResult(requestId, body.context_digest as string) as JsonValue;
     }),
     deadlineMs: 30_000,
   });
@@ -782,7 +820,7 @@ test("agent client sends role-specific closed stage contexts", async () => {
       if (role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
       if (role === "work") decodeConductorPerformerWorkTurnRequest(body as JsonValue);
       if (role === "verify") decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
-      return directStageResult(role, requestId) as JsonValue;
+      return directStageResult(role, requestId, body.context_digest as string) as JsonValue;
     }, calls),
     deadlineMs: 30_000,
   });
@@ -800,19 +838,63 @@ test("agent client sends role-specific closed stage contexts", async () => {
     reasoning_effort: "medium",
     is_fast_mode_enabled: false,
   });
-  assert.deepEqual(Object.keys(requests[0]!.context as object).sort(), [
-    "current_git_facts", "current_plan_issue", "cycle", "human_action_thread_facts", "prior_approved_plan_facts",
-    "prior_plan_attempt_facts", "required_output", "root_contract", "unresolved_finding_issue_facts",
-  ]);
-  assert.deepEqual(Object.keys(requests[1]!.context as object).sort(), [
-    "approved_plan_contract", "completed_work_evidence", "current_active_work_dag", "git_baseline",
-    "human_action_thread_facts", "prior_work_attempt_facts", "selected_work", "workspace_capability",
-  ]);
-  assert.deepEqual(Object.keys(requests[2]!.context as object).sort(), [
-    "approved_plan_contract", "archived_cycle_nodes", "complete_active_cycle_dag", "completed_work_issue_facts",
-    "human_action_thread_facts", "immutable_target_revision", "repository_snapshot", "unresolved_finding_issue_facts",
-    "verification_requirements",
-  ]);
+  assert.equal(requests.every((request) => !("context" in request)), true);
+  const updates = requests.map((request) => request.role_context_update as {
+    kind: string;
+    sources: Array<{ value: { kind: string } }>;
+  });
+  assert.deepEqual(updates.map(({ kind }) => kind), ["initial", "initial", "initial"]);
+  assert.deepEqual(updates[0]!.sources.map(({ value }) => value.kind).sort(), ["cycle", "git", "issue", "root_contract"]);
+  assert.deepEqual(updates[1]!.sources.map(({ value }) => value.kind).sort(), ["git", "issue", "issue"]);
+  assert.deepEqual(updates[2]!.sources.map(({ value }) => value.kind).sort(), ["git", "issue", "issue"]);
+});
+
+test("agent client isolates Stage baselines, sends only changed delta sources, and fresh-opens after closure", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ body }) => {
+      if (body.role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
+      else decodeConductorPerformerWorkTurnRequest(body as JsonValue);
+      return directStageResultForRequest(body, body.request_id === "plan-closed") as JsonValue;
+    }, calls),
+    deadlineMs: 30_000,
+  });
+
+  await client.executePlanTurn(stageInput("plan"));
+  const changed = stageInput("plan");
+  changed.requestId = "plan-request-2";
+  changed.roleTurnId = "plan-turn-2";
+  const changedPlan = changed.tree.issues.find(({ issue_id }) => issue_id === "plan-1")!;
+  changedPlan.description = "Revised Plan description";
+  changedPlan.remote_version = "plan-v2";
+  await client.executePlanTurn(changed);
+
+  const work = stageInput("work");
+  await client.executeWorkTurn(work);
+
+  const closed = structuredClone(changed);
+  closed.requestId = "plan-closed";
+  closed.roleTurnId = "plan-turn-3";
+  await client.executePlanTurn(closed);
+
+  const fresh = structuredClone(changed);
+  fresh.requestId = "plan-fresh";
+  fresh.roleTurnId = "plan-turn-4";
+  await client.executePlanTurn(fresh);
+
+  assert.equal(calls.every((request) => !("context" in request)), true);
+  const updates = calls.map((request) => request.role_context_update as {
+    kind: string;
+    changes?: Array<{ kind: string; source_id: string; replaces_source_version_or_digest?: string }>;
+  });
+  assert.deepEqual(updates.map(({ kind }) => kind), ["initial", "delta", "initial", "delta", "initial"]);
+  assert.equal(updates[1]!.changes!.length, 1);
+  assert.equal(updates[1]!.changes![0]!.kind, "replacement");
+  assert.equal(updates[1]!.changes![0]!.source_id, "plan-1");
+  assert.equal(updates[1]!.changes![0]!.replaces_source_version_or_digest, "plan-v1");
+  assert.notEqual(calls[0]!.context_digest, calls[2]!.context_digest);
 });
 
 test("agent client keeps a long Work execution goal within the Plan Contract scope bound", async () => {
@@ -821,7 +903,7 @@ test("agent client keeps a long Work execution goal within the Plan Contract sco
     environment: () => ({}),
     channelFactory: channelFactoryFor(({ requestId, body }) => {
       decodeConductorPerformerWorkTurnRequest(body as JsonValue);
-      return directStageResult("work", requestId) as JsonValue;
+      return directStageResult("work", requestId, body.context_digest as string) as JsonValue;
     }),
     deadlineMs: 30_000,
   });

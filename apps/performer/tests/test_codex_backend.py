@@ -249,6 +249,7 @@ def test_invalid_provider_json_is_sanitized():
         )
 
     assert raised.value.code == "provider_output_invalid_json"
+    assert raised.value.append_outcome == "accepted"
     assert "not-json" not in raised.value.sanitized_reason
 
 

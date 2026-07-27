@@ -151,6 +151,7 @@ function tree(): LinearWorkflowTreeSnapshot {
       url: `https://github.com/acme/repo/commit/${revision}`, source_type: "github", remote_version: "attachment-v1",
       created_at: observedAt, updated_at: observedAt,
     }],
+    activities: [],
     source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: observedAt,
   };
 }

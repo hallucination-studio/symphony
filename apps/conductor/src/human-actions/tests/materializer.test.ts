@@ -111,7 +111,7 @@ class FakeLinear {
       issue("cycle-1", "SYM-CYCLE-1", "cycle", "root-1", "planning", "Planning", 1),
       issue("plan-1", "SYM-PLAN-1", "plan", "cycle-1", "review", "In Review", 2),
     ],
-    comments: [], relations: [], attachments: [], source_manifest: [],
+    comments: [], relations: [], attachments: [], activities: [], source_manifest: [],
     coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-24T00:00:00Z",
   };
 

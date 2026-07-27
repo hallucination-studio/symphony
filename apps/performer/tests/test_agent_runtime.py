@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,8 @@ from performer.agent_protocol.host import AgentProtocolHost
 from performer.backends.provider_backend_interface import ProviderBackendError
 from performer.backends.provider_backend_interface import ProviderSession
 from performer.root_reconciler.comment_replies import pending_comment_reply_sources_from_request
+
+EMPTY_CONTEXT_DIGEST = sha256(b"[]").hexdigest()
 
 
 class FakeBackend:
@@ -54,6 +57,27 @@ class RootFailureBackend(FakeBackend):
     def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
         if session.role == "root_reconciler":
             raise ProviderBackendError("provider turn failed", code="provider_turn_failed", retryable=True)
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
+class RootAppendFailureBackend(FakeBackend):
+    def __init__(self, append_outcome: str) -> None:
+        super().__init__()
+        self.append_outcome = append_outcome
+
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler" and request.get("kind") == "advance_root_reconciler":
+            raise ProviderBackendError(
+                "provider append failed",
+                code=f"provider_append_{self.append_outcome}",
+                retryable=True,
+                append_outcome=self.append_outcome,
+            )
         return super().execute_role_turn(
             session,
             request,
@@ -183,7 +207,25 @@ def envelope(request_id: str, kind: str, payload: dict[str, object]) -> dict[str
     return {"protocol_version": "1", "request_id": request_id, "kind": kind, **payload}
 
 
-def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
+def fragment_digest(manifest: list[dict[str, object]]) -> str:
+    fragments = sorted([
+        [entry["source_kind"], entry["source_id"], entry["source_version_or_digest"], entry["actor_kind"]]
+        for entry in manifest
+    ])
+    return sha256(json.dumps(fragments, separators=(",", ":")).encode()).hexdigest()
+
+
+def root_manifest(version: str = "root-v1") -> list[dict[str, object]]:
+    return [{
+        "source_kind": "issue",
+        "source_id": "root-1",
+        "source_version_or_digest": version,
+        "actor_kind": "human",
+    }]
+
+
+def root_bootstrap(root_digest: str | None = None) -> dict[str, object]:
+    manifest = root_manifest()
     return {
         "root_snapshot": {
             "root": {
@@ -201,6 +243,8 @@ def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
             "cycles": [],
             "issues": [],
             "relations": [],
+            "attachments": [],
+            "activities": [],
             "user_comments": [],
             "user_comment_thread_states": [],
             "worktree_gate": {
@@ -213,9 +257,9 @@ def root_bootstrap(root_digest: str = "tree-1") -> dict[str, object]:
             },
             "mechanical_violations": [],
         },
-        "source_manifest": [],
+        "source_manifest": manifest,
         "coverage": {"is_complete": True, "omissions": []},
-        "root_digest": root_digest,
+        "root_digest": root_digest or fragment_digest(manifest),
         "pending_input_ids": [],
     }
 
@@ -278,14 +322,19 @@ def convergence_snapshot() -> dict[str, object]:
 
 def issue_change(description: str = "Updated root description") -> dict[str, object]:
     return {
-        "kind": "issue_current_value",
+        "kind": "replacement",
+        "source_kind": "issue",
         "source_id": "root-1",
-        "source_version": "root-v2",
+        "source_version_or_digest": "root-v2",
+        "replaces_source_version_or_digest": "root-v1",
         "actor_kind": "human",
         "observed_at": "2026-07-23T00:00:01Z",
-        "issue": {
-            "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": description,
-            "status": "Todo", "is_archived": False, "labels": [], "remote_version": "root-v2",
+        "value": {
+            "kind": "issue",
+            "issue": {
+                "issue_id": "root-1", "issue_kind": "root", "title": "Root", "description": description,
+                "status": "Todo", "is_archived": False, "labels": [], "remote_version": "root-v2",
+            },
         },
     }
 
@@ -362,7 +411,7 @@ def test_host_keeps_root_session_and_returns_root_directive():
     assert model_turn["model"] == "gpt"
     assert model_turn["outcome"] == "directive_accepted"
     assert model_turn["usage"] == {"status": "unavailable", "reason": "provider_omitted"}
-    assert opened["bootstrap_root_digest"] == "tree-1"
+    assert opened["bootstrap_root_digest"] == fragment_digest(root_manifest())
     assert backend.turns[0][0] == "provider-1"
     assert backend.turns[0][1]["kind"] == "open_root_reconciler"
 
@@ -371,36 +420,42 @@ def test_host_accepts_multiple_continuous_deltas_in_one_root_session():
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
     host.handle(open_root_request())
+    digest = fragment_digest(root_manifest())
 
-    first = host.handle(root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2"))
-    second = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
+    first = host.handle(root_delta("advance-1", "root-session", "turn-2", digest, digest))
+    second = host.handle(root_delta("advance-2", "root-session", "turn-3", digest, digest))
 
-    assert first["based_on_target_root_digest"] == "tree-2"
-    assert second["based_on_target_root_digest"] == "tree-3"
+    assert first["based_on_target_root_digest"] == digest
+    assert second["based_on_target_root_digest"] == digest
     assert [turn[1]["kind"] for turn in backend.turns] == ["open_root_reconciler", "advance_root_reconciler", "advance_root_reconciler"]
 
 
 def test_host_rejects_stale_and_discontinuous_deltas():
     stale_host = AgentProtocolHost(FakeBackend())
     stale_host.handle(open_root_request())
-    stale_host.handle(root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2"))
+    initial_digest = fragment_digest(root_manifest())
+    changed_digest = fragment_digest(root_manifest("root-v2"))
+    first = root_delta("advance-1", "root-session", "turn-2", initial_digest, changed_digest)
+    first["delta"]["changes"] = [issue_change()]
+    stale_host.handle(first)
 
-    stale = stale_host.handle(root_delta("stale", "root-session", "turn-3", "tree-1", "tree-3"))
+    stale = stale_host.handle(root_delta("stale", "root-session", "turn-3", initial_digest, changed_digest))
 
     discontinuous_host = AgentProtocolHost(FakeBackend())
     discontinuous_host.handle(open_root_request())
-    discontinuous = discontinuous_host.handle(root_delta("gap", "root-session", "turn-2", "unknown", "tree-4"))
+    discontinuous = discontinuous_host.handle(root_delta("gap", "root-session", "turn-2", "unknown", initial_digest))
 
     assert stale["code"] == "root_delta_stale"
     assert discontinuous["code"] == "root_delta_discontinuous"
-    assert stale_host.handle(root_delta("after-stale", "root-session", "turn-4", "tree-1", "tree-4"))["code"] == "root_reconciler_bootstrap_required"
+    assert stale_host.handle(root_delta("after-stale", "root-session", "turn-4", initial_digest, initial_digest))["code"] == "root_reconciler_bootstrap_required"
 
 
 def test_host_rejects_full_snapshot_and_implicit_root_turn_on_advance():
     host = AgentProtocolHost(FakeBackend())
     host.handle(open_root_request())
-    full_snapshot = root_delta("full", "root-session", "turn-2", "tree-1", "tree-2")
-    full_snapshot["bootstrap"] = root_bootstrap("tree-2")
+    digest = fragment_digest(root_manifest())
+    full_snapshot = root_delta("full", "root-session", "turn-2", digest, digest)
+    full_snapshot["bootstrap"] = root_bootstrap()
     legacy = {
         "protocol_version": "1", "request_id": "legacy", "reconciler_session_id": "root-session",
         "reconciler_turn_id": "turn-2", "observed_at": "2026-07-23T00:00:00Z", "root": {},
@@ -414,18 +469,20 @@ def test_delta_advances_runtime_canonical_facts_and_lost_session_requires_bootst
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
     host.handle(open_root_request())
-    changed = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    initial_digest = fragment_digest(root_manifest())
+    changed_digest = fragment_digest(root_manifest("root-v2"))
+    changed = root_delta("advance-1", "root-session", "turn-2", initial_digest, changed_digest)
     changed["delta"]["changes"] = [issue_change()]
     changed["delta"]["pending_input_ids"] = ["root-v2"]
 
     host.handle(changed)
     baseline = host._root._baselines["root-session"]
-    assert baseline.root_digest == "tree-2"
+    assert baseline.root_digest == changed_digest
     assert baseline.canonical_facts["pending_input_ids"] == ["root-v2"]
     assert baseline.canonical_facts["root_snapshot"]["root"]["issue"]["description"] == "Updated root description"
 
     host._sessions.close("root-session")
-    lost = host.handle(root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3"))
+    lost = host.handle(root_delta("advance-2", "root-session", "turn-3", changed_digest, changed_digest))
     assert lost["code"] == "root_reconciler_bootstrap_required"
 
 
@@ -433,7 +490,15 @@ def test_delta_replaces_the_structured_convergence_snapshot_in_the_root_baseline
     backend = FakeBackend()
     host = AgentProtocolHost(backend)
     host.handle(open_root_request())
-    changed = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    initial_manifest = root_manifest()
+    target_manifest = [*initial_manifest, {
+        "source_kind": "mechanical_violation", "source_id": "mechanical:root-1",
+        "source_version_or_digest": "mechanical-v2", "actor_kind": "symphony",
+    }]
+    changed = root_delta(
+        "advance-1", "root-session", "turn-2",
+        fragment_digest(initial_manifest), fragment_digest(target_manifest),
+    )
     convergence = convergence_snapshot()
     convergence["view"] = {
         **convergence["view"],
@@ -441,15 +506,16 @@ def test_delta_replaces_the_structured_convergence_snapshot_in_the_root_baseline
         "active_cycle_repair_attempts": 1,
     }
     changed["delta"]["changes"] = [{
-        "kind": "convergence_current_value",
-        "source_id": "root-1",
-        "source_version": "convergence-v2",
+        "kind": "current_value",
+        "source_kind": "mechanical_violation",
+        "source_id": "mechanical:root-1",
+        "source_version_or_digest": "mechanical-v2",
         "actor_kind": "symphony",
         "observed_at": "2026-07-23T00:00:01Z",
-        "convergence": convergence,
+        "value": {"kind": "mechanical_violation", "mechanical_violations": [], "convergence": convergence},
     }]
 
-    assert host.handle(changed)["based_on_target_root_digest"] == "tree-2"
+    assert host.handle(changed)["based_on_target_root_digest"] == fragment_digest(target_manifest)
     baseline = host._root._baselines["root-session"].canonical_facts
     assert baseline["root_snapshot"]["root"]["convergence"]["view"]["active_cycle_repair_attempts"] == 1
 
@@ -463,10 +529,25 @@ def test_delta_updates_and_removes_the_native_plan_issue_in_the_root_baseline():
     plan = {**issue_snapshot("plan"), "parent_issue_id": "cycle-1"}
     bootstrap["root_snapshot"]["cycles"][0]["issues"] = [plan]
     bootstrap["root_snapshot"]["issues"] = [issue_snapshot("cycle"), plan]
+    bootstrap_manifest = [
+        {"source_kind": "issue", "source_id": "cycle-1", "source_version_or_digest": "cycle-v1", "actor_kind": "symphony"},
+        {"source_kind": "issue", "source_id": "plan-1", "source_version_or_digest": "plan-v1", "actor_kind": "symphony"},
+        *root_manifest(),
+    ]
+    bootstrap["source_manifest"] = bootstrap_manifest
+    bootstrap["root_digest"] = fragment_digest(bootstrap_manifest)
     open_request["bootstrap"] = bootstrap
     host.handle(open_request)
 
-    added = root_delta("advance-1", "root-session", "turn-2", "tree-1", "tree-2")
+    updated_manifest = [
+        bootstrap_manifest[0],
+        {"source_kind": "issue", "source_id": "plan-1", "source_version_or_digest": "plan-v2", "actor_kind": "symphony"},
+        bootstrap_manifest[2],
+    ]
+    added = root_delta(
+        "advance-1", "root-session", "turn-2",
+        fragment_digest(bootstrap_manifest), fragment_digest(updated_manifest),
+    )
     updated_plan = {
         **plan,
         "description": "# Objective\nComplete the cycle using native Linear facts.",
@@ -475,28 +556,37 @@ def test_delta_updates_and_removes_the_native_plan_issue_in_the_root_baseline():
         "remote_version": "plan-v2",
     }
     added["delta"]["changes"] = [{
-        "kind": "issue_current_value",
+        "kind": "replacement",
+        "source_kind": "issue",
         "source_id": "plan-1",
-        "source_version": "plan-v2",
+        "source_version_or_digest": "plan-v2",
+        "replaces_source_version_or_digest": "plan-v1",
         "actor_kind": "symphony",
         "observed_at": "2026-07-23T00:00:01Z",
-        "issue": updated_plan,
+        "value": {"kind": "issue", "issue": updated_plan},
     }]
-    assert host.handle(added)["based_on_target_root_digest"] == "tree-2"
+    assert host.handle(added)["based_on_target_root_digest"] == fragment_digest(updated_manifest)
     baseline = host._root._baselines["root-session"].canonical_facts
     cycle = baseline["root_snapshot"]["cycles"][0]
     assert cycle["issues"][0] == updated_plan
     assert next(issue for issue in baseline["root_snapshot"]["issues"] if issue["issue_id"] == "plan-1") == updated_plan
 
-    removed = root_delta("advance-2", "root-session", "turn-3", "tree-2", "tree-3")
+    final_manifest = [updated_manifest[0], updated_manifest[2]]
+    removed = root_delta(
+        "advance-2", "root-session", "turn-3",
+        fragment_digest(updated_manifest), fragment_digest(final_manifest),
+    )
     removed["delta"]["changes"] = [{
-        "kind": "issue_detached",
+        "kind": "tombstone",
+        "source_kind": "issue",
         "source_id": "plan-1",
-        "source_version": "plan-v2",
+        "source_version_or_digest": "plan-tombstone-v1",
+        "removes_source_version_or_digest": "plan-v2",
         "actor_kind": "symphony",
         "observed_at": "2026-07-23T00:00:02Z",
+        "reason": "left_role_scope",
     }]
-    assert host.handle(removed)["based_on_target_root_digest"] == "tree-3"
+    assert host.handle(removed)["based_on_target_root_digest"] == fragment_digest(final_manifest)
     cycle = host._root._baselines["root-session"].canonical_facts["root_snapshot"]["cycles"][0]
     assert cycle["issues"] == []
     assert [issue["issue_id"] for issue in host._root._baselines["root-session"].canonical_facts["root_snapshot"]["issues"]] == ["cycle-1"]
@@ -513,6 +603,11 @@ def test_host_persists_root_provider_failure_as_a_typed_model_turn_result():
     assert failure["root_issue_id"] == "root-1"
     assert failure["failure"]["category"] == "transport_failed"
     assert failure["failure"]["attempted_input_ids"] == []
+    assert failure["failure"]["continuity"] == {
+        "kind": "closed", "append_outcome": "acceptance_unknown",
+    }
+    assert "root-session" not in host._sessions._sessions
+    assert "root-session" not in host._root._baselines
     assert failure["failure"]["model_turn"] == {
         "turn_record_id": "root-1:turn-1",
         "role": "root_reconciler",
@@ -536,6 +631,69 @@ def test_host_reports_root_directive_contract_failure():
     assert failure["kind"] == "root_reconciler_failed"
     assert failure["failure"]["category"] == "schema_invalid"
     assert failure["failure"]["model_turn"]["outcome"] == "schema_invalid"
+    assert failure["failure"]["continuity"] == {
+        "kind": "retained",
+        "append_outcome": "accepted",
+        "provider_visible_context_digest": fragment_digest(root_manifest()),
+    }
+    assert host._root._baselines["root-session"].root_digest == fragment_digest(root_manifest())
+
+
+def test_root_not_accepted_failure_retains_the_confirmed_base():
+    backend = RootAppendFailureBackend("not_accepted")
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+    initial_digest = fragment_digest(root_manifest())
+    target_digest = fragment_digest(root_manifest("root-v2"))
+    request = root_delta("advance", "root-session", "turn-2", initial_digest, target_digest)
+    request["delta"]["changes"] = [issue_change()]
+
+    failure = host.handle(request)
+
+    assert failure["failure"]["continuity"] == {
+        "kind": "retained", "append_outcome": "not_accepted",
+        "provider_visible_context_digest": initial_digest,
+    }
+    assert host._root._baselines["root-session"].root_digest == initial_digest
+    assert host._sessions._sessions["root-session"].provider_visible_context_digest == initial_digest
+
+
+def test_root_accepted_failure_advances_the_confirmed_target():
+    backend = RootAppendFailureBackend("accepted")
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+    initial_digest = fragment_digest(root_manifest())
+    target_digest = fragment_digest(root_manifest("root-v2"))
+    request = root_delta("advance", "root-session", "turn-2", initial_digest, target_digest)
+    request["delta"]["changes"] = [issue_change()]
+
+    failure = host.handle(request)
+
+    assert failure["failure"]["continuity"] == {
+        "kind": "retained", "append_outcome": "accepted",
+        "provider_visible_context_digest": target_digest,
+    }
+    assert host._root._baselines["root-session"].root_digest == target_digest
+    assert host._root._baselines["root-session"].canonical_facts["root_snapshot"]["root"]["issue"]["remote_version"] == "root-v2"
+    assert host._sessions._sessions["root-session"].provider_visible_context_digest == target_digest
+
+
+def test_root_ambiguous_append_failure_closes_the_session_and_baseline():
+    backend = RootAppendFailureBackend("acceptance_unknown")
+    host = AgentProtocolHost(backend)
+    host.handle(open_root_request())
+    initial_digest = fragment_digest(root_manifest())
+    target_digest = fragment_digest(root_manifest("root-v2"))
+    request = root_delta("advance", "root-session", "turn-2", initial_digest, target_digest)
+    request["delta"]["changes"] = [issue_change()]
+
+    failure = host.handle(request)
+
+    assert failure["failure"]["continuity"] == {
+        "kind": "closed", "append_outcome": "acceptance_unknown",
+    }
+    assert "root-session" not in host._sessions._sessions
+    assert "root-session" not in host._root._baselines
 
 
 def test_host_accepts_create_root_workspace_as_one_closed_root_action():
@@ -671,16 +829,55 @@ def test_host_accepts_a_reply_that_matches_the_pending_user_comment_input():
     assert directive["comment_replies"][0]["source_input_id"] == source["source_input_id"]
 
 
-def test_host_accepts_linear_status_catalog_in_root_bootstrap_manifest():
+def test_root_delta_extracts_pending_comment_reply_source_from_the_closed_context_value():
+    body_digest = sha256(b"Continue planning.").hexdigest()
+    input_id = "input:" + sha256(f"comment_body:comment-2\0{body_digest}".encode()).hexdigest()
+    request = root_delta("advance", "root-session", "turn-2", "base", "target")
+    request["delta"]["pending_input_ids"] = [input_id]
+    request["delta"]["changes"] = [{
+        "kind": "current_value",
+        "source_kind": "comment",
+        "source_id": "comment-2",
+        "source_version_or_digest": body_digest,
+        "actor_kind": "human",
+        "observed_at": "2026-07-23T00:00:01Z",
+        "value": {
+            "kind": "comment",
+            "user_input": {
+                "kind": "comment_body", "input_id": input_id,
+                "comment_id": "comment-2", "comment_body_digest": body_digest,
+                "issue_id": "root-1", "issue_kind": "root",
+                "author_kind": "human", "author_id": "user-1",
+                "body": "Continue planning.", "thread_root_comment_id": "comment-2",
+                "thread_state": "unresolved", "created_at": "2026-07-23T00:00:00Z",
+                "updated_at": "2026-07-23T00:00:01Z",
+            },
+        },
+    }]
+
+    assert pending_comment_reply_sources_from_request(request) == [{
+        "source_input_id": input_id,
+        "source": {"kind": "comment_body", "comment_id": "comment-2", "comment_body_digest": body_digest},
+    }]
+
+
+def test_host_accepts_a_canonical_activity_fragment_in_root_bootstrap_manifest():
     request = open_root_request()
     bootstrap = request["bootstrap"]
     assert isinstance(bootstrap, dict)
-    bootstrap["source_manifest"] = [{
-        "source_kind": "linear_status_catalog",
-        "source_id": "status-catalog-1",
-        "source_version": "status-catalog-v1",
-        "actor_kind": "linear_integration",
+    snapshot = bootstrap["root_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["activities"] = [{
+        "activity_id": "activity-1", "issue_id": "root-1",
+        "activity_kinds": ["description_changed"], "actor_kind": "human",
+        "remote_version": "activity-v1", "created_at": "2026-07-23T00:00:00Z",
     }]
+    manifest = [{
+        "source_kind": "activity", "source_id": "activity-1",
+        "source_version_or_digest": "activity-v1", "actor_kind": "human",
+    }, *root_manifest()]
+    bootstrap["source_manifest"] = manifest
+    bootstrap["root_digest"] = fragment_digest(manifest)
 
     result = AgentProtocolHost(FakeBackend()).handle(request)
 
@@ -705,7 +902,7 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "root_issue_id": "root-1",
         "cycle_issue_id": "cycle-1",
         "observed_tree_digest": "tree-1",
-        "context_digest": "context-1",
+        "context_digest": EMPTY_CONTEXT_DIGEST,
         "execution_policy": {"sandbox_mode": "read_only", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
         "model_settings": {"model": "gpt", "reasoning_effort": "medium", "is_fast_mode_enabled": False},
         "target_issue_id": "target-1",
@@ -721,7 +918,7 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
             "max_context_bytes": 1, "max_result_bytes": 1, "max_output_tokens": 1,
             "max_tool_calls": 0, "max_wall_time_ms": 1000, "deadline_at": "2027-07-23T00:00:00Z",
         },
-        "context": {},
+        "role_context_update": {"kind": "initial", "target_context_digest": EMPTY_CONTEXT_DIGEST, "sources": []},
     }
     for role in ("plan", "verify"):
         result = host.handle({
@@ -731,7 +928,6 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
             "role_session_id": f"{role}-session",
             "role_turn_id": f"{role}-turn",
             "stage_execution_id": f"{role}-execution",
-            "context": stage_context(role),
         })
         assert "kind" not in result
         assert result["role"] == role
@@ -745,7 +941,6 @@ def test_host_routes_plan_work_and_verify_to_distinct_sessions(tmp_path: Path):
         "stage_execution_id": "work-execution",
         "execution_policy": {"sandbox_mode": "workspace_write", "allowed_tools": [], "denied_tools": [], "network_policy": "disabled"},
         "repository_context": {**common["repository_context"], "workspace_access": "read_write"},
-        "context": stage_context("work"),
     }
     work_payload = {"protocol_version": "1", "request_id": "work", **work_payload}
     result = host.handle(work_payload)

@@ -52,13 +52,12 @@
     "RootSourceManifestEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source_kind", "source_id", "source_version", "actor_kind"],
+      "required": ["source_kind", "source_id", "source_version_or_digest", "actor_kind"],
       "properties": {
-        "source_kind": { "enum": ["linear_issue", "linear_comment", "linear_relation", "linear_status_catalog"] },
+        "source_kind": { "$ref": "#/$defs/RootContextSourceKind" },
         "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
-        "stable_write_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+        "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "actor_kind": { "$ref": "#/$defs/RootActorKind" }
       }
     },
     "CoverageOmission": {
@@ -436,12 +435,14 @@
     "RootBootstrapSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "cycles", "issues", "relations", "user_comments", "user_comment_thread_states", "worktree_gate", "mechanical_violations"],
+      "required": ["root", "cycles", "issues", "relations", "attachments", "activities", "user_comments", "user_comment_thread_states", "worktree_gate", "mechanical_violations"],
       "properties": {
         "root": { "$ref": "#/$defs/RootObservation" },
         "cycles": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CycleObservation" } },
         "issues": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } },
         "relations": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RelationSnapshot" } },
+        "attachments": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RootAttachmentFact" } },
+        "activities": { "type": "array", "maxItems": 8192, "items": { "$ref": "#/$defs/RootActivityFact" } },
         "user_comments": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentSnapshot" } },
         "user_comment_thread_states": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CommentThreadStateSnapshot" } },
         "worktree_gate": { "$ref": "#/$defs/RootWorktreeGateResult" },
@@ -460,140 +461,27 @@
         "pending_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true }
       }
     },
-    "IssueCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "issue"],
-      "properties": {
-        "kind": { "const": "issue_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "issue": { "$ref": "#/$defs/IssueSnapshot" }
-      }
-    },
-    "IssueDetached": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
-      "properties": {
-        "kind": { "const": "issue_detached" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "CommentCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "user_input"],
-      "properties": {
-        "kind": { "const": "comment_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "user_input": { "$ref": "#/$defs/UserCommentInput" }
-      }
-    },
-    "CommentRemoved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
-      "properties": {
-        "kind": { "const": "comment_removed" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "CommentThreadStateCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "thread_state"],
-      "properties": {
-        "kind": { "const": "comment_thread_state_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "thread_state": { "$ref": "#/$defs/CommentThreadStateSnapshot" }
-      }
-    },
-    "RelationCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "relation"],
-      "properties": {
-        "kind": { "const": "relation_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "relation": { "$ref": "#/$defs/RelationSnapshot" }
-      }
-    },
-    "RelationRemoved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at"],
-      "properties": {
-        "kind": { "const": "relation_removed" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
-      }
-    },
-    "WorktreeGateCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "worktree_gate"],
-      "properties": {
-        "kind": { "const": "worktree_gate_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "worktree_gate": { "$ref": "#/$defs/RootWorktreeGateResult" }
-      }
-    },
-    "MechanicalViolationsCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "mechanical_violations"],
-      "properties": {
-        "kind": { "const": "mechanical_violations_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "enum": ["human", "symphony", "external_automation", "unknown"] },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }
-      }
-    },
-    "ConvergenceCurrentValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "source_id", "source_version", "actor_kind", "observed_at", "convergence"],
-      "properties": {
-        "kind": { "const": "convergence_current_value" },
-        "source_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "source_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
-        "actor_kind": { "const": "symphony" },
-        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "convergence": { "$ref": "#/$defs/RootConvergenceSnapshot" }
-      }
-    },
+    "RootActorKind": { "enum": ["human", "symphony", "linear_integration", "external_automation", "unknown"] },
+    "RootContextSourceKind": { "enum": ["issue", "comment", "comment_thread", "activity", "relation", "attachment", "git", "mechanical_violation"] },
+    "RootActivityFact": { "type": "object", "additionalProperties": false, "required": ["activity_id", "issue_id", "activity_kinds", "actor_kind", "remote_version", "created_at"], "properties": { "activity_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "activity_kinds": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "enum": ["status_changed", "description_changed", "archive_changed", "labels_changed", "parent_changed", "delegation_changed", "attachment_changed"] } }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "actor_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "from_state_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "to_state_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "updated_description": { "$ref": "common.schema.json#/$defs/BoundedText" }, "archived": { "type": "boolean" }, "added_label_ids": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "removed_label_ids": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "from_parent_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "to_parent_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "from_delegate_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "to_delegate_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "attachment_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" } } },
+    "RootAttachmentFact": { "type": "object", "additionalProperties": false, "required": ["attachment_id", "issue_id", "title", "url", "source_type", "remote_version", "created_at", "updated_at"], "properties": { "attachment_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "title": { "$ref": "common.schema.json#/$defs/BoundedText" }, "url": { "$ref": "common.schema.json#/$defs/BoundedText" }, "source_type": { "$ref": "common.schema.json#/$defs/ShortText" }, "remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "created_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" } } },
+    "RootActivityContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "activity"], "properties": { "kind": { "const": "activity" }, "activity": { "$ref": "#/$defs/RootActivityFact" } } },
+    "RootAttachmentContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "attachment"], "properties": { "kind": { "const": "attachment" }, "attachment": { "$ref": "#/$defs/RootAttachmentFact" } } },
+    "RootIssueContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "issue"], "properties": { "kind": { "const": "issue" }, "issue": { "$ref": "#/$defs/IssueSnapshot" } } },
+    "RootCommentContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "user_input"], "properties": { "kind": { "const": "comment" }, "user_input": { "$ref": "#/$defs/UserCommentInput" } } },
+    "RootCommentThreadContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "thread_state"], "properties": { "kind": { "const": "comment_thread" }, "thread_state": { "$ref": "#/$defs/CommentThreadStateSnapshot" } } },
+    "RootRelationContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "relation"], "properties": { "kind": { "const": "relation" }, "relation": { "$ref": "#/$defs/RelationSnapshot" } } },
+    "RootGitContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "worktree_gate"], "properties": { "kind": { "const": "git" }, "worktree_gate": { "$ref": "#/$defs/RootWorktreeGateResult" } } },
+    "RootMechanicalContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "mechanical_violations", "convergence"], "properties": { "kind": { "const": "mechanical_violation" }, "mechanical_violations": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/MechanicalViolation" } }, "convergence": { "$ref": "#/$defs/RootConvergenceSnapshot" } } },
+    "RootContextSourceValue": { "oneOf": [{ "$ref": "#/$defs/RootIssueContextValue" }, { "$ref": "#/$defs/RootCommentContextValue" }, { "$ref": "#/$defs/RootCommentThreadContextValue" }, { "$ref": "#/$defs/RootActivityContextValue" }, { "$ref": "#/$defs/RootRelationContextValue" }, { "$ref": "#/$defs/RootAttachmentContextValue" }, { "$ref": "#/$defs/RootGitContextValue" }, { "$ref": "#/$defs/RootMechanicalContextValue" }] },
+    "RootContextCurrentValue": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "current_value" }, "source_kind": { "$ref": "#/$defs/RootContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/RootContextSourceValue" } } },
+    "RootContextReplacement": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "replaces_source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "replacement" }, "source_kind": { "$ref": "#/$defs/RootContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "replaces_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/RootContextSourceValue" } } },
+    "RootContextTombstone": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "removes_source_version_or_digest", "actor_kind", "observed_at", "reason"], "properties": { "kind": { "const": "tombstone" }, "source_kind": { "$ref": "#/$defs/RootContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "removes_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "reason": { "enum": ["deleted", "left_role_scope"] } } },
     "RootDeltaChange": {
       "oneOf": [
-        { "$ref": "#/$defs/IssueCurrentValue" }, { "$ref": "#/$defs/IssueDetached" },
-        { "$ref": "#/$defs/CommentCurrentValue" }, { "$ref": "#/$defs/CommentThreadStateCurrentValue" }, { "$ref": "#/$defs/CommentRemoved" },
-        { "$ref": "#/$defs/RelationCurrentValue" }, { "$ref": "#/$defs/RelationRemoved" },
-        { "$ref": "#/$defs/WorktreeGateCurrentValue" }, { "$ref": "#/$defs/MechanicalViolationsCurrentValue" },
-        { "$ref": "#/$defs/ConvergenceCurrentValue" }
+        { "$ref": "#/$defs/RootContextCurrentValue" },
+        { "$ref": "#/$defs/RootContextReplacement" },
+        { "$ref": "#/$defs/RootContextTombstone" }
       ]
     },
     "RootDelta": {
@@ -658,7 +546,7 @@
     "RootReconcilerFailure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "category", "sanitized_reason", "failed_at"],
+      "required": ["failure_id", "reconciler_session_id", "reconciler_turn_id", "target_root_digest", "attempted_input_ids", "model_turn", "category", "sanitized_reason", "continuity", "failed_at"],
       "properties": {
         "failure_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "reconciler_session_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -667,6 +555,7 @@
         "attempted_input_ids": { "type": "array", "maxItems": 512, "items": { "$ref": "common.schema.json#/$defs/Identifier" }, "uniqueItems": true },
         "category": { "enum": ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"] },
         "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "continuity": { "$ref": "#/$defs/ProviderTurnContinuity" },
         "model_turn": { "$ref": "#/$defs/RootReconcilerModelTurnRecord" },
         "failed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
@@ -949,6 +838,36 @@
     "WorkBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "blocker_kind", "sanitized_reason", "attempted_approaches", "failed_check_evidence", "discovered_facts", "suggested_dag_changes"], "properties": { "kind": { "const": "work_blocked" }, "blocker_kind": { "$ref": "common.schema.json#/$defs/ShortText" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "attempted_approaches": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "failed_check_evidence": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "discovered_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "suggested_dag_changes": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } } } },
     "WorkSpecialResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "enum": ["work_plan_assumption_invalid", "work_scope_conflict", "work_permission_required", "work_information_required"] }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "VerifyTurnContext": { "type": "object", "additionalProperties": false, "required": ["approved_plan_contract", "complete_active_cycle_dag", "archived_cycle_nodes", "completed_work_issue_facts", "unresolved_finding_issue_facts", "human_action_thread_facts", "verification_requirements", "immutable_target_revision", "repository_snapshot"], "properties": { "approved_plan_contract": { "$ref": "#/$defs/PlanContract" }, "complete_active_cycle_dag": { "$ref": "#/$defs/PlanDag" }, "archived_cycle_nodes": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "completed_work_issue_facts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "unresolved_finding_issue_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/IssueSnapshot" } }, "human_action_thread_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CommentSnapshot" } }, "verification_requirements": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/ShortText" } }, "immutable_target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "repository_snapshot": { "$ref": "#/$defs/GitFacts" } } },
+    "StageRoleContextSourceKind": { "enum": ["linear_issue", "linear_comment", "linear_relation", "git", "repository_instruction"] },
+    "StageRootContractContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "root_contract"], "properties": { "kind": { "const": "root_contract" }, "root_contract": { "$ref": "#/$defs/PlanRootContract" } } },
+    "StageCycleContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle"], "properties": { "kind": { "const": "cycle" }, "cycle": { "$ref": "#/$defs/PlanCycleContext" } } },
+    "StageIssueContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "issue"], "properties": { "kind": { "const": "issue" }, "issue": { "$ref": "#/$defs/IssueSnapshot" } } },
+    "StageCommentContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "comment"], "properties": { "kind": { "const": "comment" }, "comment": { "$ref": "#/$defs/CommentSnapshot" } } },
+    "StageRelationContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "relation"], "properties": { "kind": { "const": "relation" }, "relation": { "$ref": "#/$defs/RelationSnapshot" } } },
+    "StageGitContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "git_facts"], "properties": { "kind": { "const": "git" }, "git_facts": { "$ref": "#/$defs/GitFacts" } } },
+    "StageRepositoryInstructionContextValue": { "type": "object", "additionalProperties": false, "required": ["kind", "instruction"], "properties": { "kind": { "const": "repository_instruction" }, "instruction": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
+    "PlanContextSourceValue": { "oneOf": [{ "$ref": "#/$defs/StageRootContractContextValue" }, { "$ref": "#/$defs/StageCycleContextValue" }, { "$ref": "#/$defs/StageIssueContextValue" }, { "$ref": "#/$defs/StageCommentContextValue" }, { "$ref": "#/$defs/StageRelationContextValue" }, { "$ref": "#/$defs/StageGitContextValue" }, { "$ref": "#/$defs/StageRepositoryInstructionContextValue" }] },
+    "WorkContextSourceValue": { "oneOf": [{ "$ref": "#/$defs/StageIssueContextValue" }, { "$ref": "#/$defs/StageCommentContextValue" }, { "$ref": "#/$defs/StageRelationContextValue" }, { "$ref": "#/$defs/StageGitContextValue" }, { "$ref": "#/$defs/StageRepositoryInstructionContextValue" }] },
+    "VerifyContextSourceValue": { "oneOf": [{ "$ref": "#/$defs/StageIssueContextValue" }, { "$ref": "#/$defs/StageCommentContextValue" }, { "$ref": "#/$defs/StageRelationContextValue" }, { "$ref": "#/$defs/StageGitContextValue" }, { "$ref": "#/$defs/StageRepositoryInstructionContextValue" }] },
+    "PlanContextCurrentValue": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "current_value" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/PlanContextSourceValue" } } },
+    "WorkContextCurrentValue": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "current_value" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/WorkContextSourceValue" } } },
+    "VerifyContextCurrentValue": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "current_value" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/VerifyContextSourceValue" } } },
+    "PlanContextReplacement": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "replaces_source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "replacement" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "replaces_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/PlanContextSourceValue" } } },
+    "WorkContextReplacement": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "replaces_source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "replacement" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "replaces_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/WorkContextSourceValue" } } },
+    "VerifyContextReplacement": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "replaces_source_version_or_digest", "actor_kind", "observed_at", "value"], "properties": { "kind": { "const": "replacement" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "replaces_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "value": { "$ref": "#/$defs/VerifyContextSourceValue" } } },
+    "StageContextTombstone": { "type": "object", "additionalProperties": false, "required": ["kind", "source_kind", "source_id", "source_version_or_digest", "removes_source_version_or_digest", "actor_kind", "observed_at", "reason"], "properties": { "kind": { "const": "tombstone" }, "source_kind": { "$ref": "#/$defs/StageRoleContextSourceKind" }, "source_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "removes_source_version_or_digest": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }, "actor_kind": { "$ref": "#/$defs/RootActorKind" }, "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "reason": { "enum": ["deleted", "left_role_scope"] } } },
+    "PlanRoleContextChange": { "oneOf": [{ "$ref": "#/$defs/PlanContextCurrentValue" }, { "$ref": "#/$defs/PlanContextReplacement" }, { "$ref": "#/$defs/StageContextTombstone" }] },
+    "WorkRoleContextChange": { "oneOf": [{ "$ref": "#/$defs/WorkContextCurrentValue" }, { "$ref": "#/$defs/WorkContextReplacement" }, { "$ref": "#/$defs/StageContextTombstone" }] },
+    "VerifyRoleContextChange": { "oneOf": [{ "$ref": "#/$defs/VerifyContextCurrentValue" }, { "$ref": "#/$defs/VerifyContextReplacement" }, { "$ref": "#/$defs/StageContextTombstone" }] },
+    "PlanRoleContextInitial": { "type": "object", "additionalProperties": false, "required": ["kind", "target_context_digest", "sources"], "properties": { "kind": { "const": "initial" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "sources": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/PlanContextCurrentValue" } } } },
+    "WorkRoleContextInitial": { "type": "object", "additionalProperties": false, "required": ["kind", "target_context_digest", "sources"], "properties": { "kind": { "const": "initial" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "sources": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/WorkContextCurrentValue" } } } },
+    "VerifyRoleContextInitial": { "type": "object", "additionalProperties": false, "required": ["kind", "target_context_digest", "sources"], "properties": { "kind": { "const": "initial" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "sources": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/VerifyContextCurrentValue" } } } },
+    "PlanRoleContextDelta": { "type": "object", "additionalProperties": false, "required": ["kind", "base_context_digest", "target_context_digest", "changes"], "properties": { "kind": { "const": "delta" }, "base_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "changes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/PlanRoleContextChange" } } } },
+    "WorkRoleContextDelta": { "type": "object", "additionalProperties": false, "required": ["kind", "base_context_digest", "target_context_digest", "changes"], "properties": { "kind": { "const": "delta" }, "base_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "changes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/WorkRoleContextChange" } } } },
+    "VerifyRoleContextDelta": { "type": "object", "additionalProperties": false, "required": ["kind", "base_context_digest", "target_context_digest", "changes"], "properties": { "kind": { "const": "delta" }, "base_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "changes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/VerifyRoleContextChange" } } } },
+    "PlanRoleContextUpdate": { "oneOf": [{ "$ref": "#/$defs/PlanRoleContextInitial" }, { "$ref": "#/$defs/PlanRoleContextDelta" }] },
+    "WorkRoleContextUpdate": { "oneOf": [{ "$ref": "#/$defs/WorkRoleContextInitial" }, { "$ref": "#/$defs/WorkRoleContextDelta" }] },
+    "VerifyRoleContextUpdate": { "oneOf": [{ "$ref": "#/$defs/VerifyRoleContextInitial" }, { "$ref": "#/$defs/VerifyRoleContextDelta" }] },
     "VerifyCriterionResult": { "type": "object", "additionalProperties": false, "required": ["criterion_key", "outcome", "summary"], "properties": { "criterion_key": { "$ref": "common.schema.json#/$defs/Identifier" }, "outcome": { "enum": ["passed", "failed", "not_run"] }, "summary": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
     "VerifyPassedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "checks", "resolved_finding_ids", "evidence_refs"], "properties": { "kind": { "const": "verify_passed" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } }, "resolved_finding_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "VerifyChangesRequiredResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "acceptance_results", "findings", "checks"], "properties": { "kind": { "const": "verify_changes_required" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "acceptance_results": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/VerifyCriterionResult" } }, "findings": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/Finding" } }, "checks": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/CheckResult" } } } },
@@ -957,13 +876,16 @@
     "VerifyBlockedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "target_revision", "sanitized_reason", "evidence_refs"], "properties": { "kind": { "const": "verify_blocked" }, "target_revision": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "StageBudgetExhaustedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "budget_kind", "attempted_approaches", "resumable_facts"], "properties": { "kind": { "const": "budget_exhausted" }, "budget_kind": { "$ref": "common.schema.json#/$defs/ShortText" }, "attempted_approaches": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/BoundedText" } }, "resumable_facts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } } } },
     "StageCanceledResult": { "type": "object", "additionalProperties": false, "required": ["kind", "sanitized_reason"], "properties": { "kind": { "const": "canceled" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" } } },
-    "StageExecutionFailedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "error_code", "sanitized_reason", "retryable"], "properties": { "kind": { "const": "execution_failed" }, "error_code": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "retryable": { "type": "boolean" } } },
+    "RetainedProviderTurnContinuity": { "type": "object", "additionalProperties": false, "required": ["kind", "append_outcome", "provider_visible_context_digest"], "properties": { "kind": { "const": "retained" }, "append_outcome": { "enum": ["not_accepted", "accepted"] }, "provider_visible_context_digest": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "ClosedProviderTurnContinuity": { "type": "object", "additionalProperties": false, "required": ["kind", "append_outcome"], "properties": { "kind": { "const": "closed" }, "append_outcome": { "enum": ["acceptance_unknown", "session_lost"] } } },
+    "ProviderTurnContinuity": { "oneOf": [{ "$ref": "#/$defs/RetainedProviderTurnContinuity" }, { "$ref": "#/$defs/ClosedProviderTurnContinuity" }] },
+    "StageExecutionFailedResult": { "type": "object", "additionalProperties": false, "required": ["kind", "error_code", "sanitized_reason", "retryable", "continuity"], "properties": { "kind": { "const": "execution_failed" }, "error_code": { "$ref": "common.schema.json#/$defs/Identifier" }, "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "retryable": { "type": "boolean" }, "continuity": { "$ref": "#/$defs/ProviderTurnContinuity" } } },
     "PlanResultOutcome": { "oneOf": [{ "$ref": "#/$defs/PlanCompletedResult" }, { "$ref": "#/$defs/PlanNeedsInformationResult" }, { "$ref": "#/$defs/PlanBlockedResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
     "WorkResultOutcome": { "oneOf": [{ "$ref": "#/$defs/WorkCompletedResult" }, { "$ref": "#/$defs/WorkBlockedResult" }, { "$ref": "#/$defs/WorkSpecialResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
     "VerifyResultOutcome": { "oneOf": [{ "$ref": "#/$defs/VerifyPassedResult" }, { "$ref": "#/$defs/VerifyChangesRequiredResult" }, { "$ref": "#/$defs/VerifyInconclusiveResult" }, { "$ref": "#/$defs/VerifyPlanContractViolationResult" }, { "$ref": "#/$defs/VerifyBlockedResult" }, { "$ref": "#/$defs/StageBudgetExhaustedResult" }, { "$ref": "#/$defs/StageCanceledResult" }, { "$ref": "#/$defs/StageExecutionFailedResult" }] },
-    "PlanTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "model_settings", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "plan" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/PlanTurnContext" } } },
-    "WorkTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "model_settings", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "work" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/WorkTurnContext" } } },
-    "VerifyTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "repository_context", "execution_policy", "model_settings", "limits", "context_digest", "context"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "verify" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context": { "$ref": "#/$defs/VerifyTurnContext" } } },
+    "PlanTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "role_context_update", "repository_context", "execution_policy", "model_settings", "limits", "context_digest"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "plan" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "role_context_update": { "$ref": "#/$defs/PlanRoleContextUpdate" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "WorkTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "role_context_update", "repository_context", "execution_policy", "model_settings", "limits", "context_digest"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "work" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "role_context_update": { "$ref": "#/$defs/WorkRoleContextUpdate" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" } } },
+    "VerifyTurnRequest": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "source_manifest", "coverage", "instruction_bundle", "role_context_update", "repository_context", "execution_policy", "model_settings", "limits", "context_digest"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "verify" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "source_manifest": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/SourceManifestEntry" } }, "coverage": { "$ref": "#/$defs/Coverage" }, "instruction_bundle": { "$ref": "#/$defs/InstructionBundle" }, "role_context_update": { "$ref": "#/$defs/VerifyRoleContextUpdate" }, "repository_context": { "$ref": "#/$defs/RepositoryContext" }, "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" }, "model_settings": { "$ref": "#/$defs/CodexTurnSettings" }, "limits": { "$ref": "#/$defs/TurnLimits" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "PlanResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "model_turn", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "plan" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "model_turn": { "$ref": "#/$defs/StageModelTurnRecord" }, "outcome": { "$ref": "#/$defs/PlanResultOutcome" } } },
     "WorkResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "model_turn", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "work" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "model_turn": { "$ref": "#/$defs/StageModelTurnRecord" }, "outcome": { "$ref": "#/$defs/WorkResultOutcome" } } },
     "VerifyResult": { "type": "object", "additionalProperties": false, "required": ["protocol_version", "request_id", "stage_execution_id", "role", "role_session_id", "role_turn_id", "root_issue_id", "cycle_issue_id", "target_issue_id", "observed_tree_digest", "context_digest", "completed_at", "model_turn", "outcome"], "properties": { "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" }, "request_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "stage_execution_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role": { "const": "verify" }, "role_session_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "role_turn_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "observed_tree_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" }, "completed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }, "model_turn": { "$ref": "#/$defs/StageModelTurnRecord" }, "outcome": { "$ref": "#/$defs/VerifyResultOutcome" } } },

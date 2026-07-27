@@ -27,6 +27,20 @@ import type {
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 type JsonRecord = Record<string, unknown>;
+type StageSource = JsonRecord & {
+  source_kind: string;
+  source_id: string;
+  source_version_or_digest: string;
+  actor_kind: string;
+  observed_at: string;
+  value: JsonRecord;
+};
+interface StageContextBatch {
+  update: JsonRecord;
+  sources: Map<string, StageSource>;
+  manifest: JsonRecord[];
+  digest: string;
+}
 
 export interface SessionPerformerAgentClientOptions {
   executable: string;
@@ -39,6 +53,14 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   private readonly channels = new Map<string, PerformerAgentChannel>();
   private readonly profileByRoot = new Map<string, string>();
   private readonly profileByRootSession = new Map<string, string>();
+  private readonly stageBaselines = new Map<string, {
+    profileId: string;
+    role: string;
+    rootIssueId: string;
+    cycleIssueId: string;
+    digest: string;
+    sources: Map<string, StageSource>;
+  }>();
 
   constructor(private readonly options: SessionPerformerAgentClientOptions) {}
 
@@ -75,7 +97,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
           throw new Error("root_reconciler_open_result_invalid");
         }
         const initialResult = decodeRootTurnResult(response.initial_result);
-        if (initialResult.kind === "directive") {
+        if (initialResult.kind === "directive" || initialResult.failure.continuity.kind === "retained") {
           this.profileByRoot.set(input.rootIssueId, input.profileId);
           this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
         }
@@ -115,7 +137,9 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     )
       .then((response) => {
         const result = decodeRootTurnResult(response);
-        if (result.kind === "failed") this.profileByRootSession.delete(input.sessionId);
+        if (result.kind === "failed" && result.failure.continuity.kind === "closed") {
+          this.profileByRootSession.delete(input.sessionId);
+        }
         return result;
       });
   }
@@ -139,6 +163,11 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
       protocol_version: "1", request_id: input.requestId, kind: "close_cycle_stage_sessions",
       root_issue_id: input.rootIssueId, cycle_issue_id: input.cycleIssueId, reason: "cycle_terminal",
     }, decodeConductorPerformerCloseCycleStageSessionsResult, "cycle_stage_close_response_contract_invalid");
+    for (const [sessionId, baseline] of this.stageBaselines) {
+      if (baseline.rootIssueId === input.rootIssueId && baseline.cycleIssueId === input.cycleIssueId) {
+        this.stageBaselines.delete(sessionId);
+      }
+    }
   }
 
   async closeRootReconciler(input: { requestId: string; rootIssueId: string; sessionId: string }): Promise<void> {
@@ -160,6 +189,11 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
 
   private async executeStage(kind: "execute_plan_turn" | "execute_work_turn" | "execute_verify_turn", input: StageTurnInput): Promise<StageResult> {
     this.profileByRoot.set(input.rootIssueId, input.profileId);
+    const previous = this.stageBaselines.get(input.roleSessionId);
+    if (previous && (previous.profileId !== input.profileId || previous.role !== input.role)) {
+      throw new Error("stage_role_session_correlation_invalid");
+    }
+    const batch = buildStageContextBatch(input, previous);
     const decoder = kind === "execute_plan_turn"
       ? decodeConductorPerformerPlanResult
       : kind === "execute_work_turn"
@@ -171,10 +205,25 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         ? "work_result_response_contract_invalid"
         : "verify_result_response_contract_invalid";
     const response = await this.invoke(input.requestId, input.profileId, {
-      protocol_version: "1", request_id: input.requestId, ...toWireStageInput(input),
+      protocol_version: "1", request_id: input.requestId, ...toWireStageInput(input, batch),
     }, decoder, responseContractCode);
     try {
-      return decodeStageResult(response);
+      const result = decodeStageResult(response);
+      if (result.contextDigest !== batch.digest) throw new Error("stage_context_digest_mismatch");
+      const continuity = result.outcome.continuity;
+      if (result.outcome.kind !== "execution_failed" || continuity?.kind === "retained" && continuity.appendOutcome === "accepted") {
+        this.stageBaselines.set(input.roleSessionId, {
+          profileId: input.profileId,
+          role: input.role,
+          rootIssueId: input.rootIssueId,
+          cycleIssueId: input.cycleIssueId,
+          digest: batch.digest,
+          sources: batch.sources,
+        });
+      } else if (continuity?.kind === "closed") {
+        this.stageBaselines.delete(input.roleSessionId);
+      }
+      return result;
     } catch (error) {
       const wrapped = new Error("stage_result_normalization_invalid", { cause: error });
       Object.assign(wrapped, { code: "stage_result_normalization_invalid" });
@@ -230,6 +279,9 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     for (const [sessionId, mappedProfileId] of this.profileByRootSession) {
       if (mappedProfileId === profileId) this.profileByRootSession.delete(sessionId);
     }
+    for (const [sessionId, baseline] of this.stageBaselines) {
+      if (baseline.profileId === profileId) this.stageBaselines.delete(sessionId);
+    }
   }
 }
 
@@ -256,6 +308,155 @@ function toWireLimits(limits: import("../../root-reconciliation/api/RootReconcil
   };
 }
 
+function buildStageContextBatch(
+  input: StageTurnInput,
+  previous: { digest: string; sources: Map<string, StageSource> } | undefined,
+): StageContextBatch {
+  const sources = stageSources(input);
+  const digest = canonicalDigest([...sources.values()].map((source) => [
+    source.source_kind, source.source_id, source.source_version_or_digest, source.actor_kind,
+  ]));
+  const manifest = [...sources.values()].map((source) => ({
+    source_kind: source.source_kind,
+    source_id: source.source_id,
+    version_or_digest: source.source_version_or_digest,
+    actor_kind: source.actor_kind,
+  }));
+  if (!previous) {
+    return {
+      update: { kind: "initial", target_context_digest: digest, sources: [...sources.values()] },
+      sources,
+      manifest,
+      digest,
+    };
+  }
+  const changes: JsonRecord[] = [];
+  const keys = new Set([...previous.sources.keys(), ...sources.keys()]);
+  for (const key of [...keys].sort()) {
+    const before = previous.sources.get(key);
+    const after = sources.get(key);
+    if (before && after && canonicalDigest(before) === canonicalDigest(after)) continue;
+    if (after && before) {
+      changes.push({ ...after, kind: "replacement", replaces_source_version_or_digest: before.source_version_or_digest });
+    } else if (after) {
+      changes.push(after);
+    } else if (before) {
+      changes.push({
+        kind: "tombstone",
+        source_kind: before.source_kind,
+        source_id: before.source_id,
+        source_version_or_digest: canonicalDigest({ removed: before.source_version_or_digest, target: digest }),
+        removes_source_version_or_digest: before.source_version_or_digest,
+        actor_kind: "unknown",
+        observed_at: input.tree.observed_at,
+        reason: "left_role_scope",
+      });
+    }
+  }
+  return {
+    update: {
+      kind: "delta",
+      base_context_digest: previous.digest,
+      target_context_digest: digest,
+      changes,
+    },
+    sources,
+    manifest,
+    digest,
+  };
+}
+
+function stageSources(input: StageTurnInput): Map<string, StageSource> {
+  const root = input.tree.issues.find(({ issue_id }) => issue_id === input.rootIssueId);
+  const cycle = input.tree.issues.find(({ issue_id }) => issue_id === input.cycleIssueId);
+  if (!root || !cycle) throw new Error("stage_context_issue_missing");
+  const manifest = new Map(input.tree.source_manifest.map((source) => [
+    `${source.source_kind}:${source.source_id}`,
+    source,
+  ]));
+  const relevantIds = new Set<string>([input.targetIssueId]);
+  if (input.role !== "plan") {
+    relevantIds.add(input.cycleIssueId);
+    for (const issue of input.tree.issues) {
+      if (belongsToCycle(issue.issue_id, input.cycleIssueId, input.tree)) relevantIds.add(issue.issue_id);
+    }
+  } else {
+    for (const issue of input.tree.issues) {
+      if (belongsToCycle(issue.issue_id, input.cycleIssueId, input.tree) &&
+          (issue.issue_kind === "plan" || issue.issue_kind === "finding")) relevantIds.add(issue.issue_id);
+    }
+  }
+  const values: StageSource[] = [];
+  if (input.role === "plan") {
+    values.push(stageSource("linear_issue", root.issue_id, root.remote_version, root.updated_at, "unknown", {
+      kind: "root_contract",
+      root_contract: planRootContract(root),
+    }));
+    values.push(stageSource("linear_issue", cycle.issue_id, cycle.remote_version, cycle.updated_at, "unknown", {
+      kind: "cycle",
+      cycle: { cycle_issue_id: cycle.issue_id, trigger: "initial" },
+    }));
+  }
+  for (const issue of input.tree.issues.filter(({ issue_id }) => relevantIds.has(issue_id))) {
+    if (input.role === "plan" && (issue.issue_id === root.issue_id || issue.issue_id === cycle.issue_id)) continue;
+    const source = manifest.get(`linear_issue:${issue.issue_id}`);
+    values.push(stageSource("linear_issue", issue.issue_id, source?.source_version ?? issue.remote_version,
+      issue.updated_at, source?.actor_kind ?? "unknown", { kind: "issue", issue: toWireIssue(issue) }));
+  }
+  for (const comment of input.tree.comments.filter(({ issue_id }) => relevantIds.has(issue_id))) {
+    const source = manifest.get(`linear_comment:${comment.comment_id}`);
+    values.push(stageSource("linear_comment", comment.comment_id, source?.source_version ?? comment.remote_version,
+      comment.updated_at, source?.actor_kind ?? comment.author_kind, { kind: "comment", comment: toWireTreeComment(comment) }));
+  }
+  for (const relation of input.tree.relations.filter(({ source_issue_id, target_issue_id }) =>
+    relevantIds.has(source_issue_id) && relevantIds.has(target_issue_id))) {
+    const source = manifest.get(`linear_relation:${relation.relation_id}`);
+    values.push(stageSource("linear_relation", relation.relation_id,
+      source?.source_version ?? canonicalDigest(relation), input.tree.observed_at, source?.actor_kind ?? "unknown",
+      { kind: "relation", relation: toWireTreeRelation(relation) }));
+  }
+  values.push(stageSource("git", `git:${input.rootIssueId}`, canonicalDigest(input.git), input.tree.observed_at,
+    "symphony", { kind: "git", git_facts: gitFactsFor(input) }));
+  values.sort((left, right) => `${left.source_kind}:${left.source_id}`.localeCompare(`${right.source_kind}:${right.source_id}`));
+  return new Map(values.map((source) => [`${source.source_kind}:${source.source_id}`, source]));
+}
+
+function stageSource(
+  sourceKind: string,
+  sourceId: string,
+  sourceVersionOrDigest: string,
+  observedAt: string,
+  actorKind: string,
+  value: JsonRecord,
+): StageSource {
+  return {
+    kind: "current_value",
+    source_kind: sourceKind,
+    source_id: sourceId,
+    source_version_or_digest: sourceVersionOrDigest,
+    actor_kind: actorKind,
+    observed_at: observedAt,
+    value,
+  };
+}
+
+function belongsToCycle(issueId: string, cycleIssueId: string, tree: RootTree): boolean {
+  let current = tree.issues.find(({ issue_id }) => issue_id === issueId);
+  const visited = new Set<string>();
+  while (current && !visited.has(current.issue_id)) {
+    if (current.issue_id === cycleIssueId) return true;
+    visited.add(current.issue_id);
+    current = current.parent_issue_id
+      ? tree.issues.find(({ issue_id }) => issue_id === current!.parent_issue_id)
+      : undefined;
+  }
+  return false;
+}
+
+function canonicalDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
 function toWireBootstrap(input: RootBootstrap): JsonRecord {
   return {
     root_snapshot: {
@@ -263,6 +464,8 @@ function toWireBootstrap(input: RootBootstrap): JsonRecord {
       cycles: input.rootSnapshot.cycles.map(toWireCycleObservation),
       issues: input.rootSnapshot.issues.map(toWireFactIssue),
       relations: input.rootSnapshot.relations.map(toWireRelation),
+      attachments: input.rootSnapshot.attachments.map(toWireAttachmentFact),
+      activities: input.rootSnapshot.activities.map(toWireActivityFact),
       user_comments: input.rootSnapshot.userComments.map(toWireComment),
       user_comment_thread_states: input.rootSnapshot.userCommentThreadStates.map(toWireCommentThreadState),
       worktree_gate: toWireWorktreeGate(input.rootSnapshot.worktreeGate),
@@ -271,9 +474,8 @@ function toWireBootstrap(input: RootBootstrap): JsonRecord {
     source_manifest: input.sourceManifest.map((entry) => ({
       source_kind: entry.sourceKind,
       source_id: entry.sourceId,
-      source_version: entry.sourceVersion,
+      source_version_or_digest: entry.sourceVersionOrDigest,
       actor_kind: entry.actorKind,
-      ...(entry.stableWriteId ? { stable_write_id: entry.stableWriteId } : {}),
     })),
     coverage: {
       is_complete: input.coverage.isComplete,
@@ -296,25 +498,77 @@ function toWireDelta(input: RootDelta): JsonRecord {
 function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
   const base = {
     kind: change.kind,
+    source_kind: change.sourceKind,
     source_id: change.sourceId,
-    source_version: change.sourceVersion,
+    source_version_or_digest: change.sourceVersionOrDigest,
     actor_kind: change.actorKind,
     observed_at: change.observedAt,
   };
-  if (change.kind === "issue_current_value") return { ...base, issue: toWireFactIssue(change.issue) };
-  if (change.kind === "comment_current_value") return { ...base, user_input: toWireUserCommentInput(change.userInput) };
-  if (change.kind === "comment_thread_state_current_value") return { ...base, thread_state: toWireCommentThreadState(change.threadState) };
-  if (change.kind === "relation_current_value") return { ...base, relation: toWireRelation(change.relation) };
-  if (change.kind === "worktree_gate_current_value") {
-    return { ...base, worktree_gate: toWireWorktreeGate(change.worktreeGate) };
+  if (change.kind === "tombstone") return {
+    ...base,
+    removes_source_version_or_digest: change.removesSourceVersionOrDigest,
+    reason: change.reason,
+  };
+  return {
+    ...base,
+    ...(change.kind === "replacement"
+      ? { replaces_source_version_or_digest: change.replacesSourceVersionOrDigest }
+      : {}),
+    value: toWireRootContextValue(change.value),
+  };
+}
+
+function toWireRootContextValue(value: Exclude<RootDeltaChange, { kind: "tombstone" }>["value"]): JsonRecord {
+  if (value.kind === "issue") return { kind: value.kind, issue: toWireFactIssue(value.issue) };
+  if (value.kind === "comment") return { kind: value.kind, user_input: toWireUserCommentInput(value.userInput) };
+  if (value.kind === "comment_thread") {
+    return { kind: value.kind, thread_state: toWireCommentThreadState(value.threadState) };
   }
-  if (change.kind === "mechanical_violations_current_value") {
-    return { ...base, mechanical_violations: change.mechanicalViolations.map(toWireMechanicalViolation) };
-  }
-  if (change.kind === "convergence_current_value") {
-    return { ...base, convergence: toWireRootConvergence(change.convergence) };
-  }
-  return base;
+  if (value.kind === "activity") return { kind: value.kind, activity: toWireActivityFact(value.activity) };
+  if (value.kind === "relation") return { kind: value.kind, relation: toWireRelation(value.relation) };
+  if (value.kind === "attachment") return { kind: value.kind, attachment: toWireAttachmentFact(value.attachment) };
+  if (value.kind === "git") return { kind: value.kind, worktree_gate: toWireWorktreeGate(value.worktreeGate) };
+  return {
+    kind: value.kind,
+    mechanical_violations: value.mechanicalViolations.map(toWireMechanicalViolation),
+    convergence: toWireRootConvergence(value.convergence),
+  };
+}
+
+function toWireAttachmentFact(value: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootAttachmentFact): JsonRecord {
+  return {
+    attachment_id: value.attachmentId,
+    issue_id: value.issueId,
+    title: value.title,
+    url: value.url,
+    source_type: value.sourceType,
+    remote_version: value.remoteVersion,
+    created_at: value.createdAt,
+    updated_at: value.updatedAt,
+  };
+}
+
+function toWireActivityFact(value: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootActivityFact): JsonRecord {
+  return {
+    activity_id: value.activityId,
+    issue_id: value.issueId,
+    activity_kinds: value.activityKinds,
+    actor_kind: value.actorKind,
+    ...(value.actorId === undefined ? {} : { actor_id: value.actorId }),
+    ...(value.fromStateId === undefined ? {} : { from_state_id: value.fromStateId }),
+    ...(value.toStateId === undefined ? {} : { to_state_id: value.toStateId }),
+    ...(value.updatedDescription === undefined ? {} : { updated_description: value.updatedDescription }),
+    ...(value.archived === undefined ? {} : { archived: value.archived }),
+    ...(value.addedLabelIds === undefined ? {} : { added_label_ids: value.addedLabelIds }),
+    ...(value.removedLabelIds === undefined ? {} : { removed_label_ids: value.removedLabelIds }),
+    ...(value.fromParentId === undefined ? {} : { from_parent_id: value.fromParentId }),
+    ...(value.toParentId === undefined ? {} : { to_parent_id: value.toParentId }),
+    ...(value.fromDelegateId === undefined ? {} : { from_delegate_id: value.fromDelegateId }),
+    ...(value.toDelegateId === undefined ? {} : { to_delegate_id: value.toDelegateId }),
+    ...(value.attachmentId === undefined ? {} : { attachment_id: value.attachmentId }),
+    remote_version: value.remoteVersion,
+    created_at: value.createdAt,
+  };
 }
 
 function toWireRootObservation(input: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootObservation): JsonRecord {
@@ -494,49 +748,11 @@ function toWireMechanicalViolation(input: import("../../root-reconciliation/api/
   return { violation_kind: input.violationKind, source_issue_ids: input.sourceIssueIds, summary: input.summary };
 }
 
-function toWireStageInput(input: StageTurnInput): JsonRecord {
+function toWireStageInput(input: StageTurnInput, batch: StageContextBatch): JsonRecord {
   const rootIssue = input.tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
   const cycleIssue = input.tree.issues.find((issue) => issue.issue_id === input.cycleIssueId);
   const targetIssue = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
   if (!rootIssue || !cycleIssue || !targetIssue) throw new Error("stage_context_issue_missing");
-  const rootContract = planRootContract(rootIssue);
-  const planContract = planContractFor(input, rootIssue, targetIssue);
-  const planDag = planDagFor(input);
-  const gitFacts = gitFactsFor(input);
-  const context = input.role === "plan"
-    ? {
-      root_contract: rootContract,
-      cycle: { cycle_issue_id: cycleIssue.issue_id, trigger: "initial" },
-      current_plan_issue: toWireIssue(targetIssue),
-      prior_plan_attempt_facts: [],
-      prior_approved_plan_facts: [],
-      unresolved_finding_issue_facts: [],
-      human_action_thread_facts: [],
-      current_git_facts: gitFacts,
-      required_output: input.goal,
-    }
-    : input.role === "work"
-      ? {
-        approved_plan_contract: planContract,
-        current_active_work_dag: planDag,
-        selected_work: toWireIssue(targetIssue),
-        completed_work_evidence: [],
-        prior_work_attempt_facts: [],
-        human_action_thread_facts: [],
-        git_baseline: gitFacts,
-        workspace_capability: "workspace_write",
-      }
-      : {
-        approved_plan_contract: planContract,
-        complete_active_cycle_dag: planDag,
-        archived_cycle_nodes: input.tree.issues.filter((issue) => issue.is_archived).map((issue) => toWireIssue(issue)),
-        completed_work_issue_facts: [],
-        unresolved_finding_issue_facts: [],
-        human_action_thread_facts: [],
-        verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
-        immutable_target_revision: input.git.head,
-        repository_snapshot: gitFacts,
-      };
   return {
     stage_execution_id: input.stageExecutionId,
     role: input.role,
@@ -546,13 +762,14 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
     cycle_issue_id: input.cycleIssueId,
     target_issue_id: input.targetIssueId,
     observed_tree_digest: input.observedTreeDigest,
-    source_manifest: [],
+    source_manifest: batch.manifest,
     coverage: { is_complete: true, omissions: [] },
     instruction_bundle: {
       instruction_set_id: "symphony-stage-v1",
       instructions: input.goal,
       output_schema: `${input.role}_result`,
     },
+    role_context_update: batch.update,
     repository_context: {
       repository_identity: input.rootIssueId,
       base_branch: input.git.branch,
@@ -575,8 +792,7 @@ function toWireStageInput(input: StageTurnInput): JsonRecord {
       is_fast_mode_enabled: input.modelSettings.isFastModeEnabled,
     },
     limits: defaultLimits(300_000),
-    context_digest: input.contextDigest,
-    context,
+    context_digest: batch.digest,
   };
 }
 
@@ -592,6 +808,38 @@ function toWireIssue(issue: RootTree["issues"][number]): JsonRecord {
     is_archived: issue.is_archived,
     labels: issue.labels,
     remote_version: issue.remote_version,
+  };
+}
+
+function toWireTreeComment(comment: RootTree["comments"][number]): JsonRecord {
+  return {
+    comment_id: comment.comment_id,
+    comment_remote_version: comment.remote_version,
+    issue_id: comment.issue_id,
+    author_kind: comment.author_kind,
+    author_id: comment.author_id,
+    ...(comment.author_user_id ? { author_user_id: comment.author_user_id } : {}),
+    body: comment.body,
+    ...(comment.parent_comment_id ? { parent_comment_id: comment.parent_comment_id } : {}),
+    thread_root_comment_id: comment.thread_root_comment_id,
+    thread_state: comment.thread_state,
+    reactions: comment.reactions.map((reaction) => ({
+      reaction_id: reaction.reaction_id,
+      emoji: reaction.emoji,
+      actor_kind: reaction.actor_kind,
+      actor_id: reaction.actor_id,
+    })),
+    created_at: comment.created_at,
+    updated_at: comment.updated_at,
+  };
+}
+
+function toWireTreeRelation(relation: RootTree["relations"][number]): JsonRecord {
+  return {
+    relation_id: relation.relation_id,
+    relation_kind: relation.relation_kind,
+    source_issue_id: relation.source_issue_id,
+    target_issue_id: relation.target_issue_id,
   };
 }
 
@@ -634,61 +882,6 @@ function planRootContract(rootIssue: JsonRecord): JsonRecord {
   };
 }
 
-function planContractFor(input: StageTurnInput, rootIssue: JsonRecord, targetIssue: JsonRecord): JsonRecord {
-  const objective = typeof rootIssue.description === "string" && rootIssue.description
-    ? rootIssue.description
-    : input.goal;
-  return {
-    objective,
-    included_scope: [scopeSummary(input.goal, targetIssue.title)],
-    excluded_scope: [],
-    assumptions: [],
-    constraints: [],
-    acceptance_criteria: [{
-      criterion_key: `${input.targetIssueId}:acceptance`,
-      statement: objective,
-      verification_method: "provider-defined verification",
-    }],
-    verification_requirements: input.requiredEvidenceRefs.length > 0 ? input.requiredEvidenceRefs : ["provider-defined verification"],
-  };
-}
-
-function scopeSummary(goal: string, title: unknown): string {
-  if (goal.trim().length > 0 && goal.length <= 256) return goal;
-  if (typeof title === "string" && title.trim().length > 0 && title.length <= 256) return title;
-  return "selected work issue";
-}
-
-function planDagFor(input: StageTurnInput): JsonRecord {
-  const workIssues = input.tree.issues.filter((issue) => issue.issue_kind === "work" && !issue.is_archived);
-  const fallback = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
-  if (!fallback) throw new Error("stage_context_target_issue_missing");
-  const selected = workIssues.length > 0 ? workIssues : [fallback];
-  const workNodes = selected.filter(Boolean).map((issue) => ({
-    proposal_key: issue.issue_id,
-    title: issue.title,
-    description: issue.description,
-    expected_outcome: issue.description || issue.title,
-    required_checks: ["provider-defined verification"],
-    dependency_proposal_keys: input.tree.relations
-      .filter((relation) => relation.target_issue_id === issue.issue_id && relation.relation_kind === "blocks")
-      .map((relation) => relation.source_issue_id),
-  }));
-  return {
-    work_nodes: workNodes,
-    dependency_edges: input.tree.relations,
-    verify_node: {
-      title: "Verify cycle",
-      acceptance_criteria: [{
-        criterion_key: `${input.cycleIssueId}:verify`,
-        statement: "The cycle objective is complete.",
-        verification_method: "provider-defined verification",
-      }],
-      required_checks: ["provider-defined verification"],
-    },
-  };
-}
-
 function decodeDirective(value: unknown): RootDirective {
   const directive = record(value);
   const action = record(directive.action);
@@ -716,6 +909,8 @@ function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
     throw new Error("root_reconciler_failure_root_correlation_invalid");
   }
   const usage = record(modelTurn.usage);
+  const continuity = record(failure.continuity);
+  const continuityKind = enumValue(continuity, "kind", ["retained", "closed"]);
   return {
     kind: "failed",
     failure: {
@@ -747,6 +942,16 @@ function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
       },
       category: enumValue(failure, "category", ["transport_failed", "timed_out", "schema_invalid", "stale_output", "canceled"]),
       sanitizedReason: textValue(failure, "sanitized_reason"),
+      continuity: continuityKind === "retained"
+        ? {
+          kind: "retained",
+          appendOutcome: enumValue(continuity, "append_outcome", ["not_accepted", "accepted"]),
+          providerVisibleContextDigest: textValue(continuity, "provider_visible_context_digest"),
+        }
+        : {
+          kind: "closed",
+          appendOutcome: enumValue(continuity, "append_outcome", ["acceptance_unknown", "session_lost"]),
+        },
       failedAt: textValue(failure, "failed_at"),
     },
   };
@@ -859,7 +1064,22 @@ function normalizeStageResultOutcome(outcome: JsonRecord): StageResult["outcome"
     };
   }
   if (kind === "execution_failed") {
-    return { kind, errorCode: string(outcome.error_code, "role_result_error_code_invalid") };
+    const continuity = record(outcome.continuity);
+    const continuityKind = enumValue(continuity, "kind", ["retained", "closed"]);
+    return {
+      kind,
+      errorCode: string(outcome.error_code, "role_result_error_code_invalid"),
+      continuity: continuityKind === "retained"
+        ? {
+          kind: "retained",
+          appendOutcome: enumValue(continuity, "append_outcome", ["not_accepted", "accepted"]),
+          providerVisibleContextDigest: textValue(continuity, "provider_visible_context_digest"),
+        }
+        : {
+          kind: "closed",
+          appendOutcome: enumValue(continuity, "append_outcome", ["acceptance_unknown", "session_lost"]),
+        },
+    };
   }
   return { kind };
 }
@@ -938,3 +1158,4 @@ function sanitizedError(value: unknown): string {
     .replace(/\s+/gu, " ")
     .slice(0, 2_000);
 }
+import { createHash } from "node:crypto";

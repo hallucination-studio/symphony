@@ -261,7 +261,7 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
       async advance(input: Parameters<RootReconciliationRuntimeDependencies["reconciler"]["advance"]>[0]) {
         advances += 1;
         assert.equal("rootSnapshot" in input.delta, false);
-        assert.equal(input.delta.changes[0]?.kind, "issue_current_value");
+        assert.equal(input.delta.changes[0]?.kind, "replacement");
         return { kind: "directive" as const, directive: humanActionDirective(input.delta.targetRootDigest, input.delta.pendingInputIds) };
       },
       async close() {},
@@ -672,6 +672,7 @@ function failureFor(input: Parameters<RootReconciliationRuntimeDependencies["rec
     },
     category: "schema_invalid",
     sanitizedReason: "The Root Reconciler output was invalid.",
+    continuity: { kind: "closed", appendOutcome: "session_lost" },
     failedAt: "2026-07-23T00:00:01Z",
   };
 }
@@ -782,7 +783,7 @@ function workflowTree(): LinearWorkflowTreeSnapshot {
       authorId: "symphony-bot",
       body: "Symphony is observing this Root.",
     })],
-    relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
+    relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:00Z",
   };
 }

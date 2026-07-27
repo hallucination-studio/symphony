@@ -236,7 +236,7 @@ class FakeLinear {
         thread_root_comment_id: "comment-1", thread_state: input.threadState ?? "unresolved", reactions: [],
         created_at: "2026-07-23T00:00:01Z", remote_version: input.remoteVersion ?? "comment-v1", updated_at: "2026-07-23T00:00:01Z",
       }],
-      relations: [], attachments: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-23T00:00:02Z",
+      relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-23T00:00:02Z",
     };
     this.omitCreatedReply = input.omitCreatedReply ?? false;
   }

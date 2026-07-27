@@ -556,6 +556,7 @@ class FakeLinear {
     comments: [],
     relations: [],
     attachments: [],
+    activities: [],
     source_manifest: [],
     coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-23T00:00:02Z",

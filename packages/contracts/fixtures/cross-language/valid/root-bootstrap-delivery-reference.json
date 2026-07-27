@@ -44,6 +44,8 @@
     "cycles": [],
     "issues": [],
     "relations": [],
+    "attachments": [],
+    "activities": [],
     "user_comments": [],
     "user_comment_thread_states": [],
     "worktree_gate": {

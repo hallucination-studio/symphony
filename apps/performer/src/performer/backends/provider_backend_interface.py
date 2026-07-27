@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 class ProviderTurnDeadlineExpired(TimeoutError):
@@ -24,12 +24,15 @@ class ProviderBackendError(RuntimeError):
         code: str = "provider_turn_failed",
         retryable: bool = True,
         action_required: str = "Retry the turn with a fresh Provider context.",
+        append_outcome: Literal["not_accepted", "accepted", "acceptance_unknown"] = "acceptance_unknown",
     ) -> None:
         super().__init__(sanitized_reason)
         self.code = code
         self.sanitized_reason = sanitized_reason
         self.retryable = retryable
         self.action_required = action_required
+        self.append_outcome = append_outcome
+        self.continuity: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

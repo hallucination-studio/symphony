@@ -1023,8 +1023,7 @@ function validateStageResult(input: StageTurnInput, result: StageResult): void {
     result.rootIssueId !== input.rootIssueId ||
     result.cycleIssueId !== input.cycleIssueId ||
     result.targetIssueId !== input.targetIssueId ||
-    result.observedTreeDigest !== input.observedTreeDigest ||
-    result.contextDigest !== input.contextDigest
+    result.observedTreeDigest !== input.observedTreeDigest
   ) {
     throw new Error("role_result_correlation_invalid");
   }
@@ -1327,7 +1326,6 @@ function stageInput(
     roleTurnId: randomUUID(),
     stageExecutionId: stageExecutionIdFor(root.issueId, directiveId, role, targetIssueId),
     observedTreeDigest: view.treeDigest,
-    contextDigest: view.treeDigest,
     goal: JSON.stringify(action),
     requiredEvidenceRefs: [],
     tree: view.tree,
