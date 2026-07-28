@@ -266,6 +266,23 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     }
     const cycleWriteId = `${directive.rootDirectiveId}:cycle`;
     let currentView = view;
+    if (action.reason === "initial") {
+      const root = rootIssue(currentView, view.root.issueId);
+      if (root.status_name === "Todo") {
+        const started = await executeStatusChange(
+          this.linear,
+          directive,
+          currentView,
+          root,
+          "In Progress",
+          "initial_cycle_root_start",
+        );
+        if (started.kind === "failed") return started;
+        currentView = started.view;
+      } else if (root.status_name !== "In Progress") {
+        return failed(directive, "initial_cycle_root_status_invalid");
+      }
+    }
     const cycleTitle = `Cycle ${currentView.tree.issues.filter((issue) => issue.issue_kind === "cycle").length + 1}`;
     const matchesCycle = (tree: RootReconciliationView["tree"]) => tree.issues.filter((issue) =>
       issue.parent_issue_id === view.root.issueId && issue.issue_kind === "cycle" && !issue.is_archived &&
@@ -361,17 +378,8 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     statusName: string,
     failurePrefix: string,
   ): Promise<RootActionMaterializationResult> {
-    const status = view.tree.status_catalog.find(({ name }) => name === statusName);
-    if (!status) return failed(directive, `${failurePrefix}_status_missing`);
-    const outcome = await this.linear.mutateWorkflow(updateIssueCommand(view, directive, target, status.status_id));
-    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
-      return failed(directive, `${failurePrefix}_${outcome.kind}`);
-    }
-    const readBack = await this.linear.readWorkflowIssueTree(view.root.issueId);
-    const updated = readBack.issues.find(({ issue_id }) => issue_id === target.issue_id);
-    if (!updated || updated.status_id !== status.status_id || updated.status_name !== status.name) {
-      return failed(directive, `${failurePrefix}_read_back_invalid`);
-    }
+    const changed = await executeStatusChange(this.linear, directive, view, target, statusName, failurePrefix);
+    if (changed.kind === "failed") return changed;
     return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [target.issue_id] };
   }
 
@@ -688,6 +696,31 @@ async function executeMutation(
   return { kind: "materialized", view: currentView };
 }
 
+async function executeStatusChange(
+  linear: LinearGatewayInterface,
+  directive: RootDirective,
+  view: RootReconciliationView,
+  target: RootReconciliationView["tree"]["issues"][number],
+  statusName: string,
+  failurePrefix: string,
+): Promise<
+  | { kind: "materialized"; view: RootReconciliationView }
+  | { kind: "failed"; rootDirectiveId: string; code: string; sanitizedReason: string }
+> {
+  const status = view.tree.status_catalog.find(({ name }) => name === statusName);
+  if (!status) return failed(directive, `${failurePrefix}_status_missing`);
+  const outcome = await linear.mutateWorkflow(updateIssueCommand(view, directive, target, status.status_id));
+  if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+    return failed(directive, `${failurePrefix}_${outcome.kind}`);
+  }
+  const currentView = await refreshView(linear, view);
+  const updated = currentView.tree.issues.find(({ issue_id }) => issue_id === target.issue_id);
+  if (!updated || updated.status_id !== status.status_id || updated.status_name !== status.name) {
+    return failed(directive, `${failurePrefix}_read_back_invalid`);
+  }
+  return { kind: "materialized", view: currentView };
+}
+
 function rebaseOperationPrecondition(
   operation: TreeOperation,
   view: RootReconciliationView,
@@ -858,7 +891,10 @@ function isTerminalCycle(issue: RootReconciliationView["tree"]["issues"][number]
     issue.status_name === "Succeeded" || issue.status_name === "Changes Required" || issue.status_name === "Canceled";
 }
 
-function failed(directive: RootDirective, code: string): RootActionMaterializationResult {
+function failed(
+  directive: RootDirective,
+  code: string,
+): Extract<RootActionMaterializationResult, { kind: "failed" }> {
   return { kind: "failed", rootDirectiveId: directive.rootDirectiveId, code, sanitizedReason: code };
 }
 

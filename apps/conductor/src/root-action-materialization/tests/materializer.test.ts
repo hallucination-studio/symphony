@@ -227,6 +227,80 @@ test("terminalizes a Cycle through native status only", async () => {
   assert.equal(linear.tree.comments.length, 0);
 });
 
+test("starts a delegated fresh Root before creating its initial Planning Cycle", async () => {
+  const linear = new FakeLinear();
+  linear.tree.issues = linear.tree.issues.filter(({ issue_id }) => issue_id === "root-1");
+  const root = linear.issue("root-1");
+  Object.assign(root, {
+    status_id: "todo",
+    status_name: "Todo",
+    status_category: "unstarted",
+    status_position: 4,
+  });
+  const freshView = view(linear.tree);
+  freshView.root.state = "Todo";
+  const materializer = new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
+
+  const result = await materializer.materialize({
+    directive: directive({
+      kind: "create_cycle",
+      reason: "initial",
+      planTrigger: "Plan the complete fresh Root requirement.",
+      inheritedFactRefs: [],
+      invalidatedDeliveryRefs: [],
+    }),
+    view: freshView,
+  });
+
+  assert.deepEqual(result, {
+    kind: "materialized",
+    rootDirectiveId: "directive-1",
+    sourceIssueIds: ["directive-1:cycle"],
+  });
+  assert.equal(linear.issue("root-1").status_name, "In Progress");
+  assert.equal(linear.issue("directive-1:cycle").status_name, "Planning");
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), [
+    "update_workflow_issue",
+    "create_workflow_issue",
+  ]);
+  assert.equal(linear.readCount, 2);
+});
+
+test("rejects an initial Cycle when the fresh Root cannot enter In Progress", async () => {
+  for (const scenario of ["invalid_status", "status_missing"] as const) {
+    const linear = new FakeLinear();
+    linear.tree.issues = linear.tree.issues.filter(({ issue_id }) => issue_id === "root-1");
+    const root = linear.issue("root-1");
+    Object.assign(root, scenario === "invalid_status"
+      ? { status_id: "canceled", status_name: "Canceled", status_category: "canceled", status_position: 8 }
+      : { status_id: "todo", status_name: "Todo", status_category: "unstarted", status_position: 4 });
+    if (scenario === "status_missing") {
+      linear.tree.status_catalog = linear.tree.status_catalog.filter(({ name }) => name !== "In Progress");
+    }
+    const freshView = view(linear.tree);
+    freshView.root.state = root.status_name as typeof freshView.root.state;
+    const materializer = new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
+
+    const result = await materializer.materialize({
+      directive: directive({
+        kind: "create_cycle",
+        reason: "initial",
+        planTrigger: "Plan the complete fresh Root requirement.",
+        inheritedFactRefs: [],
+        invalidatedDeliveryRefs: [],
+      }),
+      view: freshView,
+    });
+
+    assert.equal(result.kind, "failed");
+    assert.equal(result.kind === "failed" && result.code, scenario === "invalid_status"
+      ? "initial_cycle_root_status_invalid"
+      : "initial_cycle_root_start_status_missing");
+    assert.equal(linear.mutations.length, 0);
+    assert.equal(linear.tree.issues.length, 1);
+  }
+});
+
 test("creates one successor Cycle from terminal native predecessor topology", async () => {
   const linear = new FakeLinear();
   const predecessor = linear.issue("cycle-1");
