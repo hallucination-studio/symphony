@@ -12,6 +12,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 *.egg-info/
+apps/performer/build/
 docs/superpowers
 .codex-runtime
 .DS_Store
