@@ -1,6 +1,6 @@
 # Performer Plan、Work与Verify Contracts
 
-状态：目标架构提案。本文是Conductor调用Performer执行Plan、Work和Verify的request/result contract、角色
+状态：目标架构提案。本文是Conductor调用Performer执行Plan、Work和Verify的request/response contract、角色
 thread、capability和Result语义的唯一事实源。Root/Cycle下一步和用户comment处理由
 [Root Reconciliation](root-reconciliation.md)决定。本文不定义RootNextAction或Human Action状态。
 
@@ -10,13 +10,14 @@ thread、capability和Result语义的唯一事实源。Root/Cycle下一步和用
 
 ```text
 Plan Thread
-  -> only PlanTurnRequest / PlanResult
+  -> PlanTurnRequest / PlanTurnResponse
 
 Work Thread
-  -> multiple WorkTurnRequest / WorkResult across multiple Work Issues
+  -> multiple WorkTurnRequest / WorkTurnResponse across multiple Work Issues
+  -> may own one bounded Work Agent Tree
 
 Verify Thread
-  -> only VerifyTurnRequest / VerifyResult
+  -> VerifyTurnRequest / VerifyTurnResponse
 ```
 
 它们与Root Reconciler thread也互相隔离。Conductor是唯一caller；Performer独占Provider SDK、thread、turn、
@@ -76,7 +77,7 @@ Plan在返回`plan_completed`前必须先完成需求拆解和计划评审：
   `expected_outcome`和`required_checks[]`明确目标、边界、预期成果与验收方法；只有输入或repository facts支持时才写
   具体文件路径和参考模式，不能虚构路径；
 - 用每个`work_node.dependency_proposal_keys[]`表达真实依赖和执行顺序，不创建另一个sequence/status字段；
-  `dependency_edges[]`在Plan proposal中必须是空数组，因为materialization前还不存在可引用的Work Issue ID。并行单元
+- `dependency_edges[]`在Plan proposal中必须是空数组，因为materialization前还不存在可引用的Work Issue ID。并行单元
   不得制造不必要依赖，有依赖的单元必须说明上游成果如何成为下游输入；
 - 证明全部Root acceptance criteria都由Work checks或Verify requirements覆盖，且Verify node可以在immutable target
   revision上独立判定；
@@ -94,6 +95,11 @@ Work只完成本轮`selected_work`，遵守approved Plan Contract、dependency e
 Issue、扩大scope、修改DAG、commit/push或声称整个Cycle完成。完成时返回实际变化、checks、artifacts、discovered facts
 和evidence；假设失效、scope冲突、权限或信息缺失时使用matching现有special/blocked variant，让Root Reconciler决定
 后续动作。
+
+只有Work prompt包含[Work Subagents](work-subagents.md)定义的协作行为。Work root可以把可独立并行的bounded task交给
+matching `stage_execution_id`内的descendants，但整个tree仍执行同一个selected Work Issue、共享本轮limits与workspace，
+并且只有root可以生成semantic `WorkResult`。Root Reconciler、Plan和Verify不注册这些tools，也不得出现创建subagent的
+instruction。
 
 Work不得把DEFINE、Plan、REVIEW、SHIP或执行进度写成repository workflow文档。只有selected Work Issue本身明确要求
 修改项目documentation时，相关文件才属于产品scope；transient Work Result由Conductor收敛为Work Issue的native
@@ -114,10 +120,10 @@ Plan Contract的acceptance criteria和verification requirements，检查matching
 Verify的审阅结论由Conductor从transient Verify Result渲染为Verify Issue的native status、description以及matching
 Finding/Git/check facts，不能写入repository report、comment file或task checklist，也不在Linear保存Result object。
 
-三个Stage prompt的退出条件必须绑定matching request、target、capability、evidence和closed Result。任何required
-input缺失、事实冲突、越权需求、未运行required check或无法验证的结论都是red flag；role必须选择matching
-blocked、needs-information、inconclusive、changes-required、contract-violation或execution failure variant，而不是
-输出不完整的success variant。schema-invalid输出由机械边界拒绝，不能通过自然语言解释、重试猜测或fallback推进。
+三个Stage prompt的退出条件必须绑定matching request、target、capability、evidence和closed semantic Result。任何required
+input缺失、事实冲突、越权需求、未运行required check或无法验证的结论都是red flag；role必须选择matching blocked、
+needs-information、inconclusive、changes-required或contract-violation variant，而不是输出不完整的success variant。
+Cancel、deadline、hard budget、Provider或schema failure由Performer返回`StageTurnFailure`，不属于model output。
 
 ## 2. 公共wire envelope
 
@@ -147,7 +153,7 @@ StageTurnRequestEnvelope
 ```
 
 ```text
-StageTurnResultEnvelope
+StageTurnResponseEnvelope
   protocol_version
   request_id
   stage_execution_id
@@ -161,11 +167,19 @@ StageTurnResultEnvelope
   context_digest
   completed_at
   model_observation: RuntimeModelObservation
-  outcome:
-    PlanResult | WorkResult | VerifyResult
+  terminal:
+    StageSemanticResult | StageTurnFailure
+
+StageSemanticResult
+  kind: result
+  outcome: PlanResult | WorkResult | VerifyResult
+
+PlanTurnResponse   = StageTurnResponseEnvelope(role=plan)
+WorkTurnResponse   = StageTurnResponseEnvelope(role=work)
+VerifyTurnResponse = StageTurnResponseEnvelope(role=verify)
 ```
 
-`role`是discriminator；context和result variant必须matching。未知字段、未知variant、role/session不匹配、
+`role`是discriminator；context、semantic result或failure必须matching。未知字段、未知variant、role/session不匹配、
 source coverage不完整、digest错误或超出bound均fail closed。所有schema使用`additionalProperties: false`，由
 JSON Schema生成各语言的generated codecs；生成语言集合由[契约与接口边界](contracts.md)统一定义。
 `instruction_bundle`携带本轮命令、target identity和output contract identity，是validated Stage request data；它不选择、
@@ -180,7 +194,8 @@ operator诊断，不能持久化到Linear或影响restart。其语义只由[Perf
 - role sessions不得共享Provider thread，也不得跨Cycle复用；
 - Plan和Verify role可以有多个turn，例如Plan rejection后的fresh Plan turn或同Cycle修复后的再次Verify；
 - Work role在同一Cycle跨多个Work Issues和turn持续存在，以保留实现上下文；
-- 每个turn有独立`stage_execution_id`、context digest、deadline、reservation和terminal Result；
+- Work root thread可以跨当前Cycle保留；每个Work turn创建fresh descendant epoch，descendant不能跨`stage_execution_id`复用；
+- 每个turn有独立`stage_execution_id`、context digest、deadline、reservation和terminal response；
 - role thread是runtime continuity，不是durable authority；thread丢失时从Linear/Git facts创建fresh role session；
 - stale session/turn output不得materialize。
 
@@ -293,6 +308,67 @@ Performer为每个role session在runtime内独立维护Provider-visible context 
 可接受Result的facts不在同一live thread重复注入；无法证明append或baseline连续性时关闭该role session，并从Linear/Git
 durable facts重建一次fresh role-scoped initial context。该baseline不持久化，不是workflow checkpoint或authority。
 
+### 3.2 Stage session close contract
+
+Cycle Stage close沿用一个public batch call，但不是subagent API：
+
+```text
+CloseCycleStageSessionsCommand
+  protocol_version
+  command_id
+  root_issue_id
+  cycle_issue_id
+  expected_process_generation
+  reason: cycle_terminal | root_canceled | routing_revoked | shutdown | profile_invalidated | runtime_fence_recovery
+  deadline_at
+  expected_sessions:
+    plan: ExpectedStageRoleSession
+    work: ExpectedStageRoleSession
+    verify: ExpectedStageRoleSession
+
+ExpectedStageRoleSession =
+  | { kind: expected, role_session_id, session_generation }
+  | { kind: absent }
+
+CloseCycleStageSessionsResult
+  protocol_version
+  command_id
+  root_issue_id
+  cycle_issue_id
+  process_generation
+  kind: all_closed | close_incomplete
+  role_results:
+    plan: CloseRoleSessionResult(role=plan)
+    work: CloseRoleSessionResult(role=work)
+    verify: CloseRoleSessionResult(role=verify)
+
+CloseRoleSessionResult =
+  | { kind: closed, role, role_session_id: string | null, close_outcome: closed_now | already_closed | already_absent }
+  | { kind: close_pending, role, role_session_id: string | null, close_reason:
+        provider_shutdown_pending | workspace_fence_unproven,
+      sanitized_reason, retryable: true, action_required: retry_close_only }
+  | { kind: close_rejected, role, role_session_id: string | null, close_reason:
+        process_generation_mismatch | session_generation_mismatch | concurrent_newer_session,
+      sanitized_reason, retryable: false, action_required: refresh_runtime_state }
+```
+
+三个role keys必须exactly once且schema `additionalProperties: false`；array、missing/duplicate role或command/result correlation mismatch均
+fail closed。`kind=all_closed`当且仅当三个role result都是`closed`。Transport/RPC success、Plan已关闭或Verify从未打开都不能替代该
+判断；`already_absent`只在command声明`kind=absent`且current Performer generation证明没有matching session/containment时成立。
+
+Conductor先停止该Cycle的新Stage admission，再发送包含current expected session identities的command。每个role的turn admission与
+`open -> closing`使用同一CAS：close先赢则拒绝new execute；execute已admit则close先撤销matching result authority再interrupt/drain。
+Work还必须在同一linearization中执行[Work Subagents](work-subagents.md#12-abortsession-close与恢复)的epoch/write/containment gate。
+一个role pending不回滚其他已closed roles；retry携带fresh `command_id`和fresh expected state，并安全得到`already_closed`。同一
+process generation内duplicate `command_id`不得启动第二次close，same ID不同payload直接拒绝。Process generation变化后不恢复close
+ledger，只能从fresh runtime/Linear/Git facts发起新command。
+
+`runtime_fence_recovery`只在matching `StageTurnFailure(action_required=retry_close_only)`或先前
+`CloseRoleSessionResult(close_reason=workspace_fence_unproven)`仍阻塞该Root时有效。它冻结整个Cycle的Stage admission并重试同一个batch
+close gate，不重放Stage request、不轮询agent tree，也不新建writer。只有`kind=all_closed`、matching outer Binding fence仍有效且
+fresh Git/worktree facts读取成功后，Conductor才生成可供Root Reconciler消费的closed mechanical fact；pending/rejected结果继续保持
+runtime-blocked。
+
 ## 4. 公共source、repository与limits
 
 ```text
@@ -320,10 +396,29 @@ StageLimits
   max_context_bytes
   max_result_bytes
   max_output_tokens
+  max_weighted_tokens
   max_tool_calls
   max_wall_time_ms
   deadline_at
+
+StageTokenAccountingV1
+  weighted_tokens = input_tokens + output_tokens
+  cached_input_tokens = subset_of_input_tokens
+  reasoning_tokens = subset_of_output_tokens
+  weights = 1 per input/output token
+  rounding = exact_integer_per_class
 ```
+
+`StageLimits`是三个roles共享的closed公共边界。对于Work，weighted tokens、tool calls、wall time和deadline对root与全部
+descendants整体聚合；Performer按[Work Subagents](work-subagents.md#8-tree-wide-budget与hard-reservation)派生internal
+`WorkTreePolicy`和root finalization reserve。Conductor request不携带agent count、tree depth、mailbox、residency或Provider
+agent-tree config。
+
+`StageTokenAccountingV1`是`max_weighted_tokens`的versioned wire语义：cached input和reasoning只是matching total的breakdown，不能
+重复相加；V1没有cache discount或fractional weight。`max_output_tokens`是每次Provider sampling的上界，必须覆盖ordinary output与
+reasoning并由Provider真实强制执行；`max_weighted_tokens`是整个Stage turn的总上界。`max_wall_time_ms`从Performer接受turn时开始，
+effective deadline固定为
+`min(turn_started_at + max_wall_time_ms, deadline_at)`；任一limit为zero、unbounded、overflow或已过期都在dispatch前拒绝。
 
 matching role所需的Root Contract projection、current Plan facts、target Node、dependencies、Human Action thread facts和
 Git revision是matching turn的required facts。coverage证明该role projection完整，不要求把整个Root或Cycle搬进请求；被
@@ -371,9 +466,6 @@ PlanResult =
   | PlanCompletedResult
   | PlanNeedsInformationResult
   | PlanBlockedResult
-  | StageBudgetExhaustedResult
-  | StageCanceledResult
-  | StageExecutionFailedResult
 ```
 
 ```text
@@ -438,12 +530,20 @@ WorkTurnContext
 
 该结构定义Work role initial projection及后续delta可更新的最大事实集合，不表示每个Work turn都重新发送完整结构。
 
+`WorkTurnRequest`只由公共envelope、该role context和role-generic `StageLimits`组成。Agent-tree concurrency、residency、depth、
+mailbox、write grant和finalization reserve是Performer internal policy，不进入Conductor protocol或Provider-visible role context。
+
 一个Cycle只有一个Work thread。Conductor在不同turn中把Root Reconciler选择且机械ready的Work Issue依次交给
 它。Work thread可以在当前turn内部执行Claude Code式tool loop：读取代码、修改、运行命令、观察普通错误、
-修复和重试，直到完成、需要外部输入或达到turn预算。
+修复和重试，直到完成、需要外部输入或达到turn预算；也可以按[Work Subagents](work-subagents.md)在同一个Work Agent
+Tree中递归delegation。
 
-Work只能修改授予的Root worktree，不能commit、push、创建worktree、调用Linear、改变DAG或执行另一个
-Work Issue。发现需要调整DAG时只报告structured observation；Root Reconciler决定是否提出Tree patch。
+Work只能修改授予的Root worktree，不能commit、push、创建worktree、调用Linear、改变DAG或执行另一个Work Issue。
+Tree内parallel mutation必须使用[Work Subagents](work-subagents.md#9-shared-worktree与机械write-grant)定义的mechanical、
+per-mutation alias-safe write grant；无法机械隔离时serial exclusive-write。最终完整diff与required checks由Work root在全部grants
+归还后、进入不可逆finalization前完成；finalization只做fresh inspection和tools-disabled Result sampling，随后永久retire matching
+mutation epoch。发现需要调整DAG时只报告structured observation；Root Reconciler决定是否提出
+Tree patch。
 
 ### 6.2 WorkResult
 
@@ -455,9 +555,6 @@ WorkResult =
   | WorkScopeConflictResult
   | WorkPermissionRequiredResult
   | WorkInformationRequiredResult
-  | StageBudgetExhaustedResult
-  | StageCanceledResult
-  | StageExecutionFailedResult
 ```
 
 ```text
@@ -488,6 +585,10 @@ WorkBlockedResult
 
 普通command或test失败不是自动terminal Result；Work agent应在turn预算内继续诊断。只有无法在当前target和
 capability内继续时才返回blocked/specialized result。`suggested_dag_changes`只是observation，不是RootNextAction。
+
+任何`WorkResult`都必须由Work root生成，并由Performer在matching mutation epoch永久retire、producer/activity watermark稳定且
+barrier后worktree read-back成功后才可返回。Subagent final answer、status或check本身不是Stage Result或completion evidence。
+若runtime无法完成该proof，Performer返回`StageTurnFailure`，不能生成一个`execution_failed` WorkResult冒充root output。
 
 ## 7. Verify contract
 
@@ -525,9 +626,6 @@ VerifyResult =
   | VerifyInconclusiveResult
   | VerifyPlanContractViolationResult
   | VerifyBlockedResult
-  | StageBudgetExhaustedResult
-  | StageCanceledResult
-  | StageExecutionFailedResult
 ```
 
 ```text
@@ -566,29 +664,66 @@ Reconciler。Conductor不把
 `verify_changes_required`机械映射为successor Cycle；Root Reconciler可以在当前Cycle预算内继续Work，也可以提出
 repair conclusion。
 
-## 8. 公共terminal variants
+## 8. Mechanical StageTurnFailure
 
 ```text
-StageBudgetExhaustedResult
-  kind: budget_exhausted
-  budget_kind
-  attempted_approaches[]
-  resumable_facts[]
-
-StageCanceledResult
-  kind: canceled
-  sanitized_reason
-
-StageExecutionFailedResult
-  kind: execution_failed
-  error_code
+StageTurnFailure
+  kind: runtime_failure
+  failure_kind:
+    canceled
+    | deadline_exceeded
+    | budget_exhausted
+    | provider_failure
+    | output_invalid
+    | work_epoch_closure_failed
+    | workspace_fence_unproven
+  error_code:
+    turn_canceled | target_invalidated | session_closing
+    | turn_deadline_exceeded
+    | weighted_token_budget_exhausted | tool_call_budget_exhausted
+    | wall_time_budget_exhausted | root_finalization_reserve_exhausted
+    | provider_append_not_accepted | provider_append_acceptance_unknown
+    | provider_session_lost | provider_transport_failed | provider_budget_bound_unavailable
+    | provider_output_schema_invalid | provider_output_oversized | provider_output_correlation_invalid
+    | work_epoch_activity_after_candidate | work_epoch_registry_incomplete
+    | work_completion_unacked | work_budget_unsettled | work_finalization_evidence_stale
+    | workspace_write_revocation_unproven | mutation_containment_unproven
+    | session_containment_unproven
   sanitized_reason
   retryable
+  action_required: root_reconciliation | retry_close_only
+  continuity: ProviderTurnContinuity
 ```
 
-Provider transport/crash/schema failure与业务blocked必须区分。只有validated Result可以materialize native Linear/Git
-facts；无业务Result的process failure把matching Node收敛为`Failed`或`Interrupted`并记录sanitized runtime observation，
-不能伪造业务结论或创建failure payload comment。
+`StageTurnFailure`由Performer runtime生成，不是Plan/Work/Verify structured model output。Provider transport/crash/schema failure、
+external cancel、hard deadline/budget和Work tree closure/fence failure必须与business blocked区分。只有validated semantic Result
+可以materialize业务结论；failure在required runtime fencing后只形成closed mechanical fact，由fresh Root Reconciler选择matching
+terminal action，Conductor不能直接推导`Failed`或`Interrupted`。Failure不能伪造业务Result、resumable facts或failure payload
+comment；sanitized detail只进入runtime observation。`ProviderTurnContinuity`语义只由
+[Performer](performer.md#52-provider-append确认与失败)定义。
+
+`failure_kind`、`error_code`、continuity、`retryable`和`action_required`是一个closed validated组合，不能自由配对：
+
+| failure_kind | allowed error-code family | action / retry |
+|---|---|---|
+| `canceled` | `turn_canceled` / `target_invalidated` / `session_closing` | `root_reconciliation`, `retryable=false` |
+| `deadline_exceeded` | `turn_deadline_exceeded` | `root_reconciliation`, `retryable=false` |
+| `budget_exhausted` | four `*_budget_exhausted` codes | `root_reconciliation`, `retryable=false` |
+| `provider_failure` | five `provider_*` transport/continuity/budget-bound codes | `root_reconciliation`, `retryable=false` |
+| `output_invalid` | three `provider_output_*` codes | `root_reconciliation`, `retryable=false` |
+| `work_epoch_closure_failed` | five `work_*` codes | `root_reconciliation`, `retryable=false` |
+| `workspace_fence_unproven` | three workspace/containment codes | `retry_close_only`, `retryable=true` |
+
+这里的`retryable`只允许retry matching generic close，不授权重放Stage request；新的Stage turn始终需要fresh Root Reconciler action。
+`workspace_fence_unproven`只报告Root runtime-blocked，不能形成可推进Root的mechanical fact；只有后续close success和fresh Git facts
+完成后才能进入`root_reconciliation`。
+
+`provider_budget_bound_unavailable`表示Provider在dispatch前无法给出并强制执行token true upper bound。Completion后的usage缺失不是该
+failure：Performer保留完整reservation并把`RuntimeModelObservation`标为unavailable，不改变workflow事实。
+
+Work failure中的public `continuity`只描述persistent Work root Provider thread。Descendant continuity、thread ID和append outcome保持
+epoch-internal并在retire/fence时丢弃。Child ambiguity在能够证明thread、context和containment与root隔离时不改变root continuity；任一
+隔离证明缺失都机械升级为root `continuity.kind=closed`，并关闭整个Work role session，不能任选child或root状态报告。
 
 ## 9. Human input边界
 
@@ -608,9 +743,10 @@ resolved Human Action thread在Conductor验证后作为current native facts进�
 ## 10. Result与materialization
 
 Performer可以返回bounded runtime progress/heartbeat/tool summary，但它不决定业务完成、不写Linear，也不成为恢复输入。
-每个turn必须有一个terminal Result，或由Conductor归一化process/transport failure。
+每个turn必须有一个closed terminal response：matching semantic Result或mechanical `StageTurnFailure`。Conductor不得把transport
+exception自行转换成看似model生成的Result；未收到closed response时按同一runtime-failure contract fail closed。
 
-Result接受顺序固定：
+Semantic Result接受顺序固定：
 
 ```text
 fresh-read Root/Cycle/target/Git preconditions
@@ -640,20 +776,24 @@ ProviderBackendInterface
   close_role_session(session)
 ```
 
+Work backend还实现turn-epoch begin/execute/seal/abort和role-session close internal capability；字段与fencing语义只见
+[Work Subagents](work-subagents.md)，不得扩展成Conductor操纵subagent的public API。
+
 只有Performer backend使用Provider SDK。公共contract不能包含SDK object、raw Provider thread ID、Token、
 credential path、raw reasoning或完整transcript。Performer映射model、effort、sandbox、deadline、interrupt和
 structured output；无法表达execution policy时fail closed。
 
-Plan和Verify必须read-only；Work是workspace-write。每个turn执行wall time、context bytes、result bytes、tool
-calls和output token limits。取消、Root routing/process generation变化、Cycle terminal或archive active target时，Conductor使
-matching turn/session失效并拒绝late output。
+Plan和Verify必须read-only；Work是workspace-write。每个turn执行weighted tokens、wall time、context bytes、result bytes、
+tool calls和output token limits。取消、Root routing/process generation变化、Cycle terminal或archive active target时，
+Conductor使matching turn/session失效并拒绝late output。Work只有在matching write capability永久撤销且required runtime
+containment proof成立后才释放Root writer domain；PID或process-group exit不是充分证明。
 
 ## 12. 不变量
 
 1. 每个Cycle的Plan、Work、Verify使用三个不同Provider thread。
 2. Work thread跨当前Cycle多个Work Issues和turn复用，但每turn只执行一个selected target。
 3. Plan/Work/Verify都不决定下一步、不修改DAG、不创建Human Action。
-4. 所有request/result是closed、versioned、generated的强类型contract。
+4. 所有request/terminal response是closed、versioned、generated的强类型contract。
 5. Conductor是唯一caller；Performer不反向调用Conductor。
 6. Result必须materialize为native Linear/Git facts并read-back后才能交给Root Reconciler。
 7. Provider thread不是durable authority；丢失后从Linear/Git facts恢复。
@@ -662,3 +802,6 @@ matching turn/session失效并拒绝late output。
 10. Plan必须在现有Plan Contract和DAG字段中完整表达任务单元、scope、依赖顺序和验收覆盖；残缺或冲突的
     `plan_completed`不能推进Plan review或DAG materialization。
 11. Work只执行selected target；Verify只验证immutable target。二者的Result都是Root Reconciler输入，不拥有下一步语义。
+12. 只有Work role可以创建subagent；descendants不成为Stage或workflow nodes，也不能跨Work turn复用。
+13. 只有Work root生成semantic WorkResult；Performer生成mechanical StageTurnFailure，二者不可互相伪造。
+14. Work Result离开Performer前必须永久retire matching mutation epoch并验证barrier后worktree evidence。

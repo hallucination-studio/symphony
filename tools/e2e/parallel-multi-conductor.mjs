@@ -8,31 +8,14 @@ export async function runParallelMultiConductorCase({ definition, human, rootCre
   assertDefinition(definition);
   const rootCreations = assertInput({ definition, human, rootCreationsByRootKey, signal });
 
-  const roots = await Promise.all(definition.rootTopology.map(async (topology) => {
+  const roots = definition.rootTopology.map((topology) => {
     const creation = rootCreations.get(topology.rootKey);
-    const root = await human.createRootIssue({
-      caseId: definition.caseId,
-      rootKey: topology.rootKey,
-      teamId: creation.teamId,
-      projectId: creation.projectId,
-      rootLabelId: creation.rootLabelId,
-      routingLabelId: creation.routingLabelId,
-      rootStatusId: creation.rootStatusId,
-      ...(signal ? { signal } : {}),
-    });
+    const root = { rootIssueId: creation.rootIssueId, identifier: creation.identifier };
     if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
       throw stableError("foreground_e2e_parallel_root_create_invalid");
     }
     return Object.freeze({ topology, creation, root });
-  }));
-  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
-  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
+  });
 
   const requests = await Promise.all(roots.map(async ({ root }) => {
     const request = await human.waitForPlanApprovalRequest({
@@ -82,9 +65,8 @@ function assertDefinition(definition) {
 }
 
 function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
-  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
-      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanApprovalRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
+  if (!human || !identifier(human.actorId) || typeof human.waitForPlanApprovalRequest !== "function" ||
+      typeof human.replyToHumanAction !== "function" ||
       !rootCreationsByRootKey || typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
       signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
     throw stableError("foreground_e2e_parallel_case_input_invalid");
@@ -108,7 +90,7 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
 function validRootCreation(value) {
   if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.rootLabelId) || !identifier(value.routingLabelId) ||
       !identifier(value.rootStatusId) || !identifier(value.conductorId) || !identifier(value.performerProfileId) ||
-      !worktreeDirectory(value.worktreeDirectory)) {
+      !worktreeDirectory(value.worktreeDirectory) || !identifier(value.rootIssueId) || !identifier(value.identifier)) {
     return undefined;
   }
   return Object.freeze({
@@ -120,6 +102,8 @@ function validRootCreation(value) {
     conductorId: value.conductorId,
     performerProfileId: value.performerProfileId,
     worktreeDirectory: value.worktreeDirectory,
+    rootIssueId: value.rootIssueId,
+    identifier: value.identifier,
   });
 }
 

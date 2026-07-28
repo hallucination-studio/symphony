@@ -7,16 +7,9 @@ import { runMissingWorktreeRecoveryCase } from "../../tools/e2e/missing-worktree
 test("missing-worktree Case approves old Plans, faults both fenced owners together, and approves only the fresh invalid Plan", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "missing_worktree_recovery");
   const calls = [];
-  const roots = {
-    "recoverable-worktree-root": { rootIssueId: "root-recoverable", identifier: "ENG-10" },
-    "invalid-generation-root": { rootIssueId: "root-invalid", identifier: "ENG-20" },
-  };
   let approvalCount = 0;
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) { calls.push(["create", input]); return roots[input.rootKey]; },
-    async assertRootUndelegatedAndInactive({ rootIssueId }) { calls.push(["undelegated", rootIssueId]); },
-    async delegateRootIssue({ rootIssueId }) { calls.push(["delegate", rootIssueId]); },
     async waitForPlanApprovalRequest({ rootIssueId }) {
       calls.push(["old-approval", rootIssueId]);
       return {
@@ -73,12 +66,7 @@ test("missing-worktree Case approves old Plans, faults both fenced owners togeth
 
   const result = await runMissingWorktreeRecoveryCase({ definition, human, runtime, rootCreationsByRootKey });
 
-  assert.deepEqual(calls.slice(0, 2), [
-    ["create", rootCreateInput("recoverable-worktree-root", rootCreationsByRootKey["recoverable-worktree-root"])],
-    ["create", rootCreateInput("invalid-generation-root", rootCreationsByRootKey["invalid-generation-root"])],
-  ]);
   assert.deepEqual(calls.map(([kind]) => kind), [
-    "create", "create", "undelegated", "undelegated", "delegate", "delegate",
     "old-approval", "old-approval", "reply", "reply", "admission", "fault", "fresh-approval", "reply",
   ]);
   assert.deepEqual(result.context.missingWorktree, {
@@ -101,6 +89,7 @@ test("missing-worktree Case approves old Plans, faults both fenced owners togeth
 });
 
 function rootCreation(routingLabelId, conductorId, worktreeDirectory) {
+  const root = routingLabelId === "route-a" ? rootsForCreation().recoverable : rootsForCreation().invalid;
   return {
     teamId: "team-1",
     projectId: "project-1",
@@ -110,9 +99,13 @@ function rootCreation(routingLabelId, conductorId, worktreeDirectory) {
     conductorId,
     performerProfileId: `profile-${conductorId}`,
     worktreeDirectory,
+    ...root,
   };
 }
 
-function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
-  return { caseId: "missing_worktree_recovery", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
+function rootsForCreation() {
+  return {
+    recoverable: { rootIssueId: "root-recoverable", identifier: "ENG-10" },
+    invalid: { rootIssueId: "root-invalid", identifier: "ENG-20" },
+  };
 }

@@ -8,13 +8,10 @@ export async function runInformationRequestedAndAnsweredCase({ definition, human
 
   const rootKey = definition.rootTopology[0].rootKey;
   const answer = frozenAnswer(definition);
-  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation, ...(signal ? { signal } : {}) });
+  const root = { rootIssueId: rootCreation.rootIssueId, identifier: rootCreation.identifier };
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_information_root_create_invalid");
   }
-  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
-  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
-
   const request = await waitForInformation({ human, rootIssueId: root.rootIssueId, signal });
   const comment = await human.replyToHumanAction({
     rootIssueId: root.rootIssueId,
@@ -85,12 +82,12 @@ function assertDefinition(definition) {
 }
 
 function assertInput({ human, rootCreation, signal }) {
-  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
-      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForInformationRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
+  if (!human || !identifier(human.actorId) || typeof human.waitForInformationRequest !== "function" ||
+      typeof human.replyToHumanAction !== "function" ||
       typeof human.waitForPlanApprovalRequest !== "function" ||
       !rootCreation || !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||
+      !identifier(rootCreation.rootIssueId) || !identifier(rootCreation.identifier) ||
       (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"))) {
     throw stableError("foreground_e2e_information_case_input_invalid");
   }

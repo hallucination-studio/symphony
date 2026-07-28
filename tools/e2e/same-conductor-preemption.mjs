@@ -8,31 +8,14 @@ export async function runSameConductorPreemptionCase({ definition, human, rootCr
   assertDefinition(definition);
   const rootCreations = assertInput({ definition, human, rootCreationsByRootKey, signal });
 
-  const roots = await Promise.all(definition.rootTopology.map(async (topology) => {
+  const roots = definition.rootTopology.map((topology) => {
     const creation = rootCreations.get(topology.rootKey);
-    const root = await human.createRootIssue({
-      caseId: definition.caseId,
-      rootKey: topology.rootKey,
-      teamId: creation.teamId,
-      projectId: creation.projectId,
-      rootLabelId: creation.rootLabelId,
-      routingLabelId: creation.routingLabelId,
-      rootStatusId: creation.rootStatusId,
-      ...(signal ? { signal } : {}),
-    });
+    const root = { rootIssueId: creation.rootIssueId, identifier: creation.identifier };
     if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
       throw stableError("foreground_e2e_preemption_root_create_invalid");
     }
     return Object.freeze({ topology, root });
-  }));
-  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
-  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
+  });
 
   const rootIssueIdsByKey = Object.freeze(Object.fromEntries(roots.map(({ topology, root }) => [topology.rootKey, root.rootIssueId])));
   const admission = assertAdmission(
@@ -111,9 +94,8 @@ function assertDefinition(definition) {
 }
 
 function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
-  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
-      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForSameConductorPreemptionAdmission !== "function" || typeof human.updateRootDescription !== "function" ||
+  if (!human || !identifier(human.actorId) || typeof human.waitForSameConductorPreemptionAdmission !== "function" ||
+      typeof human.updateRootDescription !== "function" ||
       typeof human.waitForSameConductorPreemptionCandidate !== "function" || typeof human.waitForPlanApprovalRequest !== "function" ||
       typeof human.replyToHumanAction !== "function" || !rootCreationsByRootKey ||
       typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
@@ -138,7 +120,8 @@ function assertInput({ definition, human, rootCreationsByRootKey, signal }) {
 
 function validRootCreation(value) {
   if (!value || !identifier(value.teamId) || !identifier(value.projectId) || !identifier(value.rootLabelId) || !identifier(value.routingLabelId) ||
-      !identifier(value.rootStatusId) || !identifier(value.conductorId)) {
+      !identifier(value.rootStatusId) || !identifier(value.conductorId) ||
+      !identifier(value.rootIssueId) || !identifier(value.identifier)) {
     return undefined;
   }
   return Object.freeze({
@@ -148,6 +131,8 @@ function validRootCreation(value) {
     routingLabelId: value.routingLabelId,
     rootStatusId: value.rootStatusId,
     conductorId: value.conductorId,
+    rootIssueId: value.rootIssueId,
+    identifier: value.identifier,
   });
 }
 

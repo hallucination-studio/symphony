@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 
+import {
+  humanActionRequest,
+  humanActionSummaryStatus,
+} from "../../human-actions/api/HumanActionSummary.js";
 import type { LinearGatewayInterface } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
   RootDirective,
@@ -22,6 +26,7 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     let tree = input.view.tree;
     let source = sourceComment(tree, input.reply);
     if (!source) return failed("reply_source_comment_missing");
+    const belongsToHumanAction = humanActionRequest(tree, input.view.root.issueId, source) !== undefined;
     if (input.reply.source.kind === "comment_thread_state" && input.reply.reaction !== "none") {
       return failed("reply_thread_state_receipt_invalid");
     }
@@ -106,7 +111,9 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
     const desiredState = input.reply.threadAction === "resolve" ? "resolved" : "unresolved";
     if (input.reply.threadAction === "keep_open") {
       if (source.thread_state !== desiredState) return failed("reply_thread_state_not_open");
-      return { kind: "materialized" };
+      return belongsToHumanAction
+        ? convergeHumanActionRootStatus(this.linear, tree, input.view.root.issueId, replyId)
+        : { kind: "materialized" };
     }
     if (source.thread_state !== desiredState) {
       const stateOutcome = await this.linear.mutateWorkflow({
@@ -136,8 +143,57 @@ export class LinearRootReconcilerReplyWriterImpl implements RootReconcilerReplyW
         return failed("reply_thread_state_read_back_missing");
       }
     }
-    return { kind: "materialized" };
+    return belongsToHumanAction
+      ? convergeHumanActionRootStatus(this.linear, tree, input.view.root.issueId, replyId)
+      : { kind: "materialized" };
   }
+}
+
+async function convergeHumanActionRootStatus(
+  linear: LinearGatewayInterface,
+  tree: RootReconciliationView["tree"],
+  rootIssueId: string,
+  replyId: string,
+): Promise<{ kind: "materialized" } | { kind: "failed"; code: string }> {
+  const desiredStatus = humanActionSummaryStatus(tree, rootIssueId);
+  if (!desiredStatus) return failed("reply_human_action_summary_missing");
+  const root = rootIssue(tree, rootIssueId);
+  if (!root || root.issue_kind !== "root" || root.is_archived) return failed("reply_human_action_root_invalid");
+  if (root.status_name === desiredStatus) return { kind: "materialized" };
+  if (!["In Progress", "Needs Approval", "Needs Info"].includes(root.status_name)) {
+    return failed("reply_human_action_root_status_invalid");
+  }
+  const status = tree.status_catalog.find(({ name }) => name === desiredStatus);
+  if (!status) return failed("reply_human_action_root_status_missing");
+
+  const outcome = await linear.mutateWorkflow({
+    kind: "update_workflow_issue",
+    writeId: `${replyId}:human-action-root-status`,
+    expectedProjectId: root.project_id,
+    rootIssueId,
+    expectedRootRemoteVersion: root.remote_version,
+    target: {
+      targetIssueId: root.issue_id,
+      expectedRemoteVersion: root.remote_version,
+      expectedStatusId: root.status_id,
+      expectedIsArchived: false,
+    },
+    statusId: status.status_id,
+    title: root.title,
+    description: root.description,
+    labelNames: root.labels,
+    isArchived: false,
+    parentAssignment: { mode: "retain" },
+    order: root.order,
+  });
+  const readBack = await linear.readWorkflowIssueTree(rootIssueId);
+  const confirmed = rootIssue(readBack, rootIssueId);
+  if (!confirmed || confirmed.status_id !== status.status_id || confirmed.status_name !== status.name) {
+    return failed(outcome.kind === "applied" || outcome.kind === "already_applied"
+      ? "reply_human_action_root_status_read_back_missing"
+      : "reply_human_action_root_status_write_failed");
+  }
+  return { kind: "materialized" };
 }
 
 function deterministicReplyId(input: {

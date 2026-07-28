@@ -11,6 +11,7 @@ import { PodiumDesktopViewImpl } from "../desktop-views/PodiumDesktopViewImpl.js
 import { PodiumError, podiumError } from "../errors.js";
 import { LinearAuthImpl } from "../linear-auth/LinearAuthImpl.js";
 import { LinearOAuthHttpClientImpl } from "../linear-auth/LinearOAuthHttpClientImpl.js";
+import { linearProtocolFailure } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
 import { ProjectCatalogUseCase } from "../project-catalog/ProjectCatalogUseCase.js";
 import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
@@ -206,6 +207,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
         await sdk.initializeTargetTeamWorkflow({ projectId, authorized: true });
       },
       "conductor_target_workflow_initialization_failed",
+      { preserveLinearFailure: true },
     );
     this.#targetWorkflowInitializations.set(projectId, initialization);
     try {
@@ -358,11 +360,22 @@ function profileCommand(body: Body) {
 async function createConductorStep<T>(
   operation: () => Promise<T>,
   failureCode: string,
+  options: { preserveLinearFailure?: boolean } = {},
 ): Promise<T> {
   try {
     return await operation();
   } catch (error) {
     if (error instanceof PodiumError) throw error;
+    if (options.preserveLinearFailure) {
+      const failure = linearProtocolFailure(error);
+      if (failure.code !== "linear_request_failed") {
+        throw podiumError(failure.code, failure.sanitizedReason, {
+          retryable: failure.retryable,
+          actionRequired: "retry_request",
+          nextAction: "Resolve the reported Linear workflow setup problem and retry the request.",
+        });
+      }
+    }
     throw podiumError(failureCode, failureCode, {
       actionRequired: "retry_request",
       nextAction: "Resolve the reported Conductor setup problem and retry the request.",

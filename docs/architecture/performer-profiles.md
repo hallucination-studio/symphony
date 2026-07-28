@@ -15,6 +15,7 @@ Profiles，以及Conductor、Performer和Codex SDK之间的所有权边界。
   Conductor验证并持久化；
 - Profile切换不重启Conductor，下一次Root admission立即使用新active Profile；
 - Root固定使用claim时的Profile；每个Root创建Reconciler thread，每个Cycle创建隔离Plan、Work、Verify threads；
+- 每个Work role session使用独立`WorkSessionContainment`，并可在其中创建同Profile、同policy的Work Agent Tree；
 - model、reasoning effort和Fast由Conductor保存为产品设置，并由Performer映射为SDK参数；
 - sandbox mode和command allowlist/denylist由Conductor保存，并由Performer映射为Provider-native策略；
 - actual model/Token usage由Performer从Codex SDK采集为runtime logs/metrics；完成数量只来自Linear Root事实。
@@ -313,6 +314,12 @@ Provider thread。Profile复用认证、Provider设置和SDK cache；Root Reconc
 Stage thread只在matching Cycle内复用，且都不能成为durable authority。契约由
 [Root Reconciliation](root-reconciliation.md)和[Stage Contracts](stage-orchestration.md)定义。
 
+Work session containment、descendant setting inheritance和writer fence由[Work Subagents](work-subagents.md)定义。多个
+Work-session Codex app-server processes可以使用同一Profile `CODEX_HOME`，但只能通过pinned SDK的public concurrency contract；
+Symphony不得复制auth文件、创建shadow credential home或读取Codex state来协调。Tree内model、reasoning、Fast、sandbox、
+command和network policy全部继承matching Work turn，model不能override。Turn-scoped path write grant只是对该既有workspace-write
+policy的机械收紧，不成为新的Profile setting或通用授权系统。
+
 ## 11. Model与usage observability
 
 本节是actual model和Provider usage runtime observation的唯一事实源。Performer从实际SDK调用设置和SDK response采集：
@@ -330,6 +337,10 @@ RuntimeModelObservation
 
 该对象不属于模型structured output，只进入sanitized structured logs/metrics和当前cross-process response。它不写Linear、
 Git workflow file、Podium DB或Desktop workflow view，也不参与restart、dispatch、Cycle conclusion或Root delivery。
+
+Work role的一个observation聚合Work Agent Tree Root与全部descendants的actual Provider usage；不按agent path向public contract或
+Desktop展开。缺失任一node usage时按Provider aggregate能力返回`unavailable`或明确的不完整原因，不能只报告root并冒充tree
+总量。
 
 usage字段存在时遵循Provider语义；cached/reasoning子集不得重复计入total。Provider未返回、transport丢失或process crash时
 记录`unavailable`，不能伪造零。operator telemetry不宣称账单、ChatGPT credits或货币成本精度。
@@ -371,6 +382,7 @@ Desktop只显示Profile配置和认证操作的真实Result，不显示当前Roo
 | Profile目录不可读 | `performer_profile_home_unavailable` |
 | Root固定Profile被移除 | Root blocked，不静默改用active Profile |
 | usage无法取得 | runtime observation写`unavailable`；不伪造零，也不改变workflow事实 |
+| Work epoch无法retire或containment state不明 | 永久撤销matching workspace write capability并terminate exact containment；proof前不释放Root writer domain |
 
 本轮不提供删除Profile Command，因此不会正常产生“固定Profile被移除”；该错误只防御
 磁盘损坏或人工删除。
@@ -394,6 +406,8 @@ Desktop只显示Profile配置和认证操作的真实Result，不显示当前Roo
 15. Podium发起或转发active选择，但只有Conductor可以提交active Profile事实。
 16. actual model和usage是runtime observability，不写Linear，也不形成workflow authority。
 17. exact cross-restart usage aggregate被删除；convergence只使用native可重建facts。
+18. Profile是认证与设置边界，不是共享Work runtime；每个Work role session使用独立non-escapable containment并继承同一Profile policy。
+19. Work Agent Tree内不暴露model、reasoning、Fast、agent type或execution policy override。
 
 ## 15. 官方技术依据
 

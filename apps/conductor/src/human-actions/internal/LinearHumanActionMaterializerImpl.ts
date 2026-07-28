@@ -4,17 +4,15 @@ import type {
   CreateHumanActionAction,
   RootReconciliationView,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import {
+  humanActionHeadings,
+  humanActionRequestIsActive,
+  humanActionSummaryStatus,
+} from "../api/HumanActionSummary.js";
 import type {
   HumanActionMaterializationResult,
   HumanActionMaterializerInterface,
 } from "../api/HumanActionMaterializerInterface.js";
-
-const headings: Record<CreateHumanActionAction["actionKind"], string> = {
-  plan_approval: "需要你审批",
-  information: "需要你补充信息",
-  permission: "需要你授权",
-  finding_waiver: "需要你确认 Finding 豁免",
-};
 
 export class LinearHumanActionMaterializerImpl implements HumanActionMaterializerInterface {
   constructor(private readonly linear: LinearGatewayInterface) {}
@@ -27,35 +25,44 @@ export class LinearHumanActionMaterializerImpl implements HumanActionMaterialize
     const prepared = prepare(input.action, input.view);
     if (typeof prepared === "string") return failed(prepared);
 
-    const outcome = await this.linear.mutateWorkflow({
-      kind: "append_workflow_comment",
-      writeId: `${input.rootDirectiveId}:human-action-request`,
-      expectedProjectId: prepared.root.project_id,
-      rootIssueId: prepared.root.issue_id,
-      expectedRootRemoteVersion: prepared.root.remote_version,
-      target: {
-        targetIssueId: prepared.root.issue_id,
-        expectedRemoteVersion: prepared.root.remote_version,
-        expectedStatusId: prepared.root.status_id,
-        expectedIsArchived: false,
-      },
-      body: prepared.body,
-    });
-    if (outcome.kind === "precondition_conflict" || outcome.kind === "failed") {
-      return failed(`human_action_request_write_${outcome.kind}`);
+    const initialMatches = matchingRequests(input.view.tree, prepared.root.issue_id, prepared.body);
+    if (initialMatches.length > 1) return failed("human_action_request_ambiguous");
+    let writeOutcome: Awaited<ReturnType<LinearGatewayInterface["mutateWorkflow"]>> | undefined;
+    if (initialMatches.length === 0) {
+      writeOutcome = await this.linear.mutateWorkflow({
+        kind: "append_workflow_comment",
+        writeId: `${input.rootDirectiveId}:human-action-request`,
+        expectedProjectId: prepared.root.project_id,
+        rootIssueId: prepared.root.issue_id,
+        expectedRootRemoteVersion: prepared.root.remote_version,
+        target: {
+          targetIssueId: prepared.root.issue_id,
+          expectedRemoteVersion: prepared.root.remote_version,
+          expectedStatusId: prepared.root.status_id,
+          expectedIsArchived: false,
+        },
+        body: prepared.body,
+      });
     }
-    const readBack = outcome.kind === "write_unconfirmed" ? outcome.readBackTarget : outcome.readBack;
-    const comment = readBack.comment;
-    if (!comment || !matchesRequest(comment, prepared.root.issue_id, prepared.body)) {
+
+    let tree = await this.linear.readWorkflowIssueTree(prepared.root.issue_id);
+    const confirmed = matchingRequests(tree, prepared.root.issue_id, prepared.body);
+    if (confirmed.length !== 1) {
+      if (confirmed.length > 1) return failed("human_action_request_ambiguous");
+      if (writeOutcome?.kind === "precondition_conflict" || writeOutcome?.kind === "failed") {
+        return failed(`human_action_request_write_${writeOutcome.kind}`);
+      }
       return failed("human_action_request_write_unconfirmed");
     }
 
-    const tree = await this.linear.readWorkflowIssueTree(prepared.root.issue_id);
-    const confirmed = tree.comments.find(({ comment_id }) => comment_id === comment.comment_id);
-    if (!confirmed || !matchesRequest(confirmed, prepared.root.issue_id, prepared.body)) {
+    const statusResult = await convergeRootStatus(this.linear, tree, prepared.root.issue_id, input.rootDirectiveId);
+    if (typeof statusResult === "string") return failed(statusResult);
+    tree = statusResult;
+    const request = tree.comments.find(({ comment_id }) => comment_id === confirmed[0]!.comment_id);
+    if (!request || !matchesRequest(request, prepared.root.issue_id, prepared.body)) {
       return failed("human_action_request_read_back_invalid");
     }
-    return { kind: "materialized", requestCommentId: confirmed.comment_id };
+    return { kind: "materialized", requestCommentId: request.comment_id };
   }
 }
 
@@ -85,8 +92,9 @@ function prepare(
   }
 
   const body = [
-    `## ${headings[action.actionKind]}`,
+    `## ${humanActionHeadings[action.actionKind]}`,
     "",
+    "### 需要你的操作",
     action.question.trim(),
     "",
     "### 相关对象",
@@ -95,6 +103,14 @@ function prepare(
     "### 背景与影响",
     action.context.trim(),
     ...(action.options.length === 0 ? [] : ["", "### 可选项", ...action.options.map((option) => `- ${option}`)]),
+    "",
+    "### 如何继续",
+    action.actionKind === "information"
+      ? "请直接在本条 comment 下回复并提供上述信息。"
+      : "请直接在本条 comment 下回复你的决定。",
+    "",
+    "### 回复后",
+    "Symphony 会验证回复与相关对象的当前事实，并在确认后继续。",
   ].join("\n");
   if (body.length > 16_384 || /```json|<!--|\0/u.test(body)) return "human_action_request_content_invalid";
   return { root, body };
@@ -127,6 +143,62 @@ function matchesRequest(
     comment.thread_root_comment_id === comment.comment_id &&
     comment.author_kind === "symphony" &&
     comment.body === body;
+}
+
+function matchingRequests(
+  tree: LinearWorkflowTreeSnapshot,
+  rootIssueId: string,
+  body: string,
+): LinearWorkflowTreeSnapshot["comments"] {
+  return tree.comments.filter((comment) =>
+    matchesRequest(comment, rootIssueId, body) && humanActionRequestIsActive(tree, comment));
+}
+
+async function convergeRootStatus(
+  linear: LinearGatewayInterface,
+  tree: LinearWorkflowTreeSnapshot,
+  rootIssueId: string,
+  rootDirectiveId: string,
+): Promise<LinearWorkflowTreeSnapshot | string> {
+  const desiredStatus = humanActionSummaryStatus(tree, rootIssueId);
+  if (!desiredStatus) return "human_action_root_summary_invalid";
+  const root = tree.issues.find(({ issue_id }) => issue_id === rootIssueId);
+  if (!root || root.issue_kind !== "root" || root.is_archived) return "human_action_root_invalid";
+  if (root.status_name === desiredStatus) return tree;
+  if (!["In Progress", "Needs Approval", "Needs Info"].includes(root.status_name)) {
+    return "human_action_root_status_invalid";
+  }
+  const status = tree.status_catalog.find(({ name }) => name === desiredStatus);
+  if (!status) return "human_action_root_status_missing";
+
+  const outcome = await linear.mutateWorkflow({
+    kind: "update_workflow_issue",
+    writeId: `${rootDirectiveId}:human-action-root-status`,
+    expectedProjectId: root.project_id,
+    rootIssueId,
+    expectedRootRemoteVersion: root.remote_version,
+    target: {
+      targetIssueId: root.issue_id,
+      expectedRemoteVersion: root.remote_version,
+      expectedStatusId: root.status_id,
+      expectedIsArchived: false,
+    },
+    statusId: status.status_id,
+    title: root.title,
+    description: root.description,
+    labelNames: root.labels,
+    isArchived: false,
+    parentAssignment: { mode: "retain" },
+    order: root.order,
+  });
+  const readBack = await linear.readWorkflowIssueTree(rootIssueId);
+  const confirmed = readBack.issues.find(({ issue_id }) => issue_id === rootIssueId);
+  if (!confirmed || confirmed.status_id !== status.status_id || confirmed.status_name !== status.name) {
+    return outcome.kind === "applied" || outcome.kind === "already_applied"
+      ? "human_action_root_status_read_back_invalid"
+      : "human_action_root_status_write_failed";
+  }
+  return readBack;
 }
 
 function failed(code: string): HumanActionMaterializationResult {

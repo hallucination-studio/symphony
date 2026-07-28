@@ -4,21 +4,11 @@ import test from "node:test";
 import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { runInformationRequestedAndAnsweredCase } from "../../tools/e2e/information-requested-and-answered.mjs";
 
-test("information Case writes its frozen answer on the product Clarification Action and waits for fresh Plan Review", async () => {
+test("information Case consumes its admitted Root, answers the Clarification Action, and waits for fresh Plan Review", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
   const calls = [];
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) {
-      calls.push({ kind: "create_root", input });
-      return { rootIssueId: "root-1", identifier: "ENG-1" };
-    },
-    async assertRootUndelegatedAndInactive(input) {
-      calls.push({ kind: "assert_undelegated", input });
-    },
-    async delegateRootIssue(input) {
-      calls.push({ kind: "delegate_root", input });
-    },
     async waitForInformationRequest(input) {
       calls.push({ kind: "wait_for_clarification", input });
       return { requestCommentId: "information-request", rootIssueId: "root-1" };
@@ -41,23 +31,12 @@ test("information Case writes its frozen answer on the product Clarification Act
       projectId: "project-1",
       routingLabelId: "route-label",
       rootStatusId: "todo-state",
+      rootIssueId: "root-1",
+      identifier: "ENG-1",
     },
   });
 
   assert.deepEqual(calls, [
-    {
-      kind: "create_root",
-      input: {
-        caseId: "information_requested_and_answered",
-        rootKey: "information-root",
-        teamId: "team-1",
-        projectId: "project-1",
-        routingLabelId: "route-label",
-        rootStatusId: "todo-state",
-      },
-    },
-    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
-    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_clarification", input: { rootIssueId: "root-1" } },
     {
       kind: "answer_information",
@@ -80,9 +59,6 @@ test("information Case rejects a noncanonical definition or a Human boundary out
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "information_requested_and_answered");
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive() {},
-    async delegateRootIssue() {},
     async waitForInformationRequest() { return { requestCommentId: "information-request", rootIssueId: "root-1" }; },
     async replyToHumanAction() { return { commentId: "answer-comment", issueId: "root-1", requestCommentId: "information-request" }; },
     async waitForPlanApprovalRequest() { return { requestCommentId: "replacement-plan-review", planIssueId: "replacement-plan" }; },
@@ -92,7 +68,7 @@ test("information Case rejects a noncanonical definition or a Human boundary out
     runInformationRequestedAndAnsweredCase({
       definition: { ...definition, caseId: "approved_happy_path" },
       human,
-      rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+      rootCreation: admittedRootCreation(),
     }),
     hasCode("foreground_e2e_information_case_definition_invalid"),
   );
@@ -100,7 +76,7 @@ test("information Case rejects a noncanonical definition or a Human boundary out
     runInformationRequestedAndAnsweredCase({
       definition,
       human: { ...human, waitForInformationRequest: undefined },
-      rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+      rootCreation: admittedRootCreation(),
     }),
     hasCode("foreground_e2e_information_case_input_invalid"),
   );
@@ -112,9 +88,6 @@ test("information Case forwards cancellation only to its Clarification and Plan 
   const waits = [];
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
-    async delegateRootIssue(input) { waits.push(input); },
     async waitForInformationRequest(input) {
       waits.push(input);
       return { requestCommentId: "information-request", rootIssueId: "root-1" };
@@ -130,16 +103,25 @@ test("information Case forwards cancellation only to its Clarification and Plan 
     definition,
     human,
     signal: abortController.signal,
-    rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+    rootCreation: admittedRootCreation(),
   });
 
   assert.deepEqual(waits, [
     { rootIssueId: "root-1", signal: abortController.signal },
     { rootIssueId: "root-1", signal: abortController.signal },
-    { rootIssueId: "root-1", signal: abortController.signal },
-    { rootIssueId: "root-1", signal: abortController.signal },
   ]);
 });
+
+function admittedRootCreation() {
+  return {
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+    rootIssueId: "root-1",
+    identifier: "ENG-1",
+  };
+}
 
 function hasCode(code) {
   return (error) => error?.code === code;

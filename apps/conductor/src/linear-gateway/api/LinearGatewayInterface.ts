@@ -11,6 +11,8 @@ export interface LinearWorkflowTreeSnapshot {
     identifier: string;
     project_id: string;
     parent_issue_id?: string;
+    creator_user_id?: string;
+    assignee_user_id?: string;
     status_id: string;
     status_name: string;
     status_category: "backlog" | "unstarted" | "started" | "completed" | "canceled";
@@ -230,7 +232,7 @@ export type LinearWorkflowMutationCommand =
       sourceExpectedRemoteVersion: string;
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+      relationKind: "blocks" | "blocked_by" | "relates_to";
       relationState: "present" | "absent";
     };
 

@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 
 import type { RootWorktreeGateInspection, RootWorktreeGateResult } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import {
+  humanActionRequest,
+  humanActionRequestIsActive,
+  humanCommentHasCurrentResolution,
+} from "../../human-actions/api/HumanActionSummary.js";
 import { rootInputId } from "./RootInputIdentity.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type {
@@ -76,7 +81,8 @@ export function buildRootFactSet(input: {
   const userCommentThreadStates: RootCommentThreadState[] = [];
   for (const comment of input.tree.comments) {
     if (comment.comment_id !== comment.thread_root_comment_id ||
-        isAcknowledgedThreadState(comment, input.tree)) continue;
+        isAcknowledgedThreadState(comment, input.tree) ||
+        isCompletedHumanAction(comment, input.tree)) continue;
     const threadState = toCommentThreadState(comment, input.tree.observed_at);
     userCommentThreadStates.push(threadState);
     add(entries, `linear_comment_thread_state:${comment.comment_id}`, {
@@ -218,7 +224,10 @@ export function buildRootFactSet(input: {
       sourceVersionOrDigest: change.sourceVersionOrDigest,
       actorKind: change.actorKind,
     }))
-    .sort((left, right) => `${left.sourceKind}:${left.sourceId}`.localeCompare(`${right.sourceKind}:${right.sourceId}`));
+    .sort((left, right) => compareCodePoints(
+      `${left.sourceKind}:${left.sourceId}`,
+      `${right.sourceKind}:${right.sourceId}`,
+    ));
   const receiptedInputIds = new Set(userComments
     .filter((comment) => isNativelyReceipted(comment, input.tree))
     .map((comment) => commentBodyInputId(comment.commentId, bodyDigest(comment.body))));
@@ -242,6 +251,14 @@ export function buildRootFactSet(input: {
     pendingInputIds,
   };
   return { bootstrap, entries };
+}
+
+function isCompletedHumanAction(
+  comment: LinearWorkflowTreeSnapshot["comments"][number],
+  tree: LinearWorkflowTreeSnapshot,
+): boolean {
+  const identified = humanActionRequest(tree, tree.root_issue_id, comment);
+  return identified !== undefined && !humanActionRequestIsActive(tree, identified.request);
 }
 
 export function viewFromFactSet(input: {
@@ -352,6 +369,8 @@ function toFactIssue(issue: LinearWorkflowTreeSnapshot["issues"][number]): RootF
     issueId: issue.issue_id,
     issueKind,
     ...(issue.parent_issue_id ? { parentIssueId: issue.parent_issue_id } : {}),
+    ...(issue.creator_user_id ? { creatorUserId: issue.creator_user_id } : {}),
+    ...(issue.assignee_user_id ? { assigneeUserId: issue.assignee_user_id } : {}),
     title: issue.title,
     description: issue.description,
     status: issue.status_name as RootFactIssue["status"],
@@ -450,15 +469,8 @@ function isAcknowledgedThreadState(
 }
 
 function isNativelyReceipted(comment: RootFactComment, tree: LinearWorkflowTreeSnapshot): boolean {
-  if (comment.authorKind !== "human" || !comment.authorUserId || comment.authorId !== comment.authorUserId) return false;
-  const receipts = new Set(comment.reactions
-    .filter(({ actorKind, emoji }) => actorKind === "symphony" && (emoji === "✅" || emoji === "❌"))
-    .map(({ emoji }) => emoji));
-  return receipts.size === 1 && tree.comments.some((reply) =>
-    reply.parent_comment_id === comment.commentId &&
-    reply.thread_root_comment_id === comment.threadRootCommentId &&
-    reply.author_kind === "symphony" &&
-    reply.body.trim().length > 0);
+  const source = tree.comments.find(({ comment_id }) => comment_id === comment.commentId);
+  return source !== undefined && humanCommentHasCurrentResolution(tree, source);
 }
 
 function cycleForIssue(issueId: string, tree: LinearWorkflowTreeSnapshot): string | undefined {
@@ -535,7 +547,11 @@ function bodyDigest(body: string): string {
 function rootDigest(manifest: RootBootstrap["sourceManifest"]): string {
   return digest(manifest
     .map((entry) => [entry.sourceKind, entry.sourceId, entry.sourceVersionOrDigest, entry.actorKind])
-    .sort((left, right) => `${left[0]}:${left[1]}`.localeCompare(`${right[0]}:${right[1]}`)));
+    .sort((left, right) => compareCodePoints(`${left[0]}:${left[1]}`, `${right[0]}:${right[1]}`)));
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function digest(value: unknown): string {

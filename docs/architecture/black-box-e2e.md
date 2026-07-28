@@ -128,6 +128,8 @@ unexpected product状态产生`failed`或`incomplete`，不能由runner“帮忙
 | `native_result_evidence` | Stage conclusions可由Issue status/labels/comments/Findings和Git facts证明 |
 | `delivery_consistent` | Root `In Review`时Cycle、Verify、commit、checks和PR/link指向same revision |
 | `terminal_nodes_not_dispatched` | terminal Issue没有后续`In Progress` Activity或新的execution target使用同一native ID |
+| `work_epoch_fenced` | Work terminal response后旧turn不能再改变worktree；commit/Verify读取的是epoch retirement后的fresh evidence |
+| `agent_tree_not_workflow` | Linear、Desktop和Git history中不存在agent path、mailbox、tree status或per-agent commit/branch |
 | `human_content_only` | Symphony Linear content没有machine serialization、hidden marker、internal receipt或自动step-by-step comments |
 | `no_test_control_facts` | 成功链中没有E2E writer创建的product facts |
 
@@ -192,8 +194,9 @@ coverage缺失产生`incomplete`，不能降级为passed。
 必须证明：
 
 - 至少两个process在runtime interval上真实overlap；
-- 每个Root任一时刻只有一个matching writer interval，且证据能定位到唯一routing label、Binding process generation和
+- 每个Root任一时刻只有一个matching writer-domain interval，且证据能定位到唯一routing label、Binding process generation和
   native mutation actor；
+- Work descendants即使并行运行也不形成额外Root writer domain，且旧epoch在domain handoff后没有late mutation；
 - native facts和Git branches无跨Case引用；
 - duplicate wake没有产生duplicate Issues、comments或commits；
 - 一个process失败不终止其他Roots。
@@ -222,7 +225,7 @@ runtime interval只证明并行拓扑；workflow success仍只由Final Evidence 
 - 若继续工作，使用fresh successor Issue和replacement/predecessor relation；
 - restart前已经`Done`的Issues没有新`In Progress` Activity；
 - Human Action threads、Root description和approved target facts不丢失；
-- stale process output不能materialize。
+- stale process output不能materialize，旧Work epoch也不能继续写worktree。
 
 ### 7.8 `missing_worktree_recovery`
 

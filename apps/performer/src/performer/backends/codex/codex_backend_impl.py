@@ -8,8 +8,9 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from contracts import SCHEMA_REGISTRY
 from openai_codex import Codex, CodexConfig, Sandbox
@@ -21,6 +22,7 @@ from performer.backends.provider_backend_interface import (
     ProviderTurnCanceled,
     ProviderTurnDeadlineExpired,
 )
+from performer.backends.codex.provider_io_capture import ProviderIoCapture
 from performer.prompt_resources import RolePromptCatalog
 from performer.root_reconciler.comment_replies import pending_comment_reply_sources_from_request
 
@@ -28,6 +30,9 @@ CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
 CODEX_PLUGIN_BOOTSTRAP_OVERRIDE = "features.plugins=false"
 CONDUCTOR_PERFORMER_SCHEMA_ID = "https://symphony.local/contracts/conductor-performer.schema.json"
 COMMON_SCHEMA_ID = "https://symphony.local/contracts/common.schema.json"
+UNSUPPORTED_STRUCTURED_OUTPUT_KEYWORDS = frozenset({"minLength", "maxLength", "uniqueItems"})
+
+
 def create_sdk(environment: dict[str, str] | None = None) -> Codex:
     source = os.environ if environment is None else environment
     base_url = source.get(CODEX_BASE_URL_ENVIRONMENT_KEY)
@@ -57,9 +62,17 @@ def _validate_base_url(value: str) -> None:
 class CodexBackendImpl(ProviderBackendInterface):
     """The only module allowed to depend on the Provider SDK."""
 
-    def __init__(self, sdk: Any, prompt_catalog: RolePromptCatalog) -> None:
+    def __init__(
+        self,
+        sdk: Any,
+        prompt_catalog: RolePromptCatalog,
+        *,
+        io_capture: ProviderIoCapture | None = None,
+    ) -> None:
         self._sdk = sdk
         self._prompt_catalog = prompt_catalog
+        self._io_capture = io_capture
+        self._capture_session_ids: dict[int, str] = {}
 
     def open_role_session(self, role: str, settings: dict[str, Any]) -> ProviderSession:
         try:
@@ -72,20 +85,39 @@ class CodexBackendImpl(ProviderBackendInterface):
             ) from error
         normalized = _settings(settings)
         service_tier = self._service_tier(normalized)
+        session_capture_id = str(uuid4()) if self._io_capture is not None else ""
+        options = {
+            "model": normalized.get("model"),
+            "service_tier": service_tier,
+            "sandbox": _sandbox_for_role(role),
+            "base_instructions": base_instructions,
+        }
+        self._record_provider_io(
+            "provider_session_input",
+            role=role,
+            session_capture_id=session_capture_id,
+            payload={"options": options},
+            append_outcome="not_accepted",
+        )
         try:
-            thread = self._sdk.thread_start(
-                model=normalized.get("model"),
-                service_tier=service_tier,
-                sandbox=_sandbox_for_role(role),
-                base_instructions=base_instructions,
-            )
+            thread = self._sdk.thread_start(**options)
         except Exception as error:
+            self._record_provider_error(
+                "provider_session_error",
+                role=role,
+                session_capture_id=session_capture_id,
+                phase="start",
+                error=error,
+                append_outcome="not_accepted",
+            )
             raise ProviderBackendError(
                 "The Provider could not start the role session.",
                 code="provider_session_start_failed",
                 retryable=True,
                 action_required="Retry the role with a fresh Provider context.",
             ) from error
+        if self._io_capture is not None:
+            self._capture_session_ids[id(thread)] = session_capture_id
         return ProviderSession(role, thread, normalized)
 
     def execute_role_turn(
@@ -97,6 +129,8 @@ class CodexBackendImpl(ProviderBackendInterface):
         cancel_event: Event,
     ) -> dict[str, Any]:
         settings = session.settings or {}
+        session_capture_id = self._capture_session_ids.get(id(session.provider_handle), "")
+        turn_capture_id = str(uuid4()) if self._io_capture is not None else ""
         try:
             service_tier = self._service_tier(settings)
             prompt = _role_prompt(session.role, request)
@@ -104,23 +138,52 @@ class CodexBackendImpl(ProviderBackendInterface):
         except ProviderBackendError:
             raise
         except Exception as error:
+            self._record_provider_error(
+                "provider_turn_error",
+                role=session.role,
+                session_capture_id=session_capture_id,
+                turn_capture_id=turn_capture_id,
+                request=request,
+                phase="preparation",
+                error=error,
+                append_outcome="not_accepted",
+            )
             raise ProviderBackendError(
                 "The Performer could not prepare the Provider turn.",
                 code="provider_turn_preparation_failed",
                 retryable=False,
                 append_outcome="not_accepted",
             ) from error
+        options = {
+            "cwd": str(workspace_root) if workspace_root is not None else None,
+            "model": settings.get("model"),
+            "effort": settings.get("reasoning_effort"),
+            "sandbox": _sandbox_for_role(session.role),
+            "service_tier": service_tier,
+            "output_schema": output_schema,
+        }
+        self._record_provider_io(
+            "provider_turn_input",
+            role=session.role,
+            session_capture_id=session_capture_id,
+            turn_capture_id=turn_capture_id,
+            request=request,
+            payload={"prompt": prompt, "options": options},
+            append_outcome="not_accepted",
+        )
         try:
-            handle = session.provider_handle.turn(
-                prompt,
-                cwd=str(workspace_root) if workspace_root is not None else None,
-                model=settings.get("model"),
-                effort=settings.get("reasoning_effort"),
-                sandbox=_sandbox_for_role(session.role),
-                service_tier=service_tier,
-                output_schema=output_schema,
-            )
+            handle = session.provider_handle.turn(prompt, **options)
         except Exception as error:
+            self._record_provider_error(
+                "provider_turn_error",
+                role=session.role,
+                session_capture_id=session_capture_id,
+                turn_capture_id=turn_capture_id,
+                request=request,
+                phase="start",
+                error=error,
+                append_outcome="not_accepted",
+            )
             raise ProviderBackendError(
                 "The Provider could not start the role turn.",
                 code="provider_turn_start_failed",
@@ -168,10 +231,27 @@ class CodexBackendImpl(ProviderBackendInterface):
                 result = handle.run()
                 completed = True
             except Exception as error:
+                self._record_provider_error(
+                    "provider_turn_error",
+                    role=session.role,
+                    session_capture_id=session_capture_id,
+                    turn_capture_id=turn_capture_id,
+                    request=request,
+                    phase="run",
+                    error=error,
+                    append_outcome="acceptance_unknown",
+                )
                 if deadline_expired.is_set():
                     raise ProviderTurnDeadlineExpired() from error
                 if cancel_event.is_set() or interrupted.is_set():
                     raise ProviderTurnCanceled() from error
+                if _is_provider_schema_rejection(error):
+                    raise ProviderBackendError(
+                        _provider_failure_reason(error),
+                        code="provider_schema_unsupported",
+                        retryable=False,
+                        append_outcome="not_accepted",
+                    ) from error
                 raise ProviderBackendError(
                     _provider_failure_reason(error),
                     code="provider_turn_failed",
@@ -184,6 +264,19 @@ class CodexBackendImpl(ProviderBackendInterface):
             if not completed:
                 request_interrupt()
 
+        self._record_provider_io(
+            "provider_turn_output",
+            role=session.role,
+            session_capture_id=session_capture_id,
+            turn_capture_id=turn_capture_id,
+            request=request,
+            payload={
+                "status": str(result.status),
+                "error": None if result.error is None else str(result.error),
+                "final_response": result.final_response,
+            },
+            append_outcome="accepted",
+        )
         if cancel_event.is_set() or interrupted.is_set():
             raise ProviderTurnCanceled()
         if deadline_expired.is_set():
@@ -214,6 +307,7 @@ class CodexBackendImpl(ProviderBackendInterface):
         return None
 
     def close_role_session(self, session: ProviderSession) -> None:
+        self._capture_session_ids.pop(id(session.provider_handle), None)
         thread_id = getattr(session.provider_handle, "id", None)
         if not isinstance(thread_id, str) or not thread_id:
             return
@@ -224,6 +318,62 @@ class CodexBackendImpl(ProviderBackendInterface):
                 "The Provider role session could not be closed.",
                 code="provider_session_close_failed",
                 retryable=True,
+            ) from error
+
+    def _record_provider_error(
+        self,
+        event: str,
+        *,
+        role: str,
+        session_capture_id: str,
+        phase: str,
+        error: Exception,
+        append_outcome: Literal["not_accepted", "accepted", "acceptance_unknown"],
+        turn_capture_id: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> None:
+        self._record_provider_io(
+            event,
+            role=role,
+            session_capture_id=session_capture_id,
+            turn_capture_id=turn_capture_id,
+            request=request,
+            payload={
+                "phase": phase,
+                "error_type": type(error).__name__,
+                "error_text": str(error),
+            },
+            append_outcome=append_outcome,
+        )
+
+    def _record_provider_io(
+        self,
+        event: str,
+        *,
+        role: str,
+        session_capture_id: str,
+        payload: dict[str, Any],
+        append_outcome: Literal["not_accepted", "accepted", "acceptance_unknown"],
+        turn_capture_id: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> None:
+        if self._io_capture is None:
+            return
+        try:
+            self._io_capture.record(
+                event,
+                role=role,
+                session_capture_id=session_capture_id,
+                turn_capture_id=turn_capture_id,
+                request=request,
+                payload=payload,
+            )
+        except Exception as error:
+            raise ProviderBackendError(
+                "The Provider I/O diagnostic capture failed.",
+                code="provider_io_capture_failed",
+                retryable=False,
+                append_outcome=append_outcome,
             ) from error
 
     def _service_tier(self, settings: dict[str, Any]) -> str | None:
@@ -397,7 +547,7 @@ def _expand_schema(
                 common_defs=common_defs,
                 active_refs=(*active_refs, reference),
             )
-        return {
+        expanded = {
             ("anyOf" if key == "oneOf" else key): _expand_schema(
                 child,
                 conductor_defs=conductor_defs,
@@ -405,7 +555,20 @@ def _expand_schema(
                 active_refs=active_refs,
             )
             for key, child in value.items()
+            if key not in UNSUPPORTED_STRUCTURED_OUTPUT_KEYWORDS
         }
+        if "type" not in expanded:
+            inferred_type = _closed_primitive_type(expanded)
+            if inferred_type is not None:
+                expanded["type"] = inferred_type
+        properties = expanded.get("properties")
+        if expanded.get("type") == "object" and isinstance(properties, dict):
+            originally_required = set(expanded.get("required", []))
+            for key, property_schema in properties.items():
+                if key not in originally_required:
+                    properties[key] = {"anyOf": [property_schema, {"type": "null"}]}
+            expanded["required"] = list(properties)
+        return expanded
     if isinstance(value, list):
         return [
             _expand_schema(
@@ -419,6 +582,27 @@ def _expand_schema(
     return value
 
 
+def _closed_primitive_type(schema: dict[str, Any]) -> str | None:
+    if "const" in schema:
+        return _primitive_type(schema["const"])
+    enum = schema.get("enum")
+    if not isinstance(enum, list) or not enum:
+        return None
+    primitive_types = {_primitive_type(value) for value in enum}
+    if len(primitive_types) != 1:
+        return None
+    return primitive_types.pop()
+
+
+def _primitive_type(value: Any) -> str | None:
+    return {
+        bool: "boolean",
+        int: "integer",
+        float: "number",
+        str: "string",
+    }.get(type(value))
+
+
 def _role_output(role: str, response: Any) -> dict[str, Any]:
     if not isinstance(response, str) or not response.strip():
         raise ProviderBackendError(
@@ -427,7 +611,7 @@ def _role_output(role: str, response: Any) -> dict[str, Any]:
             retryable=True,
         )
     try:
-        output = _decode_single_json_object(response)
+        output = _drop_null_object_fields(_decode_single_json_object(response))
     except (json.JSONDecodeError, ValueError) as error:
         raise ProviderBackendError(
             "The Provider returned an invalid role result.",
@@ -446,6 +630,14 @@ def _role_output(role: str, response: Any) -> dict[str, Any]:
     elif not isinstance(output.get("kind"), str):
         raise ProviderBackendError("The Provider returned an invalid role result.", code="role_output_kind_invalid", retryable=True)
     return output
+
+
+def _drop_null_object_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _drop_null_object_fields(child) for key, child in value.items() if child is not None}
+    if isinstance(value, list):
+        return [_drop_null_object_fields(child) for child in value]
+    return value
 
 
 def _decode_single_json_object(value: str) -> Any:
@@ -482,6 +674,10 @@ def _provider_failure_reason(error: Exception) -> str:
     detail = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
     detail = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]+", "[REDACTED]", detail)
     return f"The Provider turn failed: {detail}"[:1_024]
+
+
+def _is_provider_schema_rejection(error: Exception) -> bool:
+    return "invalid_json_schema" in str(error)
 
 
 def _usage(usage: Any) -> dict[str, Any]:

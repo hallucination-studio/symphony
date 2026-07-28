@@ -18,6 +18,7 @@ import type { PerformerAgentClientInterface } from "../../performer-agent-client
 import type { RootReconcilerClientInterface } from "../../root-reconciler-client/api/RootReconcilerClientInterface.js";
 import type { RootActionMaterializerInterface } from "../../root-action-materialization/api/RootActionMaterializerInterface.js";
 import type { RootReconcilerReplyWriterInterface } from "../../root-action-materialization/api/RootReconcilerReplyWriterInterface.js";
+import { humanActionRequest } from "../../human-actions/api/HumanActionSummary.js";
 import type {
   RootDirective,
   RootReconciliationView,
@@ -41,6 +42,7 @@ import { buildRootFactSet, diffRootFactSets, viewFromFactSet, type RootFactSet }
 import { rootInputId } from "./RootInputIdentity.js";
 
 const PROJECT_ROOT_INDEX_PAGE_SIZE = 8;
+const ROOT_FAILURE_COMMENT_HEADING = "## Symphony 无法继续此 Root";
 
 export interface RootReconciliationRuntimeDependencies {
   conductorId: string;
@@ -341,7 +343,10 @@ export class RootReconciliationRuntime {
         root_issue_id: root.issueId,
         failure_id: result.failure.failureId,
         failure_code: result.failure.code,
+        sanitized_reason: result.failure.sanitizedReason,
       });
+      setPhase("write_root_failure_comment");
+      await this.writeRootFailureComment(result.failure, tree);
       return "needs-attention";
     }
     this.sessions.set(root.issueId, { sessionId, profileId, factSet });
@@ -354,24 +359,68 @@ export class RootReconciliationRuntime {
       root,
       profileId,
       setPhase,
-      factSet.bootstrap.pendingInputIds,
+      attemptedInputIds,
       convergence,
     );
+    if (materialization.kind === "failed") {
+      const diagnostic = "diagnostic" in materialization ? materialization.diagnostic : undefined;
+      this.dependencies.log("root_directive_materialization_failed", {
+        root_issue_id: root.issueId,
+        directive_id: result.directive.rootDirectiveId,
+        reason: materialization.sanitizedReason,
+        directive_kind: result.directive.action.kind,
+        ...(diagnostic === undefined ? {} : {
+          operation_group: diagnostic.operationGroup,
+          operation_index: String(diagnostic.operationIndex),
+          operation_kind: diagnostic.operationKind,
+        }),
+      });
+      setPhase("write_root_failure_comment");
+      await this.writeRootFailureComment(materialization, tree);
+      await this.dependencies.reconciler.close({ requestId: randomUUID(), sessionId, reason: "turn_failed" });
+      this.sessions.delete(root.issueId);
+      return "needs-attention";
+    }
     this.dependencies.log("root_next_action_materialized", {
       root_issue_id: root.issueId,
       directive_kind: result.directive.action.kind,
       directive_id: result.directive.rootDirectiveId,
     });
-    if (materialization.kind === "failed") {
-      this.dependencies.log("root_directive_materialization_failed", {
-        root_issue_id: root.issueId,
-        directive_id: result.directive.rootDirectiveId,
-        reason: materialization.sanitizedReason,
-      });
-      return "needs-attention";
-    }
     await this.closeSessionsAfterDirective(result.directive, root, sessionId);
     return dispositionAfterDirective(result.directive);
+  }
+
+  private async writeRootFailureComment(
+    failure: { sanitizedReason: string },
+    tree: LinearWorkflowTreeSnapshot,
+  ): Promise<void> {
+    const root = tree.issues.find(({ issue_id }) => issue_id === tree.root_issue_id);
+    if (!root || root.issue_kind !== "root" || root.is_archived || root.parent_issue_id !== undefined) {
+      throw new Error("root_failure_comment_target_invalid");
+    }
+    const body = rootFailureCommentBody(failure.sanitizedReason);
+    const matches = matchingRootFailureComments(tree, body);
+    if (matches.length > 1) throw new Error("root_failure_comment_ambiguous");
+    if (matches.length === 1) return;
+    await this.dependencies.linear.mutateWorkflow({
+      kind: "append_workflow_comment",
+      writeId: `${root.issue_id}:root-reconciler-failure`,
+      conductorShortHash: this.dependencies.conductorShortHash,
+      expectedProjectId: root.project_id,
+      rootIssueId: root.issue_id,
+      expectedRootRemoteVersion: root.remote_version,
+      target: {
+        targetIssueId: root.issue_id,
+        expectedRemoteVersion: root.remote_version,
+        expectedStatusId: root.status_id,
+        expectedIsArchived: false,
+      },
+      body,
+    });
+    const readBack = await this.readWorkflowIssueTree(root.issue_id);
+    if (matchingRootFailureComments(readBack, body).length !== 1) {
+      throw new Error("root_failure_comment_write_unconfirmed");
+    }
   }
 
   private async finishDirective(
@@ -736,6 +785,33 @@ export class RootReconciliationRuntime {
 
 }
 
+function matchingRootFailureComments(tree: LinearWorkflowTreeSnapshot, body: string) {
+  return tree.comments.filter((comment) =>
+    comment.issue_id === tree.root_issue_id &&
+    comment.parent_comment_id === undefined &&
+    comment.author_kind === "symphony" &&
+    comment.body === body
+  );
+}
+
+function rootFailureCommentBody(sanitizedReason: string): string {
+  const reason = truncateCodePoints(sanitizedReason, 2_048)
+    .replace(/[\p{Cc}]/gu, " ")
+    .replaceAll("<!--", "< !--")
+    .replaceAll("```json", "``` json")
+    .trim();
+  if (!reason) throw new Error("root_failure_comment_reason_invalid");
+  return [
+    ROOT_FAILURE_COMMENT_HEADING,
+    "",
+    "Root Reconciler 没有产生可执行的下一步。Provider 返回的原始错误如下：",
+    "",
+    reason,
+    "",
+    "Symphony 没有修改 workflow status。修复该错误后，请在 Root 上补充一条 comment 或重新委派以触发重试。",
+  ].join("\n");
+}
+
 class RootReconciliationPhaseError extends Error {
   readonly failureCode: string;
 
@@ -961,6 +1037,15 @@ export function validateDirectiveInputs(
   ) {
     return "root_directive_comment_replies_incomplete";
   }
+  if (
+    (directive.action.kind === "wait" || directive.action.kind === "acknowledge" ||
+      directive.action.kind === "create_human_action") &&
+    directive.commentReplies.some((reply) => {
+      if (reply.threadAction !== "resolve") return false;
+      const source = tree.comments.find(({ comment_id }) => comment_id === reply.source.commentId);
+      return source !== undefined && humanActionRequest(tree, tree.root_issue_id, source) !== undefined;
+    })
+  ) return "root_directive_human_action_resolution_without_consequence";
   return undefined;
 }
 

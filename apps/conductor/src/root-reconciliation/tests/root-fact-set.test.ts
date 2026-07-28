@@ -54,6 +54,8 @@ test("fact sets send a bootstrap snapshot and only changed current values afterw
   const delta = diffRootFactSets(first, second);
 
   assert.equal(first.bootstrap.rootSnapshot.issues.length, 1);
+  const manifestIdentities = first.bootstrap.sourceManifest.map(({ sourceKind, sourceId }) => `${sourceKind}:${sourceId}`);
+  assert.deepEqual(manifestIdentities, [...manifestIdentities].sort());
   assert.equal(first.bootstrap.rootDigest, delta.baseRootDigest);
   assert.equal(delta.targetRootDigest, second.bootstrap.rootDigest);
   assert.deepEqual(delta.changes.map((change) => change.kind), ["replacement"]);
@@ -162,6 +164,56 @@ test("a matching native reply thread state does not re-enter as a pending input"
   assert.equal(factSet.entries.has("linear_comment_thread_state:comment-1"), false);
 });
 
+test("a completed Human Action thread does not re-enter after a fresh bootstrap", () => {
+  const workflow = tree("Root", "root-v1");
+  workflow.comments = [humanActionRequest(), humanActionReply(), humanActionResolution()];
+
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+
+  assert.equal(factSet.entries.has("linear_comment_thread_state:human-request"), false);
+  const humanReplyInput = rootInputId(
+    "comment_body:human-reply",
+    createHash("sha256").update("批准。", "utf8").digest("hex"),
+  );
+  assert.equal(factSet.bootstrap.pendingInputIds.includes(humanReplyInput), false);
+});
+
+test("an edited Human Action reply is pending despite an old receipt and resolution", () => {
+  const workflow = tree("Root", "root-v1");
+  const editedReply = humanActionReply();
+  editedReply.body = "改为拒绝。";
+  editedReply.remote_version = "human-reply-v3";
+  editedReply.updated_at = "2026-07-23T00:04:00Z";
+  workflow.comments = [humanActionRequest(), editedReply, humanActionResolution()];
+
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+  const editedInput = rootInputId(
+    "comment_body:human-reply",
+    createHash("sha256").update("改为拒绝。", "utf8").digest("hex"),
+  );
+
+  assert.ok(factSet.bootstrap.pendingInputIds.includes(editedInput));
+  assert.equal(factSet.entries.has("linear_comment_thread_state:human-request"), true);
+});
+
+test("a reopened Human Action request re-enters as a pending thread-state input", () => {
+  const workflow = tree("Root", "root-v1");
+  const reopened = humanActionRequest();
+  reopened.thread_state = "unresolved";
+  reopened.remote_version = "human-request-v3";
+  reopened.updated_at = "2026-07-23T00:04:00Z";
+  workflow.comments = [reopened, humanActionReply(), humanActionResolution()];
+
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+  const threadState = factSet.entries.get("linear_comment_thread_state:human-request")?.change;
+
+  assert.equal(threadState?.value.kind, "comment_thread");
+  assert.ok(factSet.bootstrap.pendingInputIds.includes(rootInputId(
+    "comment_thread_state:human-request:human-request:unresolved",
+    "human-request-v3",
+  )));
+});
+
 test("removed source facts become tombstones", () => {
   const first = buildRootFactSet({ root, tree: tree("Root", "root-v1", "comment-v1", true), git: git("head-1"), mechanicalViolations: [] });
   const second = buildRootFactSet({ root, tree: tree("Root", "root-v1", undefined, false), git: git("head-1"), mechanicalViolations: [] });
@@ -228,6 +280,34 @@ function git(head: string) {
   return { head, branch: "main", status: { items: [], returned: 0, cap: 32, has_more: false, partial: false } };
 }
 
+function humanActionRequest(): LinearWorkflowTreeSnapshot["comments"][number] {
+  return {
+    comment_id: "human-request", issue_id: "root-1", body: "## 需要你审批\n\n请审批 Plan。",
+    author_kind: "symphony", author_id: "symphony", thread_root_comment_id: "human-request",
+    thread_state: "resolved", reactions: [], created_at: "2026-07-23T00:00:00Z",
+    remote_version: "human-request-v2", updated_at: "2026-07-23T00:03:00Z",
+  };
+}
+
+function humanActionReply(): LinearWorkflowTreeSnapshot["comments"][number] {
+  return {
+    comment_id: "human-reply", issue_id: "root-1", parent_comment_id: "human-request", body: "批准。",
+    author_kind: "human", author_id: "user-1", author_user_id: "user-1",
+    thread_root_comment_id: "human-request", thread_state: "resolved",
+    reactions: [{ reaction_id: "receipt-check", emoji: "✅", actor_kind: "symphony", actor_id: "symphony" }],
+    created_at: "2026-07-23T00:01:00Z", remote_version: "human-reply-v2", updated_at: "2026-07-23T00:02:00Z",
+  };
+}
+
+function humanActionResolution(): LinearWorkflowTreeSnapshot["comments"][number] {
+  return {
+    comment_id: "human-resolution", issue_id: "root-1", parent_comment_id: "human-reply", body: "## ✅ 已接受",
+    author_kind: "symphony", author_id: "symphony", thread_root_comment_id: "human-request",
+    thread_state: "resolved", reactions: [], created_at: "2026-07-23T00:02:00Z",
+    remote_version: "human-resolution-v1", updated_at: "2026-07-23T00:02:00Z",
+  };
+}
+
 function commentBodyInputId(factSet: ReturnType<typeof buildRootFactSet>, commentId: string): string {
   const entry = factSet.entries.get(`linear_comment_body:${commentId}`)?.change;
   if (entry?.value.kind !== "comment" || entry.value.userInput.kind !== "comment_body") {
@@ -253,6 +333,7 @@ function tree(title: string, rootVersion: string, commentVersion?: string, inclu
     status_catalog: [{ status_id: "progress", name: "In Progress", category: "started", position: 1 }],
     issues: [{
       issue_id: "root-1", identifier: "SYM-1", project_id: "project-1", status_id: "progress",
+      creator_user_id: "user-1",
       status_name: "In Progress", status_category: "started", status_position: 1, order: 0, depth: 0,
       title, description: "Build it", labels: [], is_archived: false, issue_kind: "root",
       remote_version: rootVersion, created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",

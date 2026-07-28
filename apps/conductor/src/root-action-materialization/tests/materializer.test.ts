@@ -462,7 +462,7 @@ test("replan_current_cycle updates native Cycle and Plan facts without writing c
   assert.equal(linear.tree.comments.length, 0);
 });
 
-test("reads a fresh tree after every Tree patch and supports reorder, dependency, and relates_to operations", async () => {
+test("reads a fresh tree after every Tree patch and supports reorder and dependency operations", async () => {
   const linear = new FakeLinear();
   linear.tree.issues.push({
     issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
@@ -504,34 +504,103 @@ test("reads a fresh tree after every Tree patch and supports reorder, dependency
           dependencyIssueIds: [],
           precondition: { targetIssueId: "work-1", expectedRemoteVersion: "work-v1" },
         },
-        {
-          kind: "create_relation",
-          relationKind: "relates_to",
-          sourceIssueId: "cycle-1",
-          targetIssueId: "work-1",
-        },
       ],
     }),
     view: view(linear.tree),
   });
 
   assert.equal(result.kind, "materialized");
-  assert.equal(linear.readCount, 5);
+  assert.equal(linear.readCount, 4);
   assert.deepEqual(linear.mutations.map((mutation) => mutation.kind), [
     "update_workflow_issue",
     "update_workflow_issue",
     "update_workflow_issue",
-    "create_workflow_relation",
     "create_workflow_relation",
   ]);
   assert.deepEqual(
     linear.mutations
       .filter((mutation) => mutation.kind === "create_workflow_relation")
       .map((mutation) => mutation.relationState),
-    ["absent", "present"],
+    ["absent"],
   );
-  assert.equal(linear.tree.relations.length, 1);
-  assert.equal(linear.tree.relations[0]?.relation_kind, "relates_to");
+  assert.equal(linear.tree.relations.length, 0);
+});
+
+test("preflights the complete Tree action before an invalid later operation can mutate Linear", async () => {
+  const linear = new FakeLinear();
+  linear.tree.issues.push({
+    issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
+    status_id: "todo", status_name: "Todo", status_category: "unstarted", status_position: 1,
+    order: 1, depth: 2, title: "Work", description: workflowDescription("work-1", "cycle-1", "work", "Do work"),
+    labels: ["symphony:kind/work"], is_archived: false, issue_kind: "work", remote_version: "work-v1",
+    created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
+  });
+  const materializer = new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
+
+  const result = await materializer.materialize({
+    directive: directive({
+      kind: "revise_root_tree",
+      reason: "Attempt an invalid multi-operation patch.",
+      operations: [{
+        kind: "update_node",
+        precondition: { targetIssueId: "cycle-1", expectedRemoteVersion: "cycle-v1" },
+        title: "Cycle updated",
+        description: "Execute the plan.",
+        status: "Executing",
+      }, {
+        kind: "replace_dependencies",
+        workIssueId: "work-1",
+        dependencyIssueIds: ["work-1"],
+        precondition: { targetIssueId: "work-1", expectedRemoteVersion: "work-v1" },
+      }],
+    }),
+    view: view(linear.tree),
+  });
+
+  assert.equal(result.kind, "failed");
+  assert.equal(result.kind === "failed" && result.sanitizedReason,
+    "cycle_tree_operation_replace_dependencies_self_dependency");
+  assert.deepEqual(result.kind === "failed" && result.diagnostic, {
+    operationGroup: "operations",
+    operationIndex: 1,
+    operationKind: "replace_dependencies",
+  });
+  assert.equal(linear.mutations.length, 0);
+});
+
+test("blocked_by removal read-back rejects a remaining canonical blocks relation", async () => {
+  const linear = new FakeLinear();
+  linear.preserveCanonicalBlockedByOnRemoval = true;
+  for (const [issueId, order] of [["work-1", 1], ["work-2", 2]] as const) {
+    linear.tree.issues.push({
+      issue_id: issueId, identifier: `SYM-${order + 2}`, project_id: "project-1", parent_issue_id: "cycle-1",
+      status_id: "todo", status_name: "Todo", status_category: "unstarted", status_position: 1,
+      order, depth: 2, title: issueId, description: workflowDescription(issueId, "cycle-1", "work", issueId),
+      labels: ["symphony:kind/work"], is_archived: false, issue_kind: "work", remote_version: `${issueId}-v1`,
+      created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
+    });
+  }
+  linear.tree.relations.push({
+    relation_id: "blocked-by-1", relation_kind: "blocked_by", source_issue_id: "work-1", target_issue_id: "work-2",
+  });
+  const materializer = new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
+
+  const result = await materializer.materialize({
+    directive: directive({
+      kind: "revise_root_tree",
+      reason: "Remove the stale dependency.",
+      operations: [{
+        kind: "remove_relation",
+        relationId: "blocked-by-1",
+        precondition: { targetIssueId: "work-2", expectedRemoteVersion: "work-2-v1" },
+      }],
+    }),
+    view: view(linear.tree),
+  });
+
+  assert.equal(result.kind, "failed");
+  assert.equal(result.kind === "failed" && result.sanitizedReason,
+    "cycle_tree_operation_remove_relation_read_back_invalid");
 });
 
 function directive(action: RootDirective["action"]): RootDirective {
@@ -637,6 +706,7 @@ class FakeLinear {
   };
   mutations: LinearWorkflowMutationCommand[] = [];
   readCount = 0;
+  preserveCanonicalBlockedByOnRemoval = false;
 
   issue(issueId: string) {
     const issue = this.tree.issues.find((candidate) => candidate.issue_id === issueId);
@@ -707,11 +777,18 @@ class FakeLinear {
           target_issue_id: command.targetIssueId,
         });
       } else {
+        if (command.relationKind === "blocked_by") {
+          this.tree.relations = this.tree.relations.map((relation) => relation.relation_id === "blocked-by-1"
+            ? { ...relation, relation_kind: "blocks", source_issue_id: command.targetIssueId, target_issue_id: command.sourceIssueId }
+            : relation);
+        }
+        if (!this.preserveCanonicalBlockedByOnRemoval) {
         this.tree.relations = this.tree.relations.filter((relation) => !(
-          relation.relation_kind === command.relationKind &&
-          relation.source_issue_id === command.sourceIssueId &&
-          relation.target_issue_id === command.targetIssueId
+          relation.relation_kind === (command.relationKind === "blocked_by" ? "blocks" : command.relationKind) &&
+          relation.source_issue_id === (command.relationKind === "blocked_by" ? command.targetIssueId : command.sourceIssueId) &&
+          relation.target_issue_id === (command.relationKind === "blocked_by" ? command.sourceIssueId : command.targetIssueId)
         ));
+        }
       }
       this.issue(command.sourceIssueId).remote_version += ":updated";
       this.issue(command.targetIssueId).remote_version += ":updated";

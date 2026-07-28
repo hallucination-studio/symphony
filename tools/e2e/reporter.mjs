@@ -2,7 +2,9 @@ const PHASES = new Set([
   "resetting",
   "starting",
   "ready",
+  "admitting",
   "running",
+  "quiescing",
   "final-reading",
   "cleaning",
 ]);
@@ -16,6 +18,8 @@ const CASE_OBSERVATIONS = new Set([
   "failed",
   "incomplete",
 ]);
+const ADMISSION_MILESTONES = new Set(["roots-created", "roots-verified", "roots-delegated"]);
+const ASSERTION_OUTCOMES = new Set(["satisfied", "contradicted", "coverage_missing"]);
 
 const RUNTIME_DIAGNOSTIC_LEVELS = new Set(["info", "warning", "error"]);
 const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
@@ -89,6 +93,26 @@ export function createForegroundReporter({
         ...(detail === undefined ? {} : { detail }),
       });
     },
+    admissionProgress({ milestone, rootCount } = {}) {
+      if (!ADMISSION_MILESTONES.has(milestone) || !Number.isSafeInteger(rootCount) || rootCount < 1) {
+        throw stableError("foreground_e2e_reporter_admission_invalid");
+      }
+      emit({ event: "foreground_e2e_admission_progress", milestone, root_count: rootCount });
+    },
+    caseAssertion({ caseId, assertionId, outcome, reasonCode } = {}) {
+      const reasonRequired = outcome !== "satisfied";
+      if (!identifier(caseId) || !identifier(assertionId) || !ASSERTION_OUTCOMES.has(outcome) ||
+          reasonRequired !== identifier(reasonCode)) {
+        throw stableError("foreground_e2e_reporter_assertion_invalid");
+      }
+      emit({
+        event: "foreground_e2e_case_assertion",
+        case_id: caseId,
+        assertion_id: assertionId,
+        outcome,
+        ...(reasonCode === undefined ? {} : { reason_code: reasonCode }),
+      });
+    },
     waitingHuman({ caseId, detail } = {}) {
       this.caseObservation({ caseId, observation: "waiting-human", detail });
     },
@@ -118,14 +142,27 @@ export function createForegroundReporter({
       rootIssueId,
       reason,
       failureCode,
+      sanitizedReason,
       phase,
+      directiveId,
+      directiveKind,
+      operationGroup,
+      operationIndex,
+      operationKind,
     } = {}) {
+      const hasDirectiveDiagnostic = directiveId !== undefined || directiveKind !== undefined;
+      const hasOperationDiagnostic = operationGroup !== undefined || operationIndex !== undefined || operationKind !== undefined;
       if (component !== "conductor" || !identifier(conductorId) || !RUNTIME_DIAGNOSTIC_LEVELS.has(level) ||
           !isForegroundE2EConductorRuntimeEvent(runtimeEvent) ||
           rootIssueId !== undefined && !identifier(rootIssueId) ||
           reason !== undefined && !safeRuntimeCode(reason) ||
           failureCode !== undefined && !safeRuntimeCode(failureCode) ||
-          phase !== undefined && !safeRuntimeCode(phase)) {
+          sanitizedReason !== undefined && !safeSanitizedReason(sanitizedReason) ||
+          phase !== undefined && !safeRuntimeCode(phase) ||
+          hasDirectiveDiagnostic && (runtimeEvent !== "root_directive_materialization_failed" ||
+            !identifier(directiveId) || !safeRuntimeCode(directiveKind)) ||
+          hasOperationDiagnostic && (!hasDirectiveDiagnostic || !safeRuntimeCode(operationGroup) ||
+            !Number.isSafeInteger(operationIndex) || operationIndex < 0 || !safeRuntimeCode(operationKind))) {
         throw stableError("foreground_e2e_reporter_runtime_diagnostic_invalid");
       }
       emit({
@@ -137,7 +174,13 @@ export function createForegroundReporter({
         ...(rootIssueId === undefined ? {} : { root_issue_id: rootIssueId }),
         ...(reason === undefined ? {} : { reason }),
         ...(failureCode === undefined ? {} : { failure_code: failureCode }),
+        ...(sanitizedReason === undefined ? {} : { sanitized_reason: sanitizedReason }),
         ...(phase === undefined ? {} : { phase }),
+        ...(directiveId === undefined ? {} : { directive_id: directiveId }),
+        ...(directiveKind === undefined ? {} : { directive_kind: directiveKind }),
+        ...(operationGroup === undefined ? {} : { operation_group: operationGroup }),
+        ...(operationIndex === undefined ? {} : { operation_index: operationIndex }),
+        ...(operationKind === undefined ? {} : { operation_kind: operationKind }),
       });
     },
     summary({ exitCode, cases } = {}) {
@@ -217,6 +260,10 @@ function identifier(value) {
 
 function safeRuntimeCode(value) {
   return typeof value === "string" && /^[a-z][a-z0-9_]{1,120}$/u.test(value);
+}
+
+function safeSanitizedReason(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 1_024 && !/[\p{Cc}]/u.test(value);
 }
 
 function stableError(code) {

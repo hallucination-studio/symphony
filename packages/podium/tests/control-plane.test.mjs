@@ -543,6 +543,59 @@ test("creating a Conductor retries failed Project workflow initialization", asyn
   store.close();
 });
 
+test("creating a Conductor preserves a stable workflow initialization reason code", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  const services = new PodiumClientServicesImpl(
+    store,
+    new ConductorPresenceImpl(),
+    {},
+    {},
+    {
+      async resolveRepository(repositoryHandle, baseBranch) {
+        return {
+          repositoryHandle,
+          repositoryIdentity: "repository-1",
+          repositoryDisplayName: "Repository",
+          repositoryRoot: "/private/repository",
+          baseBranch,
+        };
+      },
+    },
+    () => "2026-07-16T00:00:00Z",
+    () => ({
+      async initializeTargetTeamWorkflow() {
+        throw new Error("linear_workflow_labels_read_back_failed");
+      },
+    }),
+  );
+
+  await assert.rejects(
+    services.command({
+      kind: "create_conductor",
+      project_id: "project-1",
+      repository: { repository_handle: "repository-1", base_branch: "main" },
+    }),
+    (error) => error?.protocolError?.code === "linear_workflow_labels_read_back_failed" &&
+      error.protocolError.sanitizedReason === "linear_workflow_labels_read_back_failed",
+  );
+  store.close();
+});
+
 test("creating a Conductor exposes stable sanitized failures for each external creation stage", async (t) => {
   const installation = {
     kind: "oauth",

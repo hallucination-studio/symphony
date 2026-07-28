@@ -208,6 +208,8 @@
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "issue_kind": { "enum": ["root", "cycle", "plan", "work", "verify", "finding"] },
         "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "creator_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "assignee_user_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "title": { "$ref": "common.schema.json#/$defs/ShortText" },
         "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
         "status": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
@@ -759,7 +761,7 @@
       "oneOf": [
         { "$ref": "#/$defs/CreateNodeOperation" }, { "$ref": "#/$defs/UpdateNodeOperation" }, { "$ref": "#/$defs/ArchiveNodeOperation" },
         { "$ref": "#/$defs/RestoreNodeOperation" }, { "$ref": "#/$defs/ReorderNodesOperation" }, { "$ref": "#/$defs/ReplaceDependenciesOperation" },
-        { "$ref": "#/$defs/CreateRelationOperation" }, { "$ref": "#/$defs/RemoveRelationOperation" }
+        { "$ref": "#/$defs/RemoveRelationOperation" }
       ]
     },
     "TreePrecondition": {
@@ -778,7 +780,6 @@
     "RestoreNodeOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "precondition"], "properties": { "kind": { "const": "restore_node" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
     "ReorderNodesOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "ordered_issue_ids", "precondition"], "properties": { "kind": { "const": "reorder_nodes" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "ordered_issue_ids": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
     "ReplaceDependenciesOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "work_issue_id", "dependency_issue_ids", "precondition"], "properties": { "kind": { "const": "replace_dependencies" }, "work_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "dependency_issue_ids": { "type": "array", "maxItems": 128, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
-    "CreateRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_kind", "source_issue_id", "target_issue_id"], "properties": { "kind": { "const": "create_relation" }, "relation_kind": { "enum": ["blocks", "blocked_by", "relates_to", "triggered_by"] }, "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" } } },
     "RemoveRelationOperation": { "type": "object", "additionalProperties": false, "required": ["kind", "relation_id", "precondition"], "properties": { "kind": { "const": "remove_relation" }, "relation_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "precondition": { "$ref": "#/$defs/TreePrecondition" } } },
     "ReviseRootTreeDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "reason", "operations"], "properties": { "kind": { "const": "revise_root_tree" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "operations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/TreeOperation" } } } },
     "ReplanCurrentCycleDirective": { "type": "object", "additionalProperties": false, "required": ["kind", "cycle_issue_id", "reason", "invalidate_execution_ids", "preserve_evidence_refs", "archive_or_restore_operations", "plan_issue_id", "fresh_plan_goal"], "properties": { "kind": { "const": "replan_current_cycle" }, "cycle_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "reason": { "$ref": "common.schema.json#/$defs/BoundedText" }, "invalidate_execution_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "common.schema.json#/$defs/Identifier" } }, "preserve_evidence_refs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/EvidenceRef" } }, "archive_or_restore_operations": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/TreeOperation" } }, "plan_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }, "fresh_plan_goal": { "$ref": "common.schema.json#/$defs/BoundedText" } } },

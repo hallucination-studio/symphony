@@ -1,6 +1,7 @@
 import path from "node:path";
 
 export const CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL";
+export const PROVIDER_IO_CAPTURE_PATH_ENVIRONMENT_KEY = "SYMPHONY_PROVIDER_IO_CAPTURE_PATH";
 
 export function validateCodexBaseUrl(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;

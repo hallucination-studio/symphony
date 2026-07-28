@@ -111,12 +111,21 @@ Human Action不是Issue、private payload或Desktop View。native thread resolve
 | Canonical term | 代码名 | 定义 |
 |---|---|---|
 | Stage Turn Request | `PlanTurnRequest` / `WorkTurnRequest` / `VerifyTurnRequest` | closed transient role input |
-| Stage Result | `PlanResult` / `WorkResult` / `VerifyResult` | closed transient role output；必须materialize为native facts |
+| Stage Turn Response | `PlanTurnResponse` / `WorkTurnResponse` / `VerifyTurnResponse` | semantic Stage Result或mechanical Stage Turn Failure的closed transient envelope |
+| Stage Result | `PlanResult` / `WorkResult` / `VerifyResult` | model-generated semantic role output；必须materialize为native facts |
+| Stage Turn Failure | `StageTurnFailure` | Performer-generated mechanical terminal failure；不能伪造Stage Result |
 | Stage Role Session | `StageRoleSession` | Cycle-scoped Provider runtime continuity |
+| Work Agent Tree | `WorkAgentTree` | 一个persistent Work root与matching turn-scoped recursive descendants组成的runtime tree；完整语义见[Work Subagents](work-subagents.md) |
+| Work Agent Tree Root | `WorkAgentTreeRoot` | tree中唯一生成matching `WorkResult`的Work Provider thread；不是Linear Root Reconciler |
+| Work Subagent | `WorkSubagent` | Work-owned独立Provider thread；不是Stage、Issue或workflow actor |
+| Work Agent Path | `WorkAgentPath` | `/root/...` runtime寻址；descendant path在turn epoch结束后失效，不是durable identity |
+| Work Turn Epoch | `WorkTurnEpoch` | 绑定一个`stage_execution_id`且只能retire或fence一次的descendant、budget与mutation lifetime |
+| Work Write Lease | `WorkWriteLease` | 从parent lease原子切分给matching dispatch、按generation在每次mutation强制并从叶到根归还的workspace path subset |
+| Work Runtime Containment | `WorkSessionContainment` / `WorkMutationContainment` | 防止tool writer逃逸并支持write revocation与empty/isolated proof的runtime boundary |
 | Runtime Model Observation | `RuntimeModelObservation` | actual model/usage日志观测；不写Linear |
 | Immutable Verify Target | `immutable_target_revision` | Verify与delivery共同绑定的Git commit |
 
-Stage Result、execution correlation、approved Plan和model observation都不得命名成durable private object。
+Stage response、execution correlation、approved Plan和model observation都不得命名成durable private object。
 
 ## 9. Linear Gateway
 
@@ -215,6 +224,7 @@ workflow DB / checkpoint / replay cursor
 - durable/recovery规则引用`workflow-authority-recovery.md`；
 - Human comment规则引用`human-actions.md`；
 - Stage wire规则引用`stage-orchestration.md`；
+- Work内部agent-tree规则引用`work-subagents.md`；
 - Git规则引用`git-worktree-delivery.md`；
 - public schema规则引用`contracts.md`；
 - glossary只命名，不定义第二套行为。

@@ -26,16 +26,6 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
   };
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) {
-      calls.push({ kind: "create_root", input });
-      return { rootIssueId: "root-1", identifier: "ENG-1" };
-    },
-    async assertRootUndelegatedAndInactive(input) {
-      calls.push({ kind: "assert_undelegated", input });
-    },
-    async delegateRootIssue(input) {
-      calls.push({ kind: "delegate_root", input });
-    },
     async waitForPlanApprovalGate(input) {
       calls.push({ kind: "wait_for_initial_plan", input });
       return {
@@ -96,13 +86,12 @@ test("revision Case waits for the initial Plan gate, receipts every frozen input
       projectId: "project-1",
       routingLabelId: "route-label",
       rootStatusId: "todo-state",
+      rootIssueId: "root-1",
+      identifier: "ENG-1",
     },
   });
 
   assert.deepEqual(calls, [
-    { kind: "create_root", input: { caseId: "root_revision_and_comment", rootKey: "revision-root", teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" } },
-    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
-    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_initial_plan", input: { rootIssueId: "root-1" } },
     { kind: "update_description", input: { rootIssueId: "root-1", description: "Replace the uppercase helper with a lowercase identifier helper and focused tests." } },
     { kind: "wait_for_description_receipt", input: { rootIssueId: "root-1", inputReference: revisionInput("revision-description", "description") } },
@@ -147,9 +136,6 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "root_revision_and_comment");
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive() {},
-    async delegateRootIssue() {},
     async waitForPlanApprovalGate() { return planGate("cycle-1", "plan-1", "review-1", "2026-07-26T00:00:01.000Z"); },
     async updateRootDescription() { return revisionInput("description", "description"); },
     async waitForRootDescriptionReceipt() {},
@@ -162,7 +148,7 @@ test("revision Case rejects noncanonical definitions and a Human boundary withou
     async waitForSuccessorPlanApprovalGate() { return planGate("cycle-2", "plan-2", "review-2", "2026-07-26T00:00:06.000Z"); },
   };
 
-  const rootCreation = { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" };
+  const rootCreation = admittedRootCreation();
   await assert.rejects(
     runRootRevisionAndCommentCase({ definition: { ...definition, caseId: "approved_happy_path" }, human, rootCreation }),
     hasCode("foreground_e2e_revision_case_definition_invalid"),
@@ -185,9 +171,6 @@ test("revision Case forwards cancellation to every Linear Human operation", asyn
   const reopened = revisionInput("reopened", "comment_thread_state", { commentId, threadRootCommentId: commentId, expectedThreadState: "unresolved", remoteVersion: "2026-07-26T00:00:05.000Z" });
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
-    async delegateRootIssue(input) { waits.push(input); },
     async waitForPlanApprovalGate(input) { waits.push(input); return planGate("cycle-1", "plan-1", "review-1", "2026-07-26T00:00:01.000Z"); },
     async updateRootDescription() { return description; },
     async waitForRootDescriptionReceipt(input) { waits.push(input); },
@@ -204,15 +187,26 @@ test("revision Case forwards cancellation to every Linear Human operation", asyn
     definition,
     human,
     signal: abortController.signal,
-    rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+    rootCreation: admittedRootCreation(),
   });
 
-  assert.equal(waits.length, 9);
+  assert.equal(waits.length, 7);
   assert.ok(waits.every(({ signal }) => signal === abortController.signal));
 });
 
 function planGate(cycleIssueId, planIssueId, requestCommentId, planRemoteVersion) {
   return { cycleIssueId, planIssueId, requestCommentId, planRemoteVersion };
+}
+
+function admittedRootCreation() {
+  return {
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+    rootIssueId: "root-1",
+    identifier: "ENG-1",
+  };
 }
 
 function revisionInput(sourceId, kind, extra = {}) {

@@ -734,8 +734,8 @@ function workflowMutationScope(body: Body): {
   };
 }
 
-function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" | "triggered_by" {
-  if (value === "blocks" || value === "blocked_by" || value === "relates_to" || value === "triggered_by") return value;
+function workflowRelationKind(value: JsonValue | undefined): "blocks" | "blocked_by" | "relates_to" {
+  if (value === "blocks" || value === "blocked_by" || value === "relates_to") return value;
   throw new Error("linear_workflow_relation_kind_invalid");
 }
 

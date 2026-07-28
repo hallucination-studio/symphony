@@ -15,7 +15,11 @@ import { SerializedPerformerProcessRunnerImpl } from "./performer-profiles/inter
 import { SessionPerformerAgentClientImpl } from "./performer-agent-client/internal/SessionPerformerAgentClientImpl.js";
 import { PersistentPerformerAgentChannelFactory } from "./performer-agent-client/internal/PerformerAgentChannel.js";
 import { PerformerRootReconcilerClientImpl } from "./root-reconciler-client/internal/PerformerRootReconcilerClientImpl.js";
-import { agentProcessEnvironment, validateCodexBaseUrl } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
+import {
+  agentProcessEnvironment,
+  PROVIDER_IO_CAPTURE_PATH_ENVIRONMENT_KEY,
+  validateCodexBaseUrl,
+} from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
 import { LinearGitRootActionMaterializerImpl } from "./root-action-materialization/internal/LinearGitRootActionMaterializerImpl.js";
 import { LinearRootReconcilerReplyWriterImpl } from "./root-action-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
@@ -57,7 +61,16 @@ export async function runConductor(environment = process.env): Promise<void> {
     environment: (profileId) => agentProcessEnvironment(
       config.performerExecutable,
       config.codexBaseUrl,
-      { CODEX_HOME: profiles.codexHome(profileId) },
+      {
+        CODEX_HOME: profiles.codexHome(profileId),
+        ...(config.providerIoCaptureDirectory === undefined ? {} : {
+          [PROVIDER_IO_CAPTURE_PATH_ENVIRONMENT_KEY]: providerIoCapturePath(
+            config.providerIoCaptureDirectory,
+            config.conductorShortHash,
+            profileId,
+          ),
+        }),
+      },
     ),
     channelFactory: new PersistentPerformerAgentChannelFactory(),
     deadlineMs: 300_000,
@@ -184,7 +197,7 @@ export async function runConductor(environment = process.env): Promise<void> {
         isFastModeEnabled: profile.codexTurnSettings.isFastModeEnabled,
       };
     },
-    log: (event, fields) => logs.publish({ level: "info", event, fields }),
+    log: (event, fields) => logs.publish({ level: runtimeLogLevel(event), event, fields }),
   });
   const stop = () => { void requestStop().catch(() => undefined); };
   process.once("SIGTERM", stop);
@@ -204,6 +217,10 @@ export async function runConductor(environment = process.env): Promise<void> {
   } finally {
     await requestStop();
   }
+}
+
+export function runtimeLogLevel(event: string): "info" | "error" {
+  return event.endsWith("_failed") ? "error" : "info";
 }
 
 async function profileReadiness(
@@ -243,6 +260,7 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     dataRoot: required(environment.SYMPHONY_CONDUCTOR_DATA_ROOT, "conductor_data_root_missing"),
     performerExecutable: environment.SYMPHONY_PERFORMER_EXECUTABLE ?? "performer",
     codexBaseUrl: validateCodexBaseUrl(environment.SYMPHONY_CODEX_BASE_URL),
+    providerIoCaptureDirectory: providerIoCaptureDirectory(environment.SYMPHONY_PROVIDER_IO_CAPTURE_DIR),
     rootDeadlineDurationMs: rootPolicyPositiveInteger(
       environment.SYMPHONY_ROOT_DEADLINE_DURATION_MS,
       "root_deadline_duration_invalid",
@@ -254,6 +272,30 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
       maxCycleRepairAttempts: rootPolicyNonNegativeInteger(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "root_max_cycle_repair_attempts_invalid"),
     },
   };
+}
+
+export function providerIoCaptureDirectory(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value || value.length > 4_096 || /[\r\n\0]/u.test(value) || !path.isAbsolute(value)) {
+    throw new Error("provider_io_capture_directory_invalid");
+  }
+  return path.normalize(value);
+}
+
+export function providerIoCapturePath(
+  directory: string,
+  conductorShortHash: string,
+  profileId: string,
+  processId = process.pid,
+): string {
+  const captureDirectory = providerIoCaptureDirectory(directory);
+  if (captureDirectory === undefined ||
+      !/^[a-f0-9]{12}$/u.test(conductorShortHash) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(profileId) ||
+      !Number.isSafeInteger(processId) || processId < 1) {
+    throw new Error("provider_io_capture_path_invalid");
+  }
+  return path.join(captureDirectory, `provider-io-${conductorShortHash}-${profileId}-${processId}.jsonl`);
 }
 
 function required(value: string | undefined, code: string): string {

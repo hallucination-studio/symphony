@@ -9,7 +9,8 @@
 authorized
   - 多Conductor Binding的single-generation reconcile
   - 全局role-turn capacity与有界admission
-  - Root worktree single-writer和maintenance coordination
+  - Root worktree single-writer-domain和maintenance coordination
+  - Work-only agent tree的内部capacity、dedicated session containment、epoch retirement与late-writer fencing
   - Linear request broker、rate-limit和bounded retry
   - structured logs、Problems、health和Desktop observations
   - immutable runtime bundle、atomic upgrade、bounded shutdown和safe cleanup
@@ -23,9 +24,10 @@ required_consequences
   - Host/Conductor crash后从Binding、Linear和Git重新建立runtime
   - failure必须有界、脱敏、可观察并释放资源
   - execution policy只做closed DTO映射，不形成Symphony通用授权系统
+  - Work descendants计入同一个Stage turn和writer domain，不改变Root admission顺序
 
 out_of_scope
-  - role内部sub-agents或fan-out/fan-in capacity
+  - Root Reconciler、Plan或Verify内部subagents
   - Workflow DB、Root/Leaf Queue、本地dispatch table、内部attempt journal或turn checkpoint
   - 多writer、per-Agent worktree、自动merge或远程Agent runtime
   - 第二Provider Backend
@@ -48,6 +50,9 @@ InstallationLinearRequestBroker
 PerformerProcessHandle
 PerformerSessionTransportHandle
 OpaqueRoleSessionHandle
+WorkSessionContainmentHandle
+WorkMutationContainmentHandle
+RootWorktreeWriterPermit
 HeartbeatObservation
 ShutdownDeadline
 ```
@@ -97,11 +102,21 @@ duplicate wake。不存在跨独立Conductor进程共享的Root lease；generati
 Root Reconciler/Plan/Work/Verify session、turn lifecycle、Human等待、deadline、cancellation和恢复分别由
 [Root Reconciliation](root-reconciliation.md)与[Stage Contracts](stage-orchestration.md)定义。
 
+Work role内部agent tree的active/resident capacity、tree budget、shared worktree coordination、epoch retirement和containment只由
+[Work Subagents](work-subagents.md)定义。Runtime把整棵tree作为一个Conductor Stage permit和一个Root writer domain；
+descendant slots不能形成第二套Root scheduler或workflow queue。
+
 Runtime Hardening只允许permit、process/connection handle、opaque role session mapping和普通heartbeat存在于
 memory。live Provider thread可以提供同一Cycle role的上下文连续性，但不能成为workflow authority；丢失后从
 Linear/Git打开fresh session。crash fencing依赖process identity、channel、session/turn correlation和native target
 preconditions，不写private lease payload到Linear。只有exclusive `BindingProcessFence`已取得且旧channel已失效，runtime才可
 把旧process视为不能再materialize output；heartbeat超时或看不到PID本身不构成该证明。
+
+每个Work role session还必须拥有独立`WorkSessionContainment`，每个turn在其中创建fresh
+`WorkMutationContainment(stage_execution_id, epoch_generation)`。其他roles、Work sessions和turn epochs不得共享这些identity。
+Containment必须在tool child执行第一条user code前完成membership，阻止detach/reparent逃逸，并在supervisor loss后仍可撤销
+workspace mutation capability或terminate全部members。普通PID/process group只能用于best-effort signaling，不能证明writer已消失；
+只有matching write capability永久撤销且containment empty/isolated proof成立后，runtime才可释放Root writer permit。
 
 ## 5. Linear request broker
 
@@ -177,6 +192,11 @@ Desktop可见日志只使用binding/profile correlation IDs，不记录Root、Is
 Key、raw Profile credential、Provider transcript、SDK object或不受限Issue内容。绝对Profile path在UI和
 public logs中脱敏。
 
+[Performer](performer.md)定义的opt-in local Provider I/O diagnostic capture不属于Desktop可见日志或public runtime logs。
+它只能写入operator显式指定的absolute directory，不能经过stdout/stderr forwarding、Problem、Podium storage或Linear；
+Symphony不能读取它参与health、recovery、workflow或E2E verdict。默认关闭、restricted file mode、capture failure semantics与
+operator retention责任只由Performer文档定义。
+
 ## 7. Immutable runtime bundle与atomic upgrade
 
 安装的runtime bundle是immutable、content-addressed并带manifest：
@@ -202,12 +222,12 @@ bundle pointer和payload只属于runtime delivery，不保存Root、Provider thr
 application、Binding或upgrade shutdown：
 
 1. 停止新的Root/session/turn admission；
-2. 停止所有active turns接受新的tool call；
-3. 请求Performer graceful cancel；
-4. 在deadline内等待当前Request处理或read-back结束；
-5. terminate剩余process trees；
-6. 关闭private channels和logs；
-7. 只有确认退出后报告stopped。
+2. 先撤销active turn的result publication authority；对Work原子seal producer admission并永久撤销matching workspace write；
+3. 请求Performer graceful cancel并interrupt active Provider/tool dispatch；
+4. 在deadline内等待当前Request、pre-seal producer、read-back和containment drain结束；
+5. terminate剩余exact containments并证明Work write revocation与containment empty/isolated；
+6. 释放permits，关闭private channels和logs；
+7. 只有全部required proof成立后报告stopped；否则保留fence并报告bounded failure。
 
 shutdown不会把Root标成failed或Canceled。下次启动从Linear/Git重建Root并打开fresh matching role sessions；
 不恢复raw Provider thread pointer。
@@ -217,7 +237,7 @@ shutdown不会把Root标成failed或Canceled。下次启动从Linear/Git重建Ro
 cleanup只删除可证明属于同一Conductor/Root的deterministic worktree，并同时满足：
 
 - Root已经Done/Canceled或用户明确请求cleanup；
-- 没有live process、permit或writer；
+- 没有live process、permit或Work Agent Tree writer domain；
 - worktree identity、repository common git dir和expected branch一致；
 - 没有未提交修改、未push commit或未交付branch，除非用户明确批准丢弃；
 - path位于配置的worktree root内且不是repository root、home或宽泛目录；
@@ -227,22 +247,24 @@ cleanup只删除可证明属于同一Conductor/Root的deterministic worktree，�
 
 并行E2E的process topology、start barrier、restart动作和artifact retention只由
 [并行黑盒端到端验收](black-box-e2e.md)定义。Runtime只提供本节已有的生产start/stop/kill语义；专用E2E Project的
-启动前baseline reset是runner在Runtime创建前经Linear公开API执行的外部测试操作，不是Runtime lifecycle、quiescence或
+启动前baseline reset是runner在Runtime创建前经Linear公开API执行的外部测试操作，不是Runtime lifecycle、turn closure或
 test-only daemon mutation。
 
 ## 10. Failure matrix
 
 | 故障 | Runtime动作 | Workflow恢复 |
 |---|---|---|
-| role session/turn启动失败 | 释放permit，记录Problem | matching Issue收敛为`Failed`或`Interrupted`，再从fresh facts进入Root delta或bootstrap |
+| role session/turn启动失败 | 只有明确not-accepted且no-capability proof才rollback；Work accepted/unknown时revoke、fence并在proof后释放permit | 返回closed mechanical failure；fresh Root Reconciler选择terminal action |
 | Linear mutation上限到达 | 拒绝mutation，结束turn后释放permit、read-back | 从fresh Linear/Git重建并继续 |
-| heartbeat停止/硬wall-time耗尽 | cancel active turn、terminate、释放permit、read-back | matching Issue收敛为`Interrupted`并把native facts交给Root Reconciler |
-| transport在terminal Result前中断 | 终止turn、释放permit、read-back | 使用native current facts或fresh role session |
-| terminal Result重复/迟到 | 以execution identity与precondition拒绝旧Result | Workflow facts不变 |
+| heartbeat停止/硬wall-time耗尽 | invalidate result generation；Work先revoke write并fence exact containment，proof后才释放permit | closed mechanical failure交给fresh Root Reconciler选择terminal action |
+| Work epoch无法retire或枚举状态不明 | revoke workspace capability并terminate exact containment；证明empty/isolated后才释放writer permit | proof成功为`work_epoch_closure_failed`；否则`workspace_fence_unproven`且Root保持runtime-blocked |
+| Work descendant late write/output | generation fence拒绝，记录sanitized observation | Workflow facts不变；fresh worktree read决定后续 |
+| transport在terminal response前中断 | invalidate generation；Work经过同一write-revocation/containment gate后释放permit并read-back | 使用native current facts或fresh role session |
+| terminal response重复/迟到 | 以execution identity与precondition拒绝旧response | Workflow facts不变 |
 | Linear 429 | bounded backoff，释放超时permit | 下次full-read继续 |
 | mutation unconfirmed | semantic read-back | 以read-back事实继续 |
 | Git HEAD变化 | 拒绝旧Result/mutation | fresh Root delta或bootstrap重新审计Git |
-| Host/Conductor crash | replacement前证明旧tree退出 | full-read所有Roots/Git |
+| Host/Conductor crash | replacement前证明旧write capability已撤销且containment不能再写 | full-read所有Roots/Git |
 | upgrade失败 | 保留旧完整bundle | Workflow不变 |
 | cleanup证明不足 | 不删除 | Root/branch保持可恢复 |
 
@@ -252,7 +274,7 @@ test-only daemon mutation。
 2. capacity单位是active Root Reconciler/Stage turn；Root仍是全局admission与workspace单位。
 3. turn绑定execution identity和fresh precondition；旧Context/Result不能修改新事实。
 4. launch、heartbeat、turn limits、cancel和child-process cleanup有界；Provider usage只进入runtime observation。
-5. 同一Root同时最多一个workspace writer。
+5. 同一Root同时最多一个workspace writer domain；Work Agent Tree可以在该domain内按不相交write sets协作。
 6. Linear request遵守rate-limit，ambiguous write先read-back。
 7. runtime observations不参与Root scheduling或Workflow恢复。
 8. upgrade不原地覆盖binary，失败可回到上一个完整bundle。
@@ -261,6 +283,8 @@ test-only daemon mutation。
 11. crash后不恢复permit、process、raw thread、Result、iteration guard或token observation；status、attempt和Finding从native Linear
     重建，code/delivery从Git重建。
 12. physical Linear request和protocol request分别观测，background最多使用request与complexity窗口的25%。
+13. Work Agent Tree active/resident与budget有界；semantic Result前matching epoch永久retire并交还writer permit，close不确定时由
+    write revocation和non-escapable containment精确fence。
 
 ## 12. 不变量
 
@@ -270,5 +294,6 @@ test-only daemon mutation。
 4. Linear/Git事实修复后Root自然恢复，不需要operation resume API。
 5. Root Reconciler与Stage protocol只由[Root Reconciliation](root-reconciliation.md)和
    [Stage Contracts](stage-orchestration.md)定义。
-6. 当前runtime不预建role内部sub-agent、workflow memory store或Provider-specific capacity控制面；live Provider memory仍按
+6. 只有Work runtime可以承载[Work Subagents](work-subagents.md)定义的agent tree；其他roles不预建subagent capability。
+7. Work tree仍是一个Stage turn和writer domain，tree runtime state不进入workflow memory store；live Provider memory仍按
    [Performer](performer.md#51-provider注入分层)维护。

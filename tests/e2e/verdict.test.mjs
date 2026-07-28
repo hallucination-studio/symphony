@@ -145,27 +145,77 @@ test("contradiction outranks incomplete and process faults never become success"
   });
 });
 
-test("scheduler starts every Case and final-reads every settled driver", async () => {
+test("scheduler settles every Case, quiesces writers once, then final-reads every Case", async () => {
   const started = [];
+  const settled = [];
   const finalReads = [];
+  const reportedAssertions = [];
+  let writersQuiesced = 0;
   const result = await runForegroundE2ECases({
     definitions: FOREGROUND_E2E_CASES,
     runCase: async ({ definition }) => {
       started.push(definition.caseId);
-      if (definition.caseId === "plan_rejected_and_replanned") throw Object.assign(new Error("driver failed"), { code: "foreground_e2e_driver_failed" });
-      return { context: {} };
+      try {
+        if (definition.caseId === "plan_rejected_and_replanned") {
+          throw Object.assign(new Error("driver failed"), { code: "foreground_e2e_driver_failed" });
+        }
+        return { context: {} };
+      } finally {
+        settled.push(definition.caseId);
+      }
+    },
+    quiesce: async () => {
+      assert.equal(settled.length, FOREGROUND_E2E_CASES.length);
+      writersQuiesced += 1;
     },
     readFinalEvidence: async ({ definition }) => {
+      assert.equal(writersQuiesced, 1);
       finalReads.push(definition.caseId);
       return { evidence: emptyEvidence(definition), context: { humanActorId: "human-1", rootIssueIdsByKey: {} } };
+    },
+    reporter: {
+      caseObservation() {},
+      caseAssertion(assertion) { reportedAssertions.push(assertion); },
     },
   });
 
   assert.deepEqual(started.sort(), FOREGROUND_E2E_CASES.map(({ caseId }) => caseId).sort());
+  assert.deepEqual(settled.sort(), FOREGROUND_E2E_CASES.map(({ caseId }) => caseId).sort());
+  assert.equal(writersQuiesced, 1);
   assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASES.map(({ caseId }) => caseId).sort());
+  assert.equal(reportedAssertions.length, FOREGROUND_E2E_CASES
+    .reduce((total, definition) => total + definition.assertions.length, 0));
+  assert.equal(reportedAssertions.every(({ caseId, assertionId, outcome: value, reasonCode }) =>
+    typeof caseId === "string" && typeof assertionId === "string" && value === "coverage_missing" &&
+      reasonCode === `e2e.${caseId}.${assertionId}.coverage_missing`), true);
   assert.equal(result.exitCode, 1);
   assert.equal(result.cases.length, FOREGROUND_E2E_CASES.length);
   assert.ok(result.cases.every(({ verdict }) => verdict === "incomplete"));
+});
+
+test("scheduler cannot pass a Case whose driver scope failed even when final evidence looks complete", async () => {
+  const approved = approvedFixture();
+  const finalReads = [];
+  const result = await runForegroundE2ECases({
+    definitions: FOREGROUND_E2E_CASES,
+    createCaseScope: ({ definition }) => {
+      if (definition.caseId === "approved_happy_path") {
+        throw Object.assign(new Error("scope failed"), { code: "foreground_e2e_case_scope_failed" });
+      }
+      return { caseId: definition.caseId, signal: new AbortController().signal };
+    },
+    runCase: async () => ({ context: {} }),
+    quiesce: async () => {},
+    readFinalEvidence: async ({ definition }) => {
+      finalReads.push(definition.caseId);
+      return definition.caseId === "approved_happy_path"
+        ? { evidence: approved.evidence, context: approved.context }
+        : { evidence: emptyEvidence(definition), context: { humanActorId: "human-1", rootIssueIdsByKey: {} } };
+    },
+  });
+
+  assert.deepEqual(finalReads.sort(), FOREGROUND_E2E_CASES.map(({ caseId }) => caseId).sort());
+  assert.equal(result.cases.find(({ caseId }) => caseId === "approved_happy_path")?.verdict, "incomplete");
 });
 
 function approvedFixture() {

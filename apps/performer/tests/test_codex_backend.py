@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import threading
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -9,7 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl, _usage
-from performer.backends.provider_backend_interface import ProviderBackendError, ProviderTurnDeadlineExpired
+from performer.backends.codex.provider_io_capture import ProviderIoCapture
+from performer.backends.provider_backend_interface import (
+    ProviderBackendError,
+    ProviderTurnCanceled,
+    ProviderTurnDeadlineExpired,
+)
 from performer.prompt_resources import load_role_prompt_catalog
 
 
@@ -81,6 +87,16 @@ class BlockingThread(FakeThread):
         return self.turn_handle
 
 
+class InvalidSchemaThread(FakeThread):
+    def turn(self, prompt: str, **kwargs: object):
+        self.calls.append((prompt, kwargs))
+
+        def fail():
+            raise RuntimeError('{"error":{"code":"invalid_json_schema","message":"uniqueItems is not permitted"}}')
+
+        return SimpleNamespace(run=fail, interrupt=lambda: None)
+
+
 @pytest.mark.parametrize("value", [True, 1.5, "1"])
 def test_provider_usage_rejects_non_integer_token_counts(value: object):
     usage = SimpleNamespace(total=SimpleNamespace(
@@ -140,7 +156,13 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert '"oneOf"' not in json.dumps(sdk.thread.calls[0][1]["output_schema"])
     action_variants = action_schema["anyOf"]
     execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")
-    assert execute_plan_schema["required"] == [
+    assert execute_plan_schema["properties"]["kind"]["type"] == "string"
+    revise_tree_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "revise_root_tree")
+    tree_operations = revise_tree_schema["properties"]["operations"]["items"]["anyOf"]
+    assert "create_relation" not in {
+        schema.get("properties", {}).get("kind", {}).get("const") for schema in tree_operations
+    }
+    assert set(execute_plan_schema["required"]) == {
         "kind",
         "cycle_issue_id",
         "plan_issue_id",
@@ -148,11 +170,14 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
         "required_outputs",
         "prior_plan_result_ids",
         "human_resolution_ids",
-    ]
+    }
     assert "RETURN ONLY THE JSON OBJECT." not in sdk.thread.calls[0][0]
     assert "additionalProperties" not in sdk.thread.calls[0][0]
     comment_replies_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["comment_replies"]
     assert comment_replies_schema["maxItems"] == 0
+    _assert_closed_primitives_are_typed(sdk.thread.calls[0][1]["output_schema"])
+    _assert_only_supported_string_and_array_constraints(sdk.thread.calls[0][1]["output_schema"])
+    _assert_all_object_properties_are_required(sdk.thread.calls[0][1]["output_schema"])
 
 
 @pytest.mark.parametrize("role", ["root_reconciler", "plan", "work", "verify"])
@@ -304,6 +329,8 @@ def test_stage_roles_use_the_complete_outcome_contract(role: str):
     assert len(schema["anyOf"]) >= 5
     assert all("kind" in variant["properties"] for variant in schema["anyOf"])
     assert all(len(variant["required"]) > 1 for variant in schema["anyOf"])
+    _assert_only_supported_string_and_array_constraints(schema)
+    _assert_all_object_properties_are_required(schema)
     assert "STAGE OUTCOME REQUIRED FIELDS:" not in sdk.thread.calls[0][0]
     assert "STAGE OUTCOME FIELD SHAPES:" not in sdk.thread.calls[0][0]
     assert "STAGE OUTCOME NESTED CONTRACT SHAPES:" not in sdk.thread.calls[0][0]
@@ -325,6 +352,170 @@ def test_invalid_provider_json_is_sanitized():
     assert raised.value.code == "provider_output_invalid_json"
     assert raised.value.append_outcome == "accepted"
     assert "not-json" not in raised.value.sanitized_reason
+
+
+def test_provider_io_capture_records_exact_turn_input_and_output_before_parsing(tmp_path):
+    response = "not-json\nverbatim provider output"
+    sdk = FakeCodex(FakeThread(response))
+    log_path = tmp_path / "provider-io.jsonl"
+    backend = CodexBackendImpl(
+        sdk,
+        load_role_prompt_catalog(),
+        io_capture=ProviderIoCapture(log_path),
+    )
+    session = backend.open_role_session("root_reconciler", {"model": "gpt"})
+    request = {
+        "kind": "open_root_reconciler",
+        "request_id": "request-1",
+        "root_issue_id": "root-1",
+        "reconciler_session_id": "session-1",
+        "reconciler_turn_id": "turn-1",
+        "bootstrap": {
+            "root_digest": "tree-1",
+            "pending_input_ids": ["input:" + "a" * 64],
+            "root_snapshot": {
+                "root": {"issue": {"issue_id": "root-1"}},
+                "cycles": [],
+                "user_comments": [],
+                "user_comment_thread_states": [],
+            },
+        },
+    }
+
+    with pytest.raises(ProviderBackendError):
+        backend.execute_role_turn(
+            session,
+            request,
+            workspace_root=None,
+            cancel_event=threading.Event(),
+        )
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    session_input = next(record for record in records if record["event"] == "provider_session_input")
+    turn_input = next(record for record in records if record["event"] == "provider_turn_input")
+    turn_output = next(record for record in records if record["event"] == "provider_turn_output")
+    actual_prompt, actual_options = sdk.thread.calls[0]
+
+    assert session_input["payload"]["options"]["base_instructions"] == load_role_prompt_catalog().for_role("root_reconciler")
+    assert turn_input["payload"]["prompt"] == actual_prompt
+    assert turn_input["payload"]["options"]["model"] == actual_options["model"]
+    assert turn_input["payload"]["options"]["output_schema"] == actual_options["output_schema"]
+    assert turn_input["correlation"]["request_id"] == "request-1"
+    assert turn_input["correlation"]["root_issue_id"] == "root-1"
+    assert turn_input["turn_capture_id"] == turn_output["turn_capture_id"]
+    assert turn_output["payload"]["final_response"] == response
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+
+def test_provider_io_capture_records_the_original_sdk_error(tmp_path):
+    raw_error = '{"error":{"code":"invalid_json_schema","message":"uniqueItems is not permitted"}}'
+    log_path = tmp_path / "provider-io.jsonl"
+    backend = CodexBackendImpl(
+        FakeCodex(InvalidSchemaThread()),
+        load_role_prompt_catalog(),
+        io_capture=ProviderIoCapture(log_path),
+    )
+    session = backend.open_role_session("root_reconciler", {"model": "gpt"})
+
+    with pytest.raises(ProviderBackendError):
+        backend.execute_role_turn(
+            session,
+            {"request_id": "request-1", "root_issue_id": "root-1"},
+            workspace_root=None,
+            cancel_event=threading.Event(),
+        )
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    turn_error = next(record for record in records if record["event"] == "provider_turn_error")
+    assert turn_error["payload"] == {
+        "phase": "run",
+        "error_type": "RuntimeError",
+        "error_text": raw_error,
+    }
+
+
+def test_provider_io_capture_records_a_returned_output_before_cancel_wins_the_race(tmp_path):
+    response = '{"kind":"wait"}'
+    log_path = tmp_path / "provider-io.jsonl"
+    backend = CodexBackendImpl(
+        FakeCodex(FakeThread(response)),
+        load_role_prompt_catalog(),
+        io_capture=ProviderIoCapture(log_path),
+    )
+    session = backend.open_role_session("plan", {"model": "gpt"})
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(ProviderTurnCanceled):
+        backend.execute_role_turn(
+            session,
+            {"request_id": "request-1"},
+            workspace_root=None,
+            cancel_event=cancel_event,
+        )
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    turn_output = next(record for record in records if record["event"] == "provider_turn_output")
+    assert turn_output["payload"]["final_response"] == response
+
+
+def test_provider_schema_rejection_is_non_retryable_and_not_accepted():
+    backend = backend_for(FakeCodex(InvalidSchemaThread()))
+    session = backend.open_role_session("root_reconciler", {"model": "gpt"})
+
+    with pytest.raises(ProviderBackendError) as raised:
+        backend.execute_role_turn(
+            session,
+            {},
+            workspace_root=None,
+            cancel_event=threading.Event(),
+        )
+
+    assert raised.value.code == "provider_schema_unsupported"
+    assert raised.value.retryable is False
+    assert raised.value.append_outcome == "not_accepted"
+
+
+def test_provider_null_placeholders_restore_optional_fields_to_absence():
+    sdk = FakeCodex(FakeThread('{"action":{"kind":"acknowledge","continue_execution_id":null}}'))
+    backend = backend_for(sdk)
+    session = backend.open_role_session("root_reconciler", {"model": "gpt"})
+
+    result = backend.execute_role_turn(session, {}, workspace_root=None, cancel_event=threading.Event())
+
+    assert "continue_execution_id" not in result["output"]["action"]
+
+
+def _assert_closed_primitives_are_typed(value: object) -> None:
+    if isinstance(value, dict):
+        if "const" in value or "enum" in value:
+            assert value.get("type") in {"boolean", "integer", "number", "string"}
+        for child in value.values():
+            _assert_closed_primitives_are_typed(child)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_closed_primitives_are_typed(child)
+
+
+def _assert_only_supported_string_and_array_constraints(value: object) -> None:
+    if isinstance(value, dict):
+        assert not {"minLength", "maxLength", "uniqueItems"}.intersection(value)
+        for child in value.values():
+            _assert_only_supported_string_and_array_constraints(child)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_only_supported_string_and_array_constraints(child)
+
+
+def _assert_all_object_properties_are_required(value: object) -> None:
+    if isinstance(value, dict):
+        if value.get("type") == "object":
+            assert set(value.get("required", [])) == set(value.get("properties", {}))
+        for child in value.values():
+            _assert_all_object_properties_are_required(child)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_all_object_properties_are_required(child)
 
 
 def test_role_turn_interrupts_a_blocked_provider_at_its_deadline():

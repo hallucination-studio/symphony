@@ -103,7 +103,12 @@ read current reality
 
 恢复不是event replay，也不继续某个已持久化command。live session内必须遵守[Performer](performer.md#51-provider注入分层)
 定义的incremental Provider memory contract；只有process/session丢失时，in-memory baseline、opaque continuation、handle和本轮
-typed Result才整体丢弃，并从当前Linear/Git facts创建fresh initial context。
+typed response才整体丢弃，并从当前Linear/Git facts创建fresh initial context。
+
+Work role session还可能包含[Work Subagents](work-subagents.md)定义的Provider agent tree。Work root continuity和每个turn的path、
+mailbox、descendant threads及Provider graph在session loss后全部丢弃；不能从Codex persistence恢复旧agent或重放其task。只有
+matching workspace write capability永久撤销且`WorkSessionContainment` empty/isolated proof成立后，fresh runtime才可取得Root writer
+domain。Partial edits作为Git/worktree current facts保留。
 
 只有新generation已经持有[Runtime Hardening](runtime-hardening.md#3-multi-binding-process-ownership)定义的
 `BindingProcessFence`，且Podium已经拒绝旧private channel mutation后，旧process loss才得到机械证明。fresh Root
@@ -184,6 +189,9 @@ Project/Profile当前配置。progress从当前DAG、terminal statuses和Git evi
 精确model/token usage、Provider turn ID、runtime timing和tool progress属于logs/metrics observability，不是workflow
 authority，也不写入Linear。丢失这些观测不得改变Root恢复或dispatch结果。
 
+Work Agent Tree token/tool/activity aggregate也只属于当前runtime；它不会形成cross-restart budget ledger。跨重启limits仍由本节
+已有native Cycle/attempt/timestamp facts机械重建。
+
 ## 11. Hard cut
 
 目标架构不读取、不写入、不迁移以下旧surface：
@@ -206,3 +214,5 @@ authority，也不写入Linear。丢失这些观测不得改变Root恢复或disp
 6. 已确认的人类需求先进入Root description；Human Action thread保留actor和scope，审批不跨replacement target继承。
 7. 每个native mutation都必须fresh read-back；ambiguous state一律fail closed。
 8. 其他架构文档只引用本文，不复制恢复算法或持久化矩阵。
+9. Work session loss后不恢复Provider agent graph；旧write capability撤销与containment empty/isolated未证明前不得启动new writer、
+   commit、Verify或cleanup。

@@ -107,10 +107,11 @@ Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository
 `RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
 `root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
 `root-action-materialization`验证transient RootNextAction并收敛native Linear/Git postcondition；
-`performer-agent-client`拥有Root Reconciler和三个Stage role session/turn transport；Human Action reply由
+`performer-agent-client`拥有Root Reconciler和三个Stage role session/turn transport，并持有Work turn的Root writer-domain
+handoff；它不解析或操纵Provider agent tree、turn epoch或containment。Human Action reply由
 `human-actions`和`root-action-materialization`完成。完整边界分别由
 [Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和
-[Human Action](human-actions.md)定义。
+[Human Action](human-actions.md)定义；Work内部tree由[Work Subagents](work-subagents.md)定义。
 
 Conductor可以保存`PerformerProfile`明文配置文件，但不能读取或修改Profile
 `CODEX_HOME`中的Codex-owned文件。Profile配置文件不是数据库。
@@ -132,6 +133,7 @@ agent_protocol
 root_reconciler
 role_execution
 session_runtime
+work_agent_tree
 profile_control
 backends
 ```
@@ -147,7 +149,9 @@ backends/<provider>/<Provider>BackendImpl.py
 和SDK参数映射仍只能存在于`CodexBackendImpl`。
 Root Reconciler bootstrap/delta和Stage turn request可以携带approved `CodexTurnSettings`；不能携带任意Provider
 config map。Root Reconciler和三个Stage role session及Provider thread mapping只存在于Performer
-`session_runtime`。
+`session_runtime`。`work_agent_tree`拥有Work-only tool exposure、path/mailbox/capacity、tree budget、turn epoch、write grants、
+retirement与containment policy；它只依赖Performer内部`ProviderBackendInterface`，不导出Provider ID或Conductor-facing
+subagent API。
 
 ### Podium Desktop
 
@@ -249,6 +253,8 @@ Performer -X-> Linear
 
 - Linear SDK出现在Podium之外；
 - Provider SDK出现在Performer backend之外；
+- Root Reconciler、Plan或Verify注册Work collaboration tools；
+- Work agent path、mailbox、Provider thread status或tree snapshot进入cross-process contracts；
 - `internal`被跨角色导入；
 - Conductor workflow database/repository；
 - 未带规定后缀的public contract。

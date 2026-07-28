@@ -4,21 +4,11 @@ import test from "node:test";
 import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { runRejectedPlanAndReplannedCase } from "../../tools/e2e/rejected-plan-and-replanned.mjs";
 
-test("rejected Plan Case writes its frozen reason on the product Action, rejects it, and waits for a fresh Action", async () => {
+test("rejected Plan Case consumes its admitted Root, writes its frozen reason, and waits for a fresh Action", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
   const calls = [];
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) {
-      calls.push({ kind: "create_root", input });
-      return { rootIssueId: "root-1", identifier: "ENG-1" };
-    },
-    async assertRootUndelegatedAndInactive(input) {
-      calls.push({ kind: "assert_undelegated", input });
-    },
-    async delegateRootIssue(input) {
-      calls.push({ kind: "delegate_root", input });
-    },
     async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return calls.filter(({ kind }) => kind === "wait_for_plan_review").length === 1
@@ -39,23 +29,12 @@ test("rejected Plan Case writes its frozen reason on the product Action, rejects
       projectId: "project-1",
       routingLabelId: "route-label",
       rootStatusId: "todo-state",
+      rootIssueId: "root-1",
+      identifier: "ENG-1",
     },
   });
 
   assert.deepEqual(calls, [
-    {
-      kind: "create_root",
-      input: {
-        caseId: "plan_rejected_and_replanned",
-        rootKey: "rejected-plan-root",
-        teamId: "team-1",
-        projectId: "project-1",
-        routingLabelId: "route-label",
-        rootStatusId: "todo-state",
-      },
-    },
-    { kind: "assert_undelegated", input: { rootIssueId: "root-1" } },
-    { kind: "delegate_root", input: { rootIssueId: "root-1" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "root-1" } },
     {
       kind: "create_reply",
@@ -84,9 +63,6 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "plan_rejected_and_replanned");
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive() {},
-    async delegateRootIssue() {},
     async waitForPlanApprovalRequest() { return { requestCommentId: "request-1", planIssueId: "plan-1" }; },
     async replyToHumanAction() { return { commentId: "comment-1", issueId: "root-1", requestCommentId: "request-1" }; },
   };
@@ -95,7 +71,7 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
     runRejectedPlanAndReplannedCase({
       definition: { ...definition, caseId: "approved_happy_path" },
       human,
-      rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+      rootCreation: admittedRootCreation(),
     }),
     hasCode("foreground_e2e_rejected_case_definition_invalid"),
   );
@@ -103,11 +79,22 @@ test("rejected Plan Case rejects a noncanonical definition or a Human boundary o
     runRejectedPlanAndReplannedCase({
       definition,
       human: { ...human, replyToHumanAction: undefined },
-      rootCreation: { teamId: "team-1", projectId: "project-1", routingLabelId: "route-label", rootStatusId: "todo-state" },
+      rootCreation: admittedRootCreation(),
     }),
     hasCode("foreground_e2e_rejected_case_input_invalid"),
   );
 });
+
+function admittedRootCreation() {
+  return {
+    teamId: "team-1",
+    projectId: "project-1",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+    rootIssueId: "root-1",
+    identifier: "ENG-1",
+  };
+}
 
 function hasCode(code) {
   return (error) => error?.code === code;

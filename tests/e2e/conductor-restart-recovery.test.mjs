@@ -6,23 +6,11 @@ import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { runConductorRestartRecoveryCase } from "../../tools/e2e/conductor-restart-recovery.mjs";
 import { forceKillOwnedProcess } from "../../tools/e2e/runtime-owner.mjs";
 
-test("restart recovery Case creates both Roots, kills only the affected Conductor, and approves product-created Plan Reviews", async () => {
+test("restart recovery Case consumes admitted Roots, kills only the affected Conductor, and approves product-created Plan Reviews", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "conductor_restart_recovery");
   const calls = [];
   const human = {
     actorId: "human-1",
-    async createRootIssue(input) {
-      calls.push({ kind: "create_root", input });
-      return input.rootKey === "affected-root"
-        ? { rootIssueId: "affected-root-id", identifier: "ENG-1" }
-        : { rootIssueId: "continuous-root-id", identifier: "ENG-2" };
-    },
-    async assertRootUndelegatedAndInactive(input) {
-      calls.push({ kind: "assert_undelegated", input });
-    },
-    async delegateRootIssue(input) {
-      calls.push({ kind: "delegate_root", input });
-    },
     async waitForRestartRecoveryAdmission(input) {
       calls.push({ kind: "wait_for_admission", input });
       return { affectedRootIssueId: "affected-root-id", interruptedStageIssueId: "old-execution" };
@@ -49,12 +37,6 @@ test("restart recovery Case creates both Roots, kills only the affected Conducto
   const result = await runConductorRestartRecoveryCase({ definition, human, runtime, rootCreationsByRootKey });
 
   assert.deepEqual(calls, [
-    { kind: "create_root", input: rootCreateInput("affected-root", rootCreationsByRootKey["affected-root"]) },
-    { kind: "create_root", input: rootCreateInput("continuous-root", rootCreationsByRootKey["continuous-root"]) },
-    { kind: "assert_undelegated", input: { rootIssueId: "affected-root-id" } },
-    { kind: "assert_undelegated", input: { rootIssueId: "continuous-root-id" } },
-    { kind: "delegate_root", input: { rootIssueId: "affected-root-id" } },
-    { kind: "delegate_root", input: { rootIssueId: "continuous-root-id" } },
     {
       kind: "wait_for_admission",
       input: { affectedRootIssueId: "affected-root-id", continuousRootIssueId: "continuous-root-id" },
@@ -93,9 +75,6 @@ test("restart recovery Case rejects noncanonical topology, non-owning runtime fa
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "conductor_restart_recovery");
   const human = {
     actorId: "human-1",
-    async createRootIssue({ rootKey }) { return { rootIssueId: `${rootKey}-id`, identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive() {},
-    async delegateRootIssue() {},
     async waitForRestartRecoveryAdmission() {
       return { affectedRootIssueId: "continuous-root-id", interruptedStageIssueId: "old-execution" };
     },
@@ -142,11 +121,13 @@ test("owned recovery fault sends SIGKILL without graceful termination", { skip: 
 });
 
 function rootCreation(routingLabelId, conductorId, performerProfileId, worktreeDirectory) {
-  return { teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
-}
-
-function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
-  return { caseId: "conductor_restart_recovery", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
+  const affected = routingLabelId === "route-a";
+  return {
+    teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId,
+    rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory,
+    rootIssueId: affected ? "affected-root-id" : "continuous-root-id",
+    identifier: affected ? "ENG-1" : "ENG-2",
+  };
 }
 
 function hasCode(code) {

@@ -75,6 +75,8 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
   let projectReads = 0;
   let localCreated = false;
   let budgetAssertions = 0;
+  let runtimeClosed = 0;
+  let resourcesClosed = 0;
   let runtimeFaultListener;
   const resetClient = {
     client: {
@@ -137,7 +139,7 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
         },
         async createLocalResources() {
           localCreated = true;
-          return { directory: temporaryDirectory, async close() {} };
+          return { directory: temporaryDirectory, async close() { resourcesClosed += 1; } };
         },
         async startProductionRuntime() {
           return {
@@ -150,7 +152,7 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
               runtimeFaultListener = listener;
               return () => { runtimeFaultListener = undefined; };
             },
-            async close() {},
+            async close() { runtimeClosed += 1; },
           };
         },
       },
@@ -170,7 +172,13 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
     assert.equal(budgetAssertions, 1);
     assert.deepEqual(observedFault, { component: "podium", reasonCode: "process_exited" });
     assert.deepEqual(events.map(({ phase }) => phase), ["resetting", "starting", "ready"]);
+    await Promise.all([environment.stopWriters(), environment.stopWriters()]);
+    assert.equal(runtimeClosed, 1);
+    assert.equal(resourcesClosed, 0);
     await environment.close();
+    await environment.close();
+    assert.equal(runtimeClosed, 1);
+    assert.equal(resourcesClosed, 1);
     assert.deepEqual(events.map(({ phase }) => phase), ["resetting", "starting", "ready", "cleaning"]);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -854,6 +862,21 @@ test("foreground reporter emits sanitized structured phase and heartbeat observa
 
   reporter.phase("resetting");
   elapsed = 1;
+  reporter.phase("admitting");
+  reporter.admissionProgress({ milestone: "roots-created", rootCount: 14 });
+  reporter.admissionProgress({ milestone: "roots-verified", rootCount: 14 });
+  reporter.admissionProgress({ milestone: "roots-delegated", rootCount: 14 });
+  reporter.caseAssertion({
+    caseId: "approved_happy_path",
+    assertionId: "native_identity_consistent",
+    outcome: "satisfied",
+  });
+  reporter.caseAssertion({
+    caseId: "approved_happy_path",
+    assertionId: "complete_native_coverage",
+    outcome: "coverage_missing",
+    reasonCode: "e2e.approved_happy_path.complete_native_coverage.coverage_missing",
+  });
   reporter.waitingHuman({ caseId: "approved_happy_path", detail: "symphony-secret" });
   reporter.startHeartbeat(1_000);
   elapsed = 2;
@@ -863,11 +886,36 @@ test("foreground reporter emits sanitized structured phase and heartbeat observa
   const events = lines.map((line) => JSON.parse(line));
   assert.deepEqual(events.map(({ event }) => event), [
     "foreground_e2e_phase",
+    "foreground_e2e_phase",
+    "foreground_e2e_admission_progress",
+    "foreground_e2e_admission_progress",
+    "foreground_e2e_admission_progress",
+    "foreground_e2e_case_assertion",
+    "foreground_e2e_case_assertion",
     "foreground_e2e_case_observation",
     "foreground_e2e_heartbeat",
   ]);
-  assert.equal(events[1].detail, "[REDACTED]");
-  assert.equal(events[2].elapsed_ms, 2_000);
+  assert.deepEqual(events.filter(({ event }) => event === "foreground_e2e_phase").map(({ phase }) => phase), [
+    "resetting",
+    "admitting",
+  ]);
+  assert.deepEqual(events.filter(({ event }) => event === "foreground_e2e_admission_progress")
+    .map(({ milestone, root_count: rootCount }) => ({ milestone, rootCount })), [
+    { milestone: "roots-created", rootCount: 14 },
+    { milestone: "roots-verified", rootCount: 14 },
+    { milestone: "roots-delegated", rootCount: 14 },
+  ]);
+  assert.deepEqual(events.filter(({ event }) => event === "foreground_e2e_case_assertion")
+    .map(({ assertion_id: assertionId, outcome, reason_code: reasonCode }) => ({ assertionId, outcome, reasonCode })), [
+    { assertionId: "native_identity_consistent", outcome: "satisfied", reasonCode: undefined },
+    {
+      assertionId: "complete_native_coverage",
+      outcome: "coverage_missing",
+      reasonCode: "e2e.approved_happy_path.complete_native_coverage.coverage_missing",
+    },
+  ]);
+  assert.equal(events.at(-2).detail, "[REDACTED]");
+  assert.equal(events.at(-1).elapsed_ms, 2_000);
 });
 
 test("foreground reporter emits only closed sanitized Conductor diagnostic fields", () => {
@@ -883,11 +931,17 @@ test("foreground reporter emits only closed sanitized Conductor diagnostic field
     component: "conductor",
     conductorId: "conductor-1",
     level: "error",
-    runtimeEvent: "root_reconciliation_failed",
+    runtimeEvent: "root_directive_materialization_failed",
     rootIssueId: "root-1",
     reason: "performer_timeout",
     failureCode: "performer_timeout",
+    sanitizedReason: "The Provider turn failed safely.",
     phase: "open_reconciler",
+    directiveId: "directive-1",
+    directiveKind: "revise_root_tree",
+    operationGroup: "operations",
+    operationIndex: 0,
+    operationKind: "remove_relation",
   });
 
   assert.deepEqual(JSON.parse(lines[0]), {
@@ -898,11 +952,17 @@ test("foreground reporter emits only closed sanitized Conductor diagnostic field
     component: "conductor",
     conductor_id: "conductor-1",
     level: "error",
-    runtime_event: "root_reconciliation_failed",
+    runtime_event: "root_directive_materialization_failed",
     root_issue_id: "root-1",
     reason: "performer_timeout",
     failure_code: "performer_timeout",
+    sanitized_reason: "The Provider turn failed safely.",
     phase: "open_reconciler",
+    directive_id: "directive-1",
+    directive_kind: "revise_root_tree",
+    operation_group: "operations",
+    operation_index: 0,
+    operation_kind: "remove_relation",
   });
   assert.throws(
     () => reporter.runtimeDiagnostic({
@@ -932,11 +992,17 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
 
   stdout.emit("data", Buffer.from(`${JSON.stringify({
     level: "error",
-    event: "root_reconciliation_failed",
+    event: "root_directive_materialization_failed",
     root_issue_id: "root-1",
     reason: "performer_timeout",
     failure_code: "performer_timeout",
+    sanitized_reason: "The Provider turn failed safely.",
     phase: "open_reconciler",
+    directive_id: "directive-1",
+    directive_kind: "revise_root_tree",
+    operation_group: "operations",
+    operation_index: "0",
+    operation_kind: "remove_relation",
     raw_error: "symphony-secret",
   })}\n`, "utf8"));
   stdout.emit("data", Buffer.from(`${JSON.stringify({
@@ -955,11 +1021,17 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
       component: "conductor",
       conductorId: "conductor-1",
       level: "error",
-      runtimeEvent: "root_reconciliation_failed",
+      runtimeEvent: "root_directive_materialization_failed",
       rootIssueId: "root-1",
       reason: "performer_timeout",
       failureCode: "performer_timeout",
+      sanitizedReason: "The Provider turn failed safely.",
       phase: "open_reconciler",
+      directiveId: "directive-1",
+      directiveKind: "revise_root_tree",
+      operationGroup: "operations",
+      operationIndex: 0,
+      operationKind: "remove_relation",
     },
     {
       component: "conductor",
@@ -1165,6 +1237,10 @@ test("production child environments keep development and Codex API secrets outsi
       dataRoot: "/tmp/conductor",
       instanceId: "instance-1",
     },
+    environment: {
+      ...process.env,
+      SYMPHONY_PROVIDER_IO_CAPTURE_DIR: "/tmp/symphony-provider-io",
+    },
   });
 
   assert.equal(podium.SYMPHONY_LINEAR_CLIENT_SECRET, "client-secret");
@@ -1179,6 +1255,34 @@ test("production child environments keep development and Codex API secrets outsi
   assert.equal(conductor.SYMPHONY_PRIVATE_IPC_FD, undefined);
   assert.equal(conductor.SYMPHONY_CODEX_BASE_URL, "https://example.test");
   assert.equal(conductor.SYMPHONY_REPOSITORY_IDENTITY, "repository-identity-1");
+  assert.equal(conductor.SYMPHONY_PROVIDER_IO_CAPTURE_DIR, "/tmp/symphony-provider-io");
+});
+
+test("production child environment rejects a relative Provider I/O capture directory", () => {
+  assert.throws(() => createConductorEnvironment({
+    config,
+    resources: {
+      podiumDataRoot: "/tmp/podium",
+      conductorSocketPath: "/tmp/conductor.sock",
+      podiumBackend: "/repo/apps/podium-desktop/dist-backend/main.js",
+      conductor: "/repo/apps/conductor/dist/main.js",
+      performer: "/repo/.venv/bin/performer",
+    },
+    conductor: {
+      bindingId: "binding-1",
+      conductorId: "conductor-1",
+      conductorShortHash: "abc123def456",
+      linearInstallationId: "installation-1",
+      organizationId: "organization-1",
+      repositoryHandle: "repository-1",
+      repositoryIdentity: "repository-identity-1",
+      repositoryRoot: "/tmp/repository",
+      baseBranch: "main",
+      dataRoot: "/tmp/conductor",
+      instanceId: "instance-1",
+    },
+    environment: { SYMPHONY_PROVIDER_IO_CAPTURE_DIR: "relative/provider-io" },
+  }), /foreground_e2e_conductor_environment_invalid/u);
 });
 
 function eventReporter(events) {

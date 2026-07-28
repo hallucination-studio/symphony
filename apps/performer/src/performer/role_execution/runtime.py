@@ -92,12 +92,13 @@ class RoleExecutionRuntime:
             }
         except ProviderBackendError as error:
             continuity = _error_continuity(error, record, request)
+            category = "schema_invalid" if error.code == "provider_schema_unsupported" else "transport_failed"
             result = {
                 "kind": "execution_failed",
-                "error_code": _continuity_error_code(continuity),
+                "error_code": error.code if category == "schema_invalid" else _continuity_error_code(continuity),
                 "sanitized_reason": error.sanitized_reason,
                 "retryable": error.retryable,
-                **({"failure_category": "transport_failed"} if role == "root_reconciler" else {}),
+                **({"failure_category": category} if role == "root_reconciler" else {}),
             }
         except (KeyError, TypeError, ValueError, SessionError) as error:
             continuity = _error_continuity(error, record, request, accepted=output is not None)

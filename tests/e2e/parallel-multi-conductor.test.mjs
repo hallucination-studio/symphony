@@ -4,22 +4,11 @@ import test from "node:test";
 import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 import { runParallelMultiConductorCase } from "../../tools/e2e/parallel-multi-conductor.mjs";
 
-test("parallel Case concurrently creates its frozen routed Roots and approves only their product Plan Review Actions", async () => {
+test("parallel Case consumes admitted routed Roots and approves only their product Plan Review Actions", async () => {
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "parallel_multi_conductor");
   const calls = [];
-  const pendingRootCreates = [];
   const human = {
     actorId: "human-1",
-    createRootIssue(input) {
-      calls.push({ kind: "create_root", input });
-      return new Promise((resolve) => { pendingRootCreates.push(resolve); });
-    },
-    async assertRootUndelegatedAndInactive(input) {
-      calls.push({ kind: "assert_undelegated", input });
-    },
-    async delegateRootIssue(input) {
-      calls.push({ kind: "delegate_root", input });
-    },
     async waitForPlanApprovalRequest(input) {
       calls.push({ kind: "wait_for_plan_review", input });
       return {
@@ -36,24 +25,9 @@ test("parallel Case concurrently creates its frozen routed Roots and approves on
     "parallel-b-root": rootCreation("route-b", "conductor-b-id", "profile-b", "/repositories/b"),
   };
 
-  const running = runParallelMultiConductorCase({ definition, human, rootCreationsByRootKey });
-  await Promise.resolve();
-  assert.deepEqual(calls, [
-    { kind: "create_root", input: rootCreateInput("parallel-a-root", rootCreationsByRootKey["parallel-a-root"]) },
-    { kind: "create_root", input: rootCreateInput("parallel-b-root", rootCreationsByRootKey["parallel-b-root"]) },
-  ]);
-
-  pendingRootCreates[0]({ rootIssueId: "parallel-a-root-id", identifier: "ENG-1" });
-  pendingRootCreates[1]({ rootIssueId: "parallel-b-root-id", identifier: "ENG-2" });
-  const result = await running;
+  const result = await runParallelMultiConductorCase({ definition, human, rootCreationsByRootKey });
 
   assert.deepEqual(calls, [
-    { kind: "create_root", input: rootCreateInput("parallel-a-root", rootCreationsByRootKey["parallel-a-root"]) },
-    { kind: "create_root", input: rootCreateInput("parallel-b-root", rootCreationsByRootKey["parallel-b-root"]) },
-    { kind: "assert_undelegated", input: { rootIssueId: "parallel-a-root-id" } },
-    { kind: "assert_undelegated", input: { rootIssueId: "parallel-b-root-id" } },
-    { kind: "delegate_root", input: { rootIssueId: "parallel-a-root-id" } },
-    { kind: "delegate_root", input: { rootIssueId: "parallel-b-root-id" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-a-root-id" } },
     { kind: "wait_for_plan_review", input: { rootIssueId: "parallel-b-root-id" } },
     { kind: "approve_plan_review", input: { rootIssueId: "parallel-a-root-id", requestCommentId: "parallel-a-action", body: "Approved." } },
@@ -80,9 +54,6 @@ test("parallel Case rejects noncanonical definitions, incomplete topology bindin
   const definition = FOREGROUND_E2E_CASES.find(({ caseId }) => caseId === "parallel_multi_conductor");
   const human = {
     actorId: "human-1",
-    async createRootIssue() { return { rootIssueId: "root-1", identifier: "ENG-1" }; },
-    async assertRootUndelegatedAndInactive() {},
-    async delegateRootIssue() {},
     async waitForPlanApprovalRequest() { return { requestCommentId: "action-1", planIssueId: "plan-1" }; },
     async replyToHumanAction() {},
   };
@@ -111,13 +82,6 @@ test("parallel Case forwards cancellation to every independent Linear Human oper
   const waits = [];
   const human = {
     actorId: "human-1",
-    async createRootIssue({ rootKey }) {
-      return rootKey === "parallel-a-root"
-        ? { rootIssueId: "parallel-a-root-id", identifier: "ENG-1" }
-        : { rootIssueId: "parallel-b-root-id", identifier: "ENG-2" };
-    },
-    async assertRootUndelegatedAndInactive(input) { waits.push(input); },
-    async delegateRootIssue(input) { waits.push(input); },
     async waitForPlanApprovalRequest(input) {
       waits.push(input);
       return { requestCommentId: `${input.rootIssueId}-action`, planIssueId: `${input.rootIssueId}-plan` };
@@ -138,19 +102,17 @@ test("parallel Case forwards cancellation to every independent Linear Human oper
   assert.deepEqual(waits, [
     { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
     { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
-    { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
-    { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
-    { rootIssueId: "parallel-a-root-id", signal: abortController.signal },
-    { rootIssueId: "parallel-b-root-id", signal: abortController.signal },
   ]);
 });
 
 function rootCreation(routingLabelId, conductorId, performerProfileId, worktreeDirectory) {
-  return { teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId, rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory };
-}
-
-function rootCreateInput(rootKey, { teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
-  return { caseId: "parallel_multi_conductor", rootKey, teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
+  const first = routingLabelId === "route-a";
+  return {
+    teamId: "team-1", projectId: "project-1", rootLabelId: "root-label", routingLabelId,
+    rootStatusId: "todo-state", conductorId, performerProfileId, worktreeDirectory,
+    rootIssueId: first ? "parallel-a-root-id" : "parallel-b-root-id",
+    identifier: first ? "ENG-1" : "ENG-2",
+  };
 }
 
 function parallelRoot(rootKey, conductorRef, repositoryRef, rootIssueId, approvalRequestCommentId, {

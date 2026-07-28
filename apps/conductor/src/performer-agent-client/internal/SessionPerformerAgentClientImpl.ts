@@ -853,6 +853,8 @@ function toWireFactIssue(issue: import("../../root-reconciliation/api/RootReconc
     issue_id: issue.issueId,
     issue_kind: issue.issueKind,
     ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
+    ...(issue.creatorUserId ? { creator_user_id: issue.creatorUserId } : {}),
+    ...(issue.assigneeUserId ? { assignee_user_id: issue.assigneeUserId } : {}),
     title: issue.title,
     description: issue.description,
     status: issue.status,

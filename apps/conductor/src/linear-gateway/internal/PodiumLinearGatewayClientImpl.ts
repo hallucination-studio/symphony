@@ -353,6 +353,8 @@ function workflowTree(
       identifier: string(issue.identifier, "linear_workflow_issue_invalid"),
       project_id: string(issue.project_id, "linear_workflow_issue_invalid"),
       ...(issue.parent_issue_id === undefined ? {} : { parent_issue_id: string(issue.parent_issue_id, "linear_workflow_issue_invalid") }),
+      ...(issue.creator_user_id === undefined ? {} : { creator_user_id: string(issue.creator_user_id, "linear_workflow_issue_invalid") }),
+      ...(issue.assignee_user_id === undefined ? {} : { assignee_user_id: string(issue.assignee_user_id, "linear_workflow_issue_invalid") }),
       status_id: string(issue.status_id, "linear_workflow_issue_invalid"),
       status_name: string(issue.status_name, "linear_workflow_issue_invalid"),
       status_category: workflowStatusCategory(issue.status_category),

@@ -181,6 +181,8 @@ const WORKFLOW_ISSUE_TREE_ROOT_QUERY = `
       id identifier title description sortOrder createdAt updatedAt archivedAt
       project { id }
       parent { id }
+      creator { id }
+      assignee { id }
       state { name }
       labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
       comments(first: 8) {
@@ -217,6 +219,8 @@ const WORKFLOW_ISSUE_TREE_CHILDREN_QUERY = `
         id identifier title description sortOrder subIssueSortOrder createdAt updatedAt archivedAt
         project { id }
         parent { id }
+        creator { id }
+        assignee { id }
         state { name }
         labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         comments(first: 8) {
@@ -498,6 +502,8 @@ interface IssueTreeFact {
   archivedAt?: string | null;
   project?: { id: string } | null;
   parent?: { id: string } | null;
+  creator?: { id: string } | null;
+  assignee?: { id: string } | null;
   state: { name: string };
   labels: {
     nodes: Array<{ name: string }>;
@@ -1552,9 +1558,9 @@ export class LinearSdkImpl implements LinearClientInterface {
     append(root.id);
 
     const rootConductorLabels = conductorPoolFromLabels(root.labels.nodes.map(({ name }) => name));
-    const comments = [...facts.values()].flatMap(({ fact }) =>
+    const comments = normalizeWorkflowCommentThreads([...facts.values()].flatMap(({ fact }) =>
       fact.comments.nodes.map((comment) => workflowCommentValue(comment, fact.id, delegateActorId)),
-    );
+    ));
     if (comments.length > MAX_ROOT_COMMENTS) {
       throw new Error("linear_workflow_comments_too_many");
     }
@@ -1617,6 +1623,8 @@ export class LinearSdkImpl implements LinearClientInterface {
         identifier: issue.identifier ?? issue.issueId,
         projectId: issue.projectId,
         ...(issue.parentIssueId ? { parentIssueId: issue.parentIssueId } : {}),
+        ...(issue.creatorUserId ? { creatorUserId: issue.creatorUserId } : {}),
+        ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
         statusId: status.statusId,
         statusName: status.name,
         statusCategory: status.category,
@@ -1863,9 +1871,6 @@ export class LinearSdkImpl implements LinearClientInterface {
           (await this.#client.issue(command.targetIssueId)).projectId;
         if (sourceProjectId !== command.expectedProjectId || targetProjectId !== command.expectedProjectId) {
           throw new Error("linear_workflow_relation_project_invalid");
-        }
-        if (command.relationKind === "triggered_by") {
-          throw new Error("linear_workflow_relation_kind_unsupported");
         }
         const issueId = command.relationKind === "blocks" || command.relationKind === "relates_to"
           ? command.sourceIssueId : command.targetIssueId;
@@ -2738,6 +2743,29 @@ function workflowCommentValue(
   };
 }
 
+function normalizeWorkflowCommentThreads(
+  comments: WorkflowCommentValue[],
+): WorkflowCommentValue[] {
+  const byId = new Map(comments.map((comment) => [comment.commentId, comment]));
+  if (byId.size !== comments.length) throw new Error("linear_workflow_comment_ambiguous");
+  return comments.map((comment) => {
+    const visited = new Set<string>();
+    let root = comment;
+    while (root.parentCommentId !== undefined) {
+      if (visited.has(root.commentId)) throw new Error("linear_workflow_comment_thread_invalid");
+      visited.add(root.commentId);
+      const parent = byId.get(root.parentCommentId);
+      if (!parent) throw new Error("linear_workflow_comment_thread_incomplete");
+      root = parent;
+    }
+    return {
+      ...comment,
+      threadRootCommentId: root.commentId,
+      threadState: root.threadState,
+    };
+  });
+}
+
 type WorkflowCommentSource = {
   id: string;
   issue?: unknown;
@@ -3520,6 +3548,8 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     identifier: fact.identifier,
     ...(fact.project ? { projectId: fact.project.id } : {}),
     ...(fact.parent ? { parentIssueId: fact.parent.id } : {}),
+    ...(fact.creator ? { creatorUserId: workflowIssueUserId(fact.creator.id) } : {}),
+    ...(fact.assignee ? { assigneeUserId: workflowIssueUserId(fact.assignee.id) } : {}),
     state: linearIssueState(fact.state.name),
     order: fact.subIssueSortOrder ?? fact.sortOrder,
     depth,
@@ -3530,6 +3560,11 @@ function treeFactValue(fact: IssueTreeFact, depth: number): LinearIssueValue {
     createdAt: timestampValue(fact.createdAt),
     updatedAt: timestampValue(fact.updatedAt),
   };
+}
+
+function workflowIssueUserId(value: string): string {
+  if (!SAFE_ID.test(value)) throw new Error("linear_workflow_issue_actor_invalid");
+  return value;
 }
 
 function issueLabels(value: IssueTreeFact["labels"] | undefined): string[] {

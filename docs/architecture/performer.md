@@ -12,8 +12,8 @@ Performer负责：
 - open时接收一次完整Root bootstrap，后续ReAct turn只接收严格连续的delta；
 - 返回closed `RootReconcilerTurnResult`；只有next-action variant携带matching用户comment dispositions和下一步语义，
   failure variant只提供当前调用的closed failure；
-- 执行Plan/Work/Verify turn并返回matching强类型Result；
-- Work turn内部运行有界coding-agent tool loop；
+- 执行Plan/Work/Verify turn并返回matching semantic Result或mechanical `StageTurnFailure`；
+- Work turn内部运行有界coding-agent tool loop，并只允许Work root/descendants创建递归subagents；
 - 映射model、effort、Fast、sandbox、deadline和structured output；
 - 校验generated wire contracts并归一化Provider failure；
 - 使用isolated Performer Profile `CODEX_HOME`。
@@ -34,7 +34,8 @@ RootAgentRuntime
   root_reconciler_session -> one Provider thread across Root Cycles
   cycle_sessions[]
     plan_session          -> separate Provider thread
-    work_session          -> separate Provider thread, multiple Work targets
+    work_session          -> dedicated containment + persistent Work root, multiple Work targets
+      current_turn_epoch? -> fresh descendant tree for one stage_execution_id
     verify_session        -> separate Provider thread
 ```
 
@@ -42,9 +43,10 @@ RootAgentRuntime
 session可以有多个Conductor驱动的turn；Work session跨多个Work Issues复用。Stage角色不能兼任Root Reconciler
 或共享Provider conversation。
 
-session handle是Performer内部或opaque Symphony runtime identity，不能暴露raw Provider thread ID。Cycle terminal
-关闭该Cycle三个Stage sessions；Root Reconciler-directed cancel、routing/process generation变化或Profile失效时关闭Root Reconciler并拒绝late
-output。
+session handle是Performer内部或opaque Symphony runtime identity，不能暴露raw Provider thread ID。Cycle terminal关闭该Cycle三个
+Stage sessions；每个Work turn永久retire matching mutation epoch和descendants，只有Work root thread可以进入下一turn。Work role
+session只有在workspace write capability永久撤销且matching containment empty/isolated得到proof后才算关闭。
+Root Reconciler-directed cancel、routing/process generation变化或Profile失效时关闭Root Reconciler并拒绝late output。
 
 ## 3. 调用协议
 
@@ -54,9 +56,9 @@ Conductor始终是caller：
 PerformerAgentClientInterface
   openRootReconciler(bootstrap) -> RootReconcilerOpenedResult + initial RootReconcilerTurnResult
   advanceRootReconciler(delta) -> RootReconcilerTurnResult
-  executePlanTurn(request) -> PlanResult
-  executeWorkTurn(request) -> WorkResult
-  executeVerifyTurn(request) -> VerifyResult
+  executePlanTurn(request) -> PlanTurnResponse
+  executeWorkTurn(request) -> WorkTurnResponse
+  executeVerifyTurn(request) -> VerifyTurnResponse
   closeCycleStageSessions(command) -> CloseCycleStageSessionsResult
   closeRootReconciler(command) -> CloseRootReconcilerResult
 ```
@@ -77,11 +79,34 @@ ProviderBackendInterface
   closeSession(session)
 ```
 
+Work还要求backend提供role-session open/close以及turn-epoch begin/execute/seal/abort的closed internal capability。该能力、六个
+model-facing协作工具、hard reservations、write grants和runtime containment只由[Work Subagents](work-subagents.md)定义，
+不进入其他role或Conductor-facing Provider types。
+
 当前实现目标为`CodexBackendImpl`。Backend差异只存在于`*BackendImpl`，公共Result不包含SDK object、Token、
 raw error、reasoning、transcript或credential path。
 
 `CodexBackendImpl`只使用官方SDK public API；不得调用Codex CLI、读取/改写`config.toml`或`auth.json`、依赖
 private SDK成员或静默放宽sandbox。无法表达完整policy时fail closed。
+
+### 4.1 Provider I/O诊断capture
+
+Provider I/O capture默认关闭，只能由process-start环境中的`SYMPHONY_PROVIDER_IO_CAPTURE_DIR`显式启用。Conductor验证其为
+operator指定的absolute directory，并为每个Conductor、Profile和process generation派生独立JSONL文件；Performer只接收
+派生后的内部file path。该开关不是Profile设置、Podium API、Desktop control或workflow capability，不修改`.env`，也不能由
+Root、comment或Provider输出开启。
+
+开启时，`CodexBackendImpl`在调用SDK前同步append exact model-visible session/turn input，包括base instructions、current prompt与
+SDK options；SDK返回后在任何JSON/schema/business validation前append原始`final_response`、status和error；SDK抛错时append
+matching exception type与未改写的`str(error)`。每条record使用local session/turn capture ID，并带request、Root、Cycle、Stage
+等已有correlation；capture失败必须以`provider_io_capture_failed` fail closed，且若Provider已经返回，continuity仍按`accepted`
+处理，不能伪装成`not_accepted`。
+
+capture文件不走Performer stdout/stderr、Conductor public runtime logs、Podium、Desktop或Linear，创建mode为`0600`，也不记录
+request中的`secrets`字段、Provider credential、Authorization header、API Key或`CODEX_HOME`内容。model-visible input和原始
+output可能包含完整Root、comment、repository facts及其他敏感业务内容；因此目录授权、retention与删除由启用它的operator负责。
+Symphony不读取、上传、展示、索引或解析capture文件，不用它恢复Provider continuity、重放turn、生成workflow事实或裁决E2E。
+它是临时diagnostic evidence，不是transcript store、context checkpoint或durable workflow authority。
 
 ## 5. Role prompt资源
 
@@ -103,7 +128,8 @@ Performer内部prompt loader在process composition时一次性读取全部四个
 role-to-prompt mapping；创建matching Provider session时只从该内存映射取得完整Markdown并作为base instructions交给
 backend。resource缺失、不可读、空白、不是打包资源或role未知时必须fail closed；不得回退到backend中的内联字符串、
 另一个role的prompt、Provider默认prompt或Profile配置。process运行期间不重新读取文件。prompt正文、文件路径和loader
-对象不跨Conductor-Performer contract，不进入Linear、日志、Result或Provider Profile。
+对象不跨Conductor-Performer contract，不进入Linear、normal/public日志、Result或Provider Profile；唯一诊断例外是4.1中
+operator显式启用且只能本地读取的Provider I/O capture。
 
 Markdown只拥有稳定的role identity、职责、禁止事项和决策/执行方法。每轮bootstrap、delta、Stage context、
 `instruction_bundle`和其他dynamic facts仍来自validated request；matching structured-output schema仍从
@@ -155,7 +181,8 @@ conversation。Root Reconciler的完整bootstrap不能成为Stage startup contex
 Provider history只append current-value、replacement和tombstone fragments，不修改旧item。已经确认append但业务Result或
 RootNextAction尚未materialize的事实不在同一live thread重复发送；human input disposition、materialization和workflow推进
 仍由native Linear/Git current facts独立决定。append是否成功或continuation baseline无法证明时关闭session，并由Conductor
-从fresh Linear/Git facts重建fresh initial context；Performer不持久化transcript、fragment log或context checkpoint。
+从fresh Linear/Git facts重建fresh initial context；正常运行不持久化transcript、fragment log或context checkpoint。4.1的
+opt-in diagnostic capture不能被Performer读取，因此不改变该恢复不变量。
 
 本节优化的是每个turn新增的model-visible输入，不定义总conversation token上限、compaction、旧history裁剪或摘要替换
 策略。资源limits仍用于拒绝单次过大的initial/delta/result，但不能作为重复注入完整上下文的理由。
@@ -194,15 +221,21 @@ ProviderTurnContinuity =
 
 `retained + not_accepted`中的digest是本次base；`retained + accepted`中的digest是本次target；二者之外的组合无效。
 `closed`不携带digest，因为旧baseline不再可引用。matching failure同时使用closed error code区分
-`provider_append_not_accepted`、`provider_output_invalid`、`provider_append_acceptance_unknown`和`provider_session_lost`；
-`retryable`只说明是否可以从fresh facts发起后续业务尝试，不授权重放本次request。成功Result隐含`retained + accepted`且其
+`provider_append_not_accepted`、`provider_output_schema_invalid`、`provider_append_acceptance_unknown`和`provider_session_lost`。
+`retryable`的意义由matching outer failure union封闭定义，任何值都不授权重放本次request；对于`StageTurnFailure`，只有
+`workspace_fence_unproven`为true且只允许retry generic close，不能直接发起后续业务turn。成功Result隐含`retained + accepted`且其
 matching context digest必须是target，因此不重复携带该union。
 
 `not_accepted`不授权Performer内部重试；Conductor下一次fresh observation可以针对仍连续的session发出一个新的turn。
 `acceptance_unknown`后的唯一恢复是使用新Symphony session/turn identity，从fresh Linear/Git/repository facts生成matching role
 完整initial和新current command。旧request body、旧command、旧delta、partial response或本地transcript都不重放；仍pending的
 human input从native receipt/reply/target facts重新推导，并随新command引用。此fresh-open是丢失runtime continuity后的唯一
-恢复语义，不是兼容fallback，也不允许持久化fragment log、transcript、cursor或context checkpoint。
+恢复语义，不是兼容fallback，也不允许持久化可供Symphony读取的fragment log、transcript、cursor或context checkpoint；4.1的
+operator-only capture不能用于恢复或重放。
+
+Work response中的该union只描述persistent Work root thread；descendant Provider continuity不会展开到public contract。Child failure只有在
+Performer证明其thread/context/containment与root隔离后才可保留root continuation，否则整个Work role session返回`closed`并走fresh
+session恢复。完整规则由[Work Subagents](work-subagents.md)拥有。
 
 ## 6. Agent行为
 
@@ -225,8 +258,11 @@ Plan read-only，生成Plan Contract和initial Work DAG proposal。它不创建I
 
 ### 6.3 Work
 
-Work workspace-write。一个turn只接收一个selected Work target，但内部可以反复读取、编辑、运行命令、观察错误
-和修复，直到完成、blocked或预算耗尽。它不能修改Cycle DAG；发现调整需要时返回structured facts。
+Work workspace-write。一个turn只接收一个selected Work target，但内部可以反复读取、编辑、运行命令、观察错误和修复，
+直到完成、blocked或runtime终止。只有Work可以创建subagent；descendants仍属于同一个Work role并共享current turn budget与
+Root worktree，但write access由subsetted lease机械限制，且不能跨`stage_execution_id`复用。Work root负责分工、final diff
+review、checks和唯一semantic `WorkResult`；Performer只在机械失败时返回`StageTurnFailure`。完整语义见
+[Work Subagents](work-subagents.md)。Work不能修改Cycle DAG；发现调整需要时返回structured facts。
 
 ### 6.4 Verify
 
@@ -239,10 +275,10 @@ Performer不保存workflow数据库。live session可以在进程内维持Provid
 
 | 故障 | 处理 |
 |---|---|
-| turn transport失败 | interrupt matching turn；无validated Result则不产生业务结论 |
+| turn transport失败 | 先invalidate matching generation，再按role关闭/fence；以mechanical StageTurnFailure contract fail closed且不产生业务结论 |
 | Provider thread丢失 | close Symphony session；Conductor用fresh facts打开fresh role session |
 | Performer process崩溃 | Reconciler和Stage sessions全部丢弃；Conductor从Root facts重建 |
-| Work留下部分修改 | fresh Git/worktree facts进入下一份delta；session已丢失则进入fresh bootstrap。Root Reconciler决定继续、rerun、replan或supersede |
+| Work tree留下部分修改 | 永久撤销matching write epoch并fence containment；fresh Git/worktree facts进入下一份delta；session丢失则fresh bootstrap。Root Reconciler决定继续、rerun、replan或supersede |
 | stale/late Result | correlation/digest/precondition检查拒绝 |
 | Human等待 | turn结束并释放active execution；session可保留或丢弃，恢复结果相同 |
 
@@ -250,27 +286,29 @@ Provider session retention是性能优化，不是完成条件。系统必须在
 
 ## 8. 资源与安全
 
-- 每个Root Reconciler/Plan/Work/Verify turn有独立token、tool、context、result和wall-time limits；
+- 每个Root Reconciler/Plan/Work/Verify turn有独立weighted-token、tool、context、result和wall-time limits；
+- Work turn的weighted-token、tool和wall-time limits覆盖root与全部descendants，并在dispatch前hard reserve；
 - Cycle和Root预算由Conductor机械gate，Performer只执行授予的turn limits；
 - stdout/stderr、event frame和tool output必须bounded和sanitized；
 - Plan、Verify、Root Reconciler是read-only；只有Work获得matching workspace-write capability；
-- cancellation必须interrupt active Provider turn并清理child process；
+- cancellation先撤销matching result/write authority，再interrupt active Provider turn并fence child execution；
+- Work semantic Result前必须永久retire matching mutation epoch并fresh-read worktree；PID/process group不作为writer proof；
 - secrets和auth material不进入request/result/log或Linear content。
 
 ## 9. Profile Control
 
 Profile control仍是独立closed protocol，负责SDK login/status和受支持设置验证。Profile复用认证与设置，不复用
-跨Cycleconversation。完整规则由[Performer Profile](performer-profiles.md)定义。
+跨Cycle conversation。完整规则由[Performer Profile](performer-profiles.md)定义。
 
 ## 10. 不变量
 
 1. Performer拥有全部Agent SDK和Provider thread实现。
 2. 每个Root有一个Reconciler thread；每个Cycle有Plan、Work、Verify三个隔离角色thread。
 3. Conductor是唯一caller；Performer不反向调用Conductor。
-4. Root Reconciler只返回RootNextAction及comment dispositions，执行角色只返回Result。
+4. Root Reconciler只返回RootNextAction及comment dispositions；执行角色返回semantic Result，Performer返回mechanical failure。
 5. Work thread可以跨Work Issues复用，但每turn只有一个target。
 6. Performer不直接拥有Linear/Git workflow副作用。
-7. Provider thread和transcript不是durable authority。
+7. Provider thread、transcript和operator diagnostic capture都不是durable authority。
 8. 只有open request允许完整Root snapshot；advance request只允许delta，baseline mismatch必须fresh bootstrap。
 9. 四个role各自只加载一个随Performer打包的英文Markdown resource；不存在运行时覆盖、locale或inline fallback。
 10. Markdown定义稳定role行为，validated request提供本轮事实，generated schema和Conductor gate始终拥有机械执行边界。
@@ -279,3 +317,8 @@ Profile control仍是独立closed protocol，负责SDK login/status和受支持�
 12. 已有session的Provider输入只追加current turn command和该role的new/replacement/tombstone fragments；base instructions、
     initial context、完整Root/Cycle snapshot和其他role transcript不得重复注入。
 13. structured-output schema是每次调用的独立机械参数，不得复制成自然语言turn prompt。
+14. 只有Work role暴露subagent tools；Root Reconciler、Plan和Verify没有该tool capability。
+15. Work tree的全部nodes共享一个Work turn和Root worktree；只有root跨turn保留，descendants在epoch closure后失效。
+16. 只有Work root生成semantic `WorkResult`；runtime cancel、budget、Provider或fence failure使用`StageTurnFailure`。
+17. Work turn/session关闭、deadline或异常必须在write revocation与containment proof后释放writer capability；Provider archive、
+    PID和process group不是closure proof。

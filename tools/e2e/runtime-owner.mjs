@@ -138,12 +138,15 @@ export function createPodiumEnvironment({ config, resources, environment = proce
 
 export function createConductorEnvironment({ config, resources, conductor, environment = process.env } = {}) {
   assertRuntimeInput({ config, resources });
+  const providerIoCaptureDirectory = environment.SYMPHONY_PROVIDER_IO_CAPTURE_DIR;
   if (!conductor || !identifier(conductor.bindingId) || !identifier(conductor.conductorId) ||
       !shortHash(conductor.conductorShortHash) || !identifier(conductor.linearInstallationId) ||
       !identifier(conductor.organizationId) || !identifier(conductor.repositoryHandle) ||
       typeof conductor.repositoryIdentity !== "string" || conductor.repositoryIdentity.length === 0 ||
       !boundedPath(conductor.repositoryRoot) || !branch(conductor.baseBranch) ||
-      !boundedPath(conductor.dataRoot) || !identifier(conductor.instanceId)) {
+      !boundedPath(conductor.dataRoot) || !identifier(conductor.instanceId) ||
+      providerIoCaptureDirectory !== undefined &&
+        (!boundedPath(providerIoCaptureDirectory) || !path.isAbsolute(providerIoCaptureDirectory))) {
     throw stableError("foreground_e2e_conductor_environment_invalid");
   }
   return Object.freeze({
@@ -161,6 +164,9 @@ export function createConductorEnvironment({ config, resources, conductor, envir
     SYMPHONY_CONDUCTOR_DATA_ROOT: conductor.dataRoot,
     SYMPHONY_PERFORMER_EXECUTABLE: resources.performer,
     SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
+    ...(providerIoCaptureDirectory === undefined
+      ? {}
+      : { SYMPHONY_PROVIDER_IO_CAPTURE_DIR: path.normalize(providerIoCaptureDirectory) }),
     SYMPHONY_ROOT_DEADLINE_DURATION_MS: "300000",
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
@@ -1377,11 +1383,15 @@ export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr
       level: value.level,
       runtimeEvent: value.event,
       ...(value.root_issue_id === undefined ? {} : { rootIssueId: value.root_issue_id }),
-      ...(value.reason === undefined && value.sanitized_reason === undefined
-        ? {}
-        : { reason: value.reason ?? value.sanitized_reason }),
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
       ...(value.failure_code === undefined ? {} : { failureCode: value.failure_code }),
+      ...(value.sanitized_reason === undefined ? {} : { sanitizedReason: value.sanitized_reason }),
       ...(value.phase === undefined ? {} : { phase: value.phase }),
+      ...(value.directive_id === undefined ? {} : { directiveId: value.directive_id }),
+      ...(value.directive_kind === undefined ? {} : { directiveKind: value.directive_kind }),
+      ...(value.operation_group === undefined ? {} : { operationGroup: value.operation_group }),
+      ...(value.operation_index === undefined ? {} : { operationIndex: Number(value.operation_index) }),
+      ...(value.operation_kind === undefined ? {} : { operationKind: value.operation_kind }),
     };
     if (!runtimeLogDiagnostic(diagnostic)) {
       reportInvalidFields();
@@ -1435,13 +1445,24 @@ function removeDataListener(stream, listener) {
 }
 
 function runtimeLogDiagnostic(value) {
+  const hasDirectiveDiagnostic = value.directiveId !== undefined || value.directiveKind !== undefined;
+  const hasOperationDiagnostic = value.operationGroup !== undefined || value.operationIndex !== undefined || value.operationKind !== undefined;
   return value.component === "conductor" && identifier(value.conductorId) &&
     (value.level === "info" || value.level === "warning" || value.level === "error") &&
     isForwardableConductorRuntimeEvent(value.runtimeEvent) &&
     (value.rootIssueId === undefined || identifier(value.rootIssueId)) &&
     (value.reason === undefined || safeReasonCode(value.reason)) &&
     (value.failureCode === undefined || safeReasonCode(value.failureCode)) &&
-    (value.phase === undefined || safeReasonCode(value.phase));
+    (value.sanitizedReason === undefined || safeSanitizedReason(value.sanitizedReason)) &&
+    (value.phase === undefined || safeReasonCode(value.phase)) &&
+    (!hasDirectiveDiagnostic || value.runtimeEvent === "root_directive_materialization_failed" &&
+      identifier(value.directiveId) && safeReasonCode(value.directiveKind)) &&
+    (!hasOperationDiagnostic || hasDirectiveDiagnostic && safeReasonCode(value.operationGroup) &&
+      Number.isSafeInteger(value.operationIndex) && value.operationIndex >= 0 && safeReasonCode(value.operationKind));
+}
+
+function safeSanitizedReason(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 1_024 && !/[\p{Cc}]/u.test(value);
 }
 
 function collectSanitizedChildReason(stream, fallback, observe) {

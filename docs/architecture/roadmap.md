@@ -45,6 +45,8 @@
 
 - 每Cycle创建隔离Plan、Work、Verify threads；Work thread跨多个Work Issues复用；
 - Plan/Verify read-only，Work仅获matching worktree-write capability；
+- Work-only agent tree使用独立session containment、bounded recursive collaboration、tree-wide limits、mechanical write grants与
+  irreversible turn-epoch retirement；
 - Plan Result渲染为Plan description与status，approval使用Root Human Action thread；
 - Work Result转成Work status、Git/check evidence和必要comment；
 - Verify Result转成Verify status/conclusion label、native Finding Issues和Git evidence；
@@ -86,7 +88,8 @@
 ## 9. R7：真实边界验收
 
 - 使用真实Linear Project、Podium SDK boundary、Git repository和Performer process；
-- 至少三个Conductor实例并发启动，以唯一routing、Host process fencing和fresh mutation precondition证明同Root single writer；
+- 至少三个Conductor实例并发启动，以唯一routing、Host process fencing和fresh mutation precondition证明同Root single writer
+  domain；Work tree内部协作不创建第二个domain；
 - 独立E2E Human Actor只通过Linear公开surface操作；
 - all-settled后丢弃poll cache，fresh-read Linear/Git Final Evidence Snapshot；
 - 验证normal restart不重跑Done，process loss创建fresh successor；
@@ -109,7 +112,6 @@
 
 ## 11. 明确延期
 
-- role thread内部sub-agents或fan-out/fan-in；
 - 第二Provider；
 - 同一Root多个active Cycles或并行workspace writers；
 - durable Provider transcript、vector memory或workflow database；

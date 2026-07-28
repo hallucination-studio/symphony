@@ -676,6 +676,12 @@
         "parent_issue_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
         },
+        "creator_user_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
+        "assignee_user_id": {
+          "$ref": "common.schema.json#/$defs/Identifier"
+        },
         "status_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
         },
@@ -1605,8 +1611,7 @@
           "enum": [
             "blocks",
             "blocked_by",
-            "relates_to",
-            "triggered_by"
+            "relates_to"
           ]
         },
         "relation_state": {

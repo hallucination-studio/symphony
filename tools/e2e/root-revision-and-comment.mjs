@@ -8,13 +8,10 @@ export async function runRootRevisionAndCommentCase({ definition, human, rootCre
 
   const rootKey = definition.rootTopology[0].rootKey;
   const interactions = frozenInteractions(definition);
-  const root = await human.createRootIssue({ caseId: definition.caseId, rootKey, ...rootCreation, ...(signal ? { signal } : {}) });
+  const root = { rootIssueId: rootCreation.rootIssueId, identifier: rootCreation.identifier };
   if (!identifier(root?.rootIssueId) || !identifier(root?.identifier)) {
     throw stableError("foreground_e2e_revision_root_create_invalid");
   }
-  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
-  await human.delegateRootIssue({ rootIssueId: root.rootIssueId, ...(signal ? { signal } : {}) });
-
   const initialPlan = await waitForInitialPlan({ human, rootIssueId: root.rootIssueId, signal });
   const description = await human.updateRootDescription({
     rootIssueId: root.rootIssueId,
@@ -161,9 +158,8 @@ function assertDefinition(definition) {
 }
 
 function assertInput({ human, rootCreation, signal }) {
-  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
-      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanApprovalGate !== "function" || typeof human.updateRootDescription !== "function" ||
+  if (!human || !identifier(human.actorId) || typeof human.waitForPlanApprovalGate !== "function" ||
+      typeof human.updateRootDescription !== "function" ||
       typeof human.waitForRootDescriptionReceipt !== "function" || typeof human.createComment !== "function" ||
       typeof human.waitForCommentReceipt !== "function" || typeof human.editComment !== "function" ||
       typeof human.resolveCommentThread !== "function" || typeof human.reopenCommentThread !== "function" ||
@@ -171,6 +167,7 @@ function assertInput({ human, rootCreation, signal }) {
       typeof human.waitForSuccessorPlanApprovalGate !== "function" || !rootCreation ||
       !identifier(rootCreation.teamId) || !identifier(rootCreation.projectId) ||
       !identifier(rootCreation.routingLabelId) || !identifier(rootCreation.rootStatusId) ||
+      !identifier(rootCreation.rootIssueId) || !identifier(rootCreation.identifier) ||
       (signal !== undefined && (!signal || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"))) {
     throw stableError("foreground_e2e_revision_case_input_invalid");
   }

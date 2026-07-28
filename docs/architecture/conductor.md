@@ -13,7 +13,7 @@ Conductor负责：
 - 验证active/archived coverage、status catalog、actor、remote preconditions、capability和Git facts；
 - 把topology/lifecycle/Git矛盾作为mechanical violations交给Root Reconciler，不自行选择修复；
 - 调用Performer Root Reconciler与Plan/Work/Verify roles；
-- 验证transient typed Result并materialize为native Linear/Git facts；
+- 验证transient typed Stage response，将semantic Result或mechanical failure收敛为native Linear/Git facts；
 - materialize Human Action Root comment threads及ordinary human receipts/replies；
 - 管理Root branch/worktree、immutable revision、PR和delivery；
 - 输出sanitized structured logs/metrics。
@@ -84,7 +84,8 @@ Conductor首先执行Workflow Authority文档的worktree gate，再打开或推�
 Root Reconciler返回一个closed `RootNextAction`或failure。Conductor不持久化output object：它验证preconditions，收敛一个
 bounded native postcondition，fresh read-back后丢弃output。partial/ambiguous mutation重新读取current state；不回放旧action。
 
-Stage Result同样只在当前call中存在，并按[Root Issue工作流](root-issue.md)转成native facts。
+Stage response同样只在当前call中存在；semantic Result按[Root Issue工作流](root-issue.md)转成native facts，mechanical
+`StageTurnFailure`按[Root Reconciliation](root-reconciliation.md#10-humanfinding与failure)进入fresh next-action判断。
 
 ## 5. Session client
 
@@ -116,7 +117,7 @@ Verify与delivery绑定same immutable revision。完整mechanics只见
 
 ## 8. 错误与恢复
 
-- malformed/stale Root action或Stage Result不materialize；
+- malformed/stale Root action或Stage response不materialize；
 - process crash不恢复memory decision，按Workflow Authority文档fresh converge；
 - target `In Progress`在process loss后不能重新dispatch；
 - routing/process generation/profile/worktree无法验证时取消matching sessions并拒绝late output；

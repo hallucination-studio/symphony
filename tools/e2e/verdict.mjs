@@ -43,19 +43,20 @@ export function deriveForegroundE2EVerdict(assertions, { deadlineExceeded = fals
 export async function runForegroundE2ECases({
   definitions,
   runCase,
+  quiesce,
   readFinalEvidence,
   reporter,
   createCaseScope = defaultCaseScope,
   now = () => new Date().toISOString(),
 } = {}) {
   validateForegroundE2EAssertionCatalog(definitions);
-  if (typeof runCase !== "function" || typeof readFinalEvidence !== "function" ||
-      reporter !== undefined && typeof reporter.caseObservation !== "function" ||
+  if (typeof runCase !== "function" || typeof quiesce !== "function" || typeof readFinalEvidence !== "function" ||
+      reporter !== undefined && (typeof reporter.caseObservation !== "function" || typeof reporter.caseAssertion !== "function") ||
       typeof createCaseScope !== "function" || typeof now !== "function") {
     throw stableError("foreground_e2e_scheduler_input_invalid");
   }
   const startedAt = new Map();
-  const settlements = await Promise.allSettled(definitions.map(async (definition) => {
+  const driverSettlements = await Promise.allSettled(definitions.map(async (definition) => {
     const started = requiredTimestamp(now());
     startedAt.set(definition.caseId, started);
     const scope = createCaseScope({ definition });
@@ -73,39 +74,53 @@ export async function runForegroundE2ECases({
         driverFailureCode = caseDriverFailureCode(error);
         observe(reporter, { caseId: definition.caseId, observation: "failed", detail: driverFailureCode });
       }
-      observe(reporter, { caseId: definition.caseId, observation: "final-reading" });
-      let finalRead;
-      let finalReadFailed = false;
-      try {
-        finalRead = await readFinalEvidence({ definition, scope, driverResult });
-      } catch {
-        finalReadFailed = true;
-      }
-      const assertions = finalReadFailed
-        ? missingCoverageAssertions(definition)
-        : evaluateForegroundE2EAssertions({
-          definition,
-          evidence: finalRead?.evidence ?? finalRead,
-          context: finalRead?.context ?? driverResult?.context,
-        });
-      const outcome = deriveForegroundE2EVerdict(assertions, {
+      return Object.freeze({
+        driverResult,
+        driverFailureCode,
         deadlineExceeded: driverResult?.deadlineExceeded === true || scope.deadlineExceeded?.() === true,
         processFault: scope.processFault?.(),
-      });
-      observe(reporter, { caseId: definition.caseId, observation: outcome.verdict });
-      return Object.freeze({
-        caseId: definition.caseId,
-        verdict: outcome.verdict,
-        reasonCodes: outcome.reasonCodes,
-        assertions,
-        elapsedMs: elapsedMilliseconds(started, requiredTimestamp(now())),
-        ...(driverFailureCode ? { driverFailureCode } : {}),
       });
     } finally {
       scope.dispose?.();
     }
   }));
-  const cases = settlements.map((settlement, index) => {
+
+  await quiesce();
+
+  const finalSettlements = await Promise.allSettled(definitions.map(async (definition, index) => {
+    const driverSettlement = driverSettlements[index];
+    const driver = driverSettlement.status === "fulfilled" ? driverSettlement.value : undefined;
+    observe(reporter, { caseId: definition.caseId, observation: "final-reading" });
+    let finalRead;
+    let finalReadFailed = false;
+    try {
+      finalRead = await readFinalEvidence({ definition, driverResult: driver?.driverResult });
+    } catch {
+      finalReadFailed = true;
+    }
+    const assertions = finalReadFailed || driverSettlement.status !== "fulfilled"
+      ? missingCoverageAssertions(definition)
+      : evaluateForegroundE2EAssertions({
+        definition,
+        evidence: finalRead?.evidence ?? finalRead,
+        context: finalRead?.context ?? driver?.driverResult?.context,
+      });
+    reportAssertions(reporter, definition.caseId, assertions);
+    const outcome = deriveForegroundE2EVerdict(assertions, {
+      deadlineExceeded: driver?.deadlineExceeded === true,
+      processFault: driver?.processFault,
+    });
+    observe(reporter, { caseId: definition.caseId, observation: outcome.verdict });
+    return Object.freeze({
+      caseId: definition.caseId,
+      verdict: outcome.verdict,
+      reasonCodes: outcome.reasonCodes,
+      assertions,
+      elapsedMs: elapsedMilliseconds(startedAt.get(definition.caseId) ?? requiredTimestamp(now()), requiredTimestamp(now())),
+      ...(driver?.driverFailureCode ? { driverFailureCode: driver.driverFailureCode } : {}),
+    });
+  }));
+  const cases = finalSettlements.map((settlement, index) => {
     if (settlement.status === "fulfilled") return settlement.value;
     const definition = definitions[index];
     const assertions = missingCoverageAssertions(definition);
@@ -618,6 +633,18 @@ function verdict(value, assertions, outcome, processFault) {
 }
 
 function observe(reporter, observation) { try { reporter?.caseObservation(observation); } catch {} }
+function reportAssertions(reporter, caseId, assertions) {
+  for (const assertion of assertions) {
+    try {
+      reporter?.caseAssertion({
+        caseId,
+        assertionId: assertion.assertionId,
+        outcome: assertion.outcome,
+        ...(assertion.reasonCode === undefined ? {} : { reasonCode: assertion.reasonCode }),
+      });
+    } catch {}
+  }
+}
 function caseDriverFailureCode(error) { return identifier(error?.code) ? error.code : "foreground_e2e_case_driver_failed"; }
 function runWithinCaseScope(operation, scope) {
   if (scope.signal.aborted) return Promise.reject(caseScopeAbortError(scope));

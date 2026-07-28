@@ -45,6 +45,42 @@ test("reply writer materializes a native child reply and receipts the human sour
   assert.equal(linear.mutations.length, 3);
 });
 
+test("resolving the last Human Action returns the Root to In Progress", async () => {
+  const linear = new FakeLinear();
+  linear.setHumanActionThread("plan_approval");
+  const candidate = reply();
+  const writer = new LinearRootReconcilerReplyWriterImpl(linear);
+
+  const result = await writer.write({ directive: directive(candidate), reply: candidate, view: view(linear.tree) });
+
+  assert.deepEqual(result, { kind: "materialized" });
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), [
+    "create_comment_reply",
+    "set_comment_receipt_reaction",
+    "set_comment_thread_state",
+    "update_workflow_issue",
+  ]);
+  assert.equal(linear.root().status_name, "In Progress");
+
+  const replay = await writer.write({ directive: directive(candidate), reply: candidate, view: view(linear.tree) });
+  assert.deepEqual(replay, result);
+  assert.equal(linear.mutations.length, 4);
+});
+
+test("resolving an approval preserves a remaining information barrier", async () => {
+  const linear = new FakeLinear();
+  linear.setHumanActionThread("plan_approval");
+  linear.addHumanActionRequest("information", "information-request");
+  const candidate = reply();
+
+  const result = await new LinearRootReconcilerReplyWriterImpl(linear).write({
+    directive: directive(candidate), reply: candidate, view: view(linear.tree),
+  });
+
+  assert.deepEqual(result, { kind: "materialized" });
+  assert.equal(linear.root().status_name, "Needs Info");
+});
+
 test("reply writer keeps an unresolved thread open without issuing a thread-state mutation", async () => {
   const linear = new FakeLinear();
   const candidate = reply({
@@ -226,7 +262,11 @@ class FakeLinear {
     const body = input.body ?? "Please rerun this check.";
     this.tree = {
       root_issue_id: "root-1",
-      status_catalog: [{ status_id: "in-progress", name: "In Progress", category: "started", position: 1 }],
+      status_catalog: [
+        { status_id: "in-progress", name: "In Progress", category: "started", position: 1 },
+        { status_id: "needs-approval", name: "Needs Approval", category: "started", position: 2 },
+        { status_id: "needs-info", name: "Needs Info", category: "started", position: 3 },
+      ],
       issues: [
         issue("root-1", "SYM-1", undefined, "Root", 0),
         issue("work-1", "SYM-2", "root-1", "Work", 1),
@@ -242,6 +282,31 @@ class FakeLinear {
   }
 
   private readonly omitCreatedReply: boolean;
+
+  root() {
+    const root = this.tree.issues.find(({ issue_id }) => issue_id === "root-1");
+    if (!root) throw new Error("root_missing");
+    return root;
+  }
+
+  setHumanActionThread(actionKind: "plan_approval" | "information"): void {
+    const source = this.source();
+    const requestId = "request-1";
+    Object.assign(source, {
+      issue_id: "root-1",
+      parent_comment_id: requestId,
+      thread_root_comment_id: requestId,
+    });
+    this.tree.comments.unshift(humanActionRequest(actionKind, requestId));
+    Object.assign(this.root(), {
+      status_id: actionKind === "information" ? "needs-info" : "needs-approval",
+      status_name: actionKind === "information" ? "Needs Info" : "Needs Approval",
+    });
+  }
+
+  addHumanActionRequest(actionKind: "plan_approval" | "information", requestId: string): void {
+    this.tree.comments.push(humanActionRequest(actionKind, requestId));
+  }
 
   source() {
     const source = this.tree.comments.find(({ comment_id }) => comment_id === "comment-1");
@@ -301,9 +366,26 @@ class FakeLinear {
     }
     if (command.kind === "set_comment_thread_state") {
       const source = this.source();
-      source.thread_state = command.threadState;
+      for (const comment of this.tree.comments) {
+        if (comment.comment_id === command.threadRootCommentId ||
+            comment.thread_root_comment_id === command.threadRootCommentId) {
+          comment.thread_state = command.threadState;
+        }
+      }
       source.remote_version = `comment-v${this.nextVersion++}`;
       return applied(command.writeId, source.issue_id, source.remote_version);
+    }
+    if (command.kind === "update_workflow_issue") {
+      const root = this.root();
+      const status = this.tree.status_catalog.find(({ status_id }) => status_id === command.statusId);
+      if (!status) throw new Error("status_missing");
+      Object.assign(root, {
+        status_id: status.status_id,
+        status_name: status.name,
+        status_category: status.category,
+        status_position: status.position,
+      });
+      return applied(command.writeId, root.issue_id, root.remote_version);
     }
     throw new Error(`unexpected_mutation:${command.kind}`);
   }
@@ -312,6 +394,7 @@ class FakeLinear {
 function issue(issueId: string, identifier: string, parentIssueId: string | undefined, title: string, depth: number) {
   return {
     issue_id: issueId, identifier, project_id: "project-1", ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
+    ...(issueId === "root-1" ? { creator_user_id: "user-1" } : {}),
     status_id: "in-progress", status_name: "In Progress", status_category: "started" as const, status_position: 1,
     order: depth, depth, title, description: title, labels: [], is_archived: false,
     issue_kind: issueId === "root-1" ? "root" as const : "work" as const,
@@ -326,6 +409,26 @@ function receipt(comment: LinearWorkflowTreeSnapshot["comments"][number]): "chec
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function humanActionRequest(
+  actionKind: "plan_approval" | "information",
+  commentId: string,
+): LinearWorkflowTreeSnapshot["comments"][number] {
+  const heading = actionKind === "information" ? "需要你补充信息" : "需要你审批";
+  return {
+    comment_id: commentId,
+    issue_id: "root-1",
+    body: `## ${heading}\n\n请回复。`,
+    author_kind: "symphony",
+    author_id: "symphony-bot",
+    thread_root_comment_id: commentId,
+    thread_state: "unresolved",
+    reactions: [],
+    created_at: "2026-07-23T00:00:00Z",
+    remote_version: `${commentId}-v1`,
+    updated_at: "2026-07-23T00:00:00Z",
+  };
 }
 
 function applied(writeId: string, targetIssueId: string, remoteVersion: string) {

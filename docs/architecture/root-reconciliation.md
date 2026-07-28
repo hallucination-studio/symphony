@@ -278,6 +278,10 @@ preconditions和comment dispositions。字段是transient wire contract，只用
 status的writes可以构成同一bounded convergence target。跨多个Issue的DAG、generation rebuild或delivery步骤必须由fresh
 Root Reconciler基于read-back current facts逐轮选择，不能藏在一个可持久化command sequence中。
 
+Root Reconciler不拥有generic relation creation。Work dependency必须使用`replace_dependencies`；Plan/DAG、Cycle predecessor、
+Stage successor和Finding relation分别由其owning typed action/materializer生成。`PatchCycleTreeAction`可以删除已存在且被完整
+precondition约束的relation，但不能用任意source/target/kind创建关系。这样relation intent不能退化成无业务语义的自由组合。
+
 Root Reconciler不能返回arbitrary GraphQL、Git shell、Linear SDK payload、raw Markdown comment或unbounded metadata。
 
 ## 7. Materialization
@@ -285,13 +289,19 @@ Root Reconciler不能返回arbitrary GraphQL、Git shell、Linear SDK payload、
 Conductor对每个RootNextAction执行：
 
 1. fresh-read action引用的native facts；
-2. 验证Root binding、worktree gate、digest、actor、status、archive、parent、relation和Git preconditions；
+2. 在任何side effect前验证整份action的Root binding、worktree gate、digest、cross-field、reference、actor、status、archive、
+   parent、relation和Git preconditions；
 3. 计算一个closed native postcondition；
 4. 执行必要的Linear/Git mutations；
 5. fresh-read完整postcondition；
 6. 只在成功后处理matching comment receipt并进入下一轮。
 
-部分写入、timeout或ambiguous response不会触发command replay。Conductor重新读取current tree；若postcondition已经成立则
+Provider structured-output schema通过只证明closed wire shape，不证明action可materialize。整份action的pre-side-effect
+validation必须证明所有引用对象存在且current，并满足kind、parent、archive与canonical direction约束。Generic relation
+creation不属于closed action contract；Conductor不能把非法relation当作no-op、替换endpoint或推导另一workflow动作。
+
+整份action的pre-side-effect validation通过后，remote mutation仍可能因部分写入、timeout或ambiguous response失败；这不会触发
+command replay。Conductor重新读取current tree；若postcondition已经成立则
 接受；若remote明确确认未发生且precondition仍成立才可重试；若出现竞争对象或语义不明确则停止当前Root，并把closed
 mechanical violation交给fresh Root Reconciler。Conductor不能自行选择`Escalated`或另一业务状态。完整原则只由Workflow
 Authority文档定义。
@@ -304,9 +314,10 @@ read-back succeeded、usage或内部correlation receipts。
 `ExecuteStageAction`只能选择matching kind的active `Todo` Issue。Conductor先将其置`In Progress`并read-back，再调用matching
 Plan/Work/Verify thread。
 
-Stage返回closed transient Result后，Conductor验证correlation与evidence，并把结果materialize为
-[Root Issue工作流](root-issue.md)定义的native facts。只有native postcondition和required Git factsread-back后，Root
-Reconciler才能看到结果。
+Stage返回closed transient response后，Conductor先区分semantic Result与mechanical `StageTurnFailure`。只有semantic Result按
+[Root Issue工作流](root-issue.md)materialize为native result facts；failure必须先完成matching runtime fencing并转换为closed
+mechanical fact。只有native postcondition与required Git facts已fresh read-back、mechanical fact已validated后，Root Reconciler才能
+看到结果。
 
 Provider/process loss的证明、恢复和terminal no-dispatch只见
 [Workflow Authority与恢复](workflow-authority-recovery.md)。本模块只接收已证明的mechanical fact，并允许fresh Root
@@ -334,10 +345,10 @@ Verify发现的问题materialize为native Finding Issues。Root Reconciler根据
 fresh Verify、Cycle conclusion或Human Action。Finding不嵌入Verify机器Result。
 
 schema-invalid output、Provider failure、budget exhaustion或mechanical mutation failure不会写private failure payload。Conductor
-只保留sanitized correlated logs并生成closed mechanical fact。只有已验证的terminal Stage Result可按其closed variant把matching
-Node置`Failed`或`Canceled`；无terminal Result的process loss必须先完成runtime fencing，再由
-`RecordStageInterruptionAction`置为`Interrupted`。Cycle/Root escalation、用户comment和后续动作全部由fresh Root Reconciler
-选择；Conductor不能根据错误字符串或本地retry结果运行另一套failure lifecycle。
+只保留sanitized correlated logs，并在matching runtime fencing完成后生成closed mechanical fact；`StageTurnFailure`不能伪装成
+semantic Stage Result或由Conductor直接映射业务结论。Fresh Root Reconciler根据该fact返回
+`RecordStageInterruptionAction`，把matching `In Progress` attempt收敛为允许的terminal failure status。Cycle/Root escalation、
+用户comment和后续动作全部由fresh Root Reconciler选择；Conductor不能根据错误字符串或本地retry结果运行另一套failure lifecycle。
 
 ## 11. Cycle conclusion、REVIEW与delivery
 
@@ -370,7 +381,7 @@ process restart、session loss、normal no-replay、worktree gate和missing-work
 ## 14. 不变量
 
 1. Root Reconciler是唯一model-driven next-step role；Conductor只机械validate/materialize。
-2. RootNextAction与Stage Result都是transient typed outputs，不是Linear durable facts。
+2. RootNextAction与Stage terminal response都是transient typed outputs，不是Linear durable facts。
 3. 每轮只收敛一个bounded semantic action，并fresh read-back。
 4. comments只处理human communication，不形成workflow event log。
 5. Stage只dispatch `Todo`；terminal attempts永不重跑。

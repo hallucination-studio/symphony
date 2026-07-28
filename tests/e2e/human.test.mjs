@@ -7,6 +7,7 @@ import {
   HUMAN_ACTION_POLL_INTERVAL_MS,
   HUMAN_LINEAR_REQUEST_INTERVAL_MS,
 } from "../../tools/e2e/human.mjs";
+import { FOREGROUND_E2E_CASES } from "../../tools/e2e/cases.mjs";
 
 const immediateBudget = Object.freeze({ execute: (operation) => Promise.resolve().then(operation) });
 const actor = (fixture, input = {}) => createActor({
@@ -57,23 +58,72 @@ test("Human Actor resolves one Root kind label into every Case creation binding"
   assert.equal(bindings["approved-root"].routingLabelId, "route-aaa111aaa111");
 });
 
-test("Human Actor creates, verifies, and delegates only declared Root Issues", async () => {
+test("Human Actor admits every declared Root through one bounded batch lifecycle", async () => {
+  const fixture = linearFixture();
+  let budgetedRequests = 0;
+  const requestBudget = Object.freeze({
+    execute: async (operation) => {
+      budgetedRequests += 1;
+      return operation();
+    },
+  });
+  const human = await actor(fixture, { delegateActorId: "symphony-1", requestBudget });
+  const progress = [];
+
+  const admission = await human.admitRootIssues({
+    rootCreationsByRootKey: allRootCreationBindings(),
+    onProgress: (event) => progress.push(event),
+  });
+
+  const rootKeys = FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) => rootTopology.map(({ rootKey }) => rootKey));
+  assert.equal(rootKeys.length, 14);
+  assert.deepEqual(Object.keys(admission.rootsByKey), rootKeys);
+  assert.equal(Object.values(admission.rootsByKey).every(({ rootIssueId, identifier }) =>
+    typeof rootIssueId === "string" && typeof identifier === "string"), true);
+  assert.equal(fixture.calls.createIssueBatch.length, 1);
+  assert.equal(fixture.calls.createIssueBatch[0].issues.length, rootKeys.length);
+  assert.deepEqual(fixture.calls.updateIssueBatch, [{
+    issueIds: Object.values(admission.rootsByKey).map(({ rootIssueId }) => rootIssueId),
+    input: { delegateId: "symphony-1" },
+  }]);
+  assert.deepEqual(fixture.calls.admission, [
+    "create-roots",
+    "read-roots",
+    "read-children",
+    "read-comments",
+    "delegate-roots",
+    "read-roots",
+  ]);
+  assert.deepEqual(progress, [
+    { milestone: "roots-created", rootCount: 14 },
+    { milestone: "roots-verified", rootCount: 14 },
+    { milestone: "roots-delegated", rootCount: 14 },
+  ]);
+  assert.equal(budgetedRequests, 6);
+});
+
+test("Human Actor admits one catalog Root for focused real-boundary diagnosis", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture, { delegateActorId: "symphony-1" });
-  const root = await createRoot(human, "approved_happy_path", "approved-root");
+  const binding = allRootCreationBindings()["approved-root"];
 
-  await assert.rejects(human.delegateRootIssue({ rootIssueId: root.rootIssueId }), hasCode("foreground_e2e_human_root_delegate_not_verified"));
-  await human.assertRootUndelegatedAndInactive({ rootIssueId: root.rootIssueId });
-  await human.delegateRootIssue({ rootIssueId: root.rootIssueId });
+  const admission = await human.admitRootIssues({
+    rootCreationsByRootKey: { "approved-root": binding },
+  });
 
-  assert.deepEqual(fixture.calls.createIssue[0].labelIds, ["root-label", "route-label"]);
-  assert.deepEqual(fixture.calls.updateIssue, [{ issueId: root.rootIssueId, input: { delegateId: "symphony-1" } }]);
+  assert.deepEqual(Object.keys(admission.rootsByKey), ["approved-root"]);
+  assert.equal(fixture.calls.createIssueBatch.length, 1);
+  assert.equal(fixture.calls.createIssueBatch[0].issues.length, 1);
+  assert.deepEqual(fixture.calls.updateIssueBatch, [{
+    issueIds: [admission.rootsByKey["approved-root"].rootIssueId],
+    input: { delegateId: "symphony-1" },
+  }]);
 });
 
 test("Human Actor waits for an exact Plan Approval Root thread and writes only a native human reply", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture);
-  const root = await createRoot(human, "approved_happy_path", "approved-root");
+  const root = await admittedRoot(human, "approved-root");
   fixture.addPlanApproval(root.rootIssueId, { cycleId: "cycle-1", planId: "plan-1", planIdentifier: "ENG-PLAN-1", requestId: "approval-1" });
 
   const request = await human.waitForPlanApprovalRequest({ rootIssueId: root.rootIssueId });
@@ -101,7 +151,7 @@ test("Human Actor waits for an exact Plan Approval Root thread and writes only a
 test("Human Actor ignores resolved approval history and rejects human-authored requests", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture);
-  const root = await createRoot(human, "plan_rejected_and_replanned", "rejected-plan-root");
+  const root = await admittedRoot(human, "rejected-plan-root");
   fixture.addPlanApproval(root.rootIssueId, {
     cycleId: "cycle-old", planId: "plan-old", planIdentifier: "ENG-OLD", requestId: "approval-old", resolved: true,
   });
@@ -120,7 +170,7 @@ test("Human Actor ignores resolved approval history and rejects human-authored r
 test("Human Actor reads Information requests and observes native human-readable receipts", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture);
-  const root = await createRoot(human, "information_requested_and_answered", "information-root");
+  const root = await admittedRoot(human, "information-root");
   fixture.addProductComment(root.rootIssueId, "information-1", "## 需要你补充信息\n\nWhich separator should be used?");
   assert.deepEqual(await human.waitForInformationRequest({ rootIssueId: root.rootIssueId }), {
     requestCommentId: "information-1",
@@ -139,10 +189,9 @@ test("Human Actor reads Information requests and observes native human-readable 
 test("Human Actor observes preemption and restart admission from native Stage statuses and Activity", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture);
-  const ids = {};
-  for (const key of ["inflight-root", "touched-root", "remaining-root"]) {
-    ids[key] = (await createRoot(human, "same_conductor_preemption", key)).rootIssueId;
-  }
+  const admitted = await admitRoots(human);
+  const ids = Object.fromEntries(["inflight-root", "touched-root", "remaining-root"]
+    .map((key) => [key, admitted[key].rootIssueId]));
   fixture.addStage(ids["inflight-root"], "stage-old", "work", "in-progress-state", "2026-07-26T00:00:01.000Z");
   const admission = await human.waitForSameConductorPreemptionAdmission({ rootIssueIds: Object.values(ids) });
   assert.equal(admission.inflightStageIssueId, "stage-old");
@@ -163,8 +212,9 @@ test("Human Actor observes preemption and restart admission from native Stage st
 
   const recoveryFixture = linearFixture();
   const recoveryHuman = await actor(recoveryFixture);
-  const affected = await createRoot(recoveryHuman, "conductor_restart_recovery", "affected-root");
-  const continuous = await createRoot(recoveryHuman, "conductor_restart_recovery", "continuous-root");
+  const recoveryRoots = await admitRoots(recoveryHuman);
+  const affected = recoveryRoots["affected-root"];
+  const continuous = recoveryRoots["continuous-root"];
   recoveryFixture.addStage(affected.rootIssueId, "stage-interrupted", "work", "in-progress-state", "2026-07-26T00:00:01.000Z");
   assert.deepEqual(await recoveryHuman.waitForRestartRecoveryAdmission({
     affectedRootIssueId: affected.rootIssueId,
@@ -175,8 +225,9 @@ test("Human Actor observes preemption and restart admission from native Stage st
 test("Human Actor admits missing-worktree recovery only at each declared Root's native active Verify", async () => {
   const fixture = linearFixture();
   const human = await actor(fixture);
-  const recoverable = await createRoot(human, "missing_worktree_recovery", "recoverable-worktree-root");
-  const invalid = await createRoot(human, "missing_worktree_recovery", "invalid-generation-root");
+  const admitted = await admitRoots(human);
+  const recoverable = admitted["recoverable-worktree-root"];
+  const invalid = admitted["invalid-generation-root"];
   fixture.addStage(recoverable.rootIssueId, "verify-recoverable", "verify", "in-progress-state", "2026-07-26T00:00:01.000Z");
   fixture.addStage(invalid.rootIssueId, "verify-invalid", "verify", "in-progress-state", "2026-07-26T00:00:02.000Z");
 
@@ -204,24 +255,30 @@ test("Human Actor public surface contains no product workflow mutation", async (
   assert.equal("createHumanAction" in human, false);
   assert.equal(["write", "Managed", "Record"].join("") in human, false);
   assert.equal("mutatePlan" in human, false);
+  assert.equal("createRootIssue" in human, false);
+  assert.equal("assertRootUndelegatedAndInactive" in human, false);
+  assert.equal("delegateRootIssue" in human, false);
   assert.equal("client" in human, false);
   assert.equal(typeof human.replyToHumanAction, "function");
 });
 
-async function createRoot(human, caseId, rootKey) {
-  return human.createRootIssue({
-    caseId,
-    rootKey,
-    teamId: "team-1",
-    projectId: "project-1",
-    rootLabelId: "root-label",
-    routingLabelId: "route-label",
-    rootStatusId: "todo-state",
-  });
+async function admittedRoot(human, rootKey) {
+  return (await admitRoots(human))[rootKey];
+}
+
+async function admitRoots(human) {
+  return (await human.admitRootIssues({ rootCreationsByRootKey: allRootCreationBindings() })).rootsByKey;
 }
 
 function linearFixture() {
-  const calls = { createIssue: [], updateIssue: [], createComment: [] };
+  const calls = {
+    createIssue: [],
+    createIssueBatch: [],
+    updateIssue: [],
+    updateIssueBatch: [],
+    createComment: [],
+    admission: [],
+  };
   const issues = new Map();
   const comments = new Map();
   let rootSequence = 0;
@@ -277,20 +334,43 @@ function linearFixture() {
 
   fixture.client = {
     viewer: Promise.resolve({ id: "human-1" }),
+    async createIssueBatch(input) {
+      calls.createIssueBatch.push(input);
+      calls.admission.push("create-roots");
+      const created = input.issues.map((issueInput) => createFixtureRoot(issueInput));
+      return { success: true, issues: created };
+    },
+    async updateIssueBatch(issueIds, input) {
+      calls.updateIssueBatch.push({ issueIds, input });
+      calls.admission.push("delegate-roots");
+      const updated = issueIds.map((issueId) => {
+        const issue = issues.get(issueId);
+        Object.assign(issue, input);
+        return issue;
+      });
+      return { success: true, issues: updated };
+    },
+    async issues({ filter }) {
+      if (filter?.id?.in) {
+        calls.admission.push("read-roots");
+        return connection(filter.id.in.map((issueId) => issues.get(issueId)).filter(Boolean));
+      }
+      if (filter?.parent?.id?.in) {
+        calls.admission.push("read-children");
+        const parents = new Set(filter.parent.id.in);
+        return connection([...issues.values()].filter(({ parentId }) => parents.has(parentId)));
+      }
+      return connection([]);
+    },
+    async comments({ filter }) {
+      calls.admission.push("read-comments");
+      const issueIds = new Set(filter?.issue?.id?.in ?? []);
+      return connection([...comments.values()].filter(({ issueId }) => issueIds.has(issueId)));
+    },
     async createIssue(input) {
       calls.createIssue.push(input);
-      rootSequence += 1;
-      const id = `root-${rootSequence}`;
-      issues.set(id, makeIssue({
-        id,
-        identifier: `ENG-${rootSequence}`,
-        labels: input.labelIds.map((labelId) => labelId === "root-label" ? "symphony:kind/root" : "symphony:conductor/abc123def456"),
-        stateId: input.stateId,
-        title: input.title,
-        description: input.description,
-        priority: input.priority,
-      }));
-      return { success: true, issueId: id };
+      const issue = createFixtureRoot(input);
+      return { success: true, issueId: issue.id };
     },
     async updateIssue(issueId, input) {
       calls.updateIssue.push({ issueId, input });
@@ -345,9 +425,26 @@ function linearFixture() {
     },
   };
 
-  function makeIssue({ id, identifier, parentId, labels, stateId, title = id, description = "Product-created native Issue.", priority = 2 }) {
+  function createFixtureRoot(input) {
+    rootSequence += 1;
+    const id = `root-${rootSequence}`;
+    const issue = makeIssue({
+      id,
+      identifier: `ENG-${rootSequence}`,
+      labels: input.labelIds.map((labelId) => labelId === "root-label" ? "symphony:kind/root" : "symphony:conductor/abc123def456"),
+      labelIds: input.labelIds,
+      stateId: input.stateId,
+      title: input.title,
+      description: input.description,
+      priority: input.priority,
+    });
+    issues.set(id, issue);
+    return issue;
+  }
+
+  function makeIssue({ id, identifier, parentId, labels, labelIds, stateId, title = id, description = "Product-created native Issue.", priority = 2 }) {
     const issue = {
-      id, identifier, parentId, labelsValue: labels, stateId, title, description, priority,
+      id, identifier, parentId, labelsValue: labels, labelIds: labelIds ?? labels, stateId, title, description, priority,
       teamId: "team-1", projectId: "project-1", creatorId: "symphony-1", delegateId: undefined,
       updatedAt: new Date("2026-07-26T00:00:00.000Z"), historyEntries: [],
       async labels() { return { nodes: this.labelsValue.map((name) => ({ id: name === "symphony:conductor/abc123def456" ? "route-label" : name === "symphony:kind/root" ? "root-label" : `${name.toLowerCase()}-label`, name })), pageInfo: { hasNextPage: false } }; },
@@ -358,6 +455,23 @@ function linearFixture() {
     return issue;
   }
   return fixture;
+}
+
+function allRootCreationBindings() {
+  return Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) => rootTopology.map(({ rootKey }) => [rootKey, {
+    teamId: "team-1",
+    projectId: "project-1",
+    rootLabelId: "root-label",
+    routingLabelId: "route-label",
+    rootStatusId: "todo-state",
+    conductorId: "conductor-a",
+    performerProfileId: "profile-a",
+    worktreeDirectory: "/tmp/conductor-a",
+  }])));
+}
+
+function connection(nodes) {
+  return { nodes, pageInfo: { hasNextPage: false } };
 }
 
 function conductorBinding(conductorRef, conductorShortHash) {

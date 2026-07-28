@@ -65,6 +65,23 @@ class RootFailureBackend(FakeBackend):
         )
 
 
+class RootSchemaFailureBackend(FakeBackend):
+    def execute_role_turn(self, session, request, *, workspace_root, cancel_event):
+        if session.role == "root_reconciler":
+            raise ProviderBackendError(
+                "The Provider rejected the structured response schema.",
+                code="provider_schema_unsupported",
+                retryable=False,
+                append_outcome="not_accepted",
+            )
+        return super().execute_role_turn(
+            session,
+            request,
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+        )
+
+
 class RootAppendFailureBackend(FakeBackend):
     def __init__(self, append_outcome: str) -> None:
         super().__init__()
@@ -621,6 +638,15 @@ def test_host_persists_root_provider_failure_as_a_typed_model_turn_result():
         "usage": {"status": "unavailable", "reason": "transport_lost"},
         "terminal_at": failure["failure"]["failed_at"],
     }
+
+
+def test_host_preserves_a_provider_schema_rejection_as_a_typed_schema_failure():
+    result = AgentProtocolHost(RootSchemaFailureBackend()).handle(open_root_request())
+    failure = result["initial_result"]["failure"]
+
+    assert failure["code"] == "provider_schema_unsupported"
+    assert failure["category"] == "schema_invalid"
+    assert failure["continuity"]["append_outcome"] == "not_accepted"
 
 
 def test_host_reports_root_directive_contract_failure():

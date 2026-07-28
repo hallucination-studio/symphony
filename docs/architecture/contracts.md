@@ -63,11 +63,15 @@ Conductor始终是caller：
 ```text
 OpenRootReconcilerRequest    | RootReconcilerOpenedResult
 AdvanceRootReconcilerRequest | RootReconcilerTurnResult
-PlanTurnRequest              | PlanResult
-WorkTurnRequest              | WorkResult
-VerifyTurnRequest            | VerifyResult
-CloseRoleSessionCommand      | CloseRoleSessionResult
+PlanTurnRequest              | PlanTurnResponse
+WorkTurnRequest              | WorkTurnResponse
+VerifyTurnRequest            | VerifyTurnResponse
+CloseCycleStageSessionsCommand | CloseCycleStageSessionsResult
 ```
+
+`CloseCycleStageSessionsCommand | Result`使用exact plan/work/verify keys，并为每个role携带
+`ExpectedStageRoleSession | CloseRoleSessionResult`；完整closed union、CAS和retry语义由
+[Stage Contracts](stage-orchestration.md#32-stage-session-close-contract)拥有。它不是agent-tree batch API。
 
 Root Reconciler字段由[Root Reconciliation](root-reconciliation.md)定义；Stage字段由
 [Performer Stage Contracts](stage-orchestration.md)定义。本文不复制字段表。
@@ -78,6 +82,12 @@ transport；response验证并materialize后即可丢弃，绝不复制到Linear 
 Protocol传输Symphony session/turn correlation，不传raw Provider conversation pointer。Performer不能callback Conductor，也不
 返回Linear/Git SDK command。
 
+Work subagent tree不是新的cross-process actor、protocol resource或Conductor policy。Conductor仍只发送一个
+`WorkTurnRequest`并接收一个`WorkTurnResponse`；request只有role-generic `StageLimits`，不包含agent count、depth、mailbox、
+residency、write lease或Provider config。Semantic `WorkResult`不得包含agent path、thread status、transcript或delegation trace。
+Close result只有在matching workspace write capability永久撤销且required containment proof成立后才能success；PID或process-group
+exit本身不是proof。
+
 ## 4. Transient Result边界
 
 `RootReconcilerTurnResult`是closed union：
@@ -86,8 +96,9 @@ Protocol传输Symphony session/turn correlation，不传raw Provider conversatio
 RootNextAction | RootReconcilerTurnFailure
 ```
 
-Plan/Work/Verify各返回matching closed Result variant。所有Result只属于当前call，至少关联request、role、Root/Cycle/target、
-observed digest、session/turn和evidence references。
+Plan/Work/Verify各返回matching closed response：model-generated semantic Result或Performer-generated `StageTurnFailure`。
+Semantic Result只属于当前call，至少关联request、role、Root/Cycle/target、observed digest、session/turn和evidence references。
+Mechanical failure不伪造业务evidence或Result字段，并携带closed `ProviderTurnContinuity`。
 
 Conductor必须先验证Result，再将其收敛成native Linear/Git postcondition并fresh read-back。不得：
 
@@ -112,9 +123,14 @@ API Key通过bounded secret stdin frame进入Performer，不进入transport JSON
 
 ## 6. Validation与correlation
 
-所有third-party response、Linear snapshot、Root action和Stage Result在边界strict validate。JSON Schema使用
+所有third-party response、Linear snapshot、Root action和Stage terminal response在边界strict validate。JSON Schema使用
 `additionalProperties: false`；unknown variant/field、invalid enum、oversized payload、stale correlation、digest mismatch或
 incomplete coverage一律fail closed。
+
+JSON Schema通过只证明wire shape合法，不证明output在current native facts上可执行。字段间相等/不等、reference membership、
+actor/kind/parent/archive兼容性和canonical relation direction等约束由owning boundary执行deterministic semantic validation。
+Root action必须在第一条Linear/Git side effect前完成整份action的该类validation；该validation失败时返回closed failure并保持
+zero side effects，不能自动修正endpoint或选择替代workflow动作。Prompt prose不能增加或放宽contract，也不能替代机械validation。
 
 Root/Stage runtime envelope可以包含：
 
@@ -131,6 +147,11 @@ source_manifest
 coverage
 limits
 ```
+
+`StageLimits`对三个Stage roles使用同一closed shape；其中`max_weighted_tokens`、`max_tool_calls`、`max_wall_time_ms`和
+`deadline_at`在Work中覆盖root与全部descendants。Agent-tree-specific limits和policy只由Performer内部派生，出现在public
+envelope属于schema error。完整runtime语义见
+[Work Subagents](work-subagents.md#8-tree-wide-budget与hard-reservation)。
 
 这些字段不写入Linear。`observed_current_digest`只证明Result针对本轮current view；materialization前必须fresh-read target
 preconditions，不能仅凭digest写入。
@@ -163,8 +184,8 @@ Activity；reaction不能转换成approval语义。Root ordinary comment receipt
 
 ## 8. Error语义
 
-每个protocol使用显式Result union，不混用throw、null和partial success表达同一失败。跨进程错误包含closed code、category、
-sanitized reason、retryability和action required，不返回raw exception、stack、secret或arbitrary details map。
+每个protocol使用显式terminal union，不混用throw、null和partial success表达同一失败。跨进程错误包含closed code、category、
+sanitized reason、retryability、continuity和action required，不返回raw exception、stack、secret或arbitrary details map。
 
 业务blocked、budget exhausted、Provider transport failure、schema-invalid output、Linear coverage failure和Git identity conflict是
 不同variants。失败不会创建machine receipt或private failure payload；durable consequence必须是native terminal/interrupted status、
@@ -195,6 +216,8 @@ closed或创建有明确用户语义的Issue；不得回退到private comment pr
 - Conductor定义Root safety policy、Root Reconciler client、Stage client、materializer和Git/delivery interfaces；
 - Podium实现Linear protocol和内部SDK；
 - Performer定义Provider backend与role session runtime；
+- Performer独占Work Agent Tree、Provider collaboration tools、turn mutation epoch、write grants和runtime containment；
+  Conductor只拥有matching session transport、Root writer permit与outer Binding fence；
 - schemas是唯一手写wire source，generated code不含business policy；
 - Impl不从public exports导出，role不能deep import另一role implementation。
 
@@ -202,10 +225,11 @@ closed或创建有明确用户语义的Issue；不得回退到private comment pr
 
 1. public/cross-process input和output使用closed versioned schema。
 2. transport JSON是transient，不进入Linear/Git durable workflow content。
-3. Result必须materialize为native postcondition并fresh read-back才有业务效果。
+3. Semantic Result必须materialize为native postcondition并fresh read-back才有业务效果；StageTurnFailure不伪造业务Result。
 4. Linear Gateway只暴露bounded native query/mutation，不暴露SDK或arbitrary GraphQL。
 5. session、turn、digest和delta baseline都不是durable checkpoint。
 6. secret、SDK object、database record、process handle和raw transcript不跨public boundary。
 7. 不存在generated workflow-comment stream、private persistence或legacy comment compatibility interface。
 8. Podium-Conductor mutation envelope携带当前private channel绑定的transient Binding generation correlation；Podium按实际
    channel identity验证，不能信任caller提供的generation字符串，旧channel不能提交late mutation。
+9. Work subagent tree不形成public workflow API；外部只观察matching `WorkTurnRequest | WorkTurnResponse`，tree policy保持internal。

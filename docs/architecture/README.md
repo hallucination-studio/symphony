@@ -19,6 +19,7 @@ Conductor
 Performer
   -> one Root Reconciler thread per Root
   -> isolated Plan, Work and Verify threads per Cycle
+  -> Work thread may own bounded recursive descendants scoped to one Work turn
   -> Provider SDK and tool runtime
 ```
 
@@ -36,7 +37,7 @@ closed typed Result，不修改DAG或决定下一步。Provider threads只提供
 - Conductor不保存workflow DB、queue、checkpoint、DAG mirror或Provider thread pointer；
 - `performer.md`定义的五层Provider memory注入完整保留：fresh session只注入一次base instructions和role initial context，
   live turn只追加current command与new/replacement/tombstone fragments；
-- Root、Plan、Work、Verify各自维护独立Provider-visible baseline与opaque continuation，不共享或fork conversation；
+- Root、Plan、Work、Verify各自维护独立Provider-visible baseline与opaque continuation，role之间不共享或fork conversation；
 - 同一冻结观察批次可以包含多个独立context fragments；turn期间到达的新事实等待下一批；
 - Root恢复使用完整active/archived Root object graph和Git current facts进行state convergence，不回放旧command；
 - worktree存在时收敛现有树；目录丢失但Git branch/commits完整时重建worktree，只有Git execution authority也无法证明时才
@@ -45,6 +46,8 @@ closed typed Result，不修改DAG或决定下一步。Provider threads只提供
 - Human Action使用Root native comment threads；Finding使用native Issue；二者都不保存JSON；
 - 用户确认的需求在Human Action结束前合并进Root description；approval只对exact related target有效；
 - Conductor始终是Performer caller；Performer不调用Linear或Conductor；
+- 只有Work role可以创建subagent；Work root可跨turn保留，recursive descendants只属于matching Work turn。整棵tree共享一个
+  Root worktree并只形成一个`WorkTurnResponse`，完整规则见[Work Subagents](work-subagents.md)；
 - cross-process communication使用closed versioned schemas和generated types，但这些transient payload不持久化到Linear；
 - Podium独占Linear OAuth、token和SDK；Performer独占Provider SDK；
 - Podium Desktop只提供连接、进程、Binding和Profile控制面，不提供第二个workflow UI。
@@ -74,11 +77,12 @@ Conductor -> open/advance Root Reconciler with current native facts -> Performer
 Conductor <- one closed Root next-action result                    <- Performer
 
 Conductor -> execute Plan | Work | Verify with closed request      -> Performer
-Conductor <- one closed typed Stage Result                         <- Performer
+Conductor <- one closed typed Stage response                       <- Performer
 ```
 
-Stage Result只在当前materialization事务中使用：Conductor将其收敛成native Issue/status/relation/comment/Git facts并read-back，
-然后丢弃transport payload。恢复时重新解释current native facts，不要求重建旧Result对象。
+Stage response是semantic Result或mechanical `StageTurnFailure`。只有semantic Result进入当前materialization事务：Conductor将其
+收敛成native Issue/status/relation/comment/Git facts并read-back，然后丢弃transport payload。恢复时重新解释current native
+facts，不要求重建旧Result对象。
 
 任何Root恢复都先执行worktree gate。完整规则只见
 [Workflow Authority与恢复](workflow-authority-recovery.md)，其他文档不得建立第二套恢复流程。
@@ -90,6 +94,7 @@ Stage Result只在当前materialization事务中使用：Conductor将其收敛�
 - [Root Reconciliation](root-reconciliation.md)：唯一语义决策角色和bounded materialization。
 - [Human Action](human-actions.md)：Root comment threads、actor、scope与resolution。
 - [Performer Stage Contracts](stage-orchestration.md)：Plan、Work、Verify transient request/result contracts。
+- [Work Subagents](work-subagents.md)：Work-only agent tree、协作工具、并发、预算、turn retirement与runtime containment。
 - [Git Worktree与交付](git-worktree-delivery.md)：workspace、revision、PR和delivery边界。
 - [Linear端到端流转](linear-flow.md)：Project解析、Root发现、调度、分页和SDK ownership。
 - [契约与接口](contracts.md)：cross-process schemas和public interface边界。
@@ -114,6 +119,7 @@ Stage Result只在当前materialization事务中使用：Conductor将其收敛�
 | [Human Action](human-actions.md) | Root Human Action comment threads、actor、scope、resolution与supersession |
 | [Root Reconciliation](root-reconciliation.md) | Root inputs、Root Reconciler decisions和one-action materialization |
 | [Performer Stage Contracts](stage-orchestration.md) | Plan/Work/Verify transient request/result contract |
+| [Work Subagents](work-subagents.md) | Work-only agent tree、tool/context语义、tree limits、write grants、turn retirement与containment |
 | [Git Worktree与交付](git-worktree-delivery.md) | worktree validation、immutable revision、PR和delivery mechanics |
 | [Performer Profile](performer-profiles.md) | Profile control、actual model和runtime usage observability |
 | [契约与接口](contracts.md) | public/cross-process schema、validation与error semantics |

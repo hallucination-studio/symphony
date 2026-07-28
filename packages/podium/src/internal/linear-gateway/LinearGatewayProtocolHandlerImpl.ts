@@ -141,6 +141,8 @@ export class LinearGatewayProtocolHandlerImpl {
         !identifier(issue.issueId, 128) ||
         !shortText(issue.identifier) ||
         issue.projectId !== projectId ||
+        (issue.creatorUserId !== undefined && !identifier(issue.creatorUserId, 128)) ||
+        (issue.assigneeUserId !== undefined && !identifier(issue.assigneeUserId, 128)) ||
         !statusIds.has(issue.statusId) ||
         !shortText(issue.statusName) ||
         !workflowStatusCategory(issue.statusCategory) ||

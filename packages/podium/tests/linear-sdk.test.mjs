@@ -515,6 +515,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "Root description",
     sortOrder: 1, createdAt: "2026-07-15T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
+    creator: { id: "human-1" }, assignee: { id: "human-2" },
     state: { name: "In Progress" },
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
@@ -543,6 +544,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     id: "work-1", identifier: "WORK-1", title: "Work", description: "Work description",
     sortOrder: 2, subIssueSortOrder: 2, createdAt: "2026-07-15T00:00:02Z", updatedAt: "2026-07-16T00:00:02Z",
     project: { id: "project-1" }, parent: { id: "root-1" }, state: { name: "Todo" },
+    creator: { id: "symphony-bot" }, assignee: null,
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     comments: { nodes: [{
       id: "comment-work", body: "Progress update.",
@@ -596,6 +598,12 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     { statusId: "state-todo", name: "Todo", category: "unstarted", position: 1 },
     { statusId: "state-duplicate", name: "Duplicate", category: "canceled", position: 3 },
   ]);
+  assert.deepEqual(tree.issues.map(({ issueId, creatorUserId, assigneeUserId }) => ({
+    issueId, creatorUserId, assigneeUserId,
+  })), [
+    { issueId: "root-1", creatorUserId: "human-1", assigneeUserId: "human-2" },
+    { issueId: "work-1", creatorUserId: "symphony-bot", assigneeUserId: undefined },
+  ]);
   assert.deepEqual(tree.comments.map(({ commentId, issueId }) => ({ commentId, issueId })), [
     { commentId: "comment-root", issueId: "root-1" },
     { commentId: "comment-work", issueId: "work-1" },
@@ -614,7 +622,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     },
     {
       commentId: "comment-work", parentCommentId: "comment-root", threadRootCommentId: "comment-root",
-      threadState: "resolved",
+      threadState: "unresolved",
       reactions: [{ reactionId: "reaction-symphony", emoji: "white_check_mark", actorKind: "symphony", actorId: "symphony-bot" }],
     },
   ]);
@@ -870,6 +878,14 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
   });
   assert.deepEqual(relationInput, { issueId: "work-1", relatedIssueId: "root-1", type: "blocks" });
 
+  await adapter.executeWorkflowMutation({
+    kind: "create_workflow_relation", writeId: "write-3-blocked-by", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    sourceIssueId: "work-1", sourceExpectedRemoteVersion: "work-version",
+    targetIssueId: "root-1", targetExpectedRemoteVersion: "root-version", relationKind: "blocked_by", relationState: "present",
+  });
+  assert.deepEqual(relationInput, { issueId: "root-1", relatedIssueId: "work-1", type: "blocks" });
+
   const targetIssue = issue({
     id: "work-1", parentId: "root-1", title: "Work",
     description: "Work description",
@@ -942,16 +958,21 @@ test("workflow attachment read-back requires one exact native attachment", async
 });
 
 test("workflow SDK materializes native comment replies, receipts, and thread state with semantic read-back", async () => {
+  const request = {
+    id: "request-comment", body: "## 需要你审批\n\n请审批 Plan。", createdAt: "2026-07-16T00:00:00Z",
+    updatedAt: "2026-07-16T00:00:00Z", user: { id: "symphony-bot" }, issue: { id: "root-1" },
+    parent: null, resolvedAt: null, reactions: [],
+  };
   const source = {
     id: "source-comment", body: "Please review the plan", createdAt: "2026-07-16T00:00:00Z",
     updatedAt: "2026-07-16T00:00:01Z", user: { id: "human-1" }, issue: { id: "root-1" },
-    parent: null, resolvedAt: null, reactions: [],
+    parent: { id: "request-comment" }, resolvedAt: null, reactions: [],
   };
   const root = {
     id: "root-1", identifier: "ROOT-1", title: "Root", description: "", sortOrder: 1,
     createdAt: "2026-07-15T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z", project: { id: "project-1" }, parent: null,
     state: { name: "Todo" }, labels: { nodes: [], pageInfo: { hasNextPage: false } },
-    comments: { nodes: [source], pageInfo: { hasNextPage: false } },
+    comments: { nodes: [request, source], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
     attachments: { nodes: [], pageInfo: { hasNextPage: false } },
     history: { nodes: [], pageInfo: { hasNextPage: false } },
@@ -987,11 +1008,11 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     },
     async commentResolve(commentId) {
       calls.push({ kind: "resolve", commentId });
-      source.resolvedAt = "2026-07-16T00:00:03Z";
+      request.resolvedAt = "2026-07-16T00:00:03Z";
     },
     async commentUnresolve(commentId) {
       calls.push({ kind: "unresolve", commentId });
-      source.resolvedAt = null;
+      request.resolvedAt = null;
     },
     client: { async rawRequest(_query, variables) {
       if (variables.rootIssueId) return { data: { issue: root } };
@@ -1013,7 +1034,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     writeId: "reply-write-1",
     sourceCommentId: "source-comment",
     expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
-    expectedThreadRootCommentId: "source-comment",
+    expectedThreadRootCommentId: "request-comment",
     expectedThreadState: "unresolved",
     body: "Plan review is waiting for your decision.",
   };
@@ -1034,7 +1055,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     comment: {
       commentId: "reply-comment", issueId: "root-1", body: "Plan review is waiting for your decision.",
       authorKind: "symphony", authorId: "symphony-bot", authorUserId: "symphony-bot",
-      parentCommentId: "source-comment", threadRootCommentId: "source-comment", threadState: "unresolved",
+      parentCommentId: "source-comment", threadRootCommentId: "request-comment", threadState: "unresolved",
       reactions: [], createdAt: "2026-07-16T00:00:02.000Z",
       remoteVersion: "2026-07-16T00:00:02.000Z", updatedAt: "2026-07-16T00:00:02.000Z",
     },
@@ -1047,7 +1068,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     replyWriteId: "reply-write-1",
     sourceCommentId: "source-comment",
     expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
-    threadRootCommentId: "source-comment",
+    threadRootCommentId: "request-comment",
     expectedReceipt: "none",
     receipt: "check",
   };
@@ -1062,7 +1083,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     remoteVersion: "2026-07-16T00:00:01.000Z",
     symphonyReceipt: {
       replyWriteId: "reply-write-1", sourceCommentId: "source-comment",
-      threadRootCommentId: "source-comment", receipt: "check",
+      threadRootCommentId: "request-comment", receipt: "check",
     },
   });
 
@@ -1073,12 +1094,12 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     replyWriteId: "reply-write-1",
     sourceCommentId: "source-comment",
     expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
-    threadRootCommentId: "source-comment",
+    threadRootCommentId: "request-comment",
     expectedThreadState: "unresolved",
     threadState: "resolved",
   };
   await adapter.executeWorkflowMutation(resolve);
-  assert.deepEqual(calls.shift(), { kind: "resolve", commentId: "source-comment" });
+  assert.deepEqual(calls.shift(), { kind: "resolve", commentId: "request-comment" });
   assert.deepEqual((await adapter.readWorkflowMutationOutcome(resolve)).comment.threadState, "resolved");
 
   const removeReceipt = {
@@ -1097,7 +1118,7 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     threadState: "unresolved",
   };
   await adapter.executeWorkflowMutation(unresolve);
-  assert.deepEqual(calls.shift(), { kind: "unresolve", commentId: "source-comment" });
+  assert.deepEqual(calls.shift(), { kind: "unresolve", commentId: "request-comment" });
 });
 
 test("workflow issue creation rejects unknown and duplicate label names", async () => {
@@ -1366,6 +1387,45 @@ test("workflow blocked_by read-back maps Linear relation versions to command end
       { issueId: "blocked-1", remoteVersion: "2026-07-16T00:00:04Z" },
       { issueId: "dependency-1", remoteVersion: "2026-07-16T00:00:07Z" },
       { issueId: "root-1", remoteVersion: "2026-07-16T00:00:06Z" },
+    ],
+  });
+});
+
+test("workflow blocked_by absent read-back checks the reversed canonical blocks endpoints", async () => {
+  const command = {
+    kind: "create_workflow_relation", writeId: "remove-blocked-by", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
+    sourceIssueId: "blocked-1", sourceExpectedRemoteVersion: "blocked-version",
+    targetIssueId: "dependency-1", targetExpectedRemoteVersion: "dependency-version",
+    relationKind: "blocked_by", relationState: "absent",
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", {
+    client: {
+      async rawRequest(query) {
+        assert.match(query, /source: issue\(id: "dependency-1"\)/u);
+        assert.match(query, /issue\(id: "blocked-1"\)/u);
+        return { data: {
+          root: { id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null },
+          source: {
+            id: "dependency-1", updatedAt: "dependency-version", project: { id: "project-1" },
+            parent: { id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null },
+          },
+          issue: {
+            id: "blocked-1", updatedAt: "blocked-version", project: { id: "project-1" },
+            parent: { id: "root-1", updatedAt: "root-version", project: { id: "project-1" }, parent: null },
+            inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        } };
+      },
+    },
+  });
+
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "remove-blocked-by", targetIssueId: "blocked-1", remoteVersion: "blocked-version",
+    issueVersions: [
+      { issueId: "blocked-1", remoteVersion: "blocked-version" },
+      { issueId: "dependency-1", remoteVersion: "dependency-version" },
+      { issueId: "root-1", remoteVersion: "root-version" },
     ],
   });
 });

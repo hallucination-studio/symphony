@@ -116,7 +116,6 @@ export async function createForegroundE2EHumanActor({
   const rootCatalog = rootCatalogByKey();
   const roots = new Map();
   const createdRootKeys = new Set();
-  const verifiedUndelegatedRootIds = new Set();
   const comments = new Map();
   const receiptInputs = new Map();
   return Object.freeze({
@@ -156,6 +155,112 @@ export async function createForegroundE2EHumanActor({
       return Object.freeze(bindings);
     },
 
+    async admitRootIssues({ rootCreationsByRootKey, signal, onProgress } = {}) {
+      if (!identifier(delegateActorId)) throw stableError("foreground_e2e_human_root_delegate_actor_invalid");
+      assertOperationSignal(signal, "foreground_e2e_human_root_admission_input_invalid");
+      if (onProgress !== undefined && typeof onProgress !== "function") {
+        throw stableError("foreground_e2e_human_root_admission_input_invalid");
+      }
+      if (createdRootKeys.size !== 0 || roots.size !== 0) {
+        throw stableError("foreground_e2e_human_root_admission_input_invalid");
+      }
+      const admissions = assertRootAdmissionInput(rootCreationsByRootKey, rootCatalog);
+      const requestClient = clientForCase(signal);
+      const creation = await write(
+        () => requestClient.createIssueBatch({
+          issues: admissions.map(({ binding, rootSpec }) => ({
+            teamId: binding.teamId,
+            projectId: binding.projectId,
+            stateId: binding.rootStatusId,
+            labelIds: [binding.rootLabelId, binding.routingLabelId],
+            title: rootSpec.rootCreationInput.title,
+            description: rootSpec.rootCreationInput.description,
+            priority: linearPriorityValue(rootSpec.rootCreationInput.priority),
+          })),
+        }),
+        "foreground_e2e_human_root_create_failed",
+        signal,
+      );
+      const createdByRootKey = matchCreatedRootBatch(creation, admissions);
+      reportAdmissionProgress(onProgress, "roots-created", admissions.length);
+      const rootIssueIds = admissions.map(({ rootKey }) => createdByRootKey.get(rootKey).id);
+      const createdRoots = await readAdmissionRoots(
+        requestClient,
+        rootIssueIds,
+        "foreground_e2e_human_root_read_back_failed",
+      );
+      const [children, rootComments] = await Promise.all([
+        readAdmissionChildren(requestClient, rootIssueIds),
+        readAdmissionComments(requestClient, rootIssueIds),
+      ]);
+      if (children.length !== 0 || rootComments.length !== 0 || signal?.aborted) {
+        throw stableError("foreground_e2e_human_root_admission_read_back_failed");
+      }
+
+      const createdRootsById = exactIssuesById(
+        createdRoots,
+        rootIssueIds,
+        "foreground_e2e_human_root_admission_read_back_failed",
+      );
+      for (const admission of admissions) {
+        const created = createdByRootKey.get(admission.rootKey);
+        const issue = createdRootsById.get(created.id);
+        const labels = directIssueLabels(issue, "foreground_e2e_human_root_admission_read_back_failed");
+        if (!identifier(issue.identifier) || issue.identifier !== created.identifier ||
+            !matchesCreatedRoot(issue, labels, admission.binding, admission.rootSpec.rootCreationInput) ||
+            issue.archivedAt !== null && issue.archivedAt !== undefined) {
+          throw stableError("foreground_e2e_human_root_admission_read_back_failed");
+        }
+        roots.set(issue.id, Object.freeze({
+          rootIssueId: issue.id,
+          rootKey: admission.rootKey,
+          caseId: admission.rootSpec.caseId,
+          declaredDescriptionUpdates: admission.rootSpec.declaredDescriptionUpdates,
+          projectId: admission.binding.projectId,
+          teamId: admission.binding.teamId,
+          rootLabelId: admission.binding.rootLabelId,
+          routingLabelId: admission.binding.routingLabelId,
+          rootStatusId: admission.binding.rootStatusId,
+          title: admission.rootSpec.rootCreationInput.title,
+          description: admission.rootSpec.rootCreationInput.description,
+        }));
+        createdRootKeys.add(admission.rootKey);
+      }
+      reportAdmissionProgress(onProgress, "roots-verified", admissions.length);
+
+      const delegation = await write(
+        () => requestClient.updateIssueBatch(rootIssueIds, { delegateId: delegateActorId }),
+        "foreground_e2e_human_root_delegate_failed",
+        signal,
+      );
+      assertDelegationBatch(delegation, rootIssueIds);
+      const delegatedRoots = exactIssuesById(
+        await readAdmissionRoots(
+          requestClient,
+          rootIssueIds,
+          "foreground_e2e_human_root_delegate_read_back_failed",
+        ),
+        rootIssueIds,
+        "foreground_e2e_human_root_delegate_read_back_failed",
+      );
+      for (const rootIssueId of rootIssueIds) {
+        const known = roots.get(rootIssueId);
+        const delegated = delegatedRoots.get(rootIssueId);
+        const labels = directIssueLabels(delegated, "foreground_e2e_human_root_delegate_read_back_failed");
+        if (!known || !matchesKnownRoot(delegated, labels, known) || delegated.delegateId !== delegateActorId) {
+          throw stableError("foreground_e2e_human_root_delegate_read_back_failed");
+        }
+      }
+      reportAdmissionProgress(onProgress, "roots-delegated", admissions.length);
+
+      return Object.freeze({
+        rootsByKey: Object.freeze(Object.fromEntries(admissions.map(({ rootKey }) => {
+          const root = createdByRootKey.get(rootKey);
+          return [rootKey, Object.freeze({ rootKey, rootIssueId: root.id, identifier: root.identifier })];
+        }))),
+      });
+    },
+
     createdRootsForCase({ caseId } = {}) {
       const keys = [...rootCatalog.entries()]
         .filter(([, root]) => root.caseId === caseId)
@@ -168,84 +273,6 @@ export async function createForegroundE2EHumanActor({
         const rootIssueId = rootIssueIdByKey.get(rootKey);
         return identifier(rootIssueId) ? [Object.freeze({ rootKey, rootIssueId })] : [];
       }));
-    },
-
-    async createRootIssue(input) {
-      const rootSpec = assertRootCreateInput(input, rootCatalog);
-      assertOperationSignal(input.signal, "foreground_e2e_human_root_create_input_invalid");
-      if (createdRootKeys.has(input.rootKey)) {
-        throw stableError("foreground_e2e_human_root_create_not_declared");
-      }
-      const requestClient = clientForCase(input.signal);
-      const payload = await write(
-        () => requestClient.createIssue({
-          teamId: input.teamId,
-          projectId: input.projectId,
-          stateId: input.rootStatusId,
-          labelIds: [input.rootLabelId, input.routingLabelId],
-          title: rootSpec.rootCreationInput.title,
-          description: rootSpec.rootCreationInput.description,
-          priority: linearPriorityValue(rootSpec.rootCreationInput.priority),
-        }),
-        "foreground_e2e_human_root_create_failed",
-        input.signal,
-      );
-      if (payload?.success !== true || !identifier(payload.issueId)) {
-        throw stableError("foreground_e2e_human_root_create_failed");
-      }
-      const issue = await readIssue(requestClient, payload.issueId, "foreground_e2e_human_root_read_back_failed");
-      const labels = await readLabels(issue, "foreground_e2e_human_root_read_back_failed");
-      if (!matchesCreatedRoot(issue, labels, input, rootSpec.rootCreationInput)) {
-        throw stableError("foreground_e2e_human_root_read_back_failed");
-      }
-      roots.set(issue.id, Object.freeze({
-        rootIssueId: issue.id,
-        rootKey: input.rootKey,
-        caseId: input.caseId,
-        declaredDescriptionUpdates: rootSpec.declaredDescriptionUpdates,
-        projectId: input.projectId,
-        teamId: input.teamId,
-        rootLabelId: input.rootLabelId,
-        routingLabelId: input.routingLabelId,
-        rootStatusId: input.rootStatusId,
-        title: rootSpec.rootCreationInput.title,
-        description: rootSpec.rootCreationInput.description,
-      }));
-      createdRootKeys.add(input.rootKey);
-      return Object.freeze({ rootIssueId: issue.id, identifier: issue.identifier });
-    },
-
-    async assertRootUndelegatedAndInactive({ rootIssueId, signal } = {}) {
-      assertOperationSignal(signal, "foreground_e2e_human_root_admission_input_invalid");
-      const known = assertKnownRoot(roots, rootIssueId);
-      const requestClient = clientForCase(signal);
-      await verifyUndelegatedRoot({ client: requestClient, known, delegateActorId, signal });
-      verifiedUndelegatedRootIds.add(rootIssueId);
-    },
-
-    async delegateRootIssue({ rootIssueId, signal } = {}) {
-      if (!identifier(delegateActorId)) throw stableError("foreground_e2e_human_root_delegate_actor_invalid");
-      assertOperationSignal(signal, "foreground_e2e_human_root_delegate_input_invalid");
-      const known = assertKnownRoot(roots, rootIssueId);
-      if (!verifiedUndelegatedRootIds.has(rootIssueId)) {
-        throw stableError("foreground_e2e_human_root_delegate_not_verified");
-      }
-      const requestClient = clientForCase(signal);
-      await verifyUndelegatedRoot({ client: requestClient, known, delegateActorId, signal });
-      const payload = await write(
-        () => requestClient.updateIssue(rootIssueId, { delegateId: delegateActorId }),
-        "foreground_e2e_human_root_delegate_failed",
-        signal,
-      );
-      if (payload?.success !== true || payload.issueId !== rootIssueId) {
-        throw stableError("foreground_e2e_human_root_delegate_failed");
-      }
-      const delegated = await readIssue(requestClient, rootIssueId, "foreground_e2e_human_root_delegate_read_back_failed");
-      const labels = await readLabels(delegated, "foreground_e2e_human_root_delegate_read_back_failed");
-      if (!matchesKnownRoot(delegated, labels, known) || delegated.delegateId !== delegateActorId) {
-        throw stableError("foreground_e2e_human_root_delegate_read_back_failed");
-      }
-      verifiedUndelegatedRootIds.delete(rootIssueId);
     },
 
     async waitForPlanApprovalRequest({ rootIssueId, signal } = {}) {
@@ -582,6 +609,15 @@ export async function createForegroundE2EHumanActor({
   });
 }
 
+function reportAdmissionProgress(onProgress, milestone, rootCount) {
+  if (onProgress === undefined) return;
+  try {
+    onProgress(Object.freeze({ milestone, rootCount }));
+  } catch {
+    // Progress is observational and must not interrupt a partially completed admission.
+  }
+}
+
 async function setCommentThreadState({ client, comments, actorId, issueId, commentId, resolved, receiptInputs, signal }) {
   const known = assertKnownComment(comments, { issueId, commentId });
   const before = await readComment(client, commentId, "foreground_e2e_human_comment_target_invalid");
@@ -615,6 +651,110 @@ function assertRootCreateInput(input, rootCatalog) {
     throw stableError("foreground_e2e_human_root_create_input_invalid");
   }
   return rootSpec;
+}
+
+function assertRootAdmissionInput(rootCreationsByRootKey, rootCatalog) {
+  const rootKeys = rootCreationsByRootKey && typeof rootCreationsByRootKey === "object" &&
+      !Array.isArray(rootCreationsByRootKey)
+    ? Object.keys(rootCreationsByRootKey)
+    : [];
+  if (!rootCreationsByRootKey || typeof rootCreationsByRootKey !== "object" || Array.isArray(rootCreationsByRootKey) ||
+      rootKeys.length === 0 || rootKeys.some((rootKey) => !rootCatalog.has(rootKey))) {
+    throw stableError("foreground_e2e_human_root_admission_input_invalid");
+  }
+  return rootKeys.map((rootKey) => {
+    const rootSpec = rootCatalog.get(rootKey);
+    const binding = rootCreationsByRootKey[rootKey];
+    assertRootCreateInput({
+      ...binding,
+      rootKey,
+      caseId: rootSpec?.caseId,
+    }, rootCatalog);
+    return Object.freeze({ rootKey, rootSpec, binding });
+  });
+}
+
+function matchCreatedRootBatch(payload, admissions) {
+  if (payload?.success !== true || !Array.isArray(payload.issues) || payload.issues.length !== admissions.length) {
+    throw stableError("foreground_e2e_human_root_create_failed");
+  }
+  const expectedByTitle = new Map(admissions.map((admission) => [
+    admission.rootSpec.rootCreationInput.title,
+    admission,
+  ]));
+  if (expectedByTitle.size !== admissions.length) {
+    throw stableError("foreground_e2e_human_case_catalog_invalid");
+  }
+  const createdByRootKey = new Map();
+  const issueIds = new Set();
+  const identifiers = new Set();
+  for (const issue of payload.issues) {
+    const admission = expectedByTitle.get(issue?.title);
+    if (!admission || !identifier(issue?.id) || !identifier(issue?.identifier) ||
+        issueIds.has(issue.id) || identifiers.has(issue.identifier) || createdByRootKey.has(admission.rootKey)) {
+      throw stableError("foreground_e2e_human_root_create_failed");
+    }
+    issueIds.add(issue.id);
+    identifiers.add(issue.identifier);
+    createdByRootKey.set(admission.rootKey, Object.freeze({ id: issue.id, identifier: issue.identifier }));
+  }
+  if (createdByRootKey.size !== admissions.length) {
+    throw stableError("foreground_e2e_human_root_create_failed");
+  }
+  return createdByRootKey;
+}
+
+async function readAdmissionRoots(client, rootIssueIds, code) {
+  return readHumanNodes((after) => client.issues({
+    first: 50,
+    includeArchived: true,
+    filter: { id: { in: rootIssueIds } },
+    ...(after ? { after } : {}),
+  }), code);
+}
+
+async function readAdmissionChildren(client, rootIssueIds) {
+  return readHumanNodes((after) => client.issues({
+    first: 50,
+    includeArchived: true,
+    filter: { parent: { id: { in: rootIssueIds } } },
+    ...(after ? { after } : {}),
+  }), "foreground_e2e_human_root_admission_read_back_failed");
+}
+
+async function readAdmissionComments(client, rootIssueIds) {
+  return readHumanNodes((after) => client.comments({
+    first: 50,
+    includeArchived: true,
+    filter: { issue: { id: { in: rootIssueIds } } },
+    ...(after ? { after } : {}),
+  }), "foreground_e2e_human_root_admission_read_back_failed");
+}
+
+function exactIssuesById(issues, expectedIssueIds, code) {
+  const expected = new Set(expectedIssueIds);
+  const byId = new Map();
+  for (const issue of issues) {
+    if (!identifier(issue?.id) || !expected.has(issue.id) || byId.has(issue.id)) throw stableError(code);
+    byId.set(issue.id, issue);
+  }
+  if (byId.size !== expected.size) throw stableError(code);
+  return byId;
+}
+
+function directIssueLabels(issue, code) {
+  if (!Array.isArray(issue?.labelIds) || issue.labelIds.some((labelId) => !identifier(labelId)) ||
+      new Set(issue.labelIds).size !== issue.labelIds.length) {
+    throw stableError(code);
+  }
+  return issue.labelIds.map((id) => ({ id }));
+}
+
+function assertDelegationBatch(payload, rootIssueIds) {
+  if (payload?.success !== true || !Array.isArray(payload.issues)) {
+    throw stableError("foreground_e2e_human_root_delegate_failed");
+  }
+  exactIssuesById(payload.issues, rootIssueIds, "foreground_e2e_human_root_delegate_failed");
 }
 
 function rootCatalogByKey() {
@@ -1218,21 +1358,6 @@ function matchesKnownRoot(issue, labels, known) {
 function matchesRootLabels(labels, root) {
   return labels.length === 2 && new Set(labels.map(({ id }) => id)).size === 2 &&
     labels.some(({ id }) => id === root.rootLabelId) && labels.some(({ id }) => id === root.routingLabelId);
-}
-
-async function verifyUndelegatedRoot({ client, known, delegateActorId, signal }) {
-  const code = "foreground_e2e_human_root_admission_read_back_failed";
-  const root = await readIssue(client, known.rootIssueId, code);
-  const [labels, children, comments] = await Promise.all([
-    readLabels(root, code),
-    readChildren(root, code),
-    readIssueComments(root, code),
-  ]);
-  if (!matchesKnownRoot(root, labels, known) || root.stateId !== known.rootStatusId || root.title !== known.title ||
-      root.description !== known.description || root.delegateId !== null && root.delegateId !== undefined ||
-      children.length !== 0 || comments.length !== 0 || signal?.aborted || delegateActorId !== undefined && !identifier(delegateActorId)) {
-    throw stableError(code);
-  }
 }
 
 function matchesOwnedRootComment(comment, { issueId, body, actorId }) {

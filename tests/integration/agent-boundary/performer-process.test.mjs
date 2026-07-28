@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -12,11 +14,13 @@ test("production Performer rejects implicit Root turn input and exits on SIGTERM
   timeout: EVIDENCE_DEADLINE_MS,
 }, async () => {
   const deadlineAt = Date.now() + EVIDENCE_DEADLINE_MS;
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "symphony-performer-profile-"));
   const child = spawn(PERFORMER, ["--agent"], {
     cwd: process.cwd(),
     env: {
       PATH: process.env.PATH,
       PYTHONPATH: path.resolve("apps/performer/src"),
+      CODEX_HOME: codexHome,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -57,6 +61,7 @@ test("production Performer rejects implicit Root turn input and exits on SIGTERM
   } finally {
     child.stdin.destroy();
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await rm(codexHome, { recursive: true, force: true });
   }
 });
 

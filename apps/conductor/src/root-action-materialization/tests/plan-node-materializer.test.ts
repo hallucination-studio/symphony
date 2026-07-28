@@ -88,6 +88,42 @@ test("rejects approval from a non-human actor", async () => {
   assert.deepEqual(linear.mutations, []);
 });
 
+test("rejects approval from an unrelated human actor", async () => {
+  const linear = new FakeLinear();
+  const approval = linear.tree.comments.find(({ comment_id }) => comment_id === "approval-reply")!;
+  approval.author_id = "unrelated-human";
+  approval.author_user_id = "unrelated-human";
+
+  const result = await materializer(linear).materialize({ directive: directive(), view: view(linear.tree) });
+
+  assert.deepEqual(result, {
+    kind: "failed",
+    rootDirectiveId: "directive-1",
+    code: "plan_node_approval_reply_invalid",
+    sanitizedReason: "plan_node_approval_reply_invalid",
+  });
+  assert.deepEqual(linear.mutations, []);
+});
+
+test("rejects an approval request that predates the current Plan version", async () => {
+  const linear = new FakeLinear();
+  const plan = linear.issue("plan-1");
+  plan.remote_version = "plan-1-v2";
+  plan.updated_at = "2026-07-24T00:02:00Z";
+  const candidate = directive();
+  candidate.action.expectedPlanRemoteVersion = plan.remote_version;
+
+  const result = await materializer(linear).materialize({ directive: candidate, view: view(linear.tree) });
+
+  assert.deepEqual(result, {
+    kind: "failed",
+    rootDirectiveId: "directive-1",
+    code: "plan_node_approval_request_invalid",
+    sanitizedReason: "plan_node_approval_request_invalid",
+  });
+  assert.deepEqual(linear.mutations, []);
+});
+
 function materializer(linear: FakeLinear) {
   return new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
 }
@@ -175,7 +211,7 @@ class FakeLinear {
 }
 
 function tree(): LinearWorkflowTreeSnapshot {
-  return {
+  const value: LinearWorkflowTreeSnapshot = {
     root_issue_id: "root-1",
     status_catalog: [
       status("root-progress", "In Progress", "started", 1),
@@ -193,6 +229,8 @@ function tree(): LinearWorkflowTreeSnapshot {
     relations: [], attachments: [], activities: [], source_manifest: [], coverage: { is_complete: true, omissions: [] },
     observed_at: "2026-07-24T00:02:00Z",
   };
+  Object.assign(value.issues[0]!, { creator_user_id: "human-1" });
+  return value;
 }
 
 function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {

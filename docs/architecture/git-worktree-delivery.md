@@ -15,8 +15,9 @@ one deterministic Git worktree path
 at most one active delivery PR
 ```
 
-Performer Work只能修改授予的worktree capability。Plan和Verify只读；Conductor独占worktree创建、branch、commit、push、
-PR、cleanup和Git topology mutation。
+Performer Work只能修改授予的worktree capability。一个Work Agent Tree整体是一个writer domain；tree内全部nodes共享该
+worktree且不能创建per-agent Git topology，完整协调规则见[Work Subagents](work-subagents.md)。Plan和Verify只读；Conductor
+独占worktree创建、branch、commit、push、PR、cleanup和Git topology mutation。
 
 ## 2. Repository Context
 
@@ -44,11 +45,14 @@ Conductor在首次执行前：
 
 Work不commit或push。全部required Work完成后，Conductor：
 
-1. 验证worktree没有越界路径或未预期Git topology变化；
-2. 运行mechanical required checks；
-3. 创建一个可read-back的immutable target commit；
-4. 记录commit SHA、tree和diff facts到当前runtime request；
-5. Verify只读检查该exact revision。
+1. 只接受matching `WorkTurnResponse`的semantic Result variant；Performer必须已永久retire其turn mutation epoch，mechanical failure
+   不能进入commit gate；
+2. 确认matching workspace write capability已撤销、Root writer domain已归还；Conductor不读取agent tree status或private fence proof；
+3. fresh验证worktree没有越界路径或未预期Git topology变化；
+4. 运行mechanical required checks；
+5. 创建一个可read-back的immutable target commit；
+6. 记录commit SHA、tree和diff facts到当前runtime request；
+7. Verify只读检查该exact revision。
 
 Verify后任何内容变化都会产生new revision，并要求fresh Verify Issue。旧Verify approval或Finding conclusion不适用于new
 revision。
@@ -73,7 +77,8 @@ Issue，不能重新派发旧`Done`节点。
 
 ## 6. Cleanup
 
-只在Root `Done`或`Canceled`且没有live Stage、uncommitted changes、unreadable Git state或pending delivery时cleanup。
+只在Root `Done`或`Canceled`且没有live Stage/Work Agent Tree writer domain、uncommitted changes、unreadable Git state或pending
+delivery时cleanup。
 cleanup必须先验证exact Root path、repository和branch，再使用Git-aware worktree removal。失败保留现场并记录sanitized log；
 不得递归删除宽泛路径。
 
@@ -85,3 +90,5 @@ cleanup必须先验证exact Root path、repository和branch，再使用Git-aware
 4. delivery由Git/SCM facts加Linear native status/link表达，不保存私有record。
 5. worktree missing的行为只由Workflow Authority文档定义，本文件不复制恢复算法。
 6. ambiguous或mismatched workspace永不自动reset/clean。
+7. Work subagents共享一个Root worktree；只有matching turn epoch永久retire、write capability撤销、writer domain归还并完成barrier后
+   fresh read，Work evidence才可进入commit gate。

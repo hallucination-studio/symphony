@@ -9,6 +9,7 @@ from threading import Event
 
 from performer.agent_protocol.host import AgentProtocolHost
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl, create_sdk
+from performer.backends.codex.provider_io_capture import provider_io_capture_from_environment
 from performer.prompt_resources import load_role_prompt_catalog
 from performer.profile_control.host import ProfileControlHost
 
@@ -22,6 +23,7 @@ def main() -> None:
     try:
         prompt_catalog = load_role_prompt_catalog()
         sdk = create_sdk()
+        io_capture = provider_io_capture_from_environment()
     except ValueError as error:
         raise SystemExit(str(error)) from None
     if args.profile_control:
@@ -32,7 +34,7 @@ def main() -> None:
         for result in ProfileControlHost(sdk).iter_results(metadata, sys.stdin.buffer):
             print(json.dumps(result, separators=(",", ":")), flush=True)
         return
-    backend = CodexBackendImpl(sdk, prompt_catalog)
+    backend = CodexBackendImpl(sdk, prompt_catalog, io_capture=io_capture)
     if args.agent:
         cancel_event = Event()
         try:

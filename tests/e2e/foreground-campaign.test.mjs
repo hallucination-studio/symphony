@@ -98,6 +98,7 @@ test("Campaign composes the real eight-Case lifecycle after readiness and reads 
         startHeartbeat: () => events.push("heartbeat"),
         close: () => events.push("reporter-closed"),
         caseObservation: () => {},
+        admissionProgress: ({ milestone, rootCount }) => events.push(`admission:${milestone}:${rootCount}`),
         signal: () => {},
         failure: () => {},
         summary: () => events.push("summary"),
@@ -113,6 +114,7 @@ test("Campaign composes the real eight-Case lifecycle after readiness and reads 
             assertProjectRootIndexRequestBudget() {},
             subscribeUnexpectedExit() { return () => {}; },
           },
+          async stopWriters() { events.push("writers-stopped"); },
           async close() { events.push("closed"); },
         };
       },
@@ -129,20 +131,45 @@ test("Campaign composes the real eight-Case lifecycle after readiness and reads 
               rootTopology.map(({ rootKey }) => [rootKey, rootCreation()])),
             );
           },
+          async admitRootIssues({ rootCreationsByRootKey, onProgress }) {
+            assert.equal(Object.keys(rootCreationsByRootKey).length, Object.values(rootsByCase).flat().length);
+            assert.equal(typeof onProgress, "function");
+            onProgress({ milestone: "roots-created", rootCount: 14 });
+            onProgress({ milestone: "roots-verified", rootCount: 14 });
+            onProgress({ milestone: "roots-delegated", rootCount: 14 });
+            events.push("roots-admitted");
+            return {
+              rootsByKey: Object.fromEntries(Object.values(rootsByCase).flat().map(({ rootKey, rootIssueId }) => [rootKey, {
+                rootKey,
+                rootIssueId,
+                identifier: `ENG-${rootKey}`,
+              }])),
+            };
+          },
           createdRootsForCase: ({ caseId }) => rootsByCase[caseId] ?? [],
         };
       },
-      runCaseDriver: async ({ definition }) => {
+      runCaseDriver: async ({ definition, rootCreationsByRootKey }) => {
+        assert.ok(definition.rootTopology.every(({ rootKey }) =>
+          rootCreationsByRootKey[rootKey].rootIssueId === rootsByCase[definition.caseId]
+            .find((root) => root.rootKey === rootKey).rootIssueId));
         completedDrivers.push(definition.caseId);
         return { context: { humanActorId: "human-1", rootIssueIdsByKey: Object.fromEntries(rootsByCase[definition.caseId].map(({ rootKey, rootIssueId }) => [rootKey, rootIssueId])) } };
       },
       readFinalEvidence: async ({ caseId, rootIssueIds, repositories }) => {
+        assert.equal(events.includes("writers-stopped"), true);
+        events.push(`final-read:${caseId}`);
         finalReads.push({ caseId, rootIssueIds, repositories });
         return { caseId, rootIssueIds, repositories };
       },
-      runCases: async ({ definitions, runCase, readFinalEvidence }) => {
-        await Promise.all(definitions.map(async (definition) => {
-          const driver = await runCase({ definition, scope: { caseId: definition.caseId, signal: new AbortController().signal } });
+      runCases: async ({ definitions, runCase, quiesce, readFinalEvidence }) => {
+        const drivers = await Promise.all(definitions.map((definition) =>
+          runCase({ definition, scope: { caseId: definition.caseId, signal: new AbortController().signal } }),
+        ));
+        events.push("drivers-complete");
+        await quiesce();
+        await Promise.all(definitions.map(async (definition, index) => {
+          const driver = drivers[index];
           await readFinalEvidence({ definition, scope: { caseId: definition.caseId }, driverResult: driver });
         }));
         return { exitCode: 0, cases: definitions.map(({ caseId }) => ({ caseId, verdict: "passed" })) };
@@ -159,7 +186,26 @@ test("Campaign composes the real eight-Case lifecycle after readiness and reads 
     const expected = FOREGROUND_E2E_CASES.find((definition) => definition.caseId === caseId).rootTopology.length;
     return rootIssueIds.length === expected && repositories.length === expected;
   }));
-  assert.deepEqual(events, ["heartbeat", "phase:starting", "ready", "phase:running", "closed", "signals-disposed", "summary", "reporter-closed"]);
+  assert.deepEqual(events, [
+    "heartbeat",
+    "phase:starting",
+    "ready",
+    "phase:admitting",
+    "admission:roots-created:14",
+    "admission:roots-verified:14",
+    "admission:roots-delegated:14",
+    "roots-admitted",
+    "phase:running",
+    "drivers-complete",
+    "phase:quiescing",
+    "writers-stopped",
+    "phase:final-reading",
+    ...FOREGROUND_E2E_CASE_IDS.map((caseId) => `final-read:${caseId}`),
+    "closed",
+    "signals-disposed",
+    "summary",
+    "reporter-closed",
+  ]);
   assert.deepEqual(summary, {
     exitCode: 0,
     cases: FOREGROUND_E2E_CASE_IDS.map((caseId) => ({ caseId, verdict: "passed" })),
@@ -192,6 +238,7 @@ test("Campaign routes a runtime process fault only to its bound Cases, final-rea
             return () => listeners.delete(listener);
           },
         },
+        async stopWriters() {},
         async close() {},
       }),
       createHuman: async () => humanFor({ bindings, rootsByCase }),
@@ -258,10 +305,12 @@ test("Campaign rejects a physical Root Index budget failure after final reads wi
             },
             subscribeUnexpectedExit() { return () => {}; },
           },
+          async stopWriters() {},
           async close() {},
         }),
         createHuman: async () => humanFor({ bindings, rootsByCase }),
-        runCases: async ({ definitions, readFinalEvidence }) => {
+        runCases: async ({ definitions, quiesce, readFinalEvidence }) => {
+          await quiesce();
           for (const definition of definitions) {
             await readFinalEvidence({ definition, driverResult: { context: {} } });
           }
@@ -305,6 +354,7 @@ test("Campaign closes its Reporter when environment cleanup fails", async () => 
             assertProjectRootIndexRequestBudget() {},
             subscribeUnexpectedExit() { return () => {}; },
           },
+          async stopWriters() {},
           async close() { throw codedError("foreground_e2e_environment_cleanup_failed"); },
         }),
         createHuman: async () => { throw codedError("foreground_e2e_human_actor_identity_invalid"); },
@@ -430,6 +480,7 @@ function rootCreation() {
   return {
     teamId: "team-1",
     projectId: "project-1",
+    rootLabelId: "root-label",
     routingLabelId: "route-1",
     rootStatusId: "todo-1",
     conductorId: "conductor-a",
@@ -449,6 +500,7 @@ function rootCreationBindings() {
     return [topology.rootKey, Object.freeze({
       teamId: "team-1",
       projectId: "project-1",
+      rootLabelId: "root-label",
       routingLabelId: `route-${conductor.conductorId}`,
       rootStatusId: "todo-1",
       conductorId: conductor.conductorId,
@@ -469,6 +521,15 @@ function humanFor({ bindings, rootsByCase }) {
   return Object.freeze({
     actorId: "human-1",
     async resolveRootCreationBindings() { return bindings; },
+    async admitRootIssues() {
+      return {
+        rootsByKey: Object.fromEntries(Object.values(rootsByCase).flat().map(({ rootKey, rootIssueId }) => [rootKey, {
+          rootKey,
+          rootIssueId,
+          identifier: `ENG-${rootKey}`,
+        }])),
+      };
+    },
     createdRootsForCase({ caseId }) { return rootsByCase[caseId] ?? []; },
   });
 }
@@ -479,6 +540,8 @@ function quietReporter() {
     phase() {},
     close() {},
     caseObservation() {},
+    caseAssertion() {},
+    admissionProgress() {},
     signal() {},
     failure() {},
     summary() {},
@@ -503,6 +566,7 @@ function interruptedCampaignDependencies({ runCases, onEnvironmentClose, onRepor
         assertProjectRootIndexRequestBudget() {},
         subscribeUnexpectedExit() { return () => {}; },
       },
+      async stopWriters() {},
       async close() { onEnvironmentClose?.(); },
     }),
     createHuman: async () => ({
@@ -510,6 +574,14 @@ function interruptedCampaignDependencies({ runCases, onEnvironmentClose, onRepor
       resolveRootCreationBindings: async () => Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) =>
         rootTopology.map(({ rootKey }) => [rootKey, rootCreation()])),
       ),
+      admitRootIssues: async () => ({
+        rootsByKey: Object.fromEntries(FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) =>
+          rootTopology.map(({ rootKey }) => [rootKey, {
+            rootKey,
+            rootIssueId: `${rootKey}-id`,
+            identifier: `ENG-${rootKey}`,
+          }]))),
+      }),
       createdRootsForCase: () => [],
     }),
     runCases,

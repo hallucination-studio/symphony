@@ -116,10 +116,13 @@ function validateFacts(view: RootReconciliationView, action: MaterializePlanNode
   ) return "plan_node_plan_invalid";
 
   const request = view.tree.comments.find(({ comment_id }) => comment_id === action.approvalRequestCommentId);
+  const requestCreatedAt = request ? Date.parse(request.created_at) : Number.NaN;
+  const planUpdatedAt = Date.parse(plan.updated_at);
   if (
     !request || request.issue_id !== root.issue_id || request.parent_comment_id !== undefined ||
     request.thread_root_comment_id !== request.comment_id || request.author_kind !== "symphony" ||
     request.remote_version !== action.expectedApprovalRequestRemoteVersion ||
+    !Number.isFinite(requestCreatedAt) || !Number.isFinite(planUpdatedAt) || planUpdatedAt > requestCreatedAt ||
     !request.body.startsWith("## 需要你审批") || !request.body.includes(plan.identifier)
   ) return "plan_node_approval_request_invalid";
   const reply = view.tree.comments.find(({ comment_id }) => comment_id === action.approvalReplyCommentId);
@@ -127,6 +130,7 @@ function validateFacts(view: RootReconciliationView, action: MaterializePlanNode
     !reply || reply.issue_id !== root.issue_id || reply.parent_comment_id !== request.comment_id ||
     reply.thread_root_comment_id !== request.comment_id || reply.author_kind !== "human" ||
     !reply.author_user_id || reply.author_id !== reply.author_user_id || !reply.body.trim() ||
+    (reply.author_user_id !== root.creator_user_id && reply.author_user_id !== root.assignee_user_id) ||
     reply.remote_version !== action.expectedApprovalReplyRemoteVersion
   ) return "plan_node_approval_reply_invalid";
 

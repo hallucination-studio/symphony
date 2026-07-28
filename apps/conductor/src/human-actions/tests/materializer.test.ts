@@ -11,7 +11,7 @@ import type {
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import { LinearHumanActionMaterializerImpl } from "../internal/LinearHumanActionMaterializerImpl.js";
 
-test("creates one native Human Action thread on the Root", async () => {
+test("creates one explicit Human Action thread and moves the Root to Needs Approval", async () => {
   const linear = new FakeLinear();
   const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
     rootDirectiveId: "directive-1",
@@ -20,15 +20,80 @@ test("creates one native Human Action thread on the Root", async () => {
   });
 
   assert.deepEqual(result, { kind: "materialized", requestCommentId: "request-1" });
-  assert.deepEqual(linear.mutations.map(({ kind }) => kind), ["append_workflow_comment"]);
+  assert.deepEqual(linear.mutations.map(({ kind }) => kind), [
+    "append_workflow_comment",
+    "update_workflow_issue",
+  ]);
   const request = linear.tree.comments[0]!;
+  const root = linear.tree.issues[0]!;
   assert.equal(request.issue_id, "root-1");
   assert.equal(request.parent_comment_id, undefined);
   assert.equal(request.thread_root_comment_id, request.comment_id);
   assert.equal(request.author_kind, "symphony");
   assert.match(request.body, /^## 需要你审批/mu);
+  assert.match(request.body, /### 需要你的操作\n请审批当前计划。/u);
+  assert.match(request.body, /### 如何继续\n请直接在本条 comment 下回复/u);
+  assert.match(request.body, /### 回复后/u);
   assert.match(request.body, /SYM-PLAN-1/u);
   assert.doesNotMatch(request.body, /```json|<!--|root_directive|proposal_digest/u);
+  assert.equal(root.status_name, "Needs Approval");
+  assert.equal(root.status_id, "needs-approval");
+});
+
+test("asks for information in the same Markdown protocol and moves the Root to Needs Info", async () => {
+  const linear = new FakeLinear();
+  const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
+    rootDirectiveId: "directive-information",
+    view: view(linear.tree),
+    action: information(linear.tree),
+  });
+
+  assert.equal(result.kind, "materialized");
+  const request = linear.tree.comments[0]!;
+  assert.match(request.body, /^## 需要你补充信息/mu);
+  assert.match(request.body, /请直接在本条 comment 下回复并提供上述信息/u);
+  assert.equal(linear.tree.issues[0]!.status_name, "Needs Info");
+});
+
+test("does not invent a human mention outside the workflow contract", async () => {
+  const linear = new FakeLinear();
+
+  const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
+    rootDirectiveId: "directive-no-human",
+    view: view(linear.tree),
+    action: planApproval(linear.tree),
+  });
+
+  assert.equal(result.kind, "materialized");
+  assert.doesNotMatch(linear.tree.comments[0]!.body, /^@/mu);
+  assert.equal(linear.tree.issues[0]!.status_name, "Needs Approval");
+});
+
+test("retries a partial request without duplicating the comment and converges Root status", async () => {
+  const linear = new FakeLinear();
+  const materializer = new LinearHumanActionMaterializerImpl(linear);
+  linear.failStatusWrite = true;
+
+  const first = await materializer.materialize({
+    rootDirectiveId: "directive-partial",
+    view: view(linear.tree),
+    action: planApproval(linear.tree),
+  });
+  assert.deepEqual(first, {
+    kind: "failed",
+    code: "human_action_root_status_write_failed",
+    sanitizedReason: "human_action_root_status_write_failed",
+  });
+
+  linear.failStatusWrite = false;
+  const second = await materializer.materialize({
+    rootDirectiveId: "directive-partial",
+    view: view(linear.tree),
+    action: planApproval(linear.tree),
+  });
+  assert.equal(second.kind, "materialized");
+  assert.equal(linear.tree.comments.length, 1);
+  assert.equal(linear.tree.issues[0]!.status_name, "Needs Approval");
 });
 
 test("rejects stale or invalid native Human Action targets before writing", async () => {
@@ -79,6 +144,20 @@ function planApproval(tree: LinearWorkflowTreeSnapshot): CreateHumanActionAction
   };
 }
 
+function information(tree: LinearWorkflowTreeSnapshot): CreateHumanActionAction {
+  return {
+    kind: "create_human_action",
+    rootIssueId: "root-1",
+    actionKind: "information",
+    targetIssueIds: ["root-1"],
+    expectedRootRemoteVersion: tree.issues[0]!.remote_version,
+    question: "请提供目标发布日期和允许变更的目录。",
+    context: "这些信息无法从当前 Linear 与 Git facts 推导。",
+    options: [],
+    evidenceRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }],
+  };
+}
+
 function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {
   return {
     root: {
@@ -99,12 +178,16 @@ function view(tree: LinearWorkflowTreeSnapshot): RootReconciliationView {
 class FakeLinear {
   readonly mutations: LinearWorkflowMutationCommand[] = [];
   unconfirmed = false;
+  failStatusWrite = false;
+  readonly commentsByWriteId = new Map<string, LinearWorkflowTreeSnapshot["comments"][number]>();
   tree: LinearWorkflowTreeSnapshot = {
     root_issue_id: "root-1",
     status_catalog: [
       { status_id: "progress", name: "In Progress", category: "started", position: 1 },
       { status_id: "planning", name: "Planning", category: "started", position: 2 },
       { status_id: "review", name: "In Review", category: "started", position: 3 },
+      { status_id: "needs-approval", name: "Needs Approval", category: "started", position: 4 },
+      { status_id: "needs-info", name: "Needs Info", category: "started", position: 5 },
     ],
     issues: [
       issue("root-1", "SYM-ROOT-1", "root", undefined, "progress", "In Progress", 0),
@@ -119,9 +202,31 @@ class FakeLinear {
 
   async mutateWorkflow(command: LinearWorkflowMutationCommand) {
     this.mutations.push(command);
+    if (command.kind === "update_workflow_issue") {
+      if (this.failStatusWrite) {
+        return { kind: "failed" as const, code: "linear_write_failed", summary: "linear_write_failed" };
+      }
+      const root = this.tree.issues.find(({ issue_id }) => issue_id === command.target.targetIssueId)!;
+      const status = this.tree.status_catalog.find(({ status_id }) => status_id === command.statusId)!;
+      root.status_id = status.status_id;
+      root.status_name = status.name;
+      root.status_category = status.category;
+      root.status_position = status.position;
+      return {
+        kind: "applied" as const,
+        readBack: { writeId: command.writeId, targetIssueId: root.issue_id, remoteVersion: root.remote_version },
+      };
+    }
     if (command.kind !== "append_workflow_comment") throw new Error("unexpected mutation");
     if (this.unconfirmed) {
       return { kind: "write_unconfirmed" as const, readBackTarget: { writeId: command.writeId, targetIssueId: "root-1", remoteVersion: "root-v1" } };
+    }
+    const existing = this.commentsByWriteId.get(command.writeId);
+    if (existing) {
+      return {
+        kind: "already_applied" as const,
+        readBack: { writeId: command.writeId, targetIssueId: "root-1", remoteVersion: "root-v2", comment: existing },
+      };
     }
     const comment = {
       comment_id: "request-1", issue_id: "root-1", body: command.body, author_kind: "symphony" as const,
@@ -129,6 +234,7 @@ class FakeLinear {
       reactions: [], created_at: "2026-07-24T00:00:01Z", remote_version: "request-v1", updated_at: "2026-07-24T00:00:01Z",
     };
     this.tree.comments.push(comment);
+    this.commentsByWriteId.set(command.writeId, comment);
     return {
       kind: "applied" as const,
       readBack: { writeId: command.writeId, targetIssueId: "root-1", remoteVersion: "root-v2", comment },
@@ -145,10 +251,11 @@ function issue(
   statusName: string,
   depth: number,
 ): LinearWorkflowTreeSnapshot["issues"][number] {
-  return {
+  const value: LinearWorkflowTreeSnapshot["issues"][number] = {
     issue_id: issueId, identifier, project_id: "project-1", ...(parentIssueId ? { parent_issue_id: parentIssueId } : {}),
     status_id: statusId, status_name: statusName, status_category: "started", status_position: depth,
     order: depth, depth, title: issueKind, description: `${issueKind} description`, labels: [], is_archived: false,
     issue_kind: issueKind, remote_version: `${issueId}-v1`, created_at: "2026-07-24T00:00:00Z", updated_at: "2026-07-24T00:00:00Z",
   };
+  return value;
 }

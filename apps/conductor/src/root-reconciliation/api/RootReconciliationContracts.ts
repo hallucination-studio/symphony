@@ -67,6 +67,8 @@ export interface RootFactIssue {
   issueId: string;
   issueKind: RootFactIssueKind;
   parentIssueId?: string;
+  creatorUserId?: string;
+  assigneeUserId?: string;
   title: string;
   description: string;
   status: LinearFactState;
@@ -419,7 +421,6 @@ export type TreeOperation =
   | { kind: "restore_node"; precondition: TreePrecondition }
   | { kind: "reorder_nodes"; cycleIssueId: string; orderedIssueIds: string[]; precondition: TreePrecondition }
   | { kind: "replace_dependencies"; workIssueId: string; dependencyIssueIds: string[]; precondition: TreePrecondition }
-  | { kind: "create_relation"; relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by"; sourceIssueId: string; targetIssueId: string }
   | { kind: "remove_relation"; relationId: string; precondition: TreePrecondition };
 
 export interface ReviseRootTreeDirective { kind: "revise_root_tree"; reason: string; operations: TreeOperation[]; }

@@ -286,6 +286,183 @@ test("Root runtime opens with bootstrap and advances with only a delta", async (
   assert.equal(advances, 1);
 });
 
+test("Root runtime validates a delta directive against only the inputs attempted in that turn", async () => {
+  const tree = workflowTree();
+  const historicalComment = workflowComment({
+    commentId: "historical-comment",
+    authorKind: "human",
+    authorId: "user-1",
+    authorUserId: "user-1",
+    body: "Please keep the existing deployment constraint.",
+  });
+  tree.comments.push(historicalComment);
+  const historicalReply = commentBodyReply(historicalComment);
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const dependencies = failureDependencies({ tree, logs, onOpen: failureFor });
+  let advances = 0;
+  let deltaReply: UserCommentReply | undefined;
+  dependencies.reconciler = {
+    async open(input) {
+      return {
+        kind: "opened",
+        sessionId: input.reconcilerSessionId,
+        bootstrapRootDigest: input.bootstrap.rootDigest,
+        initialResult: {
+          kind: "directive",
+          directive: directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds, [historicalReply]),
+        },
+      };
+    },
+    async advance(input) {
+      advances += 1;
+      const currentComment = tree.comments.find(({ comment_id }) => comment_id === "current-comment");
+      assert.ok(currentComment);
+      deltaReply = { ...commentBodyReply(currentComment), replyId: "reply-body-2" };
+      assert.deepEqual(input.delta.pendingInputIds, [deltaReply.sourceInputId]);
+      return {
+        kind: "directive",
+        directive: directive(input.delta.targetRootDigest, input.delta.pendingInputIds, [deltaReply]),
+      };
+    },
+    async close() { throw new Error("close_unexpected"); },
+  };
+  dependencies.materializer = {
+    async materialize({ directive: candidate }) {
+      return { kind: "materialized", rootDirectiveId: candidate.rootDirectiveId, sourceIssueIds: [] };
+    },
+  };
+  dependencies.replyWriter = { async write() { return { kind: "materialized" }; } };
+
+  const runtime = new RootReconciliationRuntime(dependencies);
+  assert.equal(await runtime.cycle(), "waiting-human");
+  tree.comments.push(workflowComment({
+    commentId: "current-comment",
+    authorKind: "human",
+    authorId: "user-1",
+    authorUserId: "user-1",
+    body: "Also deploy this Root to staging.",
+  }));
+
+  assert.equal(await runtime.cycle(), "waiting-human", JSON.stringify(logs));
+  assert.equal(advances, 1);
+  assert.ok(deltaReply);
+  assert.equal(logs.some(({ event }) => event === "root_directive_materialization_failed"), false);
+});
+
+test("Root runtime fresh-opens unchanged native facts after directive materialization fails", async () => {
+  const tree = workflowTree();
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const dependencies = failureDependencies({ tree, logs, onOpen: failureFor });
+  let opens = 0;
+  let closes = 0;
+  let materializations = 0;
+  dependencies.reconciler = {
+    async open(input) {
+      opens += 1;
+      return {
+        kind: "opened",
+        sessionId: input.reconcilerSessionId,
+        bootstrapRootDigest: input.bootstrap.rootDigest,
+        initialResult: {
+          kind: "directive",
+          directive: directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds),
+        },
+      };
+    },
+    async advance() { throw new Error("advance_unexpected"); },
+    async close(input) {
+      assert.equal(input.reason, "turn_failed");
+      closes += 1;
+    },
+  };
+  dependencies.materializer = {
+    async materialize({ directive: candidate }) {
+      materializations += 1;
+      return materializations === 1
+        ? { kind: "failed", rootDirectiveId: candidate.rootDirectiveId, code: "native_write_unconfirmed", sanitizedReason: "native_write_unconfirmed" }
+        : { kind: "materialized", rootDirectiveId: candidate.rootDirectiveId, sourceIssueIds: [] };
+    },
+  };
+  dependencies.replyWriter = { async write() { throw new Error("reply_writer_unexpected"); } };
+
+  const runtime = new RootReconciliationRuntime(dependencies);
+  assert.equal(await runtime.cycle(), "needs-attention");
+  assert.match(tree.comments.at(-1)?.body ?? "", /native_write_unconfirmed/u);
+  assert.equal(await runtime.cycle(), "waiting-human");
+  assert.equal(opens, 2);
+  assert.equal(closes, 1);
+  assert.equal(materializations, 2);
+  assert.equal(logs.filter(({ event }) => event === "root_directive_materialization_failed").length, 1);
+  assert.equal(logs.filter(({ event }) => event === "root_next_action_materialized").length, 1);
+});
+
+test("Root runtime logs bounded operation facts without exposing referenced Issue IDs", async () => {
+  const tree = workflowTree();
+  tree.comments = [];
+  tree.issues.push({
+    issue_id: "cycle-1", identifier: "SYM-2", project_id: "project-1", status_id: "todo", status_name: "Todo",
+    status_category: "unstarted", status_position: 1, order: 0, depth: 1, parent_issue_id: "root-1", title: "Cycle",
+    description: "Plan the work", labels: [], is_archived: false, issue_kind: "cycle",
+    remote_version: "cycle-v1", created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
+  });
+  const logs: Array<{ event: string; fields: Record<string, string> }> = [];
+  const dependencies = failureDependencies({ tree, logs, onOpen: failureFor, onClose() {} });
+  dependencies.reconciler = {
+    async open(input) {
+      return {
+        kind: "opened",
+        sessionId: input.reconcilerSessionId,
+        bootstrapRootDigest: input.bootstrap.rootDigest,
+        initialResult: {
+          kind: "directive",
+          directive: {
+            ...directive(input.bootstrap.rootDigest, input.bootstrap.pendingInputIds),
+            action: {
+              kind: "revise_root_tree",
+              reason: "Remove a stale relation.",
+              operations: [{
+                kind: "remove_relation",
+                relationId: "relation-1",
+                precondition: { targetIssueId: "cycle-1", expectedRemoteVersion: "cycle-v1" },
+              }],
+            },
+          },
+        },
+      };
+    },
+    async advance() { throw new Error("advance_unexpected"); },
+    async close() {},
+  };
+  dependencies.materializer = {
+    async materialize({ directive: candidate }) {
+      return {
+        kind: "failed", rootDirectiveId: candidate.rootDirectiveId,
+        code: "cycle_tree_operation_remove_relation_unsupported",
+        sanitizedReason: "cycle_tree_operation_remove_relation_unsupported",
+        diagnostic: {
+          operationGroup: "operations",
+          operationIndex: 0,
+          operationKind: "remove_relation",
+        },
+      };
+    },
+  };
+  dependencies.replyWriter = { async write() { throw new Error("reply_writer_unexpected"); } };
+
+  assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
+  const failure = logs.find(({ event }) => event === "root_directive_materialization_failed");
+  assert.deepEqual(failure?.fields, {
+    root_issue_id: "root-1",
+    directive_id: "directive-1",
+    reason: "cycle_tree_operation_remove_relation_unsupported",
+    directive_kind: "revise_root_tree",
+    operation_group: "operations",
+    operation_index: "0",
+    operation_kind: "remove_relation",
+  });
+  assert.equal(JSON.stringify(failure).includes("cycle-1"), false);
+});
+
 test("Root runtime sends a fresh missing worktree gate to the Reconciler without materializing a workspace", async () => {
   const tree = workflowTree();
   let gateReads = 0;
@@ -468,7 +645,7 @@ test("convergence gates leave business choice to the Reconciler within their clo
   );
 });
 
-test("Root runtime reports each fresh Reconciler failure without writing machine state to Linear", async () => {
+test("Root runtime reports each fresh schema failure and writes one deduplicated explanation comment", async () => {
   const tree = workflowTree();
   const commentsBefore = structuredClone(tree.comments);
   let opens = 0;
@@ -480,19 +657,25 @@ test("Root runtime reports each fresh Reconciler failure without writing machine
 
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 1);
-  assert.deepEqual(tree.comments, commentsBefore);
+  assert.equal(tree.comments.length, commentsBefore.length + 1);
+  const explanation = tree.comments.at(-1);
+  assert.equal(explanation?.issue_id, "root-1");
+  assert.equal(explanation?.author_kind, "symphony");
+  assert.match(explanation?.body ?? "", /The Root Reconciler output was invalid\./u);
+  assert.doesNotMatch(explanation?.body ?? "", /failure_id|```json|<!--/u);
   assert.equal(logs.at(-1)?.event, "root_reconciler_failed");
   const failureLog = logs.at(-1)?.fields ?? {};
   const failureId = failureLog.failure_id;
   assert.equal(failureLog.root_issue_id, "root-1");
   assert.equal(failureLog.failure_code, "root_directive_contract_invalid");
+  assert.equal(failureLog.sanitized_reason, "The Root Reconciler output was invalid.");
   assert.ok(typeof failureId === "string");
   assert.match(failureId, /^root-1:.+:failure$/u);
   assert.equal("category" in failureLog, false);
 
   assert.equal(await new RootReconciliationRuntime(dependencies).cycle(), "needs-attention");
   assert.equal(opens, 2);
-  assert.deepEqual(tree.comments, commentsBefore);
+  assert.equal(tree.comments.length, commentsBefore.length + 1);
 });
 
 test("Root runtime closes retained failed opens before starting a fresh session", async () => {
@@ -594,6 +777,36 @@ test("comment body inputs use the canonical hashed identity in directive validat
   );
 });
 
+test("a Human Action cannot resolve through a no-op wait directive", () => {
+  const request = workflowComment({
+    commentId: "human-request",
+    authorKind: "symphony",
+    authorId: "symphony-bot",
+    body: "## 需要你审批\n\n请审批 Root。",
+  });
+  const source = workflowComment({
+    commentId: "human-reply",
+    authorKind: "human",
+    authorId: "user-1",
+    authorUserId: "user-1",
+    parentCommentId: request.comment_id,
+    threadRootCommentId: request.comment_id,
+    body: "批准。",
+  });
+  const candidate = commentBodyReply(source);
+  const tree = workflowTree();
+  tree.comments = [request, source];
+
+  assert.equal(
+    validateDirectiveInputs(
+      directive("tree-v1", [candidate.sourceInputId], [candidate]),
+      tree,
+      [candidate.sourceInputId],
+    ),
+    "root_directive_human_action_resolution_without_consequence",
+  );
+});
+
 function directive(
   digest: string,
   consumedInputIds: string[] = [],
@@ -665,7 +878,29 @@ function failureDependencies(input: {
         return { kind: "page" as const, page: { roots: [root], hasNextPage: false } };
       },
       async readWorkflowIssueTree() { return input.tree; },
-      async mutateWorkflow() { return { kind: "failed" as const, code: "unused", summary: "unused" }; },
+      async mutateWorkflow(command) {
+        if (command.kind !== "append_workflow_comment") {
+          return { kind: "failed" as const, code: "unused", summary: "unused" };
+        }
+        const comment = {
+          comment_id: `failure-comment-${input.tree.comments.length + 1}`,
+          issue_id: command.target.targetIssueId,
+          body: command.body,
+          author_kind: "symphony" as const,
+          author_id: "symphony",
+          thread_root_comment_id: `failure-comment-${input.tree.comments.length + 1}`,
+          thread_state: "unresolved" as const,
+          reactions: [],
+          created_at: "2026-07-23T00:00:02Z",
+          remote_version: "comment-v1",
+          updated_at: "2026-07-23T00:00:02Z",
+        };
+        input.tree.comments.push(comment);
+        return {
+          kind: "applied" as const,
+          readBack: { writeId: command.writeId, targetIssueId: command.target.targetIssueId, remoteVersion: "root-v2", comment },
+        };
+      },
     },
     git: {
       async inspectRootWorktreeGate() { return validWorktreeGateInspection(); },

@@ -20,6 +20,8 @@ export interface LinearIssueValue {
   identifier?: string;
   projectId?: string;
   parentIssueId?: string;
+  creatorUserId?: string;
+  assigneeUserId?: string;
   state?: LinearIssueState;
   order?: number;
   depth?: number;
@@ -67,6 +69,8 @@ export interface WorkflowIssueValue {
   identifier: string;
   projectId: string;
   parentIssueId?: string;
+  creatorUserId?: string;
+  assigneeUserId?: string;
   statusId: string;
   statusName: string;
   statusCategory: WorkflowStatusCategory;
@@ -306,7 +310,7 @@ export type WorkflowMutationCommand =
       sourceExpectedRemoteVersion: string;
       targetIssueId: string;
       targetExpectedRemoteVersion: string;
-      relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by";
+      relationKind: "blocks" | "blocked_by" | "relates_to";
       relationState: "present" | "absent";
     });
 

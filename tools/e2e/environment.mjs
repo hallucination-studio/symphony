@@ -12,7 +12,8 @@ export async function createForegroundE2EEnvironment({
   assertInput({ config, reporter, signal, operations });
   let resources;
   let runtime;
-  let closed = false;
+  let stopWritersPromise;
+  let closePromise;
   try {
     reporter.phase("resetting");
     const actors = await operations.verifyActors({ config, signal });
@@ -33,6 +34,12 @@ export async function createForegroundE2EEnvironment({
     runtime = await operations.startProductionRuntime({ config, project, resources, signal, reporter });
     assertRuntime(runtime, "foreground_e2e_runtime_invalid");
     reporter.phase("ready");
+    const stopWriters = () => {
+      stopWritersPromise ??= Promise.resolve().then(() => runtime.close()).catch(() => {
+        throw stableError("foreground_e2e_environment_writer_stop_failed");
+      });
+      return stopWritersPromise;
+    };
     return Object.freeze({
       project: Object.freeze({ ...project }),
       actors: Object.freeze({ humanActorId: actors.humanActorId }),
@@ -48,11 +55,24 @@ export async function createForegroundE2EEnvironment({
         killAndRestartConductor: runtime.killAndRestartConductor,
         removeRootWorktreesAndRestart: runtime.removeRootWorktreesAndRestart,
       }),
-      async close() {
-        if (closed) return;
-        closed = true;
-        reporter.phase("cleaning");
-        await closeOwners(runtime, resources);
+      stopWriters,
+      close() {
+        closePromise ??= (async () => {
+          reporter.phase("cleaning");
+          let cleanupFailed = false;
+          try {
+            await stopWriters();
+          } catch {
+            cleanupFailed = true;
+          }
+          try {
+            await resources.close();
+          } catch {
+            cleanupFailed = true;
+          }
+          if (cleanupFailed) throw stableError("foreground_e2e_environment_cleanup_failed");
+        })();
+        return closePromise;
       },
     });
   } catch (error) {

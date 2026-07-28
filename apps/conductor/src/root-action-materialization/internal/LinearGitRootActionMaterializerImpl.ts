@@ -12,6 +12,7 @@ import type {
   TreeOperation,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import type {
+  RootActionFailureDiagnostic,
   RootActionMaterializationResult,
   RootActionMaterializerInterface,
 } from "../api/RootActionMaterializerInterface.js";
@@ -73,7 +74,7 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     if (action.kind === "materialize_plan_node") {
       return new LinearPlanNodeMaterializerImpl(this.linear).materialize({ directive, view });
     }
-    if (action.kind === "revise_root_tree") return this.applyTreeOperations(directive, view, action.operations);
+    if (action.kind === "revise_root_tree") return this.applyTreeOperations(directive, view, action.operations, "operations");
     if (action.kind === "create_cycle") return this.createCycle(directive, view, action);
     if (action.kind === "supersede_cycle") return this.supersedeCycle(directive, view, action);
     if (action.kind === "conclude_cycle") return this.concludeCycle(directive, view, action);
@@ -158,7 +159,7 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     if (archiveOperations.length === 0) {
       return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [cycle.issue_id] };
     }
-    return this.applyTreeOperations(directive, currentView, archiveOperations);
+    return this.applyTreeOperations(directive, currentView, archiveOperations, "generated_archive_operations");
   }
 
   private async replanCycle(
@@ -173,7 +174,12 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
       return failed(directive, "cycle_replan_target_invalid");
     }
     if (action.archiveOrRestoreOperations.length > 0) {
-      const patched = await this.applyTreeOperations(directive, view, action.archiveOrRestoreOperations);
+      const patched = await this.applyTreeOperations(
+        directive,
+        view,
+        action.archiveOrRestoreOperations,
+        "archive_or_restore_operations",
+      );
       if (patched.kind === "failed") return patched;
       view = await refreshView(this.linear, view);
     }
@@ -387,26 +393,39 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     directive: RootDirective,
     view: RootReconciliationView,
     operations: TreeOperation[],
+    operationGroup: RootActionFailureDiagnostic["operationGroup"],
   ): Promise<RootActionMaterializationResult> {
     if (operations.length === 0) return failed(directive, "tree_operation_count_invalid");
+    const preflightFailure = treeOperationsPreflightFailure(view, operations);
+    if (preflightFailure) {
+      const operation = operations[preflightFailure.operationIndex]!;
+      return failed(
+        directive,
+        preflightFailure.code,
+        treeOperationFailureDiagnostic(view, operation, operationGroup, preflightFailure.operationIndex),
+      );
+    }
     let currentView = view;
     const sourceIssueIds = new Set<string>();
     const mutatedIssueIds = new Set<string>();
-    for (const operation of operations) {
+    for (const [operationIndex, operation] of operations.entries()) {
       const effectiveOperation = rebaseOperationPrecondition(operation, currentView, mutatedIssueIds);
+      const diagnostic = treeOperationFailureDiagnostic(currentView, effectiveOperation, operationGroup, operationIndex);
       if (effectiveOperation.kind === "reorder_nodes" || effectiveOperation.kind === "replace_dependencies") {
         const specialized = await applyRelationshipOperation(this.linear, directive, currentView, effectiveOperation);
-        if (specialized.kind === "failed") return specialized;
+        if (specialized.kind === "failed") return { ...specialized, diagnostic };
         currentView = specialized.view;
         for (const issueId of specialized.sourceIssueIds) sourceIssueIds.add(issueId);
         for (const issueId of specialized.mutatedIssueIds) mutatedIssueIds.add(issueId);
         continue;
       }
+      const validationFailure = treeOperationValidationFailure(currentView, effectiveOperation);
+      if (validationFailure) return failed(directive, validationFailure, diagnostic);
       const plan = operationPlan(currentView, directive, effectiveOperation);
-      if (!plan) return failed(directive, `cycle_tree_operation_${operation.kind}_unsupported`);
+      if (!plan) return failed(directive, `cycle_tree_operation_${operation.kind}_unsupported`, diagnostic);
       for (const command of plan.commands) {
         const executed = await executeMutation(this.linear, currentView, directive, command, operation.kind);
-        if (executed.kind === "failed") return executed;
+        if (executed.kind === "failed") return { ...executed, diagnostic };
         currentView = executed.view;
         for (const issueId of mutationIssueIds(command)) mutatedIssueIds.add(issueId);
       }
@@ -414,6 +433,19 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     }
     return { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [...sourceIssueIds] };
   }
+}
+
+function treeOperationFailureDiagnostic(
+  _view: RootReconciliationView,
+  operation: TreeOperation,
+  operationGroup: RootActionFailureDiagnostic["operationGroup"],
+  operationIndex: number,
+): RootActionFailureDiagnostic {
+  return {
+    operationGroup,
+    operationIndex,
+    operationKind: operation.kind,
+  };
 }
 
 function executionGenerationIssues(
@@ -548,23 +580,11 @@ function operationPlan(
     };
   }
   if (operation.kind === "reorder_nodes" || operation.kind === "replace_dependencies") return undefined;
-  if (operation.kind === "create_relation") {
-    const source = view.tree.issues.find((issue) => issue.issue_id === operation.sourceIssueId);
-    const target = view.tree.issues.find((issue) => issue.issue_id === operation.targetIssueId);
-    if (!source || !target || source.issue_id === target.issue_id || operation.relationKind === "triggered_by") return undefined;
-    if (view.tree.relations.some((relation) => relation.relation_kind === operation.relationKind && relation.source_issue_id === source.issue_id && relation.target_issue_id === target.issue_id)) {
-      return { commands: [], sourceIssueIds: [source.issue_id, target.issue_id] };
-    }
-    return {
-      commands: [createRelationCommand(view, directive, source, target, operation.relationKind, "relation")],
-      sourceIssueIds: [source.issue_id, target.issue_id],
-    };
-  }
   if (operation.kind === "remove_relation") {
     const relation = view.tree.relations.find(({ relation_id }) => relation_id === operation.relationId);
     const target = view.tree.issues.find(({ issue_id }) => issue_id === operation.precondition.targetIssueId);
     const source = relation ? view.tree.issues.find(({ issue_id }) => issue_id === relation.source_issue_id) : undefined;
-    if (!relation || !target || !source || relation.target_issue_id !== target.issue_id ||
+    if (!relation || relation.relation_kind === "triggered_by" || !target || !source || relation.target_issue_id !== target.issue_id ||
         target.remote_version !== operation.precondition.expectedRemoteVersion) return undefined;
     return {
       commands: [removeRelationCommand(view, directive, relation, source, target)],
@@ -572,6 +592,111 @@ function operationPlan(
     };
   }
   return undefined;
+}
+
+function treeOperationValidationFailure(
+  view: RootReconciliationView,
+  operation: TreeOperation,
+  previouslyMutatedIssueIds: ReadonlySet<string> = new Set(),
+): string | undefined {
+  const issue = (issueId: string) => view.tree.issues.find((candidate) => candidate.issue_id === issueId);
+  const prefix = `cycle_tree_operation_${operation.kind}`;
+  if ("precondition" in operation) {
+    const target = issue(operation.precondition.targetIssueId);
+    if (!target) return `${prefix}_target_missing`;
+    if (!previouslyMutatedIssueIds.has(target.issue_id) &&
+        target.remote_version !== operation.precondition.expectedRemoteVersion) return `${prefix}_precondition_conflict`;
+    if (operation.precondition.expectedParentIssueId !== undefined &&
+        target.parent_issue_id !== operation.precondition.expectedParentIssueId) return `${prefix}_parent_invalid`;
+    if (!previouslyMutatedIssueIds.has(target.issue_id) && operation.precondition.expectedStatus !== undefined &&
+        target.status_name !== operation.precondition.expectedStatus) return `${prefix}_status_invalid`;
+  }
+  if (operation.kind === "create_node") {
+    const parent = issue(operation.parentIssueId);
+    if (operation.precondition.targetIssueId !== operation.parentIssueId || !parent || parent.issue_kind !== "cycle" ||
+        parent.parent_issue_id !== view.root.issueId || parent.is_archived) return `${prefix}_parent_invalid`;
+    if (!view.tree.status_catalog.some(({ name }) => name === operation.status)) return `${prefix}_status_invalid`;
+    return undefined;
+  }
+  if (operation.kind === "update_node") {
+    if (!view.tree.status_catalog.some(({ name }) => name === operation.status)) return `${prefix}_status_invalid`;
+    return undefined;
+  }
+  if (operation.kind === "archive_node" || operation.kind === "restore_node") return undefined;
+  if (operation.kind === "reorder_nodes") {
+    const cycle = issue(operation.cycleIssueId);
+    if (operation.precondition.targetIssueId !== operation.cycleIssueId || !cycle || cycle.issue_kind !== "cycle" ||
+        cycle.parent_issue_id !== view.root.issueId || cycle.is_archived) return `${prefix}_target_invalid`;
+    const children = view.tree.issues.filter((candidate) => candidate.parent_issue_id === cycle.issue_id && !candidate.is_archived);
+    if (new Set(operation.orderedIssueIds).size !== operation.orderedIssueIds.length ||
+        operation.orderedIssueIds.length !== children.length ||
+        operation.orderedIssueIds.some((issueId) => !children.some((child) => child.issue_id === issueId))) {
+      return `${prefix}_shape_invalid`;
+    }
+    return undefined;
+  }
+  if (operation.kind === "replace_dependencies") {
+    const work = issue(operation.workIssueId);
+    if (operation.precondition.targetIssueId !== operation.workIssueId || !work || work.issue_kind !== "work" ||
+        work.is_archived || !work.parent_issue_id) return `${prefix}_target_invalid`;
+    const dependencyIds = new Set(operation.dependencyIssueIds);
+    if (dependencyIds.size !== operation.dependencyIssueIds.length) return `${prefix}_duplicate_dependency`;
+    if (dependencyIds.has(work.issue_id)) return `${prefix}_self_dependency`;
+    for (const dependencyId of dependencyIds) {
+      const dependency = issue(dependencyId);
+      if (!dependency || dependency.issue_kind !== "work" || dependency.is_archived ||
+          dependency.parent_issue_id !== work.parent_issue_id) return `${prefix}_target_invalid`;
+      if (dependencyPathExists(view, work.issue_id, dependency.issue_id)) return `${prefix}_cycle_invalid`;
+    }
+    return undefined;
+  }
+  const relation = view.tree.relations.find(({ relation_id }) => relation_id === operation.relationId);
+  if (!relation) return `${prefix}_relation_missing`;
+  if (relation.relation_kind === "triggered_by") return `${prefix}_kind_unsupported`;
+  if (relation.target_issue_id !== operation.precondition.targetIssueId ||
+      !issue(relation.source_issue_id) || !issue(relation.target_issue_id)) return `${prefix}_target_invalid`;
+  return undefined;
+}
+
+function treeOperationsPreflightFailure(
+  view: RootReconciliationView,
+  operations: TreeOperation[],
+): { operationIndex: number; code: string } | undefined {
+  const mutatedIssueIds = new Set<string>();
+  for (const [operationIndex, operation] of operations.entries()) {
+    const code = treeOperationValidationFailure(view, operation, mutatedIssueIds);
+    if (code) return { operationIndex, code };
+    for (const issueId of potentiallyMutatedIssueIds(view, operation)) mutatedIssueIds.add(issueId);
+  }
+  return undefined;
+}
+
+function potentiallyMutatedIssueIds(view: RootReconciliationView, operation: TreeOperation): string[] {
+  if (operation.kind === "create_node") return [operation.parentIssueId];
+  if (operation.kind === "update_node" || operation.kind === "archive_node" || operation.kind === "restore_node") {
+    return [operation.precondition.targetIssueId];
+  }
+  if (operation.kind === "reorder_nodes") return [operation.cycleIssueId, ...operation.orderedIssueIds];
+  if (operation.kind === "replace_dependencies") return [operation.workIssueId, ...operation.dependencyIssueIds];
+  const relation = view.tree.relations.find(({ relation_id }) => relation_id === operation.relationId);
+  return relation ? [relation.source_issue_id, relation.target_issue_id] : [];
+}
+
+function dependencyPathExists(view: RootReconciliationView, sourceIssueId: string, targetIssueId: string): boolean {
+  const pending = [sourceIssueId];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current === targetIssueId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const relation of view.tree.relations) {
+      if (relation.relation_kind === "blocks" && relation.source_issue_id === current) {
+        pending.push(relation.target_issue_id);
+      }
+    }
+  }
+  return false;
 }
 
 async function applyRelationshipOperation(
@@ -774,7 +899,7 @@ function createRelationCommand(
   directive: RootDirective,
   source: RootReconciliationView["tree"]["issues"][number],
   target: RootReconciliationView["tree"]["issues"][number],
-  relationKind: "blocks" | "blocked_by" | "relates_to" | "triggered_by",
+  relationKind: "blocks" | "blocked_by" | "relates_to",
   suffix: string,
 ): LinearWorkflowMutationCommand {
   const root = rootIssue(view, view.root.issueId);
@@ -801,6 +926,9 @@ function removeRelationCommand(
   target: RootReconciliationView["tree"]["issues"][number],
 ): LinearWorkflowMutationCommand {
   const root = rootIssue(view, view.root.issueId);
+  if (relation.relation_kind === "triggered_by") {
+    throw new Error("cycle_tree_operation_remove_relation_kind_unsupported");
+  }
   return {
     kind: "create_workflow_relation",
     writeId: `${directive.rootDirectiveId}:remove-relation:${relation.relation_id}`,
@@ -848,11 +976,22 @@ function mutationReadBackMatches(
       (command.order === undefined || issue.order === command.order);
   }
   if (command.kind === "create_workflow_relation") {
-    const present = tree.relations.some((relation) => relation.relation_kind === command.relationKind &&
-      relation.source_issue_id === command.sourceIssueId && relation.target_issue_id === command.targetIssueId);
+    const expected = canonicalRelation(command.relationKind, command.sourceIssueId, command.targetIssueId);
+    const present = tree.relations.some((relation) => relation.relation_kind === expected.relationKind &&
+      relation.source_issue_id === expected.sourceIssueId && relation.target_issue_id === expected.targetIssueId);
     return command.relationState === "present" ? present : !present;
   }
   return true;
+}
+
+function canonicalRelation(
+  relationKind: "blocks" | "blocked_by" | "relates_to",
+  sourceIssueId: string,
+  targetIssueId: string,
+): { relationKind: "blocks" | "relates_to"; sourceIssueId: string; targetIssueId: string } {
+  return relationKind === "blocked_by"
+    ? { relationKind: "blocks", sourceIssueId: targetIssueId, targetIssueId: sourceIssueId }
+    : { relationKind, sourceIssueId, targetIssueId };
 }
 
 function preservedDescription(
@@ -894,8 +1033,15 @@ function isTerminalCycle(issue: RootReconciliationView["tree"]["issues"][number]
 function failed(
   directive: RootDirective,
   code: string,
+  diagnostic?: RootActionFailureDiagnostic,
 ): Extract<RootActionMaterializationResult, { kind: "failed" }> {
-  return { kind: "failed", rootDirectiveId: directive.rootDirectiveId, code, sanitizedReason: code };
+  return {
+    kind: "failed",
+    rootDirectiveId: directive.rootDirectiveId,
+    code,
+    sanitizedReason: code,
+    ...(diagnostic === undefined ? {} : { diagnostic }),
+  };
 }
 
 function treeOperationFailed(

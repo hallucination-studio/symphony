@@ -95,6 +95,13 @@ export async function runForegroundE2ECampaign({
       conductors: conductorBindings(activeEnvironment.runtime.conductors),
     });
     assertRootCreationBindings(rootCreationsByRootKey);
+    reporter.phase("admitting");
+    const admission = await human.admitRootIssues({
+      rootCreationsByRootKey,
+      signal: abortController.signal,
+      onProgress: (progress) => reporter.admissionProgress(progress),
+    });
+    const admittedRootsByRootKey = bindRootAdmission(rootCreationsByRootKey, admission);
 
     const createCaseScope = createCampaignCaseScopeFactory({
       parentSignal: abortController.signal,
@@ -102,7 +109,7 @@ export async function runForegroundE2ECampaign({
       setTimeout: operations.setTimeout,
       clearTimeout: operations.clearTimeout,
       deadlineMs: campaignDeadlineMs,
-      rootCreationsByRootKey,
+      rootCreationsByRootKey: admittedRootsByRootKey,
       subscribeUnexpectedExit: activeEnvironment.runtime.subscribeUnexpectedExit,
     });
     reporter.phase("running");
@@ -118,14 +125,19 @@ export async function runForegroundE2ECampaign({
           definition,
           human,
           runtime: activeEnvironment.runtime,
-          rootCreationsByRootKey,
+          rootCreationsByRootKey: admittedRootsByRootKey,
           signal: scope.signal,
         }),
+        quiesce: async () => {
+          reporter.phase("quiescing");
+          await activeEnvironment.stopWriters();
+          reporter.phase("final-reading");
+        },
         readFinalEvidence: async ({ definition, driverResult }) => readCaseFinalEvidence({
           definition,
           driverResult,
           human,
-          rootCreationsByRootKey,
+          rootCreationsByRootKey: admittedRootsByRootKey,
           accessToken: config.secrets.linearDevToken,
           readFinalEvidence: operations.readFinalEvidence,
         }),
@@ -380,16 +392,34 @@ function assertEnvironment(value) {
   if (!value || !identifier(value.project?.projectId) || !identifier(value.project?.teamId) || !identifier(value.project?.delegateActorId) ||
       !identifier(value.actors?.humanActorId) || !Array.isArray(value.runtime?.conductors) ||
       typeof value.runtime?.assertProjectRootIndexRequestBudget !== "function" ||
-      typeof value.runtime?.subscribeUnexpectedExit !== "function" || typeof value.close !== "function") {
+      typeof value.runtime?.subscribeUnexpectedExit !== "function" || typeof value.stopWriters !== "function" ||
+      typeof value.close !== "function") {
     throw stableError("foreground_e2e_case_bindings_invalid");
   }
 }
 
 function assertHuman(value) {
   if (!value || !identifier(value.actorId) || typeof value.resolveRootCreationBindings !== "function" ||
-      typeof value.createdRootsForCase !== "function") {
+      typeof value.admitRootIssues !== "function" || typeof value.createdRootsForCase !== "function") {
     throw stableError("foreground_e2e_case_bindings_invalid");
   }
+}
+
+function bindRootAdmission(rootCreationsByRootKey, value) {
+  const requiredRoots = FOREGROUND_E2E_CASES.flatMap(({ rootTopology }) => rootTopology.map(({ rootKey }) => rootKey));
+  const roots = value?.rootsByKey;
+  if (!roots || typeof roots !== "object" || Array.isArray(roots) ||
+      Object.keys(roots).length !== requiredRoots.length || requiredRoots.some((rootKey) => {
+        const root = roots[rootKey];
+        return root?.rootKey !== rootKey || !identifier(root?.rootIssueId) || !identifier(root?.identifier);
+      })) {
+    throw stableError("foreground_e2e_case_root_identity_incomplete");
+  }
+  return Object.freeze(Object.fromEntries(requiredRoots.map((rootKey) => [rootKey, Object.freeze({
+    ...rootCreationsByRootKey[rootKey],
+    rootIssueId: roots[rootKey].rootIssueId,
+    identifier: roots[rootKey].identifier,
+  })])));
 }
 
 function assertRootCreationBindings(value) {
@@ -401,7 +431,7 @@ function assertRootCreationBindings(value) {
 }
 
 function validCreation(value) {
-  return value && identifier(value.teamId) && identifier(value.projectId) && identifier(value.routingLabelId) &&
+  return value && identifier(value.teamId) && identifier(value.projectId) && identifier(value.rootLabelId) && identifier(value.routingLabelId) &&
     identifier(value.rootStatusId) && identifier(value.conductorId) && identifier(value.performerProfileId) &&
     directory(value.worktreeDirectory);
 }

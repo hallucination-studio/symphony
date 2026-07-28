@@ -6,26 +6,14 @@ const REVISION = /^[0-9a-f]{40,64}$/u;
 export async function runMissingWorktreeRecoveryCase({ definition, human, runtime, rootCreationsByRootKey, signal } = {}) {
   assertDefinition(definition);
   const creations = assertInput({ human, runtime, rootCreationsByRootKey, signal });
-  const roots = await Promise.all(definition.rootTopology.map(async ({ rootKey }) => {
-    const root = await human.createRootIssue({
-      caseId: definition.caseId,
-      rootKey,
-      ...rootCreationInput(creations.get(rootKey)),
-      ...(signal ? { signal } : {}),
-    });
+  const roots = definition.rootTopology.map(({ rootKey }) => {
+    const creation = creations.get(rootKey);
+    const root = { rootIssueId: creation.rootIssueId, identifier: creation.identifier };
     if (!identifier(root?.rootIssueId) || !rootIdentifier(root?.identifier)) {
       throw stableError("foreground_e2e_missing_worktree_root_create_invalid");
     }
     return Object.freeze({ rootKey, root });
-  }));
-  await Promise.all(roots.map(({ root }) => human.assertRootUndelegatedAndInactive({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
-  await Promise.all(roots.map(({ root }) => human.delegateRootIssue({
-    rootIssueId: root.rootIssueId,
-    ...(signal ? { signal } : {}),
-  })));
+  });
 
   const initialApprovals = await Promise.all(roots.map(async ({ rootKey, root }) => {
     const request = assertPlanGate(await human.waitForPlanApprovalRequest({
@@ -122,9 +110,8 @@ function assertDefinition(definition) {
 }
 
 function assertInput({ human, runtime, rootCreationsByRootKey, signal }) {
-  if (!human || !identifier(human.actorId) || typeof human.createRootIssue !== "function" ||
-      typeof human.assertRootUndelegatedAndInactive !== "function" || typeof human.delegateRootIssue !== "function" ||
-      typeof human.waitForPlanApprovalRequest !== "function" || typeof human.replyToHumanAction !== "function" ||
+  if (!human || !identifier(human.actorId) || typeof human.waitForPlanApprovalRequest !== "function" ||
+      typeof human.replyToHumanAction !== "function" ||
       typeof human.waitForMissingWorktreeRecoveryAdmission !== "function" ||
       typeof human.waitForSuccessorPlanApprovalGate !== "function" || !runtime ||
       typeof runtime.removeRootWorktreesAndRestart !== "function" || !rootCreationsByRootKey ||
@@ -189,11 +176,8 @@ function exactIdentityMap(value, rootIssueIds) {
 function validRootCreation(value) {
   return value && identifier(value.teamId) && identifier(value.projectId) && identifier(value.rootLabelId) && identifier(value.routingLabelId) &&
     identifier(value.rootStatusId) && identifier(value.conductorId) && identifier(value.performerProfileId) &&
-    directory(value.worktreeDirectory) ? Object.freeze({ ...value }) : undefined;
-}
-
-function rootCreationInput({ teamId, projectId, rootLabelId, routingLabelId, rootStatusId }) {
-  return { teamId, projectId, rootLabelId, routingLabelId, rootStatusId };
+    directory(value.worktreeDirectory) && identifier(value.rootIssueId) && rootIdentifier(value.identifier)
+    ? Object.freeze({ ...value }) : undefined;
 }
 
 function identifier(value) { return typeof value === "string" && IDENTIFIER.test(value); }
