@@ -398,7 +398,7 @@ def _expand_schema(
                 active_refs=(*active_refs, reference),
             )
         return {
-            key: _expand_schema(
+            ("anyOf" if key == "oneOf" else key): _expand_schema(
                 child,
                 conductor_defs=conductor_defs,
                 common_defs=common_defs,

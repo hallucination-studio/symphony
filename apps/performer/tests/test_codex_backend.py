@@ -135,7 +135,10 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert set(sdk.thread.calls[0][1]["output_schema"]["properties"]) == {
         "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action",
     }
-    action_variants = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]["oneOf"]
+    action_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]
+    assert "oneOf" not in action_schema
+    assert '"oneOf"' not in json.dumps(sdk.thread.calls[0][1]["output_schema"])
+    action_variants = action_schema["anyOf"]
     execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")
     assert execute_plan_schema["required"] == [
         "kind",
@@ -296,9 +299,11 @@ def test_stage_roles_use_the_complete_outcome_contract(role: str):
     )
 
     schema = sdk.thread.calls[0][1]["output_schema"]
-    assert len(schema["oneOf"]) >= 5
-    assert all("kind" in variant["properties"] for variant in schema["oneOf"])
-    assert all(len(variant["required"]) > 1 for variant in schema["oneOf"])
+    assert "oneOf" not in schema
+    assert '"oneOf"' not in json.dumps(schema)
+    assert len(schema["anyOf"]) >= 5
+    assert all("kind" in variant["properties"] for variant in schema["anyOf"])
+    assert all(len(variant["required"]) > 1 for variant in schema["anyOf"])
     assert "STAGE OUTCOME REQUIRED FIELDS:" not in sdk.thread.calls[0][0]
     assert "STAGE OUTCOME FIELD SHAPES:" not in sdk.thread.calls[0][0]
     assert "STAGE OUTCOME NESTED CONTRACT SHAPES:" not in sdk.thread.calls[0][0]
