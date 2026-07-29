@@ -5,7 +5,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 
 import { RootReconciliationRuntime } from "./root-reconciliation/internal/RootReconciliationRuntime.js";
-import type { RootRuntimeDisposition } from "./root-reconciliation/api/RootRuntimeLoop.js";
+import type { RootWakeDisposition } from "./root-scheduling/api/RootWakePolicy.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
 import { FilePerformerProfileStoreImpl } from "./performer-profiles/internal/FilePerformerProfileStoreImpl.js";
@@ -206,7 +206,7 @@ export async function runConductor(environment = process.env): Promise<void> {
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    let nextWake: { disposition: RootRuntimeDisposition; deadlineAtMs?: number } = { disposition: "empty" };
+    let nextWake: { disposition: RootWakeDisposition; deadlineAtMs?: number } = { disposition: "empty" };
     while (!stopping) {
       await wakes.wait(nextWake);
       if (stopping) break;

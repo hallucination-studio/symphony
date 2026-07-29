@@ -147,9 +147,10 @@ LinearClientInterface <- LinearSdkImpl`。只有最后一层可以使用Linear S
 
 | Module | Canonical responsibility |
 |---|---|
+| `linear-runtime` | complete recovery、canonical in-memory current state、content digest与atomic observation batch |
 | `root-discovery` | Project/routing/delegation/header discovery |
 | `root-scheduling` | eligibility、fairness和进程内`RootIterationGuard` |
-| `root-reconciliation` | current view、coverage、delta与mechanical safety |
+| `root-reconciliation` | runtime-owned current view的workflow interpretation与mechanical safety |
 | `root-transition` | pure native-fact transition与mechanical target derivation |
 | `root-reconciler-client` | Root Reconciler session transport |
 | `root-intent-materialization` | RootSemanticIntent compile、validation与native postcondition convergence |

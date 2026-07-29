@@ -47,6 +47,27 @@ test("Conductor owns every uniquely derivable happy-path transition", async () =
   assert.doesNotMatch(source, /workflow next step只来自Root Reconciler/u);
 });
 
+test("recoverable Linear runtime has one in-memory owner and no revisioned consumer protocol", async () => {
+  const conductor = await architectureSource("conductor.md");
+  const codeOrganization = await architectureSource("code-organization.md");
+  const contracts = await architectureSource("contracts.md");
+  const glossary = await architectureSource("glossary.md");
+  const recovery = await architectureSource("workflow-authority-recovery.md");
+  const roadmap = await architectureSource("roadmap.md");
+
+  assert.match(conductor, /`linear-runtime`[\s\S]{0,500}canonical[\s\S]{0,500}content digest/u);
+  assert.match(conductor, /one frozen observation batch/u);
+  assert.match(recovery, /startup[\s\S]{0,500}reconnect[\s\S]{0,500}ambiguous mutation acceptance/u);
+  assert.match(recovery, /Project Root Header Index[\s\S]{0,700}active\/archived Root Tree[\s\S]{0,300}Git/u);
+  assert.match(contracts, /remote revision[\s\S]{0,500}Gateway\/materializer/u);
+  assert.match(contracts, /workflow consumers[\s\S]{0,300}cursor/u);
+  assert.match(codeOrganization, /`linear-runtime`[\s\S]{0,500}atomic current-value change batches/u);
+  assert.match(glossary, /`linear-runtime`[\s\S]{0,300}canonical in-memory current state/u);
+  assert.match(roadmap, /N0：authority与cutover contract/u);
+  assert.match(roadmap, /N6：progressive real-boundary acceptance/u);
+  assert.doesNotMatch(roadmap, /^## \d+\. R[0-6]：/mu);
+});
+
 test("recovery authority assigns uniquely derivable interruption and worktree repair to mechanical transition", async () => {
   const source = await architectureSource("workflow-authority-recovery.md");
 
@@ -272,8 +293,10 @@ test("architecture closes external effects and distinguishes delivery intent fro
 test("the implementation roadmap starts with architecture authority and progressive acceptance", async () => {
   const source = await architectureSource("roadmap.md");
 
-  assert.match(source, /R0：架构authority与progressive acceptance/u);
-  assert.match(source, /L0-L4/u);
-  assert.match(source, /14-Root campaign/u);
+  assert.match(source, /N0：authority与cutover contract/u);
+  assert.match(source, /N1：canonical observation foundation/u);
+  assert.match(source, /N6：progressive real-boundary acceptance/u);
+  assert.match(source, /L0-L8/u);
+  assert.match(source, /L9 campaign/u);
   assert.match(source, /最后/u);
 });

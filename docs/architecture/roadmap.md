@@ -11,64 +11,49 @@
 5. 删除旧surface和replacement属于同一次hard cut；不增加dual-read、adapter、flag、backfill或fallback。
 6. 每个功能点只有一个named concern owner；其他文档和代码只引用。
 
-## 2. R0：架构authority与progressive acceptance
+## 2. N0：authority与cutover contract
 
-- 统一本文、Root Reconciliation、Conductor、Stage、contracts、Linear flow、delivery、glossary和AGENTS规则；
-- 用`mechanical_target | semantic_gate | external_wait | terminal`替代universal Root next-action invariant；
-- Root只保留`requirement_and_comment | plan_human_decision | recovery_strategy | terminal_review`四类gate；
-- 定义Plan/Work/Verify discriminated Results、Provider turn outcome、one-effect mutation outcome和generation-fenced session；
-- 定义L0-L4 observer-only acceptance：process readiness、one Root discovery、valid Root intent、first mutation read-back、Plan DAG seal；
-- architecture tests拒绝模型选择ready Work、逐节点DAG物化和multi-effect mutation result。
+- 统一full recovery、runtime-only canonical state、atomic current-value observation和hidden revision ownership；
+- 分类已有实现为retain、migrate或hard-cut delete，不覆盖未提交用户工作；
+- 建立完整defect closure matrix，把全部历史finding、已实现限制和剩余functional outcome映射到N1-N6。
 
-R0只改架构authority与测试，不宣称production已经匹配。
+N0只改architecture authority、task evidence与validation tooling，不开始production runtime实现。
 
-## 3. R1：安全、诊断与最小真实验收
+## 3. N1：canonical observation foundation
 
-- child process环境先clear再按owner allowlist注入，Podium secret不得进入Conductor；
-- 建立binding generation、Root、request、session/turn、Stage、mutation和external request的相邻correlation spine；
-- 保留closed internal diagnostic code/category/phase，同时对public reason做sanitization；
-- 修复targeted、deduplicated failure visibility，保留原始失败并验证comment write outcome/read-back；
-- 实现L0-L4单Root runner，每层独立deadline与verdict，不写test-only Linear facts。
+- 定义closed canonical Linear/Git fact identity、current value与observed provenance；
+- content digest覆盖canonical value本身；
+- complete observation之间只产生atomic `current_value | replacement | tombstone` batch。
 
-## 4. R2：closed contracts、session与mutation lifecycle
+## 4. N2：full recovery
 
-- Plan、Work和Verify改为真实discriminated unions，完整proof不能在wire validation后丢弃；
-- Provider turn返回`not_accepted | accepted_valid | accepted_invalid | acceptance_unknown | session_lost | canceled`；
-- 每个generation-bound role session只允许zero or one active turn，并按`open -> executing -> closing -> closed`推进；
-- close撤销late output authority，restart从native facts推导未完成义务；
-- multi-effect command hard cut为one-effect outcome与targeted read-back。
+- 完整分页恢复bounded Project Root Header Index；
+- admission后恢复一个Root的complete active/archived Tree与Git facts；
+- same facts在restart后必须生成byte-equivalent current state。
 
-## 5. R3：deterministic convergence与semantic gates
+## 5. N3：runtime observation loop
 
-- pure transition从complete native facts返回mechanical target、semantic gate、external wait、terminal或invalid facts；
-- Conductor机械拥有workspace、initial Cycle、complete Plan DAG、ready Work、Stage dispatch、Verify target和successful Cycle closure；
-- Root gate output只含high-level intent/rationale/evidence，不含native ID生成、status、relation、version或precondition；
-- compiler先模拟完整candidate graph，再逐effect执行并read-back；
-- Root-to-first-Plan最多一次Root semantic decision，W个ready Work产生零次Root scheduling call。
+- 串行accept complete observations并在whole frozen batch后wake convergence一次；
+- targeted mutation read-back是mutation后唯一state advancement入口；
+- incomplete coverage、acceptance uncertainty或baseline uncertainty强制fresh recovery。
 
-## 6. R4：Plan、Work、Verify evidence chain
+## 6. N4：hard-cut consumer migration
 
-- lossless Plan contract与完整native DAG使用同一seal digest，approval只绑定exact target；
-- Work readiness是pure predicate；completion必须fresh验证scoped Git/check evidence；
-- Conductor创建并fence immutable Verify target；Verify proof与Finding identity完整保留；
-- Cycle success只从complete Plan/Work/Verify/Git evidence机械推导；
-- restart在每个边界都能从Linear/Git推导相同remaining obligation，terminal nodes永不reopen或redispatch。
+- discovery、scheduling、safety、transition、compiler和materializer只消费runtime-owned current state；
+- Root与Stage sessions从同一canonical source派生，但各自维护isolated Provider-visible baseline；
+- contract generation只保留new initial/change variants，不允许mixed protocol deploy。
 
-## 7. R5：delivery与terminal visibility
+## 7. N5：old runtime removal与closure
 
-- commit/push使用fenced expected HEAD；
-- Delivery Intent、Remote SCM Acceptance和Root Terminal Completion分别read-back和命名；
-- `In Review`只证明delivery intent，不能用PR-shaped URL宣称remote acceptance；
-- Project policy若要求SCM acceptance，必须读取exact PR/head/check/review/merge state；
-- Root terminal status必须有authorized human或policy-defined SCM fact并fresh read-back。
+- composition root一次切换，并在同一hard cut删除旧state owner、contract、adapter和tests；
+- 证明restart、reconnect、partial read、ambiguous write、late output与session loss恢复；
+- 完成全部control plane、workflow、stage、delivery、observability和security defect closure。
 
-## 8. R6：恢复、并发与最终campaign
+## 8. N6：progressive real-boundary acceptance
 
-- 先重复运行单Root L0-L7；remote acceptance在产品scope要求时运行L8；
-- 再运行Conductor restart、missing worktree、parallel和same-Conductor preemption；
-- 依据真实boundary latency校准独立deadline和request budget；
-- 最后运行eight-case 14-Root campaign，并fresh-read完整Linear/Git/required SCM Final Evidence Snapshot；
-- local harness、fake Linear和verdict fixture不能作为real boundary通过证据。
+- 获得明确外部effect授权后，从one Root L0-L8逐步推进；
+- 验证restart、missing worktree、fair multi-Root scheduling和physical request budgets；
+- 最后运行L9 campaign与全仓检查，并要求closure matrix zero open rows。
 
 ## 9. 每个slice的stop conditions
 
@@ -90,7 +75,7 @@ R0只改架构authority与测试，不宣称production已经匹配。
 5. Human confirmations保存在Root threads/Activity和materialized target facts，不跨replacement target继承。
 6. Stage/Root transport results不落盘，native postconditions fresh read-back后才推进。
 7. Linear可见内容只包含用户需求、计划、任务、Findings、直接交互和有意义结论。
-8. L0-L8的claimed boundaries分别有真实证据，最后的mandatory 14-Root campaign通过。
+8. L0-L8的claimed boundaries分别有真实证据，最后的L9 campaign通过。
 
 ## 11. 明确延期
 

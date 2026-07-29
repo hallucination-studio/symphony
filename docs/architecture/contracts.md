@@ -23,6 +23,9 @@ Interfaces返回closed Result unions。roles依赖contracts/interfaces，不能i
 ## 2. Podium-Conductor boundary
 
 Podium独占Linear SDK、OAuth、tokens、installation和Project catalog。Conductor只通过versioned protocol读写workflow facts。
+Linear cursor和remote revision是Podium Gateway/Conductor Gateway/materializer boundary的private transport与effect concern；不得进入
+workflow consumer、Root transition、Provider-visible role contract或public business schema。consumer observation使用canonical native
+identity、current value、provenance和content digest，不使用remote revision作为runtime ordering authority。
 
 主要query：
 
@@ -201,9 +204,10 @@ envelope属于schema error。完整runtime语义见
 这些字段不写入Linear。`observed_current_digest`只证明Result针对本轮current view；materialization前必须fresh-read target
 preconditions，不能仅凭digest写入。
 
-live session使用initial/delta transport。fresh role session只接收一次initial；之后只追加current command以及current value、
-replacement或tombstone fragments。Conductor按turn冻结fresh observation，多个changes可共享turn但保留独立identity。
-Root的closed initial/delta shape由[Root Reconciliation](root-reconciliation.md#33-root-initialdelta-transient-contract)拥有；
+live session使用initial/change transport。fresh role session只接收一次从runtime `recovered` state派生的initial；之后只追加current
+command以及current value、replacement或tombstone fragments。Conductor从一个accepted frozen observation batch派生每个role的change，
+多个changes可共享turn但保留独立identity。
+Root的closed initial/change shape由[Root Reconciliation](root-reconciliation.md#33-root-initialchange-transient-contract)拥有；
 Stage的closed role projection与fragment union由
 [Performer Stage Contracts](stage-orchestration.md#31-role-context初始化与增量)拥有。cross-process schema必须直接表达这些互斥
 variants，不能用arbitrary object、可选字段组合或完整context字段兼容旧request shape。
@@ -212,7 +216,7 @@ Provider-visible fact baseline只在live session memory中，决定哪些fragmen
 Linear receipt/reply和materialized target facts推导；两者不能合并成checkpoint。append/continuation不连续或无法证明时关闭
 session并fresh-open。Provider acceptance的三态证据与恢复规则只由
 [Performer](performer.md#52-provider-append确认与失败)定义；transport failure不能暗示baseline已推进或未推进。restart不能从
-Linear寻找delta cursor、Provider memory或private consumed-input ID。没有validated业务output的Root/Stage failure必须显式携带
+Linear寻找delta cursor、Provider memory或private consumed-input ID。workflow consumers也不能接收或重建Linear cursor。没有validated业务output的Root/Stage failure必须显式携带
 该节定义的closed `ProviderTurnContinuity`；调用方不得从error category猜测session或baseline disposition。
 
 ## 7. Linear source与actor

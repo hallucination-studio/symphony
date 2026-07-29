@@ -94,7 +94,7 @@ export interface RootReconciliationRuntimeDependencies {
     mutateWorkflow: LinearGatewayInterface["mutateWorkflow"];
   };
   git: GitWorkspaceProvisionerInterface & Partial<Pick<GitWorkspaceInterface, "checks" | "commit">>;
-  scheduling: RootSchedulingPolicyInterface;
+  scheduling: RootSchedulingPolicyInterface<DiscoveredRoot>;
   safety: RootSafetyPolicyInterface;
   convergence: RootConvergencePolicyInterface;
   reconciler: RootReconcilerClientInterface;

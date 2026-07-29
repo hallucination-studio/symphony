@@ -9,6 +9,8 @@
 Conductor负责：
 
 - 通过`LinearGatewayInterface`解析Project、routing、delegation和完整native Root object graph；
+- 通过`linear-runtime`恢复Project Root Header Index和每个admitted Root的完整current state；
+- canonicalize每次完整observation，以value-covering content digest比较current state，并发布one frozen observation batch；
 - 运行不调用模型的Root deterministic convergence host；
 - 验证active/archived coverage、status catalog、actor、remote preconditions、capability和Git facts；
 - 从complete native facts推导`mechanical_target | semantic_gate | external_wait | terminal | invalid_facts`；
@@ -35,6 +37,7 @@ Conductor不负责：
 apps/conductor/src/
   composition/
   linear-gateway/
+  linear-runtime/
   root-discovery/
   root-scheduling/
   root-reconciliation/
@@ -52,9 +55,10 @@ apps/conductor/src/
 
 | 模块 | 职责 |
 |---|---|
+| `linear-runtime` | complete observation recovery、canonical current state、content digest和atomic current-value change batch；只存在于memory |
 | `root-discovery` | Project、routing、native delegation与header discovery；未委派Root零副作用 |
 | `root-scheduling` | eligibility、Priority和runtime single-owner lease；不拥有Root语义 |
-| `root-reconciliation` | current view、coverage、diff、graph validation和mechanical limits |
+| `root-reconciliation` | runtime-owned current view的graph validation、workflow interpretation和mechanical limits；不另存mirror |
 | `root-transition` | pure native facts到mechanical target、semantic gate、external wait、terminal或invalid facts的transition |
 | `root-reconciler-client` | fresh bootstrap/live delta transport与Root Reconciler调用 |
 | `root-intent-materialization` | 编译RootSemanticIntent并收敛required native postconditions和human dispositions |
@@ -66,20 +70,25 @@ apps/conductor/src/
 `root-reconciliation`不能import Provider SDK；`root-reconciler-client`不能materialize intent；
 `root-transition`和`root-intent-materialization`不能调用模型。
 
-## 3. 可重建View
+## 3. Recoverable in-memory runtime
 
 ```text
-RootReconciliationView
-  root_header
-  complete_active_and_archived_object_graph
-  human_comment_threads
-  mechanical_violations
-  current_project_and_profile_limits
-  git_workspace_and_delivery_facts
+LinearRuntimeState
+  project_root_header_index
+  admitted_roots
+    canonical_active_and_archived_root_tree
+    current_git_facts
+    content_digest
 ```
 
-View只存在于单次runtime iteration。Podium/Linear coverage不完整时fail closed；不得从旧View、webhook cache或Provider
-conversation补齐。
+`linear-runtime`是Conductor内唯一canonical Linear runtime state owner。runtime creation先发布一次完整`recovered` state；之后每次
+complete observation canonicalize后与current content digest比较，并发布one frozen observation batch。batch按identity canonical排序，
+包含zero or more `current_value | replacement | tombstone` changes；整个batch接受后才唤醒convergence一次。它表达current value变化，
+不声称Linear历史或因果顺序。
+
+该state只存在于memory，不是workflow authority，也不写入checkpoint、database、queue或event log。Podium/Linear coverage不完整、
+canonicalization失败或observation baseline不确定时，不能从旧state、webhook cache或Provider conversation补齐，必须丢弃affected state并
+执行fresh recovery。downstream可以读取runtime的immutable current view，但不能维护第二份revisioned mirror。
 
 ## 4. 调用与materialization
 
@@ -148,3 +157,4 @@ Verify与delivery绑定same immutable revision。完整mechanics只见
     下一fresh pass再机械取消Root，terminal delivery review不能在deadline后创建任何successor或delivery recovery execution。
 12. repeated-Finding hard limit只接受相邻Cycle上的directed single-chain lineage；达到上限后Conductor完成session fence并机械关闭exact
     active Cycle，保留全部Finding evidence，restart进入non-success review而不重复调用Finding recovery gate。
+13. `linear-runtime`是唯一canonical in-memory Linear state owner；consumer只接收一次`recovered` state和后续atomic current-value batches。

@@ -87,6 +87,7 @@ Linear OAuth/credential只能出现在Podium。Codex credential由SDK保存在Pr
 
 ```text
 linear-gateway
+linear-runtime
 root-discovery
 root-scheduling
 root-reconciliation
@@ -104,9 +105,13 @@ runtime-logs
 Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository。
 `RootReconciliationView`和`WorkflowRootTreeSnapshot`只存在于内存。
 
+`linear-runtime`是唯一canonical Linear runtime state owner，负责complete observation recovery、canonical current values、
+content digest和atomic current-value change batches。其他Conductor模块只能读取其immutable current view或消费accepted batch，
+不能维护revisioned mirror。
+
 `root-reconciliation`拥有只验证routing、process fence、iteration guard、coverage、schema、capability、budget和convergence边界的
-`RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
-`root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
+`RootSafetyPolicyInterface`，并从runtime-owned current state计算mechanical violations；
+`root-reconciler-client`只在open时发送完整bootstrap，advance严格发送role-scoped current changes并调用Performer；
 `root-transition`从fresh native facts纯函数推导mechanical target、semantic gate、external wait、terminal或invalid facts；
 `root-intent-materialization`验证transient RootSemanticIntent，编译candidate graph并收敛native Linear/Git postcondition；
 `performer-agent-client`拥有Root Reconciler和三个Stage role session/turn transport，并持有Work turn的Root writer-domain

@@ -6,7 +6,7 @@ export function classifyTerminalStageRecovery(input: {
   description: string;
   labels: string[];
 }): TerminalStageRecoveryTrigger | undefined {
-  const outcome = canonicalStageOutcome(input.description);
+  const outcome = canonicalOutcomeLine(input.description);
   if (input.role === "plan" && input.status === "Failed") {
     return outcome === "Plan Blocked." || outcome === "Plan Needs Information." ? "stage_blocked" : undefined;
   }
@@ -25,7 +25,7 @@ export function classifyTerminalStageRecovery(input: {
   return undefined;
 }
 
-function canonicalStageOutcome(description: string): string | undefined {
+function canonicalOutcomeLine(description: string): string | undefined {
   const lines = description.split("\n");
   const headings = lines.flatMap((line, index) => line === "## Outcome" ? [index] : []);
   if (headings.length !== 1) return undefined;

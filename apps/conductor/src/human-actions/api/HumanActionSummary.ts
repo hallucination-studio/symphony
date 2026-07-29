@@ -1,5 +1,8 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { HumanActionKind } from "./HumanActionMaterializerInterface.js";
+import { humanActionScopeFromBody } from "./HumanActionScope.js";
+
+export { humanActionScopeFromBody } from "./HumanActionScope.js";
 
 type WorkflowComment = LinearWorkflowTreeSnapshot["comments"][number];
 
@@ -35,16 +38,6 @@ export function humanActionRequestScope(
   request: WorkflowComment,
 ): { targetIdentifiers: string[]; contextIdentifiers: string[] } | undefined {
   return humanActionScopeFromBody(request.body);
-}
-
-export function humanActionScopeFromBody(
-  body: string,
-): { targetIdentifiers: string[]; contextIdentifiers: string[] } | undefined {
-  const targetIdentifiers = canonicalListSection(body, "### 相关对象");
-  const contextIdentifiers = canonicalListSection(body, "### Verify 与 Cycle");
-  return targetIdentifiers && contextIdentifiers
-    ? { targetIdentifiers, contextIdentifiers }
-    : undefined;
 }
 
 export function humanActionSummaryStatus(
@@ -115,19 +108,4 @@ function hasSingleReceipt(comment: WorkflowComment): boolean {
   const receipts = comment.reactions.filter(({ actor_kind, emoji }) =>
     actor_kind === "symphony" && (emoji === "✅" || emoji === "❌"));
   return receipts.length === 1;
-}
-
-function canonicalListSection(body: string, heading: string): string[] | undefined {
-  const lines = body.split("\n");
-  const start = lines.indexOf(heading);
-  if (start < 0 || lines.indexOf(heading, start + 1) >= 0) return undefined;
-  const values: string[] = [];
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    if (line.startsWith("### ")) break;
-    if (!line.trim()) continue;
-    if (!line.startsWith("- ") || line.length <= 2) return undefined;
-    values.push(line.slice(2));
-  }
-  return values.length > 0 && new Set(values).size === values.length ? values : undefined;
 }

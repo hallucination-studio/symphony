@@ -1,11 +1,11 @@
-import type { RootSchedulingPolicyInterface } from "../api/RootSchedulingPolicyInterface.js";
 import type {
-  DiscoveredRoot,
-  LinearPriority,
-} from "../../root-reconciliation/api/RootModels.js";
+  RootSchedulingPolicyInterface,
+  SchedulableRoot,
+  SchedulableRootPriority,
+} from "../api/RootSchedulingPolicyInterface.js";
 import { blockerEligibleRoots } from "./LinearBlockerEligibilityPolicy.js";
 
-const PRIORITY_ORDER: Record<LinearPriority, number> = {
+const PRIORITY_ORDER: Record<SchedulableRootPriority, number> = {
   urgent: 0,
   high: 1,
   normal: 2,
@@ -15,8 +15,8 @@ const PRIORITY_ORDER: Record<LinearPriority, number> = {
 
 export class LinearPriorityRootSchedulingPolicyImpl
 implements RootSchedulingPolicyInterface {
-  evaluate(
-    roots: readonly DiscoveredRoot[],
+  evaluate<TRoot extends SchedulableRoot>(
+    roots: readonly TRoot[],
     options?: { resumeAfterRootIssueId?: string },
   ) {
     const result = blockerEligibleRoots(roots);
@@ -29,7 +29,7 @@ implements RootSchedulingPolicyInterface {
 
 }
 
-function rotateAfter(roots: DiscoveredRoot[], rootIssueId: string | undefined): DiscoveredRoot[] {
+function rotateAfter<TRoot extends SchedulableRoot>(roots: TRoot[], rootIssueId: string | undefined): TRoot[] {
   if (!rootIssueId || roots.length < 2) return roots;
   const index = roots.findIndex(({ issueId }) => issueId === rootIssueId);
   return index < 0 || index === roots.length - 1
@@ -37,7 +37,7 @@ function rotateAfter(roots: DiscoveredRoot[], rootIssueId: string | undefined): 
     : [...roots.slice(index + 1), ...roots.slice(0, index + 1)];
 }
 
-function compareRoots(left: DiscoveredRoot, right: DiscoveredRoot): number {
+function compareRoots(left: SchedulableRoot, right: SchedulableRoot): number {
   const priority = PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority];
   if (priority !== 0) return priority;
   const updatedAt = compareLexically(right.updatedAt, left.updatedAt);

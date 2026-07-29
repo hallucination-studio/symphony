@@ -1,11 +1,11 @@
-import type { DiscoveredRoot } from "../../root-reconciliation/api/RootModels.js";
+import type { SchedulableRoot } from "../api/RootSchedulingPolicyInterface.js";
 
-export function blockerEligibleRoots(
-  roots: readonly DiscoveredRoot[],
+export function blockerEligibleRoots<TRoot extends SchedulableRoot>(
+  roots: readonly TRoot[],
 ): {
-  eligible: DiscoveredRoot[];
+  eligible: TRoot[];
   blocked: Array<{
-    root: DiscoveredRoot;
+    root: TRoot;
     reason: "root_dependency_cycle" | "root_unresolved_blocker";
   }>;
 } {
@@ -20,7 +20,7 @@ export function blockerEligibleRoots(
   );
   const cycleMembers = findCycleMembers(graph);
   const blocked: Array<{
-    root: DiscoveredRoot;
+    root: TRoot;
     reason: "root_dependency_cycle" | "root_unresolved_blocker";
   }> = [];
   for (const root of roots) {

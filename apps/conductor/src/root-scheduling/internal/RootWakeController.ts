@@ -1,4 +1,4 @@
-import type { RootRuntimeDisposition } from "../../root-reconciliation/api/RootRuntimeLoop.js";
+import type { RootWakeDisposition } from "../api/RootWakePolicy.js";
 
 const IDLE_SAFETY_INTERVAL_MS = 30_000;
 const TRANSIENT_BACKOFF_INITIAL_MS = 1_000;
@@ -28,7 +28,7 @@ export class RootWakeController {
   }
 
   nextDelay(input: {
-    disposition: RootRuntimeDisposition;
+    disposition: RootWakeDisposition;
     deadlineAtMs?: number;
   }): number {
     if (this.#startupPending || this.#wakePending) {
@@ -58,7 +58,7 @@ export class RootWakeController {
   }
 
   async wait(input: {
-    disposition: RootRuntimeDisposition;
+    disposition: RootWakeDisposition;
     deadlineAtMs?: number;
   }): Promise<void> {
     const delayMs = this.nextDelay(input);

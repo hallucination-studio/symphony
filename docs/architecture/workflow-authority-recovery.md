@@ -18,6 +18,20 @@ Conductor不重放旧next action，也不从comment日志回放command。每次�
 不一致项和唯一合法的机械后果；只有结果是semantic gate时才调用matching Root Reconciler。Conductor编译mechanical target或
 semantic intent，并在每个independently durable effect后fresh read-back。
 
+## 1.1 Recoverable runtime observation
+
+Conductor runtime creation首先恢复complete bounded Project Root Header Index。Root通过admission后，再恢复该Root的complete
+active/archived Root Tree以及required Git facts；不会预先deep-mirror全部Project Roots。完整observation canonicalize为current values和
+provenance，content digest覆盖值本身而不只覆盖ID、timestamp或remote version。
+
+startup、reconnect、incomplete coverage、canonicalization failure、ambiguous mutation acceptance或session-baseline uncertainty都触发
+fresh recovery。健康process中，每次complete observation与当前in-memory state比较，形成一个atomic、canonical ordered、frozen batch；
+它可以包含零个或多个current value、replacement或tombstone change。Convergence只在整个batch被接受后运行。batch是current state
+change，不是event replay，也不表示Linear causal order。
+
+runtime state可随时丢弃，不是durable authority。Linear remote cursor/version只在Gateway和materializer内部用于分页、freshness与mutation
+precondition；workflow consumer、Root transition和Provider contract不得读取cursor或维护revisioned mirror。
+
 ## 2. 权威对象模型
 
 完整Root object graph至少包含：
@@ -340,3 +354,4 @@ Work Agent Tree token/tool/activity aggregate也只属于当前runtime；它不�
 8. 其他架构文档只引用本文，不复制恢复算法或持久化矩阵。
 9. Work session loss后不恢复Provider agent graph；旧write capability撤销与containment empty/isolated未证明前不得启动new writer、
    commit、Verify或cleanup。
+10. startup或任何observation/session不确定性都以fresh recovery恢复正确性，不通过event replay、旧runtime state或persisted cursor修补。

@@ -42,8 +42,9 @@ topology和delivery。
 
 ## 3. Session与输入边界
 
-Performer为每个Root维护至多一个live Root Reconciler thread。fresh session接收完整current Root projection；live且baseline
-连续时可接收bounded current-value delta以减少context。session、delta baseline和Provider history都是runtime continuity，
+Performer为每个Root维护至多一个live Root Reconciler thread。fresh session接收从`linear-runtime` recovered state派生的完整current
+Root projection；live且baseline连续时可接收从accepted frozen observation batch派生的bounded current-value changes以减少context。
+session、role-specific change baseline和Provider history都是runtime continuity，
 不能参与restart authority。
 
 fresh projection覆盖[Workflow Authority与恢复](workflow-authority-recovery.md)定义的完整native Root object graph、Git
@@ -87,9 +88,10 @@ disposition的input identity继续出现在下一turn current command中；其�
 若append是否进入Provider history、opaque continuation或baseline连续性无法证明，立即关闭session并从fresh Linear/Git
 facts创建new session和一次initial bootstrap。不能在同一thread补发、猜测或重建完整messages transcript。
 
-### 3.3 Root initial/delta transient contract
+### 3.3 Root initial/change transient contract
 
-Root Reconciler跨进程输入只有两种closed shape，不能在同一request中混用：
+Root Reconciler跨进程输入只有initial与change两种closed shape，不能在同一request中混用。这里的change是role projection，
+不是Linear delta、cursor或revision protocol：
 
 ```text
 OpenRootReconcilerRequest

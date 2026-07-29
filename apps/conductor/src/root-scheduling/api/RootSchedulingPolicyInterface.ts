@@ -1,16 +1,32 @@
-import type { DiscoveredRoot } from "../../root-reconciliation/api/RootModels.js";
+export type SchedulableRootState =
+  | "Todo" | "In Progress" | "Needs Approval" | "Needs Info" | "Escalated"
+  | "In Review" | "Done" | "Canceled";
 
-export interface RootSchedulingResult {
-  orderedEligible: DiscoveredRoot[];
+export type SchedulableRootPriority = "urgent" | "high" | "normal" | "low" | "no_priority";
+
+export interface SchedulableRoot {
+  issueId: string;
+  identifier: string;
+  updatedAt: string;
+  priority: SchedulableRootPriority;
+  blockers: readonly {
+    sourceIssueId: string;
+    targetIssueId: string;
+    targetState: SchedulableRootState;
+  }[];
+}
+
+export interface RootSchedulingResult<TRoot extends SchedulableRoot> {
+  orderedEligible: TRoot[];
   blocked: Array<{
-    root: DiscoveredRoot;
+    root: TRoot;
     reason: "root_dependency_cycle" | "root_unresolved_blocker";
   }>;
 }
 
-export interface RootSchedulingPolicyInterface {
+export interface RootSchedulingPolicyInterface<TRoot extends SchedulableRoot = SchedulableRoot> {
   evaluate(
-    roots: readonly DiscoveredRoot[],
+    roots: readonly TRoot[],
     options?: { resumeAfterRootIssueId?: string },
-  ): RootSchedulingResult;
+  ): RootSchedulingResult<TRoot>;
 }
