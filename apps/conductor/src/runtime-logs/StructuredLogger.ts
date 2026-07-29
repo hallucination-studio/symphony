@@ -20,6 +20,20 @@ export type RuntimeEvent =
     readonly correlation_id: CorrelationId;
     readonly root_id: RootIssueId | null;
     readonly reason_code: "tick_failed";
+  }
+  | { readonly event: "root_retirement_started"; readonly correlation_id: CorrelationId; readonly root_id: RootIssueId }
+  | {
+    readonly event: "root_retirement_retained";
+    readonly correlation_id: CorrelationId;
+    readonly root_id: RootIssueId;
+    readonly root_status: RootStatus;
+  }
+  | { readonly event: "root_retirement_completed"; readonly correlation_id: CorrelationId; readonly root_id: RootIssueId }
+  | {
+    readonly event: "root_retirement_failed";
+    readonly correlation_id: CorrelationId;
+    readonly root_id: RootIssueId;
+    readonly reason_code: "retirement_failed";
   };
 
 export interface StructuredLoggerInterface {

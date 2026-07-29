@@ -15,6 +15,7 @@ export class RootRuntimeRegistry {
   readonly #creating = new Set<RootIssueId>();
   readonly #reconcills = new Set<RootReconcillInterface>();
   readonly #tools = new Set<RootToolExecutor>();
+  readonly #toolResources = new Map<RootRuntime, RootToolExecutor>();
 
   constructor(
     private readonly homes: RootHomeManager,
@@ -64,6 +65,7 @@ export class RootRuntimeRegistry {
       const runtime = new RootRuntime(home.path, reconcill, tools);
       this.#reconcills.add(reconcill);
       this.#tools.add(tools);
+      this.#toolResources.set(runtime, tools);
       this.#runtimes.set(input.root_id, runtime);
       return runtime;
     } finally {
@@ -73,10 +75,13 @@ export class RootRuntimeRegistry {
 
   async close(rootId: RootIssueId): Promise<void> {
     const runtime = this.get(rootId);
+    const tools = this.#toolResources.get(runtime);
+    if (!tools) throw new Error("root_runtime_resource_missing");
     await runtime.close();
     this.#runtimes.delete(rootId);
     this.#reconcills.delete(runtime.reconcill);
-    this.#tools.delete(runtime.tools);
+    this.#tools.delete(tools);
+    this.#toolResources.delete(runtime);
   }
 
   async closeAll(): Promise<void> {
