@@ -9,10 +9,12 @@ import {
 } from "../../contracts/identity.js";
 import type { PlanRequest } from "../../contracts/stage-interaction.js";
 import {
+  CodexPlanSessionFactory,
   PlanPerformer,
   type PlanSession,
   type PlanSessionFactory,
 } from "./PlanPerformer.js";
+import type { CodexProcessOptions } from "../../codex-app-server/internal/CodexProcess.js";
 
 const request: PlanRequest = {
   schema_version: 1,
@@ -96,4 +98,26 @@ test("PlanPerformer rejects prose and foreign structured output without repairin
     };
     await assert.rejects(new PlanPerformer(factory).executePlan(request));
   }
+});
+
+test("Codex Plan session binds the request to the user-supplied Performer Home", async () => {
+  const received: CodexProcessOptions[] = [];
+  const factory = new CodexPlanSessionFactory({
+    executable: "/opt/codex",
+    performerHome: "/performer/home",
+    cwd: "/repository",
+    startupTimeoutMs: 1,
+    requestTimeoutMs: 1,
+    turnTimeoutMs: 1,
+    shutdownTimeoutMs: 1,
+    spawner: (options) => {
+      received.push(options);
+      throw new Error("controlled_spawn_stop");
+    },
+  });
+
+  await assert.rejects(factory.start(request), /controlled_spawn_stop/u);
+  assert.equal(received[0]?.codexHome, "/performer/home");
+  assert.equal(received[0]?.rootId, request.root_id);
+  assert.equal(received[0]?.runtimeGeneration, request.runtime_generation);
 });

@@ -15,6 +15,7 @@ import type { LinearObservation, StageObservation } from "../contracts/observati
 import type { RootToolCall } from "../contracts/root-interaction.js";
 import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface } from "../linear/api/LinearGatewayInterface.js";
+import type { LinearMutation } from "../linear/api/LinearGatewayInterface.js";
 import type { StagePerformerInterface } from "../performer/api/StagePerformerInterface.js";
 import { RootTools } from "./RootTools.js";
 
@@ -38,7 +39,7 @@ function stage(id: string, kind: StageObservation["kind"], status: StageObservat
   };
 }
 
-function linear(status: NonNullable<LinearObservation["active_cycle"]>["status"], stages: StageObservation[]): LinearObservation {
+function linear(status: NonNullable<LinearObservation["active_cycle"]>["status"], stages: readonly StageObservation[]): LinearObservation {
   return { root_id: rootId, root_status: "In Progress", active_cycle: { issue_id: cycleId, status, stages } };
 }
 
@@ -64,7 +65,14 @@ function fixture(linearReads: LinearObservation[], head = revision) {
   const linearGateway: LinearGatewayInterface = {
     discoverRoots: () => Promise.resolve([]),
     readRoot: () => Promise.resolve(linearReads[Math.min(linearIndex++, linearReads.length - 1)] as LinearObservation),
-    mutate: () => Promise.reject(new Error("unexpected_mutation")),
+    mutate: (command: LinearMutation) => {
+      calls.push(`mutate:${command.kind}`);
+      return Promise.resolve({
+        schema_version: 1, outcome: "applied",
+        target_id: "cycle_issue_id" in command ? command.cycle_issue_id : command.root_id,
+        correlation_id: command.correlation_id,
+      });
+    },
   };
   const git: GitWorkspaceInterface = {
     prepare: () => Promise.reject(new Error("unexpected_prepare")),
@@ -106,18 +114,29 @@ function fixture(linearReads: LinearObservation[], head = revision) {
   return { tools: new RootTools(rootId, generation, workspace, linearGateway, git, performer), calls };
 }
 
-test("plan dispatch fresh-reads the empty Planning Cycle and returns typed Handoff plus read-back", async () => {
+test("plan dispatch accepts only a fresh legal DAG and advances the Cycle to Executing", async () => {
   const before = linear("Planning", []);
-  const after = linear("Planning", [
+  const planned = linear("Planning", [
     stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Todo"), stage("LIN-5", "verify", "Todo", ["LIN-4"]),
   ]);
-  const f = fixture([before, after]);
+  const executing = linear("Executing", planned.active_cycle?.stages ?? []);
+  const f = fixture([before, planned, planned, executing]);
   const result = await f.tools.execute(tool({ tool: "plan", cycle_issue_id: cycleId }));
   assert.equal(result.kind, "performed");
   if (result.kind === "performed") {
     assert.equal(result.handoff.role, "plan");
-    assert.deepEqual(result.linear, after);
+    assert.deepEqual(result.linear, executing);
   }
+  assert.deepEqual(f.calls, ["plan", "mutate:set_cycle_status"]);
+});
+
+test("plan dispatch rejects an incomplete fresh DAG without a lifecycle mutation", async () => {
+  const before = linear("Planning", []);
+  const incomplete = linear("Planning", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Todo"), stage("LIN-5", "verify", "Todo"),
+  ]);
+  const f = fixture([before, incomplete]);
+  await assert.rejects(f.tools.execute(tool({ tool: "plan", cycle_issue_id: cycleId })), /invalid_plan_dag/u);
   assert.deepEqual(f.calls, ["plan"]);
 });
 

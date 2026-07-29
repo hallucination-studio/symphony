@@ -8,6 +8,8 @@ import {
 } from "../contracts/stage-interaction.js";
 import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface } from "../linear/api/LinearGatewayInterface.js";
+import { validatePlanDag } from "../orchestration/PlanDagValidator.js";
+import { WorkflowLifecycle } from "../orchestration/WorkflowLifecycle.js";
 import type { StagePerformerInterface } from "../performer/api/StagePerformerInterface.js";
 import type { RootToolsFactoryInput, RootToolsFactoryInterface } from "./RootRuntime.js";
 
@@ -78,7 +80,16 @@ export class RootTools {
     this.#assertHandoff(request, handoff);
     const after = await this.linear.readRoot(this.rootId);
     this.#assertLinearOwner(after);
-    return Object.freeze({ kind: "performed", handoff, linear: after, git: null });
+    if (handoff.role !== "plan") throw new Error("stage_handoff_identity_mismatch");
+    validatePlanDag(after, handoff);
+    const transition = await new WorkflowLifecycle(this.linear).apply({
+      kind: "begin_execution",
+      root_id: this.rootId,
+      cycle_issue_id: cycle.issue_id,
+      correlation_id: call.correlation_id,
+    });
+    if (transition.kind !== "transitioned") return mismatch(transition.observation, null);
+    return Object.freeze({ kind: "performed", handoff, linear: transition.observation, git: null });
   }
 
   async #work(call: Extract<RootToolCall, { tool: "work" }>): Promise<RootToolResult> {

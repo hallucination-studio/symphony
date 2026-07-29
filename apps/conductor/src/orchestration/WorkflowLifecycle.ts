@@ -14,6 +14,7 @@ import type {
   StageStatus,
 } from "../contracts/observation.js";
 import type { LinearGatewayInterface, LinearMutation } from "../linear/api/LinearGatewayInterface.js";
+import { hasCompletePlanDag } from "./PlanDagValidator.js";
 
 interface RootTransition {
   readonly root_id: RootIssueId;
@@ -70,38 +71,6 @@ function exactSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolea
   return left.size === right.size && [...left].every((entry) => right.has(entry));
 }
 
-function completeDag(cycle: CycleObservation): boolean {
-  const plans = cycle.stages.filter(({ kind }) => kind === "plan");
-  const works = cycle.stages.filter(({ kind }) => kind === "work");
-  const verifies = cycle.stages.filter(({ kind }) => kind === "verify");
-  if (
-    plans.length !== 1
-    || plans[0]?.status !== "Done"
-    || works.length === 0
-    || works.some(({ status }) => status !== "Todo")
-    || verifies.length !== 1
-    || verifies[0]?.status !== "Todo"
-  ) return false;
-
-  const workIds = new Set(works.map(({ issue_id }) => issue_id));
-  if (!exactSet(workIds, new Set(verifies[0].dependency_issue_ids))) return false;
-  if (works.some(({ dependency_issue_ids }) => dependency_issue_ids.some((id) => !workIds.has(id)))) return false;
-
-  const visiting = new Set<StageIssueId>();
-  const visited = new Set<StageIssueId>();
-  const byId = new Map(works.map((work) => [work.issue_id, work]));
-  const cyclic = (id: StageIssueId): boolean => {
-    if (visiting.has(id)) return true;
-    if (visited.has(id)) return false;
-    visiting.add(id);
-    const hasCycle = byId.get(id)?.dependency_issue_ids.some(cyclic) ?? false;
-    visiting.delete(id);
-    visited.add(id);
-    return hasCycle;
-  };
-  return !works.some(({ issue_id }) => cyclic(issue_id));
-}
-
 function workAndVerifyReady(cycle: CycleObservation, verifyStatus: "Todo" | "Done"): boolean {
   const works = cycle.stages.filter(({ kind }) => kind === "work");
   const verifies = cycle.stages.filter(({ kind }) => kind === "verify");
@@ -154,7 +123,7 @@ export class WorkflowLifecycle {
     }
     if (transition.kind === "begin_execution") {
       const cycle = this.#cycle(before, transition.cycle_issue_id);
-      if (before.root_status !== "In Progress" || cycle?.status !== "Planning" || !completeDag(cycle)) return null;
+      if (before.root_status !== "In Progress" || !cycle || !hasCompletePlanDag(cycle)) return null;
       return this.#cycleCommand(transition, "Planning", "Executing");
     }
     if (transition.kind === "begin_verification") {
