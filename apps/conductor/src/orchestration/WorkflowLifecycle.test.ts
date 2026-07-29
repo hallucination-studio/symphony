@@ -209,6 +209,9 @@ test("illegal edges, incomplete trigger facts, and terminal Stage redispatch per
     [{
       ...cycleBase, kind: "cancel_stage", stage_issue_id: WORK_ID, stage_kind: "work", expected_status: "Todo",
     }, dag("Executing", "Done", "Done", "Todo")],
+    [{
+      ...cycleBase, kind: "cancel_stage", stage_issue_id: WORK_ID, stage_kind: "work", expected_status: "Todo",
+    }, observation("In Progress", "Canceled", [stage(WORK_ID, "work", "Todo")])],
   ];
 
   for (const [transition, before] of cases) {
@@ -243,4 +246,18 @@ test("an applied acknowledgement without the exact fresh postcondition remains u
   const result = await f.lifecycle.apply({ ...cycleBase, kind: "admit_root" });
   assert.equal(result.kind, "mutation_unresolved");
   assert.equal(result.observation.root_status, "Todo");
+});
+
+test("target status alone is insufficient when fresh Root or Cycle ownership facts drift", async () => {
+  const workBefore = dag("Executing", "Done", "In Progress", "Todo");
+  const rootDrift = { ...dag("Executing", "Done", "Done", "Todo"), root_status: "In Review" as const };
+  const stageFixture = fixture([workBefore, rootDrift]);
+  assert.equal((await stageFixture.lifecycle.apply({
+    ...cycleBase, kind: "complete_stage", stage_issue_id: WORK_ID, stage_kind: "work",
+  })).kind, "mutation_unresolved");
+
+  const cycleBefore = dag("Planning", "Done", "Todo", "Todo");
+  const cycleDrift = { ...dag("Executing", "Done", "Todo", "Todo"), root_status: "In Review" as const };
+  const cycleFixture = fixture([cycleBefore, cycleDrift]);
+  assert.equal((await cycleFixture.lifecycle.apply({ ...cycleBase, kind: "begin_execution" })).kind, "mutation_unresolved");
 });

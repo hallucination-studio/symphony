@@ -64,7 +64,7 @@ function fixture(reads: LinearObservation[], outcomes: MutationResult["outcome"]
 test("StartCycle creates one empty Planning shell then advances Todo Root to In Progress", async () => {
   const shell = observation("Todo", "Planning");
   const ready = observation("In Progress", "Planning");
-  const f = fixture([observation("Todo", null), shell, ready]);
+  const f = fixture([observation("Todo", null), shell, shell, ready]);
 
   const outcome = await f.mechanics.startCycle(ROOT_ID, CORRELATION_ID);
 
@@ -134,7 +134,13 @@ test("replan cancels only nonterminal Stages, then Cycle, then creates one succe
   ]);
   const noActive = observation("In Progress", null);
   const successor = observation("In Progress", "Planning", [], SUCCESSOR_ID);
-  const f = fixture([initial, firstCanceled, allTerminal, noActive, noActive, successor]);
+  const f = fixture([
+    initial,
+    initial, firstCanceled,
+    firstCanceled, allTerminal,
+    allTerminal, noActive,
+    noActive, successor,
+  ]);
 
   const outcome = await f.mechanics.closeCycleAndStartSuccessor(ROOT_ID, CYCLE_ID, CORRELATION_ID);
 
@@ -151,7 +157,7 @@ test("replan cancels only nonterminal Stages, then Cycle, then creates one succe
 
 test("replan stops on an unproven cancellation and never cancels the Cycle or creates a successor", async () => {
   const active = observation("In Progress", "Executing", [stage("LIN-4", "work", "Todo")]);
-  const f = fixture([active, active], ["acceptance_unknown"]);
+  const f = fixture([active, active, active], ["acceptance_unknown"]);
 
   const outcome = await f.mechanics.closeCycleAndStartSuccessor(ROOT_ID, CYCLE_ID, CORRELATION_ID);
 
@@ -165,7 +171,7 @@ test("replan rechecks the complete fresh Stage set before canceling the Cycle", 
     stage("LIN-4", "work", "Canceled"),
     stage("LIN-5", "verify", "Todo"),
   ]);
-  const f = fixture([initial, changed]);
+  const f = fixture([initial, initial, changed]);
 
   const outcome = await f.mechanics.closeCycleAndStartSuccessor(ROOT_ID, CYCLE_ID, CORRELATION_ID);
 

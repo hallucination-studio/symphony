@@ -11,6 +11,7 @@ import type {
   LinearObservation,
   StageKind,
   StageObservation,
+  StageStatus,
 } from "../contracts/observation.js";
 import type { LinearGatewayInterface, LinearMutation } from "../linear/api/LinearGatewayInterface.js";
 
@@ -58,7 +59,8 @@ export type WorkflowLifecycleResult =
     readonly mutation: MutationResult;
   };
 
-const ACTIVE_STAGE_STATUSES = new Set(["Todo", "In Progress"] as const);
+const ACTIVE_CYCLE_STATUSES: ReadonlySet<CycleStatus> = new Set(["Planning", "Executing", "Verifying"]);
+const ACTIVE_STAGE_STATUSES: ReadonlySet<StageStatus> = new Set(["Todo", "In Progress"]);
 
 function stageById(cycle: CycleObservation, stageId: StageIssueId): StageObservation | null {
   return cycle.stages.find(({ issue_id }) => issue_id === stageId) ?? null;
@@ -170,7 +172,7 @@ export class WorkflowLifecycle {
       if (
         before.root_status !== "In Progress"
         || cycle?.status !== transition.expected_status
-        || cycle.stages.some(({ status }) => ACTIVE_STAGE_STATUSES.has(status as "Todo" | "In Progress"))
+        || cycle.stages.some(({ status }) => ACTIVE_STAGE_STATUSES.has(status))
       ) return null;
       return this.#cycleCommand(transition, transition.expected_status, "Canceled");
     }
@@ -186,6 +188,7 @@ export class WorkflowLifecycle {
     if (
       before.root_status !== "In Progress"
       || !cycle
+      || !ACTIVE_CYCLE_STATUSES.has(cycle.status)
       || !target
       || target.kind !== transition.stage_kind
     ) return null;
@@ -230,8 +233,9 @@ export class WorkflowLifecycle {
     }
     if (transition.kind === "review_root") return after.root_status === "In Review" && after.active_cycle === null;
     if (transition.kind === "succeed_cycle" || transition.kind === "cancel_cycle") {
-      return mutation.outcome === "applied" && after.active_cycle === null;
+      return mutation.outcome === "applied" && after.root_status === "In Progress" && after.active_cycle === null;
     }
+    if (after.root_status !== "In Progress") return false;
     if (transition.kind === "begin_execution") return this.#cycle(after, transition.cycle_issue_id)?.status === "Executing";
     if (transition.kind === "begin_verification") return this.#cycle(after, transition.cycle_issue_id)?.status === "Verifying";
     const desired = transition.kind === "start_stage"
@@ -243,7 +247,10 @@ export class WorkflowLifecycle {
           : "Canceled";
     const cycle = this.#cycle(after, transition.cycle_issue_id);
     const target = cycle ? stageById(cycle, transition.stage_issue_id) : null;
-    return target?.kind === transition.stage_kind && target.status === desired;
+    if (!cycle || !target || target.kind !== transition.stage_kind || target.status !== desired) return false;
+    return transition.kind === "cancel_stage"
+      ? ACTIVE_CYCLE_STATUSES.has(cycle.status)
+      : cycle.status === roleCycleStatus(target.kind);
   }
 
   #cycle(observation: LinearObservation, cycleId: CycleIssueId): CycleObservation | null {

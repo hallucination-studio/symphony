@@ -6,7 +6,8 @@ import type {
   StageObservation,
   StageStatus,
 } from "../contracts/observation.js";
-import type { LinearGatewayInterface, LinearMutation } from "../linear/api/LinearGatewayInterface.js";
+import type { LinearGatewayInterface } from "../linear/api/LinearGatewayInterface.js";
+import { WorkflowLifecycle, type WorkflowLifecycleResult } from "./WorkflowLifecycle.js";
 
 export type CycleMechanicsResult =
   | {
@@ -24,8 +25,19 @@ export type CycleMechanicsResult =
     readonly mutation: MutationResult;
   };
 
+type ActiveCycleStatus = Extract<CycleStatus, "Planning" | "Executing" | "Verifying">;
+type ActiveStageStatus = Extract<StageStatus, "Todo" | "In Progress">;
+
 const ACTIVE_CYCLE_STATUSES: ReadonlySet<CycleStatus> = new Set(["Planning", "Executing", "Verifying"]);
 const ACTIVE_STAGE_STATUSES: ReadonlySet<StageStatus> = new Set(["Todo", "In Progress"]);
+
+function isActiveCycleStatus(status: CycleStatus): status is ActiveCycleStatus {
+  return ACTIVE_CYCLE_STATUSES.has(status);
+}
+
+function isActiveStageStatus(status: StageStatus): status is ActiveStageStatus {
+  return ACTIVE_STAGE_STATUSES.has(status);
+}
 
 function exactShell(observation: LinearObservation) {
   const cycle = observation.active_cycle;
@@ -37,7 +49,11 @@ function targetStage(observation: LinearObservation, stage: StageObservation): S
 }
 
 export class CycleMechanics {
-  constructor(private readonly linear: LinearGatewayInterface) {}
+  readonly #lifecycle: WorkflowLifecycle;
+
+  constructor(private readonly linear: LinearGatewayInterface) {
+    this.#lifecycle = new WorkflowLifecycle(linear);
+  }
 
   async startCycle(rootId: RootIssueId, correlationId: CorrelationId): Promise<CycleMechanicsResult> {
     const before = await this.#read(rootId);
@@ -63,18 +79,16 @@ export class CycleMechanics {
     }
 
     if (current.root_status === "Todo") {
-      const mutation = await this.linear.mutate({
-        schema_version: 1,
-        kind: "set_root_status",
+      const shell = exactShell(current);
+      if (!shell) return { kind: "precondition_mismatch", observation: current };
+      const transition = await this.#lifecycle.apply({
+        kind: "admit_root",
         root_id: rootId,
+        cycle_issue_id: shell.issue_id,
         correlation_id: correlationId,
-        expected_status: "Todo",
-        desired_status: "In Progress",
       });
-      current = await this.#read(rootId);
-      if (current.root_status !== "In Progress" || !exactShell(current)) {
-        return { kind: "mutation_unresolved", observation: current, mutation };
-      }
+      if (transition.kind !== "transitioned") return this.#lifecycleResult(transition);
+      current = transition.observation;
     }
 
     const shell = exactShell(current);
@@ -98,62 +112,59 @@ export class CycleMechanics {
         ? { kind: "ready", cycle_issue_id: existingSuccessor.issue_id, observation: current }
         : { kind: "precondition_mismatch", observation: current };
     }
-    if (!ACTIVE_CYCLE_STATUSES.has(current.active_cycle.status)) {
+    if (!isActiveCycleStatus(current.active_cycle.status)) {
       return { kind: "precondition_mismatch", observation: current };
     }
-
     for (const stage of current.active_cycle.stages) {
-      if (!ACTIVE_STAGE_STATUSES.has(stage.status)) continue;
-      const mutation = await this.linear.mutate(this.#cancelStage(rootId, cycleId, stage, correlationId));
-      current = await this.#read(rootId);
+      if (!isActiveStageStatus(stage.status)) continue;
+      const transition = await this.#lifecycle.apply({
+        kind: "cancel_stage",
+        root_id: rootId,
+        cycle_issue_id: cycleId,
+        stage_issue_id: stage.issue_id,
+        stage_kind: stage.kind,
+        correlation_id: correlationId,
+        expected_status: stage.status,
+      });
+      current = transition.observation;
+      if (transition.kind === "mutation_unresolved") return this.#lifecycleResult(transition);
       if (!current.active_cycle) break;
       if (current.active_cycle.issue_id !== cycleId) {
         return { kind: "precondition_mismatch", observation: current };
       }
       const freshStage = targetStage(current, stage);
-      if (!freshStage || ACTIVE_STAGE_STATUSES.has(freshStage.status)) {
-        return { kind: "mutation_unresolved", observation: current, mutation };
+      if (!freshStage || isActiveStageStatus(freshStage.status)) {
+        return { kind: "precondition_mismatch", observation: current };
       }
     }
 
     if (current.active_cycle?.issue_id === cycleId) {
-      if (current.active_cycle.stages.some(({ status }) => ACTIVE_STAGE_STATUSES.has(status))) {
+      if (
+        !isActiveCycleStatus(current.active_cycle.status)
+        || current.active_cycle.stages.some(({ status }) => isActiveStageStatus(status))
+      ) {
         return { kind: "precondition_mismatch", observation: current };
       }
-      const mutation = await this.linear.mutate({
-        schema_version: 1,
-        kind: "set_cycle_status",
+      const transition = await this.#lifecycle.apply({
+        kind: "cancel_cycle",
         root_id: rootId,
         cycle_issue_id: cycleId,
         correlation_id: correlationId,
         expected_status: current.active_cycle.status,
-        desired_status: "Canceled",
       });
-      current = await this.#read(rootId);
-      if (current.active_cycle?.issue_id === cycleId) {
-        return { kind: "mutation_unresolved", observation: current, mutation };
+      current = transition.observation;
+      if (transition.kind === "mutation_unresolved") return this.#lifecycleResult(transition);
+      if (transition.kind === "precondition_mismatch" && current.active_cycle?.issue_id === cycleId) {
+        return { kind: "precondition_mismatch", observation: current };
       }
     }
     return this.startCycle(rootId, correlationId);
   }
 
-  #cancelStage(
-    rootId: RootIssueId,
-    cycleId: CycleIssueId,
-    stage: StageObservation,
-    correlationId: CorrelationId,
-  ): LinearMutation {
-    return {
-      schema_version: 1,
-      kind: "set_stage_status",
-      root_id: rootId,
-      cycle_issue_id: cycleId,
-      stage_issue_id: stage.issue_id,
-      expected_kind: stage.kind,
-      correlation_id: correlationId,
-      expected_status: stage.status,
-      desired_status: "Canceled",
-    };
+  #lifecycleResult(result: Exclude<WorkflowLifecycleResult, { kind: "transitioned" }>): CycleMechanicsResult {
+    return result.kind === "mutation_unresolved"
+      ? { kind: "mutation_unresolved", observation: result.observation, mutation: result.mutation }
+      : { kind: "precondition_mismatch", observation: result.observation };
   }
 
   async #read(rootId: RootIssueId): Promise<LinearObservation> {
