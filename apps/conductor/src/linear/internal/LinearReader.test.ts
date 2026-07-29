@@ -232,7 +232,7 @@ test("malformed provider payloads and raw provider errors never cross the bounda
 });
 
 test("SDK adapter applies the exact team page request and returns data-only snapshots", async () => {
-  const calls: unknown[] = [];
+  const calls: Array<Record<string, unknown>> = [];
   const sdkIssue = {
     id: "root-1",
     teamId: TEAM_ID,
@@ -262,6 +262,28 @@ test("SDK adapter applies the exact team page request and returns data-only snap
       calls.push({ issue: id });
       return sdkIssue;
     },
+    workflowStates: async (variables: unknown) => {
+      calls.push({ workflowStates: variables });
+      return {
+        nodes: [{ id: "state:Planning", name: "Planning", teamId: TEAM_ID }],
+        pageInfo: { hasNextPage: false },
+      };
+    },
+    issueLabels: async (variables: unknown) => {
+      calls.push({ issueLabels: variables });
+      return {
+        nodes: [{ id: "label:cycle", name: "symphony:kind/cycle", teamId: undefined, isGroup: false }],
+        pageInfo: { hasNextPage: false },
+      };
+    },
+    createIssue: async (input: unknown) => {
+      calls.push({ createIssue: input });
+      return { success: true, issueId: "cycle-1", sdk_private: "not-projected" };
+    },
+    updateIssue: async (id: string, input: unknown) => {
+      calls.push({ updateIssue: { id, input } });
+      return { success: false, issueId: id, sdk_private: "not-projected" };
+    },
   };
   const adapter = new LinearSdkReadClient(sdk as never);
 
@@ -277,4 +299,40 @@ test("SDK adapter applies the exact team page request and returns data-only snap
     issues: { after: "after:1", first: 50, filter: { team: { id: { eq: TEAM_ID } } } },
   });
   assert.equal(JSON.stringify(await adapter.getIssue("root-1")).includes("sdk_private"), false);
+
+  assert.deepEqual(await adapter.listWorkflowStates(TEAM_ID, "Planning", "states:1", 50), page([
+    { id: "state:Planning", name: "Planning", team_id: TEAM_ID },
+  ]));
+  assert.deepEqual(await adapter.listNamedIssueLabels("symphony:kind/cycle", "labels:2", 50), page([
+    { id: "label:cycle", name: "symphony:kind/cycle", team_id: null, is_group: false },
+  ]));
+  assert.deepEqual(await adapter.createCycle({
+    team_id: TEAM_ID,
+    parent_issue_id: "root-1",
+    title: "Symphony Cycle",
+    state_id: "state:Planning",
+    label_id: "label:cycle",
+  }), { success: true, issue_id: "cycle-1" });
+  assert.deepEqual(await adapter.updateIssueStatus("root-1", "state:In Progress"), {
+    success: false,
+    issue_id: "root-1",
+  });
+  assert.deepEqual(calls.find((entry) => "workflowStates" in entry), {
+    workflowStates: {
+      after: "states:1", first: 50,
+      filter: { team: { id: { eq: TEAM_ID } }, name: { eq: "Planning" } },
+    },
+  });
+  assert.deepEqual(calls.find((entry) => "issueLabels" in entry), {
+    issueLabels: { after: "labels:2", first: 50, filter: { name: { eq: "symphony:kind/cycle" } } },
+  });
+  assert.deepEqual(calls.find((entry) => "createIssue" in entry), {
+    createIssue: {
+      teamId: TEAM_ID, parentId: "root-1", title: "Symphony Cycle",
+      stateId: "state:Planning", labelIds: ["label:cycle"],
+    },
+  });
+  assert.deepEqual(calls.find((entry) => "updateIssue" in entry), {
+    updateIssue: { id: "root-1", input: { stateId: "state:In Progress" } },
+  });
 });

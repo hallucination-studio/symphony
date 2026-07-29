@@ -26,6 +26,10 @@ symphony:kind/verify
 
 Linear 原生 Issue ID 是唯一标识。description 只保存人可读内容，不保存 Symphony JSON、隐藏标记、Handoff、diff 或运行时状态。
 
+Conductor 创建的空 Cycle shell 使用固定 title `Symphony Cycle`。title 不从 Root
+title/description、模型输出、运行配置或任意 metadata 推导，也不编码 identity、attempt、
+runtime state 或 correlation；Cycle identity 仍只使用 Linear 原生 Issue ID。
+
 ## 生命周期
 
 ```text

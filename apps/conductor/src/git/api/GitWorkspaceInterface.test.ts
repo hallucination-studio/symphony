@@ -12,11 +12,11 @@ import type {
 
 const git = {
   prepare(request: PrepareWorkspaceRequest): Promise<MutationResult> {
-    return Promise.resolve({ outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
+    return Promise.resolve({ schema_version: 1, outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
   },
   read(): Promise<GitObservation> { return Promise.reject(new Error("inert_fixture")); },
   commit(request: CommitWorkspaceRequest): Promise<MutationResult> {
-    return Promise.resolve({ outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
+    return Promise.resolve({ schema_version: 1, outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
   },
 } satisfies GitWorkspaceInterface;
 

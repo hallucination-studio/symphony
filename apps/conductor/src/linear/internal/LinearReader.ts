@@ -60,6 +60,14 @@ interface IssueRecord {
   readonly createdAt: string;
 }
 
+export interface LinearTargetObservation {
+  readonly issue_id: string;
+  readonly team_id: string;
+  readonly parent_id: string | null;
+  readonly kind: "root" | "cycle" | StageKind;
+  readonly status: string;
+}
+
 interface RelationRecord {
   readonly type: string;
   readonly sourceIssueId: string;
@@ -224,6 +232,20 @@ export class LinearReader implements Pick<LinearGatewayInterface, "discoverRoots
         status: active.status,
         stages: await this.#stages(active.issue),
       },
+    });
+  }
+
+  async readTarget(issueId: string): Promise<LinearTargetObservation> {
+    const issue = await this.#issue(parseBoundedString(issueId, "invalid_issue_id", 128));
+    this.#assertTeam(issue);
+    const kind = workflowKind(await this.#labels(issue.id));
+    if (!kind) throw new Error("linear_target_kind_missing");
+    return Object.freeze({
+      issue_id: issue.id,
+      team_id: issue.teamId,
+      parent_id: issue.parentId,
+      kind,
+      status: issue.status,
     });
   }
 

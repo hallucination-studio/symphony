@@ -4,9 +4,11 @@ import {
   type IssueConnection,
   type IssueLabelConnection,
   type IssueRelationConnection,
+  type WorkflowStateConnection,
 } from "@linear/sdk";
 
 import type { LinearReadClient } from "./LinearReader.js";
+import type { LinearMutationClient } from "./LinearMutations.js";
 
 function page<T, U>(connection: { readonly nodes: readonly T[]; readonly pageInfo: {
   readonly hasNextPage: boolean;
@@ -44,7 +46,7 @@ async function issuePage(connection: IssueConnection) {
   });
 }
 
-export class LinearSdkReadClient implements LinearReadClient {
+export class LinearSdkReadClient implements LinearReadClient, LinearMutationClient {
   constructor(private readonly client: LinearClient) {}
 
   static fromApiKey(apiKey: string): LinearSdkReadClient {
@@ -82,5 +84,50 @@ export class LinearSdkReadClient implements LinearReadClient {
       source_issue_id: relation.issueId,
       target_issue_id: relation.relatedIssueId,
     }));
+  }
+
+  async listWorkflowStates(teamId: string, name: string, cursor: string | null, pageSize: number): Promise<unknown> {
+    const states: WorkflowStateConnection = await this.client.workflowStates({
+      after: cursor,
+      first: pageSize,
+      filter: { team: { id: { eq: teamId } }, name: { eq: name } },
+    });
+    return page(states, (state) => ({ id: state.id, name: state.name, team_id: state.teamId }));
+  }
+
+  async listNamedIssueLabels(name: string, cursor: string | null, pageSize: number): Promise<unknown> {
+    const labels: IssueLabelConnection = await this.client.issueLabels({
+      after: cursor,
+      first: pageSize,
+      filter: { name: { eq: name } },
+    });
+    return page(labels, (label) => ({
+      id: label.id,
+      name: label.name,
+      team_id: label.teamId ?? null,
+      is_group: label.isGroup,
+    }));
+  }
+
+  async createCycle(input: {
+    readonly team_id: string;
+    readonly parent_issue_id: string;
+    readonly title: string;
+    readonly state_id: string;
+    readonly label_id: string;
+  }): Promise<unknown> {
+    const payload = await this.client.createIssue({
+      teamId: input.team_id,
+      parentId: input.parent_issue_id,
+      title: input.title,
+      stateId: input.state_id,
+      labelIds: [input.label_id],
+    });
+    return Object.freeze({ success: payload.success, issue_id: payload.issueId ?? null });
+  }
+
+  async updateIssueStatus(issueId: string, stateId: string): Promise<unknown> {
+    const payload = await this.client.updateIssue(issueId, { stateId });
+    return Object.freeze({ success: payload.success, issue_id: payload.issueId ?? null });
   }
 }
