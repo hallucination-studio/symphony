@@ -17,17 +17,28 @@ interface QueuedRequest<T> {
   reject(reason: unknown): void;
 }
 
+export interface LinearRequestCoalescingObservation {
+  requestId: string;
+  coalescedIntoRequestId: string;
+  requestClass: InstallationRequestClass;
+}
+
 export class LinearRequestBrokerImpl {
   readonly #queues: Record<InstallationRequestClass, QueuedRequest<unknown>[]> = {
     control: [], workflow: [], mutation: [], "read-back": [], background: [],
   };
-  readonly #inFlight = new Map<string, { generation: number; promise: Promise<unknown> }>();
+  readonly #inFlight = new Map<string, {
+    generation: number;
+    promise: Promise<unknown>;
+    ownerRequestId?: string;
+  }>();
   readonly #maxConcurrent: number;
   readonly #maxHighPriorityBurst: number;
   readonly #now: () => number;
   readonly #random: () => number;
   readonly #observer: LinearRequestObserverImpl | undefined;
   readonly #requestTimeoutMs: number;
+  readonly #observeCoalesced: ((observation: LinearRequestCoalescingObservation) => void) | undefined;
   #active = 0;
   #highPriorityBurst = 0;
   #generation = 0;
@@ -39,6 +50,7 @@ export class LinearRequestBrokerImpl {
     requestTimeoutMs?: number;
     now?: () => number;
     random?: () => number;
+    observeCoalesced?(observation: LinearRequestCoalescingObservation): void;
   }) {
     if (
       !Number.isInteger(options.maxConcurrent) || options.maxConcurrent < 1 ||
@@ -53,6 +65,7 @@ export class LinearRequestBrokerImpl {
     this.#random = options.random ?? Math.random;
     this.#observer = options.observer;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#observeCoalesced = options.observeCoalesced;
     if (!Number.isSafeInteger(this.#requestTimeoutMs) || this.#requestTimeoutMs < 1 || this.#requestTimeoutMs > DEFAULT_REQUEST_TIMEOUT_MS) {
       throw new Error("linear_request_timeout_invalid");
     }
@@ -69,7 +82,7 @@ export class LinearRequestBrokerImpl {
   run<T>(
     requestClass: InstallationRequestClass,
     run: () => Promise<T>,
-    options: { deadlineAtMs?: number; coalesceKey?: string } = {},
+    options: { deadlineAtMs?: number; coalesceKey?: string; requestId?: string } = {},
   ): Promise<T> {
     this.#observer?.recordLogicalOperation();
     const now = this.#now();
@@ -86,7 +99,19 @@ export class LinearRequestBrokerImpl {
     const coalesceKey = options.coalesceKey;
     if (coalesceKey && requestClass !== "mutation" && requestClass !== "read-back") {
       const current = this.#inFlight.get(coalesceKey);
-      if (current?.generation === generation) return current.promise as Promise<T>;
+      if (current?.generation === generation) {
+        if (
+          options.requestId && current.ownerRequestId &&
+          options.requestId !== current.ownerRequestId
+        ) {
+          this.#observeCoalesced?.({
+            requestId: options.requestId,
+            coalescedIntoRequestId: current.ownerRequestId,
+            requestClass,
+          });
+        }
+        return current.promise as Promise<T>;
+      }
     }
     const promise = new Promise<T>((resolve, reject) => {
       this.#queues[requestClass].push({
@@ -96,7 +121,11 @@ export class LinearRequestBrokerImpl {
       this.#drain();
     });
     if (coalesceKey && requestClass !== "mutation" && requestClass !== "read-back") {
-      this.#inFlight.set(coalesceKey, { generation, promise });
+      this.#inFlight.set(coalesceKey, {
+        generation,
+        promise,
+        ...(options.requestId ? { ownerRequestId: options.requestId } : {}),
+      });
       void promise.finally(() => {
         const current = this.#inFlight.get(coalesceKey);
         if (current?.promise === promise) this.#inFlight.delete(coalesceKey);

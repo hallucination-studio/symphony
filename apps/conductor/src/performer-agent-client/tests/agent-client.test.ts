@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   decodeConductorPerformerOpenRootReconcilerRequest,
+  decodeConductorPerformerPlanRoleContextInitial,
   decodeConductorPerformerPlanTurnRequest,
   decodeConductorPerformerVerifyTurnRequest,
   decodeConductorPerformerWorkTurnRequest,
@@ -28,12 +29,37 @@ function channelFactoryFor(
       return {
         async request(input) {
           calls?.push(input.body);
-          return await respond({ requestId: input.requestId, body: input.body });
+          return normalizeStageResponseFixture(await respond({ requestId: input.requestId, body: input.body }));
         },
         async close() {},
       };
     },
   };
+}
+
+function normalizeStageResponseFixture(value: JsonValue): JsonValue {
+  if (value === null || Array.isArray(value) || typeof value !== "object") return value;
+  const response = value as Record<string, JsonValue>;
+  if (!["plan", "work", "verify"].includes(String(response.role))) return value;
+  if (!("model_turn" in response) || !("outcome" in response)) return value;
+  const modelObservation = response.model_turn;
+  const outcome = response.outcome;
+  const envelope = { ...response };
+  delete envelope.model_turn;
+  delete envelope.outcome;
+  delete envelope.terminal;
+  delete envelope.model_observation;
+  return {
+    ...envelope,
+    model_observation: modelObservation,
+    terminal: { kind: "result", outcome },
+  } as JsonValue;
+}
+
+function assertSemanticStageResponse<T extends { terminalKind: "runtime_failure" } | { outcome: unknown }>(
+  result: T,
+): asserts result is Extract<T, { outcome: unknown }> {
+  assert.equal("terminalKind" in result, false, "expected a semantic Stage result");
 }
 
 function stageInput(role: "plan" | "work" | "verify", goal = "execute the selected role"): StageTurnInput {
@@ -127,7 +153,12 @@ function stageInput(role: "plan" | "work" | "verify", goal = "execute the select
   };
 }
 
-function directStageResult(role: "plan" | "work" | "verify", requestId: string, contextDigest = "context-1") {
+function semanticStageResult(
+  role: "plan" | "work" | "verify",
+  requestId: string,
+  outcome: Record<string, unknown>,
+  contextDigest = "context-1",
+) {
   return {
     protocol_version: "1",
     request_id: requestId,
@@ -141,21 +172,53 @@ function directStageResult(role: "plan" | "work" | "verify", requestId: string, 
     observed_tree_digest: "tree-1",
     context_digest: contextDigest,
     completed_at: "2026-07-23T00:00:01Z",
-    model_turn: stageModelTurn(role, "canceled"),
-    outcome: { kind: "canceled", sanitized_reason: "test cancellation" },
+    model_observation: stageModelTurn(role, String(outcome.kind)),
+    terminal: { kind: "result", outcome },
   };
+}
+
+function runtimeFailureStageResult(
+  role: "plan" | "work" | "verify",
+  requestId: string,
+  contextDigest = "context-1",
+) {
+  const result = semanticStageResult(role, requestId, { kind: role === "plan" ? "plan_blocked" : role === "work" ? "work_scope_conflict" : "verify_blocked" }, contextDigest);
+  return {
+    ...result,
+    model_observation: stageModelTurn(role, "runtime_failure"),
+    terminal: {
+      kind: "runtime_failure",
+      failure_kind: "provider_failure",
+      error_code: "provider_session_lost",
+      sanitized_reason: "The Provider session was lost.",
+      retryable: true,
+      action_required: "root_reconciliation",
+      continuity: { kind: "closed", append_outcome: "session_lost" },
+    },
+  };
+}
+
+function directStageResult(role: "plan" | "work" | "verify", requestId: string, contextDigest = "context-1") {
+  const outcome = role === "plan"
+    ? { kind: "plan_blocked", sanitized_reason: "The Plan is blocked.", attempts: [], evidence_refs: [] }
+    : role === "work"
+      ? { kind: "work_scope_conflict", sanitized_reason: "The Work scope conflicts.", evidence_refs: [] }
+      : { kind: "verify_blocked", target_revision: "head-1", sanitized_reason: "Verify is blocked.", evidence_refs: [] };
+  return semanticStageResult(role, requestId, outcome, contextDigest);
 }
 
 function directStageResultForRequest(body: Record<string, unknown>, closed = false) {
   const role = body.role as "plan" | "work" | "verify";
-  const result = directStageResult(role, body.request_id as string, body.context_digest as string);
+  const result = closed
+    ? runtimeFailureStageResult(role, body.request_id as string, body.context_digest as string)
+    : directStageResult(role, body.request_id as string, body.context_digest as string);
   const modelTurn = {
-    ...result.model_turn,
+    ...result.model_observation,
     turn_record_id: `${body.stage_execution_id}:${body.role_turn_id}`,
     stage_execution_id: body.stage_execution_id,
     role_session_id: body.role_session_id,
     role_turn_id: body.role_turn_id,
-    outcome: closed ? "execution_failed" : "canceled",
+    outcome: closed ? "runtime_failure" : role === "plan" ? "plan_blocked" : role === "work" ? "work_scope_conflict" : "verify_blocked",
   };
   return {
     ...result,
@@ -164,16 +227,8 @@ function directStageResultForRequest(body: Record<string, unknown>, closed = fal
     role_turn_id: body.role_turn_id,
     target_issue_id: body.target_issue_id,
     observed_tree_digest: body.observed_tree_digest,
-    model_turn: modelTurn,
-    outcome: closed
-      ? {
-        kind: "execution_failed",
-        error_code: "provider_session_lost",
-        sanitized_reason: "The Provider session was lost.",
-        retryable: true,
-        continuity: { kind: "closed", append_outcome: "session_lost" },
-      }
-      : result.outcome,
+    model_observation: modelTurn,
+    terminal: result.terminal,
   };
 }
 
@@ -304,6 +359,7 @@ function openInput(requestId = "request-1"): RootReconcilerOpenInput {
     rootIssueId: "root-1",
     profileId: "profile-1",
     modelSettings: { model: "gpt", reasoningEffort: "medium", isFastModeEnabled: false },
+    command: requirementCommand(),
     bootstrap: bootstrap(),
     limits: {
       maxContextBytes: 8_388_608,
@@ -318,8 +374,9 @@ function openInput(requestId = "request-1"): RootReconcilerOpenInput {
 
 function bootstrap() {
   const issue = {
-    issueId: "root-1", issueKind: "root" as const, title: "Root", description: "Root description",
-    status: "Todo" as const, isArchived: false, labels: [], remoteVersion: "root-v1",
+    issueId: "root-1", identifier: "SYM-1", issueKind: "root" as const, title: "Root", description: "Root description",
+    status: "Todo" as const, order: 0, isArchived: false, labels: [], remoteVersion: "root-v1",
+    createdAt: "2026-07-23T00:00:00Z",
   };
   return {
     rootSnapshot: {
@@ -330,14 +387,12 @@ function bootstrap() {
           policy: {
             maxCyclesPerRoot: 3,
             maxSameOpenFindingCycles: 2,
-            maxConsecutiveNoProgress: 2,
             maxCycleRepairAttempts: 0,
             deadlineAt: "2026-07-24T00:00:00Z",
           },
           view: {
             cycleCount: 0,
             openFindingPersistence: [],
-            consecutiveNoProgress: 0,
             activeCycleRepairAttempts: 0,
             isDeadlineExceeded: false,
             rootIsCanceled: false,
@@ -360,37 +415,33 @@ function bootstrap() {
   };
 }
 
-function rootDirective() {
+function requirementCommand() {
   return {
-    protocol_version: "1",
-    request_id: "request-1",
-    root_directive_id: "directive-1",
-    reconciler_session_id: "session-1",
-    reconciler_turn_id: "turn-1",
-    model_turn: rootModelTurn("turn-1"),
-    based_on_target_root_digest: "tree-1",
-    rationale: "Open the root.",
-    evidence_refs: [],
-    consumed_input_ids: [],
-    comment_replies: [],
-    action: { kind: "wait", reason_code: "initial_bootstrap", blocking_fact_refs: [{ reference_id: "bootstrap", source_kind: "linear_issue" }] },
+    semanticGate: "requirement_and_comment" as const,
+    trigger: "initial_definition" as const,
+    pendingInputRefs: [],
+    expectedOutputContract: "requirement_and_comment_intent.v1" as const,
+    subject: { rootDefinitionVersionOrDigest: "root-v1", activeCycleState: "absent" as const },
   };
 }
 
-function waitDirective(requestId: string, digest: string, turnId: string) {
+function requirementIntent(requestId = "request-1", digest = "tree-1", turnId = "turn-1") {
   return {
     protocol_version: "1",
     request_id: requestId,
-    root_directive_id: `directive-${turnId}`,
+    kind: "requirement_and_comment_intent",
+    semantic_gate: "requirement_and_comment",
+    intent_id: `intent-${turnId}`,
+    root_issue_id: "root-1",
     reconciler_session_id: "session-1",
     reconciler_turn_id: turnId,
     model_turn: rootModelTurn(turnId),
     based_on_target_root_digest: digest,
-    rationale: "Wait for the next durable fact.",
+    rationale: "Open the root.",
     evidence_refs: [],
     consumed_input_ids: [],
-    comment_replies: [],
-    action: { kind: "wait", reason_code: "human", blocking_fact_refs: [{ reference_id: "fact-1", source_kind: "result" }] },
+    comment_dispositions: [],
+    intent: { kind: "answer_comments", reason: "no_requirement_change" },
   };
 }
 
@@ -403,7 +454,7 @@ function rootModelTurn(turnId: string) {
     reconciler_turn_id: turnId,
     invocation_state: "confirmed",
     model: "gpt",
-    outcome: "directive_accepted",
+    outcome: "intent_accepted",
     usage: { status: "unavailable", reason: "provider_omitted" },
     terminal_at: "2026-07-23T00:00:01Z",
   };
@@ -437,6 +488,7 @@ function rootFailure(requestId: string, turnId: string, targetRootDigest: string
 function planFacts(): { cycle: RootCycleObservation } {
   const planIssue = {
     issueId: "plan-1",
+    identifier: "SYM-3",
     issueKind: "plan" as const,
     title: "Plan",
     description: [
@@ -450,15 +502,18 @@ function planFacts(): { cycle: RootCycleObservation } {
       "- npm test -w @symphony/conductor",
     ].join("\n"),
     status: "In Review" as const,
+    order: 1,
     isArchived: false,
     labels: ["symphony:kind/plan"],
     remoteVersion: "plan-v1",
+    createdAt: "2026-07-23T02:00:00Z",
   };
   return {
     cycle: {
       cycleIssue: {
-        issueId: "cycle-1", issueKind: "cycle", title: "Cycle", description: "Current Cycle",
-        status: "In Progress", isArchived: false, labels: ["symphony:kind/cycle"], remoteVersion: "cycle-v1",
+        issueId: "cycle-1", identifier: "SYM-2", issueKind: "cycle", title: "Cycle", description: "Current Cycle",
+        status: "In Progress", order: 0, isArchived: false, labels: ["symphony:kind/cycle"], remoteVersion: "cycle-v1",
+        createdAt: "2026-07-23T01:00:00Z",
       },
       cycleStatus: "In Progress",
       isArchived: false,
@@ -481,7 +536,7 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
         kind: "root_reconciler_opened",
         reconciler_session_id: "session-1",
         bootstrap_root_digest: "tree-1",
-        initial_result: rootDirective(),
+        initial_result: requirementIntent(),
       };
     }, calls),
     deadlineMs: 30_000,
@@ -495,8 +550,8 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   });
 
   const opened = await client.openRootReconciler(input);
-  assert.equal(opened.initialResult.kind, "directive");
-  if (opened.initialResult.kind === "directive") assert.equal(opened.initialResult.directive.action.kind, "wait");
+  assert.equal(opened.initialResult.kind, "intent");
+  if (opened.initialResult.kind === "intent") assert.equal(opened.initialResult.intent.intent.kind, "answer_comments");
   assert.equal(calls.length, 1);
   const sent = calls[0]!;
   assert.equal(sent.protocol_version, "1");
@@ -504,6 +559,7 @@ test("agent client sends the closed direct OpenRootReconcilerRequest", async () 
   assert.equal("payload" in sent, false);
   assert.equal(sent.root_issue_id, "root-1");
   assert.equal(sent.performer_profile_id, "profile-1");
+  assert.equal((sent.command as Record<string, unknown>).expected_output_contract, "requirement_and_comment_intent.v1");
   const root = ((sent.bootstrap as Record<string, unknown>).root_snapshot as Record<string, unknown>).root as Record<string, unknown>;
   const convergence = root.convergence as Record<string, unknown>;
   assert.equal((convergence.policy as Record<string, unknown>).max_cycles_per_root, 3);
@@ -545,6 +601,7 @@ test("agent client decodes a closed Root Reconciler failure without retaining a 
       sessionId: "session-1",
       reconcilerTurnId: "turn-2",
       observedAt: "2026-07-23T00:00:02Z",
+      command: requirementCommand(),
       delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
     }),
     /root_reconciler_session_profile_unknown/u,
@@ -563,7 +620,7 @@ test("agent client discards a session after an advance returns a closed Root fai
         kind: "root_reconciler_opened",
         reconciler_session_id: "session-1",
         bootstrap_root_digest: "tree-1",
-        initial_result: rootDirective(),
+        initial_result: requirementIntent(),
       }
       : rootFailure(requestId, "turn-2", "tree-2"), calls),
     deadlineMs: 30_000,
@@ -575,6 +632,7 @@ test("agent client discards a session after an advance returns a closed Root fai
     sessionId: "session-1",
     reconcilerTurnId: "turn-2",
     observedAt: "2026-07-23T00:00:02Z",
+    command: requirementCommand(),
     delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
   });
 
@@ -588,6 +646,7 @@ test("agent client discards a session after an advance returns a closed Root fai
       sessionId: "session-1",
       reconcilerTurnId: "turn-3",
       observedAt: "2026-07-23T00:00:03Z",
+      command: requirementCommand(),
       delta: { baseRootDigest: "tree-2", targetRootDigest: "tree-3", changes: [], pendingInputIds: [] },
     }),
     /root_reconciler_session_profile_unknown/u,
@@ -603,9 +662,9 @@ test("agent client carries native Plan Issue and convergence facts in Root boots
     channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
       ? {
         protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: waitDirective(requestId, "tree-1", "turn-1"),
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: requirementIntent(requestId, "tree-1", "turn-1"),
       }
-      : waitDirective(requestId, "tree-2", "advance-turn"), calls),
+      : requirementIntent(requestId, "tree-2", "advance-turn"), calls),
     deadlineMs: 30_000,
   });
   const input = openInput();
@@ -628,6 +687,7 @@ test("agent client carries native Plan Issue and convergence facts in Root boots
     sessionId: "session-1",
     reconcilerTurnId: "advance-turn",
     observedAt: "2026-07-23T00:00:01Z",
+    command: requirementCommand(),
     delta: {
       baseRootDigest: "tree-1",
       targetRootDigest: "tree-2",
@@ -686,7 +746,7 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
             ? {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
               reconciler_session_id: "session-1",
-              bootstrap_root_digest: "tree-1", initial_result: rootDirective(),
+              bootstrap_root_digest: "tree-1", initial_result: requirementIntent(),
             }
             : {
               protocol_version: "1", request_id: requestId, kind: "root_reconciler_closed", root_issue_id: "root-1",
@@ -717,7 +777,7 @@ test("agent client reuses one Profile channel for a Root session lifecycle", asy
 test("agent client decodes direct role-specific results", async () => {
   const channelFactory = channelFactoryFor(({ requestId, body }) => {
     const role = body.role as "plan" | "work" | "verify";
-    if (role === "plan") decodeConductorPerformerPlanTurnRequest(body as JsonValue);
+    if (role === "plan") decodeConductorPerformerPlanRoleContextInitial(body.role_context_update as JsonValue);
     if (role === "work") decodeConductorPerformerWorkTurnRequest(body as JsonValue);
     if (role === "verify") decodeConductorPerformerVerifyTurnRequest(body as JsonValue);
     return directStageResult(role, requestId, body.context_digest as string) as JsonValue;
@@ -737,8 +797,120 @@ test("agent client decodes direct role-specific results", async () => {
         : await client.executeVerifyTurn(stageInput(role));
     assert.equal(result.role, role);
     assert.equal(result.resultId, `${role}-execution`);
-    assert.equal(result.outcome.kind, "canceled");
+    assertSemanticStageResponse(result);
+    assert.equal(result.outcome.kind, role === "plan" ? "plan_blocked" : role === "work" ? "work_scope_conflict" : "verify_blocked");
   }
+});
+
+test("agent client preserves pending Stage close identity and retries only the remaining role", async () => {
+  const calls: Record<string, unknown>[] = [];
+  let closeAttempt = 0;
+  let processGeneration = "";
+  const channelFactory: PerformerAgentChannelFactory = {
+    open(input) {
+      processGeneration = String(input.environment.SYMPHONY_PERFORMER_PROCESS_GENERATION);
+      return {
+        async request({ requestId, body }) {
+          calls.push(body);
+          if (body.kind !== "close_cycle_stage_sessions") {
+            const role = body.role as "plan" | "work";
+            return directStageResult(role, requestId, body.context_digest as string) as JsonValue;
+          }
+          closeAttempt += 1;
+          return {
+            protocol_version: "1",
+            command_id: requestId,
+            root_issue_id: "root-1",
+            cycle_issue_id: "cycle-1",
+            process_generation: processGeneration,
+            kind: closeAttempt === 1 ? "close_incomplete" : "all_closed",
+            role_results: closeAttempt === 1 ? {
+              plan: { kind: "closed", role: "plan", role_session_id: "plan-session", close_outcome: "closed_now" },
+              work: {
+                kind: "close_pending", role: "work", role_session_id: "work-session",
+                close_reason: "provider_shutdown_pending", sanitized_reason: "Close is pending.",
+                retryable: true, action_required: "retry_close_only",
+              },
+              verify: { kind: "closed", role: "verify", role_session_id: null, close_outcome: "already_absent" },
+            } : {
+              plan: { kind: "closed", role: "plan", role_session_id: null, close_outcome: "already_absent" },
+              work: { kind: "closed", role: "work", role_session_id: "work-session", close_outcome: "closed_now" },
+              verify: { kind: "closed", role: "verify", role_session_id: null, close_outcome: "already_absent" },
+            },
+          } as unknown as JsonValue;
+        },
+        async close() {},
+      };
+    },
+  };
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory,
+    deadlineMs: 30_000,
+  });
+
+  await client.executePlanTurn(stageInput("plan"));
+  await client.executeWorkTurn(stageInput("work"));
+  const first = await client.closeCycleStageSessions({
+    requestId: "close-1", rootIssueId: "root-1", cycleIssueId: "cycle-1",
+    reason: "cycle_terminal",
+  });
+  assert.equal(first.kind, "close_incomplete");
+  const firstClose = calls.at(-1)!;
+  const firstExpected = firstClose.expected_sessions as { plan: { kind: string }; work: { kind: string } };
+  assert.equal(firstExpected.plan.kind, "expected");
+  assert.equal(firstExpected.work.kind, "expected");
+
+  const second = await client.closeCycleStageSessions({
+    requestId: "close-2", rootIssueId: "root-1", cycleIssueId: "cycle-1",
+    reason: "cycle_terminal",
+  });
+  assert.equal(second.kind, "all_closed");
+  const secondClose = calls.at(-1)!;
+  const secondExpected = secondClose.expected_sessions as { plan: { kind: string }; work: { kind: string } };
+  assert.equal(secondExpected.plan.kind, "absent");
+  assert.equal(secondExpected.work.kind, "expected");
+});
+
+test("agent client rejects an all-closed result that loses an expected role identity", async () => {
+  let processGeneration = "";
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: {
+      open(input) {
+        processGeneration = String(input.environment.SYMPHONY_PERFORMER_PROCESS_GENERATION);
+        return {
+          async request({ requestId, body }) {
+            if (body.kind !== "close_cycle_stage_sessions") {
+              return directStageResult("plan", requestId, body.context_digest as string) as JsonValue;
+            }
+            return {
+              protocol_version: "1", command_id: requestId,
+              root_issue_id: "root-1", cycle_issue_id: "cycle-1",
+              process_generation: processGeneration, kind: "all_closed",
+              role_results: {
+                plan: { kind: "closed", role: "plan", role_session_id: null, close_outcome: "already_absent" },
+                work: { kind: "closed", role: "work", role_session_id: null, close_outcome: "already_absent" },
+                verify: { kind: "closed", role: "verify", role_session_id: null, close_outcome: "already_absent" },
+              },
+            } as JsonValue;
+          },
+          async close() {},
+        };
+      },
+    },
+    deadlineMs: 30_000,
+  });
+  await client.executePlanTurn(stageInput("plan"));
+
+  await assert.rejects(
+    client.closeCycleStageSessions({
+      requestId: "close-invalid", rootIssueId: "root-1", cycleIssueId: "cycle-1", reason: "cycle_terminal",
+    }),
+    /cycle_stage_close_postcondition_invalid/u,
+  );
 });
 
 test("agent client preserves every validated completed Plan field", async () => {
@@ -754,6 +926,7 @@ test("agent client preserves every validated completed Plan field", async () => 
 
   const result = await client.executePlanTurn(stageInput("plan"));
 
+  assertSemanticStageResponse(result);
   assert.deepEqual(result.outcome, {
     kind: "plan_completed",
     planContract: {
@@ -795,6 +968,264 @@ test("agent client preserves every validated completed Plan field", async () => 
   });
 });
 
+test("agent client preserves the closed Plan information proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("plan", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("plan", "plan_needs_information"),
+      outcome: {
+        kind: "plan_needs_information",
+        missing_questions: ["Which deployment boundary is authorized?"],
+        impact: "The Plan cannot define a valid acceptance target.",
+        evidence_refs: [{ reference_id: "root-comment-1", source_kind: "linear_comment" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executePlanTurn(stageInput("plan"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "plan_needs_information",
+    missingQuestions: ["Which deployment boundary is authorized?"],
+    impact: "The Plan cannot define a valid acceptance target.",
+    evidenceRefs: [{ referenceId: "root-comment-1", sourceKind: "linear_comment" }],
+  });
+});
+
+test("agent client preserves the closed Plan blocked proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("plan", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("plan", "plan_blocked"),
+      outcome: {
+        kind: "plan_blocked",
+        sanitized_reason: "The repository policy is unavailable.",
+        attempts: ["Read the repository policy from the checked-out revision."],
+        evidence_refs: [{ reference_id: "policy-read-1", source_kind: "check" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executePlanTurn(stageInput("plan"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "plan_blocked",
+    sanitizedReason: "The repository policy is unavailable.",
+    attempts: ["Read the repository policy from the checked-out revision."],
+    evidenceRefs: [{ referenceId: "policy-read-1", sourceKind: "check" }],
+  });
+});
+
+test("agent client preserves an independent Plan runtime failure", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...runtimeFailureStageResult("plan", requestId, body.context_digest as string),
+      terminal: {
+        kind: "runtime_failure",
+        failure_kind: "provider_failure",
+        error_code: "provider_append_rejected",
+        sanitized_reason: "The Provider rejected the turn append.",
+        retryable: true,
+        action_required: "root_reconciliation",
+        continuity: {
+          kind: "retained",
+          append_outcome: "not_accepted",
+          provider_visible_context_digest: "provider-context-1",
+        },
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executePlanTurn(stageInput("plan"));
+
+  assert.equal("terminalKind" in result, true);
+  if (!("terminalKind" in result)) throw new Error("expected a Stage runtime failure");
+  assert.equal(result.terminalKind, "runtime_failure");
+  assert.equal(result.errorCode, "provider_append_rejected");
+  assert.deepEqual(result.continuity, {
+    kind: "retained",
+    appendOutcome: "not_accepted",
+    providerVisibleContextDigest: "provider-context-1",
+  });
+});
+
+test("agent client rejects a Work outcome at the Plan result boundary", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("plan", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("plan", "work_completed"),
+      outcome: {
+        kind: "work_completed",
+        actual_changes: {
+          summary: "This result belongs to Work.",
+          changed_paths: [],
+          created_paths: [],
+          deleted_paths: [],
+          observed_head_revision: "head-1",
+        },
+        checks: [],
+        artifacts: [],
+        discovered_facts: [],
+        evidence_refs: [],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  await assert.rejects(
+    client.executePlanTurn(stageInput("plan")),
+    /plan_result_response_contract_invalid|expected exactly one union variant/u,
+  );
+});
+
+test("agent client preserves the closed completed Work proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("work", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("work", "work_completed"),
+      outcome: {
+        kind: "work_completed",
+        actual_changes: {
+          baseline_revision: "base-1",
+          observed_head_revision: "head-1",
+          changed_paths: ["apps/conductor/src/work.ts"],
+          summary: "Implemented the selected Work node.",
+        },
+        checks: [{
+          check_key: "work-test",
+          command_or_method: "npm test -w @symphony/conductor",
+          outcome: "passed",
+          evidence_ref: { reference_id: "work-test-result", source_kind: "check" },
+        }],
+        artifacts: [{ reference_id: "head-1", source_kind: "git" }],
+        discovered_facts: ["The existing interface is shared by Verify."],
+        evidence_refs: [{ reference_id: "work-issue-1", source_kind: "linear_issue" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeWorkTurn(stageInput("work"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "work_completed",
+    actualChanges: {
+      baselineRevision: "base-1",
+      observedHeadRevision: "head-1",
+      changedPaths: ["apps/conductor/src/work.ts"],
+      summary: "Implemented the selected Work node.",
+    },
+    checks: [{
+      checkKey: "work-test",
+      commandOrMethod: "npm test -w @symphony/conductor",
+      outcome: "passed",
+      evidenceRef: { referenceId: "work-test-result", sourceKind: "check" },
+    }],
+    artifacts: [{ referenceId: "head-1", sourceKind: "git" }],
+    discoveredFacts: ["The existing interface is shared by Verify."],
+    evidenceRefs: [{ referenceId: "work-issue-1", sourceKind: "linear_issue" }],
+  });
+});
+
+test("agent client preserves the closed blocked Work proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("work", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("work", "work_blocked"),
+      outcome: {
+        kind: "work_blocked",
+        blocker_kind: "repository_policy",
+        sanitized_reason: "The required policy cannot be read.",
+        attempted_approaches: ["Read the policy from the Work revision."],
+        failed_check_evidence: [{ reference_id: "policy-check", source_kind: "check" }],
+        discovered_facts: ["The policy path is absent."],
+        suggested_dag_changes: ["Add a policy recovery Work node."],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeWorkTurn(stageInput("work"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "work_blocked",
+    blockerKind: "repository_policy",
+    sanitizedReason: "The required policy cannot be read.",
+    attemptedApproaches: ["Read the policy from the Work revision."],
+    failedCheckEvidence: [{ referenceId: "policy-check", sourceKind: "check" }],
+    discoveredFacts: ["The policy path is absent."],
+    suggestedDagChanges: ["Add a policy recovery Work node."],
+  });
+});
+
+test("agent client preserves a closed Work special result", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("work", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("work", "work_scope_conflict"),
+      outcome: {
+        kind: "work_scope_conflict",
+        sanitized_reason: "The requested change is outside the approved Plan scope.",
+        evidence_refs: [{ reference_id: "plan-contract-1", source_kind: "result" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeWorkTurn(stageInput("work"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "work_scope_conflict",
+    sanitizedReason: "The requested change is outside the approved Plan scope.",
+    evidenceRefs: [{ referenceId: "plan-contract-1", sourceKind: "result" }],
+  });
+});
+
+test("agent client rejects a Verify outcome at the Work result boundary", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("work", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("work", "verify_blocked"),
+      outcome: {
+        kind: "verify_blocked",
+        target_revision: "head-1",
+        sanitized_reason: "This outcome belongs to Verify.",
+        evidence_refs: [],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  await assert.rejects(
+    client.executeWorkTurn(stageInput("work")),
+    /work_result_response_contract_invalid|expected exactly one union variant/u,
+  );
+});
+
 test("agent client preserves every validated Verify Finding field", async () => {
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
@@ -808,10 +1239,11 @@ test("agent client preserves every validated Verify Finding field", async () => 
 
   const result = await client.executeVerifyTurn(stageInput("verify"));
 
+  assertSemanticStageResponse(result);
   assert.deepEqual(result.outcome, {
     kind: "verify_changes_required",
-    verifiedRevision: "head-1",
-    conclusion: "changes_required",
+    targetRevision: "head-1",
+    acceptanceResults: [],
     findings: [{
       findingId: "finding-1",
       category: "code",
@@ -820,7 +1252,139 @@ test("agent client preserves every validated Verify Finding field", async () => 
       evidenceRefs: [{ referenceId: "parser-regression", sourceKind: "check" }],
       relatedWorkIssueIds: ["work-1"],
     }],
+    checks: [],
   });
+});
+
+test("agent client preserves the closed passed Verify proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("verify", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("verify", "verify_passed"),
+      outcome: {
+        kind: "verify_passed",
+        target_revision: "head-1",
+        acceptance_results: [{
+          criterion_key: "acceptance-1",
+          outcome: "passed",
+          summary: "The contract is satisfied.",
+        }],
+        checks: [{
+          check_key: "verify-test",
+          command_or_method: "npm test -w @symphony/conductor",
+          outcome: "passed",
+          evidence_ref: { reference_id: "verify-test-result", source_kind: "check" },
+        }],
+        resolved_finding_ids: ["finding-previous-1"],
+        evidence_refs: [{ reference_id: "head-1", source_kind: "git" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeVerifyTurn(stageInput("verify"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "verify_passed",
+    targetRevision: "head-1",
+    acceptanceResults: [{
+      criterionKey: "acceptance-1",
+      outcome: "passed",
+      summary: "The contract is satisfied.",
+    }],
+    checks: [{
+      checkKey: "verify-test",
+      commandOrMethod: "npm test -w @symphony/conductor",
+      outcome: "passed",
+      evidenceRef: { referenceId: "verify-test-result", sourceKind: "check" },
+    }],
+    resolvedFindingIds: ["finding-previous-1"],
+    evidenceRefs: [{ referenceId: "head-1", sourceKind: "git" }],
+  });
+});
+
+test("agent client preserves the closed inconclusive Verify proof", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("verify", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("verify", "verify_inconclusive"),
+      outcome: {
+        kind: "verify_inconclusive",
+        target_revision: "head-1",
+        missing_evidence: ["The deployment check result is unavailable."],
+        attempted_methods: ["Read the deployment check artifact."],
+        retryable: true,
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeVerifyTurn(stageInput("verify"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "verify_inconclusive",
+    targetRevision: "head-1",
+    missingEvidence: ["The deployment check result is unavailable."],
+    attemptedMethods: ["Read the deployment check artifact."],
+    retryable: true,
+  });
+});
+
+test("agent client preserves a closed Verify contract violation", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("verify", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("verify", "verify_plan_contract_violation"),
+      outcome: {
+        kind: "verify_plan_contract_violation",
+        target_revision: "head-1",
+        sanitized_reason: "The Verify target does not match the approved Plan Contract.",
+        evidence_refs: [{ reference_id: "plan-contract-1", source_kind: "result" }],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  const result = await client.executeVerifyTurn(stageInput("verify"));
+
+  assertSemanticStageResponse(result);
+  assert.deepEqual(result.outcome, {
+    kind: "verify_plan_contract_violation",
+    targetRevision: "head-1",
+    sanitizedReason: "The Verify target does not match the approved Plan Contract.",
+    evidenceRefs: [{ referenceId: "plan-contract-1", sourceKind: "result" }],
+  });
+});
+
+test("agent client rejects a Plan outcome at the Verify result boundary", async () => {
+  const client = new SessionPerformerAgentClientImpl({
+    executable: "performer",
+    environment: () => ({}),
+    channelFactory: channelFactoryFor(({ requestId, body }) => ({
+      ...directStageResult("verify", requestId, body.context_digest as string),
+      model_turn: stageModelTurn("verify", "plan_needs_information"),
+      outcome: {
+        kind: "plan_needs_information",
+        missing_questions: ["This outcome belongs to Plan."],
+        impact: "Verify cannot return it.",
+        evidence_refs: [],
+      },
+    }) as JsonValue),
+    deadlineMs: 30_000,
+  });
+
+  await assert.rejects(
+    client.executeVerifyTurn(stageInput("verify")),
+    /verify_result_response_contract_invalid|expected exactly one union variant/u,
+  );
 });
 
 test("agent client sends role-specific closed stage contexts", async () => {
@@ -908,6 +1472,8 @@ test("agent client isolates Stage baselines, sends only changed delta sources, a
   assert.equal(updates[1]!.changes![0]!.source_id, "plan-1");
   assert.equal(updates[1]!.changes![0]!.replaces_source_version_or_digest, "plan-v1");
   assert.notEqual(calls[0]!.context_digest, calls[2]!.context_digest);
+  assert.equal(calls[0]!.session_generation, calls[1]!.session_generation);
+  assert.notEqual(calls[3]!.session_generation, calls[4]!.session_generation);
 });
 
 test("agent client keeps a long Work execution goal within the Plan Contract scope bound", async () => {
@@ -940,23 +1506,24 @@ test("agent client rejects the retired stage_result envelope", async () => {
   await assert.rejects(client.executePlanTurn(stageInput("plan")), /unknown field|expected exactly one union variant|stage_result|plan_result_response_contract_invalid/u);
 });
 
-test("agent client normalizes the Root directive wire fields", async () => {
+test("agent client normalizes the gate-specific Root intent wire fields", async () => {
   const client = new SessionPerformerAgentClientImpl({
     executable: "performer",
     environment: () => ({}),
     channelFactory: channelFactoryFor(({ requestId, body }) => body.kind === "open_root_reconciler"
       ? {
         protocol_version: "1", request_id: requestId, kind: "root_reconciler_opened",
-        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: rootDirective(),
+        reconciler_session_id: "session-1", bootstrap_root_digest: "tree-1", initial_result: requirementIntent(),
       }
       : {
-        protocol_version: "1", request_id: requestId, root_directive_id: "directive-1",
-        reconciler_session_id: "session-1", reconciler_turn_id: "turn-1", based_on_target_root_digest: "tree-1",
-        model_turn: rootModelTurn("turn-1"),
-        rationale: "execute the plan", evidence_refs: [], consumed_input_ids: [], comment_replies: [],
-        action: {
-          kind: "execute_plan", cycle_issue_id: "cycle-1", plan_issue_id: "plan-1", plan_goal: "plan",
-          required_outputs: [], prior_plan_result_ids: [], human_resolution_ids: [],
+        ...requirementIntent(requestId, "tree-2", "advance-turn"),
+        intent: {
+          kind: "define_requirement",
+          requirement: {
+            objective: "Build the feature", requested_scope: "Root scope",
+            constraints: [], acceptance_criteria: ["The feature works"],
+          },
+          active_cycle_impact: "initial",
         },
       } as JsonValue),
     deadlineMs: 30_000,
@@ -968,16 +1535,14 @@ test("agent client normalizes the Root directive wire fields", async () => {
     sessionId: "session-1",
     reconcilerTurnId: "advance-turn",
     observedAt: "2026-07-23T00:00:01Z",
+    command: requirementCommand(),
     delta: { baseRootDigest: "tree-1", targetRootDigest: "tree-2", changes: [], pendingInputIds: [] },
   });
 
-  assert.equal(result.kind, "directive");
-  if (result.kind === "directive") {
-    assert.equal(result.directive.action.kind, "execute_plan");
-    if (result.directive.action.kind === "execute_plan") {
-      assert.equal(result.directive.action.planIssueId, "plan-1");
-      assert.equal(result.directive.action.cycleIssueId, "cycle-1");
-    }
+  assert.equal(result.kind, "intent");
+  if (result.kind === "intent" && result.intent.semanticGate === "requirement_and_comment" && result.intent.intent.kind === "define_requirement") {
+    assert.equal(result.intent.intent.requirement.requestedScope, "Root scope");
+    assert.equal(result.intent.intent.activeCycleImpact, "initial");
   }
 });
 

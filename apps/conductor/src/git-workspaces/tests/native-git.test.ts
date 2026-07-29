@@ -26,16 +26,17 @@ test("Root worktree gate reads fresh, recoverable, invalid, conflicting, and val
     rootIssueId: "root-1",
     rootIdentifier: "SYM-1",
     baseBranch: "main",
+    generationOrdinal: 1,
     requiredRevisions: [base],
   };
 
   assert.deepEqual(await git.inspectRootWorktreeGate({ ...common, executionKind: "fresh" }), {
-    result: { kind: "fresh_missing", repositoryIdentity: "repository-1", baseBranch: "main", baseRevision: base },
+    result: { kind: "fresh_missing", repositoryIdentity: "repository-1", generationOrdinal: 1, branch: "symphony/runs/sym-1", baseBranch: "main", baseRevision: base },
   });
   await assert.rejects(access(worktrees));
   await runCommand("git", ["-C", repository, "branch", "symphony/runs/sym-1", base]);
   assert.deepEqual(await git.inspectRootWorktreeGate({ ...common, executionKind: "existing" }), {
-    result: { kind: "recoverable_missing", repositoryIdentity: "repository-1", branch: "symphony/runs/sym-1", headRevision: base },
+    result: { kind: "recoverable_missing", repositoryIdentity: "repository-1", generationOrdinal: 1, branch: "symphony/runs/sym-1", headRevision: base },
   });
 
   const missing = await git.inspectRootWorktreeGate({ ...common, rootIdentifier: "SYM-2", executionKind: "existing" });
@@ -47,13 +48,88 @@ test("Root worktree gate reads fresh, recoverable, invalid, conflicting, and val
   assert.equal(conflict.result.kind, "execution_generation_invalid");
   assert.equal(conflict.result.kind === "execution_generation_invalid" && conflict.result.reason, "worktree_identity_conflict");
 
-  const workspace = await materializeWorkspace(git);
+  const workspace = await materializeWorkspace(git, { executionKind: "existing" });
   const valid = await git.inspectRootWorktreeGate({ ...common, executionKind: "existing" });
   assert.equal(valid.result.kind, "valid");
   if (!("workspace" in valid)) throw new Error("valid_gate_expected");
   assert.equal(valid.workspace.worktreePath, workspace.worktreePath);
   assert.equal(valid.snapshot.head, base);
   assert.equal(valid.result.isClean, true);
+
+  await writeFile(path.join(workspace.worktreePath, "README.md"), "changed\n");
+  await writeFile(path.join(workspace.worktreePath, "new file.txt"), "new\n");
+  const changed = await git.inspectRootWorktreeGate({ ...common, executionKind: "existing" });
+  assert.equal(changed.result.kind, "valid");
+  if (changed.result.kind !== "valid") throw new Error("changed_gate_expected");
+  assert.equal(changed.result.isClean, false);
+  assert.deepEqual(changed.result.changedPaths, ["README.md", "new file.txt"]);
+});
+
+test("successor generation uses a distinct branch and path from the freshly read base", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "symphony-git-successor-"));
+  const repository = path.join(root, "repository");
+  const worktrees = path.join(root, "worktrees");
+  await runCommand("git", ["init", "-b", "main", repository]);
+  await runCommand("git", ["-C", repository, "config", "user.email", "test@example.com"]);
+  await runCommand("git", ["-C", repository, "config", "user.name", "Symphony Test"]);
+  await writeFile(path.join(repository, "README.md"), "initial\n");
+  await runCommand("git", ["-C", repository, "add", "README.md"]);
+  await runCommand("git", ["-C", repository, "commit", "-m", "initial"]);
+  const base = (await runCommand("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim();
+  await runCommand("git", ["-C", repository, "branch", "symphony/runs/sym-1", base]);
+
+  const git = new NativeGitWorkspaceImpl(repository, worktrees);
+  await runCommand("git", ["-C", repository, "branch", "symphony/runs/sym-2-g2", base]);
+  const collision = await git.inspectRootWorktreeGate({
+    repositoryIdentity: "repository-1",
+    rootIssueId: "root-2",
+    rootIdentifier: "SYM-2",
+    baseBranch: "main",
+    executionKind: "fresh",
+    generationOrdinal: 2,
+    requiredRevisions: [],
+  });
+  assert.deepEqual(collision, {
+    result: {
+      kind: "execution_generation_invalid",
+      repositoryIdentity: "repository-1",
+      expectedBranch: "symphony/runs/sym-2-g2",
+      reason: "generation_branch_conflict",
+    },
+  });
+  const input = {
+    repositoryIdentity: "repository-1",
+    rootIssueId: "root-1",
+    rootIdentifier: "SYM-1",
+    baseBranch: "main",
+    executionKind: "fresh" as const,
+    generationOrdinal: 2,
+    requiredRevisions: [],
+  };
+  const gate = await git.inspectRootWorktreeGate(input);
+  assert.deepEqual(gate, {
+    result: {
+      kind: "fresh_missing",
+      repositoryIdentity: "repository-1",
+      generationOrdinal: 2,
+      branch: "symphony/runs/sym-1-g2",
+      baseBranch: "main",
+      baseRevision: base,
+    },
+  });
+  if (gate.result.kind !== "fresh_missing") throw new Error("fresh_missing_gate_expected");
+
+  const materialized = await git.materializeRootWorkspace({
+    repositoryIdentity: input.repositoryIdentity,
+    rootIssueId: input.rootIssueId,
+    rootIdentifier: input.rootIdentifier,
+    baseBranch: input.baseBranch,
+    generationOrdinal: input.generationOrdinal,
+    expectedGate: gate.result,
+  });
+  assert.equal(materialized.workspace.branch, "symphony/runs/sym-1-g2");
+  assert.equal(materialized.workspace.worktreePath, path.join(worktrees, "root-1-g2"));
+  assert.equal(materialized.snapshot.head, base);
 });
 
 test("Git workspace returns bounded facts and identity-checked commits", async () => {
@@ -172,6 +248,7 @@ test("Git workspace materialization rejects a stale gate without mutation", asyn
     rootIssueId: "root-1",
     rootIdentifier: "SYM-1",
     baseBranch: "main",
+    generationOrdinal: 1,
     expectedGate: gate.result,
   }), /git_workspace_gate_stale/);
   await assert.rejects(access(worktrees));
@@ -192,6 +269,7 @@ async function materializeWorkspace(
     rootIssueId: input.rootIssueId,
     rootIdentifier: input.rootIdentifier,
     baseBranch: input.baseBranch,
+    generationOrdinal: input.generationOrdinal,
     expectedGate: gate.result,
   })).workspace;
 }
@@ -201,6 +279,7 @@ function gateInput(overrides: Partial<{
   rootIssueId: string;
   rootIdentifier: string;
   baseBranch: string;
+  generationOrdinal: number;
   executionKind: "fresh" | "existing";
   requiredRevisions: string[];
 }> = {}) {
@@ -209,6 +288,7 @@ function gateInput(overrides: Partial<{
     rootIssueId: "root-1",
     rootIdentifier: "SYM-1",
     baseBranch: "main",
+    generationOrdinal: 1,
     executionKind: "fresh" as const,
     requiredRevisions: [],
     ...overrides,

@@ -1,12 +1,15 @@
 import type { GitWorkspace, GitWorkspaceSnapshot, RootWorktreeGateResult } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type {
+  ActualChanges,
+  CheckResult,
   EvidenceReference,
   FindingProposal,
   PlanContractProposal,
   ProposedWorkDag,
   RootReconcilerModelTurnRecord,
   StageModelTurnRecord,
+  VerifyCriterionResult,
 } from "./StageContracts.js";
 import type { RootConvergencePolicySnapshot, RootConvergenceView } from "./RootConvergence.js";
 import type { DiscoveredRoot } from "./RootModels.js";
@@ -21,7 +24,7 @@ export type RootActorKind = "human" | "symphony" | "linear_integration" | "exter
 export type LinearFactState =
   | "Draft" | "Todo" | "Planning" | "Sealed" | "Executing" | "Verifying" | "In Progress"
   | "In Review" | "Needs Approval" | "Needs Info" | "Inconclusive" | "Escalated" | "Approved" | "Rejected" | "Answered" | "Succeeded"
-  | "Changes Required" | "Done" | "Canceled" | "Failed";
+  | "Changes Required" | "Done" | "Interrupted" | "Canceled" | "Failed";
 
 interface RootReconciliationViewBase {
   root: DiscoveredRoot;
@@ -65,16 +68,20 @@ export interface RootCoverage {
 
 export interface RootFactIssue {
   issueId: string;
+  identifier?: string;
   issueKind: RootFactIssueKind;
   parentIssueId?: string;
   creatorUserId?: string;
   assigneeUserId?: string;
+  statusId?: string;
   title: string;
   description: string;
   status: LinearFactState;
+  order: number;
   isArchived: boolean;
   labels: string[];
   remoteVersion: string;
+  createdAt: string;
 }
 
 export interface RootFactRelation {
@@ -181,7 +188,7 @@ export interface RootGitFacts {
 }
 
 export interface MechanicalViolation {
-  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "archived_dependency" | "invalid_tree";
+  violationKind: "multiple_nonterminal_cycles" | "canceled_root_has_active_cycle" | "invalid_tree";
   sourceIssueIds: string[];
   summary: string;
 }
@@ -206,6 +213,60 @@ export interface RootBootstrap {
   rootDigest: string;
   pendingInputIds: string[];
 }
+
+export interface PendingRootInputRef {
+  sourceKind: "comment_body" | "comment_thread_state" | "issue_activity";
+  inputId: string;
+  nativeSourceIdentity: string;
+  sourceVersionOrDigest: string;
+}
+
+interface RootSemanticGateCommandBase {
+  pendingInputRefs: PendingRootInputRef[];
+}
+
+export type RootSemanticGateCommand =
+  | (RootSemanticGateCommandBase & {
+    semanticGate: "requirement_and_comment";
+    trigger: "initial_definition" | "human_comment" | "requirement_change";
+    expectedOutputContract: "requirement_and_comment_intent.v1";
+    subject: { rootDefinitionVersionOrDigest: string; activeCycleState: "absent" | "nonterminal" | "terminal" };
+  })
+  | (RootSemanticGateCommandBase & {
+    semanticGate: "plan_human_decision";
+    trigger: "plan_approval_reply";
+    expectedOutputContract: "plan_human_decision_intent.v1";
+    subject: {
+      planIssueId: string; planContentDigest: string; approvalThreadRootCommentId: string;
+      decisionReplyCommentId: string; decisionReplyBodyDigest: string; actorId: string;
+      actorAuthorization: "authorized";
+    };
+  })
+  | (RootSemanticGateCommandBase & {
+    semanticGate: "recovery_strategy";
+    trigger: "stage_interrupted" | "stage_blocked" | "stage_failed" | "stage_inconclusive"
+      | "finding_set_open" | "plan_rejected" | "execution_generation_invalidated" | "convergence_limit_reached"
+      | "delivery_changes_requested" | "delivery_closed_unmerged" | "delivery_head_changed";
+    expectedOutputContract: "recovery_strategy_intent.v1";
+    subject: {
+      kind: "stage_attempt" | "plan" | "cycle" | "execution_generation" | "finding_set" | "delivery";
+      subjectId: string; subjectVersionOrDigest: string;
+      sourceKind: "stage_result" | "human_decision" | "native_activity" | "finding_state" | "mechanical_convergence" | "remote_scm";
+    };
+  })
+  | (RootSemanticGateCommandBase & {
+    semanticGate: "terminal_review";
+    trigger: "cycle_terminal";
+    expectedOutputContract: "terminal_review_intent.v1";
+    subject: {
+      terminalCycleIssueId: string; terminalCycleVersionOrDigest: string;
+      cycleOutcome: "successful" | "recovery_exhausted" | "recovery_abandoned" | "canceled";
+      rootRequirementDigest: string; exactRevision: string;
+      verifyClassification: "passed" | "failed" | "inconclusive" | "absent";
+      findingClassification: "none_open" | "open";
+      successorCyclePolicy: "allowed" | "cycle_limit_reached" | "root_deadline_reached";
+    };
+  });
 
 export type RootContextSourceKind =
   | "issue" | "comment" | "comment_thread" | "activity"
@@ -478,6 +539,69 @@ export interface CancelRootDirective { kind: "cancel_root"; reason: string; acti
 export interface WaitDirective { kind: "wait"; reasonCode: string; blockingFactRefs: EvidenceRef[]; }
 export interface AcknowledgeDirective { kind: "acknowledge"; reason: string; continueExecutionId?: string; }
 
+export type RootCommentDisposition =
+  | { kind: "applied"; sourceInputId: string; source: RootCommentDispositionSource; summary: string }
+  | { kind: "not_applied"; sourceInputId: string; source: RootCommentDispositionSource; reason: string }
+  | { kind: "needs_response"; sourceInputId: string; source: RootCommentDispositionSource; reply: string }
+  | { kind: "answer_only"; sourceInputId: string; source: RootCommentDispositionSource; answer: string };
+
+export type RootCommentDispositionSource =
+  | { kind: "comment_body"; commentId: string; commentBodyDigest: string }
+  | { kind: "comment_thread_state"; commentId: string; threadRootCommentId: string; threadState: "resolved" | "unresolved" };
+
+interface RootSemanticIntentBase {
+  protocolVersion: 1;
+  requestId: string;
+  intentId: string;
+  rootIssueId: string;
+  reconcilerSessionId: string;
+  reconcilerTurnId: string;
+  modelTurn: RootReconcilerModelTurnRecord;
+  basedOnTargetRootDigest: string;
+  rationale: string;
+  evidenceRefs: EvidenceRef[];
+  consumedInputIds: string[];
+  commentDispositions: RootCommentDisposition[];
+}
+
+export type RootSemanticIntent =
+  | (RootSemanticIntentBase & {
+    kind: "requirement_and_comment_intent";
+    semanticGate: "requirement_and_comment";
+    intent:
+      | { kind: "define_requirement"; requirement: { objective: string; requestedScope: string; constraints: string[]; acceptanceCriteria: string[] }; activeCycleImpact: "initial" | "compatible" | "requires_recovery" }
+      | { kind: "request_information"; question: string; context: string; options: string[] }
+      | { kind: "answer_comments"; reason: "no_requirement_change" };
+  })
+  | (RootSemanticIntentBase & {
+    kind: "plan_human_decision_intent";
+    semanticGate: "plan_human_decision";
+    intent:
+      | { kind: "approve_plan" }
+      | { kind: "reject_plan"; reason: string; consequence: "continue_with_fresh_plan" | "end_current_cycle"; rootRequirementImpact: "unchanged" | "requires_update"; requestedChanges: string[] }
+      | { kind: "request_plan_decision_clarification"; question: string; context: string; options: string[] };
+  })
+  | (RootSemanticIntentBase & {
+    kind: "recovery_strategy_intent";
+    semanticGate: "recovery_strategy";
+    intent:
+      | { kind: "continue_with_successor_attempt"; attemptGoal: string; successEvidenceRequirements: string[] }
+      | { kind: "repair_current_cycle"; repairObjective: string; acceptanceFocus: string[] }
+      | { kind: "replan_current_cycle"; planningObjective: string; preservedConstraints: string[] }
+      | { kind: "request_human_decision"; decisionKind: "information" | "permission" | "waiver"; question: string; context: string; options: string[] }
+      | { kind: "resolve_finding_waiver"; resolution: "accepted" | "rejected" | "needs_clarification" }
+      | { kind: "end_current_cycle"; outcome: "recovery_exhausted" | "recovery_abandoned"; explanation: string };
+  })
+  | (RootSemanticIntentBase & {
+    kind: "terminal_review_intent";
+    semanticGate: "terminal_review";
+    intent:
+      | { kind: "deliver_verified_revision"; deliverySummary: string }
+      | { kind: "start_successor_cycle"; successorObjective: string; requiredOutcomes: string[]; preservedConstraints: string[] }
+      | { kind: "request_root_decision"; question: string; context: string; options: string[] }
+      | { kind: "halt_root"; disposition: "unachievable" | "abandoned"; explanation: string };
+  });
+
 export interface RootReconcilerOpenInput {
   protocolVersion: 1;
   requestId: string;
@@ -487,6 +611,7 @@ export interface RootReconcilerOpenInput {
   rootIssueId: string;
   profileId: string;
   modelSettings: AgentModelSettings;
+  command: RootSemanticGateCommand;
   bootstrap: RootBootstrap;
   limits: ReconcilerLimits;
 }
@@ -511,7 +636,7 @@ export type ProviderTurnContinuity =
   }
   | { kind: "closed"; appendOutcome: "acceptance_unknown" | "session_lost" };
 export type RootReconcilerTurnResult =
-  | { kind: "directive"; directive: RootDirective }
+  | { kind: "intent"; intent: RootSemanticIntent }
   | { kind: "failed"; failure: RootReconcilerFailure };
 
 export interface RootReconcilerOpenResult {
@@ -545,14 +670,14 @@ export interface StageTurnInput {
   executionPolicy: { sandbox_mode: "read_only" | "workspace_write"; workspace_access: "read_only" | "read_write" };
 }
 
-export interface StageResultBase {
+export interface StageResultBase<Role extends StageRole = StageRole> {
   protocolVersion: 1;
   resultId: string;
   stageExecutionId: string;
   rootIssueId: string;
   cycleIssueId: string;
   targetIssueId: string;
-  role: StageRole;
+  role: Role;
   roleSessionId: string;
   roleTurnId: string;
   observedTreeDigest: string;
@@ -563,21 +688,146 @@ export interface StageResultBase {
   modelTurn: StageModelTurnRecord;
 }
 
-export type StageResult = StageResultBase & {
-  outcome: {
-    kind: string;
-    planContract?: PlanContractProposal;
-    proposedWorkDag?: ProposedWorkDag;
-    risks?: string[];
-    requiredPermissions?: string[];
-    evidenceRefs?: EvidenceReference[];
-    changedPaths?: string[];
-    commitRevision?: string;
-    checks?: string[];
-    conclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
-    findings?: FindingProposal[];
-    verifiedRevision?: string;
-    errorCode?: string;
-    continuity?: ProviderTurnContinuity;
-  };
+export type StageTurnFailureKind =
+  | "canceled"
+  | "deadline_exceeded"
+  | "budget_exhausted"
+  | "provider_failure"
+  | "output_invalid"
+  | "work_epoch_closure_failed"
+  | "workspace_fence_unproven";
+
+export type StageTurnFailure<Role extends StageRole = StageRole> = StageResultBase<Role> & {
+  terminalKind: "runtime_failure";
+  failureKind: StageTurnFailureKind;
+  errorCode: string;
+  sanitizedReason: string;
+  retryable: boolean;
+  actionRequired: "root_reconciliation" | "retry_close_only";
+  continuity: ProviderTurnContinuity;
 };
+
+export interface PlanCompletedResult {
+  kind: "plan_completed";
+  planContract: PlanContractProposal;
+  proposedWorkDag: ProposedWorkDag;
+  risks: string[];
+  requiredPermissions: string[];
+  evidenceRefs: EvidenceReference[];
+}
+
+export interface PlanNeedsInformationResult {
+  kind: "plan_needs_information";
+  missingQuestions: string[];
+  impact: string;
+  evidenceRefs: EvidenceReference[];
+}
+
+export interface PlanBlockedResult {
+  kind: "plan_blocked";
+  sanitizedReason: string;
+  attempts: string[];
+  evidenceRefs: EvidenceReference[];
+}
+
+export type PlanResultOutcome =
+  | PlanCompletedResult
+  | PlanNeedsInformationResult
+  | PlanBlockedResult;
+
+export type PlanResult = StageResultBase<"plan"> & {
+  outcome: PlanResultOutcome;
+};
+export type PlanTurnResponse = PlanResult | StageTurnFailure<"plan">;
+
+export interface WorkCompletedResult {
+  kind: "work_completed";
+  actualChanges: ActualChanges;
+  checks: CheckResult[];
+  artifacts: EvidenceReference[];
+  discoveredFacts: string[];
+  evidenceRefs: EvidenceReference[];
+}
+
+export interface WorkBlockedResult {
+  kind: "work_blocked";
+  blockerKind: string;
+  sanitizedReason: string;
+  attemptedApproaches: string[];
+  failedCheckEvidence: EvidenceReference[];
+  discoveredFacts: string[];
+  suggestedDagChanges: string[];
+}
+
+export interface WorkSpecialResult {
+  kind:
+    | "work_plan_assumption_invalid"
+    | "work_scope_conflict"
+    | "work_permission_required"
+    | "work_information_required";
+  sanitizedReason: string;
+  evidenceRefs: EvidenceReference[];
+}
+
+export type WorkResultOutcome =
+  | WorkCompletedResult
+  | WorkBlockedResult
+  | WorkSpecialResult;
+
+export type WorkResult = StageResultBase<"work"> & {
+  outcome: WorkResultOutcome;
+};
+export type WorkTurnResponse = WorkResult | StageTurnFailure<"work">;
+
+export interface VerifyPassedResult {
+  kind: "verify_passed";
+  targetRevision: string;
+  acceptanceResults: VerifyCriterionResult[];
+  checks: CheckResult[];
+  resolvedFindingIds: string[];
+  evidenceRefs: EvidenceReference[];
+}
+
+export interface VerifyChangesRequiredResult {
+  kind: "verify_changes_required";
+  targetRevision: string;
+  acceptanceResults: VerifyCriterionResult[];
+  findings: FindingProposal[];
+  checks: CheckResult[];
+}
+
+export interface VerifyInconclusiveResult {
+  kind: "verify_inconclusive";
+  targetRevision: string;
+  missingEvidence: string[];
+  attemptedMethods: string[];
+  retryable: boolean;
+}
+
+export interface VerifyPlanContractViolationResult {
+  kind: "verify_plan_contract_violation";
+  targetRevision: string;
+  sanitizedReason: string;
+  evidenceRefs: EvidenceReference[];
+}
+
+export interface VerifyBlockedResult {
+  kind: "verify_blocked";
+  targetRevision: string;
+  sanitizedReason: string;
+  evidenceRefs: EvidenceReference[];
+}
+
+export type VerifyResultOutcome =
+  | VerifyPassedResult
+  | VerifyChangesRequiredResult
+  | VerifyInconclusiveResult
+  | VerifyPlanContractViolationResult
+  | VerifyBlockedResult;
+
+export type VerifyResult = StageResultBase<"verify"> & {
+  outcome: VerifyResultOutcome;
+};
+export type VerifyTurnResponse = VerifyResult | StageTurnFailure<"verify">;
+
+export type StageResult = PlanResult | WorkResult | VerifyResult;

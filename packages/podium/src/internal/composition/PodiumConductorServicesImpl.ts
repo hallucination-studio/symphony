@@ -15,6 +15,7 @@ import type { LinearClientInterface } from "../linear-gateway/api/LinearClientIn
 import {
   LinearRequestBrokerImpl,
   type InstallationRequestClass,
+  type LinearRequestCoalescingObservation,
 } from "../linear-gateway/internal/LinearRequestBrokerImpl.js";
 import type { LinearRequestObserverImpl } from "../linear-gateway/internal/LinearRequestObserverImpl.js";
 import type { LinearPhysicalRequestObservation } from "../linear-gateway/internal/LinearSdkImpl.js";
@@ -27,6 +28,7 @@ type PhysicalRequestContext = {
   installationId: string;
   requestClass: InstallationRequestClass;
   projectId?: string;
+  logicalRequestId?: string;
 };
 
 const MAX_LINEAR_REQUEST_TIMEOUT_MS = 5 * 60_000;
@@ -56,6 +58,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         requestScope: () => LinearWorkflowMutationRequestScope | undefined,
       ): LinearClientInterface;
       observeLinearRequest?(observation: LinearPhysicalRequestObservation): void;
+      observeLinearRequestCoalesced?(observation: LinearRequestCoalescingObservation): void;
       linearRequestObserver?: LinearRequestObserverImpl;
     },
   ) {
@@ -63,6 +66,9 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       maxConcurrent: 8,
       maxHighPriorityBurst: 4,
       ...(this.options.linearRequestObserver ? { observer: this.options.linearRequestObserver } : {}),
+      ...(this.options.observeLinearRequestCoalesced
+        ? { observeCoalesced: this.options.observeLinearRequestCoalesced }
+        : {}),
     });
   }
 
@@ -102,11 +108,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     let closed = false;
     let authenticated = false;
     return {
-      handle: (body) => this.#handleChannel(
+      handle: (body, _secretFrame, context) => this.#handleChannel(
         input.bindingId,
         input.instanceId,
         token,
         body,
+        context.requestId,
         () => authenticated,
         () => { authenticated = true; },
       ),
@@ -136,6 +143,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     instanceId: string,
     token: symbol,
     body: Body,
+    requestId: string | undefined,
     isAuthenticated: () => boolean,
     authenticate: () => void,
   ): Promise<JsonValue> {
@@ -160,7 +168,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     const gateway = this.#linearGateway(installation, classification);
     const scopedMutation = workflowMutationScope(body);
     return this.#linearRequests.run(classification, async () => this.#physicalRequestContext.run(
-      physicalRequestContext(body, installation, classification),
+      physicalRequestContext(body, installation, classification, requestId),
       async () => this.#physicalRequestScope.run(scopedMutation?.scope, async () => {
         switch (body.kind) {
         case "resolve_conductor_project":
@@ -171,10 +179,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           return this.#getWorkflowTree(gateway, body);
         case "create_workflow_issue":
         case "update_workflow_issue":
+        case "set_workflow_issue_archive_state":
         case "append_workflow_comment":
         case "create_workflow_attachment":
         case "create_comment_reply":
-        case "set_comment_receipt_reaction":
+        case "remove_comment_receipt_reaction":
+        case "create_comment_receipt_reaction":
         case "set_comment_thread_state":
         case "create_workflow_relation":
           return workflowMutationResult(
@@ -189,6 +199,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       ...(classification === "mutation" ? {} : {
         coalesceKey: linearReadCoalesceKey(body, installation),
       }),
+      ...(requestId ? { requestId } : {}),
     });
   }
 
@@ -513,10 +524,12 @@ function physicalRequestContext(
   body: Body,
   installation: LinearInstallation,
   classification: InstallationRequestClass,
+  logicalRequestId?: string,
 ): PhysicalRequestContext {
   return {
     installationId: installation.installationId,
     requestClass: classification,
+    ...(logicalRequestId ? { logicalRequestId } : {}),
     ...(typeof body.expected_project_id === "string" ? { projectId: body.expected_project_id } : {}),
   };
 }
@@ -637,7 +650,7 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       body: requiredString(body.body, "linear_workflow_comment_body_missing"),
     };
   }
-  if (body.kind === "set_comment_receipt_reaction") {
+  if (body.kind === "remove_comment_receipt_reaction") {
     return {
       ...common,
       kind: body.kind,
@@ -645,8 +658,18 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
       sourceCommentId: requiredString(body.source_comment_id, "linear_workflow_source_comment_id_missing"),
       expectedSourceCommentRemoteVersion: requiredString(body.expected_source_comment_remote_version, "linear_workflow_source_comment_version_missing"),
       threadRootCommentId: requiredString(body.thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
-      expectedReceipt: workflowCommentReceipt(body.expected_receipt, "linear_workflow_expected_receipt_invalid"),
-      receipt: workflowCommentReceipt(body.receipt, "linear_workflow_receipt_invalid"),
+      expectedReceipt: workflowPresentCommentReceipt(body.expected_receipt, "linear_workflow_expected_receipt_invalid"),
+    };
+  }
+  if (body.kind === "create_comment_receipt_reaction") {
+    return {
+      ...common,
+      kind: body.kind,
+      replyWriteId: requiredString(body.reply_write_id, "linear_workflow_reply_write_id_missing"),
+      sourceCommentId: requiredString(body.source_comment_id, "linear_workflow_source_comment_id_missing"),
+      expectedSourceCommentRemoteVersion: requiredString(body.expected_source_comment_remote_version, "linear_workflow_source_comment_version_missing"),
+      threadRootCommentId: requiredString(body.thread_root_comment_id, "linear_workflow_thread_root_comment_id_missing"),
+      receipt: workflowPresentCommentReceipt(body.receipt, "linear_workflow_receipt_invalid"),
     };
   }
   if (body.kind === "set_comment_thread_state") {
@@ -670,18 +693,43 @@ function workflowMutationCommand(body: Body): WorkflowMutationCommand {
     ...(target.expected_is_archived === undefined ? {} : { expectedIsArchived: requiredBoolean(target.expected_is_archived, "linear_workflow_target_archive_invalid") }),
   };
   if (body.kind === "update_workflow_issue") {
+    if (targetValue.expectedIsArchived !== false) {
+      throw new Error("linear_workflow_update_target_archive_invalid");
+    }
     return {
-      ...common, kind: body.kind, target: targetValue,
+      ...common,
+      kind: body.kind,
+      target: {
+        targetIssueId: targetValue.targetIssueId,
+        expectedRemoteVersion: targetValue.expectedRemoteVersion,
+        ...(targetValue.expectedStatusId === undefined ? {} : { expectedStatusId: targetValue.expectedStatusId }),
+        ...(targetValue.expectedParentIssueId === undefined ? {} : { expectedParentIssueId: targetValue.expectedParentIssueId }),
+        expectedIsArchived: false,
+      },
       statusId: requiredString(body.status_id, "linear_workflow_status_id_missing"),
       title: requiredString(body.title, "linear_workflow_title_missing"),
       description: requiredString(body.description, "linear_workflow_description_missing"),
       labelNames: requiredStringArray(body.label_names, "linear_workflow_label_names_missing"),
-      isArchived: requiredBoolean(body.is_archived, "linear_workflow_archive_missing"),
       parentAssignment: workflowParentAssignment(
         body.parent_assignment,
         "linear_workflow_parent_assignment_invalid",
       ),
       ...(body.order === undefined ? {} : { order: requiredNumber(body.order, "linear_workflow_order_invalid") }),
+    };
+  }
+  if (body.kind === "set_workflow_issue_archive_state") {
+    if (targetValue.expectedIsArchived === undefined) {
+      throw new Error("linear_workflow_expected_archive_missing");
+    }
+    return {
+      ...common,
+      kind: body.kind,
+      target: {
+        targetIssueId: targetValue.targetIssueId,
+        expectedRemoteVersion: targetValue.expectedRemoteVersion,
+        expectedIsArchived: targetValue.expectedIsArchived,
+      },
+      isArchived: requiredBoolean(body.is_archived, "linear_workflow_archive_missing"),
     };
   }
   if (body.kind === "append_workflow_comment") {
@@ -752,11 +800,11 @@ function workflowCommentThreadState(
   throw new Error(code);
 }
 
-function workflowCommentReceipt(
+function workflowPresentCommentReceipt(
   value: JsonValue | undefined,
   code: string,
-): "check" | "cross" | "none" {
-  if (value === "check" || value === "cross" || value === "none") return value;
+): "check" | "cross" {
+  if (value === "check" || value === "cross") return value;
   throw new Error(code);
 }
 

@@ -2,15 +2,23 @@ import type { CommandResult } from "../../composition/CommandRunner.js";
 import { runCommand } from "../../composition/CommandRunner.js";
 import type { GitWorkspaceInterface, GitWorkspaceProvisionerInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { RootDeliveryCommand, RootDeliveryInterface, RootDeliveryResult } from "../api/RootDeliveryInterface.js";
+import { hasCurrentWorkflowAttachmentProof } from "../../linear-gateway/api/CurrentWorkflowAttachmentProvenance.js";
+import type {
+  RootDeliveryCommand,
+  RootDeliveryInterface,
+  RootDeliveryResult,
+  RootRemoteAcceptanceCommand,
+  RootRemoteAcceptanceInterface,
+  RootRemoteAcceptanceObservation,
+} from "../api/RootDeliveryInterface.js";
+import { IMMUTABLE_VERIFY_TARGET_TITLE_PREFIX } from "../../root-reconciliation/internal/VerifyTargetIdentity.js";
 
 type Runner = (executable: string, arguments_: string[], options?: { cwd?: string }) => Promise<CommandResult>;
 type DeliveryGit = GitWorkspaceInterface & Pick<GitWorkspaceProvisionerInterface, "readCommitUrl">;
 
-const VERIFIED_REVISION_TITLE = "Verified Git revision";
-const DELIVERY_PR_TITLE = "Delivery pull request";
+const DELIVERY_PR_TITLE_PREFIX = "Delivery pull request: ";
 
-export class GitRootDeliveryImpl implements RootDeliveryInterface {
+export class GitRootDeliveryImpl implements RootDeliveryInterface, RootRemoteAcceptanceInterface {
   constructor(
     private readonly linear: LinearGatewayInterface,
     private readonly git: DeliveryGit,
@@ -22,10 +30,12 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
     validateText(command.body, 16_384, "body");
     if (!("workspace" in command.view)) throw new Error("root_delivery_worktree_invalid");
     const workspace = command.view.workspace;
-    const expected = deliveryFacts(command.view.tree, command.view.root.issueId);
+    const expected = deliveryFacts(command.view.tree, command.view.root.issueId, ["In Progress"]);
     const freshTree = await this.linear.readWorkflowIssueTree(command.view.root.issueId);
-    const fresh = deliveryFacts(freshTree, command.view.root.issueId);
-    if (!sameNativeFacts(expected, fresh) || !freshTree.coverage.is_complete) {
+    const fresh = deliveryFacts(freshTree, command.view.root.issueId, ["In Progress", "In Review"]);
+    if (!sameDeliveryAuthority(expected, fresh) ||
+        (fresh.rootStatus === "In Progress" && expected.rootVersion !== fresh.rootVersion) ||
+        !freshTree.coverage.is_complete) {
       throw new Error("root_delivery_native_precondition_failed");
     }
 
@@ -36,8 +46,10 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
     }
     const commitUrl = await this.git.readCommitUrl({ workspace, revision: fresh.revision });
     if (commitUrl !== fresh.revisionUrl) throw new Error("root_delivery_revision_attachment_mismatch");
+    const repository = githubRepository(commitUrl);
+    if (!repository) throw new Error("root_delivery_repository_identity_invalid");
 
-    let pullRequest = await this.readPullRequest(command, workspace, fresh.revision);
+    let pullRequest = await this.readPullRequest(command, workspace, fresh.revision, repository);
     if (!pullRequest) {
       await this.runner("git", ["push", "--set-upstream", "origin", workspace.branch], {
         cwd: workspace.worktreePath,
@@ -47,18 +59,27 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
         "pr", "create", "--base", command.baseBranch, "--head", workspace.branch,
         "--title", command.title, "--body", command.body,
       ], { cwd: workspace.worktreePath });
-      pullRequest = await this.readPullRequest(command, workspace, fresh.revision);
+      pullRequest = await this.readPullRequest(command, workspace, fresh.revision, repository);
       if (!pullRequest) throw new Error("root_delivery_pr_read_back_failed");
+    }
+    const deliveryTitle = deliveryPullRequestTitle(fresh.revision);
+
+    if (fresh.rootStatus === "In Review") {
+      const links = matchingSymphonyAttachments(freshTree, command.view.root.issueId, deliveryTitle, pullRequest.url);
+      if (links.length !== 1) throw new Error(links.length > 1
+        ? "root_delivery_pr_attachment_ambiguous"
+        : "root_delivery_in_review_postcondition_invalid");
+      return { kind: "pull_request", url: pullRequest.url };
     }
 
     let tree = freshTree;
     const root = issue(tree, command.view.root.issueId);
-    const links = matchingAttachments(tree, root.issue_id, DELIVERY_PR_TITLE, pullRequest.url);
+    const links = matchingSymphonyAttachments(tree, root.issue_id, deliveryTitle, pullRequest.url);
     if (links.length > 1) throw new Error("root_delivery_pr_attachment_ambiguous");
     if (links.length === 0) {
       const outcome = await this.linear.mutateWorkflow({
         kind: "create_workflow_attachment",
-        writeId: `${command.directive.rootDirectiveId}:delivery-pr`,
+        writeId: `${command.operationId}:delivery-pr`,
         expectedProjectId: root.project_id,
         rootIssueId: root.issue_id,
         expectedRootRemoteVersion: root.remote_version,
@@ -68,7 +89,7 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
           expectedStatusId: root.status_id,
           expectedIsArchived: false,
         },
-        title: DELIVERY_PR_TITLE,
+        title: deliveryTitle,
         url: pullRequest.url,
       });
       if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
@@ -76,7 +97,7 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
       }
       tree = await this.linear.readWorkflowIssueTree(root.issue_id);
     }
-    if (matchingAttachments(tree, root.issue_id, DELIVERY_PR_TITLE, pullRequest.url).length !== 1) {
+    if (matchingSymphonyAttachments(tree, root.issue_id, deliveryTitle, pullRequest.url).length !== 1) {
       throw new Error("root_delivery_pr_attachment_read_back_failed");
     }
 
@@ -88,7 +109,7 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
     if (!inReview) throw new Error("root_delivery_in_review_status_missing");
     const outcome = await this.linear.mutateWorkflow({
       kind: "update_workflow_issue",
-      writeId: `${command.directive.rootDirectiveId}:delivery-in-review`,
+      writeId: `${command.operationId}:delivery-in-review`,
       expectedProjectId: currentRoot.project_id,
       rootIssueId: currentRoot.issue_id,
       expectedRootRemoteVersion: currentRoot.remote_version,
@@ -102,22 +123,97 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
       title: currentRoot.title,
       description: currentRoot.description,
       labelNames: currentRoot.labels,
-      isArchived: false,
       parentAssignment: { mode: "retain" },
       order: currentRoot.order,
     });
-    if (outcome.kind !== "applied" && outcome.kind !== "already_applied") {
+    if (outcome.kind === "failed" || outcome.kind === "precondition_conflict") {
       throw new Error(`root_delivery_status_${outcome.kind}`);
     }
     const readBack = await this.linear.readWorkflowIssueTree(currentRoot.issue_id);
     if (issue(readBack, currentRoot.issue_id).status_name !== "In Review" ||
-        matchingAttachments(readBack, currentRoot.issue_id, DELIVERY_PR_TITLE, pullRequest.url).length !== 1) {
+        matchingSymphonyAttachments(readBack, currentRoot.issue_id, deliveryTitle, pullRequest.url).length !== 1) {
       throw new Error("root_delivery_status_read_back_failed");
     }
     return { kind: "pull_request", url: pullRequest.url };
   }
 
-  private async readPullRequest(command: RootDeliveryCommand, workspace: { branch: string; worktreePath: string }, revision: string) {
+  async observeAcceptance(command: RootRemoteAcceptanceCommand): Promise<RootRemoteAcceptanceObservation> {
+    if (!("workspace" in command.view)) return { kind: "observation_invalid", reason: "git_facts" };
+    const workspace = command.view.workspace;
+    let expected: ReturnType<typeof deliveryFacts>;
+    let freshTree: LinearWorkflowTreeSnapshot;
+    let fresh: ReturnType<typeof deliveryFacts>;
+    try {
+      expected = deliveryFacts(command.view.tree, command.view.root.issueId, ["In Review"]);
+      freshTree = await this.linear.readWorkflowIssueTree(command.view.root.issueId);
+      fresh = deliveryFacts(freshTree, command.view.root.issueId, ["In Review"]);
+    } catch {
+      return { kind: "observation_invalid", reason: "native_facts" };
+    }
+    if (!freshTree.coverage.is_complete || !sameDeliveryAuthority(expected, fresh) ||
+        expected.rootVersion !== fresh.rootVersion) {
+      return { kind: "observation_invalid", reason: "native_facts" };
+    }
+    const snapshot = await this.git.inspect(workspace);
+    const commitUrl = await this.git.readCommitUrl({ workspace, revision: fresh.revision });
+    if (snapshot.head !== fresh.revision || snapshot.branch !== workspace.branch || snapshot.status.partial ||
+        snapshot.status.has_more || snapshot.status.items.length !== 0 || commitUrl !== fresh.revisionUrl) {
+      return { kind: "observation_invalid", reason: "git_facts" };
+    }
+    const repository = githubRepository(commitUrl);
+    const deliveryTitle = deliveryPullRequestTitle(fresh.revision);
+    const attachments = freshTree.attachments.filter((attachment) =>
+      attachment.issue_id === command.view.root.issueId && attachment.title === deliveryTitle &&
+      hasCurrentWorkflowAttachmentProof({ tree: freshTree, attachment }));
+    if (!repository || attachments.length !== 1) return { kind: "observation_invalid", reason: "pull_request_identity" };
+    const pullRequestUrl = validPullRequestUrl(attachments[0]!.url);
+    if (!pullRequestUrl || githubRepository(pullRequestUrl) !== repository) {
+      return { kind: "observation_invalid", reason: "pull_request_identity" };
+    }
+    const deliveryReference = {
+      deliveryReferenceId: attachments[0]!.attachment_id,
+      deliveryReferenceVersion: attachments[0]!.remote_version,
+    };
+    let value: Record<string, unknown>;
+    try {
+      const result = await this.runner("gh", [
+        "pr", "view", pullRequestUrl,
+        "--json", "url,state,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,statusCheckRollup,mergedAt",
+      ], { cwd: workspace.worktreePath });
+      const parsed = JSON.parse(result.stdout) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid");
+      value = parsed as Record<string, unknown>;
+    } catch {
+      return { kind: "observation_invalid", reason: "provider_response" };
+    }
+    const observedUrl = validPullRequestUrl(value.url);
+    if (observedUrl !== pullRequestUrl || githubRepository(observedUrl) !== repository ||
+        value.headRefName !== workspace.branch || value.baseRefName !== command.baseBranch ||
+        typeof value.headRefOid !== "string" || !["OPEN", "CLOSED", "MERGED"].includes(String(value.state))) {
+      return { kind: "observation_invalid", reason: "pull_request_identity" };
+    }
+    if (value.headRefOid !== fresh.revision) {
+      return { kind: "head_changed", ...deliveryReference, pullRequestUrl, expectedRevision: fresh.revision, observedRevision: value.headRefOid };
+    }
+    if (value.state === "MERGED") {
+      if (typeof value.mergedAt !== "string" || !checksPassed(value.statusCheckRollup)) {
+        return { kind: "observation_invalid", reason: "checks_incomplete" };
+      }
+      return { kind: "merged_exact", ...deliveryReference, pullRequestUrl, exactRevision: fresh.revision };
+    }
+    if (value.state === "CLOSED") return { kind: "closed_unmerged", ...deliveryReference, pullRequestUrl, exactRevision: fresh.revision };
+    if (value.reviewDecision === "CHANGES_REQUESTED") {
+      return { kind: "changes_requested", ...deliveryReference, pullRequestUrl, exactRevision: fresh.revision };
+    }
+    return { kind: "open_unchanged", ...deliveryReference, pullRequestUrl, exactRevision: fresh.revision };
+  }
+
+  private async readPullRequest(
+    command: RootDeliveryCommand,
+    workspace: { branch: string; worktreePath: string },
+    revision: string,
+    repository: string,
+  ) {
     const result = await this.runner("gh", [
       "pr", "list", "--head", workspace.branch, "--state", "open",
       "--json", "url,headRefName,headRefOid,baseRefName", "--limit", "2",
@@ -127,7 +223,8 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
     const value = values[0] as Record<string, unknown> | undefined;
     if (!value) return undefined;
     const url = validPullRequestUrl(value.url);
-    if (!url || value.headRefName !== workspace.branch || value.headRefOid !== revision || value.baseRefName !== command.baseBranch) {
+    if (!url || githubRepository(url) !== repository || value.headRefName !== workspace.branch ||
+        value.headRefOid !== revision || value.baseRefName !== command.baseBranch) {
       throw new Error("root_delivery_pr_precondition_failed");
     }
     return { url };
@@ -144,9 +241,15 @@ export class GitRootDeliveryImpl implements RootDeliveryInterface {
   }
 }
 
-function deliveryFacts(tree: LinearWorkflowTreeSnapshot, rootIssueId: string) {
+function deliveryFacts(
+  tree: LinearWorkflowTreeSnapshot,
+  rootIssueId: string,
+  allowedRootStatuses: Array<"In Progress" | "In Review">,
+) {
   const root = issue(tree, rootIssueId);
-  if (root.status_name !== "In Progress" || root.is_archived) throw new Error("root_delivery_root_state_invalid");
+  if (!allowedRootStatuses.includes(root.status_name as "In Progress" | "In Review") || root.is_archived) {
+    throw new Error("root_delivery_root_state_invalid");
+  }
   const cycles = tree.issues.filter((candidate) =>
     candidate.issue_kind === "cycle" && candidate.parent_issue_id === rootIssueId &&
     candidate.status_name === "Succeeded" && !candidate.is_archived,
@@ -160,13 +263,16 @@ function deliveryFacts(tree: LinearWorkflowTreeSnapshot, rootIssueId: string) {
   if (verifies.length !== 1) throw new Error("root_delivery_verify_ambiguous");
   const verify = verifies[0]!;
   const attachments = tree.attachments.filter((attachment) =>
-    attachment.issue_id === verify.issue_id && attachment.title === VERIFIED_REVISION_TITLE,
+    attachment.issue_id === verify.issue_id && attachment.title.startsWith(IMMUTABLE_VERIFY_TARGET_TITLE_PREFIX) &&
+    hasCurrentWorkflowAttachmentProof({ tree, attachment }),
   );
   if (attachments.length !== 1) throw new Error("root_delivery_revision_attachment_ambiguous");
   const revision = commitRevision(attachments[0]!.url);
-  if (!revision) throw new Error("root_delivery_revision_attachment_invalid");
+  const titleRevision = attachments[0]!.title.slice(IMMUTABLE_VERIFY_TARGET_TITLE_PREFIX.length);
+  if (!revision || revision !== titleRevision) throw new Error("root_delivery_revision_attachment_invalid");
   return {
     rootVersion: root.remote_version,
+    rootStatus: root.status_name as "In Progress" | "In Review",
     cycleId: cycle.issue_id,
     cycleVersion: cycle.remote_version,
     verifyId: verify.issue_id,
@@ -176,11 +282,14 @@ function deliveryFacts(tree: LinearWorkflowTreeSnapshot, rootIssueId: string) {
   };
 }
 
-function sameNativeFacts(left: ReturnType<typeof deliveryFacts>, right: ReturnType<typeof deliveryFacts>): boolean {
-  return left.rootVersion === right.rootVersion && left.cycleId === right.cycleId &&
-    left.cycleVersion === right.cycleVersion && left.verifyId === right.verifyId &&
+function sameDeliveryAuthority(left: ReturnType<typeof deliveryFacts>, right: ReturnType<typeof deliveryFacts>): boolean {
+  return left.cycleId === right.cycleId && left.cycleVersion === right.cycleVersion && left.verifyId === right.verifyId &&
     left.verifyVersion === right.verifyVersion && left.revision === right.revision &&
     left.revisionUrl === right.revisionUrl;
+}
+
+function deliveryPullRequestTitle(revision: string): string {
+  return `${DELIVERY_PR_TITLE_PREFIX}${revision}`;
 }
 
 function issue(tree: LinearWorkflowTreeSnapshot, issueId: string) {
@@ -189,9 +298,10 @@ function issue(tree: LinearWorkflowTreeSnapshot, issueId: string) {
   return value;
 }
 
-function matchingAttachments(tree: LinearWorkflowTreeSnapshot, issueId: string, title: string, url: string) {
+function matchingSymphonyAttachments(tree: LinearWorkflowTreeSnapshot, issueId: string, title: string, url: string) {
   return tree.attachments.filter((attachment) =>
-    attachment.issue_id === issueId && attachment.title === title && attachment.url === url,
+    attachment.issue_id === issueId && attachment.title === title && attachment.url === url &&
+    hasCurrentWorkflowAttachmentProof({ tree, attachment }),
   );
 }
 
@@ -217,6 +327,27 @@ function validPullRequestUrl(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function githubRepository(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    return url.protocol === "https:" && url.hostname === "github.com" && segments.length >= 2
+      ? `${segments[0]!.toLowerCase()}/${segments[1]!.toLowerCase()}`
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function checksPassed(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.every((check) => {
+    if (!check || typeof check !== "object" || Array.isArray(check)) return false;
+    const record = check as Record<string, unknown>;
+    return record.status === "COMPLETED" && ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(String(record.conclusion));
+  });
 }
 
 function validateText(value: string, cap: number, field: string): void {

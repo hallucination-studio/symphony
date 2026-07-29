@@ -7,11 +7,20 @@
     "reconciler_session_id": "session-1",
     "reconciler_turn_id": "turn-2",
     "observed_at": "2026-07-24T00:00:00Z",
+    "command": {
+      "semantic_gate": "requirement_and_comment",
+      "trigger": "human_comment",
+      "pending_input_refs": [],
+      "expected_output_contract": "requirement_and_comment_intent.v1",
+      "subject": {
+        "root_definition_version_or_digest": "root-definition-v1",
+        "active_cycle_state": "absent"
+      }
+    },
     "delta": {
       "base_root_digest": "root-digest-before",
       "target_root_digest": "root-digest-after",
-      "changes": [],
-      "pending_input_ids": []
+      "changes": []
     },
     "root_snapshot": {},
     "limits": {

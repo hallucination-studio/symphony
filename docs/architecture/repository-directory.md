@@ -67,11 +67,16 @@ apps/conductor/
     │   │   └── RootReconcilerClientInterface.ts
     │   └── internal/
     │       └── PerformerRootReconcilerClientImpl.ts
-    ├── root-action-materialization/
+    ├── root-transition/
     │   ├── api/
-    │   │   └── RootActionMaterializerInterface.ts
+    │   │   └── RootTransitionInterface.ts
     │   └── internal/
-    │       └── LinearGitRootActionMaterializerImpl.ts
+    │       └── NativeFactRootTransitionImpl.ts
+    ├── root-intent-materialization/
+    │   ├── api/
+    │   │   └── RootIntentMaterializerInterface.ts
+    │   └── internal/
+    │       └── LinearGitRootIntentMaterializerImpl.ts
     ├── performer-agent-client/
     │   ├── api/
     │   │   └── PerformerAgentClientInterface.ts

@@ -38,7 +38,12 @@ test("real Performer processes isolate roles, fresh-open ambiguous continuity, a
   const ambiguous = stageInput("plan", "plan-request-3", "plan-turn-3", "plan-execution-3");
   ambiguous.goal = "force acceptance unknown";
   const failed = await first.executePlanTurn(ambiguous);
-  assert.equal(failed.outcome.kind, "execution_failed");
+  assert.equal("terminalKind" in failed, true);
+  if (!("terminalKind" in failed)) throw new Error("expected a Stage runtime failure");
+  assert.equal(failed.terminalKind, "runtime_failure");
+  assert.equal(failed.continuity.kind, "closed");
+  if (failed.continuity.kind !== "closed") throw new Error("expected closed Provider continuity");
+  assert.equal(failed.continuity.appendOutcome, "acceptance_unknown");
   await first.executePlanTurn(stageInput("plan", "plan-request-4", "plan-turn-4", "plan-execution-4"));
 
   await first.cancelAndReap();

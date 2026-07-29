@@ -17,6 +17,8 @@ import {
   type PodiumClientServices,
   type PodiumConductorServices,
   type PodiumConductorChannel,
+  type LinearPhysicalRequestObservation,
+  type LinearRequestCoalescingObservation,
 } from "@symphony/podium";
 import { FramedProtocolPeer } from "./FramedProtocolPeer.js";
 
@@ -174,23 +176,10 @@ async function createProductionComposition({
     databasePath: path.join(dataRoot, "podium.db"),
     presence,
     observeLinearRequest: (observation) => {
-      const {
-        correlationId,
-        durationMs,
-        installationId,
-        projectId,
-        requestClass,
-        ...physical
-      } = observation;
-      process.stderr.write(`${JSON.stringify({
-        event: "linear_physical_request",
-        ...physical,
-        correlation_id: correlationId,
-        duration_ms: durationMs,
-        ...(installationId ? { installation_id: installationId } : {}),
-        ...(projectId ? { project_id: projectId } : {}),
-        ...(requestClass ? { request_class: requestClass } : {}),
-      })}\n`);
+      process.stderr.write(`${JSON.stringify(linearPhysicalRequestLog(observation))}\n`);
+    },
+    observeLinearRequestCoalesced: (observation) => {
+      process.stderr.write(`${JSON.stringify(linearLogicalRequestCoalescedLog(observation))}\n`);
     },
   });
   let clientOwner: ReturnType<typeof createPodiumClientServices> | undefined;
@@ -316,7 +305,7 @@ async function serveConductorChannels(
     const peer = new FramedProtocolPeer(socket, socket, {
       decode: decodePodiumConductorMessage,
       secretLength: profileSecretLength,
-      async handleRequest(body, secret) {
+      async handleRequest(body, secret, context) {
         const request = object(body, "conductor_channel_request_invalid");
         if (!channel) {
           if (request.kind !== "conductor_channel_registration") {
@@ -339,7 +328,7 @@ async function serveConductorChannels(
         }
         const response = await new PodiumConductorProtocolHandler(channel).handle({
           protocol_version: "1",
-          request_id: "conductor-channel-request",
+          request_id: requiredString(context?.requestId, "conductor_channel_request_id_missing"),
           body,
         }, secret);
         return (response as { body: JsonValue }).body;
@@ -447,6 +436,41 @@ function hostPorts(
     relayProfile(body, secret) {
       return conductor.request(body, secret, `profile-${++sequence}`);
     },
+  };
+}
+
+export function linearPhysicalRequestLog(
+  observation: LinearPhysicalRequestObservation,
+): Record<string, unknown> {
+  const {
+    correlationId,
+    durationMs,
+    installationId,
+    logicalRequestId,
+    projectId,
+    requestClass,
+    ...physical
+  } = observation;
+  return {
+    event: "linear_physical_request",
+    ...physical,
+    correlation_id: correlationId,
+    duration_ms: durationMs,
+    ...(installationId ? { installation_id: installationId } : {}),
+    ...(logicalRequestId ? { request_id: logicalRequestId } : {}),
+    ...(projectId ? { project_id: projectId } : {}),
+    ...(requestClass ? { request_class: requestClass } : {}),
+  };
+}
+
+export function linearLogicalRequestCoalescedLog(
+  observation: LinearRequestCoalescingObservation,
+): Record<string, unknown> {
+  return {
+    event: "linear_logical_request_coalesced",
+    request_id: observation.requestId,
+    coalesced_into_request_id: observation.coalescedIntoRequestId,
+    request_class: observation.requestClass,
   };
 }
 

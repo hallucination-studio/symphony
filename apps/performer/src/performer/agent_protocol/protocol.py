@@ -27,14 +27,15 @@ def validate_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProtocolError("request_invalid", "The Performer request must be an object.")
     request = dict(value)
-    if set(request) < {"protocol_version", "request_id"}:
+    if "protocol_version" not in request:
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
     if "payload" in request:
         raise ProtocolError("request_shape_invalid", "The Performer request shape is invalid.")
     if request.get("protocol_version") != PROTOCOL_VERSION:
         raise ProtocolError("protocol_version_unsupported", "The Performer protocol version is unsupported.")
-    request_id = _text(request, "request_id")
     kind = request.get("kind")
+    correlation_key = "command_id" if kind == "close_cycle_stage_sessions" else "request_id"
+    request_id = _text(request, correlation_key)
     if kind is None:
         if "reconciler_session_id" in request:
             raise ProtocolError("request_shape_invalid", "Root Reconciler turns require an explicit command kind.")
@@ -52,7 +53,10 @@ def validate_request(value: Any) -> dict[str, Any]:
             "performer_profile_id", "model_settings", "execution_policy", "bootstrap", "limits",
         },
         "advance_root_reconciler": {"reconciler_session_id", "reconciler_turn_id", "observed_at", "delta", "limits"},
-        "close_cycle_stage_sessions": {"root_issue_id", "cycle_issue_id", "reason"},
+        "close_cycle_stage_sessions": {
+            "command_id", "root_issue_id", "cycle_issue_id", "expected_process_generation",
+            "reason", "deadline_at", "expected_sessions",
+        },
         "close_root_reconciler": {"root_issue_id", "reason"},
     }.get(kind)
     if required_fields is None:

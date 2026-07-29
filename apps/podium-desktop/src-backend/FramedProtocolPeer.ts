@@ -35,7 +35,8 @@ export class FramedProtocolPeer {
       secretLength(body: JsonValue): number;
       handleRequest?(
         body: JsonValue,
-        secret?: Uint8Array,
+        secret: Uint8Array | undefined,
+        context: { requestId: string },
       ): Promise<JsonValue>;
       onClose?(error: Error): void;
     },
@@ -152,7 +153,9 @@ export class FramedProtocolPeer {
 
   async #dispatchRequest(message: Message, secret?: Buffer): Promise<void> {
     try {
-      const body = await this.options.handleRequest!(message.body, secret);
+      const body = await this.options.handleRequest!(message.body, secret, {
+        requestId: message.request_id,
+      });
       if (this.#closed) return;
       const response = this.#decode({
         protocol_version: "1",

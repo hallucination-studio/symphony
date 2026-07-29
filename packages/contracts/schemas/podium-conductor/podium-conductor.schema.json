@@ -1222,6 +1222,28 @@
         }
       }
     },
+    "ActiveWorkflowMutationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_issue_id", "expected_remote_version", "expected_is_archived"],
+      "properties": {
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "expected_status_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_is_archived": { "const": false }
+      }
+    },
+    "ArchiveWorkflowMutationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_issue_id", "expected_remote_version", "expected_is_archived"],
+      "properties": {
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "expected_is_archived": { "type": "boolean" }
+      }
+    },
     "WorkflowParentAssignment": {
       "oneOf": [
         {
@@ -1346,7 +1368,6 @@
         "title",
         "description",
         "label_names",
-        "is_archived",
         "parent_assignment"
       ],
       "properties": {
@@ -1375,7 +1396,7 @@
           "$ref": "common.schema.json#/$defs/OpaqueIdentifier"
         },
         "target": {
-          "$ref": "#/$defs/WorkflowMutationTarget"
+          "$ref": "#/$defs/ActiveWorkflowMutationTarget"
         },
         "status_id": {
           "$ref": "common.schema.json#/$defs/Identifier"
@@ -1394,9 +1415,6 @@
           "uniqueItems": true,
           "type": "array"
         },
-        "is_archived": {
-          "type": "boolean"
-        },
         "parent_assignment": {
           "$ref": "#/$defs/WorkflowParentAssignment"
         },
@@ -1405,6 +1423,26 @@
           "minimum": -1000000000,
           "maximum": 1000000000
         }
+      }
+    },
+    "SetWorkflowIssueArchiveStateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "binding_id", "instance_id", "write_id", "conductor_short_hash",
+        "expected_project_id", "root_issue_id", "expected_root_remote_version", "target", "is_archived"
+      ],
+      "properties": {
+        "kind": { "const": "set_workflow_issue_archive_state" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "target": { "$ref": "#/$defs/ArchiveWorkflowMutationTarget" },
+        "is_archived": { "type": "boolean" }
       }
     },
     "AppendWorkflowCommentCommand": {
@@ -1501,16 +1539,16 @@
         "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
-    "SetCommentReceiptReactionCommand": {
+    "RemoveCommentReceiptReactionCommand": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "kind", "binding_id", "instance_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id",
         "expected_root_remote_version", "reply_write_id", "source_comment_id",
-        "expected_source_comment_remote_version", "thread_root_comment_id", "expected_receipt", "receipt"
+        "expected_source_comment_remote_version", "thread_root_comment_id", "expected_receipt"
       ],
       "properties": {
-        "kind": { "const": "set_comment_receipt_reaction" },
+        "kind": { "const": "remove_comment_receipt_reaction" },
         "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
@@ -1522,8 +1560,31 @@
         "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "expected_source_comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "expected_receipt": { "enum": ["check", "cross", "none"] },
-        "receipt": { "enum": ["check", "cross", "none"] }
+        "expected_receipt": { "enum": ["check", "cross"] }
+      }
+    },
+    "CreateCommentReceiptReactionCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "binding_id", "instance_id", "write_id", "conductor_short_hash", "expected_project_id", "root_issue_id",
+        "expected_root_remote_version", "reply_write_id", "source_comment_id",
+        "expected_source_comment_remote_version", "thread_root_comment_id", "receipt"
+      ],
+      "properties": {
+        "kind": { "const": "create_comment_receipt_reaction" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_root_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "reply_write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "source_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_source_comment_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "thread_root_comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "receipt": { "enum": ["check", "cross"] }
       }
     },
     "SetCommentThreadStateCommand": {
@@ -1628,6 +1689,9 @@
           "$ref": "#/$defs/UpdateWorkflowIssueCommand"
         },
         {
+          "$ref": "#/$defs/SetWorkflowIssueArchiveStateCommand"
+        },
+        {
           "$ref": "#/$defs/AppendWorkflowCommentCommand"
         },
         {
@@ -1637,7 +1701,10 @@
           "$ref": "#/$defs/CreateCommentReplyCommand"
         },
         {
-          "$ref": "#/$defs/SetCommentReceiptReactionCommand"
+          "$ref": "#/$defs/RemoveCommentReceiptReactionCommand"
+        },
+        {
+          "$ref": "#/$defs/CreateCommentReceiptReactionCommand"
         },
         {
           "$ref": "#/$defs/SetCommentThreadStateCommand"

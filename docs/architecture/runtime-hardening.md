@@ -59,7 +59,8 @@ ShutdownDeadline
 
 这些对象可以在crash后全部丢失。它们不能保存或推导current Work、Root/Cycle/Node status、pending Human request、
 authoritative retry attempt或下一Root。跨重启事实只来自native Linear Root graph与Git：execution identity使用Issue native
-ID，attempt使用predecessor/replacement relations，Finding使用native Issue，progress/deadline从statuses/timestamps推导。
+ID，attempt lineage使用role-owned native provenance与canonical topology，Finding使用native Issue，progress/deadline从
+statuses/timestamps推导。不得假设public Linear boundary未暴露的predecessor/replacement relation。
 iteration guard、permit和token reservation不恢复，也不写Linear。重启后：
 
 ```text
@@ -254,9 +255,9 @@ test-only daemon mutation。
 
 | 故障 | Runtime动作 | Workflow恢复 |
 |---|---|---|
-| role session/turn启动失败 | 只有明确not-accepted且no-capability proof才rollback；Work accepted/unknown时revoke、fence并在proof后释放permit | 返回closed mechanical failure；fresh Root Reconciler选择terminal action |
+| role session/turn启动失败 | 只有明确not-accepted且no-capability proof才rollback；Work accepted/unknown时revoke、fence并在proof后释放permit | 返回closed mechanical failure；唯一consequence机械收敛，有业务取舍时进入recovery gate |
 | Linear mutation上限到达 | 拒绝mutation，结束turn后释放permit、read-back | 从fresh Linear/Git重建并继续 |
-| heartbeat停止/硬wall-time耗尽 | invalidate result generation；Work先revoke write并fence exact containment，proof后才释放permit | closed mechanical failure交给fresh Root Reconciler选择terminal action |
+| heartbeat停止/硬wall-time耗尽 | invalidate result generation；Work先revoke write并fence exact containment，proof后才释放permit | closed mechanical failure机械收敛；有业务取舍时进入recovery gate |
 | Work epoch无法retire或枚举状态不明 | revoke workspace capability并terminate exact containment；证明empty/isolated后才释放writer permit | proof成功为`work_epoch_closure_failed`；否则`workspace_fence_unproven`且Root保持runtime-blocked |
 | Work descendant late write/output | generation fence拒绝，记录sanitized observation | Workflow facts不变；fresh worktree read决定后续 |
 | transport在terminal response前中断 | invalidate generation；Work经过同一write-revocation/containment gate后释放permit并read-back | 使用native current facts或fresh role session |

@@ -7,9 +7,10 @@ export async function createForegroundE2EEnvironment({
   config,
   reporter,
   signal,
+  repositoryCount = 3,
   operations = defaultOperations(),
 } = {}) {
-  assertInput({ config, reporter, signal, operations });
+  assertInput({ config, reporter, signal, repositoryCount, operations });
   let resources;
   let runtime;
   let stopWritersPromise;
@@ -29,7 +30,7 @@ export async function createForegroundE2EEnvironment({
       signal,
     });
     reporter.phase("starting");
-    resources = await operations.createLocalResources({ config, project, signal });
+    resources = await operations.createLocalResources({ config, project, signal, repositoryCount });
     assertOwner(resources, "foreground_e2e_local_resources_invalid");
     runtime = await operations.startProductionRuntime({ config, project, resources, signal, reporter });
     assertRuntime(runtime, "foreground_e2e_runtime_invalid");
@@ -51,6 +52,9 @@ export async function createForegroundE2EEnvironment({
         },
         subscribeUnexpectedExit(listener) {
           return runtime.subscribeUnexpectedExit(listener);
+        },
+        subscribeObservation(listener) {
+          return runtime.subscribeObservation(listener);
         },
         killAndRestartConductor: runtime.killAndRestartConductor,
         removeRootWorktreesAndRestart: runtime.removeRootWorktreesAndRestart,
@@ -147,7 +151,7 @@ function defaultOperations() {
       client: operator,
       authorized,
     }),
-    createLocalResources: () => createForegroundLocalResources(),
+    createLocalResources: ({ repositoryCount }) => createForegroundLocalResources({ repositoryCount }),
     startProductionRuntime: (input) => startForegroundProductionRuntime(input),
   });
 }
@@ -167,9 +171,10 @@ async function closeOwners(runtime, resources) {
   if (runtimeError) throw stableError("foreground_e2e_environment_cleanup_failed");
 }
 
-function assertInput({ config, reporter, signal, operations }) {
+function assertInput({ config, reporter, signal, repositoryCount, operations }) {
   if (!config || typeof config !== "object" || !reporter || typeof reporter.phase !== "function" ||
-      signal !== undefined && typeof signal !== "object" || !operations || typeof operations !== "object" ||
+      signal !== undefined && typeof signal !== "object" || ![1, 3].includes(repositoryCount) ||
+      !operations || typeof operations !== "object" ||
       ["verifyActors", "initializeProject", "resetProject", "createLocalResources", "startProductionRuntime"]
         .some((key) => typeof operations[key] !== "function")) {
     throw stableError("foreground_e2e_environment_input_invalid");
@@ -189,7 +194,8 @@ function assertOwner(value, code) {
 function assertRuntime(value, code) {
   if (!value || typeof value.close !== "function" ||
       typeof value.assertProjectRootIndexRequestBudget !== "function" ||
-      typeof value.subscribeUnexpectedExit !== "function") {
+      typeof value.subscribeUnexpectedExit !== "function" ||
+      typeof value.subscribeObservation !== "function") {
     throw stableError(code);
   }
 }

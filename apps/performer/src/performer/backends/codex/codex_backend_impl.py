@@ -19,8 +19,14 @@ from performer.backends.provider_backend_interface import (
     ProviderBackendError,
     ProviderBackendInterface,
     ProviderSession,
+    ProviderTurnAcceptanceUnknown,
+    ProviderTurnAcceptedInvalid,
+    ProviderTurnAcceptedValid,
     ProviderTurnCanceled,
-    ProviderTurnDeadlineExpired,
+    ProviderTurnFailure,
+    ProviderTurnNotAccepted,
+    ProviderTurnOutcome,
+    ProviderTurnSessionLost,
 )
 from performer.backends.codex.provider_io_capture import ProviderIoCapture
 from performer.prompt_resources import RolePromptCatalog
@@ -31,6 +37,48 @@ CODEX_PLUGIN_BOOTSTRAP_OVERRIDE = "features.plugins=false"
 CONDUCTOR_PERFORMER_SCHEMA_ID = "https://symphony.local/contracts/conductor-performer.schema.json"
 COMMON_SCHEMA_ID = "https://symphony.local/contracts/common.schema.json"
 UNSUPPORTED_STRUCTURED_OUTPUT_KEYWORDS = frozenset({"minLength", "maxLength", "uniqueItems"})
+
+
+class _ProviderTurnCanceled(Exception):
+    def __init__(
+        self,
+        *,
+        deadline_expired: bool,
+        append_outcome: Literal["accepted", "acceptance_unknown"],
+    ) -> None:
+        reason = "The Provider turn deadline expired." if deadline_expired else "The Provider turn was canceled."
+        super().__init__(reason)
+        self.deadline_expired = deadline_expired
+        self.append_outcome = append_outcome
+        self.sanitized_reason = reason
+
+
+class _ProviderTurnError(ProviderBackendError):
+    def __init__(
+        self,
+        sanitized_reason: str,
+        *,
+        code: str = "provider_turn_failed",
+        retryable: bool = True,
+        action_required: str = "Retry the turn with a fresh Provider context.",
+        append_outcome: Literal["not_accepted", "accepted", "acceptance_unknown"],
+    ) -> None:
+        super().__init__(
+            sanitized_reason,
+            code=code,
+            retryable=retryable,
+            action_required=action_required,
+        )
+        self.append_outcome = append_outcome
+
+
+def _turn_failure(error: ProviderBackendError) -> ProviderTurnFailure:
+    return ProviderTurnFailure(
+        code=error.code,
+        sanitized_reason=error.sanitized_reason,
+        retryable=error.retryable,
+        action_required=error.action_required,
+    )
 
 
 def create_sdk(environment: dict[str, str] | None = None) -> Codex:
@@ -127,6 +175,40 @@ class CodexBackendImpl(ProviderBackendInterface):
         *,
         workspace_root: Path | None,
         cancel_event: Event,
+    ) -> ProviderTurnOutcome:
+        try:
+            result = self._execute_role_turn(
+                session,
+                request,
+                workspace_root=workspace_root,
+                cancel_event=cancel_event,
+            )
+        except _ProviderTurnCanceled as error:
+            return ProviderTurnCanceled(
+                append_outcome=error.append_outcome,
+                deadline_expired=error.deadline_expired,
+                sanitized_reason=error.sanitized_reason,
+            )
+        except _ProviderTurnError as error:
+            failure = _turn_failure(error)
+            if error.append_outcome == "not_accepted":
+                return ProviderTurnNotAccepted(failure)
+            if error.append_outcome == "accepted":
+                return ProviderTurnAcceptedInvalid(failure)
+            if error.code == "provider_session_lost":
+                return ProviderTurnSessionLost(failure)
+            return ProviderTurnAcceptanceUnknown(failure)
+        except ProviderBackendError as error:
+            return ProviderTurnNotAccepted(_turn_failure(error))
+        return ProviderTurnAcceptedValid(output=result["output"], usage=result["usage"])
+
+    def _execute_role_turn(
+        self,
+        session: ProviderSession,
+        request: dict[str, Any],
+        *,
+        workspace_root: Path | None,
+        cancel_event: Event,
     ) -> dict[str, Any]:
         settings = session.settings or {}
         session_capture_id = self._capture_session_ids.get(id(session.provider_handle), "")
@@ -148,7 +230,7 @@ class CodexBackendImpl(ProviderBackendInterface):
                 error=error,
                 append_outcome="not_accepted",
             )
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "The Performer could not prepare the Provider turn.",
                 code="provider_turn_preparation_failed",
                 retryable=False,
@@ -184,11 +266,12 @@ class CodexBackendImpl(ProviderBackendInterface):
                 error=error,
                 append_outcome="not_accepted",
             )
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "The Provider could not start the role turn.",
                 code="provider_turn_start_failed",
                 retryable=True,
                 action_required="Retry the turn with a fresh Provider context.",
+                append_outcome="not_accepted",
             ) from error
 
         interrupted = threading.Event()
@@ -242,20 +325,21 @@ class CodexBackendImpl(ProviderBackendInterface):
                     append_outcome="acceptance_unknown",
                 )
                 if deadline_expired.is_set():
-                    raise ProviderTurnDeadlineExpired() from error
+                    raise _ProviderTurnCanceled(deadline_expired=True, append_outcome="acceptance_unknown") from error
                 if cancel_event.is_set() or interrupted.is_set():
-                    raise ProviderTurnCanceled() from error
+                    raise _ProviderTurnCanceled(deadline_expired=False, append_outcome="acceptance_unknown") from error
                 if _is_provider_schema_rejection(error):
-                    raise ProviderBackendError(
+                    raise _ProviderTurnError(
                         _provider_failure_reason(error),
                         code="provider_schema_unsupported",
                         retryable=False,
                         append_outcome="not_accepted",
                     ) from error
-                raise ProviderBackendError(
+                raise _ProviderTurnError(
                     _provider_failure_reason(error),
                     code="provider_turn_failed",
                     retryable=True,
+                    append_outcome="acceptance_unknown",
                 ) from error
         finally:
             stop_watcher.set()
@@ -278,11 +362,11 @@ class CodexBackendImpl(ProviderBackendInterface):
             append_outcome="accepted",
         )
         if cancel_event.is_set() or interrupted.is_set():
-            raise ProviderTurnCanceled()
+            raise _ProviderTurnCanceled(deadline_expired=False, append_outcome="accepted")
         if deadline_expired.is_set():
-            raise ProviderTurnDeadlineExpired()
+            raise _ProviderTurnCanceled(deadline_expired=True, append_outcome="accepted")
         if str(result.status) not in {"completed", "TurnStatus.completed"} or result.error:
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "The Provider did not complete the role turn.",
                 code="provider_turn_incomplete",
                 retryable=True,
@@ -291,10 +375,15 @@ class CodexBackendImpl(ProviderBackendInterface):
         try:
             return {"output": _role_output(session.role, result.final_response), "usage": _usage(result.usage)}
         except ProviderBackendError as error:
-            error.append_outcome = "accepted"
-            raise
+            raise _ProviderTurnError(
+                error.sanitized_reason,
+                code=error.code,
+                retryable=error.retryable,
+                action_required=error.action_required,
+                append_outcome="accepted",
+            ) from error
         except Exception as error:
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "The Provider returned an invalid role turn result.",
                 code="provider_output_invalid",
                 retryable=False,
@@ -369,7 +458,7 @@ class CodexBackendImpl(ProviderBackendInterface):
                 payload=payload,
             )
         except Exception as error:
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "The Provider I/O diagnostic capture failed.",
                 code="provider_io_capture_failed",
                 retryable=False,
@@ -379,7 +468,7 @@ class CodexBackendImpl(ProviderBackendInterface):
     def _service_tier(self, settings: dict[str, Any]) -> str | None:
         fast = settings.get("is_fast_mode_enabled", False)
         if fast and self._authentication_method() != "chatgpt":
-            raise ProviderBackendError(
+            raise _ProviderTurnError(
                 "Codex Fast is unavailable for this Profile.",
                 code="performer_profile_setting_unsupported",
                 retryable=False,
@@ -459,18 +548,23 @@ def _role_output_schema(role: str, request: dict[str, Any] | None = None) -> dic
     if role == "root_reconciler":
         conductor_schema = SCHEMA_REGISTRY[CONDUCTOR_PERFORMER_SCHEMA_ID]
         common_schema = SCHEMA_REGISTRY[COMMON_SCHEMA_ID]
-        root_directive = _expand_schema(
-            conductor_schema["$defs"]["RootDirective"],
+        command = (request or {}).get("command")
+        expected = command.get("expected_output_contract") if isinstance(command, dict) else None
+        definition_name = {
+            "requirement_and_comment_intent.v1": "RequirementAndCommentIntent",
+            "plan_human_decision_intent.v1": "PlanHumanDecisionIntent",
+            "recovery_strategy_intent.v1": "RecoveryStrategyIntent",
+            "terminal_review_intent.v1": "TerminalReviewIntent",
+        }.get(expected)
+        if definition_name is None:
+            raise ValueError("root_expected_output_contract_invalid")
+        semantic_intent = _expand_schema(
+            conductor_schema["$defs"][definition_name],
             conductor_defs=conductor_schema["$defs"],
             common_defs=common_schema["$defs"],
         )
-        output_fields = ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action")
-        properties = {field: root_directive["properties"][field] for field in output_fields}
-        if not pending_comment_reply_sources_from_request(request or {}):
-            properties["comment_replies"] = {
-                **properties["comment_replies"],
-                "maxItems": 0,
-            }
+        output_fields = ("rationale", "evidence_refs", "consumed_input_ids", "comment_dispositions", "intent")
+        properties = {field: semantic_intent["properties"][field] for field in output_fields}
         return {
             "type": "object",
             "additionalProperties": False,
@@ -621,12 +715,10 @@ def _role_output(role: str, response: Any) -> dict[str, Any]:
     if not isinstance(output, dict):
         raise ProviderBackendError("The Provider returned an invalid role result.", code="provider_output_object_invalid", retryable=True)
     if role == "root_reconciler":
-        if "action" not in output:
-            raise ProviderBackendError("The Provider returned a RootDirective without an action.", code="root_directive_action_missing", retryable=True)
-        if not isinstance(output["action"], dict):
-            raise ProviderBackendError("The Provider returned a RootDirective with an invalid action.", code="root_directive_action_invalid", retryable=True)
-        if not isinstance(output["action"].get("kind"), str):
-            raise ProviderBackendError("The Provider returned a RootDirective action without a kind.", code="root_directive_action_kind_missing", retryable=True)
+        if not isinstance(output.get("intent"), dict):
+            raise ProviderBackendError("The Provider returned an invalid Root semantic intent.", code="root_semantic_intent_missing", retryable=True)
+        if not isinstance(output["intent"].get("kind"), str):
+            raise ProviderBackendError("The Provider returned an intent without a kind.", code="root_semantic_intent_kind_missing", retryable=True)
     elif not isinstance(output.get("kind"), str):
         raise ProviderBackendError("The Provider returned an invalid role result.", code="role_output_kind_invalid", retryable=True)
     return output

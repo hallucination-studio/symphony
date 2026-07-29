@@ -32,7 +32,18 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     if (directive.basedOnTargetRootDigest !== view.treeDigest) return failed(directive, "root_directive_stale_tree");
     const action = directive.action;
     if (action.kind === "create_human_action") {
-      const result = await this.humanActions.materialize({ action, rootDirectiveId: directive.rootDirectiveId, view });
+      const result = await this.humanActions.materialize({
+        operationId: directive.rootDirectiveId,
+        view,
+        request: {
+          actionKind: action.actionKind,
+          targetIssueIds: action.targetIssueIds,
+          question: action.question,
+          context: action.context,
+          options: action.options,
+          evidenceRefs: action.evidenceRefs,
+        },
+      });
       return result.kind === "materialized"
         ? { kind: "materialized", rootDirectiveId: directive.rootDirectiveId, sourceIssueIds: [view.root.issueId] }
         : failed(directive, result.code);
@@ -58,6 +69,7 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
           rootIssueId: action.rootIssueId,
           rootIdentifier: view.root.identifier,
           baseBranch: this.baseBranch,
+          generationOrdinal: action.expectedWorktreeGate.generationOrdinal,
           expectedGate: action.expectedWorktreeGate,
         });
       } catch (error) {
@@ -85,7 +97,7 @@ export class LinearGitRootActionMaterializerImpl implements RootActionMaterializ
     if (action.kind === "conclude_root") {
       try {
         await this.delivery.deliver({
-          directive,
+          operationId: directive.rootDirectiveId,
           view,
           baseBranch: this.baseBranch,
           title: `${view.root.identifier} delivery`,
@@ -480,12 +492,11 @@ function updateIssueCommand(
     expectedProjectId: target.project_id,
     rootIssueId: view.root.issueId,
     expectedRootRemoteVersion: rootIssue(view, view.root.issueId).remote_version,
-    target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id },
+    target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id, expectedIsArchived: false },
     statusId,
     title: target.title,
     description: description === undefined ? target.description : preservedDescription(target, description),
     labelNames: target.labels,
-    isArchived: target.is_archived,
     parentAssignment: { mode: "retain" },
   };
 }
@@ -533,7 +544,7 @@ function operationPlan(
   if (operation.kind === "update_node") {
     const target = view.tree.issues.find((issue) => issue.issue_id === operation.precondition.targetIssueId);
     if (
-      !target ||
+      !target || target.is_archived ||
       target.remote_version !== operation.precondition.expectedRemoteVersion ||
       (operation.precondition.expectedParentIssueId !== undefined && target.parent_issue_id !== operation.precondition.expectedParentIssueId) ||
       (operation.precondition.expectedStatus !== undefined && target.status_name !== operation.precondition.expectedStatus)
@@ -544,11 +555,10 @@ function operationPlan(
       commands: [{
         kind: "update_workflow_issue", writeId: `${directive.rootDirectiveId}:${target.issue_id}`,
         expectedProjectId: target.project_id, rootIssueId: view.root.issueId, expectedRootRemoteVersion: root.remote_version,
-        target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, ...(operation.precondition.expectedStatus !== undefined ? { expectedStatusId: target.status_id } : {}) },
+        target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedIsArchived: false, ...(operation.precondition.expectedStatus !== undefined ? { expectedStatusId: target.status_id } : {}) },
         statusId: status.status_id,
         title: operation.title, description: preservedDescription(target, operation.description),
         labelNames: target.labels,
-        isArchived: target.is_archived,
         parentAssignment: { mode: "retain" },
         order: target.order,
       }],
@@ -562,19 +572,13 @@ function operationPlan(
         (operation.precondition.expectedStatus !== undefined && target.status_name !== operation.precondition.expectedStatus)) return undefined;
     return {
       commands: [{
-        kind: "update_workflow_issue",
+        kind: "set_workflow_issue_archive_state",
         writeId: `${directive.rootDirectiveId}:${target.issue_id}:${operation.kind}`,
         expectedProjectId: target.project_id,
         rootIssueId: view.root.issueId,
         expectedRootRemoteVersion: root.remote_version,
         target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedIsArchived: target.is_archived },
-        statusId: target.status_id,
-        title: target.title,
-        description: target.description,
-        labelNames: target.labels,
         isArchived: operation.kind === "archive_node",
-        parentAssignment: { mode: "retain" },
-        order: target.order,
       }],
       sourceIssueIds: [target.issue_id],
     };
@@ -861,7 +865,8 @@ function mutationIssueIds(command: LinearWorkflowMutationCommand): string[] {
   if (command.kind === "create_workflow_issue") return [command.parentIssueId];
   if (
     command.kind === "create_comment_reply" ||
-    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "remove_comment_receipt_reaction" ||
+    command.kind === "create_comment_receipt_reaction" ||
     command.kind === "set_comment_thread_state"
   ) return [];
   if (command.kind === "create_workflow_relation") {
@@ -883,12 +888,11 @@ function updateIssueOrderCommand(
     expectedProjectId: target.project_id,
     rootIssueId: view.root.issueId,
     expectedRootRemoteVersion: root.remote_version,
-    target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id },
+    target: { targetIssueId: target.issue_id, expectedRemoteVersion: target.remote_version, expectedStatusId: target.status_id, expectedIsArchived: false },
     statusId: target.status_id,
     title: target.title,
     description: target.description,
     labelNames: target.labels,
-    isArchived: target.is_archived,
     parentAssignment: { mode: "retain" },
     order,
   };
@@ -971,9 +975,13 @@ function mutationReadBackMatches(
       (command.parentAssignment.mode === "clear" && issue?.parent_issue_id === undefined) ||
       (command.parentAssignment.mode === "set" && issue?.parent_issue_id === command.parentAssignment.parentIssueId);
     return issue?.status_id === command.statusId && issue.title === command.title &&
-      issue.description === command.description && issue.is_archived === command.isArchived &&
+      issue.description === command.description && issue.is_archived === false &&
+      JSON.stringify([...issue.labels].sort()) === JSON.stringify([...command.labelNames].sort()) &&
       parentMatches &&
       (command.order === undefined || issue.order === command.order);
+  }
+  if (command.kind === "set_workflow_issue_archive_state") {
+    return tree.issues.find(({ issue_id }) => issue_id === command.target.targetIssueId)?.is_archived === command.isArchived;
   }
   if (command.kind === "create_workflow_relation") {
     const expected = canonicalRelation(command.relationKind, command.sourceIssueId, command.targetIssueId);

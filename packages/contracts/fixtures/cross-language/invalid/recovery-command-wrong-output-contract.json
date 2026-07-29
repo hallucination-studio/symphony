@@ -1,0 +1,15 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RecoveryStrategyCommand",
+  "value": {
+    "semantic_gate": "recovery_strategy",
+    "trigger": "stage_failed",
+    "pending_input_refs": [],
+    "expected_output_contract": "terminal_review_intent.v1",
+    "subject": {
+      "kind": "stage_attempt",
+      "subject_id": "stage-execution-1",
+      "subject_version_or_digest": "stage-result-digest-1",
+      "source_kind": "stage_result"
+    }
+  }
+}

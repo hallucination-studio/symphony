@@ -9,7 +9,11 @@ type ProtocolMessage = {
 };
 
 export interface PodiumConductorChannel {
-  handle(body: ProtocolMessage["body"], secretFrame?: Uint8Array): Promise<JsonValue>;
+  handle(
+    body: ProtocolMessage["body"],
+    secretFrame: Uint8Array | undefined,
+    context: { requestId: string },
+  ): Promise<JsonValue>;
   isAuthenticated(): boolean;
   close(input?: { observedAt?: string; sanitizedReason?: string }): void;
 }
@@ -34,7 +38,9 @@ export class PodiumConductorProtocolHandler {
         value,
       ) as unknown as ProtocolMessage;
       requestId = request.request_id;
-      const body = await this.channel.handle(request.body, secretFrame);
+      const body = await this.channel.handle(request.body, secretFrame, {
+        requestId,
+      });
       return decodePodiumConductorMessage({
         protocol_version: "1",
         request_id: requestId,

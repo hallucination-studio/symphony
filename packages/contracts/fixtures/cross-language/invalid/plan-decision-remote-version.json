@@ -1,0 +1,38 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PlanHumanDecisionIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-3",
+    "kind": "plan_human_decision_intent",
+    "semantic_gate": "plan_human_decision",
+    "intent_id": "intent-3",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-3",
+    "model_turn": {
+      "turn_record_id": "model-turn-3",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-3",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": { "status": "unavailable", "reason": "provider_omitted" },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-3",
+    "rationale": "Reject the Plan.",
+    "evidence_refs": [],
+    "consumed_input_ids": [],
+    "comment_dispositions": [],
+    "intent": {
+      "kind": "reject_plan",
+      "reason": "The Plan needs revision.",
+      "consequence": "continue_with_fresh_plan",
+      "root_requirement_impact": "unchanged",
+      "requested_changes": ["Add the missing verification."],
+      "remote_version": "remote-3"
+    }
+  }
+}

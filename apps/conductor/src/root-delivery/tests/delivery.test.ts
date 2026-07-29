@@ -4,6 +4,7 @@ import test from "node:test";
 import type { LinearWorkflowMutationCommand, LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
 import type { RootReconciliationView } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 import { GitRootDeliveryImpl } from "../internal/GitRootDeliveryImpl.js";
+import { immutableVerifyTargetTitle } from "../../root-reconciliation/internal/VerifyTargetIdentity.js";
 
 const revision = "abc123";
 const workspace = { branch: "symphony/runs/sym-1", worktreePath: "/worktree", rootIssueId: "root-1" };
@@ -31,7 +32,7 @@ test("delivery fresh-reads native, Git, and SCM facts before attaching the PR an
     "create_workflow_attachment", "update_workflow_issue",
   ]);
   assert.equal(linear.tree.issues[0]?.status_name, "In Review");
-  assert.equal(linear.tree.attachments.some(({ title }) => title === "Delivery pull request"), true);
+  assert.equal(linear.tree.attachments.some(({ title }) => title === `Delivery pull request: ${revision}`), true);
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "list"]]);
 });
 
@@ -74,6 +75,252 @@ test("delivery pushes, reads the remote revision, creates a PR, then fresh-reads
   ]);
 });
 
+test("delivery creates the exact current reference without removing historical attachments", async () => {
+  const linear = new FakeLinear();
+  linear.tree.attachments.push({
+    attachment_id: "delivery-pr-historical",
+    issue_id: "root-1",
+    title: "Delivery pull request",
+    url: "https://github.com/acme/repo/pull/3",
+    source_type: "github",
+    remote_version: "delivery-pr-historical-v1",
+    created_at: "2026-07-20T00:00:00Z",
+    updated_at: "2026-07-20T00:00:00Z",
+  });
+  linear.tree.source_manifest.push({
+    source_kind: "linear_attachment",
+    source_id: "delivery-pr-historical",
+    source_version: "delivery-pr-historical-v1",
+    actor_kind: "symphony",
+  });
+  const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+    if (args[0] === "pr" && args[1] === "list") {
+      return commandResult(JSON.stringify([{
+        url: "https://github.com/acme/repo/pull/7",
+        headRefName: workspace.branch,
+        headRefOid: revision,
+        baseRefName: "main",
+      }]));
+    }
+    throw new Error("unexpected_delivery_mutation");
+  });
+
+  await delivery.deliver(command(linear.tree));
+
+  assert.equal(linear.tree.attachments.some(({ attachment_id }) => attachment_id === "delivery-pr-historical"), true);
+  assert.equal(linear.tree.attachments.filter(({ title }) => title === `Delivery pull request: ${revision}`).length, 1);
+});
+
+test("delivery recovers an applied but unconfirmed In Review postcondition without another write", async () => {
+  const linear = new FakeLinear();
+  linear.loseInReviewResponseOnce = true;
+  const input = command(linear.tree);
+  let scmReads = 0;
+  const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+    if (args[0] === "pr" && args[1] === "list") {
+      scmReads += 1;
+      return commandResult(JSON.stringify([{
+        url: "https://github.com/acme/repo/pull/7",
+        headRefName: workspace.branch,
+        headRefOid: revision,
+        baseRefName: "main",
+      }]));
+    }
+    throw new Error("unexpected_delivery_mutation");
+  });
+
+  assert.deepEqual(await delivery.deliver(input), {
+    kind: "pull_request",
+    url: "https://github.com/acme/repo/pull/7",
+  });
+  assert.equal(linear.tree.issues[0]?.status_name, "In Review");
+  const mutationCount = linear.mutations.length;
+
+  assert.deepEqual(await delivery.deliver(input), {
+    kind: "pull_request",
+    url: "https://github.com/acme/repo/pull/7",
+  });
+  assert.equal(linear.mutations.length, mutationCount);
+  assert.equal(scmReads, 2);
+});
+
+test("delivery does not accept an unconfirmed In Review write when the native postcondition is absent", async () => {
+  const linear = new FakeLinear();
+  linear.loseInReviewWithoutApplyingOnce = true;
+  const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+    if (args[0] === "pr" && args[1] === "list") {
+      return commandResult(JSON.stringify([{
+        url: "https://github.com/acme/repo/pull/7",
+        headRefName: workspace.branch,
+        headRefOid: revision,
+        baseRefName: "main",
+      }]));
+    }
+    throw new Error("unexpected_delivery_mutation");
+  });
+
+  await assert.rejects(delivery.deliver(command(linear.tree)), /root_delivery_status_read_back_failed/u);
+  assert.equal(linear.tree.issues[0]?.status_name, "In Progress");
+});
+
+test("delivery rejects a matching branch and revision from a foreign repository", async () => {
+  const linear = new FakeLinear();
+  const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+    if (args[0] === "pr" && args[1] === "list") {
+      return commandResult(JSON.stringify([{
+        url: "https://github.com/other/repository/pull/7",
+        headRefName: workspace.branch,
+        headRefOid: revision,
+        baseRefName: "main",
+      }]));
+    }
+    throw new Error("unexpected_delivery_mutation");
+  });
+
+  await assert.rejects(delivery.deliver(command(linear.tree)), /root_delivery_pr_precondition_failed/u);
+  assert.deepEqual(linear.mutations, []);
+});
+
+test("remote acceptance distinguishes unchanged open, exact merged, and changed head", async () => {
+  const scenarios = [
+    [{ state: "OPEN", reviewDecision: "REVIEW_REQUIRED", headRefOid: revision, statusCheckRollup: [] }, "open_unchanged"],
+    [{ state: "MERGED", reviewDecision: "APPROVED", headRefOid: revision, statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }] }, "merged_exact"],
+    [{ state: "OPEN", reviewDecision: "APPROVED", headRefOid: "different", statusCheckRollup: [] }, "head_changed"],
+  ] as const;
+  for (const [provider, expectedKind] of scenarios) {
+    const linear = new FakeLinear();
+    setDelivered(linear);
+    const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+      assert.deepEqual(args.slice(0, 3), ["pr", "view", "https://github.com/acme/repo/pull/7"]);
+      return commandResult(JSON.stringify({
+        url: "https://github.com/acme/repo/pull/7",
+        isDraft: false,
+        headRefName: workspace.branch,
+        baseRefName: "main",
+        mergedAt: provider.state === "MERGED" ? "2026-07-29T00:00:00Z" : null,
+        ...provider,
+      }));
+    });
+
+    const observation = await delivery.observeAcceptance({ view: acceptanceView(linear.tree), baseBranch: "main" });
+    assert.equal(observation.kind, expectedKind);
+    assert.equal(observation.deliveryReferenceId, "delivery-pr");
+    assert.equal(observation.deliveryReferenceVersion, "delivery-pr-v1");
+  }
+});
+
+test("remote acceptance authorizes production-shaped attachments from exact Activity actors", async () => {
+  const linear = new FakeLinear();
+  setDelivered(linear);
+  for (const source of linear.tree.source_manifest) {
+    if (source.source_kind === "linear_attachment") source.actor_kind = "unknown";
+  }
+  linear.tree.activities.push(
+    {
+      activity_id: "activity-verified-revision", issue_id: "verify-1",
+      activity_kinds: ["attachment_changed"], actor_kind: "symphony", actor_id: "symphony-actor",
+      attachment_id: "verified-revision", remote_version: "activity-verified-revision-v1",
+      created_at: "2026-07-28T00:00:01Z",
+    },
+    {
+      activity_id: "activity-delivery-pr", issue_id: "root-1",
+      activity_kinds: ["attachment_changed"], actor_kind: "symphony", actor_id: "symphony-actor",
+      attachment_id: "delivery-pr", remote_version: "activity-delivery-pr-v1",
+      created_at: "2026-07-28T00:00:02Z",
+    },
+  );
+  const delivery = new GitRootDeliveryImpl(linear, git(), async () => commandResult(JSON.stringify({
+    url: "https://github.com/acme/repo/pull/7", state: "OPEN", isDraft: false,
+    headRefName: workspace.branch, headRefOid: revision, baseRefName: "main",
+    reviewDecision: "CHANGES_REQUESTED", statusCheckRollup: [], mergedAt: null,
+  })));
+
+  const observation = await delivery.observeAcceptance({ view: acceptanceView(linear.tree), baseBranch: "main" });
+
+  assert.equal(observation.kind, "changes_requested");
+
+  linear.tree.activities.push({
+    activity_id: "activity-verified-revision-human", issue_id: "verify-1",
+    activity_kinds: ["attachment_changed"], actor_kind: "human", actor_id: "human-1",
+    attachment_id: "verified-revision", remote_version: "activity-verified-revision-human-v1",
+    created_at: "2026-07-28T00:00:03Z",
+  });
+  assert.deepEqual(
+    await delivery.observeAcceptance({ view: acceptanceView(linear.tree), baseBranch: "main" }),
+    { kind: "observation_invalid", reason: "native_facts" },
+  );
+});
+
+test("remote acceptance selects the exact current revision while retaining historical delivery attachments", async () => {
+  const linear = new FakeLinear();
+  setDelivered(linear);
+  const current = linear.tree.attachments.find(({ attachment_id }) => attachment_id === "delivery-pr")!;
+  current.title = `Delivery pull request: ${revision}`;
+  linear.tree.attachments.push({
+    attachment_id: "delivery-pr-historical",
+    issue_id: "root-1",
+    title: "Delivery pull request",
+    url: "https://github.com/acme/repo/pull/3",
+    source_type: "github",
+    remote_version: "delivery-pr-historical-v1",
+    created_at: "2026-07-20T00:00:00Z",
+    updated_at: "2026-07-20T00:00:00Z",
+  });
+  linear.tree.source_manifest.push({
+    source_kind: "linear_attachment",
+    source_id: "delivery-pr-historical",
+    source_version: "delivery-pr-historical-v1",
+    actor_kind: "symphony",
+  });
+  const delivery = new GitRootDeliveryImpl(linear, git(), async (_executable, args) => {
+    assert.deepEqual(args.slice(0, 3), ["pr", "view", "https://github.com/acme/repo/pull/7"]);
+    return commandResult(JSON.stringify({
+      url: "https://github.com/acme/repo/pull/7",
+      state: "OPEN",
+      isDraft: false,
+      headRefName: workspace.branch,
+      headRefOid: revision,
+      baseRefName: "main",
+      reviewDecision: "REVIEW_REQUIRED",
+      statusCheckRollup: [],
+      mergedAt: null,
+    }));
+  });
+
+  const observation = await delivery.observeAcceptance({ view: acceptanceView(linear.tree), baseBranch: "main" });
+
+  assert.equal(observation.kind, "open_unchanged");
+  assert.equal(observation.deliveryReferenceId, "delivery-pr");
+  assert.equal(observation.deliveryReferenceVersion, "delivery-pr-v1");
+});
+
+test("remote acceptance rejects duplicate exact current revision references before SCM", async () => {
+  const linear = new FakeLinear();
+  setDelivered(linear);
+  linear.tree.attachments.push({
+    ...linear.tree.attachments.find(({ attachment_id }) => attachment_id === "delivery-pr")!,
+    attachment_id: "delivery-pr-duplicate",
+    remote_version: "delivery-pr-duplicate-v1",
+  });
+  linear.tree.source_manifest.push({
+    source_kind: "linear_attachment",
+    source_id: "delivery-pr-duplicate",
+    source_version: "delivery-pr-duplicate-v1",
+    actor_kind: "symphony",
+  });
+  let scmCalls = 0;
+  const delivery = new GitRootDeliveryImpl(linear, git(), async () => {
+    scmCalls += 1;
+    throw new Error("unexpected_scm_call");
+  });
+
+  assert.deepEqual(
+    await delivery.observeAcceptance({ view: acceptanceView(linear.tree), baseBranch: "main" }),
+    { kind: "observation_invalid", reason: "pull_request_identity" },
+  );
+  assert.equal(scmCalls, 0);
+});
+
 function git() {
   return {
     async inspect() {
@@ -85,7 +332,7 @@ function git() {
 
 function command(tree: LinearWorkflowTreeSnapshot) {
   return {
-    directive: { rootDirectiveId: "directive-1" } as never,
+    operationId: "delivery-1",
     view: {
       root: {
         issueId: "root-1", identifier: "SYM-1", projectId: "project-1", state: "In Progress",
@@ -103,9 +350,29 @@ function command(tree: LinearWorkflowTreeSnapshot) {
   };
 }
 
+function acceptanceView(tree: LinearWorkflowTreeSnapshot) {
+  const view = command(tree).view;
+  return { ...view, root: { ...view.root, state: "In Review" as const } };
+}
+
+function setDelivered(linear: FakeLinear): void {
+  const root = linear.tree.issues[0]!;
+  Object.assign(root, { status_id: "review", status_name: "In Review", status_category: "started" });
+  linear.tree.attachments.push({
+    attachment_id: "delivery-pr", issue_id: root.issue_id, title: `Delivery pull request: ${revision}`,
+    url: "https://github.com/acme/repo/pull/7", source_type: "github", remote_version: "delivery-pr-v1",
+    created_at: linear.tree.observed_at, updated_at: linear.tree.observed_at,
+  });
+  linear.tree.source_manifest.push({
+    source_kind: "linear_attachment", source_id: "delivery-pr", source_version: "delivery-pr-v1", actor_kind: "symphony",
+  });
+}
+
 class FakeLinear {
   readonly mutations: LinearWorkflowMutationCommand[] = [];
   readonly tree = tree();
+  loseInReviewResponseOnce = false;
+  loseInReviewWithoutApplyingOnce = false;
 
   async resolveProject() { return { kind: "resolved" as const, projectId: "project-1", conductorPool: [] }; }
   async readProjectRootIndexPage() { return { kind: "page" as const, page: { roots: [], hasNextPage: false } }; }
@@ -114,17 +381,36 @@ class FakeLinear {
     this.mutations.push(command);
     const root = this.tree.issues[0]!;
     if (command.kind === "create_workflow_attachment") {
+      const attachmentId = `attachment-${this.tree.attachments.length + 1}`;
       this.tree.attachments.push({
-        attachment_id: `attachment-${this.tree.attachments.length + 1}`, issue_id: command.target.targetIssueId,
+        attachment_id: attachmentId, issue_id: command.target.targetIssueId,
         title: command.title, url: command.url, source_type: "github", remote_version: "attachment-v1",
         created_at: this.tree.observed_at, updated_at: this.tree.observed_at,
+      });
+      this.tree.source_manifest.push({
+        source_kind: "linear_attachment", source_id: attachmentId, source_version: "attachment-v1",
+        actor_kind: "symphony",
       });
       root.remote_version = "root-v2";
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: root.issue_id, remoteVersion: "attachment-v1" } };
     }
     if (command.kind === "update_workflow_issue") {
       const status = this.tree.status_catalog.find(({ status_id }) => status_id === command.statusId)!;
+      if (this.loseInReviewWithoutApplyingOnce && status.name === "In Review") {
+        this.loseInReviewWithoutApplyingOnce = false;
+        return {
+          kind: "write_unconfirmed" as const,
+          readBackTarget: { writeId: command.writeId, targetIssueId: root.issue_id, remoteVersion: root.remote_version },
+        };
+      }
       Object.assign(root, { status_id: status.status_id, status_name: status.name, status_category: status.category, status_position: status.position, remote_version: "root-v3" });
+      if (this.loseInReviewResponseOnce && status.name === "In Review") {
+        this.loseInReviewResponseOnce = false;
+        return {
+          kind: "write_unconfirmed" as const,
+          readBackTarget: { writeId: command.writeId, targetIssueId: root.issue_id, remoteVersion: root.remote_version },
+        };
+      }
       return { kind: "applied" as const, readBack: { writeId: command.writeId, targetIssueId: root.issue_id, remoteVersion: root.remote_version } };
     }
     throw new Error("unexpected_mutation");
@@ -147,12 +433,15 @@ function tree(): LinearWorkflowTreeSnapshot {
       issue("verify-1", "verify", "cycle-1", "done", "Done", "verify-v1", ["Verify", "Passed"]),
     ],
     comments: [], relations: [], attachments: [{
-      attachment_id: "verified-revision", issue_id: "verify-1", title: "Verified Git revision",
+      attachment_id: "verified-revision", issue_id: "verify-1", title: immutableVerifyTargetTitle(revision),
       url: `https://github.com/acme/repo/commit/${revision}`, source_type: "github", remote_version: "attachment-v1",
       created_at: observedAt, updated_at: observedAt,
     }],
     activities: [],
-    source_manifest: [], coverage: { is_complete: true, omissions: [] }, observed_at: observedAt,
+    source_manifest: [{
+      source_kind: "linear_attachment", source_id: "verified-revision", source_version: "attachment-v1",
+      actor_kind: "symphony",
+    }], coverage: { is_complete: true, omissions: [] }, observed_at: observedAt,
   };
 }
 

@@ -1,8 +1,8 @@
 # Performer Plan、Work与Verify Contracts
 
 状态：目标架构提案。本文是Conductor调用Performer执行Plan、Work和Verify的request/response contract、角色
-thread、capability和Result语义的唯一事实源。Root/Cycle下一步和用户comment处理由
-[Root Reconciliation](root-reconciliation.md)决定。本文不定义RootNextAction或Human Action状态。
+thread、capability和Result语义的唯一事实源。Root semantic gates和用户comment处理由
+[Root Reconciliation](root-reconciliation.md)定义。本文不定义RootSemanticIntent、deterministic transition或Human Action状态。
 
 ## 1. 决定
 
@@ -38,33 +38,35 @@ session从完整bootstrap获得这些native consequences，而不是重建旧Res
 Plan、Work和Verify三个prompt都包含各自的`flowchart TD`，图只能组织现有request facts、capabilities和Result variants。
 “上下文看起来足够”、“通常可以跳过”、“稍后再补证据”或类似措辞不能放宽contract、required checks或退出条件。
 
-Cycle执行与Root REVIEW的唯一衔接如下。`REVIEW`不是第四个Stage；它只在Cycle terminal status、Findings和matching Git
-evidence已经fresh read-back后，由Root Reconciler在后续turn执行：
+Cycle执行与`terminal_review`的唯一衔接如下。它不是第四个Stage；只有Cycle terminal status、Findings和matching Git evidence
+已经fresh read-back后才进入该gate：
 
 ```mermaid
 flowchart TD
-    A["Root Reconciler requests PLAN"] --> B["Plan returns one closed PlanResult"]
-    B --> C{"Is the Plan complete, feasible and approved through durable facts?"}
-    C -- "No" --> C1["Root Reconciler chooses replan, rerun, Human Action or terminal handling"]
-    C1 --> A
-    C -- "Yes" --> D["Conductor materializes the approved Work DAG"]
-    D --> E["Root Reconciler selects one mechanically ready Work Issue"]
+    A["Conductor dispatches the mechanically eligible Plan"] --> B["Plan returns one closed PlanResult"]
+    B --> C{"Is Plan approval materialized through durable facts?"}
+    C -- "Pending" --> C1["Conductor waits at the Plan Human Action barrier"]
+    C1 --> C
+    C -- "Rejected or ambiguous" --> C2["plan_human_decision chooses replan, clarification or terminal handling"]
+    C2 --> A
+    C -- "Approved" --> D["Conductor compiles and seals the complete Work DAG"]
+    D --> E["Conductor selects one mechanically ready Work Issue"]
     E --> F["Work performs BUILD and returns one closed WorkResult"]
     F --> G{"Are required active Work Issues complete?"}
     G -- "No" --> E
-    G -- "Blocked or invalid" --> G1["Root Reconciler chooses repair, replan, Human Action or terminal handling"]
+    G -- "Blocked or invalid" --> G1["recovery_strategy chooses repair, replan, Human Action or terminal handling"]
     G1 --> A
     G -- "Yes" --> G2["Conductor prepares and reads back the immutable target commit"]
     G2 --> H["Verify checks the immutable target and returns one closed VerifyResult"]
     H --> I{"Does fresh evidence support a terminal Cycle conclusion?"}
-    I -- "No" --> I1["Root Reconciler chooses rerun, repair, replan or Human Action"]
+    I -- "No" --> I1["recovery_strategy chooses rerun, repair, replan or Human Action"]
     I1 --> E
     I -- "Yes" --> J["Conductor writes and reads back native Cycle terminal facts"]
-    J --> K["Root Reconciler performs REVIEW against the complete Root history"]
+    J --> K["terminal_review evaluates the complete Root history"]
     K --> L{"Is the Root satisfied and ready for delivery?"}
-    L -- "No" --> M["Root Reconciler specifies a bounded successor Cycle requirement or Human Action"]
+    L -- "No" --> M["terminal_review specifies a successor intent or Human Action"]
     M --> A
-    L -- "Yes" --> N["Root Reconciler chooses SHIP through conclude_root"]
+    L -- "Yes" --> N["terminal_review returns delivery intent"]
 ```
 
 #### Plan
@@ -88,6 +90,11 @@ Plan只提出Contract和DAG。它不创建Linear Issue、请求Human Action、�
 Plan也不在Root worktree创建`SPEC.md`、`PLAN.md`、repository task checklist或其他计划文件；transient Plan Result由
 Conductor渲染为Plan Issue description与native status，并fresh read-back后才成为后续角色可见的durable fact。
 
+Plan description使用Symphony定义的canonical、用户可读Markdown结构，losslessly保留Plan Contract、每个Work的
+`proposal_key`、全部dependency proposal keys和Verify proposal。它不是JSON、hidden marker或machine envelope；字段值必须经过
+closed renderer/parser round-trip验证后才能进入`In Review`。自由文本展示若不能无歧义还原proposal identity，就不能作为approved
+DAG authority。
+
 #### Work
 
 Work只完成本轮`selected_work`，遵守approved Plan Contract、dependency evidence、workspace capability和明确scope。
@@ -110,6 +117,10 @@ target commit。commit message、数量和Git command不由任何prompt输出决
 不得调用Verify。Verify通过后SHIP只能交付该exact commit，不能在delivery时创建新commit或改变内容。
 
 #### Verify
+
+当Interrupted Verify选择current-Cycle repair时，Conductor先持久化repair Work，再机械创建fresh Verify、archive旧Verify并把Cycle
+退回Executing。repair Work完成后才重新进入Verifying；fresh Verify必须独立准备并读回自己的immutable target，不能继承旧Verify的
+attachment、target revision、session或terminal identity。
 
 Verify与Plan、Work和Root Reconciler conversation隔离，并只读检查`immutable_target_revision`。它必须逐项验证approved
 Plan Contract的acceptance criteria和verification requirements，检查matching Work evidence、required checks、Git facts
@@ -533,8 +544,9 @@ WorkTurnContext
 `WorkTurnRequest`只由公共envelope、该role context和role-generic `StageLimits`组成。Agent-tree concurrency、residency、depth、
 mailbox、write grant和finalization reserve是Performer internal policy，不进入Conductor protocol或Provider-visible role context。
 
-一个Cycle只有一个Work thread。Conductor在不同turn中把Root Reconciler选择且机械ready的Work Issue依次交给
-它。Work thread可以在当前turn内部执行Claude Code式tool loop：读取代码、修改、运行命令、观察普通错误、
+一个Cycle只有一个Work thread。Conductor在不同turn中把deterministic transition选择且机械ready的Work Issue依次交给
+它。多个Work同时ready时按native Issue `order`、再按native Issue ID稳定排序；`order`必须保留在Conductor到Performer的
+complete Issue fact中，不能退化为本地queue或仅按随机ID选择。Work thread可以在当前turn内部执行Claude Code式tool loop：读取代码、修改、运行命令、观察普通错误、
 修复和重试，直到完成、需要外部输入或达到turn预算；也可以按[Work Subagents](work-subagents.md)在同一个Work Agent
 Tree中递归delegation。
 
@@ -542,8 +554,8 @@ Work只能修改授予的Root worktree，不能commit、push、创建worktree、
 Tree内parallel mutation必须使用[Work Subagents](work-subagents.md#9-shared-worktree与机械write-grant)定义的mechanical、
 per-mutation alias-safe write grant；无法机械隔离时serial exclusive-write。最终完整diff与required checks由Work root在全部grants
 归还后、进入不可逆finalization前完成；finalization只做fresh inspection和tools-disabled Result sampling，随后永久retire matching
-mutation epoch。发现需要调整DAG时只报告structured observation；Root Reconciler决定是否提出
-Tree patch。
+mutation epoch。发现需要调整DAG时只报告structured observation；存在业务取舍时进入`recovery_strategy`，由Conductor compiler
+生成合法successor topology。
 
 ### 6.2 WorkResult
 
@@ -560,7 +572,11 @@ WorkResult =
 ```text
 WorkCompletedResult
   kind: work_completed
-  actual_changes[]
+  actual_changes
+    baseline_revision
+    observed_head_revision
+    changed_paths[]
+    summary
   checks[]
     check_key
     command_or_method
@@ -571,6 +587,16 @@ WorkCompletedResult
   git_worktree_state
   evidence_refs[]
 ```
+
+`baseline_revision`是turn开始时Conductor提供的worktree HEAD；
+`observed_head_revision`是Work finalization barrier后观察到的同一worktree HEAD。由于Work无权commit或改变Git topology，
+两者必须相等，并且Conductor只在turn返回后fresh inspection得到相同HEAD、完整status和matching changed paths时接受
+`work_completed`。该字段不是immutable Verify target，也不能命名或解释为`target_revision`、commit或delivery revision。
+
+Work Result中的`checks`是matching Work turn实际执行的structured semantic evidence；Conductor必须保留它，但不能仅因schema
+有效就把`passed`升级为机械证明。全部required Work完成后的commit gate仍由Conductor按
+[Git worktree与交付](git-worktree-delivery.md#4-work与immutable-verify-target)重新运行policy要求的mechanical checks，创建并
+read-back唯一immutable target commit。两类check事实必须在native渲染中可区分，不能相互替代。
 
 ```text
 WorkBlockedResult
@@ -584,7 +610,7 @@ WorkBlockedResult
 ```
 
 普通command或test失败不是自动terminal Result；Work agent应在turn预算内继续诊断。只有无法在当前target和
-capability内继续时才返回blocked/specialized result。`suggested_dag_changes`只是observation，不是RootNextAction。
+capability内继续时才返回blocked/specialized result。`suggested_dag_changes`只是observation，不是RootSemanticIntent或mutation program。
 
 任何`WorkResult`都必须由Work root生成，并由Performer在matching mutation epoch永久retire、producer/activity watermark稳定且
 barrier后worktree read-back成功后才可返回。Subagent final answer、status或check本身不是Stage Result或completion evidence。
@@ -664,6 +690,31 @@ Reconciler。Conductor不把
 `verify_changes_required`机械映射为successor Cycle；Root Reconciler可以在当前Cycle预算内继续Work，也可以提出
 repair conclusion。
 
+非Finding terminal Result进入recovery时，`Failed`或`Done`只提供lifecycle closure，不提供业务分类。Conductor必须用role、Cycle phase、
+terminal status、canonical `## Outcome`以及current Symphony actor/version共同构造exact Stage recovery subject；任一不匹配都停止。
+`verify_changes_required`例外：其Finding Issues和关系是native recovery authority，不能用Verify的通用terminal status替代。
+全部Finding postcondition确认后，recovery subject按一个Verify拥有的完整Todo/In Progress Finding set冻结；单Finding逐次决策过细，无法保持
+跨Finding策略一致性，单一存在性标志过粗，无法在restart后证明版本与关系未变。集合digest覆盖Cycle current version、Verify、开放Finding及其全部关系；waiver请求
+target集合中的每个Finding且不改变任何Stage或Finding lifecycle。
+当accepted purpose结束该Cycle时，唯一即时effect是owning Cycle terminal update；Changes Required Verify和全部Finding evidence保持不变。
+fresh transition随后把Verify分类为failed、Finding分类为open并进入non-success review，不能把Cycle closure解释为Finding resolution。
+
+普通Verify admission不是Root选择。全部required Work为Done后，Conductor先完成writer revocation、mechanical required checks、
+immutable commit及Todo Verify上的exact revision attachment read-back；只有fresh Git证明clean HEAD与该attachment完全一致时才机械dispatch。
+Verify Result返回后Conductor再次fresh-read Git并验证同一revision，不能只与turn开始时的内存snapshot比较。
+
+`resolved_finding_ids`只能引用matching Cycle中的native Finding Issue ID。`verify_passed` terminalization前，Conductor逐个验证Finding仍属
+该Cycle、未archive且处于可解决状态，将其机械收敛为Done并targeted read-back；missing、cross-Cycle、ambiguous或无法确认的Finding
+均fail closed。`verify_changes_required`产生的每个Finding Issue及每条Verify/Work relation同样是独立postcondition，partial acceptance
+必须从native facts续做，不得重新调用Verify来重放已经接受的semantic Result。
+
+为使该desired set跨restart可恢复，Conductor在第一个Finding mutation前先把完整`verify_changes_required`结论和每个Finding的category、
+severity、statement、evidence及related Work写成Verify Issue description中的human-readable canonical Markdown section，保持Verify
+`In Progress`并fresh read-back。该section不是JSON、隐藏marker或parallel Result object；它就是matching Verify的native visible evidence。
+只有complete source manifest证明当前Verify version由Symphony写入时，fresh runtime才可解析该section并继续剩余Finding effects；human或
+external automation改写的同形文本只能进入普通interruption/recovery路径。全部Finding postconditions确认后才把同一description和label
+收敛为Verify Done。
+
 ## 8. Mechanical StageTurnFailure
 
 ```text
@@ -697,8 +748,8 @@ StageTurnFailure
 
 `StageTurnFailure`由Performer runtime生成，不是Plan/Work/Verify structured model output。Provider transport/crash/schema failure、
 external cancel、hard deadline/budget和Work tree closure/fence failure必须与business blocked区分。只有validated semantic Result
-可以materialize业务结论；failure在required runtime fencing后只形成closed mechanical fact，由fresh Root Reconciler选择matching
-terminal action，Conductor不能直接推导`Failed`或`Interrupted`。Failure不能伪造业务Result、resumable facts或failure payload
+可以materialize业务结论；failure在required runtime fencing后只形成closed mechanical fact。唯一合法的failure consequence由
+Conductor收敛；存在业务取舍时才进入fresh `recovery_strategy` gate。Failure不能伪造业务Result、resumable facts或failure payload
 comment；sanitized detail只进入runtime observation。`ProviderTurnContinuity`语义只由
 [Performer](performer.md#52-provider-append确认与失败)定义。
 

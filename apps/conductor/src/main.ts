@@ -21,7 +21,6 @@ import {
   validateCodexBaseUrl,
 } from "./performer-agent-client/internal/AgentProcessEnvironment.js";
 import { LinearHumanActionMaterializerImpl } from "./human-actions/internal/LinearHumanActionMaterializerImpl.js";
-import { LinearGitRootActionMaterializerImpl } from "./root-action-materialization/internal/LinearGitRootActionMaterializerImpl.js";
 import { LinearRootReconcilerReplyWriterImpl } from "./root-action-materialization/internal/LinearRootReconcilerReplyWriterImpl.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
@@ -113,13 +112,11 @@ export async function runConductor(environment = process.env): Promise<void> {
         () => new Date().toISOString(),
       ).handleRequest(body, secret);
     },
-  }, (reason, schemaPath, details) => logs.publish({ level: "error", event: "private_ipc_failed", fields: {
-    sanitized_reason: reason,
-    ...(schemaPath ? { schema_path: schemaPath } : {}),
-    ...(details?.bodyKind ? { body_kind: details.bodyKind } : {}),
-    ...(details?.bodyCode ? { body_code: details.bodyCode } : {}),
-    ...(details?.bodyKeys ? { body_keys: details.bodyKeys.join(",") } : {}),
-  }}));
+  }, (reason, schemaPath, details) => logs.publish({
+    level: "error",
+    event: "private_ipc_failed",
+    fields: privateIpcFailureLogFields(reason, schemaPath, details),
+  }));
   const gateway = new PodiumLinearGatewayClientImpl(
     config.conductorShortHash,
     protocol,
@@ -132,6 +129,14 @@ export async function runConductor(environment = process.env): Promise<void> {
           root_header_count: String(evidence.rootHeaderCount),
           list_page_count: String(evidence.listPageCount),
           workflow_tree_count: String(evidence.workflowTreeCount),
+        }});
+      },
+      observeLogicalRequest(observation) {
+        logs.publish({ level: "info", event: "linear_logical_request", fields: {
+          request_id: observation.requestId,
+          operation_kind: observation.operationKind,
+          ...(observation.rootIssueId ? { root_issue_id: observation.rootIssueId } : {}),
+          ...(observation.writeId ? { write_id: observation.writeId } : {}),
         }});
       },
     },
@@ -155,6 +160,8 @@ export async function runConductor(environment = process.env): Promise<void> {
       base_branch: config.baseBranch,
     },
   });
+  const humanActions = new LinearHumanActionMaterializerImpl(gateway);
+  const delivery = new GitRootDeliveryImpl(gateway, git);
   const runtime = new RootReconciliationRuntime({
     conductorId: config.conductorId,
     conductorShortHash: config.conductorShortHash,
@@ -170,13 +177,9 @@ export async function runConductor(environment = process.env): Promise<void> {
     ),
     reconciler,
     performer,
-    materializer: new LinearGitRootActionMaterializerImpl(
-      gateway,
-      new LinearHumanActionMaterializerImpl(gateway),
-      git,
-      config.baseBranch,
-      new GitRootDeliveryImpl(gateway, git),
-    ),
+    delivery,
+    remoteAcceptance: delivery,
+    humanActions,
     replyWriter: new LinearRootReconcilerReplyWriterImpl(gateway),
     profileIdFor: async () => {
       const file = await profiles.list();
@@ -221,6 +224,26 @@ export async function runConductor(environment = process.env): Promise<void> {
 
 export function runtimeLogLevel(event: string): "info" | "error" {
   return event.endsWith("_failed") ? "error" : "info";
+}
+
+export function privateIpcFailureLogFields(
+  reason: string,
+  schemaPath?: string,
+  details?: {
+    requestId?: string;
+    bodyKind?: string;
+    bodyCode?: string;
+    bodyKeys?: string[];
+  },
+): Record<string, string> {
+  return {
+    sanitized_reason: reason,
+    ...(details?.requestId ? { request_id: details.requestId } : {}),
+    ...(schemaPath ? { schema_path: schemaPath } : {}),
+    ...(details?.bodyKind ? { body_kind: details.bodyKind } : {}),
+    ...(details?.bodyCode ? { body_code: details.bodyCode } : {}),
+    ...(details?.bodyKeys ? { body_keys: details.bodyKeys.join(",") } : {}),
+  };
 }
 
 async function profileReadiness(
@@ -268,7 +291,6 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     rootConvergencePolicy: {
       maxCyclesPerRoot: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT, "root_max_cycles_per_root_invalid"),
       maxSameOpenFindingCycles: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES, "root_max_same_open_finding_cycles_invalid"),
-      maxConsecutiveNoProgress: rootPolicyPositiveInteger(environment.SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS, "root_max_consecutive_no_progress_invalid"),
       maxCycleRepairAttempts: rootPolicyNonNegativeInteger(environment.SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS, "root_max_cycle_repair_attempts_invalid"),
     },
   };

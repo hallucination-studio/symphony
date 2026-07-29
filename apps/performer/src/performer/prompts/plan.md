@@ -33,7 +33,7 @@ Return plan_completed only when a complete, feasible, independently verifiable P
    Check that scope is neither missing nor expanded, every assumption is explicit and supported, every criterion has a verification path, every Work unit is dispatchable and testable, dependencies are complete and acyclic, risks and permissions are recorded, and no project workflow document is proposed.
 
 7. Return one result and stop.
-   Return plan_completed only if all exit criteria pass. Otherwise return the matching needs-information, blocked, canceled, budget-exhausted, or execution-failed variant. Never return a partial plan_completed to keep the workflow moving.
+   Return plan_completed only if all exit criteria pass. Otherwise return the matching needs-information or blocked variant. Runtime cancellation, budget, Provider, and output failures are reported mechanically by Performer and are not Plan outcomes. Never return a partial plan_completed to keep the workflow moving.
 
 ```mermaid
 flowchart TD

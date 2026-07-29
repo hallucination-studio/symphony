@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   LinearGatewayInterface,
   LinearWorkflowTreeSnapshot,
@@ -30,8 +32,14 @@ interface ProtocolClient {
   }): Promise<JsonValue>;
 }
 
+export interface LinearLogicalRequestObservation {
+  requestId: string;
+  operationKind: string;
+  rootIssueId?: string;
+  writeId?: string;
+}
+
 export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
-  #sequence = 0;
   #projectId: string | undefined;
   #activeDiscovery: {
     rootHeaderCount: number;
@@ -50,6 +58,7 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
         listPageCount: number;
         workflowTreeCount: number;
       }): void;
+      observeLogicalRequest?(observation: LinearLogicalRequestObservation): void;
     },
   ) {}
 
@@ -190,12 +199,14 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
       if (body.kind === "list_project_root_index_page") this.#activeDiscovery.listPageCount += 1;
       if (body.kind === "get_workflow_issue_tree") this.#activeDiscovery.workflowTreeCount += 1;
     }
-    this.#sequence += 1;
+    const requestId = randomUUID();
+    const observation = linearLogicalRequestObservation(body, requestId);
+    if (observation) this.options.observeLogicalRequest?.(observation);
     const timeoutMs = typeof this.options.timeoutMs === "function"
       ? this.options.timeoutMs()
       : this.options.timeoutMs;
     return this.protocol.request({
-      requestId: `conductor-${this.#sequence}`,
+      requestId,
       body,
       timeoutMs,
     });
@@ -207,6 +218,21 @@ export class PodiumLinearGatewayClientImpl implements LinearGatewayInterface {
     }
   }
 
+}
+
+function linearLogicalRequestObservation(
+  body: JsonValue,
+  requestId: string,
+): LinearLogicalRequestObservation | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.kind !== "string") {
+    return undefined;
+  }
+  return {
+    requestId,
+    operationKind: body.kind,
+    ...(typeof body.root_issue_id === "string" ? { rootIssueId: body.root_issue_id } : {}),
+    ...(typeof body.write_id === "string" ? { writeId: body.write_id } : {}),
+  };
 }
 
 function record(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -707,6 +733,7 @@ function workflowMutationBody(
         ...(input.order === undefined ? {} : { order: input.order }),
       };
     case "update_workflow_issue":
+    case "set_workflow_issue_archive_state":
     case "append_workflow_comment":
     case "create_workflow_attachment":
       return {
@@ -715,8 +742,8 @@ function workflowMutationBody(
         target: {
           target_issue_id: input.target.targetIssueId,
           expected_remote_version: input.target.expectedRemoteVersion,
-          ...(input.target.expectedStatusId === undefined ? {} : { expected_status_id: input.target.expectedStatusId }),
-          ...(input.target.expectedParentIssueId === undefined ? {} : { expected_parent_issue_id: input.target.expectedParentIssueId }),
+          ...(!("expectedStatusId" in input.target) || input.target.expectedStatusId === undefined ? {} : { expected_status_id: input.target.expectedStatusId }),
+          ...(!("expectedParentIssueId" in input.target) || input.target.expectedParentIssueId === undefined ? {} : { expected_parent_issue_id: input.target.expectedParentIssueId }),
           ...(input.target.expectedIsArchived === undefined ? {} : { expected_is_archived: input.target.expectedIsArchived }),
         },
         ...(input.kind === "update_workflow_issue"
@@ -725,13 +752,13 @@ function workflowMutationBody(
             title: input.title,
             description: input.description,
             label_names: input.labelNames,
-            is_archived: input.isArchived,
             parent_assignment: input.parentAssignment.mode === "set"
               ? { mode: "set", parent_issue_id: input.parentAssignment.parentIssueId }
               : { mode: input.parentAssignment.mode },
             ...(input.order === undefined ? {} : { order: input.order }),
           }
-          : input.kind === "append_workflow_comment" ? { body: input.body }
+          : input.kind === "set_workflow_issue_archive_state" ? { is_archived: input.isArchived }
+            : input.kind === "append_workflow_comment" ? { body: input.body }
             : input.kind === "create_workflow_attachment" ? { title: input.title, url: input.url } : {}),
       };
     case "create_comment_reply":
@@ -744,7 +771,7 @@ function workflowMutationBody(
         expected_thread_state: input.expectedThreadState,
         body: input.body,
       };
-    case "set_comment_receipt_reaction":
+    case "remove_comment_receipt_reaction":
       return {
         ...common,
         kind: input.kind,
@@ -753,6 +780,15 @@ function workflowMutationBody(
         expected_source_comment_remote_version: input.expectedSourceCommentRemoteVersion,
         thread_root_comment_id: input.threadRootCommentId,
         expected_receipt: input.expectedReceipt,
+      };
+    case "create_comment_receipt_reaction":
+      return {
+        ...common,
+        kind: input.kind,
+        reply_write_id: input.replyWriteId,
+        source_comment_id: input.sourceCommentId,
+        expected_source_comment_remote_version: input.expectedSourceCommentRemoteVersion,
+        thread_root_comment_id: input.threadRootCommentId,
         receipt: input.receipt,
       };
     case "set_comment_thread_state":

@@ -9,5 +9,8 @@ export interface RootSchedulingResult {
 }
 
 export interface RootSchedulingPolicyInterface {
-  evaluate(roots: readonly DiscoveredRoot[]): RootSchedulingResult;
+  evaluate(
+    roots: readonly DiscoveredRoot[],
+    options?: { resumeAfterRootIssueId?: string },
+  ): RootSchedulingResult;
 }

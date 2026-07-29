@@ -20,6 +20,7 @@ async function createConductorServices(
   onRequestScope = () => undefined,
   bindings = [conductorBinding()],
   observeLinearRequest = () => undefined,
+  observeLinearRequestCoalesced = () => undefined,
 ) {
   const services = new PodiumConductorServicesImpl(
     {
@@ -43,6 +44,7 @@ async function createConductorServices(
         return linearSdk;
       },
       observeLinearRequest,
+      observeLinearRequestCoalesced,
     },
   );
   const channels = new Map();
@@ -66,13 +68,13 @@ async function createConductorServices(
         canonical_path: entry.repositoryContext.repositoryRoot,
         base_branch: entry.repositoryContext.baseBranch,
       },
-    });
+    }, undefined, { requestId: `handshake-${index + 1}` });
   }));
   return {
-    handle(body) {
+    handle(body, requestId = `${body.binding_id}:${body.kind}`) {
       const channel = channels.get(body.binding_id);
       if (!channel) throw new Error("test_channel_missing");
-      return channel.handle(body);
+      return channel.handle(body, undefined, { requestId });
     },
     close() {
       for (const channel of channels.values()) channel.close();
@@ -125,6 +127,7 @@ test("installation broker coalesces identical concurrent Podium reads", async ()
 test("Project Root Index coalesces concurrent reads from three Conductors sharing an installation", async () => {
   let physicalReads = 0;
   let release;
+  const coalesced = [];
   const headers = Array.from({ length: 12 }, (_unused, index) => rootHeader({
     rootIssueId: `root-${index + 1}`,
     identifier: `SYM-${index + 1}`,
@@ -140,7 +143,7 @@ test("Project Root Index coalesces concurrent reads from three Conductors sharin
       await new Promise((resolve) => { release = resolve; });
       return { headers, pageInfo: { hasNextPage: false } };
     },
-  }, undefined, undefined, bindings);
+  }, undefined, undefined, bindings, undefined, (observation) => coalesced.push(observation));
 
   const reads = bindings.map(({ bindingId }, index) => services.handle({
     kind: "list_project_root_index_page",
@@ -148,7 +151,7 @@ test("Project Root Index coalesces concurrent reads from three Conductors sharin
     instance_id: `instance-${index + 1}`,
     expected_project_id: "project-1",
     page: { limit: 250 },
-  }));
+  }, `index-request-${index + 1}`));
   await Promise.resolve();
 
   assert.equal(physicalReads, 1);
@@ -157,6 +160,18 @@ test("Project Root Index coalesces concurrent reads from three Conductors sharin
   assert.equal(pages.length, 3);
   assert.ok(pages.every((page) => page.kind === "project_root_index_page" && page.page.headers.length === 12));
   assert.equal(physicalReads, 1);
+  assert.deepEqual(coalesced, [
+    {
+      requestId: "index-request-2",
+      coalescedIntoRequestId: "index-request-1",
+      requestClass: "workflow",
+    },
+    {
+      requestId: "index-request-3",
+      coalescedIntoRequestId: "index-request-1",
+      requestClass: "workflow",
+    },
+  ]);
 });
 
 test("Project Root Index physical observations retain the production installation and Project scope", async () => {
@@ -193,7 +208,7 @@ test("Project Root Index physical observations retain the production installatio
     instance_id: `instance-${index + 1}`,
     expected_project_id: "project-1",
     page: { limit: 250 },
-  })));
+  }, `index-request-${index + 1}`)));
 
   assert.equal(physicalReads, 1);
   assert.deepEqual(observations, [{
@@ -204,6 +219,7 @@ test("Project Root Index physical observations retain the production installatio
     installationId: "installation-1",
     projectId: "project-1",
     requestClass: "workflow",
+    logicalRequestId: "index-request-1",
   }]);
 });
 
@@ -572,8 +588,9 @@ test("workflow mutation rejects stale Root and target versions before Linear wri
   const result = await handler.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-old",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version", expectedStatusId: "status-todo" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version", expectedStatusId: "status-todo", expectedIsArchived: false },
     statusId: "status-progress", title: "Updated", description: "Description",
+    labelNames: [], parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "precondition_conflict" });
@@ -683,8 +700,9 @@ test("workflow mutation proves stable write idempotency with semantic read-back"
   const result = await handler.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-1", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version", expectedIsArchived: false },
     statusId: "status-progress", title: "Updated", description: "Description",
+    labelNames: [], parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "already_applied", readBack });
@@ -712,8 +730,9 @@ test("workflow mutation uses one compact preflight instead of rereading Root and
   const result = await handler.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-compact", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "target-version", expectedIsArchived: false },
     statusId: "status-progress", title: "Updated", description: "Description",
+    labelNames: [], parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "applied", readBack });

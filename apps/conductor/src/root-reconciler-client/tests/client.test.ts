@@ -2,20 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PerformerRootReconcilerClientImpl } from "../internal/PerformerRootReconcilerClientImpl.js";
-import type { RootDirective, RootReconcilerFailure } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { RootReconcilerFailure, RootSemanticIntent } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
-const directive = {
-  protocolVersion: 1 as const, requestId: "request-1", rootDirectiveId: "directive-1",
+const intent = {
+  protocolVersion: 1 as const, requestId: "request-1", kind: "requirement_and_comment_intent" as const,
+  semanticGate: "requirement_and_comment" as const, intentId: "intent-1", rootIssueId: "root-1",
   reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", modelTurn: rootModelTurn(), basedOnTargetRootDigest: "root-1",
-  rationale: "wait", evidenceRefs: [], consumedInputIds: [], commentReplies: [],
-  action: { kind: "wait" as const, reasonCode: "test", blockingFactRefs: [] },
+  rationale: "No requirement change.", evidenceRefs: [], consumedInputIds: [], commentDispositions: [],
+  intent: { kind: "answer_comments" as const, reason: "no_requirement_change" as const },
+} satisfies RootSemanticIntent;
+
+const command = {
+  semanticGate: "requirement_and_comment" as const,
+  trigger: "initial_definition" as const,
+  pendingInputRefs: [],
+  expectedOutputContract: "requirement_and_comment_intent.v1" as const,
+  subject: { rootDefinitionVersionOrDigest: "root-v1", activeCycleState: "absent" as const },
 };
 
-function rootModelTurn(): RootDirective["modelTurn"] {
+function rootModelTurn(): RootSemanticIntent["modelTurn"] {
   return {
     turnRecordId: "root-1:turn-1", role: "root_reconciler", rootIssueId: "root-1",
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", invocationState: "confirmed",
-    model: "gpt", outcome: "directive_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
+    model: "gpt", outcome: "intent_accepted", usage: { status: "unavailable", reason: "provider_omitted" },
     terminalAt: "2026-07-23T00:00:01Z",
   };
 }
@@ -29,7 +38,7 @@ test("root reconciler client owns session-to-root close correlation", async () =
         kind: "opened",
         sessionId: "session-1",
         bootstrapRootDigest: "root-1",
-        initialResult: { kind: "directive", directive },
+        initialResult: { kind: "intent", intent },
       };
     },
     async advanceRootReconciler(input) {
@@ -47,6 +56,7 @@ test("root reconciler client owns session-to-root close correlation", async () =
     rootIssueId: "root-1",
     profileId: "profile-1",
     modelSettings: { model: "model", reasoningEffort: "medium", isFastModeEnabled: false },
+    command,
     reconcilerSessionId: "session-request", reconcilerTurnId: "turn-1", observedAt: "2026-07-23T00:00:00Z",
     bootstrap: {} as never,
     limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
@@ -84,6 +94,7 @@ test("root reconciler client retains close correlation for a retained bootstrap 
     rootIssueId: "root-1",
     profileId: "profile-1",
     modelSettings: { model: "model", reasoningEffort: "medium", isFastModeEnabled: false },
+    command,
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", observedAt: "2026-07-23T00:00:00Z",
     bootstrap: {} as never,
     limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
@@ -102,7 +113,7 @@ test("root reconciler client discards an advance session after a closed failure"
         kind: "opened" as const,
         sessionId: "session-1",
         bootstrapRootDigest: "root-1",
-        initialResult: { kind: "directive" as const, directive },
+        initialResult: { kind: "intent" as const, intent },
       };
     },
     async advanceRootReconciler() {
@@ -117,6 +128,7 @@ test("root reconciler client discards an advance session after a closed failure"
     rootIssueId: "root-1",
     profileId: "profile-1",
     modelSettings: { model: "model", reasoningEffort: "medium", isFastModeEnabled: false },
+    command,
     reconcilerSessionId: "session-1", reconcilerTurnId: "turn-1", observedAt: "2026-07-23T00:00:00Z",
     bootstrap: {} as never,
     limits: { maxContextBytes: 1, maxResultBytes: 1, maxOutputTokens: 1, maxToolCalls: 0, maxWallTimeMs: 1, deadlineAt: "2026-07-23T00:00:01Z" },
@@ -126,6 +138,7 @@ test("root reconciler client discards an advance session after a closed failure"
     sessionId: "session-1",
     reconcilerTurnId: "turn-2",
     observedAt: "2026-07-23T00:00:02Z",
+    command,
     delta: {} as never,
   });
 

@@ -91,23 +91,32 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "RootContextCurrentValue",
     "RootContextReplacement",
     "RootContextTombstone",
+    "RootSemanticGateCommand",
+    "RequirementAndCommentCommand",
+    "PlanHumanDecisionCommand",
+    "RecoveryStrategyCommand",
+    "TerminalReviewCommand",
     "ProviderTurnContinuity",
     "AdvanceRootReconcilerRequest",
-    "RootDirective",
+    "RequirementAndCommentIntent",
+    "PlanHumanDecisionIntent",
+    "RecoveryStrategyIntent",
+    "TerminalReviewIntent",
     "RootReconcilerTurnFailure",
     "RootReconcilerTurnResult",
     "UserCommentReply",
     "UserCommentThreadStateInput",
-    "CancelRootDirective",
-    "MaterializePlanNodeAction",
     "PlanTurnRequest",
     "WorkTurnRequest",
     "VerifyTurnRequest",
-    "PlanResult",
-    "WorkResult",
-    "VerifyResult",
+    "PlanTurnResponse",
+    "WorkTurnResponse",
+    "VerifyTurnResponse",
+    "StageTurnFailure",
     "CreateCommentReplyCommand",
-    "SetCommentReceiptReactionCommand",
+    "SetWorkflowIssueArchiveStateCommand",
+    "RemoveCommentReceiptReactionCommand",
+    "CreateCommentReceiptReactionCommand",
     "SetCommentThreadStateCommand",
     "TurnUsage",
     "ModelTurnRecord",
@@ -125,6 +134,9 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "ProviderConfigMap",
     "PlanTurnCommand",
     "WorkTurnCommand",
+    "PlanResult\"",
+    "WorkResult\"",
+    "VerifyResult\"",
     "RootGateTurnCommand",
     "IssueCurrentValue",
     "IssueDetached",
@@ -153,7 +165,6 @@ test("the schemas include only the approved active protocol vocabulary", async (
     ["ExternalLinearChange", "Input"].join(""),
     ["ExternalLinearChange", "Disposition"].join(""),
     ["UserComment", "Disposition"].join(""),
-    "comment_" + "dispositions",
     "external_" + "change_dispositions",
     "based_on_" + "root_tree_digest",
     "resolve_" + "invalid_lifecycle",
@@ -168,6 +179,7 @@ test("the schemas include only the approved active protocol vocabulary", async (
     "Archive" + "WorkflowIssueCommand",
     "Restore" + "WorkflowIssueCommand",
     "Remove" + "WorkflowRelationCommand",
+    "SetCommentReceiptReactionCommand",
     ...retiredRootListContracts,
   ]) {
     assert.doesNotMatch(source, new RegExp(forbiddenName), forbiddenName);
@@ -324,14 +336,17 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/OpenRootReconcilerRequest",
     "#/$defs/RootReconcilerOpenedResult",
     "#/$defs/AdvanceRootReconcilerRequest",
-    "#/$defs/RootDirective",
+    "#/$defs/RequirementAndCommentIntent",
+    "#/$defs/PlanHumanDecisionIntent",
+    "#/$defs/RecoveryStrategyIntent",
+    "#/$defs/TerminalReviewIntent",
     "#/$defs/RootReconcilerTurnFailure",
     "#/$defs/PlanTurnRequest",
-    "#/$defs/PlanResult",
+    "#/$defs/PlanTurnResponse",
     "#/$defs/WorkTurnRequest",
-    "#/$defs/WorkResult",
+    "#/$defs/WorkTurnResponse",
     "#/$defs/VerifyTurnRequest",
-    "#/$defs/VerifyResult",
+    "#/$defs/VerifyTurnResponse",
     "#/$defs/CloseCycleStageSessionsCommand",
     "#/$defs/CloseCycleStageSessionsResult",
     "#/$defs/CloseRootReconcilerCommand",
@@ -341,13 +356,49 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   ]);
   const open = schema.$defs.OpenRootReconcilerRequest;
   assert.ok(open.required.includes("bootstrap"));
+  assert.ok(open.required.includes("command"));
   assert.equal(open.properties.bootstrap.$ref, "#/$defs/RootBootstrap");
+  assert.equal(open.properties.command.$ref, "#/$defs/RootSemanticGateCommand");
+
+  const closeCommand = schema.$defs.CloseCycleStageSessionsCommand;
+  assert.deepEqual(closeCommand.required, [
+    "protocol_version", "command_id", "kind", "root_issue_id", "cycle_issue_id",
+    "expected_process_generation", "reason", "deadline_at", "expected_sessions",
+  ]);
+  assert.deepEqual(closeCommand.properties.reason.enum, [
+    "cycle_terminal", "root_canceled", "routing_revoked", "shutdown",
+    "profile_invalidated", "runtime_fence_recovery",
+  ]);
+  assert.equal(closeCommand.properties.expected_sessions.$ref, "#/$defs/ExpectedStageSessions");
+  assert.deepEqual(schema.$defs.ExpectedStageSessions.required, ["plan", "work", "verify"]);
+  assert.equal(schema.$defs.ExpectedStageSessions.additionalProperties, false);
+  assert.deepEqual(schema.$defs.ExpectedStageRoleSession.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/ExpectedPresentStageRoleSession", "#/$defs/ExpectedAbsentStageRoleSession",
+  ]);
+
+  const closeResult = schema.$defs.CloseCycleStageSessionsResult;
+  assert.deepEqual(closeResult.required, [
+    "protocol_version", "command_id", "root_issue_id", "cycle_issue_id",
+    "process_generation", "kind", "role_results",
+  ]);
+  assert.deepEqual(closeResult.properties.kind.enum, ["all_closed", "close_incomplete"]);
+  assert.equal(closeResult.properties.role_results.$ref, "#/$defs/CloseStageRoleResults");
+  assert.deepEqual(schema.$defs.CloseStageRoleResults.required, ["plan", "work", "verify"]);
+  assert.equal(schema.$defs.CloseStageRoleResults.additionalProperties, false);
+  assert.deepEqual(schema.$defs.CloseRoleSessionResult.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/ClosedRoleSessionResult",
+    "#/$defs/ClosePendingRoleSessionResult",
+    "#/$defs/CloseRejectedRoleSessionResult",
+  ]);
   const opened = schema.$defs.RootReconcilerOpenedResult;
   assert.ok(opened.required.includes("initial_result"));
   assert.equal(opened.properties.initial_result.$ref, "#/$defs/RootReconcilerTurnResult");
   assert.equal(Object.hasOwn(opened.properties, "initial_" + "directive"), false);
   assert.deepEqual(schema.$defs.RootReconcilerTurnResult.oneOf.map(({ $ref }) => $ref), [
-    "#/$defs/RootDirective",
+    "#/$defs/RequirementAndCommentIntent",
+    "#/$defs/PlanHumanDecisionIntent",
+    "#/$defs/RecoveryStrategyIntent",
+    "#/$defs/TerminalReviewIntent",
     "#/$defs/RootReconcilerTurnFailure",
   ]);
   assert.deepEqual(schema.$defs.RootReconcilerTurnFailure.required, [
@@ -356,8 +407,9 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
   const advance = schema.$defs.AdvanceRootReconcilerRequest;
   assert.deepEqual(advance.required, [
     "protocol_version", "request_id", "kind", "reconciler_session_id",
-    "reconciler_turn_id", "observed_at", "delta", "limits",
+    "reconciler_turn_id", "observed_at", "command", "delta", "limits",
   ]);
+  assert.equal(advance.properties.command.$ref, "#/$defs/RootSemanticGateCommand");
   assert.equal(advance.properties.delta.$ref, "#/$defs/RootDelta");
   assert.equal(
     Object.hasOwn(advance.properties, "root_snapshot"),
@@ -439,29 +491,51 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "common.schema.json#/$defs/Identifier",
   );
   assert.ok(schema.$defs.RootReconcilerFailure.required.includes("continuity"));
-  assert.ok(schema.$defs.StageExecutionFailedResult.required.includes("continuity"));
-  for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest", "PlanResult", "WorkResult", "VerifyResult"]) {
+  for (const name of ["PlanTurnRequest", "WorkTurnRequest", "VerifyTurnRequest"]) {
     const definition = schema.$defs[name];
     assert.equal(definition.additionalProperties, false, name);
     assert.ok(definition.required.includes("role"), name);
     assert.ok(definition.required.includes("role_session_id"), name);
     assert.ok(definition.required.includes("role_turn_id"), name);
   }
+  for (const [responseName, role, terminalName] of [
+    ["PlanTurnResponse", "plan", "PlanTurnTerminal"],
+    ["WorkTurnResponse", "work", "WorkTurnTerminal"],
+    ["VerifyTurnResponse", "verify", "VerifyTurnTerminal"],
+  ]) {
+    const response = schema.$defs[responseName];
+    assert.equal(response.additionalProperties, false, responseName);
+    assert.equal(response.properties.role.const, role, responseName);
+    assert.ok(response.required.includes("model_observation"), responseName);
+    assert.ok(response.required.includes("terminal"), responseName);
+    assert.equal(response.properties.model_observation.$ref, "#/$defs/StageModelTurnRecord", responseName);
+    assert.equal(response.properties.terminal.$ref, `#/$defs/${terminalName}`, responseName);
+    assert.deepEqual(schema.$defs[terminalName].oneOf.map(({ $ref }) => $ref), [
+      `#/$defs/${role[0].toUpperCase()}${role.slice(1)}SemanticResult`,
+      "#/$defs/StageTurnFailure",
+    ]);
+  }
+  assert.deepEqual(schema.$defs.StageTurnFailure.required, [
+    "kind", "failure_kind", "error_code", "sanitized_reason", "retryable", "action_required", "continuity",
+  ]);
+  assert.equal(schema.$defs.StageTurnFailure.properties.kind.const, "runtime_failure");
+  assert.deepEqual(schema.$defs.StageTurnFailure.properties.failure_kind.enum, [
+    "canceled", "deadline_exceeded", "budget_exhausted", "provider_failure",
+    "output_invalid", "work_epoch_closure_failed", "workspace_fence_unproven",
+  ]);
+  assert.deepEqual(schema.$defs.StageTurnFailure.properties.action_required.enum, [
+    "root_reconciliation", "retry_close_only",
+  ]);
+  assert.equal(schema.$defs.StageTurnFailure.properties.continuity.$ref, "#/$defs/ProviderTurnContinuity");
   assert.deepEqual(schema.$defs.PlanResultOutcome.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/PlanCompletedResult",
     "#/$defs/PlanNeedsInformationResult",
     "#/$defs/PlanBlockedResult",
-    "#/$defs/StageBudgetExhaustedResult",
-    "#/$defs/StageCanceledResult",
-    "#/$defs/StageExecutionFailedResult",
   ]);
   assert.deepEqual(schema.$defs.WorkResultOutcome.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/WorkCompletedResult",
     "#/$defs/WorkBlockedResult",
     "#/$defs/WorkSpecialResult",
-    "#/$defs/StageBudgetExhaustedResult",
-    "#/$defs/StageCanceledResult",
-    "#/$defs/StageExecutionFailedResult",
   ]);
   assert.deepEqual(schema.$defs.VerifyResultOutcome.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/VerifyPassedResult",
@@ -469,10 +543,106 @@ test("Agent Wire is closed, correlated, and covers each role outcome", async () 
     "#/$defs/VerifyInconclusiveResult",
     "#/$defs/VerifyPlanContractViolationResult",
     "#/$defs/VerifyBlockedResult",
-    "#/$defs/StageBudgetExhaustedResult",
-    "#/$defs/StageCanceledResult",
-    "#/$defs/StageExecutionFailedResult",
   ]);
+  for (const retired of ["StageExecutionFailedResult", "StageCanceledResult", "StageBudgetExhaustedResult"]) {
+    assert.equal(Object.hasOwn(schema.$defs, retired), false, retired);
+  }
+});
+
+test("Root semantic gate commands freeze one exact subject and expected result contract", async () => {
+  const schema = await loadSchema("conductor-performer");
+  assert.deepEqual(schema.$defs.RootSemanticGateCommand.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/RequirementAndCommentCommand",
+    "#/$defs/PlanHumanDecisionCommand",
+    "#/$defs/RecoveryStrategyCommand",
+    "#/$defs/TerminalReviewCommand",
+  ]);
+
+  const expected = [
+    ["RequirementAndCommentCommand", "requirement_and_comment", "requirement_and_comment_intent.v1", "RootDefinitionSubject"],
+    ["PlanHumanDecisionCommand", "plan_human_decision", "plan_human_decision_intent.v1", "PlanHumanDecisionSubject"],
+    ["RecoveryStrategyCommand", "recovery_strategy", "recovery_strategy_intent.v1", "RecoveryStrategySubject"],
+    ["TerminalReviewCommand", "terminal_review", "terminal_review_intent.v1", "TerminalReviewSubject"],
+  ];
+  for (const [name, gate, contract, subject] of expected) {
+    const command = schema.$defs[name];
+    assert.equal(command.additionalProperties, false);
+    assert.deepEqual(command.required, [
+      "semantic_gate", "trigger", "pending_input_refs", "expected_output_contract", "subject",
+    ]);
+    assert.equal(command.properties.semantic_gate.const, gate);
+    assert.equal(command.properties.expected_output_contract.const, contract);
+    assert.equal(command.properties.pending_input_refs.items.$ref, "#/$defs/PendingRootInputRef");
+    assert.equal(command.properties.subject.$ref, `#/$defs/${subject}`);
+  }
+
+  const serialized = JSON.stringify(schema.$defs.RootSemanticGateCommand) +
+    expected.map(([name]) => JSON.stringify(schema.$defs[name])).join("");
+  for (const forbidden of ["action", "remote_version", "precondition", "relation", "archive", "status"]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+  assert.equal(
+    Object.hasOwn(schema.$defs.TerminalReviewSubject.properties, "delivery_policy"),
+    false,
+    "terminal review must not expose mechanical delivery policy to the model",
+  );
+  assert.ok(schema.$defs.TerminalReviewSubject.required.includes("successor_cycle_policy"));
+  assert.deepEqual(
+    schema.$defs.TerminalReviewSubject.properties.successor_cycle_policy.enum,
+    ["allowed", "cycle_limit_reached", "root_deadline_reached"],
+  );
+  assert.ok(schema.$defs.RecoveryStrategyCommand.properties.trigger.enum.includes("delivery_changes_requested"));
+  assert.ok(schema.$defs.RecoveryStrategyCommand.properties.trigger.enum.includes("delivery_closed_unmerged"));
+  assert.ok(schema.$defs.RecoveryStrategyCommand.properties.trigger.enum.includes("delivery_head_changed"));
+  assert.ok(schema.$defs.RecoveryStrategySubject.properties.kind.enum.includes("delivery"));
+  assert.ok(schema.$defs.RecoveryStrategySubject.properties.source_kind.enum.includes("remote_scm"));
+});
+
+test("requirement and comment intent is an independent closed semantic gate contract", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const intent = schema.$defs.RequirementAndCommentIntent;
+  assert.equal(intent.additionalProperties, false);
+  assert.deepEqual(intent.required, [
+    "protocol_version", "request_id", "kind", "semantic_gate", "intent_id",
+    "root_issue_id", "reconciler_session_id", "reconciler_turn_id", "model_turn",
+    "based_on_target_root_digest", "rationale", "evidence_refs",
+    "consumed_input_ids", "comment_dispositions", "intent",
+  ]);
+  assert.equal(intent.properties.kind.const, "requirement_and_comment_intent");
+  assert.equal(intent.properties.semantic_gate.const, "requirement_and_comment");
+  assert.equal(intent.properties.intent.$ref, "#/$defs/RequirementAndCommentPurpose");
+  assert.equal(intent.properties.comment_dispositions.items.$ref, "#/$defs/RootCommentDisposition");
+
+  assert.deepEqual(schema.$defs.RequirementAndCommentPurpose.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/DefineRequirementPurpose",
+    "#/$defs/RequestInformationPurpose",
+    "#/$defs/AnswerCommentsPurpose",
+  ]);
+  assert.deepEqual(schema.$defs.RootCommentDisposition.oneOf.map(({ $ref }) => $ref), [
+    "#/$defs/AppliedCommentDisposition",
+    "#/$defs/NotAppliedCommentDisposition",
+    "#/$defs/NeedsResponseCommentDisposition",
+    "#/$defs/AnswerOnlyCommentDisposition",
+  ]);
+  assert.deepEqual(schema.$defs.DefineRequirementPurpose.required, [
+    "kind", "requirement", "active_cycle_impact",
+  ]);
+  assert.deepEqual(schema.$defs.DefineRequirementPurpose.properties.active_cycle_impact.enum, [
+    "initial", "compatible", "requires_recovery",
+  ]);
+  assert.deepEqual(schema.$defs.RootRequirement.required, [
+    "objective", "requested_scope", "constraints", "acceptance_criteria",
+  ]);
+
+  const serialized = JSON.stringify(intent) +
+    JSON.stringify(schema.$defs.RequirementAndCommentPurpose) +
+    JSON.stringify(schema.$defs.RootCommentDisposition);
+  for (const retiredField of [
+    "action", "remote_version", "precondition", "status", "relation",
+    "stage_execution_id", "cycle_issue_id", "tree_operation",
+  ]) {
+    assert.equal(serialized.includes(retiredField), false, retiredField);
+  }
 });
 
 test("Root bootstrap uses native authority and one closed worktree gate result", async () => {
@@ -572,8 +742,13 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
     "linear_attachment", "linear_activity", "linear_status_catalog",
   ]);
   assert.equal(schema.$defs.WorkflowRelationSnapshot.additionalProperties, false);
-  assert.ok(schema.$defs.UpdateWorkflowIssueCommand.required.includes("is_archived"));
+  assert.equal(schema.$defs.UpdateWorkflowIssueCommand.required.includes("is_archived"), false);
   assert.ok(schema.$defs.UpdateWorkflowIssueCommand.required.includes("parent_assignment"));
+  assert.equal(schema.$defs.UpdateWorkflowIssueCommand.properties.target.$ref,
+    "#/$defs/ActiveWorkflowMutationTarget");
+  assert.equal(schema.$defs.ActiveWorkflowMutationTarget.properties.expected_is_archived.const, false);
+  assert.equal(schema.$defs.SetWorkflowIssueArchiveStateCommand.properties.target.$ref,
+    "#/$defs/ArchiveWorkflowMutationTarget");
   assert.deepEqual(schema.$defs.WorkflowParentAssignment.oneOf.map(({ properties }) => properties.mode.const), [
     "retain", "set", "clear",
   ]);
@@ -581,20 +756,24 @@ test("workflow gateway contracts expose catalog, complete Tree facts, and stable
   assert.deepEqual(schema.$defs.WorkflowMutationCommand.oneOf.map(({ $ref }) => $ref), [
     "#/$defs/CreateWorkflowIssueCommand",
     "#/$defs/UpdateWorkflowIssueCommand",
+    "#/$defs/SetWorkflowIssueArchiveStateCommand",
     "#/$defs/AppendWorkflowCommentCommand",
     "#/$defs/CreateWorkflowAttachmentCommand",
     "#/$defs/CreateCommentReplyCommand",
-    "#/$defs/SetCommentReceiptReactionCommand",
+    "#/$defs/RemoveCommentReceiptReactionCommand",
+    "#/$defs/CreateCommentReceiptReactionCommand",
     "#/$defs/SetCommentThreadStateCommand",
     "#/$defs/CreateWorkflowRelationCommand",
   ]);
   for (const name of [
     "CreateWorkflowIssueCommand",
     "UpdateWorkflowIssueCommand",
+    "SetWorkflowIssueArchiveStateCommand",
     "AppendWorkflowCommentCommand",
     "CreateWorkflowAttachmentCommand",
     "CreateCommentReplyCommand",
-    "SetCommentReceiptReactionCommand",
+    "RemoveCommentReceiptReactionCommand",
+    "CreateCommentReceiptReactionCommand",
     "SetCommentThreadStateCommand",
     "CreateWorkflowRelationCommand",
   ]) {
@@ -633,8 +812,12 @@ test("turn facts and comment replies have closed transient contract shapes", asy
     "#/$defs/StageModelTurnRecord",
   ]);
 
-  for (const name of ["PlanResult", "WorkResult", "VerifyResult", "RootDirective", "RootReconcilerFailure"]) {
+  for (const name of ["RootDirective", "RootReconcilerFailure"]) {
     assert.ok(schema.$defs[name].required.includes("model_turn"), name);
+    assert.equal(Object.hasOwn(schema.$defs[name].properties, "usage"), false, name);
+  }
+  for (const name of ["PlanTurnResponse", "WorkTurnResponse", "VerifyTurnResponse"]) {
+    assert.ok(schema.$defs[name].required.includes("model_observation"), name);
     assert.equal(Object.hasOwn(schema.$defs[name].properties, "usage"), false, name);
   }
 
@@ -655,6 +838,190 @@ test("turn facts and comment replies have closed transient contract shapes", asy
     "resolve", "keep_open", "reopen",
   ]);
 
+});
+
+test("recovery strategy has an independent high-level intent contract", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const intent = schema.$defs.RecoveryStrategyIntent;
+
+  assert.equal(intent.additionalProperties, false);
+  assert.equal(intent.properties.kind.const, "recovery_strategy_intent");
+  assert.equal(intent.properties.semantic_gate.const, "recovery_strategy");
+  assert.deepEqual(
+    schema.$defs.RecoveryStrategyPurpose.oneOf.map(({ $ref }) => $ref),
+    [
+      "#/$defs/ContinueWithSuccessorAttemptPurpose",
+      "#/$defs/RepairCurrentCyclePurpose",
+      "#/$defs/ReplanCurrentCyclePurpose",
+      "#/$defs/RequestHumanDecisionPurpose",
+      "#/$defs/ResolveFindingWaiverPurpose",
+      "#/$defs/EndCurrentCyclePurpose",
+    ],
+  );
+  assert.deepEqual(
+    schema.$defs.RequestHumanDecisionPurpose.properties.decision_kind.enum,
+    ["information", "permission", "waiver"],
+  );
+  assert.deepEqual(
+    schema.$defs.EndCurrentCyclePurpose.properties.outcome.enum,
+    ["recovery_exhausted", "recovery_abandoned"],
+  );
+  assert.deepEqual(
+    schema.$defs.ResolveFindingWaiverPurpose.required,
+    ["kind", "resolution"],
+  );
+  assert.equal(
+    schema.$defs.ResolveFindingWaiverPurpose.properties.kind.const,
+    "resolve_finding_waiver",
+  );
+  assert.deepEqual(
+    schema.$defs.ResolveFindingWaiverPurpose.properties.resolution.enum,
+    ["accepted", "rejected", "needs_clarification"],
+  );
+  assert.equal(
+    schema.$defs.ContinueWithSuccessorAttemptPurpose.properties.success_evidence_requirements.minItems,
+    1,
+  );
+  assert.equal(schema.$defs.RepairCurrentCyclePurpose.properties.acceptance_focus.minItems, 1);
+
+  const visited = new Set();
+  const purposePropertyNames = new Set();
+  const visitPurpose = (definition) => {
+    if (definition.$ref?.startsWith("#/$defs/")) {
+      const name = definition.$ref.slice("#/$defs/".length);
+      if (visited.has(name)) return;
+      visited.add(name);
+      visitPurpose(schema.$defs[name]);
+      return;
+    }
+    for (const name of Object.keys(definition.properties ?? {})) {
+      purposePropertyNames.add(name);
+    }
+    for (const branch of definition.oneOf ?? []) visitPurpose(branch);
+    for (const child of Object.values(definition.properties ?? {})) {
+      if (child && typeof child === "object") visitPurpose(child);
+    }
+  };
+  visitPurpose(schema.$defs.RecoveryStrategyPurpose);
+  for (const forbidden of [
+    "action", "remote_version", "precondition", "status", "relation",
+    "cycle_issue_id", "plan_issue_id", "stage_issue_id", "finding_issue_id",
+    "successor_issue_id", "archive",
+  ]) {
+    assert.equal(purposePropertyNames.has(forbidden), false, forbidden);
+  }
+  assert.equal(
+    schema.$defs.ConductorPerformerMessage.oneOf.some(
+      ({ $ref }) => $ref === "#/$defs/RecoveryStrategyIntent",
+    ),
+    true,
+  );
+});
+
+test("Plan human decision has an independent business intent contract", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const intent = schema.$defs.PlanHumanDecisionIntent;
+
+  assert.equal(intent.additionalProperties, false);
+  assert.equal(intent.properties.kind.const, "plan_human_decision_intent");
+  assert.equal(intent.properties.semantic_gate.const, "plan_human_decision");
+  assert.deepEqual(
+    schema.$defs.PlanHumanDecisionPurpose.oneOf.map(({ $ref }) => $ref),
+    [
+      "#/$defs/ApprovePlanPurpose",
+      "#/$defs/RejectPlanPurpose",
+      "#/$defs/RequestPlanDecisionClarificationPurpose",
+    ],
+  );
+  assert.deepEqual(schema.$defs.RejectPlanPurpose.properties.consequence.enum, [
+    "continue_with_fresh_plan", "end_current_cycle",
+  ]);
+  assert.deepEqual(schema.$defs.RejectPlanPurpose.properties.root_requirement_impact.enum, [
+    "unchanged", "requires_update",
+  ]);
+
+  const visited = new Set();
+  const purposePropertyNames = new Set();
+  const visitPurpose = (definition) => {
+    if (definition.$ref?.startsWith("#/$defs/")) {
+      const name = definition.$ref.slice("#/$defs/".length);
+      if (visited.has(name)) return;
+      visited.add(name);
+      visitPurpose(schema.$defs[name]);
+      return;
+    }
+    for (const name of Object.keys(definition.properties ?? {})) purposePropertyNames.add(name);
+    for (const branch of definition.oneOf ?? []) visitPurpose(branch);
+    for (const child of Object.values(definition.properties ?? {})) {
+      if (child && typeof child === "object") visitPurpose(child);
+    }
+  };
+  visitPurpose(schema.$defs.PlanHumanDecisionPurpose);
+  for (const forbidden of [
+    "action", "remote_version", "precondition", "status", "relation", "archive",
+    "plan_issue_id", "cycle_issue_id", "approval_request_comment_id",
+    "approval_reply_comment_id", "node_kind", "dependency_issue_ids",
+  ]) {
+    assert.equal(purposePropertyNames.has(forbidden), false, forbidden);
+  }
+  assert.equal(
+    schema.$defs.ConductorPerformerMessage.oneOf.some(
+      ({ $ref }) => $ref === "#/$defs/PlanHumanDecisionIntent",
+    ),
+    true,
+  );
+});
+
+test("terminal review has an independent Root outcome intent contract", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const intent = schema.$defs.TerminalReviewIntent;
+
+  assert.equal(intent.additionalProperties, false);
+  assert.equal(intent.properties.kind.const, "terminal_review_intent");
+  assert.equal(intent.properties.semantic_gate.const, "terminal_review");
+  assert.deepEqual(
+    schema.$defs.TerminalReviewPurpose.oneOf.map(({ $ref }) => $ref),
+    [
+      "#/$defs/DeliverVerifiedRevisionPurpose",
+      "#/$defs/StartSuccessorCyclePurpose",
+      "#/$defs/RequestRootDecisionPurpose",
+      "#/$defs/HaltRootPurpose",
+    ],
+  );
+  assert.deepEqual(schema.$defs.HaltRootPurpose.properties.disposition.enum, [
+    "unachievable", "abandoned",
+  ]);
+
+  const visited = new Set();
+  const purposePropertyNames = new Set();
+  const visitPurpose = (definition) => {
+    if (definition.$ref?.startsWith("#/$defs/")) {
+      const name = definition.$ref.slice("#/$defs/".length);
+      if (visited.has(name)) return;
+      visited.add(name);
+      visitPurpose(schema.$defs[name]);
+      return;
+    }
+    for (const name of Object.keys(definition.properties ?? {})) purposePropertyNames.add(name);
+    for (const branch of definition.oneOf ?? []) visitPurpose(branch);
+    for (const child of Object.values(definition.properties ?? {})) {
+      if (child && typeof child === "object") visitPurpose(child);
+    }
+  };
+  visitPurpose(schema.$defs.TerminalReviewPurpose);
+  for (const forbidden of [
+    "action", "remote_version", "precondition", "status", "relation", "archive",
+    "cycle_issue_id", "stage_issue_id", "finding_issue_id", "successor_issue_id",
+    "git_sha", "branch", "pull_request", "scm_target", "delivery_policy",
+  ]) {
+    assert.equal(purposePropertyNames.has(forbidden), false, forbidden);
+  }
+  assert.equal(
+    schema.$defs.ConductorPerformerMessage.oneOf.some(
+      ({ $ref }) => $ref === "#/$defs/TerminalReviewIntent",
+    ),
+    true,
+  );
 });
 
 test("generation is deterministic and check mode detects drift", async () => {

@@ -4,6 +4,7 @@ import type {
   RootReconcilerAdvanceResult,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
+  RootSemanticGateCommand,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 interface RootReconcilerTransport {
@@ -13,6 +14,7 @@ interface RootReconcilerTransport {
     sessionId: string;
     reconcilerTurnId: string;
     observedAt: string;
+    command: RootSemanticGateCommand;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult>;
   closeRootReconciler(input: {
@@ -31,7 +33,7 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
   async open(input: RootReconcilerOpenInput): Promise<RootReconcilerOpenResult> {
     const result = await this.transport.openRootReconciler(input);
     if (
-      result.initialResult.kind === "directive" ||
+      result.initialResult.kind === "intent" ||
       result.initialResult.failure.continuity.kind === "retained"
     ) {
       this.rootsBySession.set(result.sessionId, input.rootIssueId);
@@ -44,6 +46,7 @@ export class PerformerRootReconcilerClientImpl implements RootReconcilerClientIn
     sessionId: string;
     reconcilerTurnId: string;
     observedAt: string;
+    command: RootSemanticGateCommand;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
     const result = await this.transport.advanceRootReconciler(input);

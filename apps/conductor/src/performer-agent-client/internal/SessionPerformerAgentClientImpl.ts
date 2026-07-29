@@ -1,11 +1,11 @@
 import {
   decodeConductorPerformerCloseCycleStageSessionsResult,
   decodeConductorPerformerCloseRootReconcilerResult,
-  decodeConductorPerformerPlanResult,
+  decodeConductorPerformerPlanTurnResponse,
   decodeConductorPerformerRootReconcilerOpenedResult,
   decodeConductorPerformerRootReconcilerTurnResult,
-  decodeConductorPerformerVerifyResult,
-  decodeConductorPerformerWorkResult,
+  decodeConductorPerformerVerifyTurnResponse,
+  decodeConductorPerformerWorkTurnResponse,
   type JsonValue,
 } from "@symphony/contracts";
 import type { PerformerAgentChannel, PerformerAgentChannelFactory } from "./PerformerAgentChannel.js";
@@ -14,17 +14,35 @@ import type {
 } from "../api/PerformerAgentClientInterface.js";
 import type {
   RootBootstrap,
+  RootFactIssue,
   RootDelta,
   RootDeltaChange,
-  RootDirective,
   RootReconcilerAdvanceResult,
+  RootSemanticGateCommand,
+  RootSemanticIntent,
   RootReconcilerTurnResult,
   RootReconcilerOpenInput,
   RootReconcilerOpenResult,
   RootTree,
+  PlanResult,
+  PlanTurnResponse,
   StageResult,
+  StageTurnFailure,
   StageTurnInput,
+  VerifyResult,
+  VerifyTurnResponse,
+  WorkResult,
+  WorkTurnResponse,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type {
+  ActualChanges,
+  CheckResult,
+  EvidenceReference,
+  FindingProposal,
+  PlanContractProposal,
+  ProposedWorkDag,
+  VerifyCriterionResult,
+} from "../../root-reconciliation/api/StageContracts.js";
 
 type JsonRecord = Record<string, unknown>;
 type StageSource = JsonRecord & {
@@ -51,6 +69,7 @@ export interface SessionPerformerAgentClientOptions {
 
 export class SessionPerformerAgentClientImpl implements PerformerAgentClientInterface {
   private readonly channels = new Map<string, PerformerAgentChannel>();
+  private readonly processGenerationByProfile = new Map<string, string>();
   private readonly profileByRoot = new Map<string, string>();
   private readonly profileByRootSession = new Map<string, string>();
   private readonly stageBaselines = new Map<string, {
@@ -60,6 +79,13 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     cycleIssueId: string;
     digest: string;
     sources: Map<string, StageSource>;
+  }>();
+  private readonly stageSessions = new Map<string, {
+    profileId: string;
+    role: "plan" | "work" | "verify";
+    rootIssueId: string;
+    cycleIssueId: string;
+    sessionGeneration: string;
   }>();
 
   constructor(private readonly options: SessionPerformerAgentClientOptions) {}
@@ -85,6 +111,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         denied_tools: [],
         network_policy: "disabled",
       },
+      command: toWireRootCommand(input.command),
       bootstrap: toWireBootstrap(input.bootstrap),
       limits: toWireLimits(input.limits),
     }, decodeConductorPerformerRootReconcilerOpenedResult, "root_reconciler_open_response_contract_invalid")
@@ -97,7 +124,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
           throw new Error("root_reconciler_open_result_invalid");
         }
         const initialResult = decodeRootTurnResult(response.initial_result);
-        if (initialResult.kind === "directive" || initialResult.failure.continuity.kind === "retained") {
+        if (initialResult.kind === "intent" || initialResult.failure.continuity.kind === "retained") {
           this.profileByRoot.set(input.rootIssueId, input.profileId);
           this.profileByRootSession.set(response.reconciler_session_id, input.profileId);
         }
@@ -115,6 +142,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     sessionId: string;
     reconcilerTurnId: string;
     observedAt: string;
+    command: RootSemanticGateCommand;
     delta: RootDelta;
   }): Promise<RootReconcilerAdvanceResult> {
     const profileId = this.profileByRootSession.get(input.sessionId);
@@ -129,6 +157,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         reconciler_session_id: input.sessionId,
         reconciler_turn_id: input.reconcilerTurnId,
         observed_at: input.observedAt,
+        command: toWireRootCommand(input.command),
         delta: toWireDelta(input.delta),
         limits: defaultLimits(this.options.deadlineMs),
       },
@@ -144,30 +173,93 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
       });
   }
 
-  executePlanTurn(input: StageTurnInput): Promise<StageResult> {
-    return this.executeStage("execute_plan_turn", input);
+  executePlanTurn(input: StageTurnInput): Promise<PlanTurnResponse> {
+    return this.executeStage("execute_plan_turn", input, decodePlanResult);
   }
 
-  executeWorkTurn(input: StageTurnInput): Promise<StageResult> {
-    return this.executeStage("execute_work_turn", input);
+  executeWorkTurn(input: StageTurnInput): Promise<WorkTurnResponse> {
+    return this.executeStage("execute_work_turn", input, decodeWorkResult);
   }
 
-  executeVerifyTurn(input: StageTurnInput): Promise<StageResult> {
-    return this.executeStage("execute_verify_turn", input);
+  executeVerifyTurn(input: StageTurnInput): Promise<VerifyTurnResponse> {
+    return this.executeStage("execute_verify_turn", input, decodeVerifyResult);
   }
 
-  async closeCycleStageSessions(input: { requestId: string; rootIssueId: string; cycleIssueId: string }): Promise<void> {
+  async closeCycleStageSessions(input: {
+    requestId: string;
+    rootIssueId: string;
+    cycleIssueId: string;
+    reason: "cycle_terminal" | "runtime_fence_recovery";
+  }) {
     const profileId = this.profileByRoot.get(input.rootIssueId);
-    if (!profileId) return;
-    await this.invoke(input.requestId, profileId, {
-      protocol_version: "1", request_id: input.requestId, kind: "close_cycle_stage_sessions",
-      root_issue_id: input.rootIssueId, cycle_issue_id: input.cycleIssueId, reason: "cycle_terminal",
-    }, decodeConductorPerformerCloseCycleStageSessionsResult, "cycle_stage_close_response_contract_invalid");
-    for (const [sessionId, baseline] of this.stageBaselines) {
-      if (baseline.rootIssueId === input.rootIssueId && baseline.cycleIssueId === input.cycleIssueId) {
-        this.stageBaselines.delete(sessionId);
-      }
+    if (!profileId) throw new Error("cycle_stage_session_profile_unknown");
+    this.channelFor(profileId);
+    const processGeneration = this.processGenerationByProfile.get(profileId);
+    if (!processGeneration) throw new Error("performer_process_generation_unknown");
+    const expectedSessions = Object.fromEntries((["plan", "work", "verify"] as const).map((role) => {
+      const tracked = [...this.stageSessions.entries()].find(([, session]) =>
+        session.profileId === profileId && session.rootIssueId === input.rootIssueId &&
+        session.cycleIssueId === input.cycleIssueId && session.role === role);
+      return [role, tracked ? {
+        kind: "expected",
+        role_session_id: tracked[0],
+        session_generation: tracked[1].sessionGeneration,
+      } : { kind: "absent" }];
+    }));
+    const response = await this.invoke(input.requestId, profileId, {
+      protocol_version: "1",
+      command_id: input.requestId,
+      kind: "close_cycle_stage_sessions",
+      root_issue_id: input.rootIssueId,
+      cycle_issue_id: input.cycleIssueId,
+      expected_process_generation: processGeneration,
+      reason: input.reason,
+      deadline_at: new Date(Date.now() + this.deadlineDuration()).toISOString(),
+      expected_sessions: expectedSessions,
+    }, decodeConductorPerformerCloseCycleStageSessionsResult, "cycle_stage_close_response_contract_invalid", "command_id");
+    if (response.process_generation !== processGeneration || response.command_id !== input.requestId ||
+        response.root_issue_id !== input.rootIssueId || response.cycle_issue_id !== input.cycleIssueId) {
+      return this.rejectClose(profileId, "cycle_stage_close_correlation_invalid");
     }
+    const wireRoleResults = record(response.role_results);
+    const roleResults = Object.fromEntries((["plan", "work", "verify"] as const).map((role) => {
+      const wire = record(wireRoleResults[role]);
+      if (wire.role !== role) return this.rejectClose(profileId, "cycle_stage_close_role_invalid");
+      const roleSessionId = wire.role_session_id === null
+        ? null
+        : string(wire.role_session_id, "cycle_stage_close_session_invalid");
+      const expected = record(expectedSessions[role]);
+      if (wire.kind === "closed") {
+        if (expected.kind === "expected") {
+          if (roleSessionId !== expected.role_session_id ||
+              (wire.close_outcome !== "closed_now" && wire.close_outcome !== "already_closed")) {
+            return this.rejectClose(profileId, "cycle_stage_close_postcondition_invalid");
+          }
+        } else if (roleSessionId !== null || wire.close_outcome !== "already_absent") {
+          return this.rejectClose(profileId, "cycle_stage_close_postcondition_invalid");
+        }
+      }
+      return [role, {
+        kind: wire.kind,
+        roleSessionId,
+        ...(typeof wire.close_outcome === "string" ? { closeOutcome: wire.close_outcome } : {}),
+        ...(typeof wire.close_reason === "string" ? { closeReason: wire.close_reason } : {}),
+      }];
+    })) as import("../api/PerformerAgentClientInterface.js").CycleStageSessionCloseResult["roleResults"];
+    const everyRoleClosed = Object.values(roleResults).every((result) => result.kind === "closed");
+    if ((response.kind === "all_closed") !== everyRoleClosed) {
+      return this.rejectClose(profileId, "cycle_stage_close_postcondition_invalid");
+    }
+    for (const result of Object.values(roleResults)) {
+      if (result.kind !== "closed" || !result.roleSessionId) continue;
+      this.stageSessions.delete(result.roleSessionId);
+      this.stageBaselines.delete(result.roleSessionId);
+    }
+    return {
+      kind: response.kind as "all_closed" | "close_incomplete",
+      processGeneration,
+      roleResults,
+    };
   }
 
   async closeRootReconciler(input: {
@@ -187,36 +279,54 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   }
 
   async cancelAndReap(): Promise<void> {
-    const channels = [...this.channels.values()];
-    this.channels.clear();
-    await Promise.all(channels.map((channel) => channel.close(1_000)));
+    const entries = [...this.channels.entries()];
+    for (const [profileId] of entries) this.dropProfile(profileId);
+    await Promise.all(entries.map(([, channel]) => channel.close(1_000)));
   }
 
-  private async executeStage(kind: "execute_plan_turn" | "execute_work_turn" | "execute_verify_turn", input: StageTurnInput): Promise<StageResult> {
+  private async executeStage<Result extends StageResult | StageTurnFailure>(
+    kind: "execute_plan_turn" | "execute_work_turn" | "execute_verify_turn",
+    input: StageTurnInput,
+    normalize: (value: unknown) => Result,
+  ): Promise<Result> {
     this.profileByRoot.set(input.rootIssueId, input.profileId);
     const previous = this.stageBaselines.get(input.roleSessionId);
     if (previous && (previous.profileId !== input.profileId || previous.role !== input.role)) {
       throw new Error("stage_role_session_correlation_invalid");
     }
+    let session = this.stageSessions.get(input.roleSessionId);
+    if (session && (session.profileId !== input.profileId || session.role !== input.role ||
+        session.rootIssueId !== input.rootIssueId || session.cycleIssueId !== input.cycleIssueId)) {
+      throw new Error("stage_role_session_correlation_invalid");
+    }
+    session ??= {
+      profileId: input.profileId,
+      role: input.role,
+      rootIssueId: input.rootIssueId,
+      cycleIssueId: input.cycleIssueId,
+      sessionGeneration: randomUUID(),
+    };
+    this.stageSessions.set(input.roleSessionId, session);
     const batch = buildStageContextBatch(input, previous);
     const decoder = kind === "execute_plan_turn"
-      ? decodeConductorPerformerPlanResult
+      ? decodeConductorPerformerPlanTurnResponse
       : kind === "execute_work_turn"
-        ? decodeConductorPerformerWorkResult
-        : decodeConductorPerformerVerifyResult;
+        ? decodeConductorPerformerWorkTurnResponse
+        : decodeConductorPerformerVerifyTurnResponse;
     const responseContractCode = kind === "execute_plan_turn"
       ? "plan_result_response_contract_invalid"
       : kind === "execute_work_turn"
         ? "work_result_response_contract_invalid"
         : "verify_result_response_contract_invalid";
     const response = await this.invoke(input.requestId, input.profileId, {
-      protocol_version: "1", request_id: input.requestId, ...toWireStageInput(input, batch),
+      protocol_version: "1", request_id: input.requestId,
+      ...toWireStageInput(input, batch, session.sessionGeneration),
     }, decoder, responseContractCode);
     try {
-      const result = decodeStageResult(response);
+      const result = normalize(response);
       if (result.contextDigest !== batch.digest) throw new Error("stage_context_digest_mismatch");
-      const continuity = result.outcome.continuity;
-      if (result.outcome.kind !== "execution_failed" || continuity?.kind === "retained" && continuity.appendOutcome === "accepted") {
+      const continuity = "terminalKind" in result ? result.continuity : undefined;
+      if (!("terminalKind" in result) || continuity?.kind === "retained" && continuity.appendOutcome === "accepted") {
         this.stageBaselines.set(input.roleSessionId, {
           profileId: input.profileId,
           role: input.role,
@@ -227,6 +337,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         });
       } else if (continuity?.kind === "closed") {
         this.stageBaselines.delete(input.roleSessionId);
+        this.stageSessions.delete(input.roleSessionId);
       }
       return result;
     } catch (error) {
@@ -242,6 +353,7 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     body: JsonRecord,
     decoder: (value: JsonValue) => JsonValue,
     responseContractCode: string,
+    responseCorrelationKey: "request_id" | "command_id" = "request_id",
   ): Promise<JsonRecord> {
     try {
       const value = await this.channelFor(profileId).request({
@@ -250,7 +362,10 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
         deadlineMs: typeof this.options.deadlineMs === "function" ? this.options.deadlineMs() : this.options.deadlineMs,
       });
       const response = record(value);
-      if (response.protocol_version !== "1" || response.request_id !== requestId) throw new Error("performer_agent_correlation_invalid");
+      if (response.protocol_version !== "1" ||
+          (response[responseCorrelationKey] !== requestId && !(response.kind === "error" && response.request_id === requestId))) {
+        throw new Error("performer_agent_correlation_invalid");
+      }
       if (response.kind === "error") throw new Error(sanitizedError(response));
       try {
         return record(decoder(value as JsonValue));
@@ -268,16 +383,22 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
   private channelFor(profileId: string): PerformerAgentChannel {
     const existing = this.channels.get(profileId);
     if (existing) return existing;
+    const processGeneration = randomUUID();
     const channel = this.options.channelFactory.open({
       executable: this.options.executable,
-      environment: this.options.environment(profileId),
+      environment: {
+        ...this.options.environment(profileId),
+        SYMPHONY_PERFORMER_PROCESS_GENERATION: processGeneration,
+      },
     });
     this.channels.set(profileId, channel);
+    this.processGenerationByProfile.set(profileId, processGeneration);
     return channel;
   }
 
   private dropProfile(profileId: string): void {
     this.channels.delete(profileId);
+    this.processGenerationByProfile.delete(profileId);
     for (const [rootIssueId, mappedProfileId] of this.profileByRoot) {
       if (mappedProfileId === profileId) this.profileByRoot.delete(rootIssueId);
     }
@@ -287,6 +408,18 @@ export class SessionPerformerAgentClientImpl implements PerformerAgentClientInte
     for (const [sessionId, baseline] of this.stageBaselines) {
       if (baseline.profileId === profileId) this.stageBaselines.delete(sessionId);
     }
+    for (const [sessionId, session] of this.stageSessions) {
+      if (session.profileId === profileId) this.stageSessions.delete(sessionId);
+    }
+  }
+
+  private deadlineDuration(): number {
+    return typeof this.options.deadlineMs === "function" ? this.options.deadlineMs() : this.options.deadlineMs;
+  }
+
+  private rejectClose(profileId: string, code: string): never {
+    this.dropProfile(profileId);
+    throw new Error(code);
   }
 }
 
@@ -487,7 +620,6 @@ function toWireBootstrap(input: RootBootstrap): JsonRecord {
       omissions: input.coverage.omissions.map((omission) => ({ source_id: omission.sourceId, reason: omission.reason })),
     },
     root_digest: input.rootDigest,
-    pending_input_ids: input.pendingInputIds,
   };
 }
 
@@ -496,8 +628,11 @@ function toWireDelta(input: RootDelta): JsonRecord {
     base_root_digest: input.baseRootDigest,
     target_root_digest: input.targetRootDigest,
     changes: input.changes.map(toWireDeltaChange),
-    pending_input_ids: input.pendingInputIds,
   };
+}
+
+function toWireRootCommand(input: RootSemanticGateCommand): JsonRecord {
+  return snakeCaseKeys(input) as JsonRecord;
 }
 
 function toWireDeltaChange(change: RootDeltaChange): JsonRecord {
@@ -636,7 +771,6 @@ function toWireRootConvergence(
     policy: {
       max_cycles_per_root: input.policy.maxCyclesPerRoot,
       max_same_open_finding_cycles: input.policy.maxSameOpenFindingCycles,
-      max_consecutive_no_progress: input.policy.maxConsecutiveNoProgress,
       max_cycle_repair_attempts: input.policy.maxCycleRepairAttempts,
       deadline_at: input.policy.deadlineAt,
     },
@@ -646,7 +780,6 @@ function toWireRootConvergence(
         finding_id: finding.findingId,
         open_cycle_count: finding.openCycleCount,
       })),
-      consecutive_no_progress: input.view.consecutiveNoProgress,
       ...(input.view.activeCycleIssueId ? { active_cycle_issue_id: input.view.activeCycleIssueId } : {}),
       active_cycle_repair_attempts: input.view.activeCycleRepairAttempts,
       is_deadline_exceeded: input.view.isDeadlineExceeded,
@@ -753,7 +886,7 @@ function toWireMechanicalViolation(input: import("../../root-reconciliation/api/
   return { violation_kind: input.violationKind, source_issue_ids: input.sourceIssueIds, summary: input.summary };
 }
 
-function toWireStageInput(input: StageTurnInput, batch: StageContextBatch): JsonRecord {
+function toWireStageInput(input: StageTurnInput, batch: StageContextBatch, sessionGeneration: string): JsonRecord {
   const rootIssue = input.tree.issues.find((issue) => issue.issue_id === input.rootIssueId);
   const cycleIssue = input.tree.issues.find((issue) => issue.issue_id === input.cycleIssueId);
   const targetIssue = input.tree.issues.find((issue) => issue.issue_id === input.targetIssueId);
@@ -762,6 +895,7 @@ function toWireStageInput(input: StageTurnInput, batch: StageContextBatch): Json
     stage_execution_id: input.stageExecutionId,
     role: input.role,
     role_session_id: input.roleSessionId,
+    session_generation: sessionGeneration,
     role_turn_id: input.roleTurnId,
     root_issue_id: input.rootIssueId,
     cycle_issue_id: input.cycleIssueId,
@@ -805,14 +939,19 @@ function toWireIssue(issue: RootTree["issues"][number]): JsonRecord {
   const issueKind = issue.issue_kind ?? "work";
   return {
     issue_id: issue.issue_id,
+    identifier: issue.identifier,
     issue_kind: issueKind,
     ...(issue.parent_issue_id ? { parent_issue_id: issue.parent_issue_id } : {}),
+    ...(issue.creator_user_id ? { creator_user_id: issue.creator_user_id } : {}),
+    ...(issue.assignee_user_id ? { assignee_user_id: issue.assignee_user_id } : {}),
     title: issue.title,
     description: issue.description,
     status: issue.status_name,
+    order: issue.order,
     is_archived: issue.is_archived,
     labels: issue.labels,
     remote_version: issue.remote_version,
+    created_at: issue.created_at,
   };
 }
 
@@ -851,6 +990,7 @@ function toWireTreeRelation(relation: RootTree["relations"][number]): JsonRecord
 function toWireFactIssue(issue: import("../../root-reconciliation/api/RootReconciliationContracts.js").RootFactIssue): JsonRecord {
   return {
     issue_id: issue.issueId,
+    identifier: requiredIssueIdentifier(issue),
     issue_kind: issue.issueKind,
     ...(issue.parentIssueId ? { parent_issue_id: issue.parentIssueId } : {}),
     ...(issue.creatorUserId ? { creator_user_id: issue.creatorUserId } : {}),
@@ -858,10 +998,22 @@ function toWireFactIssue(issue: import("../../root-reconciliation/api/RootReconc
     title: issue.title,
     description: issue.description,
     status: issue.status,
+    order: issue.order,
     is_archived: issue.isArchived,
     labels: issue.labels,
     remote_version: issue.remoteVersion,
+    created_at: requiredIssueCreatedAt(issue),
   };
+}
+
+function requiredIssueIdentifier(issue: RootFactIssue): string {
+  if (!issue.identifier) throw new Error("root_fact_issue_identifier_missing");
+  return issue.identifier;
+}
+
+function requiredIssueCreatedAt(issue: RootFactIssue): string {
+  if (!issue.createdAt) throw new Error("root_fact_issue_created_at_missing");
+  return issue.createdAt;
 }
 
 function gitFactsFor(input: StageTurnInput): JsonRecord {
@@ -889,25 +1041,24 @@ function planRootContract(rootIssue: JsonRecord): JsonRecord {
   };
 }
 
-function decodeDirective(value: unknown): RootDirective {
-  const directive = record(value);
-  const action = record(directive.action);
-  if (directive.protocol_version !== "1" || typeof directive.root_directive_id !== "string" || typeof directive.based_on_target_root_digest !== "string") {
-    throw new Error("root_directive_shape_invalid");
+function decodeSemanticIntent(value: unknown): RootSemanticIntent {
+  const intent = record(value);
+  const expectedGate = new Map([
+    ["requirement_and_comment_intent", "requirement_and_comment"],
+    ["plan_human_decision_intent", "plan_human_decision"],
+    ["recovery_strategy_intent", "recovery_strategy"],
+    ["terminal_review_intent", "terminal_review"],
+  ]).get(String(intent.kind));
+  if (!expectedGate || intent.semantic_gate !== expectedGate || typeof intent.intent_id !== "string") {
+    throw new Error("root_semantic_intent_gate_invalid");
   }
-  if (typeof action.kind !== "string" || !new Set([
-    "execute_plan", "execute_work", "execute_verify", "rerun_stage", "revise_root_tree",
-    "materialize_plan_node",
-    "replan_current_cycle", "supersede_cycle", "create_cycle", "create_root_workspace", "create_human_action",
-    "conclude_cycle", "conclude_root", "cancel_root", "wait", "acknowledge",
-  ]).has(action.kind)) throw new Error("root_directive_action_invalid");
-  return camelizeKeys(directive) as RootDirective;
+  return camelizeKeys(intent) as RootSemanticIntent;
 }
 
 function decodeRootTurnResult(value: unknown): RootReconcilerTurnResult {
   const response = record(value);
   if (response.kind !== "root_reconciler_failed") {
-    return { kind: "directive", directive: decodeDirective(response) };
+    return { kind: "intent", intent: decodeSemanticIntent(response) };
   }
   const failure = record(response.failure);
   const modelTurn = record(failure.model_turn);
@@ -1005,91 +1156,205 @@ function camelizeKeys(value: unknown): unknown {
   );
 }
 
-function decodeStageResult(value: unknown): StageResult {
-  const result = record(value);
-  const outcome = record(result.outcome);
-  if (typeof result.stage_execution_id !== "string" || typeof result.role !== "string" || typeof outcome.kind !== "string") {
-    throw new Error("role_result_shape_invalid");
-  }
-  const normalizedOutcome = normalizeStageResultOutcome(outcome);
-  return {
-    resultId: result.stage_execution_id,
-    protocolVersion: 1,
-    rootIssueId: result.root_issue_id,
-    cycleIssueId: result.cycle_issue_id,
-    targetIssueId: result.target_issue_id,
-    role: result.role as StageResult["role"],
-    roleSessionId: result.role_session_id,
-    roleTurnId: result.role_turn_id,
-    stageExecutionId: result.stage_execution_id,
-    observedTreeDigest: result.observed_tree_digest,
-    contextDigest: result.context_digest,
-    summary: stageResultSummary(outcome),
-    sourceManifest: [],
-    completedAt: result.completed_at,
-    modelTurn: camelizeKeys(record(result.model_turn)) as StageResult["modelTurn"],
-    outcome: normalizedOutcome,
-  } as StageResult;
+function snakeCaseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(snakeCaseKeys);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+    key.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`),
+    snakeCaseKeys(child),
+  ]));
 }
 
-function normalizeStageResultOutcome(outcome: JsonRecord): StageResult["outcome"] {
-  const kind = outcome.kind;
-  if (typeof kind !== "string") throw new Error("role_result_outcome_invalid");
-  if (kind === "plan_completed") {
-    const planContract = record(outcome.plan_contract);
-    const proposedWorkDag = record(outcome.proposed_work_dag);
-    const risks = stringArray(outcome.risks, "role_result_plan_risks_invalid");
-    const requiredPermissions = stringArray(outcome.required_permissions, "role_result_plan_permissions_invalid");
-    const evidenceRefs = evidenceReferences(outcome.evidence_refs);
-    return {
-      kind,
-      planContract: camelizeKeys(planContract) as NonNullable<StageResult["outcome"]["planContract"]>,
-      proposedWorkDag: camelizeKeys(proposedWorkDag) as NonNullable<StageResult["outcome"]["proposedWorkDag"]>,
-      risks,
-      requiredPermissions,
-      evidenceRefs,
-    };
+function decodePlanResult(value: unknown): PlanTurnResponse {
+  const result = record(value);
+  if (result.protocol_version !== "1" || result.role !== "plan") {
+    throw new Error("plan_result_role_invalid");
   }
-  if (kind === "work_completed") {
-    const changes = record(outcome.actual_changes);
-    return {
-      kind,
-      changedPaths: stringArray(changes.changed_paths, "role_result_changed_paths_invalid"),
-      commitRevision: string(changes.target_revision, "role_result_target_revision_invalid"),
-    };
+  const terminal = record(result.terminal);
+  if (terminal.kind === "runtime_failure") return normalizeStageTurnFailure(result, terminal, "plan");
+  if (terminal.kind !== "result") throw new Error("plan_result_terminal_invalid");
+  const outcome = normalizePlanResultOutcome(record(terminal.outcome));
+  return {
+    protocolVersion: 1,
+    resultId: string(result.stage_execution_id, "plan_result_stage_execution_id_invalid"),
+    stageExecutionId: string(result.stage_execution_id, "plan_result_stage_execution_id_invalid"),
+    rootIssueId: string(result.root_issue_id, "plan_result_root_issue_id_invalid"),
+    cycleIssueId: string(result.cycle_issue_id, "plan_result_cycle_issue_id_invalid"),
+    targetIssueId: string(result.target_issue_id, "plan_result_target_issue_id_invalid"),
+    role: "plan",
+    roleSessionId: string(result.role_session_id, "plan_result_role_session_id_invalid"),
+    roleTurnId: string(result.role_turn_id, "plan_result_role_turn_id_invalid"),
+    observedTreeDigest: string(result.observed_tree_digest, "plan_result_tree_digest_invalid"),
+    contextDigest: string(result.context_digest, "plan_result_context_digest_invalid"),
+    summary: stageResultSummary(record(terminal.outcome)),
+    sourceManifest: [],
+    completedAt: string(result.completed_at, "plan_result_completed_at_invalid"),
+    modelTurn: camelizeKeys(record(result.model_observation)) as PlanResult["modelTurn"],
+    outcome,
+  };
+}
+
+function normalizePlanResultOutcome(outcome: JsonRecord): PlanResult["outcome"] {
+  switch (outcome.kind) {
+    case "plan_completed":
+      return {
+        kind: "plan_completed",
+        planContract: camelizeKeys(record(outcome.plan_contract)) as PlanContractProposal,
+        proposedWorkDag: camelizeKeys(record(outcome.proposed_work_dag)) as ProposedWorkDag,
+        risks: stringArray(outcome.risks, "role_result_plan_risks_invalid"),
+        requiredPermissions: stringArray(outcome.required_permissions, "role_result_plan_permissions_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    case "plan_needs_information":
+      return {
+        kind: "plan_needs_information",
+        missingQuestions: stringArray(outcome.missing_questions, "role_result_plan_questions_invalid"),
+        impact: string(outcome.impact, "role_result_plan_impact_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    case "plan_blocked":
+      return {
+        kind: "plan_blocked",
+        sanitizedReason: string(outcome.sanitized_reason, "role_result_plan_reason_invalid"),
+        attempts: stringArray(outcome.attempts, "role_result_plan_attempts_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    default:
+      throw new Error("plan_result_outcome_invalid");
   }
-  if (kind === "verify_passed" || kind === "verify_changes_required" || kind === "verify_inconclusive" || kind === "verify_plan_contract_violation" || kind === "verify_blocked") {
-    const targetRevision = outcome.target_revision;
-    return {
-      kind,
-      ...(typeof targetRevision === "string" ? { verifiedRevision: targetRevision } : {}),
-      ...(kind === "verify_passed" ? { conclusion: "passed" as const } : {}),
-      ...(kind === "verify_changes_required" ? {
-        conclusion: "changes_required" as const,
+}
+
+function decodeWorkResult(value: unknown): WorkTurnResponse {
+  const result = record(value);
+  if (result.protocol_version !== "1" || result.role !== "work") {
+    throw new Error("work_result_role_invalid");
+  }
+  const terminal = record(result.terminal);
+  if (terminal.kind === "runtime_failure") return normalizeStageTurnFailure(result, terminal, "work");
+  if (terminal.kind !== "result") throw new Error("work_result_terminal_invalid");
+  const outcome = normalizeWorkResultOutcome(record(terminal.outcome));
+  return {
+    protocolVersion: 1,
+    resultId: string(result.stage_execution_id, "work_result_stage_execution_id_invalid"),
+    stageExecutionId: string(result.stage_execution_id, "work_result_stage_execution_id_invalid"),
+    rootIssueId: string(result.root_issue_id, "work_result_root_issue_id_invalid"),
+    cycleIssueId: string(result.cycle_issue_id, "work_result_cycle_issue_id_invalid"),
+    targetIssueId: string(result.target_issue_id, "work_result_target_issue_id_invalid"),
+    role: "work",
+    roleSessionId: string(result.role_session_id, "work_result_role_session_id_invalid"),
+    roleTurnId: string(result.role_turn_id, "work_result_role_turn_id_invalid"),
+    observedTreeDigest: string(result.observed_tree_digest, "work_result_tree_digest_invalid"),
+    contextDigest: string(result.context_digest, "work_result_context_digest_invalid"),
+    summary: stageResultSummary(record(terminal.outcome)),
+    sourceManifest: [],
+    completedAt: string(result.completed_at, "work_result_completed_at_invalid"),
+    modelTurn: camelizeKeys(record(result.model_observation)) as WorkResult["modelTurn"],
+    outcome,
+  };
+}
+
+function normalizeWorkResultOutcome(outcome: JsonRecord): WorkResult["outcome"] {
+  switch (outcome.kind) {
+    case "work_completed":
+      return {
+        kind: "work_completed",
+        actualChanges: camelizeKeys(record(outcome.actual_changes)) as ActualChanges,
+        checks: checkResults(outcome.checks),
+        artifacts: evidenceReferences(outcome.artifacts),
+        discoveredFacts: stringArray(outcome.discovered_facts, "role_result_discovered_facts_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    case "work_blocked":
+      return {
+        kind: "work_blocked",
+        blockerKind: string(outcome.blocker_kind, "role_result_blocker_kind_invalid"),
+        sanitizedReason: string(outcome.sanitized_reason, "role_result_reason_invalid"),
+        attemptedApproaches: stringArray(outcome.attempted_approaches, "role_result_attempted_approaches_invalid"),
+        failedCheckEvidence: evidenceReferences(outcome.failed_check_evidence),
+        discoveredFacts: stringArray(outcome.discovered_facts, "role_result_discovered_facts_invalid"),
+        suggestedDagChanges: stringArray(outcome.suggested_dag_changes, "role_result_dag_changes_invalid"),
+      };
+    case "work_plan_assumption_invalid":
+    case "work_scope_conflict":
+    case "work_permission_required":
+    case "work_information_required":
+      return {
+        kind: outcome.kind,
+        sanitizedReason: string(outcome.sanitized_reason, "role_result_reason_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    default:
+      throw new Error("work_result_outcome_invalid");
+  }
+}
+
+function decodeVerifyResult(value: unknown): VerifyTurnResponse {
+  const result = record(value);
+  if (result.protocol_version !== "1" || result.role !== "verify") {
+    throw new Error("verify_result_role_invalid");
+  }
+  const terminal = record(result.terminal);
+  if (terminal.kind === "runtime_failure") return normalizeStageTurnFailure(result, terminal, "verify");
+  if (terminal.kind !== "result") throw new Error("verify_result_terminal_invalid");
+  const outcome = normalizeVerifyResultOutcome(record(terminal.outcome));
+  return {
+    protocolVersion: 1,
+    resultId: string(result.stage_execution_id, "verify_result_stage_execution_id_invalid"),
+    stageExecutionId: string(result.stage_execution_id, "verify_result_stage_execution_id_invalid"),
+    rootIssueId: string(result.root_issue_id, "verify_result_root_issue_id_invalid"),
+    cycleIssueId: string(result.cycle_issue_id, "verify_result_cycle_issue_id_invalid"),
+    targetIssueId: string(result.target_issue_id, "verify_result_target_issue_id_invalid"),
+    role: "verify",
+    roleSessionId: string(result.role_session_id, "verify_result_role_session_id_invalid"),
+    roleTurnId: string(result.role_turn_id, "verify_result_role_turn_id_invalid"),
+    observedTreeDigest: string(result.observed_tree_digest, "verify_result_tree_digest_invalid"),
+    contextDigest: string(result.context_digest, "verify_result_context_digest_invalid"),
+    summary: stageResultSummary(record(terminal.outcome)),
+    sourceManifest: [],
+    completedAt: string(result.completed_at, "verify_result_completed_at_invalid"),
+    modelTurn: camelizeKeys(record(result.model_observation)) as VerifyResult["modelTurn"],
+    outcome,
+  };
+}
+
+function normalizeVerifyResultOutcome(outcome: JsonRecord): VerifyResult["outcome"] {
+  switch (outcome.kind) {
+    case "verify_passed":
+      return {
+        kind: "verify_passed",
+        targetRevision: string(outcome.target_revision, "role_result_target_revision_invalid"),
+        acceptanceResults: verifyCriterionResults(outcome.acceptance_results),
+        checks: checkResults(outcome.checks),
+        resolvedFindingIds: stringArray(outcome.resolved_finding_ids, "role_result_resolved_findings_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    case "verify_changes_required":
+      return {
+        kind: "verify_changes_required",
+        targetRevision: string(outcome.target_revision, "role_result_target_revision_invalid"),
+        acceptanceResults: verifyCriterionResults(outcome.acceptance_results),
         findings: normalizeFindings(outcome.findings),
-      } : {}),
-      ...(kind === "verify_inconclusive" ? { conclusion: "inconclusive" as const } : {}),
-    };
+        checks: checkResults(outcome.checks),
+      };
+    case "verify_inconclusive":
+      return {
+        kind: "verify_inconclusive",
+        targetRevision: string(outcome.target_revision, "role_result_target_revision_invalid"),
+        missingEvidence: stringArray(outcome.missing_evidence, "role_result_missing_evidence_invalid"),
+        attemptedMethods: stringArray(outcome.attempted_methods, "role_result_attempted_methods_invalid"),
+        retryable: booleanValue(outcome.retryable, "role_result_retryable_invalid"),
+      };
+    case "verify_plan_contract_violation":
+    case "verify_blocked":
+      return {
+        kind: outcome.kind,
+        targetRevision: string(outcome.target_revision, "role_result_target_revision_invalid"),
+        sanitizedReason: string(outcome.sanitized_reason, "role_result_reason_invalid"),
+        evidenceRefs: evidenceReferences(outcome.evidence_refs),
+      };
+    default:
+      throw new Error("verify_result_outcome_invalid");
   }
-  if (kind === "execution_failed") {
-    const continuity = record(outcome.continuity);
-    const continuityKind = enumValue(continuity, "kind", ["retained", "closed"]);
-    return {
-      kind,
-      errorCode: string(outcome.error_code, "role_result_error_code_invalid"),
-      continuity: continuityKind === "retained"
-        ? {
-          kind: "retained",
-          appendOutcome: enumValue(continuity, "append_outcome", ["not_accepted", "accepted"]),
-          providerVisibleContextDigest: textValue(continuity, "provider_visible_context_digest"),
-        }
-        : {
-          kind: "closed",
-          appendOutcome: enumValue(continuity, "append_outcome", ["acceptance_unknown", "session_lost"]),
-        },
-    };
-  }
-  return { kind };
 }
 
 function stageResultSummary(outcome: JsonRecord): string {
@@ -1108,12 +1373,17 @@ function string(value: unknown, code: string): string {
   return value;
 }
 
+function booleanValue(value: unknown, code: string): boolean {
+  if (typeof value !== "boolean") throw new Error(code);
+  return value;
+}
+
 function stringArray(value: unknown, code: string): string[] {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) throw new Error(code);
   return value as string[];
 }
 
-function evidenceReferences(value: unknown): NonNullable<StageResult["outcome"]["evidenceRefs"]> {
+function evidenceReferences(value: unknown): EvidenceReference[] {
   if (!Array.isArray(value)) throw new Error("role_result_plan_evidence_invalid");
   return value.map((entry) => {
     const reference = record(entry);
@@ -1124,11 +1394,81 @@ function evidenceReferences(value: unknown): NonNullable<StageResult["outcome"][
     ].includes(sourceKind)) {
       throw new Error("role_result_plan_evidence_invalid");
     }
-    return { referenceId, sourceKind: sourceKind as NonNullable<StageResult["outcome"]["evidenceRefs"]>[number]["sourceKind"] };
+    return { referenceId, sourceKind: sourceKind as EvidenceReference["sourceKind"] };
   });
 }
 
-function normalizeFindings(value: unknown): NonNullable<StageResult["outcome"]["findings"]> {
+function checkResults(value: unknown): CheckResult[] {
+  if (!Array.isArray(value)) throw new Error("role_result_checks_invalid");
+  return value.map((entry) => {
+    const check = record(entry);
+    return {
+      checkKey: string(check.check_key, "role_result_check_key_invalid"),
+      commandOrMethod: string(check.command_or_method, "role_result_check_method_invalid"),
+      outcome: enumValue(check, "outcome", ["passed", "failed", "not_run"]),
+      evidenceRef: evidenceReferences([check.evidence_ref])[0]!,
+    };
+  });
+}
+
+function verifyCriterionResults(value: unknown): VerifyCriterionResult[] {
+  if (!Array.isArray(value)) throw new Error("role_result_acceptance_results_invalid");
+  return value.map((entry) => {
+    const criterion = record(entry);
+    return {
+      criterionKey: string(criterion.criterion_key, "role_result_criterion_key_invalid"),
+      outcome: enumValue(criterion, "outcome", ["passed", "failed", "not_run"]),
+      summary: string(criterion.summary, "role_result_criterion_summary_invalid"),
+    };
+  });
+}
+
+function normalizeStageTurnFailure<Role extends "plan" | "work" | "verify">(
+  response: JsonRecord,
+  terminal: JsonRecord,
+  role: Role,
+): StageTurnFailure<Role> {
+  const continuity = record(terminal.continuity);
+  const continuityKind = enumValue(continuity, "kind", ["retained", "closed"]);
+  return {
+    protocolVersion: 1,
+    resultId: string(response.stage_execution_id, "stage_failure_execution_id_invalid"),
+    stageExecutionId: string(response.stage_execution_id, "stage_failure_execution_id_invalid"),
+    rootIssueId: string(response.root_issue_id, "stage_failure_root_issue_id_invalid"),
+    cycleIssueId: string(response.cycle_issue_id, "stage_failure_cycle_issue_id_invalid"),
+    targetIssueId: string(response.target_issue_id, "stage_failure_target_issue_id_invalid"),
+    role,
+    roleSessionId: string(response.role_session_id, "stage_failure_session_id_invalid"),
+    roleTurnId: string(response.role_turn_id, "stage_failure_turn_id_invalid"),
+    observedTreeDigest: string(response.observed_tree_digest, "stage_failure_tree_digest_invalid"),
+    contextDigest: string(response.context_digest, "stage_failure_context_digest_invalid"),
+    summary: string(terminal.sanitized_reason, "stage_failure_reason_invalid"),
+    sourceManifest: [],
+    completedAt: string(response.completed_at, "stage_failure_completed_at_invalid"),
+    modelTurn: camelizeKeys(record(response.model_observation)) as StageTurnFailure<Role>["modelTurn"],
+    terminalKind: "runtime_failure",
+    failureKind: enumValue(terminal, "failure_kind", [
+      "canceled", "deadline_exceeded", "budget_exhausted", "provider_failure",
+      "output_invalid", "work_epoch_closure_failed", "workspace_fence_unproven",
+    ]),
+    errorCode: string(terminal.error_code, "stage_failure_error_code_invalid"),
+    sanitizedReason: string(terminal.sanitized_reason, "stage_failure_reason_invalid"),
+    retryable: booleanValue(terminal.retryable, "stage_failure_retryable_invalid"),
+    actionRequired: enumValue(terminal, "action_required", ["root_reconciliation", "retry_close_only"]),
+    continuity: continuityKind === "retained"
+      ? {
+        kind: "retained",
+        appendOutcome: enumValue(continuity, "append_outcome", ["not_accepted", "accepted"]),
+        providerVisibleContextDigest: textValue(continuity, "provider_visible_context_digest"),
+      }
+      : {
+        kind: "closed",
+        appendOutcome: enumValue(continuity, "append_outcome", ["acceptance_unknown", "session_lost"]),
+      },
+  };
+}
+
+function normalizeFindings(value: unknown): FindingProposal[] {
   if (!Array.isArray(value)) throw new Error("role_result_findings_invalid");
   return value.map((entry) => {
     const finding = record(entry);
@@ -1142,8 +1482,8 @@ function normalizeFindings(value: unknown): NonNullable<StageResult["outcome"]["
     }
     return {
       findingId: string(finding.finding_id, "role_result_finding_id_invalid"),
-      category: category as NonNullable<StageResult["outcome"]["findings"]>[number]["category"],
-      severity: severity as NonNullable<StageResult["outcome"]["findings"]>[number]["severity"],
+      category: category as FindingProposal["category"],
+      severity: severity as FindingProposal["severity"],
       description: string(finding.description, "role_result_finding_description_invalid"),
       evidenceRefs: evidenceReferences(finding.evidence_refs),
       relatedWorkIssueIds: stringArray(finding.related_work_issue_ids, "role_result_finding_work_ids_invalid"),
@@ -1166,4 +1506,4 @@ function sanitizedError(value: unknown): string {
     .replace(/\s+/gu, " ")
     .slice(0, 2_000);
 }
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";

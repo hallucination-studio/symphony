@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -36,9 +37,16 @@ def main() -> None:
         return
     backend = CodexBackendImpl(sdk, prompt_catalog, io_capture=io_capture)
     if args.agent:
+        process_generation = os.environ.get("SYMPHONY_PERFORMER_PROCESS_GENERATION")
+        if not process_generation:
+            raise SystemExit("SYMPHONY_PERFORMER_PROCESS_GENERATION is required in agent mode")
         cancel_event = Event()
         try:
-            host = AgentProtocolHost(backend, workspace_root=args.workspace_root)
+            host = AgentProtocolHost(
+                backend,
+                workspace_root=args.workspace_root,
+                process_generation=process_generation,
+            )
             def request_cancel(*_: object) -> None:
                 cancel_event.set()
                 host.cancel()

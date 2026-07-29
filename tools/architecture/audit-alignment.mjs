@@ -18,7 +18,6 @@ const targetRules = [
   ["apps/conductor/src/root-scheduling", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/root-reconciliation", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/root-reconciler-client", "conductor", "docs/architecture/conductor.md#模块"],
-  ["apps/conductor/src/root-action-materialization", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/performer-agent-client", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/human-actions", "conductor", "docs/architecture/conductor.md#模块"],
   ["apps/conductor/src/performer-profiles", "conductor", "docs/architecture/conductor.md#模块"],
@@ -48,7 +47,6 @@ const interfaceRules = [
   ["RootSchedulingPolicyInterface", "apps/conductor/src/root-scheduling/api/RootSchedulingPolicyInterface.ts", "LinearPriorityRootSchedulingPolicyImpl", "apps/conductor/src/root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.ts", "conductor"],
   ["RootSafetyPolicyInterface", "apps/conductor/src/root-reconciliation/api/RootSafetyPolicyInterface.ts", "LinearRootSafetyPolicyImpl", "apps/conductor/src/root-reconciliation/internal/LinearRootSafetyPolicyImpl.ts", "conductor"],
   ["RootReconcilerClientInterface", "apps/conductor/src/root-reconciler-client/api/RootReconcilerClientInterface.ts", "PerformerRootReconcilerClientImpl", "apps/conductor/src/root-reconciler-client/internal/PerformerRootReconcilerClientImpl.ts", "conductor"],
-  ["RootActionMaterializerInterface", "apps/conductor/src/root-action-materialization/api/RootActionMaterializerInterface.ts", "LinearGitRootActionMaterializerImpl", "apps/conductor/src/root-action-materialization/internal/LinearGitRootActionMaterializerImpl.ts", "conductor"],
   ["PerformerAgentClientInterface", "apps/conductor/src/performer-agent-client/api/PerformerAgentClientInterface.ts", "SessionPerformerAgentClientImpl", "apps/conductor/src/performer-agent-client/internal/SessionPerformerAgentClientImpl.ts", "conductor"],
   ["GitWorkspaceInterface", "apps/conductor/src/git-workspaces/api/GitWorkspaceInterface.ts", "NativeGitWorkspaceImpl", "apps/conductor/src/git-workspaces/internal/NativeGitWorkspaceImpl.ts", "conductor"],
   ["RootDeliveryInterface", "apps/conductor/src/root-delivery/api/RootDeliveryInterface.ts", "GitRootDeliveryImpl", "apps/conductor/src/root-delivery/internal/GitRootDeliveryImpl.ts", "conductor"],
@@ -66,8 +64,8 @@ const evidenceRules = [
 const alignmentTraceRules = [
   {
     id: "root_reconciler_turn_result",
-    owner: "RootNextAction",
-    architectureSource: "docs/architecture/root-reconciliation.md#6-closed-rootnextaction",
+    owner: "RootSemanticIntent",
+    architectureSource: "docs/architecture/root-reconciliation.md#6-closed-root-semantic-intent",
     contractPaths: ["packages/contracts/schemas/conductor-performer/conductor-performer.schema.json"],
     implementationPaths: [
       "apps/performer/src/performer/root_reconciler/runtime.py",
@@ -113,7 +111,7 @@ const alignmentTraceRules = [
     architectureSource: "docs/architecture/human-actions.md#5-actor与有效回复",
     contractPaths: ["packages/contracts/schemas/podium-conductor/podium-conductor.schema.json"],
     implementationPaths: ["apps/conductor/src/root-action-materialization/internal/LinearRootReconcilerReplyWriterImpl.ts"],
-    testPaths: ["apps/conductor/src/root-action-materialization/tests/reply-writer.test.ts"],
+    testPaths: ["apps/conductor/src/root-action-materialization/tests/comment-disposition-writer.test.ts"],
   },
   {
     id: "model_usage",

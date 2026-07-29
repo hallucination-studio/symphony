@@ -58,6 +58,36 @@ test("Human Actor resolves one Root kind label into every Case creation binding"
   assert.equal(bindings["approved-root"].routingLabelId, "route-aaa111aaa111");
 });
 
+test("Human Actor resolves one focused Root binding for one Conductor", async () => {
+  const human = await actor(linearFixture());
+  const binding = await human.resolveFocusedRootCreationBinding({
+    rootKey: "approved-root",
+    teamId: "team-1",
+    projectId: "project-1",
+    conductor: conductorBinding("conductor-a", "aaa111aaa111"),
+  });
+
+  assert.deepEqual(binding, {
+    teamId: "team-1",
+    projectId: "project-1",
+    rootLabelId: "root-label",
+    routingLabelId: "route-aaa111aaa111",
+    rootStatusId: "todo-state",
+    conductorId: "conductor-a-id",
+    performerProfileId: "conductor-a-profile",
+    worktreeDirectory: "/tmp/conductor-a",
+  });
+  await assert.rejects(
+    human.resolveFocusedRootCreationBinding({
+      rootKey: "not-a-catalog-root",
+      teamId: "team-1",
+      projectId: "project-1",
+      conductor: conductorBinding("conductor-a", "aaa111aaa111"),
+    }),
+    hasCode("foreground_e2e_human_root_binding_input_invalid"),
+  );
+});
+
 test("Human Actor admits every declared Root through one bounded batch lifecycle", async () => {
   const fixture = linearFixture();
   let budgetedRequests = 0;

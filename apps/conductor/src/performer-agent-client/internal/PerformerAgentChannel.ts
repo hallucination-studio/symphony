@@ -154,16 +154,23 @@ class PersistentPerformerAgentChannel implements PerformerAgentChannel {
       this.fail(new Error("performer_agent_response_invalid"));
       return;
     }
-    if (!isJsonRecord(value) || typeof value.request_id !== "string") {
+    if (!isJsonRecord(value)) {
       this.fail(new Error("performer_agent_response_correlation_invalid"));
       return;
     }
-    const request = this.pending.get(value.request_id);
+    const requestId = typeof value.request_id === "string" ? value.request_id : undefined;
+    const commandId = typeof value.command_id === "string" ? value.command_id : undefined;
+    if ((requestId === undefined) === (commandId === undefined)) {
+      this.fail(new Error("performer_agent_response_correlation_invalid"));
+      return;
+    }
+    const correlationId = requestId ?? commandId;
+    const request = this.pending.get(correlationId!);
     if (!request) {
       this.fail(new Error("performer_agent_response_unexpected"));
       return;
     }
-    this.pending.delete(value.request_id);
+    this.pending.delete(correlationId!);
     request.resolve(value);
   }
 

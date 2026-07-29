@@ -10,6 +10,7 @@ import type {
   RootConvergencePolicyInterface,
 } from "../api/RootConvergencePolicyInterface.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
+import { deriveOpenFindingPersistence } from "./OpenFindingPersistence.js";
 
 type WorkflowIssue = LinearWorkflowTreeSnapshot["issues"][number];
 
@@ -63,8 +64,8 @@ function convergenceView(
   const activeCycleIssueId = activeCycles[0]?.issue_id;
   return {
     cycleCount: cycles.length,
-    openFindingPersistence: openFindingPersistence(tree, cycles),
-    consecutiveNoProgress: consecutiveNoProgress(tree, cycles),
+    openFindingPersistence: deriveOpenFindingPersistence(tree, rootIssue.issue_id, activeCycleIssueId)
+      .map(({ findingId, openCycleCount }) => ({ findingId, openCycleCount })),
     ...(activeCycleIssueId ? { activeCycleIssueId } : {}),
     activeCycleRepairAttempts: activeCycleIssueId
       ? activeRepairAttempts(tree, activeCycleIssueId)
@@ -87,60 +88,6 @@ function activeRepairAttempts(tree: LinearWorkflowTreeSnapshot, cycleIssueId: st
   }).length;
 }
 
-function openFindingPersistence(
-  tree: LinearWorkflowTreeSnapshot,
-  cycles: WorkflowIssue[],
-): Array<{ findingId: string; openCycleCount: number }> {
-  const cycleIds = new Set(cycles.map(({ issue_id }) => issue_id));
-  const findings = tree.issues.filter((issue) =>
-    issue.parent_issue_id !== undefined && cycleIds.has(issue.parent_issue_id) && issueKind(issue) === "finding",
-  );
-  const findingsById = new Map(findings.map((finding) => [finding.issue_id, finding]));
-  const adjacent = new Map<string, Set<string>>();
-  for (const relation of tree.relations) {
-    if (relation.relation_kind !== "triggered_by" ||
-        !findingsById.has(relation.source_issue_id) || !findingsById.has(relation.target_issue_id)) continue;
-    connect(adjacent, relation.source_issue_id, relation.target_issue_id);
-    connect(adjacent, relation.target_issue_id, relation.source_issue_id);
-  }
-  const result: Array<{ findingId: string; openCycleCount: number }> = [];
-  const visited = new Set<string>();
-  for (const finding of findings) {
-    if (visited.has(finding.issue_id)) continue;
-    const component = collectComponent(finding.issue_id, adjacent);
-    component.forEach((id) => visited.add(id));
-    const open = [...component]
-      .map((id) => findingsById.get(id)!)
-      .filter((candidate) => !candidate.is_archived && !terminal(candidate));
-    if (open.length > 1) throw new Error("root_convergence_finding_lineage_ambiguous");
-    if (open.length === 0) continue;
-    const openCycleCount = new Set([...component].map((id) => findingsById.get(id)!.parent_issue_id)).size;
-    result.push({ findingId: open[0]!.issue_id, openCycleCount });
-  }
-  return result.sort((left, right) => left.findingId.localeCompare(right.findingId));
-}
-
-function consecutiveNoProgress(tree: LinearWorkflowTreeSnapshot, cycles: WorkflowIssue[]): number {
-  const terminalCycles = cycles
-    .filter(terminal)
-    .sort((left, right) => right.created_at.localeCompare(left.created_at) || right.issue_id.localeCompare(left.issue_id));
-  let count = 0;
-  for (const cycle of terminalCycles) {
-    if (cycle.status_name !== "Changes Required" || cycleHasProgress(tree, cycle.issue_id)) break;
-    count += 1;
-  }
-  return count;
-}
-
-function cycleHasProgress(tree: LinearWorkflowTreeSnapshot, cycleIssueId: string): boolean {
-  return tree.issues.some((issue) => {
-    if (issue.parent_issue_id !== cycleIssueId) return false;
-    const kind = issueKind(issue);
-    return (kind === "work" && issue.status_name === "Done") ||
-      (kind === "verify" && issue.status_name === "Done" && issue.labels.includes("Passed"));
-  });
-}
-
 function convergenceTrigger(policy: RootConvergencePolicySnapshot, view: RootConvergenceView) {
   if (view.rootIsCanceled) return "root_canceled" as const;
   if (view.isDeadlineExceeded) return "deadline_exceeded" as const;
@@ -148,10 +95,10 @@ function convergenceTrigger(policy: RootConvergencePolicySnapshot, view: RootCon
       (view.cycleCount === policy.maxCyclesPerRoot && !view.activeCycleIssueId)) {
     return "max_cycles_per_root" as const;
   }
-  if (view.openFindingPersistence.some(({ openCycleCount }) => openCycleCount >= policy.maxSameOpenFindingCycles)) {
+  if (view.activeCycleIssueId &&
+      view.openFindingPersistence.some(({ openCycleCount }) => openCycleCount >= policy.maxSameOpenFindingCycles)) {
     return "max_same_open_finding_cycles" as const;
   }
-  if (view.consecutiveNoProgress >= policy.maxConsecutiveNoProgress) return "max_consecutive_no_progress" as const;
   if (view.activeCycleIssueId && view.activeCycleRepairAttempts > policy.maxCycleRepairAttempts) {
     return "max_cycle_repair_attempts" as const;
   }
@@ -169,26 +116,8 @@ function terminal(issue: WorkflowIssue): boolean {
     ["Interrupted", "Failed", "Canceled"].includes(issue.status_name);
 }
 
-function connect(adjacency: Map<string, Set<string>>, from: string, to: string): void {
-  const values = adjacency.get(from) ?? new Set<string>();
-  values.add(to);
-  adjacency.set(from, values);
-}
-
-function collectComponent(start: string, adjacency: Map<string, Set<string>>): Set<string> {
-  const result = new Set<string>();
-  const pending = [start];
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (result.has(current)) continue;
-    result.add(current);
-    pending.push(...(adjacency.get(current) ?? []));
-  }
-  return result;
-}
-
 function validateConfiguration(configured: RootConvergencePolicyValues, deadlineDurationMs: number): void {
-  for (const value of [configured.maxCyclesPerRoot, configured.maxSameOpenFindingCycles, configured.maxConsecutiveNoProgress]) {
+  for (const value of [configured.maxCyclesPerRoot, configured.maxSameOpenFindingCycles]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("root_convergence_policy_value_invalid");
   }
   if (!Number.isSafeInteger(configured.maxCycleRepairAttempts) || configured.maxCycleRepairAttempts < 0 ||

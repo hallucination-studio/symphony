@@ -30,12 +30,18 @@ def pending_comment_reply_sources_from_snapshot(
 
 
 def pending_comment_reply_sources_from_request(request: dict[str, Any]) -> list[dict[str, Any]]:
+    command = request.get("command")
+    refs = command.get("pending_input_refs") if isinstance(command, dict) else None
+    pending = [
+        item.get("input_id")
+        for item in refs
+        if isinstance(item, dict) and item.get("source_kind") in {"comment_body", "comment_thread_state"}
+    ] if isinstance(refs, list) else []
     if request.get("kind") == "open_root_reconciler":
         bootstrap = request.get("bootstrap")
         if not isinstance(bootstrap, dict):
             return []
         snapshot = bootstrap.get("root_snapshot")
-        pending = bootstrap.get("pending_input_ids")
         if not isinstance(snapshot, dict) or not _identifiers(pending):
             return []
         return pending_comment_reply_sources_from_snapshot(snapshot, pending)
@@ -43,7 +49,6 @@ def pending_comment_reply_sources_from_request(request: dict[str, Any]) -> list[
     delta = request.get("delta")
     if not isinstance(delta, dict):
         return []
-    pending = delta.get("pending_input_ids")
     if not _identifiers(pending):
         return []
     sources: list[dict[str, Any]] = []
@@ -114,7 +119,6 @@ def _thread_state_source(value: dict[str, Any]) -> dict[str, Any] | None:
         "source": {
             "kind": "comment_thread_state",
             "comment_id": comment_id,
-            "comment_remote_version": remote_version,
             "thread_root_comment_id": thread_root_comment_id,
             "thread_state": thread_state,
         },

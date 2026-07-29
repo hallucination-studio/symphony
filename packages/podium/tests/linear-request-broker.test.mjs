@@ -15,27 +15,37 @@ test("installation broker dispatches background reads regardless of observed rem
 });
 
 test("installation broker coalesces reads only within one mutation generation", async () => {
-  const broker = new LinearRequestBrokerImpl({ maxConcurrent: 3, maxHighPriorityBurst: 4 });
+  const coalesced = [];
+  const broker = new LinearRequestBrokerImpl({
+    maxConcurrent: 3,
+    maxHighPriorityBurst: 4,
+    observeCoalesced: (observation) => coalesced.push(observation),
+  });
   let runs = 0;
   const releases = [];
-  const read = () => broker.run("workflow", () => new Promise((resolve) => {
+  const read = (requestId) => broker.run("workflow", () => new Promise((resolve) => {
     runs += 1;
     releases.push(resolve);
-  }), { coalesceKey: "root:1" });
+  }), { coalesceKey: "root:1", requestId });
 
-  const first = read();
-  const shared = read();
+  const first = read("request-1");
+  const shared = read("request-2");
   await Promise.resolve();
   assert.equal(runs, 1);
   const mutation = broker.run("mutation", async () => "mutated");
   await mutation;
-  const afterMutation = read();
+  const afterMutation = read("request-3");
   await Promise.resolve();
   assert.equal(runs, 2);
   releases[1]("fresh");
   assert.equal(await afterMutation, "fresh");
   releases[0]("original");
   assert.deepEqual(await Promise.all([first, shared]), ["original", "original"]);
+  assert.deepEqual(coalesced, [{
+    requestId: "request-2",
+    coalescedIntoRequestId: "request-1",
+    requestClass: "workflow",
+  }]);
 });
 
 test("installation broker deadlines and retry jitter are bounded", async () => {

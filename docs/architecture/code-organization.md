@@ -91,7 +91,8 @@ root-discovery
 root-scheduling
 root-reconciliation
 root-reconciler-client
-root-action-materialization
+root-transition
+root-intent-materialization
 performer-agent-client
 human-actions
 performer-profiles
@@ -106,10 +107,11 @@ Conductor不能出现Linear SDK、Provider SDK或workflow persistence repository
 `root-reconciliation`拥有只验证routing、process fence、iteration guard、coverage、schema、capability、budget和convergence边界的
 `RootSafetyPolicyInterface`，并从fresh facts计算mechanical violations与delta；
 `root-reconciler-client`只在open时发送完整bootstrap，advance严格发送delta并调用Performer；
-`root-action-materialization`验证transient RootNextAction并收敛native Linear/Git postcondition；
+`root-transition`从fresh native facts纯函数推导mechanical target、semantic gate、external wait、terminal或invalid facts；
+`root-intent-materialization`验证transient RootSemanticIntent，编译candidate graph并收敛native Linear/Git postcondition；
 `performer-agent-client`拥有Root Reconciler和三个Stage role session/turn transport，并持有Work turn的Root writer-domain
 handoff；它不解析或操纵Provider agent tree、turn epoch或containment。Human Action reply由
-`human-actions`和`root-action-materialization`完成。完整边界分别由
+`human-actions`和`root-intent-materialization`完成。完整边界分别由
 [Root Reconciliation](root-reconciliation.md)、[Stage Contracts](stage-orchestration.md)和
 [Human Action](human-actions.md)定义；Work内部tree由[Work Subagents](work-subagents.md)定义。
 

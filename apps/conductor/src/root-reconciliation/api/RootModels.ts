@@ -1,6 +1,9 @@
 export type LinearIssueState =
   | "Todo"
   | "In Progress"
+  | "Needs Approval"
+  | "Needs Info"
+  | "Escalated"
   | "In Review"
   | "Done"
   | "Canceled";

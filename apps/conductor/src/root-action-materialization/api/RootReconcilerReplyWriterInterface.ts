@@ -1,13 +1,13 @@
 import type {
-  RootDirective,
+  RootCommentDisposition,
   RootReconciliationView,
-  UserCommentReply,
 } from "../../root-reconciliation/api/RootReconciliationContracts.js";
 
 export interface RootReconcilerReplyWriterInterface {
   write(input: {
-    directive: RootDirective;
-    reply: UserCommentReply;
+    operationId: string;
+    disposition: RootCommentDisposition;
     view: RootReconciliationView;
+    completion?: "complete" | "adoption_only";
   }): Promise<{ kind: "materialized" } | { kind: "failed"; code: string }>;
 }

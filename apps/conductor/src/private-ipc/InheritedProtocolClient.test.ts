@@ -324,13 +324,15 @@ test("private protocol reports a sanitized handler response failure", async () =
   const output = new PassThrough();
   const failures: string[] = [];
   const schemaPaths: (string | undefined)[] = [];
+  const requestIds: (string | undefined)[] = [];
   new InheritedProtocolClient(input, output, {
     async handleRequest() {
       return { kind: "not-a-profile-result" };
     },
-  }, (reason, schemaPath) => {
+  }, (reason, schemaPath, details) => {
     failures.push(reason);
     schemaPaths.push(schemaPath);
+    requestIds.push(details?.requestId);
   });
 
   input.write(`${JSON.stringify({
@@ -342,4 +344,5 @@ test("private protocol reports a sanitized handler response failure", async () =
 
   assert.deepEqual(failures, ["private_ipc_handler_result_schema_invalid"]);
   assert.deepEqual(schemaPaths, ["$.body"]);
+  assert.deepEqual(requestIds, ["profile-invalid-result"]);
 });

@@ -8,7 +8,13 @@ from threading import Event
 from typing import Any
 
 from performer.agent_protocol.host import AgentProtocolHost
-from performer.backends.provider_backend_interface import ProviderBackendError, ProviderSession
+from performer.backends.provider_backend_interface import (
+    ProviderSession,
+    ProviderTurnAcceptanceUnknown,
+    ProviderTurnAcceptedValid,
+    ProviderTurnFailure,
+    ProviderTurnOutcome,
+)
 
 
 class ProbeBackend:
@@ -29,7 +35,7 @@ class ProbeBackend:
         *,
         workspace_root: Path | None,
         cancel_event: Event,
-    ) -> dict[str, Any]:
+    ) -> ProviderTurnOutcome:
         update = request.get("role_context_update")
         self._write({
             "event": "turn",
@@ -41,11 +47,18 @@ class ProbeBackend:
         })
         bundle = request.get("instruction_bundle")
         if isinstance(bundle, dict) and bundle.get("instructions") == "force acceptance unknown":
-            raise ProviderBackendError(
-                "The probe could not prove Provider acceptance.",
-                append_outcome="acceptance_unknown",
+            return ProviderTurnAcceptanceUnknown(
+                ProviderTurnFailure(
+                    code="provider_turn_failed",
+                    sanitized_reason="The probe could not prove Provider acceptance.",
+                    retryable=True,
+                    action_required="Fresh-open from current native facts.",
+                ),
             )
-        return {"output": {"kind": "canceled", "sanitized_reason": "probe cancellation"}}
+        return ProviderTurnAcceptedValid(
+            output={"kind": "canceled", "sanitized_reason": "probe cancellation"},
+            usage={"status": "unavailable", "reason": "provider_omitted"},
+        )
 
     def interrupt_turn(self, session: ProviderSession) -> None:
         return None

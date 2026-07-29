@@ -1,19 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 from typing import Any, Literal, Protocol
-
-
-class ProviderTurnDeadlineExpired(TimeoutError):
-    pass
-
-
-class ProviderTurnCanceled(Exception):
-    def __init__(self, sanitized_reason: str = "The Provider turn was canceled.") -> None:
-        super().__init__(sanitized_reason)
-        self.sanitized_reason = sanitized_reason
 
 
 class ProviderBackendError(RuntimeError):
@@ -24,15 +14,12 @@ class ProviderBackendError(RuntimeError):
         code: str = "provider_turn_failed",
         retryable: bool = True,
         action_required: str = "Retry the turn with a fresh Provider context.",
-        append_outcome: Literal["not_accepted", "accepted", "acceptance_unknown"] = "acceptance_unknown",
     ) -> None:
         super().__init__(sanitized_reason)
         self.code = code
         self.sanitized_reason = sanitized_reason
         self.retryable = retryable
         self.action_required = action_required
-        self.append_outcome = append_outcome
-        self.continuity: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +27,65 @@ class ProviderSession:
     role: str
     provider_handle: Any
     settings: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ProviderTurnFailure:
+    code: str
+    sanitized_reason: str
+    retryable: bool
+    action_required: str
+
+
+@dataclass(frozen=True)
+class ProviderTurnNotAccepted:
+    failure: ProviderTurnFailure
+    kind: Literal["not_accepted"] = field(default="not_accepted", init=False)
+
+
+@dataclass(frozen=True)
+class ProviderTurnAcceptedValid:
+    output: dict[str, Any]
+    usage: dict[str, Any]
+    kind: Literal["accepted_valid"] = field(default="accepted_valid", init=False)
+
+
+@dataclass(frozen=True)
+class ProviderTurnAcceptedInvalid:
+    failure: ProviderTurnFailure
+    usage: dict[str, Any] | None = None
+    kind: Literal["accepted_invalid"] = field(default="accepted_invalid", init=False)
+
+
+@dataclass(frozen=True)
+class ProviderTurnAcceptanceUnknown:
+    failure: ProviderTurnFailure
+    kind: Literal["acceptance_unknown"] = field(default="acceptance_unknown", init=False)
+
+
+@dataclass(frozen=True)
+class ProviderTurnSessionLost:
+    failure: ProviderTurnFailure
+    kind: Literal["session_lost"] = field(default="session_lost", init=False)
+
+
+@dataclass(frozen=True)
+class ProviderTurnCanceled:
+    append_outcome: Literal["accepted", "acceptance_unknown"]
+    deadline_expired: bool
+    sanitized_reason: str
+    usage: dict[str, Any] | None = None
+    kind: Literal["canceled"] = field(default="canceled", init=False)
+
+
+ProviderTurnOutcome = (
+    ProviderTurnNotAccepted
+    | ProviderTurnAcceptedValid
+    | ProviderTurnAcceptedInvalid
+    | ProviderTurnAcceptanceUnknown
+    | ProviderTurnSessionLost
+    | ProviderTurnCanceled
+)
 
 
 class ProviderBackendInterface(Protocol):
@@ -52,7 +98,7 @@ class ProviderBackendInterface(Protocol):
         *,
         workspace_root: Path | None,
         cancel_event: Event,
-    ) -> dict[str, Any]: ...
+    ) -> ProviderTurnOutcome: ...
 
     def interrupt_turn(self, session: ProviderSession) -> None: ...
 

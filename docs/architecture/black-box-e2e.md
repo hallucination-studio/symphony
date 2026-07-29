@@ -95,7 +95,29 @@ active和archived Issues，以每次最多25个`issueDelete(permanentlyDelete: t
 Index必须读取archived authority facts；按title、label、creator、时间或本次Campaign namespace过滤旧Issues同样禁止。任一delete或
 read-back不完整都fail closed，不能用新的Root掩盖历史测试资源。
 
-## 5. Immutable Case definition
+## 5. Progressive acceptance ladder
+
+Full Campaign不是首个真实boundary诊断工具。产品按同一个workflow的observer-only early exits逐层验收；observer只读production
+facts/events，不写test marker、私有checkpoint或替代workflow mutation：
+
+| Level | Stop condition | 新证明的真实boundary |
+|---|---|---|
+| L0 | Podium、Host、one Conductor与Performer handshake/profile ready | process/runtime readiness |
+| L1 | one Root admitted并出现在owning Conductor fresh Root Index | Linear routing/discovery |
+| L2 | first Root turn被Provider接受且gate-specific output strict-valid | Performer/Provider Root contract |
+| L3 | workspace、initial Cycle与Plan targeted read-back成立 | first native mutation convergence |
+| L4 | lossless Plan Result与完整native DAG seal digest一致 | Plan/compiler/DAG materialization |
+| L5 | one ready Work完成且scoped Git/check evidence read-back | Work/Git |
+| L6 | Verify通过exact immutable revision且Cycle成功收口 | Verify/Finding/Cycle |
+| L7 | push/PR link和Root `In Review` targeted read-back | Delivery Intent |
+| L8 | exact remote PR/head/check/review/merge state满足Project policy | Remote SCM Acceptance |
+| L9 | 本文eight-case 14-Root Campaign | concurrency/recovery/full regression |
+
+每层最多新增一个independently failing owner，并有独立deadline、correlation和verdict。L0-L8中未被产品scope要求的层必须在claim中
+明确排除，不能默认为通过。只有前一层稳定通过后才运行下一层；L9最后运行。local harness/fake/fixture只能证明runner contract，
+不能证明其替代的真实boundary。
+
+## 6. Immutable Case definition
 
 每个Case启动前固定：
 
@@ -114,7 +136,7 @@ deadline
 runner不能根据运行中结果修改requirement或放宽assertions。每个人类操作记录expected target native ID、actor和precondition；
 unexpected product状态产生`failed`或`incomplete`，不能由runner“帮忙推进”。
 
-## 6. Common assertions
+## 7. Common assertions
 
 每个Case至少验证：
 
@@ -135,9 +157,9 @@ unexpected product状态产生`failed`或`incomplete`，不能由runner“帮忙
 
 coverage缺失产生`incomplete`，不能降级为passed。
 
-## 7. Mandatory Cases
+## 8. Mandatory Cases
 
-### 7.1 `approved_happy_path`
+### 8.1 `approved_happy_path`
 
 场景：完整Root requirement形成Plan，产品创建Plan Approval Root thread，human明确批准，Work/Verify完成并交付。
 
@@ -151,7 +173,7 @@ coverage缺失产生`incomplete`，不能降级为passed。
 - Root在`In Review`，matching verified commit与PR/link一致；
 - 不存在额外自动progress comments。
 
-### 7.2 `plan_rejected_and_replanned`
+### 8.2 `plan_rejected_and_replanned`
 
 场景：human拒绝first Plan，产品创建fresh Plan和fresh Approval thread。
 
@@ -163,7 +185,7 @@ coverage缺失产生`incomplete`，不能降级为passed。
 - 旧Plan没有Work dispatch；
 - fresh request mention fresh Plan，不覆盖旧thread历史。
 
-### 7.3 `information_requested_and_answered`
+### 8.3 `information_requested_and_answered`
 
 场景：产品请求缺失信息，human回答后形成fresh Plan。
 
@@ -175,7 +197,7 @@ coverage缺失产生`incomplete`，不能降级为passed。
 - fresh Plan包含该信息且没有默认猜测；
 - restart后不会再次请求已经纳入Root description的相同信息。
 
-### 7.4 `root_revision_and_comment`
+### 8.4 `root_revision_and_comment`
 
 场景：human按预声明顺序修改Root description、增加ordinary comment、编辑comment并resolve/reopen thread。
 
@@ -187,7 +209,7 @@ coverage缺失产生`incomplete`，不能降级为passed。
 - destructive requirement change使旧Cycle terminal并创建successor；
 - product-authored comments不被当作human input。
 
-### 7.5 `parallel_multi_conductor`
+### 8.5 `parallel_multi_conductor`
 
 场景：至少三个Conductor同时处理不同Roots。
 
@@ -203,7 +225,7 @@ coverage缺失产生`incomplete`，不能降级为passed。
 
 runtime interval只证明并行拓扑；workflow success仍只由Final Evidence Snapshot证明。
 
-### 7.6 `same_conductor_preemption`
+### 8.6 `same_conductor_preemption`
 
 场景：同一个Conductor负责多个eligible Roots，Priority较高Root在下一安全边界先获得iteration。
 
@@ -214,7 +236,7 @@ runtime interval只证明并行拓扑；workflow success仍只由Final Evidence 
 - Root排序不写入Linear workflow状态；
 - 被延后Root的terminal nodes未重新dispatch。
 
-### 7.7 `conductor_restart_recovery`
+### 8.7 `conductor_restart_recovery`
 
 场景：worktree仍存在时，在Plan、Work或Verify的`In Progress`阶段停止Conductor/Performer再启动。
 
@@ -222,12 +244,16 @@ runtime interval只证明并行拓扑；workflow success仍只由Final Evidence 
 
 - worktree identity、branch和partial Git facts保留；
 - 遗留`In Progress` Issue收敛为`Interrupted`，不以同一ID重跑；
-- 若继续工作，使用fresh successor Issue和replacement/predecessor relation；
+- 若Interrupted Plan继续，使用fresh Plan identity；若Interrupted Work/Verify继续，使用带Symphony recovery provenance的fresh
+  successor Cycle，并证明旧approved DAG未被改写；
+- 若Interrupted Stage结束current Cycle，只产生一个`Canceled` Cycle update，且恰好保留`Recovery Exhausted`或
+  `Recovery Abandoned`、canonical explanation和matching Symphony actor/version；restart后直接进入non-success terminal review，
+  Root保持nonterminal且任何delivery effect为零；
 - restart前已经`Done`的Issues没有新`In Progress` Activity；
 - Human Action threads、Root description和approved target facts不丢失；
 - stale process output不能materialize，旧Work epoch也不能继续写worktree。
 
-### 7.8 `missing_worktree_recovery`
+### 8.8 `missing_worktree_recovery`
 
 场景包含两个隔离分支：先停止matching processes、取得replacement `BindingProcessFence`并验证exact test worktree后移除它；
 第一分支保留可验证branch/commits，第二分支还使case-local execution branch不可恢复，再启动Conductor。
@@ -244,7 +270,7 @@ runtime interval只证明并行拓扑；workflow success仍只由Final Evidence 
 - Root description中已确认信息和全部Root comment threads仍存在；
 - exact new Plan需要fresh Approval thread。
 
-## 8. Final Evidence Snapshot
+## 9. Final Evidence Snapshot
 
 settle后runner必须丢弃所有poll cache并fresh-read：
 
@@ -258,7 +284,7 @@ settle后runner必须丢弃所有poll cache并fresh-read：
 每个assertion返回其独立source references和coverage。不能用一个Case级boolean掩盖缺失事实，也不能用logs替代Linear/Git
 workflow evidence。
 
-## 9. Verdict
+## 10. Verdict
 
 ```text
 passed
@@ -277,7 +303,7 @@ incomplete
 `incomplete`不是soft pass。reporter必须输出Case、assertion ID、sanitized reason和source references；不能输出tokens、raw
 credentials、Provider transcript或unbounded Linear content。
 
-## 10. Runner organization
+## 11. Runner organization
 
 ```text
 tools/e2e/
@@ -295,7 +321,7 @@ tools/e2e/
 process management、polling、deadline、Linear pagination、Git evidence和cleanup各只有一份实现。Case files只声明input与
 assertions，不创建process、不解析private comment protocol、不修改product state。
 
-## 11. 不变量
+## 12. 不变量
 
 1. E2E是产品外black-box consumer，不是第二个control plane。
 2. Human Actor使用独立identity，不能由Symphony credential代替。

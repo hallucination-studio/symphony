@@ -16,7 +16,7 @@ async function openChannelAndHandshake(services, body) {
     conductorId: body.conductor_id,
     instanceId: body.instance_id,
   });
-  await channel.handle(body);
+  await channel.handle(body, undefined, { requestId: "handshake-request" });
   return channel;
 }
 
@@ -175,12 +175,12 @@ test("Podium revokes the old private channel before accepting a replacement gene
     conductor_id: "conductor-1", conductor_short_hash: "abc123",
     linear_installation_id: "installation-1", organization_id: "organization-1",
     repository: { repository_handle: "repo-1", canonical_path: "/repository", base_branch: "main" },
-  });
+  }, undefined, { requestId: "handshake-request" });
   await assert.rejects(
     oldChannel.handle({
       kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-stale",
       conductor_short_hash: "abc123",
-    }),
+    }, undefined, { requestId: "stale-instance-request" }),
     /conductor_channel_instance_mismatch/u,
   );
   assert.equal(linearCalls, 0);
@@ -195,7 +195,7 @@ test("Podium revokes the old private channel before accepting a replacement gene
     oldChannel.handle({
       kind: "resolve_conductor_project", binding_id: "binding-1", instance_id: "instance-1",
       conductor_short_hash: "abc123",
-    }),
+    }, undefined, { requestId: "revoked-channel-request" }),
     /conductor_channel_revoked/u,
   );
   assert.equal(linearCalls, 0);

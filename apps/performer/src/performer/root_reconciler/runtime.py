@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from contracts import SCHEMA_REGISTRY, decode_contract
 from performer.contracts import validate
 from performer.role_execution.runtime import RoleExecutionRuntime
 from performer.root_reconciler.comment_replies import pending_comment_reply_sources_from_snapshot
@@ -42,9 +40,10 @@ class RootReconcilerRuntime:
         if not isinstance(bootstrap, dict):
             raise RootReconcilerTurnError("root_bootstrap_invalid", "The Root bootstrap is invalid.")
         root_digest = _text(bootstrap, "root_digest")
-        canonical_facts = _bootstrap_facts(bootstrap)
+        canonical_facts = _bootstrap_facts(bootstrap, _command(request))
         record = self._sessions.open(
             session_id=session_id,
+            session_generation=session_id,
             role="root_reconciler",
             root_issue_id=root_issue_id,
             cycle_issue_id=None,
@@ -121,7 +120,7 @@ class RootReconcilerRuntime:
 
         execution_request = {**request, "root_issue_id": baseline.root_issue_id}
         try:
-            next_facts = _apply_delta(baseline.canonical_facts, delta)
+            next_facts = _apply_delta(baseline.canonical_facts, delta, _command(request))
             result = self._roles.execute_root_reconciler(execution_request)
             turn_result = _reconciler_turn_result(result, execution_request, target_digest, next_facts)
             if turn_result.get("kind") == "root_reconciler_failed":
@@ -172,31 +171,32 @@ def _reconciler_turn_result(
     if result.get("kind") == "root_reconciler_failed":
         return _validate_failure_result(result, request, expected_digest)
     try:
-        return _successful_directive(result, request, expected_digest, canonical_facts)
+        return _successful_intent(result, request, expected_digest, canonical_facts)
     except RootReconcilerTurnError as error:
-        return _failure_from_invalid_directive(result, request, expected_digest, error)
+        return _failure_from_invalid_intent(result, request, expected_digest, error)
 
 
-def _successful_directive(
-    directive: dict[str, Any],
+def _successful_intent(
+    intent: dict[str, Any],
     request: dict[str, Any],
     expected_digest: str,
     canonical_facts: dict[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(directive, dict):
-        raise RootReconcilerTurnError("root_directive_missing", "The Root Reconciler turn did not produce a directive.")
-    validated = _validate_directive(directive)
+    if not isinstance(intent, dict):
+        raise RootReconcilerTurnError("root_semantic_intent_missing", "The Root Reconciler turn did not produce an intent.")
+    command = _command(request)
+    validated = _validate_semantic_intent(intent, command)
     if validated["reconciler_session_id"] != request["reconciler_session_id"]:
-        raise RootReconcilerTurnError("root_directive_session_mismatch", "The Root directive session does not match the request.")
+        raise RootReconcilerTurnError("root_semantic_intent_session_mismatch", "The Root intent session does not match the request.")
     if validated["reconciler_turn_id"] != request["reconciler_turn_id"]:
-        raise RootReconcilerTurnError("root_directive_turn_mismatch", "The Root directive turn does not match the request.")
+        raise RootReconcilerTurnError("root_semantic_intent_turn_mismatch", "The Root intent turn does not match the request.")
     if validated["based_on_target_root_digest"] != expected_digest:
-        raise RootReconcilerTurnError("root_directive_digest_mismatch", "The Root directive does not match the requested facts.")
-    _validate_comment_replies(validated, canonical_facts)
+        raise RootReconcilerTurnError("root_semantic_intent_digest_mismatch", "The Root intent does not match the requested facts.")
+    _validate_comment_dispositions(validated, canonical_facts)
     return validated
 
 
-def _validate_comment_replies(directive: dict[str, Any], canonical_facts: dict[str, Any]) -> None:
+def _validate_comment_dispositions(intent: dict[str, Any], canonical_facts: dict[str, Any]) -> None:
     snapshot = canonical_facts.get("root_snapshot")
     pending = canonical_facts.get("pending_input_ids")
     if not isinstance(snapshot, dict) or not isinstance(pending, list):
@@ -205,19 +205,19 @@ def _validate_comment_replies(directive: dict[str, Any], canonical_facts: dict[s
         source["source_input_id"]: source["source"]
         for source in pending_comment_reply_sources_from_snapshot(snapshot, pending)
     }
-    replies = directive["comment_replies"]
-    actual = [reply.get("source_input_id") for reply in replies]
+    dispositions = intent["comment_dispositions"]
+    actual = [disposition.get("source_input_id") for disposition in dispositions]
     if len(actual) != len(expected) or len(set(actual)) != len(actual):
         raise RootReconcilerTurnError(
-            "root_directive_comment_replies_invalid",
-            "The Root directive comment replies do not match the pending user comment inputs.",
+            "root_semantic_intent_comment_dispositions_invalid",
+            "The Root intent dispositions do not match the pending user comment inputs.",
         )
-    for reply in replies:
-        source_input_id = reply.get("source_input_id")
-        if expected.get(source_input_id) != reply.get("source"):
+    for disposition in dispositions:
+        source_input_id = disposition.get("source_input_id")
+        if expected.get(source_input_id) != disposition.get("source"):
             raise RootReconcilerTurnError(
-                "root_directive_comment_replies_invalid",
-                "The Root directive comment replies do not match the pending user comment inputs.",
+                "root_semantic_intent_comment_dispositions_invalid",
+                "The Root intent dispositions do not match the pending user comment inputs.",
             )
 
 
@@ -251,13 +251,13 @@ def _validate_failure_result(value: dict[str, Any], request: dict[str, Any], exp
     return validated
 
 
-def _failure_from_invalid_directive(
-    directive: dict[str, Any],
+def _failure_from_invalid_intent(
+    intent: dict[str, Any],
     request: dict[str, Any],
     expected_digest: str,
     error: RootReconcilerTurnError,
 ) -> dict[str, Any]:
-    model_turn = directive.get("model_turn")
+    model_turn = intent.get("model_turn")
     if not isinstance(model_turn, dict):
         raise error
     try:
@@ -292,24 +292,21 @@ def _failure_from_invalid_directive(
 
 
 def _attempted_input_ids(request: dict[str, Any]) -> list[str]:
-    if request.get("kind") == "open_root_reconciler":
-        source = request.get("bootstrap")
-    else:
-        source = request.get("delta")
-    if not isinstance(source, dict):
+    pending = _command(request).get("pending_input_refs")
+    if not isinstance(pending, list):
         raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root turn inputs are invalid.")
-    pending = source.get("pending_input_ids")
-    if not isinstance(pending, list) or any(not isinstance(input_id, str) or not input_id for input_id in pending):
+    identities = [item.get("input_id") for item in pending if isinstance(item, dict)]
+    if len(identities) != len(pending) or any(not isinstance(input_id, str) or not input_id for input_id in identities):
         raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root turn inputs are invalid.")
-    return pending
+    return identities
 
 
-def _bootstrap_facts(bootstrap: dict[str, Any]) -> dict[str, Any]:
+def _bootstrap_facts(bootstrap: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
     facts = {
         "root_snapshot": deepcopy(bootstrap["root_snapshot"]),
         "source_manifest": deepcopy(bootstrap["source_manifest"]),
         "coverage": deepcopy(bootstrap["coverage"]),
-        "pending_input_ids": deepcopy(bootstrap["pending_input_ids"]),
+        "pending_input_ids": _pending_input_identities(command),
     }
     _validate_manifest(facts["source_manifest"])
     if _root_digest(facts["source_manifest"]) != bootstrap["root_digest"]:
@@ -320,7 +317,7 @@ def _bootstrap_facts(bootstrap: dict[str, Any]) -> dict[str, Any]:
     return facts
 
 
-def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+def _apply_delta(facts: dict[str, Any], delta: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
     next_facts = deepcopy(facts)
     snapshot = next_facts["root_snapshot"]
     manifest = _manifest_by_identity(next_facts["source_manifest"])
@@ -361,7 +358,7 @@ def _apply_delta(facts: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
     if _root_digest(next_facts["source_manifest"]) != delta.get("target_root_digest"):
         raise RootReconcilerTurnError("root_delta_digest_invalid", "The Root delta target digest is invalid.")
     _refresh_cycles(snapshot)
-    next_facts["pending_input_ids"] = deepcopy(delta["pending_input_ids"])
+    next_facts["pending_input_ids"] = _pending_input_identities(command)
     return next_facts
 
 
@@ -506,63 +503,37 @@ def _refresh_cycles(snapshot: dict[str, Any]) -> None:
     snapshot["cycles"] = cycles
 
 
-def _validate_directive(value: dict[str, Any]) -> dict[str, Any]:
+def _command(request: dict[str, Any]) -> dict[str, Any]:
+    command = request.get("command")
+    if not isinstance(command, dict):
+        raise RootReconcilerTurnError("root_semantic_gate_command_invalid", "The Root semantic gate command is invalid.")
+    return command
+
+
+def _pending_input_identities(command: dict[str, Any]) -> list[str]:
+    pending = command.get("pending_input_refs")
+    if not isinstance(pending, list):
+        raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root pending input references are invalid.")
+    identities = [item.get("input_id") for item in pending if isinstance(item, dict)]
+    if len(identities) != len(pending) or any(not isinstance(item, str) or not item for item in identities):
+        raise RootReconcilerTurnError("root_pending_inputs_invalid", "The Root pending input references are invalid.")
+    return identities
+
+
+def _validate_semantic_intent(value: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
+    expected = command.get("expected_output_contract")
+    gate = command.get("semantic_gate")
+    contract = {
+        "requirement_and_comment_intent.v1": ("RequirementAndCommentIntent", "requirement_and_comment"),
+        "plan_human_decision_intent.v1": ("PlanHumanDecisionIntent", "plan_human_decision"),
+        "recovery_strategy_intent.v1": ("RecoveryStrategyIntent", "recovery_strategy"),
+        "terminal_review_intent.v1": ("TerminalReviewIntent", "terminal_review"),
+    }.get(expected)
+    if contract is None or contract[1] != gate:
+        raise RootReconcilerTurnError("root_semantic_gate_contract_mismatch", "The Root gate and expected output contract do not match.")
+    if value.get("semantic_gate") != gate:
+        raise RootReconcilerTurnError("root_semantic_gate_result_mismatch", "The Root result gate does not match the request.")
     try:
-        return validate("RootDirective", value)
+        return validate(contract[0], value)
     except ValueError as error:
-        raise RootReconcilerTurnError(_root_directive_contract_code(value, error), "The Root directive did not match its closed contract.") from error
-
-
-def _root_directive_contract_code(value: dict[str, Any], error: ValueError) -> str:
-    detail = str(error.__cause__ or error)
-    if "expected exactly one union variant" in detail:
-        action = value.get("action")
-        kind = action.get("kind") if isinstance(action, dict) else None
-        if not isinstance(kind, str):
-            return "root_directive_action_kind_invalid"
-        action_definition = _action_definition_name(kind)
-        if action_definition is None:
-            return "root_directive_action_kind_invalid"
-        try:
-            decode_contract(
-                f"https://symphony.local/contracts/conductor-performer.schema.json#/$defs/{action_definition}",
-                action,
-            )
-        except ValueError as action_error:
-            return _action_contract_code(kind, str(action_error))
-        return "root_directive_action_union_invalid"
-    if "unknown field" in detail:
-        return "root_directive_unknown_field"
-    if "missing required field" in detail:
-        return "root_directive_required_field_missing"
-    return "root_directive_contract_invalid"
-
-
-def _action_definition_name(kind: str) -> str | None:
-    schema = SCHEMA_REGISTRY["https://symphony.local/contracts/conductor-performer.schema.json"]
-    for name, definition in schema["$defs"].items():
-        if not isinstance(definition, dict):
-            continue
-        properties = definition.get("properties")
-        action_kind = properties.get("kind", {}).get("const") if isinstance(properties, dict) else None
-        if action_kind == kind:
-            return name
-    return None
-
-
-def _action_contract_code(kind: str, detail: str) -> str:
-    prefix = f"root_directive_{kind}"
-    missing = re.search(r"missing required field ([A-Za-z0-9_]+)", detail)
-    if missing:
-        return f"{prefix}_missing_{missing.group(1)}"
-    if "unknown field" in detail:
-        return f"{prefix}_unknown_field"
-    if "expected constant" in detail or "closed enum" in detail:
-        return f"{prefix}_value_invalid"
-    field_type = re.search(r"\$\.([A-Za-z0-9_]+): expected (object|array|string|boolean|number|integer)", detail)
-    if field_type:
-        return f"{prefix}_{field_type.group(1)}_type_invalid"
-    field = re.search(r"\$\.([A-Za-z0-9_]+)", detail)
-    if field:
-        return f"{prefix}_{field.group(1)}_invalid"
-    return f"{prefix}_invalid"
+        raise RootReconcilerTurnError("root_semantic_intent_contract_invalid", "The Root intent did not match its closed contract.") from error

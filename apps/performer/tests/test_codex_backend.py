@@ -12,9 +12,11 @@ import pytest
 from performer.backends.codex.codex_backend_impl import CodexBackendImpl, _usage
 from performer.backends.codex.provider_io_capture import ProviderIoCapture
 from performer.backends.provider_backend_interface import (
-    ProviderBackendError,
+    ProviderTurnAcceptanceUnknown,
+    ProviderTurnAcceptedInvalid,
+    ProviderTurnAcceptedValid,
     ProviderTurnCanceled,
-    ProviderTurnDeadlineExpired,
+    ProviderTurnNotAccepted,
 )
 from performer.prompt_resources import load_role_prompt_catalog
 
@@ -58,6 +60,28 @@ def backend_for(sdk: FakeCodex) -> CodexBackendImpl:
     return CodexBackendImpl(sdk, load_role_prompt_catalog())
 
 
+def root_command(pending_input_ids: list[str] | None = None) -> dict[str, object]:
+    return {
+        "semantic_gate": "requirement_and_comment",
+        "trigger": "human_comment" if pending_input_ids else "initial_definition",
+        "pending_input_refs": [
+            {"source_kind": "comment_body", "input_id": input_id, "native_source_identity": input_id, "source_version_or_digest": "pending-v1"}
+            for input_id in (pending_input_ids or [])
+        ],
+        "expected_output_contract": "requirement_and_comment_intent.v1",
+        "subject": {"root_definition_version_or_digest": "root-v1", "active_cycle_state": "absent"},
+    }
+
+
+ROOT_INTENT_OUTPUT = json.dumps({
+    "rationale": "The Root requirement is unchanged.",
+    "evidence_refs": [],
+    "consumed_input_ids": [],
+    "comment_dispositions": [],
+    "intent": {"kind": "answer_comments", "reason": "no_requirement_change"},
+})
+
+
 class BlockingTurn:
     def __init__(self) -> None:
         self.interrupted = threading.Event()
@@ -97,6 +121,16 @@ class InvalidSchemaThread(FakeThread):
         return SimpleNamespace(run=fail, interrupt=lambda: None)
 
 
+class FailedRunThread(FakeThread):
+    def turn(self, prompt: str, **kwargs: object):
+        self.calls.append((prompt, kwargs))
+
+        def fail():
+            raise RuntimeError("connection lost")
+
+        return SimpleNamespace(run=fail, interrupt=lambda: None)
+
+
 @pytest.mark.parametrize("value", [True, 1.5, "1"])
 def test_provider_usage_rejects_non_integer_token_counts(value: object):
     usage = SimpleNamespace(total=SimpleNamespace(
@@ -111,7 +145,7 @@ def test_provider_usage_rejects_non_integer_token_counts(value: object):
 
 
 def test_role_session_uses_role_specific_instructions_and_returns_json():
-    sdk = FakeCodex(FakeThread('{"action":{"kind":"wait"}}'))
+    sdk = FakeCodex(FakeThread(ROOT_INTENT_OUTPUT))
     backend = backend_for(sdk)
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
 
@@ -120,6 +154,7 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
         {
             "kind": "open_root_reconciler",
             "root_issue_id": "root-1",
+            "command": root_command(),
             "bootstrap": {
                 "root_digest": "tree-1",
                 "root_snapshot": {
@@ -135,7 +170,8 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
         cancel_event=__import__("threading").Event(),
     )
 
-    assert result["output"]["action"]["kind"] == "wait"
+    assert isinstance(result, ProviderTurnAcceptedValid)
+    assert result.output["intent"]["kind"] == "answer_comments"
     assert sdk.started[0]["base_instructions"] == load_role_prompt_catalog().for_role("root_reconciler")
     assert "root-1" in sdk.thread.calls[0][0]
     assert "ROOT TARGET IDS:" in sdk.thread.calls[0][0]
@@ -144,37 +180,20 @@ def test_role_session_uses_role_specific_instructions_and_returns_json():
     assert "ROOT ACTION CLOSED VALUES:" not in sdk.thread.calls[0][0]
     assert "plan-1" in sdk.thread.calls[0][0]
     assert "ROOT COMMENT REPLY RULE:" in sdk.thread.calls[0][0]
-    assert "No comment source is pending in this turn, so comment_replies must be []." in sdk.thread.calls[0][0]
+    assert "No comment source is pending in this turn" in sdk.thread.calls[0][0]
     assert sdk.thread.calls[0][1]["output_schema"]["required"] == [
-        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action",
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_dispositions", "intent",
     ]
     assert set(sdk.thread.calls[0][1]["output_schema"]["properties"]) == {
-        "rationale", "evidence_refs", "consumed_input_ids", "comment_replies", "action",
+        "rationale", "evidence_refs", "consumed_input_ids", "comment_dispositions", "intent",
     }
-    action_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["action"]
-    assert "oneOf" not in action_schema
     assert '"oneOf"' not in json.dumps(sdk.thread.calls[0][1]["output_schema"])
-    action_variants = action_schema["anyOf"]
-    execute_plan_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "execute_plan")
-    assert execute_plan_schema["properties"]["kind"]["type"] == "string"
-    revise_tree_schema = next(schema for schema in action_variants if schema.get("properties", {}).get("kind", {}).get("const") == "revise_root_tree")
-    tree_operations = revise_tree_schema["properties"]["operations"]["items"]["anyOf"]
-    assert "create_relation" not in {
-        schema.get("properties", {}).get("kind", {}).get("const") for schema in tree_operations
-    }
-    assert set(execute_plan_schema["required"]) == {
-        "kind",
-        "cycle_issue_id",
-        "plan_issue_id",
-        "plan_goal",
-        "required_outputs",
-        "prior_plan_result_ids",
-        "human_resolution_ids",
+    purpose_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["intent"]
+    assert {branch["properties"]["kind"]["const"] for branch in purpose_schema["anyOf"]} == {
+        "define_requirement", "request_information", "answer_comments",
     }
     assert "RETURN ONLY THE JSON OBJECT." not in sdk.thread.calls[0][0]
     assert "additionalProperties" not in sdk.thread.calls[0][0]
-    comment_replies_schema = sdk.thread.calls[0][1]["output_schema"]["properties"]["comment_replies"]
-    assert comment_replies_schema["maxItems"] == 0
     _assert_closed_primitives_are_typed(sdk.thread.calls[0][1]["output_schema"])
     _assert_only_supported_string_and_array_constraints(sdk.thread.calls[0][1]["output_schema"])
     _assert_all_object_properties_are_required(sdk.thread.calls[0][1]["output_schema"])
@@ -192,12 +211,13 @@ def test_live_role_session_uses_the_packaged_prompt_as_its_only_base_instruction
 
 
 def test_live_root_turn_appends_only_the_delta_after_the_initial_turn():
-    sdk = FakeCodex(FakeThread('{"action":{"kind":"wait"}}'))
+    sdk = FakeCodex(FakeThread(ROOT_INTENT_OUTPUT))
     backend = backend_for(sdk)
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
     initial = {
         "kind": "open_root_reconciler",
         "root_issue_id": "root-1",
+        "command": root_command(),
         "bootstrap": {
             "root_digest": "root-v1",
             "root_snapshot": {"root": {"issue": {"issue_id": "root-1"}}, "cycles": []},
@@ -206,6 +226,7 @@ def test_live_root_turn_appends_only_the_delta_after_the_initial_turn():
     delta = {
         "kind": "advance_root_reconciler",
         "root_issue_id": "root-1",
+        "command": root_command(),
         "delta": {
             "base_root_digest": "root-v1",
             "target_root_digest": "root-v2",
@@ -277,7 +298,7 @@ def test_root_reconciler_prompt_exposes_the_pending_comment_reply_source():
     body = "Please start planning."
     body_digest = sha256(body.encode("utf-8")).hexdigest()
     source_input_id = "input:" + sha256(f"comment_body:comment-1\0{body_digest}".encode("utf-8")).hexdigest()
-    sdk = FakeCodex(FakeThread('{"action":{"kind":"wait"}}'))
+    sdk = FakeCodex(FakeThread(ROOT_INTENT_OUTPUT))
     backend = backend_for(sdk)
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
 
@@ -286,9 +307,9 @@ def test_root_reconciler_prompt_exposes_the_pending_comment_reply_source():
         {
             "kind": "open_root_reconciler",
             "root_issue_id": "root-1",
+            "command": root_command([source_input_id]),
             "bootstrap": {
                 "root_digest": "tree-1",
-                "pending_input_ids": [source_input_id],
                 "root_snapshot": {
                     "root": {"issue": {"issue_id": "root-1"}},
                     "cycles": [],
@@ -307,11 +328,21 @@ def test_root_reconciler_prompt_exposes_the_pending_comment_reply_source():
     prompt, options = sdk.thread.calls[0]
     assert source_input_id in prompt
     assert '"comment_body_digest":"' + body_digest in prompt
-    assert options["output_schema"]["properties"]["comment_replies"]["maxItems"] == 256
+    assert options["output_schema"]["properties"]["comment_dispositions"]["maxItems"] == 512
 
 
-@pytest.mark.parametrize("role", ["plan", "work", "verify"])
-def test_stage_roles_use_the_complete_outcome_contract(role: str):
+@pytest.mark.parametrize(("role", "expected_kinds"), [
+    ("plan", {"plan_completed", "plan_needs_information", "plan_blocked"}),
+    ("work", {
+        "work_completed", "work_blocked", "work_plan_assumption_invalid",
+        "work_scope_conflict", "work_permission_required", "work_information_required",
+    }),
+    ("verify", {
+        "verify_passed", "verify_changes_required", "verify_inconclusive",
+        "verify_plan_contract_violation", "verify_blocked",
+    }),
+])
+def test_stage_roles_use_the_complete_outcome_contract(role: str, expected_kinds: set[str]):
     sdk = FakeCodex()
     backend = backend_for(sdk)
     session = backend.open_role_session(role, {"model": "gpt"})
@@ -326,7 +357,11 @@ def test_stage_roles_use_the_complete_outcome_contract(role: str):
     schema = sdk.thread.calls[0][1]["output_schema"]
     assert "oneOf" not in schema
     assert '"oneOf"' not in json.dumps(schema)
-    assert len(schema["anyOf"]) >= 5
+    actual_kinds = set()
+    for variant in schema["anyOf"]:
+        kind = variant["properties"]["kind"]
+        actual_kinds.update(kind.get("enum", [kind["const"]] if "const" in kind else []))
+    assert actual_kinds == expected_kinds
     assert all("kind" in variant["properties"] for variant in schema["anyOf"])
     assert all(len(variant["required"]) > 1 for variant in schema["anyOf"])
     _assert_only_supported_string_and_array_constraints(schema)
@@ -341,17 +376,16 @@ def test_invalid_provider_json_is_sanitized():
     backend = backend_for(sdk)
     session = backend.open_role_session("plan", {"model": "gpt"})
 
-    with pytest.raises(ProviderBackendError) as raised:
-        backend.execute_role_turn(
-            session,
-            {},
-            workspace_root=None,
-            cancel_event=__import__("threading").Event(),
-        )
+    result = backend.execute_role_turn(
+        session,
+        {},
+        workspace_root=None,
+        cancel_event=__import__("threading").Event(),
+    )
 
-    assert raised.value.code == "provider_output_invalid_json"
-    assert raised.value.append_outcome == "accepted"
-    assert "not-json" not in raised.value.sanitized_reason
+    assert isinstance(result, ProviderTurnAcceptedInvalid)
+    assert result.failure.code == "provider_output_invalid_json"
+    assert "not-json" not in result.failure.sanitized_reason
 
 
 def test_provider_io_capture_records_exact_turn_input_and_output_before_parsing(tmp_path):
@@ -370,9 +404,9 @@ def test_provider_io_capture_records_exact_turn_input_and_output_before_parsing(
         "root_issue_id": "root-1",
         "reconciler_session_id": "session-1",
         "reconciler_turn_id": "turn-1",
+        "command": root_command(["input:" + "a" * 64]),
         "bootstrap": {
             "root_digest": "tree-1",
-            "pending_input_ids": ["input:" + "a" * 64],
             "root_snapshot": {
                 "root": {"issue": {"issue_id": "root-1"}},
                 "cycles": [],
@@ -382,13 +416,14 @@ def test_provider_io_capture_records_exact_turn_input_and_output_before_parsing(
         },
     }
 
-    with pytest.raises(ProviderBackendError):
-        backend.execute_role_turn(
-            session,
-            request,
-            workspace_root=None,
-            cancel_event=threading.Event(),
-        )
+    result = backend.execute_role_turn(
+        session,
+        request,
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
+
+    assert isinstance(result, ProviderTurnAcceptedInvalid)
 
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     session_input = next(record for record in records if record["event"] == "provider_session_input")
@@ -417,13 +452,14 @@ def test_provider_io_capture_records_the_original_sdk_error(tmp_path):
     )
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
 
-    with pytest.raises(ProviderBackendError):
-        backend.execute_role_turn(
-            session,
-            {"request_id": "request-1", "root_issue_id": "root-1"},
-            workspace_root=None,
-            cancel_event=threading.Event(),
-        )
+    result = backend.execute_role_turn(
+        session,
+        {"request_id": "request-1", "root_issue_id": "root-1", "command": root_command()},
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
+
+    assert isinstance(result, ProviderTurnNotAccepted)
 
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     turn_error = next(record for record in records if record["event"] == "provider_turn_error")
@@ -446,13 +482,16 @@ def test_provider_io_capture_records_a_returned_output_before_cancel_wins_the_ra
     cancel_event = threading.Event()
     cancel_event.set()
 
-    with pytest.raises(ProviderTurnCanceled):
-        backend.execute_role_turn(
-            session,
-            {"request_id": "request-1"},
-            workspace_root=None,
-            cancel_event=cancel_event,
-        )
+    result = backend.execute_role_turn(
+        session,
+        {"request_id": "request-1"},
+        workspace_root=None,
+        cancel_event=cancel_event,
+    )
+
+    assert isinstance(result, ProviderTurnCanceled)
+    assert result.append_outcome == "accepted"
+    assert result.deadline_expired is False
 
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     turn_output = next(record for record in records if record["event"] == "provider_turn_output")
@@ -463,27 +502,49 @@ def test_provider_schema_rejection_is_non_retryable_and_not_accepted():
     backend = backend_for(FakeCodex(InvalidSchemaThread()))
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
 
-    with pytest.raises(ProviderBackendError) as raised:
-        backend.execute_role_turn(
-            session,
-            {},
-            workspace_root=None,
-            cancel_event=threading.Event(),
-        )
+    result = backend.execute_role_turn(
+        session,
+        {"command": root_command()},
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
 
-    assert raised.value.code == "provider_schema_unsupported"
-    assert raised.value.retryable is False
-    assert raised.value.append_outcome == "not_accepted"
+    assert isinstance(result, ProviderTurnNotAccepted)
+    assert result.failure.code == "provider_schema_unsupported"
+    assert result.failure.retryable is False
+
+
+def test_provider_run_failure_has_unknown_acceptance_without_throwing():
+    backend = backend_for(FakeCodex(FailedRunThread()))
+    session = backend.open_role_session("plan", {"model": "gpt"})
+
+    result = backend.execute_role_turn(
+        session,
+        {},
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
+
+    assert isinstance(result, ProviderTurnAcceptanceUnknown)
+    assert result.failure.code == "provider_turn_failed"
+    assert result.failure.retryable is True
 
 
 def test_provider_null_placeholders_restore_optional_fields_to_absence():
-    sdk = FakeCodex(FakeThread('{"action":{"kind":"acknowledge","continue_execution_id":null}}'))
+    sdk = FakeCodex(FakeThread(json.dumps({
+        "rationale": "Need information.",
+        "evidence_refs": [],
+        "consumed_input_ids": [],
+        "comment_dispositions": [],
+        "intent": {"kind": "request_information", "question": "Question?", "context": "Context.", "options": None},
+    })))
     backend = backend_for(sdk)
     session = backend.open_role_session("root_reconciler", {"model": "gpt"})
 
-    result = backend.execute_role_turn(session, {}, workspace_root=None, cancel_event=threading.Event())
+    result = backend.execute_role_turn(session, {"command": root_command()}, workspace_root=None, cancel_event=threading.Event())
 
-    assert "continue_execution_id" not in result["output"]["action"]
+    assert isinstance(result, ProviderTurnAcceptedValid)
+    assert "options" not in result.output["intent"]
 
 
 def _assert_closed_primitives_are_typed(value: object) -> None:
@@ -523,13 +584,16 @@ def test_role_turn_interrupts_a_blocked_provider_at_its_deadline():
     backend = backend_for(FakeCodex(thread))
     session = backend.open_role_session("plan", {"model": "gpt"})
 
-    with pytest.raises(ProviderTurnDeadlineExpired):
-        backend.execute_role_turn(
-            session,
-            {"limits": {"deadline_at": (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()}},
-            workspace_root=None,
-            cancel_event=threading.Event(),
-        )
+    result = backend.execute_role_turn(
+        session,
+        {"limits": {"deadline_at": (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()}},
+        workspace_root=None,
+        cancel_event=threading.Event(),
+    )
+
+    assert isinstance(result, ProviderTurnCanceled)
+    assert result.append_outcome == "accepted"
+    assert result.deadline_expired is True
 
     assert thread.turn_handle.interrupted.is_set()
     assert thread.turn_handle.interrupt_calls == 1

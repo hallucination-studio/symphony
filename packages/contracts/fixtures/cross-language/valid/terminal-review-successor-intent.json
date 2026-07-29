@@ -1,0 +1,38 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/TerminalReviewIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-6",
+    "kind": "terminal_review_intent",
+    "semantic_gate": "terminal_review",
+    "intent_id": "intent-6",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-6",
+    "model_turn": {
+      "turn_record_id": "model-turn-6",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-6",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": { "status": "unavailable", "reason": "provider_omitted" },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-6",
+    "rationale": "The terminal Cycle leaves one required outcome unmet.",
+    "evidence_refs": [
+      { "reference_id": "finding-2", "source_kind": "linear_issue" }
+    ],
+    "consumed_input_ids": [],
+    "comment_dispositions": [],
+    "intent": {
+      "kind": "start_successor_cycle",
+      "successor_objective": "Resolve the remaining verified gap.",
+      "required_outcomes": ["The remaining acceptance criterion passes."],
+      "preserved_constraints": ["Preserve the accepted Root scope."]
+    }
+  }
+}

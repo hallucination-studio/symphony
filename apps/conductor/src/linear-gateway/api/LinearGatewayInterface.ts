@@ -134,18 +134,31 @@ export type LinearWorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedIsArchived?: boolean;
+        expectedIsArchived: false;
       };
       statusId: string;
       title: string;
       description: string;
       labelNames: string[];
-      isArchived: boolean;
       parentAssignment:
         | { mode: "retain" }
         | { mode: "set"; parentIssueId: string }
         | { mode: "clear" };
       order?: number;
+    }
+  | {
+      kind: "set_workflow_issue_archive_state";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedIsArchived: boolean;
+      };
+      isArchived: boolean;
     }
   | {
       kind: "append_workflow_comment";
@@ -194,7 +207,7 @@ export type LinearWorkflowMutationCommand =
       body: string;
     }
   | {
-      kind: "set_comment_receipt_reaction";
+      kind: "remove_comment_receipt_reaction";
       writeId: string;
       conductorShortHash?: string;
       expectedProjectId: string;
@@ -204,8 +217,20 @@ export type LinearWorkflowMutationCommand =
       sourceCommentId: string;
       expectedSourceCommentRemoteVersion: string;
       threadRootCommentId: string;
-      expectedReceipt: "check" | "cross" | "none";
-      receipt: "check" | "cross" | "none";
+      expectedReceipt: "check" | "cross";
+    }
+  | {
+      kind: "create_comment_receipt_reaction";
+      writeId: string;
+      conductorShortHash?: string;
+      expectedProjectId: string;
+      rootIssueId: string;
+      expectedRootRemoteVersion: string;
+      replyWriteId: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      receipt: "check" | "cross";
     }
   | {
       kind: "set_comment_thread_state";

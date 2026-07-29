@@ -120,6 +120,31 @@ export async function createForegroundE2EHumanActor({
   const receiptInputs = new Map();
   return Object.freeze({
     actorId,
+    async resolveFocusedRootCreationBinding({ rootKey, teamId, projectId, conductor } = {}) {
+      if (!identifier(rootKey) || !rootCatalog.has(rootKey) || !identifier(teamId) || !identifier(projectId) ||
+          !conductor || typeof conductor.conductorRef !== "string" || conductor.conductorRef.length === 0 ||
+          !identifier(conductor.conductorId) || !shortHash(conductor.conductorShortHash) ||
+          !identifier(conductor.performerProfileId) || !directory(conductor.worktreeDirectory)) {
+        throw stableError("foreground_e2e_human_root_binding_input_invalid");
+      }
+      const statuses = await readTeamStatuses(client, teamId, "foreground_e2e_human_root_binding_read_failed");
+      const todo = statuses.filter((state) => state.name === "Todo" && state.type === "unstarted");
+      if (todo.length !== 1) throw stableError("foreground_e2e_human_root_binding_read_failed");
+      const [rootLabel, routingLabel] = await Promise.all([
+        readIssueLabel({ client, teamId, name: "symphony:kind/root" }),
+        readIssueLabel({ client, teamId, name: `symphony:conductor/${conductor.conductorShortHash}` }),
+      ]);
+      return Object.freeze({
+        teamId,
+        projectId,
+        rootLabelId: rootLabel.id,
+        routingLabelId: routingLabel.id,
+        rootStatusId: todo[0].id,
+        conductorId: conductor.conductorId,
+        performerProfileId: conductor.performerProfileId,
+        worktreeDirectory: conductor.worktreeDirectory,
+      });
+    },
     async resolveRootCreationBindings({ teamId, projectId, conductors } = {}) {
       const resolvedConductors = assertConductorBindings({ teamId, projectId, conductors });
       const statuses = await readTeamStatuses(client, teamId, "foreground_e2e_human_root_binding_read_failed");

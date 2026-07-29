@@ -13,7 +13,7 @@ Podium Desktop
 Conductor
   -> read native Linear + Git
   -> host Root Reconciliation
-  -> materialize one bounded native mutation
+  -> converge deterministic native transitions and semantic intents
   -> manage one Git worktree per Root
 
 Performer
@@ -23,8 +23,8 @@ Performer
   -> Provider SDK and tool runtime
 ```
 
-Root Reconciler是唯一决定workflow下一步的model-driven角色。Conductor不运行模型；Plan、Work和Verify只返回当前执行的
-closed typed Result，不修改DAG或决定下一步。Provider threads只提供runtime continuity，不是durable authority。
+Root Reconciler是唯一作业务语义选择的model-driven角色。Conductor不运行模型，但从fresh facts解释closed Plan、Work和Verify
+Result并执行唯一可推导的transition；Stage不修改DAG或作业务策略选择。Provider threads只提供runtime continuity，不是durable authority。
 
 ## 2. 核心不变量
 
@@ -59,8 +59,8 @@ closed typed Result，不修改DAG或决定下一步。Provider threads只提供
 | OAuth、token、installation、Project catalog、Binding | `podium.db` | Podium |
 | Root routing和initial delegation | Linear native labels/delegate | Human / Podium / Conductor |
 | Root requirement | Root current description + accepted Root human facts | Human / Root Reconciler |
-| Root/Cycle/Node lifecycle | Linear custom status + native archive flag | Root Reconciler proposes; Conductor writes |
-| Issue kind、scope和DAG | labels + parent/child + relations | Root Reconciler proposes; Conductor writes |
+| Root/Cycle/Node lifecycle | Linear custom status + native archive flag | Conductor mechanical transition / Root semantic gate |
+| Issue kind、scope和DAG | labels + parent/child + relations | Plan contract / Conductor compiler / Root recovery gate |
 | Human Action与approval | Root comment threads + native reactions/resolved state/Activity | Human / Root Reconciler / Conductor |
 | Finding | native Issues + status/labels/comments/Activity | Root Reconciler / Conductor |
 | branch、worktree、commit、diff、checks、PR和delivery | Git/SCM | Conductor / Performer Work |
@@ -73,8 +73,8 @@ closed typed Result，不修改DAG或决定下一步。Provider threads只提供
 ## 4. 调用与恢复
 
 ```text
-Conductor -> open/advance Root Reconciler with current native facts -> Performer
-Conductor <- one closed Root next-action result                    <- Performer
+Conductor -> open/advance a Root semantic gate with current facts -> Performer
+Conductor <- one closed gate-specific Root semantic intent        <- Performer
 
 Conductor -> execute Plan | Work | Verify with closed request      -> Performer
 Conductor <- one closed typed Stage response                       <- Performer
@@ -117,7 +117,7 @@ facts，不要求重建旧Result对象。
 | [Workflow Authority与恢复](workflow-authority-recovery.md) | native durable facts、recovery、no-replay、worktree-loss rebuild和hard cut |
 | [Root Issue工作流](root-issue.md) | Issue kinds、status subsets、Root Tree、DAG与archive semantics |
 | [Human Action](human-actions.md) | Root Human Action comment threads、actor、scope、resolution与supersession |
-| [Root Reconciliation](root-reconciliation.md) | Root inputs、Root Reconciler decisions和one-action materialization |
+| [Root Reconciliation](root-reconciliation.md) | Root inputs、deterministic transition和Root semantic gates |
 | [Performer Stage Contracts](stage-orchestration.md) | Plan/Work/Verify transient request/result contract |
 | [Work Subagents](work-subagents.md) | Work-only agent tree、tool/context语义、tree limits、write grants、turn retirement与containment |
 | [Git Worktree与交付](git-worktree-delivery.md) | worktree validation、immutable revision、PR和delivery mechanics |

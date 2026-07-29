@@ -38,12 +38,16 @@ COMMON_SECTIONS = (
 
 ROLE_REQUIREMENTS = {
     "root_reconciler": (
-        "DEFINE clarifies the durable Root requirement.",
-        "REVIEW evaluates each read-back terminal CycleOutcome",
-        "Automatic delivery is the default unless the user explicitly disables it.",
-        "SHIP with conclude_root ready_for_delivery",
-        'wrapper shape {"action": <RootDirectiveAction>}',
-        "never create SPEC.md, PLAN.md, tasks files, review reports, or delivery notes",
+        "Choose one business intent for exactly the semantic gate",
+        "### requirement_and_comment",
+        "### plan_human_decision",
+        "### recovery_strategy",
+        "`waiver` is reserved for Finding recovery",
+        "### terminal_review",
+        "subject.successor_cycle_policy",
+        "do not return\n`start_successor_cycle`",
+        "You do not schedule Plan, Work, or Verify",
+        "Do not include `action`",
     ),
     "plan": (
         "independently dispatchable Work units",
@@ -77,9 +81,13 @@ def test_role_prompt_resources_have_the_required_workflow_structure() -> None:
 
     for role, content in resources.items():
         assert content.startswith(ROLE_OPENING_LINES[role])
-        assert all(content.count(section) == 1 for section in COMMON_SECTIONS)
-        assert content.count("```mermaid") == 1
-        assert content.count("flowchart TD") == 1
+        if role == "root_reconciler":
+            assert "RootDirective" not in content
+            assert "one action and stop" not in content
+        else:
+            assert all(content.count(section) == 1 for section in COMMON_SECTIONS)
+            assert content.count("```mermaid") == 1
+            assert content.count("flowchart TD") == 1
         assert all(requirement in content for requirement in ROLE_REQUIREMENTS[role])
 
 
@@ -157,6 +165,7 @@ def test_process_composition_eagerly_validates_the_prompt_catalog(monkeypatch: p
     monkeypatch.setattr(performer_main, "AgentProtocolHost", Host)
     monkeypatch.setattr(performer_main.signal, "signal", lambda *_: None)
     monkeypatch.setattr(performer_main.sys, "argv", ["performer", "--agent"])
+    monkeypatch.setenv("SYMPHONY_PERFORMER_PROCESS_GENERATION", "process-test")
     monkeypatch.setattr(performer_main.sys, "stdin", type("Input", (), {"buffer": object()})())
 
     performer_main.main()

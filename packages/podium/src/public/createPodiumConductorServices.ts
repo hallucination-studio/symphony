@@ -10,6 +10,7 @@ import { SqlitePodiumStoreImpl } from "../internal/storage/SqlitePodiumStoreImpl
 import type { PodiumConductorServices } from "./PodiumConductorProtocolHandler.js";
 import type { ConductorPresence } from "./ConductorPresence.js";
 import type { LinearPhysicalRequestGate } from "./LinearPhysicalRequestGate.js";
+import type { LinearRequestCoalescingObservation } from "../internal/linear-gateway/internal/LinearRequestBrokerImpl.js";
 
 export interface PodiumConductorServiceOwner {
   services: PodiumConductorServices;
@@ -21,6 +22,7 @@ export function createPodiumConductorServices(input: {
   now?: () => string;
   sleep?: (delayMs: number) => Promise<void>;
   observeLinearRequest?: (observation: LinearPhysicalRequestObservation) => void;
+  observeLinearRequestCoalesced?: (observation: LinearRequestCoalescingObservation) => void;
   linearRequestObserver?: LinearRequestObserverImpl;
   linearPhysicalRequestGate?: LinearPhysicalRequestGate;
   presence: ConductorPresence;
@@ -64,6 +66,9 @@ export function createPodiumConductorServices(input: {
       ),
       ...(observer ? { linearRequestObserver: observer } : {}),
       ...(input.observeLinearRequest ? { observeLinearRequest: input.observeLinearRequest } : {}),
+      ...(input.observeLinearRequestCoalesced
+        ? { observeLinearRequestCoalesced: input.observeLinearRequestCoalesced }
+        : {}),
     }),
     close: () => store.close(),
   };

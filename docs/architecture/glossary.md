@@ -67,7 +67,7 @@ credential、SDK object和process handle不属于该DTO。
 | Finding Issue | `FindingIssueSnapshot` | Verify发现的native Cycle child Issue |
 | Native Archive Membership | `is_archived` | 是否参与active DAG；archived object仍属于Root history |
 | Node Readiness | `NodeReadiness` | 从current status/dependencies/Git派生的runtime值 |
-| Predecessor Relation | native relation | Cycle或attempt lineage |
+| Cycle Lineage | native Root children + `(created_at, issue_id)` order | Cycle predecessor/successor顺序；不伪造Linear relation |
 | Replacement Relation | native relation | fresh Issue替代terminal/invalidated target |
 
 `Todo`是唯一dispatchable node state。`Interrupted`、`Done`、`Failed`和`Canceled`是terminal attempt states。
@@ -78,16 +78,18 @@ credential、SDK object和process handle不属于该DTO。
 
 | Canonical term | 代码名 | 定义 |
 |---|---|---|
-| Root DEFINE | semantic phase | 收敛Root current description |
-| Root REVIEW | semantic phase | terminal Cycle后判断successor、human input或delivery |
-| Root SHIP | semantic phase | 提出ready-for-delivery；Git操作仍由Conductor完成 |
-| Root Next Action | `RootNextAction` | 当前turn的one bounded transient semantic output |
+| Requirement And Comment Gate | `requirement_and_comment` | 定义需求并解释ordinary human input |
+| Plan Human Decision Gate | `plan_human_decision` | 解释Plan rejection、clarification或有歧义的approval reply |
+| Recovery Strategy Gate | `recovery_strategy` | 对blocked、failed、inconclusive或Finding选择业务策略 |
+| Terminal Review Gate | `terminal_review` | terminal Cycle后判断successor、human decision或delivery intent |
+| Root Semantic Intent | `RootSemanticIntent` | matching gate的一次closed transient semantic output |
+| Root Transition | `RootTransition` | native facts到mechanical target、semantic gate、external wait或terminal的pure decision |
 | Root Bootstrap Snapshot | `RootBootstrapSnapshot` | fresh session首次接收的完整current projection |
 | Root Delta | `RootDelta` | live session current-value/replacement/tombstone transport optimization |
 | Root Digest | `RootDigest` | 当前runtime stale-output correlation；不持久化 |
 | Mechanical Violation | `MechanicalViolation` | coverage/topology/lifecycle/actor/Git safety finding；不选择业务修复 |
 
-禁止使用持久化next-action object、accepted command log或replay cursor。需要泛指runtime output时使用`RootNextAction`。
+禁止使用持久化next-action object、accepted command log或replay cursor。需要泛指model output时使用`RootSemanticIntent`。
 
 ## 7. Human interaction
 
@@ -148,8 +150,9 @@ LinearClientInterface <- LinearSdkImpl`。只有最后一层可以使用Linear S
 | `root-discovery` | Project/routing/delegation/header discovery |
 | `root-scheduling` | eligibility、fairness和进程内`RootIterationGuard` |
 | `root-reconciliation` | current view、coverage、delta与mechanical safety |
+| `root-transition` | pure native-fact transition与mechanical target derivation |
 | `root-reconciler-client` | Root Reconciler session transport |
-| `root-action-materialization` | RootNextAction native postcondition convergence |
+| `root-intent-materialization` | RootSemanticIntent compile、validation与native postcondition convergence |
 | `performer-agent-client` | Reconciler/Stage request-response transport |
 | `human-actions` | Root request thread与human dispositions |
 | `performer-profiles` | Profile store/control |

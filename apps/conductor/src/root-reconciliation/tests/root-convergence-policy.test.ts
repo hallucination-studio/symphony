@@ -14,7 +14,6 @@ const root = {
 const configured = {
   maxCyclesPerRoot: 2,
   maxSameOpenFindingCycles: 2,
-  maxConsecutiveNoProgress: 2,
   maxCycleRepairAttempts: 0,
 };
 
@@ -57,19 +56,7 @@ test("counts native terminal Work and Verify attempts in the active Cycle", () =
 });
 
 test("derives open Finding persistence from native Finding lineage", () => {
-  const workflow = tree();
-  terminalize(workflow, "cycle-1", "Changes Required");
-  workflow.issues.push(
-    issue("finding-1", "Finding", "cycle-1", "Todo", "unstarted", true, 2),
-    issue("cycle-2", "Cycle", "root-1", "In Progress", "started", false, 1),
-    issue("finding-2", "Finding", "cycle-2", "Todo", "unstarted", false, 2),
-  );
-  workflow.relations.push({
-    relation_id: "finding-successor-1",
-    relation_kind: "triggered_by",
-    source_issue_id: "finding-2",
-    target_issue_id: "finding-1",
-  });
+  const workflow = repeatedFindingTree();
   const policy = new LinearRootConvergencePolicyImpl(configured, 86_400_000);
 
   const assessed = policy.assess({ root, tree: workflow });
@@ -78,18 +65,89 @@ test("derives open Finding persistence from native Finding lineage", () => {
   assert.equal(assessed.trigger, "max_same_open_finding_cycles");
 });
 
-test("derives consecutive no-progress Cycles from native terminal DAG facts", () => {
-  const workflow = tree();
-  terminalize(workflow, "cycle-1", "Changes Required");
-  workflow.issues.push(
-    issue("cycle-2", "Cycle", "root-1", "Changes Required", "completed", true, 1),
+test("rejects a reversed Finding persistence relation instead of treating it as undirected", () => {
+  const workflow = repeatedFindingTree();
+  workflow.relations[0] = {
+    relation_id: "finding-successor-1",
+    relation_kind: "triggered_by",
+    source_issue_id: "finding-1",
+    target_issue_id: "finding-2",
+  };
+  const policy = new LinearRootConvergencePolicyImpl(configured, 86_400_000);
+
+  assert.throws(
+    () => policy.assess({ root, tree: workflow }),
+    /root_convergence_finding_lineage_invalid/,
   );
+});
+
+test("rejects a Finding relation that skips a Root Cycle", () => {
+  const workflow = repeatedFindingTree();
+  terminalize(workflow, "cycle-2", "Changes Required");
+  workflow.issues.push(
+    issue("cycle-middle", "Cycle", "root-1", "Changes Required", "completed", true, 1),
+    issue("cycle-3", "Cycle", "root-1", "In Progress", "started", false, 1),
+  );
+  workflow.issues.find(({ issue_id }) => issue_id === "finding-2")!.parent_issue_id = "cycle-3";
+  const policy = new LinearRootConvergencePolicyImpl({ ...configured, maxCyclesPerRoot: 4 }, 86_400_000);
+
+  assert.throws(
+    () => policy.assess({ root, tree: workflow }),
+    /root_convergence_finding_lineage_invalid/,
+  );
+});
+
+test("retains terminal Finding persistence evidence without retriggering active-Cycle exhaustion", () => {
+  const workflow = repeatedFindingTree();
+  terminalize(workflow, "cycle-2", "Canceled");
   const policy = new LinearRootConvergencePolicyImpl({ ...configured, maxCyclesPerRoot: 3 }, 86_400_000);
 
   const assessed = policy.assess({ root, tree: workflow });
 
-  assert.equal(assessed.snapshot.view.consecutiveNoProgress, 2);
-  assert.equal(assessed.trigger, "max_consecutive_no_progress");
+  assert.deepEqual(assessed.snapshot.view.openFindingPersistence, [{ findingId: "finding-2", openCycleCount: 2 }]);
+  assert.equal(assessed.snapshot.view.activeCycleIssueId, undefined);
+  assert.equal(assessed.trigger, "none");
+});
+
+test("ignores a fully archived Finding lineage after its defect is no longer open", () => {
+  const workflow = repeatedFindingTree();
+  workflow.issues.find(({ issue_id }) => issue_id === "finding-2")!.is_archived = true;
+  const policy = new LinearRootConvergencePolicyImpl(configured, 86_400_000);
+
+  const assessed = policy.assess({ root, tree: workflow });
+
+  assert.deepEqual(assessed.snapshot.view.openFindingPersistence, []);
+  assert.equal(assessed.trigger, "none");
+});
+
+test("rejects a branched Finding lineage with two successors", () => {
+  const workflow = repeatedFindingTree();
+  workflow.issues.push(issue("finding-3", "Finding", "cycle-2", "Todo", "unstarted", false, 2));
+  workflow.relations.push({
+    relation_id: "finding-successor-2",
+    relation_kind: "triggered_by",
+    source_issue_id: "finding-3",
+    target_issue_id: "finding-1",
+  });
+  const policy = new LinearRootConvergencePolicyImpl(configured, 86_400_000);
+
+  assert.throws(
+    () => policy.assess({ root, tree: workflow }),
+    /root_convergence_finding_lineage_invalid/,
+  );
+});
+
+test("resets persistence when the predecessor Finding was resolved before recurrence", () => {
+  const workflow = repeatedFindingTree();
+  const predecessor = workflow.issues.find(({ issue_id }) => issue_id === "finding-1")!;
+  predecessor.status_name = "Done";
+  predecessor.status_category = "completed";
+  const policy = new LinearRootConvergencePolicyImpl(configured, 86_400_000);
+
+  const assessed = policy.assess({ root, tree: workflow });
+
+  assert.deepEqual(assessed.snapshot.view.openFindingPersistence, [{ findingId: "finding-2", openCycleCount: 1 }]);
+  assert.equal(assessed.trigger, "none");
 });
 
 function tree(): LinearWorkflowTreeSnapshot {
@@ -103,6 +161,25 @@ function tree(): LinearWorkflowTreeSnapshot {
     comments: [], relations: [], attachments: [], activities: [], source_manifest: [],
     coverage: { is_complete: true, omissions: [] }, observed_at: "2026-07-25T12:00:00.000Z",
   };
+}
+
+function repeatedFindingTree(): LinearWorkflowTreeSnapshot {
+  const workflow = tree();
+  terminalize(workflow, "cycle-1", "Changes Required");
+  workflow.issues.push(
+    issue("finding-1", "Finding", "cycle-1", "Todo", "unstarted", true, 2),
+    issue("cycle-2", "Cycle", "root-1", "In Progress", "started", false, 1),
+    issue("finding-2", "Finding", "cycle-2", "Todo", "unstarted", false, 2),
+  );
+  workflow.issues.find(({ issue_id }) => issue_id === "cycle-1")!.created_at = "2026-07-23T00:00:00.000Z";
+  workflow.issues.find(({ issue_id }) => issue_id === "cycle-2")!.created_at = "2026-07-24T00:00:00.000Z";
+  workflow.relations.push({
+    relation_id: "finding-successor-1",
+    relation_kind: "triggered_by",
+    source_issue_id: "finding-2",
+    target_issue_id: "finding-1",
+  });
+  return workflow;
 }
 
 function issue(

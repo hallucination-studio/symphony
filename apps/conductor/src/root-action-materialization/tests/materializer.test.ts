@@ -17,6 +17,8 @@ test("materializes a fresh Root workspace only from exact native and Git precond
   const missingGate = {
     kind: "fresh_missing" as const,
     repositoryIdentity: "repository-1",
+    generationOrdinal: 1,
+    branch: "symphony/runs/sym-1",
     baseBranch: "main",
     baseRevision: "base-1",
   };
@@ -31,6 +33,7 @@ test("materializes a fresh Root workspace only from exact native and Git precond
         rootIssueId: "root-1",
         rootIdentifier: "SYM-1",
         baseBranch: "main",
+        generationOrdinal: 1,
         expectedGate: missingGate,
       });
       return {
@@ -71,6 +74,8 @@ test("rejects stale Root workspace action preconditions before Git mutation", as
   const missingGate = {
     kind: "fresh_missing" as const,
     repositoryIdentity: "repository-1",
+    generationOrdinal: 1,
+    branch: "symphony/runs/sym-1",
     baseBranch: "main",
     baseRevision: "base-1",
   };
@@ -526,6 +531,47 @@ test("reads a fresh tree after every Tree patch and supports reorder and depende
   assert.equal(linear.tree.relations.length, 0);
 });
 
+test("archive and restore Tree operations emit only one archive-state mutation", async () => {
+  for (const operationKind of ["archive_node", "restore_node"] as const) {
+    const linear = new FakeLinear();
+    linear.tree.issues.push({
+      issue_id: "work-1", identifier: "SYM-3", project_id: "project-1", parent_issue_id: "cycle-1",
+      status_id: "cycle-executing", status_name: "Executing", status_category: "started", status_position: 2,
+      order: 2, depth: 2, title: "Work", description: "Do work", labels: ["symphony:kind/work"],
+      is_archived: operationKind === "restore_node", issue_kind: "work", remote_version: "work-v1",
+      created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z",
+    });
+    const materializer = new LinearGitRootActionMaterializerImpl(linear, {} as never, {} as never, "main", {} as never);
+
+    const result = await materializer.materialize({
+      directive: directive({
+        kind: "revise_root_tree",
+        reason: "Align the native archive state.",
+        operations: [{
+          kind: operationKind,
+          precondition: { targetIssueId: "work-1", expectedRemoteVersion: "work-v1" },
+        }],
+      }),
+      view: view(linear.tree),
+    });
+
+    assert.equal(result.kind, "materialized");
+    assert.deepEqual(linear.mutations, [{
+      kind: "set_workflow_issue_archive_state",
+      writeId: `directive-1:work-1:${operationKind}`,
+      expectedProjectId: "project-1",
+      rootIssueId: "root-1",
+      expectedRootRemoteVersion: "root-v1",
+      target: {
+        targetIssueId: "work-1",
+        expectedRemoteVersion: "work-v1",
+        expectedIsArchived: operationKind === "restore_node",
+      },
+      isArchived: operationKind === "archive_node",
+    }]);
+  }
+});
+
 test("preflights the complete Tree action before an invalid later operation can mutate Linear", async () => {
   const linear = new FakeLinear();
   linear.tree.issues.push({
@@ -732,7 +778,6 @@ class FakeLinear {
       target.title = command.title;
       target.description = command.description;
       target.labels = command.labelNames;
-      target.is_archived = command.isArchived;
       if (command.parentAssignment.mode === "set") {
         target.parent_issue_id = command.parentAssignment.parentIssueId;
       } else if (command.parentAssignment.mode === "clear") {
@@ -740,6 +785,10 @@ class FakeLinear {
       }
       if (command.order !== undefined) target.order = command.order;
       target.remote_version = `${target.remote_version}:updated`;
+    } else if (command.kind === "set_workflow_issue_archive_state") {
+      const target = this.issue(command.target.targetIssueId);
+      target.is_archived = command.isArchived;
+      target.remote_version = `${target.remote_version}:archived`;
     } else if (command.kind === "create_workflow_issue") {
       const parent = this.issue(command.parentIssueId);
       const status = this.tree.status_catalog.find((candidate) => candidate.status_id === command.statusId);
@@ -814,7 +863,7 @@ class FakeLinear {
     this.tree.issues[0]!.remote_version = `${this.tree.issues[0]!.remote_version}:updated`;
     const targetIssueId = command.kind === "create_workflow_issue"
       ? command.writeId
-      : command.kind === "update_workflow_issue" || command.kind === "append_workflow_comment"
+      : command.kind === "update_workflow_issue" || command.kind === "set_workflow_issue_archive_state" || command.kind === "append_workflow_comment"
       ? command.target.targetIssueId
       : command.sourceIssueId;
     return {

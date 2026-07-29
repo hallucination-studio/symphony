@@ -1,0 +1,40 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RecoveryStrategyIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-2",
+    "kind": "recovery_strategy_intent",
+    "semantic_gate": "recovery_strategy",
+    "intent_id": "intent-2",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-2",
+    "model_turn": {
+      "turn_record_id": "model-turn-2",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-2",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": { "status": "unavailable", "reason": "provider_omitted" },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-2",
+    "rationale": "End the current Cycle.",
+    "evidence_refs": [],
+    "consumed_input_ids": [],
+    "comment_dispositions": [],
+    "intent": {
+      "kind": "end_current_cycle",
+      "outcome": "recovery_exhausted",
+      "explanation": "The bounded recovery options are exhausted.",
+      "status": "Failed",
+      "relation": {
+        "source_issue_id": "cycle-1",
+        "target_issue_id": "root-1"
+      }
+    }
+  }
+}

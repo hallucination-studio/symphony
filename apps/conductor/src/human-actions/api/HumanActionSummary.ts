@@ -1,13 +1,14 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type { CreateHumanActionAction, HumanActionKind } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { HumanActionKind } from "./HumanActionMaterializerInterface.js";
 
 type WorkflowComment = LinearWorkflowTreeSnapshot["comments"][number];
 
-export const humanActionHeadings: Record<CreateHumanActionAction["actionKind"], string> = {
+export const humanActionHeadings: Record<HumanActionKind, string> = {
   plan_approval: "需要你审批",
   information: "需要你补充信息",
   permission: "需要你授权",
   finding_waiver: "需要你确认 Finding 豁免",
+  root_decision: "需要你做出 Root 决策",
 };
 
 export function humanActionRequest(
@@ -28,6 +29,22 @@ export function humanActionRequest(
   const actionKind = (Object.entries(humanActionHeadings) as Array<[HumanActionKind, string]>)
     .find(([, value]) => heading === `## ${value}`)?.[0];
   return actionKind ? { request, actionKind } : undefined;
+}
+
+export function humanActionRequestScope(
+  request: WorkflowComment,
+): { targetIdentifiers: string[]; contextIdentifiers: string[] } | undefined {
+  return humanActionScopeFromBody(request.body);
+}
+
+export function humanActionScopeFromBody(
+  body: string,
+): { targetIdentifiers: string[]; contextIdentifiers: string[] } | undefined {
+  const targetIdentifiers = canonicalListSection(body, "### 相关对象");
+  const contextIdentifiers = canonicalListSection(body, "### Verify 与 Cycle");
+  return targetIdentifiers && contextIdentifiers
+    ? { targetIdentifiers, contextIdentifiers }
+    : undefined;
 }
 
 export function humanActionSummaryStatus(
@@ -71,7 +88,7 @@ export function humanCommentHasCurrentResolution(
     humanComment.author_user_id === undefined ||
     humanComment.author_id !== humanComment.author_user_id ||
     !authorizedRootHuman(tree, humanComment.author_user_id) ||
-    !hasCheckReceipt(humanComment)
+    !hasSingleReceipt(humanComment)
   ) return false;
 
   const currentBodyUpdatedAt = Date.parse(humanComment.updated_at);
@@ -94,8 +111,23 @@ function authorizedRootHuman(tree: LinearWorkflowTreeSnapshot, userId: string): 
   return root.creator_user_id === userId || root.assignee_user_id === userId;
 }
 
-function hasCheckReceipt(comment: WorkflowComment): boolean {
+function hasSingleReceipt(comment: WorkflowComment): boolean {
   const receipts = comment.reactions.filter(({ actor_kind, emoji }) =>
     actor_kind === "symphony" && (emoji === "✅" || emoji === "❌"));
-  return receipts.length === 1 && receipts[0]!.emoji === "✅";
+  return receipts.length === 1;
+}
+
+function canonicalListSection(body: string, heading: string): string[] | undefined {
+  const lines = body.split("\n");
+  const start = lines.indexOf(heading);
+  if (start < 0 || lines.indexOf(heading, start + 1) >= 0) return undefined;
+  const values: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line.startsWith("### ")) break;
+    if (!line.trim()) continue;
+    if (!line.startsWith("- ") || line.length <= 2) return undefined;
+    values.push(line.slice(2));
+  }
+  return values.length > 0 && new Set(values).size === values.length ? values : undefined;
 }

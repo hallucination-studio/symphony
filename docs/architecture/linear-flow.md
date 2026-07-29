@@ -22,7 +22,7 @@ workflow state。
 - Root primary kind label、status和archive状态允许admission。
 
 undelegated Root零副作用：不改status、不写comment、不创建worktree、不调用Performer。delegation撤销是owned Root的fresh
-native input；Conductor停止新dispatch并交给Root Reconciler决定业务后果。
+native input；Conductor停止新dispatch，执行唯一合法的机械consequence，并在存在业务取舍时进入matching Root semantic gate。
 
 Root的唯一Conductor Project Label把它route到一个Binding；同一Binding的single-live-process fencing由
 [Runtime Hardening](runtime-hardening.md#3-multi-binding-process-ownership)定义的OS-backed `BindingProcessFence`和Podium
@@ -75,7 +75,8 @@ query边界，不是调度容量、业务批次或缓存窗口；不得通过提
 调度只决定“哪个eligible Root先获得一次reconciliation机会”，不决定Root内下一步。排序使用Project policy允许的native
 Priority、updated time和fairness。capacity、rate limit和runtime health只影响何时运行，不写回workflow状态。
 
-Root内部dispatch由Root Reconciler选择，Conductor机械验证target active且为`Todo`。terminal节点永不自动dispatch。
+Root内部dispatch由Conductor从DAG prerequisites、human barriers、active `Todo`、writer fence和capacity唯一推导。terminal节点永不
+自动dispatch；存在多个ready Work时使用deterministic fairness，不调用模型选择。
 
 ## 6. Root内部调用
 
@@ -83,10 +84,10 @@ Root内部dispatch由Root Reconciler选择，Conductor机械验证target active�
 header admission + RootIterationGuard
 -> complete Root object graph + Git read
 -> worktree gate
--> fresh/open Root Reconciler
--> one RootNextAction
--> bounded native Linear/Git materialization
--> fresh read-back
+-> deterministic transition
+-> mechanical target, semantic gate, external wait or terminal
+-> optional gate-specific RootSemanticIntent
+-> one-effect native Linear/Git materialization and targeted read-back
 -> release iteration guard or continue fairly
 ```
 
@@ -98,8 +99,8 @@ worktree gate、normal recovery和missing-worktree rebuild只链接
 所有mutation使用explicit target和remote/current preconditions，并收敛到一个closed native desired state。create/update/read-back
 ambiguous时重新读取完整relevant subtree；不能依赖local write ID、comment payload或command replay。
 
-User status、description、label、archive、relation和comment changes都作为fresh native facts交给Root Reconciler。Conductor只拒绝
-schema、coverage、actor、topology、capability或Git safety violation，不主动“修正”用户语义。
+User status、description、label、archive、relation和comment changes都进入fresh native facts。Conductor先推导机械transition；只有
+无法由facts唯一确定的用户语义才进入Root Reconciler。Conductor不能猜测或主动“修正”用户业务意图。
 
 ## 8. Comment边界
 
@@ -118,10 +119,10 @@ read-back和internal decision只进入runtime logs/metrics。
 2. Human native-delegates Root给Symphony actor。
 3. Podium header query发现candidate；Conductor获得进程内`RootIterationGuard`并fresh验证routing/process generation。
 4. Conductor读取完整native graph与Git，并执行worktree gate。
-5. Root Reconciler DEFINE requirement或创建fresh Cycle/Plan。
+5. Root Reconciler在`requirement_and_comment` gate定义需求；Conductor机械创建initial Cycle/Plan。
 6. Plan proposalmaterialize为Plan description；Human通过Root request threadreview。
 7. approval后Conductor创建native Work/Verify DAG。
-8. Root Reconciler逐个选择ready `Todo` Work；Conductor materialize native results与Git evidence。
+8. Conductor机械选择ready `Todo` Work并materialize native results与Git evidence。
 9. Verify针对immutable revision，Findings作为native Issues。
 10. Root Reconciler REVIEW并选择successor、Human Action或delivery。
 11. Conductor完成Git/SCM delivery并把Root置`In Review`；human/SCM接受后`Done`。

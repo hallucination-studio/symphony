@@ -11,7 +11,8 @@ PodiumClientInterface               <- PodiumProcessClientImpl
 LinearGatewayInterface              <- PodiumLinearGatewayClientImpl
 RootReconcilerClientInterface       <- PerformerRootReconcilerClientImpl
 StagePerformerClientInterface       <- PerformerStageClientImpl
-RootActionMaterializerInterface     <- LinearGitRootActionMaterializerImpl
+RootTransitionInterface             <- NativeFactRootTransitionImpl
+RootIntentMaterializerInterface     <- LinearGitRootIntentMaterializerImpl
 GitWorkspaceInterface              <- GitWorktreeImpl
 DeliveryInterface                  <- GitHubDeliveryImpl
 PerformerProfileControlInterface   <- PerformerProfileProcessClientImpl
@@ -50,8 +51,16 @@ SetCommentThreadStateCommand
 SetIssueAttachmentCommand
 ```
 
-每个command携带explicit native target、expected remote version/current preconditions和bounded desired state。Podium执行后返回
-fresh semantic read-back。协议不提供arbitrary GraphQL、SDK passthrough、JSON comment writer或private metadata字段。
+每个command只表达一个independently durable native effect，并携带explicit target、expected remote version/current preconditions和
+bounded desired state。Podium执行后返回closed `NativeEffectOutcome`：
+
+```text
+not_applied | applied | acceptance_unknown | precondition_failed | readback_mismatch
+```
+
+`applied`必须包含matching fresh targeted read-back；timeout或lost response不得伪装成`not_applied`。协议不提供multi-effect partial
+success、arbitrary GraphQL、SDK passthrough、JSON comment writer或private metadata字段。物理transport可以batch，但每个effect仍有
+独立correlation与outcome。
 
 description/comment body是ordinary bounded Markdown。Gateway不得解析或生成Symphony JSON block、HTML marker、stable key或
 machine envelope。
@@ -90,15 +99,51 @@ exit本身不是proof。
 
 ## 4. Transient Result边界
 
-`RootReconcilerTurnResult`是closed union：
+每类`RootReconcilerTurnResult`使用gate-specific closed union：
 
 ```text
-RootNextAction | RootReconcilerTurnFailure
+RootSemanticIntent | RootReconcilerTurnFailure
 ```
+
+Open和Advance Root request都必须携带同一个按`semantic_gate`判别的closed `command` union。每个variant冻结gate-specific subject和
+matching `expected_output_contract` identity；subject只携带identity、version/digest与closed mechanical classification，不能复制
+Root projection正文。Performer按该identity选择唯一structured-output schema，并在接受success前验证request gate、expected contract和
+result gate三者一致。不存在generic Root success schema，也不存在`RootDirective` compatibility fallback。
+
+`requirement_and_comment` success使用独立`RequirementAndCommentIntent` schema；其业务payload只允许
+`define_requirement | request_information | answer_comments`，并使用closed
+`applied | not_applied | needs_response | answer_only` comment disposition。该schema不引用`RootDirectiveAction`、Tree operation、
+remote version、native status、relation或Stage dispatch contract。其精确语义由
+[Root Reconciliation](root-reconciliation.md#61-requirementandcomment-intent-contract)拥有。
+
+`recovery_strategy` success使用独立`RecoveryStrategyIntent` schema；其业务payload只允许fresh successor attempt、current Cycle
+repair、current Cycle replan、Human decision request、Finding waiver reply resolution或current Cycle ending intent。创建请求使用
+`request_human_decision`；解释已有Finding waiver reply使用独立`resolve_finding_waiver`，其resolution只允许
+`accepted | rejected | needs_clarification`，不能把同一variant同时解释为提问和接受授权。Exact recovery subject由Conductor request冻结，
+模型output不返回target identity、successor identity、native status、relation、remote version或mutation precondition。其精确语义由
+[Root Reconciliation](root-reconciliation.md#62-recoverystrategy-intent-contract)拥有。
+远端交付拒绝复用该contract family：Conductor只传递provider-neutral trigger，并用Symphony-authored Root delivery attachment ID与
+observation digest冻结`delivery` subject。PR URL、revision、provider enum和raw SCM payload不属于Root semantic contract。
+
+`plan_human_decision` success使用独立`PlanHumanDecisionIntent` schema；其业务payload只允许approve、reject或clarification。
+Exact Plan、Human Action thread、reply、actor authorization与Plan content version由Conductor request冻结，模型output不返回target
+identity、native status、DAG operation、relation、remote version或mutation precondition。其精确语义由
+[Root Reconciliation](root-reconciliation.md#63-planhumandecision-intent-contract)拥有。
+
+`terminal_review` success使用独立`TerminalReviewIntent` schema；其业务payload只允许verified-revision delivery、successor Cycle、
+Root Human decision或stopped Root。Exact Cycle/Git revision由Conductor request冻结；subject还携带closed
+`successor_cycle_policy: allowed | cycle_limit_reached | root_deadline_reached`，只表达当前terminal gate能否选择successor，不携带limit数值或
+mutation字段。Performer prompt和Conductor compiler都必须拒绝policy-incompatible successor；compiler以post-model fresh native Cycle count、
+Tree `observed_at`和current deadline重新验证该classification。
+delivery policy由后续Conductor compiler从
+Project Binding读取，不进入模型request或output。模型output不返回SHA、branch、
+SCM target、successor identity、native status、relation、remote version或mutation precondition。其精确语义由
+[Root Reconciliation](root-reconciliation.md#64-terminalreview-intent-contract)拥有。
 
 Plan/Work/Verify各返回matching closed response：model-generated semantic Result或Performer-generated `StageTurnFailure`。
 Semantic Result只属于当前call，至少关联request、role、Root/Cycle/target、observed digest、session/turn和evidence references。
-Mechanical failure不伪造业务evidence或Result字段，并携带closed `ProviderTurnContinuity`。
+Plan、Work和Verify分别使用自己的discriminated union，不共享`outcome.kind: string`。Mechanical failure不伪造业务evidence或Result
+字段，并携带closed Provider acceptance/continuation result。
 
 Conductor必须先验证Result，再将其收敛成native Linear/Git postcondition并fresh read-back。不得：
 
@@ -123,14 +168,14 @@ API Key通过bounded secret stdin frame进入Performer，不进入transport JSON
 
 ## 6. Validation与correlation
 
-所有third-party response、Linear snapshot、Root action和Stage terminal response在边界strict validate。JSON Schema使用
+所有third-party response、Linear snapshot、Root semantic intent和Stage terminal response在边界strict validate。JSON Schema使用
 `additionalProperties: false`；unknown variant/field、invalid enum、oversized payload、stale correlation、digest mismatch或
 incomplete coverage一律fail closed。
 
 JSON Schema通过只证明wire shape合法，不证明output在current native facts上可执行。字段间相等/不等、reference membership、
 actor/kind/parent/archive兼容性和canonical relation direction等约束由owning boundary执行deterministic semantic validation。
-Root action必须在第一条Linear/Git side effect前完成整份action的该类validation；该validation失败时返回closed failure并保持
-zero side effects，不能自动修正endpoint或选择替代workflow动作。Prompt prose不能增加或放宽contract，也不能替代机械validation。
+Root intent必须在第一条Linear/Git side effect前编译并模拟完整candidate graph；validation失败时返回closed failure并保持zero
+side effects，不能自动修正endpoint或选择替代业务intent。Prompt prose不能增加或放宽contract，也不能替代机械validation。
 
 Root/Stage runtime envelope可以包含：
 
@@ -213,7 +258,7 @@ closed或创建有明确用户语义的Issue；不得回退到private comment pr
 
 ## 10. Interface ownership
 
-- Conductor定义Root safety policy、Root Reconciler client、Stage client、materializer和Git/delivery interfaces；
+- Conductor定义Root transition、Root Reconciler client、Stage client、intent materializer和Git/delivery interfaces；
 - Podium实现Linear protocol和内部SDK；
 - Performer定义Provider backend与role session runtime；
 - Performer独占Work Agent Tree、Provider collaboration tools、turn mutation epoch、write grants和runtime containment；
@@ -226,10 +271,11 @@ closed或创建有明确用户语义的Issue；不得回退到private comment pr
 1. public/cross-process input和output使用closed versioned schema。
 2. transport JSON是transient，不进入Linear/Git durable workflow content。
 3. Semantic Result必须materialize为native postcondition并fresh read-back才有业务效果；StageTurnFailure不伪造业务Result。
-4. Linear Gateway只暴露bounded native query/mutation，不暴露SDK或arbitrary GraphQL。
-5. session、turn、digest和delta baseline都不是durable checkpoint。
-6. secret、SDK object、database record、process handle和raw transcript不跨public boundary。
-7. 不存在generated workflow-comment stream、private persistence或legacy comment compatibility interface。
-8. Podium-Conductor mutation envelope携带当前private channel绑定的transient Binding generation correlation；Podium按实际
+4. 一个mutation outcome只代表一个independently durable effect；unknown acceptance必须targeted read-back后才能继续。
+5. Linear Gateway只暴露bounded native query/mutation，不暴露SDK或arbitrary GraphQL。
+6. session、turn、digest和delta baseline都不是durable checkpoint。
+7. secret、SDK object、database record、process handle和raw transcript不跨public boundary。
+8. 不存在generated workflow-comment stream、private persistence或legacy comment compatibility interface。
+9. Podium-Conductor mutation envelope携带当前private channel绑定的transient Binding generation correlation；Podium按实际
    channel identity验证，不能信任caller提供的generation字符串，旧channel不能提交late mutation。
-9. Work subagent tree不形成public workflow API；外部只观察matching `WorkTurnRequest | WorkTurnResponse`，tree policy保持internal。
+10. Work subagent tree不形成public workflow API；外部只观察matching `WorkTurnRequest | WorkTurnResponse`，tree policy保持internal。

@@ -2,7 +2,44 @@ import { PassThrough } from "node:stream";
 
 import { expect, test, vi } from "vitest";
 
-import { servePodiumClient } from "./main.js";
+import {
+  linearLogicalRequestCoalescedLog,
+  linearPhysicalRequestLog,
+  servePodiumClient,
+} from "./main.js";
+
+test("Linear request logs retain physical, logical, and coalesced correlation without request bodies", () => {
+  expect(linearPhysicalRequestLog({
+    operation: "SymphonyProjectRootIndex",
+    correlationId: "physical-1",
+    logicalRequestId: "logical-1",
+    durationMs: 12,
+    status: 200,
+    installationId: "installation-1",
+    projectId: "project-1",
+    requestClass: "workflow",
+  })).toEqual({
+    event: "linear_physical_request",
+    operation: "SymphonyProjectRootIndex",
+    status: 200,
+    correlation_id: "physical-1",
+    request_id: "logical-1",
+    duration_ms: 12,
+    installation_id: "installation-1",
+    project_id: "project-1",
+    request_class: "workflow",
+  });
+  expect(linearLogicalRequestCoalescedLog({
+    requestId: "logical-2",
+    coalescedIntoRequestId: "logical-1",
+    requestClass: "workflow",
+  })).toEqual({
+    event: "linear_logical_request_coalesced",
+    request_id: "logical-2",
+    coalesced_into_request_id: "logical-1",
+    request_class: "workflow",
+  });
+});
 
 test("private Backend serves correlated bounded Podium Client frames", async () => {
   const input = new PassThrough();

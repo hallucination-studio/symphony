@@ -555,7 +555,11 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     }], pageInfo: { hasNextPage: false } },
     inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
     attachments: { nodes: [], pageInfo: { hasNextPage: false } },
-    history: { nodes: [], pageInfo: { hasNextPage: false } },
+    history: { nodes: [{
+      id: "activity-work-result", createdAt: "2026-07-16T00:00:01Z", updatedAt: "2026-07-16T00:00:02Z",
+      issue: { id: "work-1" }, botActor: { id: "symphony-bot" },
+      toStateId: "state-todo", updatedDescription: "Work description",
+    }], pageInfo: { hasNextPage: false } },
   };
   const sdk = {
     async issue() {
@@ -635,11 +639,20 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     remoteVersion: "2026-07-16T00:00:01.000Z", createdAt: "2026-07-16T00:00:00.000Z",
     updatedAt: "2026-07-16T00:00:01.000Z",
   }]);
-  assert.deepEqual(tree.activities, [{
-    activityId: "activity-1", issueId: "root-1", activityKinds: ["status_changed"],
-    actorKind: "human", actorId: "human-1", toStateId: "state-progress",
-    remoteVersion: "2026-07-16T00:00:01.000Z", createdAt: "2026-07-16T00:00:00.000Z",
-  }]);
+  assert.deepEqual(tree.activities, [
+    {
+      activityId: "activity-1", issueId: "root-1", activityKinds: ["status_changed"],
+      actorKind: "human", actorId: "human-1", toStateId: "state-progress",
+      remoteVersion: "2026-07-16T00:00:01.000Z", createdAt: "2026-07-16T00:00:00.000Z",
+    },
+    {
+      activityId: "activity-work-result", issueId: "work-1",
+      activityKinds: ["status_changed", "description_changed"],
+      actorKind: "symphony", actorId: "symphony-bot", toStateId: "state-todo",
+      updatedDescription: "Work description", remoteVersion: "2026-07-16T00:00:02.000Z",
+      createdAt: "2026-07-16T00:00:01.000Z",
+    },
+  ]);
   assert.deepEqual(tree.sourceManifest, [
     { sourceKind: "linear_issue", sourceId: "root-1", sourceVersion: "2026-07-16T00:00:00.000Z", actorKind: "unknown" },
     { sourceKind: "linear_issue", sourceId: "work-1", sourceVersion: "2026-07-16T00:00:02.000Z", actorKind: "unknown" },
@@ -648,6 +661,7 @@ test("workflow Issue Tree maps every bounded comment, native thread, reaction, r
     { sourceKind: "linear_relation", sourceId: "relation-1", sourceVersion: "relation-1", actorKind: "unknown" },
     { sourceKind: "linear_attachment", sourceId: "attachment-1", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "unknown" },
     { sourceKind: "linear_activity", sourceId: "activity-1", sourceVersion: "2026-07-16T00:00:01.000Z", actorKind: "human" },
+    { sourceKind: "linear_activity", sourceId: "activity-work-result", sourceVersion: "2026-07-16T00:00:02.000Z", actorKind: "symphony" },
     { sourceKind: "linear_status_catalog", sourceId: "project-1:status-catalog", sourceVersion: "f241b6b4887e72321a11ea914516224280ff68d55aa6709c0113557f6409e874", actorKind: "unknown" },
   ]);
   assert.deepEqual(tree.coverage, { isComplete: true, omissions: [] });
@@ -911,10 +925,10 @@ test("workflow SDK mutations preserve the supplied description and use explicit 
   await targetAdapter.executeWorkflowMutation({
     kind: "update_workflow_issue", writeId: "write-4", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt, expectedIsArchived: false },
     statusId: "state-todo", title: "Updated work", description: "Updated description",
     labelNames: [],
-    isArchived: false, parentAssignment: { mode: "retain" },
+    parentAssignment: { mode: "retain" },
   });
   assert.equal(updatedInput.title, "Updated work");
   assert.equal(updatedInput.description, "Updated description");
@@ -1061,24 +1075,23 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
     },
   });
 
-  const receipt = {
+  const createReceipt = {
     ...common,
-    kind: "set_comment_receipt_reaction",
-    writeId: "receipt-write-1",
+    kind: "create_comment_receipt_reaction",
+    writeId: "receipt-create-1",
     replyWriteId: "reply-write-1",
     sourceCommentId: "source-comment",
     expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
     threadRootCommentId: "request-comment",
-    expectedReceipt: "none",
     receipt: "check",
   };
-  await adapter.executeWorkflowMutation(receipt);
+  await adapter.executeWorkflowMutation(createReceipt);
   assert.deepEqual(calls.shift(), {
     kind: "create_reaction",
     input: { commentId: "source-comment", emoji: "✅" },
   });
-  assert.deepEqual(await adapter.readWorkflowMutationOutcome(receipt), {
-    writeId: "receipt-write-1",
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(createReceipt), {
+    writeId: "receipt-create-1",
     targetIssueId: "root-1",
     remoteVersion: "2026-07-16T00:00:01.000Z",
     symphonyReceipt: {
@@ -1103,13 +1116,26 @@ test("workflow SDK materializes native comment replies, receipts, and thread sta
   assert.deepEqual((await adapter.readWorkflowMutationOutcome(resolve)).comment.threadState, "resolved");
 
   const removeReceipt = {
-    ...receipt,
-    writeId: "receipt-write-2",
+    ...common,
+    kind: "remove_comment_receipt_reaction",
+    writeId: "receipt-remove-1",
+    replyWriteId: "reply-write-1",
+    sourceCommentId: "source-comment",
+    expectedSourceCommentRemoteVersion: "2026-07-16T00:00:01.000Z",
+    threadRootCommentId: "request-comment",
     expectedReceipt: "check",
-    receipt: "none",
   };
   await adapter.executeWorkflowMutation(removeReceipt);
   assert.deepEqual(calls.shift(), { kind: "delete_reaction", reactionId: "receipt-check" });
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(removeReceipt), {
+    writeId: "receipt-remove-1",
+    targetIssueId: "root-1",
+    remoteVersion: "2026-07-16T00:00:01.000Z",
+    symphonyReceipt: {
+      replyWriteId: "reply-write-1", sourceCommentId: "source-comment",
+      threadRootCommentId: "request-comment", receipt: "none",
+    },
+  });
 
   const unresolve = {
     ...resolve,
@@ -1149,7 +1175,7 @@ test("workflow issue creation rejects unknown and duplicate label names", async 
   );
 });
 
-test("workflow SDK update mutations use native Linear archive state", async () => {
+test("workflow SDK issue update and archive-state mutations each execute one native effect", async () => {
   const root = issue({ id: "root-1" });
   const target = issue({ id: "work-1", parentId: "root-1" });
   let archiveCalls = 0;
@@ -1174,31 +1200,48 @@ test("workflow SDK update mutations use native Linear archive state", async () =
     },
   });
   const command = {
-    kind: "update_workflow_issue", writeId: "write-archive", conductorShortHash: "abc123",
+    kind: "update_workflow_issue", writeId: "write-update", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt.toISOString(),
     target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: false },
     statusId: "state-todo", title: "Archived work", description: "Archived description",
-    labelNames: [],
-    isArchived: true, parentAssignment: { mode: "retain" },
+    labelNames: [], parentAssignment: { mode: "retain" },
   };
 
   await adapter.executeWorkflowMutation(command);
-  assert.equal(archiveCalls, 1);
+  assert.equal(archiveCalls, 0);
   assert.equal(restoreCalls, 0);
   assert.deepEqual(updateInput, {
     title: "Archived work", description: "Archived description", stateId: "state-todo", labelIds: [],
   });
+  assert.equal(await adapter.readWorkflowMutationOutcome({
+    ...command,
+    labelNames: ["Changes Required"],
+  }), undefined);
   assert.deepEqual(await adapter.readWorkflowMutationOutcome(command), {
+    writeId: "write-update", targetIssueId: "work-1", remoteVersion: target.updatedAt.toISOString(),
+    issueVersions: [{ issueId: "work-1", remoteVersion: target.updatedAt.toISOString() }],
+  });
+
+  const archive = {
+    kind: "set_workflow_issue_archive_state", writeId: "write-archive", conductorShortHash: "abc123",
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: root.updatedAt.toISOString(),
+    target: { targetIssueId: "work-1", expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: false },
+    isArchived: true,
+  };
+  await adapter.executeWorkflowMutation(archive);
+  assert.equal(archiveCalls, 1);
+  assert.equal(restoreCalls, 0);
+  assert.deepEqual(await adapter.readWorkflowMutationOutcome(archive), {
     writeId: "write-archive", targetIssueId: "work-1", remoteVersion: target.updatedAt.toISOString(),
     issueVersions: [{ issueId: "work-1", remoteVersion: target.updatedAt.toISOString() }],
   });
 
   await adapter.executeWorkflowMutation({
-    ...command,
-    writeId: "write-restore",
-    target: { ...command.target, expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: true },
+    ...archive, writeId: "write-restore",
+    target: { ...archive.target, expectedRemoteVersion: target.updatedAt.toISOString(), expectedIsArchived: true },
     isArchived: false,
   });
+  assert.equal(archiveCalls, 1);
   assert.equal(restoreCalls, 1);
   assert.equal(target.archivedAt, null);
 });
@@ -1540,9 +1583,9 @@ test("workflow SDK compact preflight validates all update facts in one physical 
   const result = await adapter.preflightWorkflowMutation({
     kind: "update_workflow_issue", writeId: "write-preflight", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1" },
+    target: { targetIssueId: "work-1", expectedRemoteVersion: "work-version", expectedStatusId: "status-todo", expectedParentIssueId: "root-1", expectedIsArchived: false },
     statusId: "status-progress", title: "Updated", description: "Updated description",
-    isArchived: false, parentAssignment: { mode: "retain" },
+    parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "ready" });
@@ -1565,9 +1608,9 @@ test("workflow SDK mutations reject targets outside the requested Root tree", as
   const command = {
     kind: "update_workflow_issue", writeId: "write-foreign", conductorShortHash: "abc123",
     expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: "root-version",
-    target: { targetIssueId: "foreign-1", expectedRemoteVersion: "foreign-version" },
+    target: { targetIssueId: "foreign-1", expectedRemoteVersion: "foreign-version", expectedIsArchived: false },
     statusId: "state-todo", title: "Updated", description: "Description",
-    isArchived: false, parentAssignment: { mode: "retain" },
+    parentAssignment: { mode: "retain" },
   };
   await assert.rejects(
     adapter.executeWorkflowMutation(command),

@@ -242,18 +242,26 @@ export type WorkflowMutationCommand =
         expectedRemoteVersion: string;
         expectedStatusId?: string;
         expectedParentIssueId?: string;
-        expectedIsArchived?: boolean;
+        expectedIsArchived: false;
       };
       statusId: string;
       title: string;
       description: string;
       labelNames: string[];
-      isArchived: boolean;
       parentAssignment:
         | { mode: "retain" }
         | { mode: "set"; parentIssueId: string }
         | { mode: "clear" };
       order?: number;
+    })
+  | (WorkflowMutationBase & {
+      kind: "set_workflow_issue_archive_state";
+      target: {
+        targetIssueId: string;
+        expectedRemoteVersion: string;
+        expectedIsArchived: boolean;
+      };
+      isArchived: boolean;
     })
   | (WorkflowMutationBase & {
       kind: "append_workflow_comment";
@@ -287,13 +295,20 @@ export type WorkflowMutationCommand =
       body: string;
     })
   | (WorkflowMutationBase & {
-      kind: "set_comment_receipt_reaction";
+      kind: "remove_comment_receipt_reaction";
       replyWriteId: string;
       sourceCommentId: string;
       expectedSourceCommentRemoteVersion: string;
       threadRootCommentId: string;
-      expectedReceipt: "check" | "cross" | "none";
-      receipt: "check" | "cross" | "none";
+      expectedReceipt: "check" | "cross";
+    })
+  | (WorkflowMutationBase & {
+      kind: "create_comment_receipt_reaction";
+      replyWriteId: string;
+      sourceCommentId: string;
+      expectedSourceCommentRemoteVersion: string;
+      threadRootCommentId: string;
+      receipt: "check" | "cross";
     })
   | (WorkflowMutationBase & {
       kind: "set_comment_thread_state";

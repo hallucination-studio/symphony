@@ -10,7 +10,7 @@ Performer负责：
 - 通过官方Provider SDK创建、继续、interrupt和关闭role thread；
 - 每个Root一个Root Reconciler thread，每个Cycle隔离Plan、Work、Verify三个Stage threads；
 - open时接收一次完整Root bootstrap，后续ReAct turn只接收严格连续的delta；
-- 返回closed `RootReconcilerTurnResult`；只有next-action variant携带matching用户comment dispositions和下一步语义，
+- 返回closed `RootReconcilerTurnResult`；只有gate-specific intent variant携带matching用户comment dispositions和业务语义，
   failure variant只提供当前调用的closed failure；
 - 执行Plan/Work/Verify turn并返回matching semantic Result或mechanical `StageTurnFailure`；
 - Work turn内部运行有界coding-agent tool loop，并只允许Work root/descendants创建递归subagents；
@@ -22,7 +22,7 @@ Performer不负责：
 
 - 调用Linear SDK/GraphQL、Podium或Conductor endpoint；
 - 创建、更新、archive或restore Issue；
-- materialize `RootNextAction`、Human Action、comment reply或Stage Result；
+- materialize `RootSemanticIntent`、Human Action、comment reply或Stage Result；
 - 判断Root convergence、创建successor Cycle或delivery；
 - commit、push、创建worktree或修改Git topology；
 - 把Provider transcript/thread当作durable workflow authority。
@@ -39,14 +39,16 @@ RootAgentRuntime
     verify_session        -> separate Provider thread
 ```
 
-同一Root最多一个active Reconciler session，同一Cycle每个Stage角色最多一个active Symphony session。每个
-session可以有多个Conductor驱动的turn；Work session跨多个Work Issues复用。Stage角色不能兼任Root Reconciler
+同一Root最多一个active Reconciler session，同一Cycle每个Stage角色最多一个active Symphony session。每个session绑定一个runtime
+generation并按`open -> executing -> closing -> closed`推进；一个generation同时最多有一个active turn。每个session可以有多个串行的
+Conductor驱动turn；Work session跨多个Work Issues复用。Stage角色不能兼任Root Reconciler
 或共享Provider conversation。
 
 session handle是Performer内部或opaque Symphony runtime identity，不能暴露raw Provider thread ID。Cycle terminal关闭该Cycle三个
 Stage sessions；每个Work turn永久retire matching mutation epoch和descendants，只有Work root thread可以进入下一turn。Work role
 session只有在workspace write capability永久撤销且matching containment empty/isolated得到proof后才算关闭。
-Root Reconciler-directed cancel、routing/process generation变化或Profile失效时关闭Root Reconciler并拒绝late output。
+semantic cancel intent、routing/process generation变化或Profile失效时关闭Root Reconciler并拒绝late output。`closing`拒绝new turn；
+旧generation的Provider output、continuation或write capability在任何后续state都没有authority。
 
 ## 3. 调用协议
 
@@ -74,10 +76,14 @@ Root Reconciler contract由[Root Reconciliation](root-reconciliation.md)定义�
 ```text
 ProviderBackendInterface
   openSession(role, profile, settings)
-  executeTurn(session, request, workspaceCapability?)
+  executeTurn(session, request, workspaceCapability?) -> ProviderTurnOutcome
   interruptTurn(session)
   closeSession(session)
 ```
+
+`ProviderTurnOutcome`是closed union：`not_accepted | accepted_valid | accepted_invalid | acceptance_unknown | session_lost | canceled`。
+backend不得以arbitrary dictionary、mutable exception attributes或throw/null组合代替该结果。只有`accepted_valid`携带validated semantic
+output；每个variant明确continuation、baseline和session generation consequence。
 
 Work还要求backend提供role-session open/close以及turn-epoch begin/execute/seal/abort的closed internal capability。该能力、六个
 model-facing协作工具、hard reservations、write grants和runtime containment只由[Work Subagents](work-subagents.md)定义，
@@ -134,7 +140,7 @@ operator显式启用且只能本地读取的Provider I/O capture。
 Markdown只拥有稳定的role identity、职责、禁止事项和决策/执行方法。每轮bootstrap、delta、Stage context、
 `instruction_bundle`和其他dynamic facts仍来自validated request；matching structured-output schema仍从
 [`packages/contracts/schemas`](contracts.md)的closed contract生成并单独传给Provider。`instruction_bundle`是本轮
-Stage目标与上下文的一部分，不是base prompt名称、resource selector或运行时prompt覆盖。prompt不能增加RootNextAction、
+Stage目标与上下文的一部分，不是base prompt名称、resource selector或运行时prompt覆盖。prompt不能增加RootSemanticIntent、
 Result variant、字段、workflow状态或capability；Provider输出即使符合自然语言要求，只要不符合matching schema、
 correlation或Conductor gate仍必须拒绝。
 
@@ -142,10 +148,10 @@ correlation或Conductor gate仍必须拒绝。
 `Anti-Rationalization`、`Red Flags`、可验证`Exit Criteria`和`Output Contract`。这些章节把何时执行、如何逐步处理、
 哪些常见理由不能放宽边界、何时必须停止以及何种证据允许返回terminal output写清楚；它们不能创建第二套contract。
 
-`root-reconciler.md`必须同时包含[Root Reconciliation](root-reconciliation.md)定义的Mermaid决策循环和等价的英文
-规则，并明确Root级`DEFINE`、terminal Cycle后的`REVIEW`和默认`SHIP`决策。`plan.md`、`work.md`和`verify.md`
+`root-reconciler.md`必须同时包含[Root Reconciliation](root-reconciliation.md)定义的Mermaid gate循环和等价的英文
+规则，并明确四类gate及禁止机械调度/mutation字段。`plan.md`、`work.md`和`verify.md`
 必须分别实现[Performer Stage Contracts](stage-orchestration.md)定义的role边界和Mermaid分支流程。Mermaid只表达
-既有closed RootNextAction或Result之间的判断顺序，不能成为第二套状态机；prompt不得复制或重新定义wire schema。
+既有closed RootSemanticIntent或Result之间的判断顺序，不能成为第二套状态机；prompt不得复制或重新定义wire schema。
 
 ### 5.1 Provider注入分层
 
@@ -179,7 +185,7 @@ conversation。Root Reconciler的完整bootstrap不能成为Stage startup contex
 的history。fresh Stage session只能从Conductor提供的matching role-scoped initial projection开始。
 
 Provider history只append current-value、replacement和tombstone fragments，不修改旧item。已经确认append但业务Result或
-RootNextAction尚未materialize的事实不在同一live thread重复发送；human input disposition、materialization和workflow推进
+RootSemanticIntent尚未materialize的事实不在同一live thread重复发送；human input disposition、materialization和workflow推进
 仍由native Linear/Git current facts独立决定。append是否成功或continuation baseline无法证明时关闭session，并由Conductor
 从fresh Linear/Git facts重建fresh initial context；正常运行不持久化transcript、fragment log或context checkpoint。4.1的
 opt-in diagnostic capture不能被Performer读取，因此不改变该恢复不变量。
@@ -201,7 +207,7 @@ Performer backend对每次Provider turn必须归一化为以下三种互斥事�
 `accepted`证据必须绑定matching local role session、Provider continuation、turn attempt和本次完整append batch；仅有request已发送、
 stream收到部分token、usage、日志文本或可重试错误不足以推进baseline。baseline推进与validated model output是两个顺序独立的
 判定：先根据Provider acceptance更新runtime continuity，再验证structured output。baseline更新不是Human input disposition、
-RootNextAction接受、Stage Result materialization或workflow进度。
+RootSemanticIntent接受、Stage Result materialization或workflow进度。
 
 没有validated业务output时，Root与Stage matching failure envelope都必须包含以下closed union；Conductor不得从通用
 `retryable`、timeout或transport category反推continuity：
@@ -242,15 +248,13 @@ session恢复。完整规则由[Work Subagents](work-subagents.md)拥有。
 ### 6.1 Root Reconciler
 
 Root Reconciler在session open时消费一次完整bootstrap，此后只消费`base_root_digest`连续的delta，并返回一个closed
-`RootReconcilerTurnResult`。其next-action variant可包含matching用户comment dispositions；failure variant不包含下一步动作。
+`RootReconcilerTurnResult`。其gate-specific intent variant可包含matching用户comment dispositions；failure variant不包含业务intent。
 它
 不能访问workspace write tool、Linear、Git mutation或其他role thread transcript。其rationale必须是bounded、
 可审计解释，不包含raw chain-of-thought。
 
-同一Root Reconciler role在现有turn模型内承担三个Root级语义phase：用`DEFINE`把可证明的用户需求规范化到Root
-description；在每个Cycle terminal status、Findings和Git evidence read-back后执行`REVIEW`并决定successor Cycle或收敛处理；满足Root且没有
-明示manual-delivery instruction时用`SHIP`语义返回`conclude_root(ready_for_delivery)`。这些phase不是新role、thread、
-Stage、Result或workflow state，实际Linear/Git materialization和delivery仍全部由Conductor完成。
+同一Root Reconciler role只执行`requirement_and_comment | plan_human_decision | recovery_strategy | terminal_review`四类gate。
+这些gate不是新role、thread、Stage、Result或workflow state；实际Linear/Git materialization和delivery仍全部由Conductor完成。
 
 ### 6.2 Plan
 
@@ -305,7 +309,7 @@ Profile control仍是独立closed protocol，负责SDK login/status和受支持�
 1. Performer拥有全部Agent SDK和Provider thread实现。
 2. 每个Root有一个Reconciler thread；每个Cycle有Plan、Work、Verify三个隔离角色thread。
 3. Conductor是唯一caller；Performer不反向调用Conductor。
-4. Root Reconciler只返回RootNextAction及comment dispositions；执行角色返回semantic Result，Performer返回mechanical failure。
+4. Root Reconciler只返回gate-specific RootSemanticIntent及comment dispositions；执行角色返回semantic Result，Performer返回mechanical failure。
 5. Work thread可以跨Work Issues复用，但每turn只有一个target。
 6. Performer不直接拥有Linear/Git workflow副作用。
 7. Provider thread、transcript和operator diagnostic capture都不是durable authority。

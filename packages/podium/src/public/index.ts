@@ -29,6 +29,9 @@ export type {
   LinearPhysicalRequestObservation,
   LinearRequestWindowObservation,
 } from "../internal/linear-gateway/internal/LinearSdkImpl.js";
+export type {
+  LinearRequestCoalescingObservation,
+} from "../internal/linear-gateway/internal/LinearRequestBrokerImpl.js";
 export {
   LinearRequestObserverImpl,
   type LinearRequestObservationSnapshot,

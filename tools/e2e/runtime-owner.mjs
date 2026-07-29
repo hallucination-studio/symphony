@@ -14,6 +14,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const REPOSITORY_COUNT = 3;
+const FOCUSED_REPOSITORY_COUNT = 1;
 const MAX_FRAME_BYTES = 1_048_576;
 const CONDUCTOR_ONLINE_ATTEMPTS = 20;
 const PROFILE_READINESS_ATTEMPTS = 10;
@@ -21,6 +22,33 @@ const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 const PROJECT_ROOT_INDEX_OPERATION = "SymphonyProjectRootIndex";
 const PROJECT_ROOT_INDEX_CONTINUATION_OPERATION = "SymphonyProjectRootIndexContinuation";
 const BINDING_FENCE_READY_FD = 4;
+const ROOT_TURN_CONTRACT_FAMILIES = new Set([
+  "universal_root_directive",
+  "semantic_gate",
+]);
+const ROOT_TURN_INTENT_KINDS = new Set([
+  "create_root_workspace",
+  "invalidate_execution_generation",
+  "execute_plan",
+  "execute_work",
+  "execute_verify",
+  "materialize_plan_node",
+  "wait",
+  "acknowledge",
+  "create_cycle",
+  "create_human_action",
+  "conclude_cycle",
+  "rerun_stage",
+  "replan_current_cycle",
+  "supersede_cycle",
+  "revise_root_tree",
+  "conclude_root",
+  "cancel_root",
+  "requirement_and_comment",
+  "plan_human_decision",
+  "recovery_strategy",
+  "terminal_review",
+]);
 const BINDING_FENCE_HOLDER = String.raw`
 import fcntl, os, sys
 lock_path, ready_fd_text = sys.argv[1:3]
@@ -170,7 +198,6 @@ export function createConductorEnvironment({ config, resources, conductor, envir
     SYMPHONY_ROOT_DEADLINE_DURATION_MS: "300000",
     SYMPHONY_ROOT_MAX_CYCLES_PER_ROOT: "3",
     SYMPHONY_ROOT_MAX_SAME_OPEN_FINDING_CYCLES: "2",
-    SYMPHONY_ROOT_MAX_CONSECUTIVE_NO_PROGRESS: "3",
     SYMPHONY_ROOT_MAX_CYCLE_REPAIR_ATTEMPTS: "0",
   });
 }
@@ -198,6 +225,7 @@ export async function startForegroundProductionRuntime({
   let conductors = [];
   let closed = false;
   const unexpectedExits = createUnexpectedExitRegistry();
+  const observations = createRuntimeObservationBus();
   try {
     const installation = await bootstrap({
       databasePath,
@@ -231,6 +259,7 @@ export async function startForegroundProductionRuntime({
       spawn,
       reporter,
       onUnexpectedExit: unexpectedExits.report,
+      onObservation: observations.publish,
     });
     podium.hostChannel.setHandler(host.handle);
     conductors = await startConfiguredConductors({
@@ -250,6 +279,9 @@ export async function startForegroundProductionRuntime({
       },
       subscribeUnexpectedExit(listener) {
         return unexpectedExits.subscribe(listener);
+      },
+      subscribeObservation(listener) {
+        return observations.subscribe(listener);
       },
       async killAndRestartConductor({ conductorId } = {}) {
         if (!identifier(conductorId)) throw stableError("foreground_e2e_recovery_restart_input_invalid");
@@ -300,7 +332,7 @@ export async function startConfiguredConductors({
   provision = provisionProfile,
   onRunning,
 } = {}) {
-  if (!Array.isArray(repositories) || repositories.length !== REPOSITORY_COUNT ||
+  if (!Array.isArray(repositories) || !supportedRepositoryCount(repositories.length) ||
       !repositories.every((repository) => repository && identifier(repository.repositoryHandle) &&
         typeof repository.repositoryIdentity === "string" && boundedPath(repository.repositoryRoot) &&
         branch(repository.baseBranch) && typeof repository.repositoryDisplayName === "string") ||
@@ -571,11 +603,13 @@ function safeRootIdentifier(value) {
 
 export async function createForegroundLocalResources({
   sourceRepositoryRoot = process.cwd(),
+  repositoryCount = REPOSITORY_COUNT,
   temporaryDirectory = (prefix) => mkdtemp(prefix),
   removeDirectory = (directory) => rm(directory, { recursive: true, force: true }),
   runGit = git,
 } = {}) {
   if (typeof sourceRepositoryRoot !== "string" || sourceRepositoryRoot.length === 0 ||
+      !supportedRepositoryCount(repositoryCount) ||
       typeof temporaryDirectory !== "function" || typeof removeDirectory !== "function" || typeof runGit !== "function") {
     throw stableError("foreground_e2e_local_resources_input_invalid");
   }
@@ -593,7 +627,7 @@ export async function createForegroundLocalResources({
     const remotes = path.join(directory, "remotes");
     await mkdir(remotes, { recursive: true });
     const repositories = [];
-    for (let index = 1; index <= REPOSITORY_COUNT; index += 1) {
+    for (let index = 1; index <= repositoryCount; index += 1) {
       repositories.push(await cloneRepository({
         sourceRoot,
         baseBranch,
@@ -621,6 +655,10 @@ export async function createForegroundLocalResources({
     await removeDirectory(directory);
     throw error;
   }
+}
+
+function supportedRepositoryCount(value) {
+  return value === FOCUSED_REPOSITORY_COUNT || value === REPOSITORY_COUNT;
 }
 
 async function startPodiumBackend({
@@ -682,6 +720,7 @@ function createDesktopHost({
   spawn,
   reporter,
   onUnexpectedExit,
+  onObservation,
 }) {
   const repositories = new Map(resources.repositories.map((repository) => [repository.repositoryHandle, repository]));
   const conductors = new Map();
@@ -761,6 +800,7 @@ function createDesktopHost({
             stderr: child.stderr,
             reporter,
             onUnexpectedExit,
+            onObservation,
           });
           const active = {
             conductor,
@@ -1318,10 +1358,18 @@ function secretLengthFor(body) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 16_384 ? value : 0;
 }
 
-export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr, reporter, onUnexpectedExit } = {}) {
+export function createConductorRuntimeLogForwarder({
+  conductorId,
+  stdout,
+  stderr,
+  reporter,
+  onUnexpectedExit,
+  onObservation,
+} = {}) {
   if (!identifier(conductorId) || !readableStream(stdout) || !readableStream(stderr) ||
       reporter !== undefined && typeof reporter.runtimeDiagnostic !== "function" ||
-      onUnexpectedExit !== undefined && typeof onUnexpectedExit !== "function") {
+      onUnexpectedExit !== undefined && typeof onUnexpectedExit !== "function" ||
+      onObservation !== undefined && typeof onObservation !== "function") {
     throw stableError("foreground_e2e_conductor_log_forwarder_input_invalid");
   }
   let closed = false;
@@ -1374,6 +1422,70 @@ export function createConductorRuntimeLogForwarder({ conductorId, stdout, stderr
           reason: "unknown_event",
         });
       }
+      return;
+    }
+    if (value.event === "root_candidate_selected") {
+      if (value.level !== "info" || !identifier(value.root_issue_id)) {
+        reportInvalidFields();
+        return;
+      }
+      onObservation?.({
+        component: "conductor",
+        conductorId,
+        runtimeEvent: "root_candidate_selected",
+        rootIssueId: value.root_issue_id,
+      });
+      return;
+    }
+    if (value.event === "root_turn_validated") {
+      if (value.level !== "info" || !identifier(value.root_issue_id) ||
+          !ROOT_TURN_CONTRACT_FAMILIES.has(value.contract_family) ||
+          !ROOT_TURN_INTENT_KINDS.has(value.intent_kind)) {
+        reportInvalidFields();
+        return;
+      }
+      onObservation?.({
+        component: "conductor",
+        conductorId,
+        runtimeEvent: "root_turn_validated",
+        rootIssueId: value.root_issue_id,
+        contractFamily: value.contract_family,
+        intentKind: value.intent_kind,
+      });
+      return;
+    }
+    if (value.event === "root_initial_execution_read_back") {
+      if (value.level !== "info" || !identifier(value.root_issue_id) ||
+          !identifier(value.cycle_issue_id) || !identifier(value.plan_issue_id)) {
+        reportInvalidFields();
+        return;
+      }
+      onObservation?.({
+        component: "conductor",
+        conductorId,
+        runtimeEvent: "root_initial_execution_read_back",
+        rootIssueId: value.root_issue_id,
+        cycleIssueId: value.cycle_issue_id,
+        planIssueId: value.plan_issue_id,
+      });
+      return;
+    }
+    if (value.event === "plan_dag_seal_read_back") {
+      if (value.level !== "info" || !identifier(value.root_issue_id) ||
+          !identifier(value.cycle_issue_id) || !identifier(value.plan_issue_id) ||
+          !sealDigest(value.seal_digest)) {
+        reportInvalidFields();
+        return;
+      }
+      onObservation?.({
+        component: "conductor",
+        conductorId,
+        runtimeEvent: "plan_dag_seal_read_back",
+        rootIssueId: value.root_issue_id,
+        cycleIssueId: value.cycle_issue_id,
+        planIssueId: value.plan_issue_id,
+        sealDigest: value.seal_digest,
+      });
       return;
     }
     if (!isForwardableConductorRuntimeEvent(value.event)) return;
@@ -1504,6 +1616,48 @@ function createUnexpectedExitRegistry() {
       return () => listeners.delete(listener);
     },
   });
+}
+
+export function createRuntimeObservationBus() {
+  const listeners = new Set();
+  return Object.freeze({
+    publish(observation) {
+      if (!runtimeObservation(observation)) {
+        throw stableError("foreground_e2e_runtime_observation_invalid");
+      }
+      const value = Object.freeze({ ...observation });
+      for (const listener of [...listeners]) listener(value);
+    },
+    subscribe(listener) {
+      if (typeof listener !== "function") {
+        throw stableError("foreground_e2e_runtime_observation_listener_invalid");
+      }
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  });
+}
+
+function runtimeObservation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.component !== "conductor" || !identifier(value.conductorId) ||
+      !identifier(value.rootIssueId)) return false;
+  if (value.runtimeEvent === "root_candidate_selected") {
+    return Object.keys(value).length === 4;
+  }
+  if (Object.keys(value).length === 6 && value.runtimeEvent === "root_turn_validated") {
+    return ROOT_TURN_CONTRACT_FAMILIES.has(value.contractFamily) &&
+      ROOT_TURN_INTENT_KINDS.has(value.intentKind);
+  }
+  if (Object.keys(value).length === 6 && value.runtimeEvent === "root_initial_execution_read_back") {
+    return identifier(value.cycleIssueId) && identifier(value.planIssueId);
+  }
+  return Object.keys(value).length === 7 && value.runtimeEvent === "plan_dag_seal_read_back" &&
+    identifier(value.cycleIssueId) && identifier(value.planIssueId) && sealDigest(value.sealDigest);
+}
+
+function sealDigest(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 }
 
 function unexpectedExitFault(value) {

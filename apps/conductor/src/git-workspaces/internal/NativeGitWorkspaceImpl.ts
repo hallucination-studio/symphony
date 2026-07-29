@@ -29,12 +29,16 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
     rootIssueId: string;
     rootIdentifier: string;
     baseBranch: string;
+    generationOrdinal: number;
     executionKind: "fresh" | "existing";
     requiredRevisions: string[];
   }): Promise<RootWorktreeGateInspection> {
     const repositoryRoot = await realpath(this.repositoryRoot);
-    const branch = rootBranch(input.rootIdentifier);
-    const worktreePath = path.join(this.worktreeRoot, input.rootIssueId);
+    if (!Number.isSafeInteger(input.generationOrdinal) || input.generationOrdinal < 1) {
+      throw new Error("git_workspace_generation_ordinal_invalid");
+    }
+    const branch = rootBranch(input.rootIdentifier, input.generationOrdinal);
+    const worktreePath = rootWorktreePath(this.worktreeRoot, input.rootIssueId, input.generationOrdinal);
     if (await pathExists(worktreePath)) {
       const identity = await this.#worktreeIdentity(worktreePath);
       if (
@@ -43,12 +47,15 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
         identity.worktreeRoot !== await realpath(worktreePath) ||
         identity.branch !== branch
       ) {
-        return { result: invalidGate(input.repositoryIdentity, branch, "worktree_identity_conflict") };
+        return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "worktree_identity_conflict") };
       }
       const workspace = { branch, worktreePath, rootIssueId: input.rootIssueId };
-      const snapshot = await this.inspect(workspace);
-      if (snapshot.status.partial || snapshot.status.has_more) {
-        return { result: invalidGate(input.repositoryIdentity, branch, "git_evidence_incomplete") };
+      const [snapshot, changedPaths] = await Promise.all([
+        this.inspect(workspace),
+        this.#changedPaths(workspace),
+      ]);
+      if (snapshot.status.partial || snapshot.status.has_more || changedPaths.partial || changedPaths.has_more) {
+        return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "git_evidence_incomplete") };
       }
       return {
         result: {
@@ -56,8 +63,8 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
           repositoryIdentity: input.repositoryIdentity,
           branch,
           headRevision: snapshot.head,
-          isClean: snapshot.status.items.length === 0,
-          changedPaths: snapshot.status.items,
+          isClean: changedPaths.items.length === 0,
+          changedPaths: changedPaths.items,
         },
         workspace,
         snapshot,
@@ -68,30 +75,37 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
     if (input.executionKind === "fresh" && !headRevision) {
       const baseRevision = await this.#revision(input.baseBranch);
       if (!baseRevision) {
-        return { result: invalidGate(input.repositoryIdentity, branch, "git_evidence_incomplete") };
+        return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "git_evidence_incomplete") };
       }
       return {
         result: {
           kind: "fresh_missing" as const,
           repositoryIdentity: input.repositoryIdentity,
+          generationOrdinal: input.generationOrdinal,
+          branch,
           baseBranch: input.baseBranch,
           baseRevision,
         },
       };
     }
 
+    if (input.executionKind === "fresh") {
+      return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "generation_branch_conflict") };
+    }
+
     if (!headRevision) {
-      return { result: invalidGate(input.repositoryIdentity, branch, "branch_missing") };
+      return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "branch_missing") };
     }
     for (const revision of input.requiredRevisions) {
       if (!safeRevision(revision) || !await this.#isAncestor(revision, branch)) {
-        return { result: invalidGate(input.repositoryIdentity, branch, "required_commit_unreachable") };
+        return { result: invalidGate(input.repositoryIdentity, input.generationOrdinal, branch, "required_commit_unreachable") };
       }
     }
     return {
       result: {
         kind: "recoverable_missing" as const,
         repositoryIdentity: input.repositoryIdentity,
+        generationOrdinal: input.generationOrdinal,
         branch,
         headRevision,
       },
@@ -103,6 +117,7 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
     rootIssueId: string;
     rootIdentifier: string;
     baseBranch: string;
+    generationOrdinal: number;
     expectedGate: Extract<RootWorktreeGateResult, { kind: "fresh_missing" | "recoverable_missing" }>;
   }): Promise<ValidRootWorktreeGateInspection> {
     const current = await this.inspectRootWorktreeGate({
@@ -110,6 +125,7 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
       rootIssueId: input.rootIssueId,
       rootIdentifier: input.rootIdentifier,
       baseBranch: input.baseBranch,
+      generationOrdinal: input.generationOrdinal,
       executionKind: input.expectedGate.kind === "fresh_missing" ? "fresh" : "existing",
       requiredRevisions: input.expectedGate.kind === "recoverable_missing" ? [input.expectedGate.headRevision] : [],
     });
@@ -117,9 +133,9 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
       throw new Error("git_workspace_gate_stale");
     }
     const repositoryRoot = await realpath(this.repositoryRoot);
-    const branch = rootBranch(input.rootIdentifier);
-    const worktreePath = path.join(this.worktreeRoot, input.rootIssueId);
-    await mkdir(this.worktreeRoot, { recursive: true });
+    const branch = rootBranch(input.rootIdentifier, input.generationOrdinal);
+    const worktreePath = rootWorktreePath(this.worktreeRoot, input.rootIssueId, input.generationOrdinal);
+    await mkdir(path.dirname(worktreePath), { recursive: true });
     if (input.expectedGate.kind === "recoverable_missing") {
       await runCommand("git", ["-C", repositoryRoot, "worktree", "add", worktreePath, branch]);
     } else {
@@ -130,6 +146,7 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
       rootIssueId: input.rootIssueId,
       rootIdentifier: input.rootIdentifier,
       baseBranch: input.baseBranch,
+      generationOrdinal: input.generationOrdinal,
       executionKind: "existing",
       requiredRevisions: [input.expectedGate.kind === "fresh_missing" ? input.expectedGate.baseRevision : input.expectedGate.headRevision],
     });
@@ -160,6 +177,18 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface, GitWorktre
       branch: workspace.branch,
       status: boundedLines(status.stdout, 512),
     };
+  }
+
+  async #changedPaths(workspace: GitWorkspace): Promise<BoundedGitItems<string>> {
+    await this.#assertWorkspaceIdentity(workspace);
+    const [unstaged, staged, untracked] = await Promise.all([
+      runCommand("git", ["-C", workspace.worktreePath, "diff", "--name-only", "--no-renames", "-z"]),
+      runCommand("git", ["-C", workspace.worktreePath, "diff", "--cached", "--name-only", "--no-renames", "-z"]),
+      runCommand("git", ["-C", workspace.worktreePath, "ls-files", "--others", "--exclude-standard", "-z"]),
+    ]);
+    const paths = [...new Set([unstaged.stdout, staged.stdout, untracked.stdout]
+      .flatMap((value) => value.split("\0").filter(Boolean)))].sort();
+    return boundedItems(paths, 512);
   }
 
   async diff(workspace: GitWorkspace, options: { staged?: boolean; path?: string; fromRevision?: string; toRevision?: string } = {}) {
@@ -413,8 +442,14 @@ function githubRepositoryUrl(value: string): string | undefined {
   }
 }
 
-function rootBranch(rootIdentifier: string): string {
-  return `symphony/runs/${rootIdentifier.toLowerCase()}`;
+function rootBranch(rootIdentifier: string, generationOrdinal: number): string {
+  const rootBranch = `symphony/runs/${rootIdentifier.toLowerCase()}`;
+  return generationOrdinal === 1 ? rootBranch : `${rootBranch}-g${generationOrdinal}`;
+}
+
+function rootWorktreePath(worktreeRoot: string, rootIssueId: string, generationOrdinal: number): string {
+  const rootPath = path.join(worktreeRoot, rootIssueId);
+  return generationOrdinal === 1 ? rootPath : path.join(worktreeRoot, `${rootIssueId}-g${generationOrdinal}`);
 }
 
 async function pathExists(value: string): Promise<boolean> {
@@ -429,8 +464,9 @@ async function pathExists(value: string): Promise<boolean> {
 
 function invalidGate(
   repositoryIdentity: string,
+  _generationOrdinal: number,
   expectedBranch: string,
-  reason: "worktree_identity_conflict" | "branch_missing" | "required_commit_unreachable" | "git_evidence_incomplete",
+  reason: "worktree_identity_conflict" | "generation_branch_conflict" | "branch_missing" | "required_commit_unreachable" | "git_evidence_incomplete",
 ) {
   return {
     kind: "execution_generation_invalid" as const,
@@ -446,7 +482,9 @@ function sameWorktreeGate(
 ): boolean {
   if (actual.kind !== expected.kind || actual.repositoryIdentity !== expected.repositoryIdentity) return false;
   return actual.kind === "fresh_missing" && expected.kind === "fresh_missing"
-    ? actual.baseBranch === expected.baseBranch && actual.baseRevision === expected.baseRevision
+    ? actual.generationOrdinal === expected.generationOrdinal && actual.branch === expected.branch &&
+      actual.baseBranch === expected.baseBranch && actual.baseRevision === expected.baseRevision
     : actual.kind === "recoverable_missing" && expected.kind === "recoverable_missing" &&
-      actual.branch === expected.branch && actual.headRevision === expected.headRevision;
+      actual.generationOrdinal === expected.generationOrdinal && actual.branch === expected.branch &&
+      actual.headRevision === expected.headRevision;
 }

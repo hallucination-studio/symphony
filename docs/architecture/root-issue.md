@@ -54,7 +54,7 @@ Team必须配置并验证以下display statuses：
 |---|---|
 | Backlog | `Draft` |
 | Unstarted | `Todo` |
-| Started | `Planning`, `Sealed`, `Executing`, `Verifying`, `In Progress`, `In Review` |
+| Started | `Planning`, `Sealed`, `Executing`, `Verifying`, `In Progress`, `In Review`, `Approved` |
 | Started | `Needs Approval`, `Needs Info`, `Inconclusive`, `Escalated` |
 | Completed | `Succeeded`, `Changes Required`, `Done` |
 | Canceled | `Interrupted`, `Canceled`, `Failed` |
@@ -106,15 +106,24 @@ any nonterminal -> Canceled
 | `Escalated` | blocking Human Action或mechanical inconsistency |
 | `Succeeded` | verification和Cycle conclusion成功 |
 | `Changes Required` | 当前Cycle terminal但Root需求未满足 |
-| `Canceled` | 用户取消、supersession或execution generation失效 |
+| `Canceled` | 用户取消、supersession、execution generation失效或closed recovery conclusion |
 
-一个Root最多一个active nonterminal Cycle。successor Cycle用native predecessor relation连接，不能建立跨Cycle execution
-dependency。
+Interrupted Stage的closed recovery conclusion使用`Canceled`，并恰好带一个`Recovery Exhausted`或`Recovery Abandoned`附加label。
+这两个label只编码closed business disposition；bounded explanation和outcome保存在canonical human-readable Cycle description中。
+它们必须具有matching Symphony actor/version provenance，不能由label单独推断或接受human-authored lookalike。该Cycle随后进入
+non-success terminal review，不等于Root已经结束，也不构成交付资格。
+
+一个Root最多一个active nonterminal Cycle。Cycle identity不可变；canonical lineage按native `(created_at, issue_id)`全序及
+archive状态推导，successor是该Root中greatest archived predecessor之后的唯一active Cycle。不得为表达内部lineage而伪造
+`blocks`或把对称`relates_to`解释成定向predecessor，也不能建立跨Cycle execution dependency。
+Archive只改变Issue是否参与当前执行，不删除native relation历史。任一endpoint已archive的relation不参与当前DAG readiness，且不能
+仅因保留该历史relation就阻断leaf-first subtree archive；missing endpoint、当前nonterminal Cycle内的非法DAG和active跨Cycle
+execution dependency仍必须fail closed。
 
 ## 6. Plan、Work与Verify lifecycle
 
 ```text
-Plan:   Todo -> In Progress -> In Review -> Done
+Plan:   Todo -> In Progress -> In Review -> Approved -> Done
 Work:   Todo -> In Progress -> Done
 Verify: Todo -> In Progress -> Done
 
@@ -123,10 +132,24 @@ any Todo         -> Canceled
 ```
 
 `Todo`是唯一可dispatch状态。`Interrupted`、`Done`、`Failed`和`Canceled`都是terminal attempt；新的执行必须创建fresh
-Issue，并以native predecessor/replacement relation连接，不能把旧Issue改回`Todo`。
+native identity，不能把旧Issue改回`Todo`。lineage representation由role topology决定：Interrupted Plan可以在同一Planning Cycle
+使用带exact Symphony provenance的fresh Plan sibling；Work与Verify不改写approved DAG，而通过带durable recovery provenance的
+fresh successor Cycle进入new Plan。当前public Linear contract没有directional predecessor/replacement mutation，因此不得把
+`blocks`或对称`relates_to`解释为attempt lineage。
 
-Plan `In Review`表示description中human-readable Plan已经固定，等待exact Plan Approval。Approval有效后Plan进入`Done`，
-Cycle进入`Sealed`。Plan description在`In Review`后发生编辑会使现有approval失效；必须创建fresh Plan，不能覆盖旧Plan。
+`replan_current_cycle`使用同一Cycle下带`Cycle Replan` authorization的fresh Todo Plan，不把任何terminal identity改回active。
+该Plan与旧DAG短暂共存只在exact Symphony actor/version、canonical description、唯一fresh Plan、matching interrupted role和owning
+Cycle phase全部成立时合法。旧children归档且Cycle为Planning后，fresh Plan是唯一active child；旧Plan/DAG继续作为archived history。
+
+`repair_current_cycle`使用同一Cycle下带`Cycle Repair` authorization的fresh Todo Work，且不改变approved Plan。Interrupted Work的
+依赖迁移完成后才archive predecessor；Interrupted Verify必须创建带`Cycle Repair Verify` provenance的fresh Verify并把Cycle退回
+Executing。repair Work及fresh Verify都是新的native identity；任何Interrupted terminal identity或旧Verify target都不能再次dispatch。
+
+Plan `In Review`表示description中human-readable Plan已经固定，等待exact Plan Approval。`Approved`是matching
+`plan_human_decision`已经验证authorized actor、exact target和unchanged Plan content后的durable authorization barrier；它不表示
+DAG已经完整。Conductor只从`Approved` Plan机械收敛完整DAG，全部节点与relations read-back后才把Plan置`Done`并把Cycle置
+`Sealed`。Plan description在`In Review`后发生编辑会使现有approval失效；`Approved`后发生编辑属于invalid topology，不能按编辑后
+内容继续materialize，必须进入recovery并创建fresh Plan。
 
 Work `Done`要求matching Git变化和required checks可验证。Verify `Done`只表示该Verify attempt给出了closed conclusion；
 结论由附加label限定为`Passed`、`Changes Required`、`Inconclusive`或`Contract Violation`，并由Finding Issues和Git evidence
@@ -141,14 +164,14 @@ Cycle从一个Plan开始：
 
 ```text
 Cycle(Planning)
-└── Plan(Todo | In Progress | In Review)
+└── Plan(Todo | In Progress | In Review | Approved)
 ```
 
 Plan description是用户可读、immutable-after-approval的Plan contract，至少包含objective、scope、assumptions、constraints、
 acceptance criteria、verification requirements、Work proposals、dependency proposal和required checks。它不包含机器JSON。
 
-Plan Approval是Root上的Human Action comment thread，正文native-mention exact Plan。批准后Root Reconciler提出initial graph，
-Conductor创建Work/Verify Issues与`blocks` relations并fresh read-back：
+Plan Approval是Root上的Human Action comment thread，正文native-mention exact Plan。批准后Conductor从lossless approved Plan contract
+机械编译完整graph，创建Work/Verify Issues与`blocks` relations并fresh read-back，不调用Root Reconciler逐节点选择：
 
 ```text
 Cycle(Sealed | Executing)
@@ -176,7 +199,9 @@ Todo -> Done | Canceled
 
 - `Todo`：unresolved，阻止不允许该severity的Cycle成功；
 - `Done`：已由fresh evidence证明resolved；
-- `Canceled`：duplicate、invalid或有matching approved Finding Waiver Human Action thread。
+- `Canceled`：duplicate、invalid或有matching approved Finding Waiver Human Action thread。waiver必须存在exact request、authorized human
+  reply、Symphony adoption reply、originally mentioned complete Finding set及current Activity proof；单独status、label、receipt或resolved
+  thread不能证明waiver。
 
 description和comments保存用户可读的观察、影响、复现与证据。waiver不能只靠comment、reaction或label推断；其scope和actor
 由[Human Action](human-actions.md)定义。

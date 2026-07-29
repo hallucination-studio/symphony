@@ -234,8 +234,7 @@ export function buildRootFactSet(input: {
   const pendingInputIds = [...entries.values()]
     .filter(({ change }) =>
       change.actorKind !== "symphony" &&
-      change.sourceKind !== "git" &&
-      change.sourceKind !== "mechanical_violation" &&
+      (change.value.kind === "comment" || change.value.kind === "comment_thread" || change.value.kind === "activity") &&
       (change.value.kind !== "comment_thread" || isPendingThreadState(change.value.threadState, input.tree)) &&
       !receiptedInputIds.has(inputIdFor(change)),
     )
@@ -367,16 +366,20 @@ function toFactIssue(issue: LinearWorkflowTreeSnapshot["issues"][number]): RootF
   if (!issueKind) throw new Error("root_issue_kind_missing");
   return {
     issueId: issue.issue_id,
+    identifier: issue.identifier,
     issueKind,
     ...(issue.parent_issue_id ? { parentIssueId: issue.parent_issue_id } : {}),
     ...(issue.creator_user_id ? { creatorUserId: issue.creator_user_id } : {}),
     ...(issue.assignee_user_id ? { assigneeUserId: issue.assignee_user_id } : {}),
+    statusId: issue.status_id,
     title: issue.title,
     description: issue.description,
     status: issue.status_name as RootFactIssue["status"],
+    order: issue.order,
     isArchived: issue.is_archived,
     labels: issue.labels,
     remoteVersion: issue.remote_version,
+    createdAt: issue.created_at,
   };
 }
 

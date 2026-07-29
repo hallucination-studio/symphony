@@ -14,8 +14,9 @@ describe("FramedProtocolPeer", () => {
     const peer = new FramedProtocolPeer(input, output, {
       decode: (value) => value as never,
       secretLength: () => 0,
-      async handleRequest(body) {
+      async handleRequest(body, _secret, context) {
         expect(body).toEqual({ kind: "slow_request" });
+        expect(context).toEqual({ requestId: "linear-request-1" });
         requestStarted();
         await requestBlocked;
         return { kind: "slow_result" };

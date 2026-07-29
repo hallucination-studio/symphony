@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PodiumLinearGatewayClientImpl } from "../internal/PodiumLinearGatewayClientImpl.js";
+import {
+  type LinearLogicalRequestObservation,
+  PodiumLinearGatewayClientImpl,
+} from "../internal/PodiumLinearGatewayClientImpl.js";
 
 const now = "2026-07-21T09:00:00Z";
 
@@ -111,27 +114,62 @@ test("gateway treats an unknown Root Index failure category as a non-retryable p
 
 test("workflow gateway serializes a closed mutation and validates its read-back", async () => {
   const requests: Record<string, unknown>[] = [];
-  const gateway = createGateway(async (body) => {
+  const requestIds: string[] = [];
+  const logicalRequests: LinearLogicalRequestObservation[] = [];
+  const gateway = createGateway(async (body, requestId) => {
     requests.push(body);
+    requestIds.push(requestId);
     if (body.kind === "resolve_conductor_project") return resolved();
     return { kind: "applied", read_back: { write_id: "write-1", target_issue_id: "work-1", remote_version: "v2" } };
-  });
+  }, (observation) => logicalRequests.push(observation));
   await gateway.resolveProject();
 
   const result = await gateway.mutateWorkflow({
     kind: "update_workflow_issue", writeId: "write-1", expectedProjectId: "project-1", rootIssueId: "root-1",
-    expectedRootRemoteVersion: now, target: { targetIssueId: "work-1", expectedRemoteVersion: now },
+    expectedRootRemoteVersion: now, target: { targetIssueId: "work-1", expectedRemoteVersion: now, expectedIsArchived: false },
     statusId: "status-progress", title: "Updated", description: "Description", labelNames: ["symphony:kind/work", "Changes Required"],
-    isArchived: false, parentAssignment: { mode: "retain" },
+    parentAssignment: { mode: "retain" },
   });
 
   assert.deepEqual(result, { kind: "applied", readBack: { writeId: "write-1", targetIssueId: "work-1", remoteVersion: "v2" } });
+  assert.deepEqual(logicalRequests[1], {
+    requestId: requestIds[1],
+    operationKind: "update_workflow_issue",
+    rootIssueId: "root-1",
+    writeId: "write-1",
+  });
+  assert.match(requestIds[1] ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
   assert.deepEqual(requests[1], {
     kind: "update_workflow_issue", binding_id: "binding-1", instance_id: "instance-1", write_id: "write-1", conductor_short_hash: "abc123",
     expected_project_id: "project-1", root_issue_id: "root-1", expected_root_remote_version: now,
-    target: { target_issue_id: "work-1", expected_remote_version: now },
+    target: { target_issue_id: "work-1", expected_remote_version: now, expected_is_archived: false },
     status_id: "status-progress", title: "Updated", description: "Description", label_names: ["symphony:kind/work", "Changes Required"],
-    is_archived: false, parent_assignment: { mode: "retain" },
+    parent_assignment: { mode: "retain" },
+  });
+});
+
+test("workflow gateway serializes archive state as one closed mutation", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    requests.push(body);
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return { kind: "applied", read_back: { write_id: "archive-write", target_issue_id: "work-1", remote_version: "v2" } };
+  });
+  await gateway.resolveProject();
+
+  await gateway.mutateWorkflow({
+    kind: "set_workflow_issue_archive_state", writeId: "archive-write", expectedProjectId: "project-1",
+    rootIssueId: "root-1", expectedRootRemoteVersion: now,
+    target: { targetIssueId: "work-1", expectedRemoteVersion: now, expectedIsArchived: false },
+    isArchived: true,
+  });
+
+  assert.deepEqual(requests[1], {
+    kind: "set_workflow_issue_archive_state", binding_id: "binding-1", instance_id: "instance-1",
+    write_id: "archive-write", conductor_short_hash: "abc123", expected_project_id: "project-1",
+    root_issue_id: "root-1", expected_root_remote_version: now,
+    target: { target_issue_id: "work-1", expected_remote_version: now, expected_is_archived: false },
+    is_archived: true,
   });
 });
 
@@ -158,6 +196,49 @@ test("workflow gateway serializes a native attachment mutation", async () => {
     target: { target_issue_id: "work-1", expected_remote_version: now, expected_status_id: "status-todo" },
     title: "Verified Git revision", url: "https://github.com/acme/repo/commit/abc123",
   });
+});
+
+test("workflow gateway serializes receipt removal and creation as distinct commands", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    requests.push(body);
+    if (body.kind === "resolve_conductor_project") return resolved();
+    return { kind: "applied", read_back: {
+      write_id: body.write_id, target_issue_id: "root-1", remote_version: "comment-v2",
+      symphony_receipt: {
+        reply_write_id: "reply-write-1", source_comment_id: "comment-1",
+        thread_root_comment_id: "comment-1",
+        receipt: body.kind === "remove_comment_receipt_reaction" ? "none" : "check",
+      },
+    } };
+  });
+  await gateway.resolveProject();
+  const common = {
+    expectedProjectId: "project-1", rootIssueId: "root-1", expectedRootRemoteVersion: now,
+    replyWriteId: "reply-write-1", sourceCommentId: "comment-1",
+    expectedSourceCommentRemoteVersion: "comment-v1", threadRootCommentId: "comment-1",
+  };
+
+  await gateway.mutateWorkflow({
+    ...common, kind: "remove_comment_receipt_reaction", writeId: "receipt-remove-1", expectedReceipt: "cross",
+  });
+  await gateway.mutateWorkflow({
+    ...common, kind: "create_comment_receipt_reaction", writeId: "receipt-create-1", receipt: "check",
+  });
+
+  assert.deepEqual(requests.slice(1), [{
+    kind: "remove_comment_receipt_reaction", binding_id: "binding-1", instance_id: "instance-1",
+    write_id: "receipt-remove-1", conductor_short_hash: "abc123", expected_project_id: "project-1",
+    root_issue_id: "root-1", expected_root_remote_version: now, reply_write_id: "reply-write-1",
+    source_comment_id: "comment-1", expected_source_comment_remote_version: "comment-v1",
+    thread_root_comment_id: "comment-1", expected_receipt: "cross",
+  }, {
+    kind: "create_comment_receipt_reaction", binding_id: "binding-1", instance_id: "instance-1",
+    write_id: "receipt-create-1", conductor_short_hash: "abc123", expected_project_id: "project-1",
+    root_issue_id: "root-1", expected_root_remote_version: now, reply_write_id: "reply-write-1",
+    source_comment_id: "comment-1", expected_source_comment_remote_version: "comment-v1",
+    thread_root_comment_id: "comment-1", receipt: "check",
+  }]);
 });
 
 test("workflow tree decoder rejects a foreign issue", async () => {
@@ -243,10 +324,20 @@ test("workflow tree rejects a descendant with multiple primary kind labels", asy
   await assert.rejects(gateway.readWorkflowIssueTree("root-1"), /linear_workflow_issue_kind_invalid/u);
 });
 
-function createGateway(request: (body: Record<string, unknown>) => Promise<unknown>) {
+function createGateway(
+  request: (body: Record<string, unknown>, requestId: string) => Promise<unknown>,
+  observeLogicalRequest?: (observation: LinearLogicalRequestObservation) => void,
+) {
   return new PodiumLinearGatewayClientImpl("abc123", {
-    async request({ body }) { return await request(body as Record<string, unknown>) as never; },
-  }, { bindingId: "binding-1", instanceId: "instance-1", timeoutMs: 1_000 });
+    async request({ body, requestId }) {
+      return await request(body as Record<string, unknown>, requestId) as never;
+    },
+  }, {
+    bindingId: "binding-1",
+    instanceId: "instance-1",
+    timeoutMs: 1_000,
+    ...(observeLogicalRequest ? { observeLogicalRequest } : {}),
+  });
 }
 
 function resolved() {

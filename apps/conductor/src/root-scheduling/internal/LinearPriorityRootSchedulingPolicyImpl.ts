@@ -15,12 +15,26 @@ const PRIORITY_ORDER: Record<LinearPriority, number> = {
 
 export class LinearPriorityRootSchedulingPolicyImpl
 implements RootSchedulingPolicyInterface {
-  evaluate(roots: readonly DiscoveredRoot[]) {
+  evaluate(
+    roots: readonly DiscoveredRoot[],
+    options?: { resumeAfterRootIssueId?: string },
+  ) {
     const result = blockerEligibleRoots(roots);
-    const orderedEligible = result.eligible.sort(compareRoots);
+    const orderedEligible = rotateAfter(
+      result.eligible.sort(compareRoots),
+      options?.resumeAfterRootIssueId,
+    );
     return { orderedEligible, blocked: result.blocked };
   }
 
+}
+
+function rotateAfter(roots: DiscoveredRoot[], rootIssueId: string | undefined): DiscoveredRoot[] {
+  if (!rootIssueId || roots.length < 2) return roots;
+  const index = roots.findIndex(({ issueId }) => issueId === rootIssueId);
+  return index < 0 || index === roots.length - 1
+    ? roots
+    : [...roots.slice(index + 1), ...roots.slice(0, index + 1)];
 }
 
 function compareRoots(left: DiscoveredRoot, right: DiscoveredRoot): number {

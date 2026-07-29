@@ -52,12 +52,14 @@ const SYMPHONY_RECEIPT_EMOJI = {
 } as const;
 
 type NativeCommentMutation = Extract<WorkflowMutationCommand, {
-  kind: "create_comment_reply" | "set_comment_receipt_reaction" | "set_comment_thread_state";
+  kind: "create_comment_reply" | "remove_comment_receipt_reaction" |
+    "create_comment_receipt_reaction" | "set_comment_thread_state";
 }>;
 
 function isNativeCommentMutation(command: WorkflowMutationCommand): command is NativeCommentMutation {
   return command.kind === "create_comment_reply" ||
-    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "remove_comment_receipt_reaction" ||
+    command.kind === "create_comment_receipt_reaction" ||
     command.kind === "set_comment_thread_state";
 }
 
@@ -421,6 +423,7 @@ export interface LinearPhysicalRequestObservation {
   installationId?: string;
   projectId?: string;
   requestClass?: "control" | "workflow" | "mutation" | "read-back" | "background";
+  logicalRequestId?: string;
 }
 
 export interface LinearRequestObservationOptions {
@@ -1768,15 +1771,14 @@ export class LinearSdkImpl implements LinearClientInterface {
           });
           return;
         }
-        case "set_comment_receipt_reaction": {
+        case "remove_comment_receipt_reaction": {
           const source = comments.get(command.sourceCommentId)!;
           const current = symphonyReceipt(source);
-          if (command.receipt === "none") {
-            if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
-            return;
-          }
-          if (current.receipt === command.receipt) return;
-          if (current.reactionId) await this.#client.deleteReaction(current.reactionId);
+          if (!current.reactionId) throw new Error("linear_workflow_receipt_reaction_missing");
+          await this.#client.deleteReaction(current.reactionId);
+          return;
+        }
+        case "create_comment_receipt_reaction": {
           await this.#client.createReaction({
             commentId: command.sourceCommentId,
             emoji: receiptEmoji(command.receipt),
@@ -1822,11 +1824,6 @@ export class LinearSdkImpl implements LinearClientInterface {
         assertNativeWorkflowContent(command.description);
         const issue = await this.#client.issue(command.target.targetIssueId);
         if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
-        const currentArchived = issue.archivedAt !== null && issue.archivedAt !== undefined;
-        if (!command.isArchived && currentArchived) {
-          const restored = await issue.unarchive();
-          if (!restored.success) throw new Error("linear_workflow_issue_restore_failed");
-        }
         await this.#workflowStatusId(issue, command.statusId);
         const team = await issue.team;
         if (!team) throw new Error("linear_workflow_team_missing");
@@ -1840,9 +1837,16 @@ export class LinearSdkImpl implements LinearClientInterface {
             : command.parentAssignment.mode === "clear" ? { parentId: null } : {}),
           ...(command.order === undefined ? {} : { subIssueSortOrder: command.order }),
         });
-        if (command.isArchived && !currentArchived) {
-          const archived = await issue.archive();
-          if (!archived.success) throw new Error("linear_workflow_issue_archive_failed");
+        return;
+      }
+      case "set_workflow_issue_archive_state": {
+        const issue = await this.#client.issue(command.target.targetIssueId);
+        if (issue.projectId !== command.expectedProjectId) throw new Error("linear_workflow_target_project_invalid");
+        const result = command.isArchived ? await issue.archive() : await issue.unarchive();
+        if (!result.success) {
+          throw new Error(command.isArchived
+            ? "linear_workflow_issue_archive_failed"
+            : "linear_workflow_issue_restore_failed");
         }
         return;
       }
@@ -1963,11 +1967,13 @@ export class LinearSdkImpl implements LinearClientInterface {
             }
           : undefined;
       }
-      case "set_comment_receipt_reaction": {
+      case "remove_comment_receipt_reaction":
+      case "create_comment_receipt_reaction": {
         const source = comments.get(command.sourceCommentId);
         if (!source || source.threadRootCommentId !== command.threadRootCommentId) return undefined;
         const current = symphonyReceipt(source);
-        return current.receipt === command.receipt
+        const expectedReceipt = command.kind === "remove_comment_receipt_reaction" ? "none" : command.receipt;
+        return current.receipt === expectedReceipt
           ? {
               writeId: command.writeId,
               targetIssueId: source.issueId,
@@ -1976,7 +1982,7 @@ export class LinearSdkImpl implements LinearClientInterface {
                 replyWriteId: command.replyWriteId,
                 sourceCommentId: command.sourceCommentId,
                 threadRootCommentId: command.threadRootCommentId,
-                receipt: command.receipt,
+                receipt: expectedReceipt,
               },
             }
           : undefined;
@@ -2157,11 +2163,22 @@ export class LinearSdkImpl implements LinearClientInterface {
         .then((value) => workflowMutationTargetValue(value));
       return issue && issue.projectId === command.expectedProjectId &&
         issue.statusId === command.statusId && issue.title === command.title &&
-        issue.description === command.description &&
-        issue.isArchived === command.isArchived &&
+        issue.description === command.description && issue.isArchived === false &&
+        workflowLabelsMatch(issue.labels, command.labelNames) &&
         workflowParentAssignmentMatches(issue.parentIssueId, command.parentAssignment) &&
         (command.order === undefined || issue.order === command.order) &&
         (command.target.expectedParentIssueId === undefined || issue.parentIssueId === command.target.expectedParentIssueId)
+        ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
+          issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
+        : undefined;
+    }
+    if (command.kind === "set_workflow_issue_archive_state") {
+      const compact = await this.#readCompactWorkflowTarget(
+        command.target.targetIssueId, command.expectedProjectId, command.rootIssueId,
+      );
+      const issue = compact ?? await this.#client.issue(command.target.targetIssueId)
+        .then((value) => workflowMutationTargetValue(value));
+      return issue && issue.projectId === command.expectedProjectId && issue.isArchived === command.isArchived
         ? { writeId: command.writeId, targetIssueId: issue.issueId, remoteVersion: issue.updatedAt,
           issueVersions: [{ issueId: issue.issueId, remoteVersion: issue.updatedAt }] }
         : undefined;
@@ -3211,12 +3228,17 @@ function workflowPreflightOutcome(
     const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
     return target.statusId === command.statusId && target.title === command.title &&
       target.description === command.description &&
-      workflowLabelsMatch(target.labels, command.labelNames) &&
-      target.isArchived === command.isArchived &&
+      workflowLabelsMatch(target.labels, command.labelNames) && target.isArchived === false &&
       workflowParentAssignmentMatches(target.parentIssueId, command.parentAssignment) &&
       (command.order === undefined || target.order === command.order) &&
       (command.target.expectedParentIssueId === undefined || target.parentIssueId === command.target.expectedParentIssueId)
       ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt } : undefined;
+  }
+  if (command.kind === "set_workflow_issue_archive_state") {
+    const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
+    return target.isArchived === command.isArchived
+      ? { writeId: command.writeId, targetIssueId: target.issueId, remoteVersion: target.updatedAt }
+      : undefined;
   }
   if (command.kind === "append_workflow_comment") {
     const comments = facts.get(command.target.targetIssueId)?.comments;
@@ -3304,8 +3326,8 @@ function workflowPreconditionMismatch(
   }
   const target = workflowPreflightTargetValue(facts.get(command.target.targetIssueId)!);
   if (target.updatedAt !== command.target.expectedRemoteVersion) return "target_remote_version";
-  if (command.target.expectedStatusId !== undefined && target.statusId !== command.target.expectedStatusId) return "target_status";
-  if (command.target.expectedParentIssueId !== undefined && target.parentIssueId !== command.target.expectedParentIssueId) return "target_parent";
+  if ("expectedStatusId" in command.target && command.target.expectedStatusId !== undefined && target.statusId !== command.target.expectedStatusId) return "target_status";
+  if ("expectedParentIssueId" in command.target && command.target.expectedParentIssueId !== undefined && target.parentIssueId !== command.target.expectedParentIssueId) return "target_parent";
   if (command.target.expectedIsArchived !== undefined && target.isArchived !== command.target.expectedIsArchived) return "target_archive";
   return command.kind !== "update_workflow_issue" || workflowPreflightHasStatus(facts.get(command.target.targetIssueId)!, command.statusId)
     ? undefined : "target_status_catalog";
@@ -3326,11 +3348,17 @@ function nativeCommentPreconditionsMatch(
         source.threadRootCommentId === command.expectedThreadRootCommentId &&
         source.threadState === command.expectedThreadState;
     }
-    case "set_comment_receipt_reaction": {
+    case "remove_comment_receipt_reaction": {
       const source = tree.comments.get(command.sourceCommentId);
       return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
         source.threadRootCommentId === command.threadRootCommentId &&
         symphonyReceipt(source).receipt === command.expectedReceipt;
+    }
+    case "create_comment_receipt_reaction": {
+      const source = tree.comments.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(source).receipt === "none";
     }
     case "set_comment_thread_state": {
       const source = tree.comments.get(command.sourceCommentId);

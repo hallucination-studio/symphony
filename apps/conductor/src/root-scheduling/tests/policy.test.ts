@@ -104,6 +104,25 @@ test("Root scheduling compares latest updates before the stable identifier tie-b
   );
 });
 
+test("Root scheduling resumes after the last memory-only lease without losing priority ordering", () => {
+  const policy = new LinearPriorityRootSchedulingPolicyImpl();
+  const roots = [
+    root("urgent", "urgent", 0, "SYM-1"),
+    root("normal-a", "normal", 0, "SYM-2"),
+    root("normal-b", "normal", 0, "SYM-3"),
+    root("low", "low", 0, "SYM-4"),
+  ];
+
+  assert.deepEqual(
+    policy.evaluate(roots, { resumeAfterRootIssueId: "normal-a" }).orderedEligible.map(({ issueId }) => issueId),
+    ["normal-b", "low", "urgent", "normal-a"],
+  );
+  assert.deepEqual(
+    policy.evaluate(roots, { resumeAfterRootIssueId: "missing" }).orderedEligible.map(({ issueId }) => issueId),
+    ["urgent", "normal-a", "normal-b", "low"],
+  );
+});
+
 function root(
   issueId: string,
   priority: "urgent" | "high" | "normal" | "low" | "no_priority",

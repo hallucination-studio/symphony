@@ -20,6 +20,8 @@ const CASE_OBSERVATIONS = new Set([
 ]);
 const ADMISSION_MILESTONES = new Set(["roots-created", "roots-verified", "roots-delegated"]);
 const ASSERTION_OUTCOMES = new Set(["satisfied", "contradicted", "coverage_missing"]);
+const ACCEPTANCE_LEVELS = new Set(["L0", "L1", "L2", "L3", "L4"]);
+const ACCEPTANCE_VERDICTS = new Set(["passed", "failed", "incomplete"]);
 
 const RUNTIME_DIAGNOSTIC_LEVELS = new Set(["info", "warning", "error"]);
 const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
@@ -36,6 +38,10 @@ const FORWARDED_CONDUCTOR_RUNTIME_EVENTS = new Set([
 const KNOWN_CONDUCTOR_RUNTIME_LOG_EVENTS = new Set([
   ...FORWARDED_CONDUCTOR_RUNTIME_EVENTS,
   "root_discovery_evidence",
+  "root_candidate_selected",
+  "root_turn_validated",
+  "root_initial_execution_read_back",
+  "plan_dag_seal_read_back",
   "root_next_action_materialized",
 ]);
 const CONDUCTOR_RUNTIME_DIAGNOSTIC_EVENTS = new Set([
@@ -133,6 +139,21 @@ export function createForegroundReporter({
         throw stableError("foreground_e2e_reporter_failure_invalid");
       }
       emit({ event: "foreground_e2e_failure", component, reason_code: reasonCode });
+    },
+    acceptanceVerdict({ level, verdict, reasonCodes = [], elapsedMs: levelElapsedMs } = {}) {
+      if (!ACCEPTANCE_LEVELS.has(level) || !ACCEPTANCE_VERDICTS.has(verdict) ||
+          !Array.isArray(reasonCodes) || reasonCodes.some((code) => !identifier(code)) ||
+          !Number.isSafeInteger(levelElapsedMs) || levelElapsedMs < 0 ||
+          (verdict === "passed") !== (reasonCodes.length === 0)) {
+        throw stableError("foreground_e2e_reporter_acceptance_invalid");
+      }
+      emit({
+        event: "foreground_e2e_acceptance_verdict",
+        level,
+        verdict,
+        reason_codes: [...reasonCodes],
+        level_elapsed_ms: levelElapsedMs,
+      });
     },
     runtimeDiagnostic({
       component,

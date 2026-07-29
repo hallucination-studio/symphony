@@ -4,6 +4,7 @@ import test from "node:test";
 import type { GitWorkspaceSnapshot } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { RootDeltaChange } from "../api/RootReconciliationContracts.js";
 import { buildRootFactSet as buildRootFactSetImpl, diffRootFactSets } from "../internal/RootFactSet.js";
 import { LinearRootSafetyPolicyImpl } from "../internal/LinearRootSafetyPolicyImpl.js";
 
@@ -32,14 +33,12 @@ function buildRootFactSet(
       policy: {
         maxCyclesPerRoot: 3,
         maxSameOpenFindingCycles: 2,
-        maxConsecutiveNoProgress: 2,
         maxCycleRepairAttempts: 0,
         deadlineAt: "2026-07-26T00:00:00.000Z",
       },
       view: {
         cycleCount: 0,
         openFindingPersistence: [],
-        consecutiveNoProgress: 0,
         activeCycleRepairAttempts: 0,
         isDeadlineExceeded: false,
         rootIsCanceled: false,
@@ -54,6 +53,7 @@ test("fact sets send a bootstrap snapshot and only changed current values afterw
   const delta = diffRootFactSets(first, second);
 
   assert.equal(first.bootstrap.rootSnapshot.issues.length, 1);
+  assert.equal(first.bootstrap.rootSnapshot.issues[0]?.statusId, "progress");
   const manifestIdentities = first.bootstrap.sourceManifest.map(({ sourceKind, sourceId }) => `${sourceKind}:${sourceId}`);
   assert.deepEqual(manifestIdentities, [...manifestIdentities].sort());
   assert.equal(first.bootstrap.rootDigest, delta.baseRootDigest);
@@ -99,6 +99,33 @@ test("initial unresolved states and natively receipted comment inputs do not re-
 
   const afterReceipt = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
   assert.equal(afterReceipt.bootstrap.pendingInputIds.includes(inputId), false);
+});
+
+test("only human semantic input facts enter pending work", () => {
+  const workflow = tree("Root", "root-v1", "comment-v1");
+  workflow.relations.push({
+    relation_id: "relation-1", relation_kind: "relates_to", source_issue_id: "root-1", target_issue_id: "root-1",
+  });
+  workflow.attachments.push({
+    attachment_id: "attachment-1", issue_id: "root-1", title: "Context", url: "https://example.test/context",
+    source_type: "link", remote_version: "attachment-v1", created_at: "2026-07-23T00:00:01Z",
+    updated_at: "2026-07-23T00:00:01Z",
+  });
+  workflow.activities.push({
+    activity_id: "activity-1", issue_id: "root-1", activity_kinds: ["description_changed"], actor_kind: "human",
+    actor_id: "user-1", updated_description: "Updated requirement", remote_version: "activity-v1",
+    created_at: "2026-07-23T00:00:02Z",
+  });
+
+  const factSet = buildRootFactSet({ root, tree: workflow, git: git("head-1"), mechanicalViolations: [] });
+  const pendingKinds = factSet.bootstrap.pendingInputIds.map((inputId) => {
+    return [...factSet.entries.values()].find(({ change }) => inputIdForTest(change) === inputId)?.change.value.kind;
+  });
+
+  assert.deepEqual(pendingKinds.sort(), ["activity", "comment"]);
+  assert.equal(pendingKinds.includes("issue"), false);
+  assert.equal(pendingKinds.includes("relation"), false);
+  assert.equal(pendingKinds.includes("attachment"), false);
 });
 
 test("a body edit produces only the comment body current value", () => {
@@ -318,6 +345,21 @@ function commentBodyInputId(factSet: ReturnType<typeof buildRootFactSet>, commen
 
 function rootInputId(sourceId: string, sourceVersion: string): string {
   return `input:${createHash("sha256").update(`${sourceId}\u0000${sourceVersion}`, "utf8").digest("hex")}`;
+}
+
+function inputIdForTest(change: RootDeltaChange): string {
+  if (change.kind === "tombstone") return rootInputId(change.sourceId, change.sourceVersionOrDigest);
+  switch (change.value.kind) {
+    case "comment": return change.value.userInput.inputId;
+    case "comment_thread": {
+      const thread = change.value.threadState;
+      return rootInputId(
+        `comment_thread_state:${thread.commentId}:${thread.threadRootCommentId}:${thread.threadState}`,
+        thread.commentRemoteVersion,
+      );
+    }
+    default: return rootInputId(change.sourceId, change.sourceVersionOrDigest);
+  }
 }
 
 function tree(title: string, rootVersion: string, commentVersion?: string, includeComment = true): LinearWorkflowTreeSnapshot {

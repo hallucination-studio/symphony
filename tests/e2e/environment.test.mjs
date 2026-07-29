@@ -25,6 +25,7 @@ import {
   createFramedChannel,
   createForegroundLocalResources,
   createProjectRootIndexRequestBudget,
+  createRuntimeObservationBus,
   createPodiumEnvironment,
   createConductorRuntimeLogForwarder,
   removeExactRootWorktreesAndRestart,
@@ -78,6 +79,8 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
   let runtimeClosed = 0;
   let resourcesClosed = 0;
   let runtimeFaultListener;
+  let runtimeObservationListener;
+  let receivedRepositoryCount;
   const resetClient = {
     client: {
       async rawRequest(query, variables) {
@@ -137,7 +140,8 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
           assert.equal(operator, resetClient);
           return resetDedicatedE2EProject({ projectId, client: operator, authorized });
         },
-        async createLocalResources() {
+        async createLocalResources({ repositoryCount }) {
+          receivedRepositoryCount = repositoryCount;
           localCreated = true;
           return { directory: temporaryDirectory, async close() { resourcesClosed += 1; } };
         },
@@ -152,6 +156,10 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
               runtimeFaultListener = listener;
               return () => { runtimeFaultListener = undefined; };
             },
+            subscribeObservation(listener) {
+              runtimeObservationListener = listener;
+              return () => { runtimeObservationListener = undefined; };
+            },
             async close() { runtimeClosed += 1; },
           };
         },
@@ -159,6 +167,7 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
     });
 
     assert.equal(projectReads, 0);
+    assert.equal(receivedRepositoryCount, 3);
     assert.deepEqual([...active.values()], [false, false, false]);
     assert.deepEqual(environment.actors, { humanActorId: "human-actor" });
     assert.deepEqual(environment.runtime.assertProjectRootIndexRequestBudget(), {
@@ -171,6 +180,18 @@ test("environment permanently deletes every Project Issue and fresh-reads an emp
     unsubscribe();
     assert.equal(budgetAssertions, 1);
     assert.deepEqual(observedFault, { component: "podium", reasonCode: "process_exited" });
+    let observedRuntime;
+    const unsubscribeObservation = environment.runtime.subscribeObservation((observation) => {
+      observedRuntime = observation;
+    });
+    runtimeObservationListener({
+      component: "conductor",
+      conductorId: "conductor-1",
+      runtimeEvent: "root_candidate_selected",
+      rootIssueId: "root-1",
+    });
+    unsubscribeObservation();
+    assert.equal(observedRuntime.rootIssueId, "root-1");
     assert.deepEqual(events.map(({ phase }) => phase), ["resetting", "starting", "ready"]);
     await Promise.all([environment.stopWriters(), environment.stopWriters()]);
     assert.equal(runtimeClosed, 1);
@@ -467,6 +488,7 @@ test("environment failure and normal close reap a real owned child and remove it
             conductors: [],
             assertProjectRootIndexRequestBudget() {},
             subscribeUnexpectedExit() { return () => {}; },
+            subscribeObservation() { return () => {}; },
             async close() {
               await closeOwnedProcess(child, { timeoutMs: 1_000 });
             },
@@ -616,6 +638,71 @@ test("foreground local resources create isolated repositories and remove the ent
     await resources.close();
   }
   await assert.rejects(access(resources.directory));
+});
+
+test("progressive local resources create exactly one isolated repository", async () => {
+  const resources = await createForegroundLocalResources({ repositoryCount: 1 });
+  try {
+    assert.equal(resources.repositories.length, 1);
+    await access(resources.repositories[0].repositoryRoot);
+  } finally {
+    await resources.close();
+  }
+  await assert.rejects(access(resources.directory));
+  await assert.rejects(
+    createForegroundLocalResources({ repositoryCount: 2 }),
+    hasCode("foreground_e2e_local_resources_input_invalid"),
+  );
+});
+
+test("runtime provisions one focused Conductor from one repository", async () => {
+  const repository = {
+    repositoryHandle: "repository-focused",
+    repositoryIdentity: "remote-focused",
+    repositoryRoot: "/repositories/focused",
+    baseBranch: "main",
+    repositoryDisplayName: "Repository focused",
+  };
+  const client = {
+    async command(body) {
+      if (body.kind === "create_conductor") {
+        return {
+          kind: "conductor_created",
+          binding_id: "binding-focused",
+          conductor_id: "conductor-focused",
+          conductor_short_hash: "abc123def456",
+          repository_identity: repository.repositoryIdentity,
+        };
+      }
+      if (body.kind === "start_conductor") {
+        return {
+          kind: "conductor_command_completed",
+          conductor_id: "conductor-focused",
+          command_kind: "start_conductor",
+        };
+      }
+      if (body.kind === "get_desktop_overview") {
+        return { conductors: [{ conductor_id: "conductor-focused", status: "online" }] };
+      }
+      throw new Error("unexpected_podium_command");
+    },
+  };
+
+  const conductors = await startConfiguredConductors({
+    repositories: [repository],
+    client,
+    host: { runningConductor: () => ({ dataRoot: "/runtime/focused" }) },
+    projectId: "project-1",
+    installation: { installationId: "installation-1", organizationId: "organization-1" },
+    config,
+    wait: async () => {},
+    provision: async () => ({ profileId: "profile-focused" }),
+  });
+
+  assert.deepEqual(conductors.map(({ conductorId, profileId }) => ({ conductorId, profileId })), [{
+    conductorId: "conductor-focused",
+    profileId: "profile-focused",
+  }]);
 });
 
 test("runtime provisions every Binding before opening one concurrent Conductor start barrier", async () => {
@@ -975,6 +1062,39 @@ test("foreground reporter emits only closed sanitized Conductor diagnostic field
   );
 });
 
+test("foreground reporter emits a closed progressive acceptance verdict", () => {
+  const lines = [];
+  const reporter = createForegroundReporter({
+    campaignId: "progressive-1",
+    now: () => "2026-01-01T00:00:00.000Z",
+    elapsedMs: () => 10,
+    write: (line) => lines.push(line),
+  });
+
+  reporter.acceptanceVerdict({
+    level: "L1",
+    verdict: "incomplete",
+    reasonCodes: ["progressive_acceptance_level_timeout"],
+    elapsedMs: 5,
+  });
+
+  assert.deepEqual(JSON.parse(lines[0]), {
+    at: "2026-01-01T00:00:00.000Z",
+    campaign_id: "progressive-1",
+    elapsed_ms: 10,
+    event: "foreground_e2e_acceptance_verdict",
+    level: "L1",
+    verdict: "incomplete",
+    reason_codes: ["progressive_acceptance_level_timeout"],
+    level_elapsed_ms: 5,
+  });
+  assert.throws(
+    () => reporter.acceptanceVerdict({ level: "L1", verdict: "passed", reasonCodes: ["unexpected"], elapsedMs: 1 }),
+    hasCode("foreground_e2e_reporter_acceptance_invalid"),
+  );
+  reporter.close();
+});
+
 test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic shape", () => {
   const stdout = new EventEmitter();
   const stderr = new EventEmitter();
@@ -1060,6 +1180,173 @@ test("Conductor runtime log forwarder exposes only a closed sanitized diagnostic
   forwarder.close();
   stdout.emit("data", Buffer.from('{"level":"error","event":"root_profile_missing"}\n', "utf8"));
   assert.equal(diagnostics.length, 4);
+});
+
+test("Conductor runtime log forwarder exposes a bounded selected Root observation", () => {
+  const stdout = new EventEmitter();
+  const observations = [];
+  const forwarder = createConductorRuntimeLogForwarder({
+    conductorId: "conductor-1",
+    stdout,
+    stderr: new EventEmitter(),
+    onObservation: (observation) => observations.push(observation),
+  });
+
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "info",
+    event: "root_candidate_selected",
+    root_issue_id: "root-1",
+    title: "must not cross the observer boundary",
+  })}\n`, "utf8"));
+
+  assert.deepEqual(observations, [{
+    component: "conductor",
+    conductorId: "conductor-1",
+    runtimeEvent: "root_candidate_selected",
+    rootIssueId: "root-1",
+  }]);
+  forwarder.close();
+});
+
+test("Conductor runtime log forwarder exposes a bounded validated Root turn observation", () => {
+  const stdout = new EventEmitter();
+  const observations = [];
+  const forwarder = createConductorRuntimeLogForwarder({
+    conductorId: "conductor-1",
+    stdout,
+    stderr: new EventEmitter(),
+    onObservation: (observation) => observations.push(observation),
+  });
+
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "info",
+    event: "root_turn_validated",
+    root_issue_id: "root-1",
+    contract_family: "universal_root_directive",
+    intent_kind: "create_root_workspace",
+    rationale: "must not cross the observer boundary",
+  })}\n`, "utf8"));
+
+  assert.deepEqual(observations, [{
+    component: "conductor",
+    conductorId: "conductor-1",
+    runtimeEvent: "root_turn_validated",
+    rootIssueId: "root-1",
+    contractFamily: "universal_root_directive",
+    intentKind: "create_root_workspace",
+  }]);
+  forwarder.close();
+});
+
+test("Conductor runtime log forwarder exposes a bounded initial execution read-back", () => {
+  const stdout = new EventEmitter();
+  const observations = [];
+  const forwarder = createConductorRuntimeLogForwarder({
+    conductorId: "conductor-1",
+    stdout,
+    stderr: new EventEmitter(),
+    onObservation: (observation) => observations.push(observation),
+  });
+
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "info",
+    event: "root_initial_execution_read_back",
+    root_issue_id: "root-1",
+    cycle_issue_id: "cycle-1",
+    plan_issue_id: "plan-1",
+    description: "must not cross the observer boundary",
+  })}\n`, "utf8"));
+
+  assert.deepEqual(observations, [{
+    component: "conductor",
+    conductorId: "conductor-1",
+    runtimeEvent: "root_initial_execution_read_back",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    planIssueId: "plan-1",
+  }]);
+  forwarder.close();
+});
+
+test("Conductor runtime log forwarder exposes a bounded Plan DAG seal read-back", () => {
+  const stdout = new EventEmitter();
+  const observations = [];
+  const sealDigest = "a".repeat(64);
+  const forwarder = createConductorRuntimeLogForwarder({
+    conductorId: "conductor-1",
+    stdout,
+    stderr: new EventEmitter(),
+    onObservation: (observation) => observations.push(observation),
+  });
+
+  stdout.emit("data", Buffer.from(`${JSON.stringify({
+    level: "info",
+    event: "plan_dag_seal_read_back",
+    root_issue_id: "root-1",
+    cycle_issue_id: "cycle-1",
+    plan_issue_id: "plan-1",
+    seal_digest: sealDigest,
+    plan: "must not cross the observer boundary",
+  })}\n`, "utf8"));
+
+  assert.deepEqual(observations, [{
+    component: "conductor",
+    conductorId: "conductor-1",
+    runtimeEvent: "plan_dag_seal_read_back",
+    rootIssueId: "root-1",
+    cycleIssueId: "cycle-1",
+    planIssueId: "plan-1",
+    sealDigest,
+  }]);
+  forwarder.close();
+});
+
+test("runtime observation bus is live-only and rejects unbounded observations", () => {
+  const bus = createRuntimeObservationBus();
+  const observations = [];
+  const unsubscribe = bus.subscribe((observation) => observations.push(observation));
+  const selected = {
+    component: "conductor",
+    conductorId: "conductor-1",
+    runtimeEvent: "root_candidate_selected",
+    rootIssueId: "root-1",
+  };
+
+  bus.publish(selected);
+  bus.publish({
+    ...selected,
+    runtimeEvent: "root_turn_validated",
+    contractFamily: "universal_root_directive",
+    intentKind: "wait",
+  });
+  const initialExecution = {
+    ...selected,
+    runtimeEvent: "root_initial_execution_read_back",
+    cycleIssueId: "cycle-1",
+    planIssueId: "plan-1",
+  };
+  bus.publish(initialExecution);
+  const planDagSeal = {
+    ...selected,
+    runtimeEvent: "plan_dag_seal_read_back",
+    cycleIssueId: "cycle-1",
+    planIssueId: "plan-1",
+    sealDigest: "a".repeat(64),
+  };
+  bus.publish(planDagSeal);
+  assert.throws(
+    () => bus.publish({ ...selected, body: "must not be accepted" }),
+    hasCode("foreground_e2e_runtime_observation_invalid"),
+  );
+  unsubscribe();
+  bus.publish(selected);
+
+  assert.deepEqual(observations, [selected, {
+    ...selected,
+    runtimeEvent: "root_turn_validated",
+    contractFamily: "universal_root_directive",
+    intentKind: "wait",
+  }, initialExecution, planDagSeal]);
 });
 
 test("production Root Index transport observations enforce the one-request normal budget and one-request fallback budget", () => {

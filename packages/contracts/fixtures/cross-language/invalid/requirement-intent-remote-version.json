@@ -1,0 +1,44 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RequirementAndCommentIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-1",
+    "kind": "requirement_and_comment_intent",
+    "semantic_gate": "requirement_and_comment",
+    "intent_id": "intent-1",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-1",
+    "model_turn": {
+      "turn_record_id": "model-turn-1",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-1",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": { "status": "unavailable", "reason": "provider_omitted" },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-1",
+    "rationale": "Answer the comment.",
+    "evidence_refs": [],
+    "consumed_input_ids": ["input-1"],
+    "comment_dispositions": [
+      {
+        "kind": "answer_only",
+        "source_input_id": "input-1",
+        "source": {
+          "kind": "comment_thread_state",
+          "comment_id": "comment-1",
+          "thread_root_comment_id": "comment-1",
+          "thread_state": "unresolved",
+          "remote_version": "remote-1"
+        },
+        "answer": "No requirement change is needed."
+      }
+    ],
+    "intent": { "kind": "answer_comments", "reason": "no_requirement_change" }
+  }
+}

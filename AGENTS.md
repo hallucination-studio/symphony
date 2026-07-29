@@ -32,10 +32,11 @@ This file contains the repository-wide working rules for coding agents.
   and `podium.db`. Linear SDK types and credentials must not cross into
   Conductor.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
-  root state from active and archived Linear facts plus Git, hosts Root
-  Reconciliation, manages one Git worktree per Root, and materializes closed
-  Root Reconciler next actions. It does not run a model or interpret Stage
-  Results and user comments to choose the next action.
+  root state from active and archived Linear facts plus Git, runs deterministic
+  Root convergence, manages one Git worktree per Root, and materializes closed
+  Root semantic intents. It does not run a model or replace Root Reconciler at
+  a semantic gate; it does interpret closed Stage Results and native facts to
+  execute uniquely derivable mechanical transitions.
 - Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
   Team workflow. Findings and Human overrides are native Linear facts;
   attempts, budgets, and progress are derived from native Linear/Git facts.
@@ -52,10 +53,12 @@ This file contains the repository-wide working rules for coding agents.
   the current command and new/replacement/tombstone context fragments. Root,
   Plan, Work, and Verify maintain isolated Provider-visible baselines and
   opaque continuations.
-- Root Reconciler is the only model-driven workflow next-step decision role.
+- Root Reconciler is the only model-driven workflow semantic-decision role.
   It reads the complete active and archived Root Tree, handles ordinary human
-  comments with native replies/receipts, and returns one closed, versioned
-  next action.
+  comments with native replies/receipts, and returns one closed, versioned,
+  gate-specific semantic intent. Workspace creation, DAG materialization,
+  ready Work selection, Stage dispatch, waits, and uniquely derivable lifecycle
+  transitions are deterministic Conductor responsibilities.
   Plan, Work, and Verify return strong typed Results and do not mutate the DAG
   or create Human Actions directly.
 - Human Action stays in Root-hosted native comment threads. Symphony writes

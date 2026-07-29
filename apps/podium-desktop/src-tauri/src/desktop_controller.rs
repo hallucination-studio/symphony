@@ -390,6 +390,7 @@ impl DesktopController {
             .or_else(|| bundled_executable("conductor"))
             .unwrap_or_else(|| PathBuf::from("conductor"));
         let mut command = Command::new(executable);
+        clear_and_allowlist_child_environment(&mut command, std::env::vars_os());
         let instance_id = uuid_like();
         let mut channel = UnixStream::connect(&self.conductor_socket_path)
             .map_err(|_| ControllerError::ConductorChannelRegistrationFailed)?;
@@ -512,6 +513,21 @@ fn backend_command(app: &AppHandle) -> Result<Command, ControllerError> {
         )
         .stderr(Stdio::inherit());
     Ok(command)
+}
+
+fn clear_and_allowlist_child_environment<I>(command: &mut Command, environment: I)
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    const ALLOWED: [&str; 9] =
+        ["HOME", "LANG", "LC_ALL", "PATH", "SSH_AUTH_SOCK", "TEMP", "TMP", "TMPDIR", "USERPROFILE"];
+    let allowed = ALLOWED.into_iter().collect::<HashSet<_>>();
+    command.env_clear();
+    command.envs(
+        environment
+            .into_iter()
+            .filter(|(key, _)| key.to_str().is_some_and(|key| allowed.contains(key))),
+    );
 }
 
 fn bundled_executable(name: &str) -> Option<PathBuf> {
@@ -741,5 +757,33 @@ mod tests {
         for generation in active.values_mut() {
             generation.process.observed_exit().unwrap();
         }
+    }
+
+    #[test]
+    fn conductor_child_environment_keeps_only_explicit_base_variables() {
+        let mut command = Command::new("conductor");
+        clear_and_allowlist_child_environment(
+            &mut command,
+            [
+                ("PATH".into(), "/usr/bin".into()),
+                ("HOME".into(), "/home/operator".into()),
+                ("SSH_AUTH_SOCK".into(), "/tmp/agent.sock".into()),
+                ("SYMPHONY_LINEAR_CLIENT_SECRET".into(), "must-not-cross".into()),
+                ("UNRELATED_PARENT_SETTING".into(), "must-not-cross".into()),
+            ],
+        );
+
+        let environment = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(environment.get(std::ffi::OsStr::new("PATH")), Some(&"/usr/bin".into()));
+        assert_eq!(environment.get(std::ffi::OsStr::new("HOME")), Some(&"/home/operator".into()));
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
+            Some(&"/tmp/agent.sock".into()),
+        );
+        assert!(!environment.contains_key(std::ffi::OsStr::new("SYMPHONY_LINEAR_CLIENT_SECRET")));
+        assert!(!environment.contains_key(std::ffi::OsStr::new("UNRELATED_PARENT_SETTING")));
     }
 }

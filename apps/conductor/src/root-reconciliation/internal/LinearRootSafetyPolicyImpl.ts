@@ -1,4 +1,5 @@
 import type { LinearWorkflowTreeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import { currentWorkflowIssueProof, currentWorkflowStatusActor } from "./CurrentIssueProvenance.js";
 import type { RootSafetyPolicyInterface, RootSafetyValidationResult } from "../api/RootSafetyPolicyInterface.js";
 import type { DiscoveredRoot } from "../api/RootModels.js";
 import type { MechanicalViolation } from "../api/RootReconciliationContracts.js";
@@ -42,7 +43,7 @@ function mechanicalViolations(
     issue.issue_kind === "cycle" && issue.parent_issue_id === rootIssueId && !issue.is_archived && !isTerminalCycle(issue),
   );
   const violations: MechanicalViolation[] = [];
-  if (activeCycles.length > 1) {
+  if (activeCycles.length > 1 && !isAuthorizedStageRecoveryPair(tree, activeCycles)) {
     violations.push({
       violationKind: "multiple_nonterminal_cycles",
       sourceIssueIds: activeCycles.map(({ issue_id }) => issue_id),
@@ -59,20 +60,58 @@ function mechanicalViolations(
     });
   }
 
-  const issuesById = new Map(tree.issues.map((issue) => [issue.issue_id, issue]));
-  for (const relation of tree.relations) {
-    const source = issuesById.get(relation.source_issue_id);
-    const target = issuesById.get(relation.target_issue_id);
-    if (source?.is_archived || target?.is_archived) {
-      violations.push({
-        violationKind: "archived_dependency",
-        sourceIssueIds: [relation.source_issue_id, relation.target_issue_id],
-        summary: "An active relation references an archived Issue.",
-      });
-    }
-  }
-
   return violations;
+}
+
+function isAuthorizedStageRecoveryPair(
+  tree: LinearWorkflowTreeSnapshot,
+  activeCycles: LinearWorkflowTreeSnapshot["issues"],
+): boolean {
+  if (activeCycles.length !== 2) return false;
+  const [predecessor, successor] = [...activeCycles]
+    .sort((left, right) => left.created_at.localeCompare(right.created_at) || compareCodePoints(left.issue_id, right.issue_id));
+  if (!predecessor || !successor || successor.status_name !== "Planning" ||
+      !successor.labels.includes("Interrupted Stage Recovery") ||
+      !successor.labels.includes("symphony:kind/cycle")) return false;
+  const children = tree.issues.filter(({ parent_issue_id }) => parent_issue_id === predecessor.issue_id);
+  const source = interruptedWorkflowStage(predecessor.status_name, children);
+  const directProof = currentWorkflowIssueProof({ tree, issue: successor, requiredActivityKinds: [] });
+  const sourceActor = source && !directProof ? currentWorkflowStatusActor({ tree, issue: source }) : undefined;
+  const authorized = directProof !== undefined || (sourceActor !== undefined && currentWorkflowIssueProof({
+    tree,
+    issue: successor,
+    requiredActivityKinds: [],
+    expectedActorId: sourceActor,
+  }) !== undefined);
+  if (!authorized) return false;
+  const active = children.filter(({ is_archived }) => !is_archived);
+  if (predecessor.status_name === "Executing") {
+    return children.filter(({ issue_kind, status_name }) =>
+      issue_kind === "work" && status_name === "Interrupted").length === 1 &&
+      active.every(({ issue_kind, status_name }) => issue_kind !== "work" || status_name !== "In Progress");
+  }
+  if (predecessor.status_name === "Verifying") {
+    return children.filter(({ issue_kind, status_name }) =>
+      issue_kind === "verify" && status_name === "Interrupted").length === 1 &&
+      children.filter(({ issue_kind }) => issue_kind === "verify").length === 1 &&
+      children.filter(({ issue_kind }) => issue_kind === "work").every(({ status_name }) => status_name === "Done");
+  }
+  return false;
+}
+
+function interruptedWorkflowStage(
+  cycleStatus: string,
+  children: LinearWorkflowTreeSnapshot["issues"],
+): LinearWorkflowTreeSnapshot["issues"][number] | undefined {
+  const role = cycleStatus === "Executing" ? "work" : cycleStatus === "Verifying" ? "verify" : undefined;
+  if (!role) return undefined;
+  const interrupted = children.filter(({ issue_kind, status_name }) =>
+    issue_kind === role && status_name === "Interrupted");
+  return interrupted.length === 1 ? interrupted[0] : undefined;
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isTerminalCycle(issue: LinearWorkflowTreeSnapshot["issues"][number]): boolean {

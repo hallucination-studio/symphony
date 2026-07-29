@@ -47,6 +47,26 @@ export interface EvidenceReference {
   sourceKind: "linear_issue" | "linear_comment" | "git" | "check" | "result";
 }
 
+export interface ActualChanges {
+  baselineRevision: string;
+  observedHeadRevision: string;
+  changedPaths: string[];
+  summary: string;
+}
+
+export interface CheckResult {
+  checkKey: string;
+  commandOrMethod: string;
+  outcome: "passed" | "failed" | "not_run";
+  evidenceRef: EvidenceReference;
+}
+
+export interface VerifyCriterionResult {
+  criterionKey: string;
+  outcome: "passed" | "failed" | "not_run";
+  summary: string;
+}
+
 export interface FindingProposal {
   findingId: string;
   category: "product" | "code" | "test" | "infra" | "requirement" | "policy";
@@ -61,12 +81,11 @@ export type StageResultOutcomeKind =
   | "work_completed" | "work_blocked" | "work_plan_assumption_invalid" | "work_scope_conflict"
   | "work_permission_required" | "work_information_required"
   | "verify_passed" | "verify_changes_required" | "verify_inconclusive"
-  | "verify_plan_contract_violation" | "verify_blocked"
-  | "budget_exhausted" | "canceled" | "execution_failed";
+  | "verify_plan_contract_violation" | "verify_blocked";
 
-export type ModelTurnOutcome =
-  | "directive_accepted" | "transport_failed" | "timed_out" | "schema_invalid" | "stale_output"
-  | StageResultOutcomeKind;
+export type RootModelTurnOutcome =
+  | "directive_accepted" | "intent_accepted" | "transport_failed" | "timed_out" | "schema_invalid" | "stale_output"
+  | "canceled";
 
 export type TurnUsage =
   | { status: "measured"; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }
@@ -80,7 +99,7 @@ export interface RootReconcilerModelTurnRecord {
   reconcilerTurnId: string;
   invocationState: "confirmed" | "ambiguous";
   model: string;
-  outcome: ModelTurnOutcome;
+  outcome: RootModelTurnOutcome;
   usage: TurnUsage;
   terminalAt: string;
 }
@@ -122,8 +141,27 @@ export interface StageResultProjection {
   risks?: string[];
   requiredPermissions?: string[];
   evidenceRefs?: EvidenceReference[];
+  missingQuestions?: string[];
+  impact?: string;
+  sanitizedReason?: string;
+  attempts?: string[];
+  budgetKind?: string;
+  attemptedApproaches?: string[];
+  resumableFacts?: EvidenceReference[];
+  retryable?: boolean;
+  actualChanges?: ActualChanges;
+  checks?: CheckResult[];
+  artifacts?: EvidenceReference[];
+  discoveredFacts?: string[];
+  blockerKind?: string;
+  failedCheckEvidence?: EvidenceReference[];
+  suggestedDagChanges?: string[];
+  acceptanceResults?: VerifyCriterionResult[];
+  resolvedFindingIds?: string[];
+  missingEvidence?: string[];
+  attemptedMethods?: string[];
   changedPaths?: string[];
-  commitRevision?: string;
+  observedHeadRevision?: string;
   verifyConclusion?: "passed" | "changes_required" | "inconclusive" | "escalate_human";
   findings?: FindingProposal[];
   verifiedRevision?: string;

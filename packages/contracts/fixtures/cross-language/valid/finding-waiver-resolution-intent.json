@@ -1,0 +1,53 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RecoveryStrategyIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-waiver-resolution-1",
+    "kind": "recovery_strategy_intent",
+    "semantic_gate": "recovery_strategy",
+    "intent_id": "intent-waiver-resolution-1",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-waiver-resolution-1",
+    "model_turn": {
+      "turn_record_id": "model-turn-waiver-resolution-1",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-waiver-resolution-1",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": {
+        "status": "unavailable",
+        "reason": "provider_omitted"
+      },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-waiver-resolution-1",
+    "rationale": "The authorized human explicitly accepted the complete Finding waiver request.",
+    "evidence_refs": [
+      {
+        "reference_id": "waiver-reply-1",
+        "source_kind": "linear_comment"
+      }
+    ],
+    "consumed_input_ids": ["waiver-reply-input-1"],
+    "comment_dispositions": [
+      {
+        "kind": "applied",
+        "source_input_id": "waiver-reply-input-1",
+        "source": {
+          "kind": "comment_body",
+          "comment_id": "waiver-reply-1",
+          "comment_body_digest": "waiver-reply-digest-1"
+        },
+        "summary": "The complete Finding waiver was accepted and will be applied to the unchanged targets."
+      }
+    ],
+    "intent": {
+      "kind": "resolve_finding_waiver",
+      "resolution": "accepted"
+    }
+  }
+}

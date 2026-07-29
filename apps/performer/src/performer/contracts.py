@@ -15,8 +15,8 @@ def validate(name: str, value: Any) -> Any:
             "PerformerProfileControlMetadata": "Performer Profile control metadata",
             "PerformerProfileControlResult": "Performer Profile control result",
             "RootDirective": "Root directive",
-            "PlanResult": "Plan result",
-            "WorkResult": "Work result",
-            "VerifyResult": "Verify result",
+            "PlanTurnResponse": "Plan turn response",
+            "WorkTurnResponse": "Work turn response",
+            "VerifyTurnResponse": "Verify turn response",
         }
         raise ValueError(f"invalid {labels.get(name, name)}") from exc

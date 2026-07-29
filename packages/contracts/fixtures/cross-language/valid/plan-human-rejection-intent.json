@@ -1,0 +1,50 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PlanHumanDecisionIntent",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-4",
+    "kind": "plan_human_decision_intent",
+    "semantic_gate": "plan_human_decision",
+    "intent_id": "intent-4",
+    "root_issue_id": "root-1",
+    "reconciler_session_id": "root-session-1",
+    "reconciler_turn_id": "root-turn-4",
+    "model_turn": {
+      "turn_record_id": "model-turn-4",
+      "role": "root_reconciler",
+      "root_issue_id": "root-1",
+      "reconciler_session_id": "root-session-1",
+      "reconciler_turn_id": "root-turn-4",
+      "invocation_state": "confirmed",
+      "model": "test-model",
+      "outcome": "intent_accepted",
+      "usage": { "status": "unavailable", "reason": "provider_omitted" },
+      "terminal_at": "2026-07-29T00:00:00Z"
+    },
+    "based_on_target_root_digest": "root-digest-4",
+    "rationale": "The human rejected the Plan and changed the requested scope.",
+    "evidence_refs": [
+      { "reference_id": "approval-reply-2", "source_kind": "linear_comment" }
+    ],
+    "consumed_input_ids": ["input-4"],
+    "comment_dispositions": [
+      {
+        "kind": "applied",
+        "source_input_id": "input-4",
+        "source": {
+          "kind": "comment_body",
+          "comment_id": "approval-reply-2",
+          "comment_body_digest": "approval-digest-2"
+        },
+        "summary": "The Plan was rejected with a confirmed scope change."
+      }
+    ],
+    "intent": {
+      "kind": "reject_plan",
+      "reason": "The requested scope has changed.",
+      "consequence": "continue_with_fresh_plan",
+      "root_requirement_impact": "requires_update",
+      "requested_changes": ["Include the newly requested workflow."]
+    }
+  }
+}

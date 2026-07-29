@@ -425,8 +425,8 @@ export class LinearGatewayProtocolHandlerImpl {
       command.target.targetIssueId,
       command.target.expectedRemoteVersion,
     ) &&
-      (command.target.expectedStatusId === undefined || target?.statusId === command.target.expectedStatusId) &&
-      (command.target.expectedParentIssueId === undefined || target?.parentIssueId === command.target.expectedParentIssueId) &&
+      (!("expectedStatusId" in command.target) || command.target.expectedStatusId === undefined || target?.statusId === command.target.expectedStatusId) &&
+      (!("expectedParentIssueId" in command.target) || command.target.expectedParentIssueId === undefined || target?.parentIssueId === command.target.expectedParentIssueId) &&
       (command.target.expectedIsArchived === undefined || target?.isArchived === command.target.expectedIsArchived)
       ? undefined : { kind: "precondition_conflict" };
   }
@@ -490,12 +490,14 @@ function workflowReadBackIssueId(command: WorkflowMutationCommand): string {
 }
 
 type NativeCommentMutation = Extract<WorkflowMutationCommand, {
-  kind: "create_comment_reply" | "set_comment_receipt_reaction" | "set_comment_thread_state";
+  kind: "create_comment_reply" | "remove_comment_receipt_reaction" |
+    "create_comment_receipt_reaction" | "set_comment_thread_state";
 }>;
 
 function isNativeCommentMutation(command: WorkflowMutationCommand): command is NativeCommentMutation {
   return command.kind === "create_comment_reply" ||
-    command.kind === "set_comment_receipt_reaction" ||
+    command.kind === "remove_comment_receipt_reaction" ||
+    command.kind === "create_comment_receipt_reaction" ||
     command.kind === "set_comment_thread_state";
 }
 
@@ -511,11 +513,17 @@ function nativeCommentPreconditionsMatch(
         source.threadRootCommentId === command.expectedThreadRootCommentId &&
         source.threadState === command.expectedThreadState;
     }
-    case "set_comment_receipt_reaction": {
+    case "remove_comment_receipt_reaction": {
       const source = byId.get(command.sourceCommentId);
       return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
         source.threadRootCommentId === command.threadRootCommentId &&
         symphonyReceipt(source) === command.expectedReceipt;
+    }
+    case "create_comment_receipt_reaction": {
+      const source = byId.get(command.sourceCommentId);
+      return source?.remoteVersion === command.expectedSourceCommentRemoteVersion &&
+        source.threadRootCommentId === command.threadRootCommentId &&
+        symphonyReceipt(source) === "none";
     }
     case "set_comment_thread_state": {
       const source = byId.get(command.sourceCommentId);

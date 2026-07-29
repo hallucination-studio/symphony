@@ -30,12 +30,15 @@ export type RootWorktreeGateResult =
   | {
     kind: "fresh_missing";
     repositoryIdentity: string;
+    generationOrdinal: number;
+    branch: string;
     baseBranch: string;
     baseRevision: string;
   }
   | {
     kind: "recoverable_missing";
     repositoryIdentity: string;
+    generationOrdinal: number;
     branch: string;
     headRevision: string;
   }
@@ -43,7 +46,7 @@ export type RootWorktreeGateResult =
     kind: "execution_generation_invalid";
     repositoryIdentity: string;
     expectedBranch: string;
-    reason: "worktree_identity_conflict" | "branch_missing" | "required_commit_unreachable" | "git_evidence_incomplete";
+    reason: "worktree_identity_conflict" | "generation_branch_conflict" | "branch_missing" | "required_commit_unreachable" | "git_evidence_incomplete";
   };
 
 export type RootWorktreeGateInspection =
@@ -79,6 +82,7 @@ export interface GitWorkspaceProvisionerInterface {
     rootIssueId: string;
     rootIdentifier: string;
     baseBranch: string;
+    generationOrdinal: number;
     executionKind: "fresh" | "existing";
     requiredRevisions: string[];
   }): Promise<RootWorktreeGateInspection>;
@@ -87,6 +91,7 @@ export interface GitWorkspaceProvisionerInterface {
     rootIssueId: string;
     rootIdentifier: string;
     baseBranch: string;
+    generationOrdinal: number;
     expectedGate: Extract<RootWorktreeGateResult, { kind: "fresh_missing" | "recoverable_missing" }>;
   }): Promise<ValidRootWorktreeGateInspection>;
   readCommitUrl(input: {

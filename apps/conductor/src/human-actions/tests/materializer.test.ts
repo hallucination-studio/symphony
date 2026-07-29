@@ -5,18 +5,16 @@ import type {
   LinearWorkflowMutationCommand,
   LinearWorkflowTreeSnapshot,
 } from "../../linear-gateway/api/LinearGatewayInterface.js";
-import type {
-  CreateHumanActionAction,
-  RootReconciliationView,
-} from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { RootReconciliationView } from "../../root-reconciliation/api/RootReconciliationContracts.js";
+import type { HumanActionRequest } from "../api/HumanActionMaterializerInterface.js";
 import { LinearHumanActionMaterializerImpl } from "../internal/LinearHumanActionMaterializerImpl.js";
 
 test("creates one explicit Human Action thread and moves the Root to Needs Approval", async () => {
   const linear = new FakeLinear();
   const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
-    rootDirectiveId: "directive-1",
+    operationId: "directive-1",
     view: view(linear.tree),
-    action: planApproval(linear.tree),
+    request: planApproval(),
   });
 
   assert.deepEqual(result, { kind: "materialized", requestCommentId: "request-1" });
@@ -43,9 +41,9 @@ test("creates one explicit Human Action thread and moves the Root to Needs Appro
 test("asks for information in the same Markdown protocol and moves the Root to Needs Info", async () => {
   const linear = new FakeLinear();
   const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
-    rootDirectiveId: "directive-information",
+    operationId: "directive-information",
     view: view(linear.tree),
-    action: information(linear.tree),
+    request: information(),
   });
 
   assert.equal(result.kind, "materialized");
@@ -55,13 +53,29 @@ test("asks for information in the same Markdown protocol and moves the Root to N
   assert.equal(linear.tree.issues[0]!.status_name, "Needs Info");
 });
 
+test("asks for a Root decision without misclassifying it as permission", async () => {
+  const linear = new FakeLinear();
+  const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
+    operationId: "terminal-review-root-decision",
+    view: view(linear.tree),
+    request: rootDecision(),
+  });
+
+  assert.equal(result.kind, "materialized");
+  const request = linear.tree.comments[0]!;
+  assert.match(request.body, /^## 需要你做出 Root 决策/mu);
+  assert.doesNotMatch(request.body, /需要你授权/u);
+  assert.match(request.body, /继续缩小范围/u);
+  assert.equal(linear.tree.issues[0]!.status_name, "Needs Approval");
+});
+
 test("does not invent a human mention outside the workflow contract", async () => {
   const linear = new FakeLinear();
 
   const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
-    rootDirectiveId: "directive-no-human",
+    operationId: "directive-no-human",
     view: view(linear.tree),
-    action: planApproval(linear.tree),
+    request: planApproval(),
   });
 
   assert.equal(result.kind, "materialized");
@@ -75,9 +89,9 @@ test("retries a partial request without duplicating the comment and converges Ro
   linear.failStatusWrite = true;
 
   const first = await materializer.materialize({
-    rootDirectiveId: "directive-partial",
+    operationId: "directive-partial",
     view: view(linear.tree),
-    action: planApproval(linear.tree),
+    request: planApproval(),
   });
   assert.deepEqual(first, {
     kind: "failed",
@@ -87,29 +101,22 @@ test("retries a partial request without duplicating the comment and converges Ro
 
   linear.failStatusWrite = false;
   const second = await materializer.materialize({
-    rootDirectiveId: "directive-partial",
+    operationId: "directive-partial",
     view: view(linear.tree),
-    action: planApproval(linear.tree),
+    request: planApproval(),
   });
   assert.equal(second.kind, "materialized");
   assert.equal(linear.tree.comments.length, 1);
   assert.equal(linear.tree.issues[0]!.status_name, "Needs Approval");
 });
 
-test("rejects stale or invalid native Human Action targets before writing", async () => {
+test("rejects invalid native Human Action targets before writing", async () => {
   const linear = new FakeLinear();
   const materializer = new LinearHumanActionMaterializerImpl(linear);
-  const stale = await materializer.materialize({
-    rootDirectiveId: "directive-1",
-    view: view(linear.tree),
-    action: { ...planApproval(linear.tree), expectedRootRemoteVersion: "stale" },
-  });
-  assert.equal(stale.kind, "failed");
-
   const invalid = await materializer.materialize({
-    rootDirectiveId: "directive-2",
+    operationId: "directive-2",
     view: view(linear.tree),
-    action: { ...planApproval(linear.tree), targetIssueIds: ["cycle-1"] },
+    request: { ...planApproval(), targetIssueIds: ["cycle-1"] },
   });
   assert.equal(invalid.kind, "failed");
   assert.deepEqual(linear.mutations, []);
@@ -119,9 +126,9 @@ test("fails closed when a native comment write is not confirmed", async () => {
   const linear = new FakeLinear();
   linear.unconfirmed = true;
   const result = await new LinearHumanActionMaterializerImpl(linear).materialize({
-    rootDirectiveId: "directive-1",
+    operationId: "directive-1",
     view: view(linear.tree),
-    action: planApproval(linear.tree),
+    request: planApproval(),
   });
   assert.deepEqual(result, {
     kind: "failed",
@@ -130,13 +137,10 @@ test("fails closed when a native comment write is not confirmed", async () => {
   });
 });
 
-function planApproval(tree: LinearWorkflowTreeSnapshot): CreateHumanActionAction {
+function planApproval(): HumanActionRequest {
   return {
-    kind: "create_human_action",
-    rootIssueId: "root-1",
     actionKind: "plan_approval",
     targetIssueIds: ["plan-1"],
-    expectedRootRemoteVersion: tree.issues[0]!.remote_version,
     question: "请审批当前计划。",
     context: "批准后才会开始创建 Work 与 Verify 节点。",
     options: ["批准", "拒绝"],
@@ -144,16 +148,24 @@ function planApproval(tree: LinearWorkflowTreeSnapshot): CreateHumanActionAction
   };
 }
 
-function information(tree: LinearWorkflowTreeSnapshot): CreateHumanActionAction {
+function information(): HumanActionRequest {
   return {
-    kind: "create_human_action",
-    rootIssueId: "root-1",
     actionKind: "information",
     targetIssueIds: ["root-1"],
-    expectedRootRemoteVersion: tree.issues[0]!.remote_version,
     question: "请提供目标发布日期和允许变更的目录。",
     context: "这些信息无法从当前 Linear 与 Git facts 推导。",
     options: [],
+    evidenceRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }],
+  };
+}
+
+function rootDecision(): HumanActionRequest {
+  return {
+    actionKind: "root_decision",
+    targetIssueIds: ["root-1"],
+    question: "请选择 Root 的下一步。",
+    context: "当前成功 Cycle 仍未覆盖一个产品取舍。",
+    options: ["继续缩小范围", "结束 Root"],
     evidenceRefs: [{ referenceId: "root-1", sourceKind: "linear_issue" }],
   };
 }

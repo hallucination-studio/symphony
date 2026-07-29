@@ -6,12 +6,8 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Literal
 
-from performer.backends.provider_backend_interface import (
-    ProviderBackendError,
-    ProviderTurnCanceled,
-    ProviderTurnDeadlineExpired,
-)
-from performer.session_runtime.manager import SessionError, SessionManager
+from performer.contracts import validate
+from performer.session_runtime.manager import SessionError, SessionManager, SessionTurnFailure
 
 StageRole = Literal["plan", "work", "verify"]
 
@@ -58,10 +54,16 @@ class RoleExecutionRuntime:
         )
         _validate_turn_scope(role, request)
         if cancel_event.is_set():
-            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn was canceled."}, self._now(), record)
+            return _terminal(request, role, _stage_runtime_failure(
+                "turn_canceled", "The turn was canceled.",
+                _retained_continuity(record, request, accepted=False),
+            ), self._now(), record)
         deadline = _deadline(request)
         if deadline is not None and deadline <= self._now():
-            return _terminal(request, role, {"kind": "canceled", "sanitized_reason": "The turn deadline expired."}, self._now(), record)
+            return _terminal(request, role, _stage_runtime_failure(
+                "turn_deadline_exceeded", "The turn deadline expired.",
+                _retained_continuity(record, request, accepted=False),
+            ), self._now(), record)
         output: dict[str, Any] | None = None
         continuity: dict[str, str] | None = None
         try:
@@ -72,54 +74,36 @@ class RoleExecutionRuntime:
                 cancel_event=cancel_event,
             )
             result = _provider_output(output, role)
-        except ProviderTurnCanceled as error:
-            continuity = _error_continuity(error, record, request)
-            result = {
-                "kind": "execution_failed",
-                "error_code": "provider_append_acceptance_unknown",
-                "sanitized_reason": error.sanitized_reason,
-                "retryable": True,
-                **({"failure_category": "canceled"} if role == "root_reconciler" else {}),
-            }
-        except ProviderTurnDeadlineExpired as error:
-            continuity = _error_continuity(error, record, request)
-            result = {
-                "kind": "execution_failed",
-                "error_code": _continuity_error_code(continuity),
-                "sanitized_reason": "The turn deadline expired.",
-                "retryable": False,
-                **({"failure_category": "timed_out"} if role == "root_reconciler" else {}),
-            }
-        except ProviderBackendError as error:
-            continuity = _error_continuity(error, record, request)
-            category = "schema_invalid" if error.code == "provider_schema_unsupported" else "transport_failed"
-            result = {
-                "kind": "execution_failed",
-                "error_code": error.code if category == "schema_invalid" else _continuity_error_code(continuity),
-                "sanitized_reason": error.sanitized_reason,
-                "retryable": error.retryable,
-                **({"failure_category": category} if role == "root_reconciler" else {}),
-            }
+        except SessionTurnFailure as error:
+            continuity = error.continuity
+            if error.provider_was_accepted:
+                output = {"usage": error.provider_usage} if error.provider_usage is not None else {}
+            result = {"kind": "execution_failed", "error_code": error.code,
+                      "sanitized_reason": error.sanitized_reason, "retryable": error.retryable,
+                      **({"failure_category": error.failure_category} if role == "root_reconciler" else {})} if role == "root_reconciler" else _stage_runtime_failure(
+                error.code, error.sanitized_reason, continuity, retryable=error.retryable,
+            )
         except (KeyError, TypeError, ValueError, SessionError) as error:
             continuity = _error_continuity(error, record, request, accepted=output is not None)
-            result = {
-                "kind": "execution_failed",
-                "error_code": _continuity_error_code(continuity),
-                "sanitized_reason": "The Performer could not validate the turn result.",
-                "retryable": False,
-                **({"failure_category": "schema_invalid"} if role == "root_reconciler" else {}),
-            }
+            code = _continuity_error_code(continuity)
+            result = {"kind": "execution_failed", "error_code": code,
+                      "sanitized_reason": "The Performer could not validate the turn result.", "retryable": False,
+                      **({"failure_category": "schema_invalid"} if role == "root_reconciler" else {})} if role == "root_reconciler" else _stage_runtime_failure(
+                "provider_output_schema_invalid", "The Performer could not validate the turn result.", continuity,
+            )
         except Exception as error:
             continuity = _error_continuity(error, record, request, accepted=output is not None)
-            result = {
-                "kind": "execution_failed",
-                "error_code": _continuity_error_code(continuity),
-                "sanitized_reason": "The Performer could not complete the turn.",
-                "retryable": False,
-                **({"failure_category": "transport_failed"} if role == "root_reconciler" else {}),
-            }
-        if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed"}:
-            result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."}
+            code = _continuity_error_code(continuity)
+            result = {"kind": "execution_failed", "error_code": code,
+                      "sanitized_reason": "The Performer could not complete the turn.", "retryable": False,
+                      **({"failure_category": "transport_failed"} if role == "root_reconciler" else {})} if role == "root_reconciler" else _stage_runtime_failure(
+                code, "The Performer could not complete the turn.", continuity,
+            )
+        if cancel_event.is_set() and result.get("kind") not in {"canceled", "execution_failed", "runtime_failure"}:
+            result = {"kind": "canceled", "sanitized_reason": "The turn was canceled."} if role == "root_reconciler" else _stage_runtime_failure(
+                "turn_canceled", "The turn was canceled.",
+                _retained_continuity(record, request, accepted=output is not None),
+            )
         if result.get("kind") == "execution_failed":
             result["continuity"] = continuity or _retained_continuity(record, request, accepted=True)
         return _terminal(request, role, result, self._now(), record, output if isinstance(output, dict) else None)
@@ -153,6 +137,39 @@ def _continuity_error_code(continuity: dict[str, str]) -> str:
     if continuity.get("kind") == "closed":
         return "provider_session_lost" if continuity.get("append_outcome") == "session_lost" else "provider_append_acceptance_unknown"
     return "provider_output_invalid" if continuity.get("append_outcome") == "accepted" else "provider_append_not_accepted"
+
+
+def _stage_runtime_failure(
+    error_code: str,
+    sanitized_reason: str,
+    continuity: dict[str, str] | None,
+    *,
+    retryable: bool = False,
+) -> dict[str, Any]:
+    normalized_code = {
+        "provider_turn_deadline_expired": "turn_deadline_exceeded",
+        "provider_turn_canceled": "turn_canceled",
+        "provider_output_invalid": "provider_output_schema_invalid",
+    }.get(error_code, error_code)
+    if normalized_code in {"turn_canceled", "target_invalidated", "session_closing"}:
+        failure_kind = "canceled"
+    elif normalized_code == "turn_deadline_exceeded":
+        failure_kind = "deadline_exceeded"
+    elif normalized_code.endswith("_budget_exhausted"):
+        failure_kind = "budget_exhausted"
+    elif normalized_code.startswith("provider_output_"):
+        failure_kind = "output_invalid"
+    else:
+        failure_kind = "provider_failure"
+    return {
+        "kind": "runtime_failure",
+        "failure_kind": failure_kind,
+        "error_code": normalized_code,
+        "sanitized_reason": sanitized_reason,
+        "retryable": retryable,
+        "action_required": "root_reconciliation",
+        "continuity": continuity or {"kind": "closed", "append_outcome": "acceptance_unknown"},
+    }
 
 
 def _validate_turn_scope(role: str, request: dict[str, Any]) -> None:
@@ -219,7 +236,10 @@ def _terminal(
         return {
             "protocol_version": "1",
             "request_id": request["request_id"],
-            "root_directive_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}",
+            "kind": _root_intent_kind(request),
+            "semantic_gate": _root_command(request)["semantic_gate"],
+            "intent_id": f"{request['root_issue_id']}:{request['reconciler_turn_id']}:intent",
+            "root_issue_id": request["root_issue_id"],
             "reconciler_session_id": request["reconciler_session_id"],
             "reconciler_turn_id": request["reconciler_turn_id"],
             "model_turn": model_turn,
@@ -227,8 +247,8 @@ def _terminal(
             "rationale": result["rationale"],
             "evidence_refs": result["evidence_refs"],
             "consumed_input_ids": result["consumed_input_ids"],
-            "comment_replies": result["comment_replies"],
-            "action": result["action"],
+            "comment_dispositions": result["comment_dispositions"],
+            "intent": result["intent"],
         }
     payload = {
         "protocol_version": "1",
@@ -242,8 +262,8 @@ def _terminal(
         "target_issue_id": request.get("target_issue_id"),
         "observed_tree_digest": request["observed_tree_digest"],
         "context_digest": request.get("context_digest"),
-        "model_turn": model_turn,
-        "outcome": result,
+        "model_observation": model_turn,
+        "terminal": result if result.get("kind") == "runtime_failure" else {"kind": "result", "outcome": result},
         "completed_at": _timestamp(completed_at),
     }
     return payload
@@ -264,11 +284,11 @@ def _model_turn(
     if not isinstance(model, str) or not model:
         raise ValueError("provider_model_missing")
     outcome = (
-        "directive_accepted"
+        "intent_accepted"
         if role == "root_reconciler" and result.get("kind") not in {"execution_failed", "canceled"}
         else _root_failure_category(result)
         if role == "root_reconciler"
-        else result.get("kind")
+        else "runtime_failure" if result.get("kind") == "runtime_failure" else result.get("kind")
     )
     if not isinstance(outcome, str):
         raise ValueError("model_turn_outcome_invalid")
@@ -337,19 +357,32 @@ def _root_failure_category(result: dict[str, Any]) -> str:
 
 
 def _root_attempted_input_ids(request: dict[str, Any]) -> list[str]:
-    if request.get("kind") == "open_root_reconciler":
-        bootstrap = request.get("bootstrap")
-        if not isinstance(bootstrap, dict):
-            raise ValueError("root_bootstrap_invalid")
-        pending = bootstrap.get("pending_input_ids")
-    else:
-        delta = request.get("delta")
-        if not isinstance(delta, dict):
-            raise ValueError("root_delta_invalid")
-        pending = delta.get("pending_input_ids")
-    if not isinstance(pending, list) or any(not isinstance(item, str) or not item for item in pending):
+    pending = _root_command(request).get("pending_input_refs")
+    if not isinstance(pending, list):
         raise ValueError("root_pending_inputs_invalid")
-    return pending
+    identities = [item.get("input_id") for item in pending if isinstance(item, dict)]
+    if len(identities) != len(pending) or any(not isinstance(item, str) or not item for item in identities):
+        raise ValueError("root_pending_inputs_invalid")
+    return identities
+
+
+def _root_command(request: dict[str, Any]) -> dict[str, Any]:
+    command = request.get("command")
+    if not isinstance(command, dict):
+        raise ValueError("root_semantic_gate_command_invalid")
+    return command
+
+
+def _root_intent_kind(request: dict[str, Any]) -> str:
+    kind = {
+        "requirement_and_comment": "requirement_and_comment_intent",
+        "plan_human_decision": "plan_human_decision_intent",
+        "recovery_strategy": "recovery_strategy_intent",
+        "terminal_review": "terminal_review_intent",
+    }.get(_root_command(request).get("semantic_gate"))
+    if kind is None:
+        raise ValueError("root_semantic_gate_invalid")
+    return kind
 
 
 def _provider_output(value: Any, role: str) -> dict[str, Any]:
@@ -359,15 +392,22 @@ def _provider_output(value: Any, role: str) -> dict[str, Any]:
     if not isinstance(output, dict):
         raise ValueError("provider_output_invalid")
     if role == "root_reconciler":
-        if not isinstance(output.get("action"), dict):
-            raise ValueError("provider_output_action_invalid")
-        for field in ("rationale", "evidence_refs", "consumed_input_ids", "comment_replies"):
+        for field in ("rationale", "evidence_refs", "consumed_input_ids", "comment_dispositions", "intent"):
             if field not in output:
                 raise ValueError(f"provider_output_{field}_missing")
+        if not isinstance(output.get("intent"), dict):
+            raise ValueError("provider_output_intent_invalid")
         return output
     if not isinstance(output.get("kind"), str):
         raise ValueError("provider_output_kind_invalid")
-    return output
+    outcome_contract = {
+        "plan": "PlanResultOutcome",
+        "work": "WorkResultOutcome",
+        "verify": "VerifyResultOutcome",
+    }.get(role)
+    if outcome_contract is None:
+        raise ValueError("provider_output_role_invalid")
+    return validate(outcome_contract, output)
 
 
 def _required_text(value: dict[str, Any], key: str) -> str:
