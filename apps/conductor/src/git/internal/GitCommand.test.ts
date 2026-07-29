@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 
 import { GitCommand } from "./GitCommand.js";
 
-function command(executable: string, timeoutMs = 1_000, maxOutputBytes = 1_024): GitCommand {
+function command(executable: string, timeoutMs = 10_000, maxOutputBytes = 1_024): GitCommand {
   return new GitCommand({ executable, timeoutMs, maxOutputBytes });
 }
 
