@@ -21,6 +21,14 @@ export interface CodexTurnResult {
   readonly output?: unknown;
 }
 
+export type CodexThreadAccess =
+  | { readonly kind: "read_only" }
+  | {
+      readonly kind: "workspace_write";
+      readonly writableRoot: string;
+      readonly networkAccess: boolean;
+    };
+
 export class CodexThread {
   #activeTurn: string | null = null;
   #turnCompletion: ((result: CodexTurnResult) => void) | null = null;
@@ -32,22 +40,29 @@ export class CodexThread {
   private constructor(
     private readonly process: CodexProcess,
     readonly threadId: ThreadId,
+    private readonly cwd: string,
+    private readonly access: CodexThreadAccess,
   ) {
     this.#unsubscribe = process.onNotification((message) => this.#handle(message));
   }
 
   static async create(
     process: CodexProcess,
-    input: { readonly cwd: string; readonly tools: readonly DynamicToolSpec[]; readonly correlationId: CorrelationId },
+    input: {
+      readonly cwd: string;
+      readonly tools: readonly DynamicToolSpec[];
+      readonly correlationId: CorrelationId;
+      readonly access: CodexThreadAccess;
+    },
   ): Promise<CodexThread> {
     const response = asRecord(await process.request("thread/start", {
       cwd: input.cwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
+      sandbox: input.access.kind === "read_only" ? "read-only" : "workspace-write",
       dynamicTools: input.tools,
     }, input.correlationId), "invalid_codex_thread_response");
     const thread = asRecord(response.thread, "invalid_codex_thread_response");
-    return new CodexThread(process, parseThreadId(thread.id));
+    return new CodexThread(process, parseThreadId(thread.id), input.cwd, input.access);
   }
 
   async turn(
@@ -64,6 +79,15 @@ export class CodexThread {
       response = asRecord(await this.process.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: input }],
+        cwd: this.cwd,
+        approvalPolicy: "never",
+        sandboxPolicy: this.access.kind === "read_only"
+          ? { type: "readOnly" }
+          : {
+              type: "workspaceWrite",
+              writableRoots: [this.access.writableRoot],
+              networkAccess: this.access.networkAccess,
+            },
         ...(outputSchema === undefined ? {} : { outputSchema }),
       }, correlationId), "invalid_codex_turn_response");
     } catch (error) {

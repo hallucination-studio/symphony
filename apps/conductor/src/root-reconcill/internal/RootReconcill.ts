@@ -219,6 +219,7 @@ export class CodexRootTurnTransportFactory implements RootTurnTransportFactory {
         cwd: input.root_home,
         tools: [],
         correlationId: `${input.root_id}:thread:${input.runtime_generation}` as CorrelationId,
+        access: { kind: "read_only" },
       });
       return {
         threadId: thread.threadId,

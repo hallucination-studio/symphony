@@ -84,6 +84,7 @@ test("Codex thread cancellation is correlated and late old completion is fenced"
   const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
   const thread = await CodexThread.create(process, {
     cwd: "/tmp", tools: [], correlationId: parseCorrelationId("thread:1"),
+    access: { kind: "read_only" },
   });
   const first = thread.turn("first", parseCorrelationId("turn:1"), 2_000);
   await new Promise((resolve) => setImmediate(resolve));
@@ -121,6 +122,7 @@ test("Codex turn sends the one native output schema and returns its structured f
   const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
   const thread = await CodexThread.create(process, {
     cwd: "/tmp", tools: [], correlationId: parseCorrelationId("thread:schema"),
+    access: { kind: "read_only" },
   });
   const outputSchema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
   assert.deepEqual(
@@ -129,6 +131,57 @@ test("Codex turn sends the one native output schema and returns its structured f
   );
   const request = fake.requests.find(({ method }) => method === "turn/start");
   assert.deepEqual((request?.params as { outputSchema?: unknown }).outputSchema, outputSchema);
+  thread.close();
+  await process.shutdown();
+});
+
+test("Work thread and every turn bind workspace write authority to one explicit worktree", async () => {
+  const fake = fakeSpawner((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-work" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-work" } } });
+      server.send({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-work",
+          turn: {
+            id: "turn-work", status: "completed", error: null,
+            items: [{ id: "answer", type: "agentMessage", text: '{"outcome":"completed"}' }],
+          },
+        },
+      });
+    }
+  });
+  const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
+  const thread = await CodexThread.create(process, {
+    cwd: "/tmp/root-worktree",
+    tools: [],
+    correlationId: parseCorrelationId("thread:work"),
+    access: { kind: "workspace_write", writableRoot: "/tmp/root-worktree", networkAccess: true },
+  });
+  await thread.turn("work", parseCorrelationId("turn:work"), 2_000);
+
+  const threadStart = fake.requests.find(({ method }) => method === "thread/start");
+  assert.deepEqual(threadStart?.params, {
+    cwd: "/tmp/root-worktree",
+    approvalPolicy: "never",
+    sandbox: "workspace-write",
+    dynamicTools: [],
+  });
+  const turnStart = fake.requests.find(({ method }) => method === "turn/start");
+  assert.deepEqual(turnStart?.params, {
+    threadId: "thread-work",
+    input: [{ type: "text", text: "work" }],
+    cwd: "/tmp/root-worktree",
+    approvalPolicy: "never",
+    sandboxPolicy: {
+      type: "workspaceWrite",
+      writableRoots: ["/tmp/root-worktree"],
+      networkAccess: true,
+    },
+  });
   thread.close();
   await process.shutdown();
 });

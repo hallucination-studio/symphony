@@ -103,6 +103,7 @@ export class CodexPlanSessionFactory implements PlanSessionFactory {
         cwd: this.options.cwd,
         tools: [],
         correlationId: request.correlation_id,
+        access: { kind: "read_only" },
       });
     } catch (error) {
       await process.shutdown();
