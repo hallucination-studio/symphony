@@ -37,6 +37,10 @@ export interface DeliveryInterface {
   createPullRequest(request: DeliverRevisionRequest): Promise<MutationResult>;
 }
 
+export function createRootHeadBranch(rootId: RootIssueId): string {
+  return `symphony/root-${Buffer.from(rootId, "utf8").toString("hex")}`;
+}
+
 export function createDeliveryIdentity(input: {
   readonly provider: unknown;
   readonly root_id: unknown;
@@ -44,13 +48,12 @@ export function createDeliveryIdentity(input: {
   readonly base_branch: unknown;
 }): DeliveryIdentity {
   const rootId = parseRootIssueId(input.root_id);
-  const encodedRoot = Buffer.from(rootId, "utf8").toString("hex");
   return Object.freeze({
     provider: parseBoundedString(input.provider, "invalid_delivery_provider", 64),
     root_id: rootId,
     repository_id: parseRepositoryId(input.repository_id),
     base_branch: parseBoundedString(input.base_branch, "invalid_base_branch"),
-    head_branch: `symphony/root-${encodedRoot}`,
+    head_branch: createRootHeadBranch(rootId),
   });
 }
 
