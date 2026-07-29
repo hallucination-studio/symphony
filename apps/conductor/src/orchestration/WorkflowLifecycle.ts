@@ -1,0 +1,294 @@
+import type {
+  CorrelationId,
+  CycleIssueId,
+  RootIssueId,
+  StageIssueId,
+} from "../contracts/identity.js";
+import type { MutationResult } from "../contracts/mutation.js";
+import type {
+  CycleObservation,
+  CycleStatus,
+  LinearObservation,
+  StageKind,
+  StageObservation,
+} from "../contracts/observation.js";
+import type { LinearGatewayInterface, LinearMutation } from "../linear/api/LinearGatewayInterface.js";
+
+interface RootTransition {
+  readonly root_id: RootIssueId;
+  readonly correlation_id: CorrelationId;
+}
+
+interface CycleTransition extends RootTransition {
+  readonly cycle_issue_id: CycleIssueId;
+}
+
+interface StageTransition extends CycleTransition {
+  readonly stage_issue_id: StageIssueId;
+  readonly stage_kind: StageKind;
+}
+
+export type WorkflowTransition =
+  | (CycleTransition & { readonly kind: "admit_root" })
+  | (RootTransition & { readonly kind: "review_root" })
+  | (CycleTransition & { readonly kind: "begin_execution" })
+  | (CycleTransition & { readonly kind: "begin_verification" })
+  | (CycleTransition & { readonly kind: "succeed_cycle" })
+  | (CycleTransition & {
+    readonly kind: "cancel_cycle";
+    readonly expected_status: "Planning" | "Executing" | "Verifying";
+  })
+  | (StageTransition & { readonly kind: "start_stage" })
+  | (StageTransition & { readonly kind: "complete_stage" })
+  | (StageTransition & {
+    readonly kind: "fail_stage";
+    readonly failure: "failed" | "inconclusive";
+  })
+  | (StageTransition & {
+    readonly kind: "cancel_stage";
+    readonly expected_status: "Todo" | "In Progress";
+  });
+
+export type WorkflowLifecycleResult =
+  | { readonly kind: "transitioned"; readonly observation: LinearObservation }
+  | { readonly kind: "precondition_mismatch"; readonly observation: LinearObservation }
+  | {
+    readonly kind: "mutation_unresolved";
+    readonly observation: LinearObservation;
+    readonly mutation: MutationResult;
+  };
+
+const ACTIVE_STAGE_STATUSES = new Set(["Todo", "In Progress"] as const);
+
+function stageById(cycle: CycleObservation, stageId: StageIssueId): StageObservation | null {
+  return cycle.stages.find(({ issue_id }) => issue_id === stageId) ?? null;
+}
+
+function exactSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((entry) => right.has(entry));
+}
+
+function completeDag(cycle: CycleObservation): boolean {
+  const plans = cycle.stages.filter(({ kind }) => kind === "plan");
+  const works = cycle.stages.filter(({ kind }) => kind === "work");
+  const verifies = cycle.stages.filter(({ kind }) => kind === "verify");
+  if (
+    plans.length !== 1
+    || plans[0]?.status !== "Done"
+    || works.length === 0
+    || works.some(({ status }) => status !== "Todo")
+    || verifies.length !== 1
+    || verifies[0]?.status !== "Todo"
+  ) return false;
+
+  const workIds = new Set(works.map(({ issue_id }) => issue_id));
+  if (!exactSet(workIds, new Set(verifies[0].dependency_issue_ids))) return false;
+  if (works.some(({ dependency_issue_ids }) => dependency_issue_ids.some((id) => !workIds.has(id)))) return false;
+
+  const visiting = new Set<StageIssueId>();
+  const visited = new Set<StageIssueId>();
+  const byId = new Map(works.map((work) => [work.issue_id, work]));
+  const cyclic = (id: StageIssueId): boolean => {
+    if (visiting.has(id)) return true;
+    if (visited.has(id)) return false;
+    visiting.add(id);
+    const hasCycle = byId.get(id)?.dependency_issue_ids.some(cyclic) ?? false;
+    visiting.delete(id);
+    visited.add(id);
+    return hasCycle;
+  };
+  return !works.some(({ issue_id }) => cyclic(issue_id));
+}
+
+function workAndVerifyReady(cycle: CycleObservation, verifyStatus: "Todo" | "Done"): boolean {
+  const works = cycle.stages.filter(({ kind }) => kind === "work");
+  const verifies = cycle.stages.filter(({ kind }) => kind === "verify");
+  const plans = cycle.stages.filter(({ kind }) => kind === "plan");
+  if (
+    plans.length !== 1
+    || plans[0]?.status !== "Done"
+    || works.length === 0
+    || works.some(({ status }) => status !== "Done")
+    || verifies.length !== 1
+    || verifies[0]?.status !== verifyStatus
+  ) return false;
+  return exactSet(
+    new Set(works.map(({ issue_id }) => issue_id)),
+    new Set(verifies[0].dependency_issue_ids),
+  );
+}
+
+function roleCycleStatus(kind: StageKind): CycleStatus {
+  if (kind === "plan") return "Planning";
+  if (kind === "work") return "Executing";
+  return "Verifying";
+}
+
+export class WorkflowLifecycle {
+  constructor(private readonly linear: LinearGatewayInterface) {}
+
+  async apply(transition: WorkflowTransition): Promise<WorkflowLifecycleResult> {
+    const before = await this.#read(transition.root_id);
+    const command = this.#command(transition, before);
+    if (!command) return Object.freeze({ kind: "precondition_mismatch", observation: before });
+
+    const mutation = await this.linear.mutate(command);
+    const after = await this.#read(transition.root_id);
+    if (this.#postcondition(transition, after, mutation)) {
+      return Object.freeze({ kind: "transitioned", observation: after });
+    }
+    return Object.freeze({ kind: "mutation_unresolved", observation: after, mutation });
+  }
+
+  #command(transition: WorkflowTransition, before: LinearObservation): LinearMutation | null {
+    if (transition.kind === "admit_root") {
+      const cycle = this.#cycle(before, transition.cycle_issue_id);
+      if (before.root_status !== "Todo" || cycle?.status !== "Planning" || cycle.stages.length !== 0) return null;
+      return this.#rootCommand(transition, "Todo", "In Progress");
+    }
+    if (transition.kind === "review_root") {
+      if (before.root_status !== "In Progress" || before.active_cycle !== null) return null;
+      return this.#rootCommand(transition, "In Progress", "In Review");
+    }
+    if (transition.kind === "begin_execution") {
+      const cycle = this.#cycle(before, transition.cycle_issue_id);
+      if (before.root_status !== "In Progress" || cycle?.status !== "Planning" || !completeDag(cycle)) return null;
+      return this.#cycleCommand(transition, "Planning", "Executing");
+    }
+    if (transition.kind === "begin_verification") {
+      const cycle = this.#cycle(before, transition.cycle_issue_id);
+      if (before.root_status !== "In Progress" || cycle?.status !== "Executing" || !workAndVerifyReady(cycle, "Todo")) return null;
+      return this.#cycleCommand(transition, "Executing", "Verifying");
+    }
+    if (transition.kind === "succeed_cycle") {
+      const cycle = this.#cycle(before, transition.cycle_issue_id);
+      if (before.root_status !== "In Progress" || cycle?.status !== "Verifying" || !workAndVerifyReady(cycle, "Done")) return null;
+      return this.#cycleCommand(transition, "Verifying", "Succeeded");
+    }
+    if (transition.kind === "cancel_cycle") {
+      const cycle = this.#cycle(before, transition.cycle_issue_id);
+      if (
+        before.root_status !== "In Progress"
+        || cycle?.status !== transition.expected_status
+        || cycle.stages.some(({ status }) => ACTIVE_STAGE_STATUSES.has(status as "Todo" | "In Progress"))
+      ) return null;
+      return this.#cycleCommand(transition, transition.expected_status, "Canceled");
+    }
+    if (
+      transition.kind !== "start_stage"
+      && transition.kind !== "complete_stage"
+      && transition.kind !== "fail_stage"
+      && transition.kind !== "cancel_stage"
+    ) throw new Error("invalid_lifecycle_transition");
+
+    const cycle = this.#cycle(before, transition.cycle_issue_id);
+    const target = cycle ? stageById(cycle, transition.stage_issue_id) : null;
+    if (
+      before.root_status !== "In Progress"
+      || !cycle
+      || !target
+      || target.kind !== transition.stage_kind
+    ) return null;
+
+    if (transition.kind === "start_stage") {
+      if (cycle.status !== roleCycleStatus(target.kind) || target.status !== "Todo") return null;
+      if (target.kind === "work") {
+        const byId = new Map(cycle.stages.map((stage) => [stage.issue_id, stage]));
+        if (target.dependency_issue_ids.some((id) => {
+          const dependency = byId.get(id);
+          return dependency?.kind !== "work" || dependency.status !== "Done";
+        })) return null;
+      }
+      if (target.kind === "verify" && !workAndVerifyReady(cycle, "Todo")) return null;
+      return this.#stageCommand(transition, "Todo", "In Progress");
+    }
+    if (transition.kind === "complete_stage") {
+      if (cycle.status !== roleCycleStatus(target.kind) || target.status !== "In Progress") return null;
+      return this.#stageCommand(transition, "In Progress", "Done");
+    }
+    if (transition.kind === "fail_stage") {
+      if (
+        cycle.status !== roleCycleStatus(target.kind)
+        || target.status !== "In Progress"
+        || (transition.failure === "inconclusive" && target.kind !== "verify")
+      ) return null;
+      return this.#stageCommand(transition, "In Progress", "Failed");
+    }
+    if (target.status !== transition.expected_status) return null;
+    return this.#stageCommand(transition, transition.expected_status, "Canceled");
+  }
+
+  #postcondition(
+    transition: WorkflowTransition,
+    after: LinearObservation,
+    mutation: MutationResult,
+  ): boolean {
+    if (mutation.outcome !== "applied" && mutation.outcome !== "acceptance_unknown") return false;
+    if (transition.kind === "admit_root") {
+      const cycle = this.#cycle(after, transition.cycle_issue_id);
+      return after.root_status === "In Progress" && cycle?.status === "Planning" && cycle.stages.length === 0;
+    }
+    if (transition.kind === "review_root") return after.root_status === "In Review" && after.active_cycle === null;
+    if (transition.kind === "succeed_cycle" || transition.kind === "cancel_cycle") {
+      return mutation.outcome === "applied" && after.active_cycle === null;
+    }
+    if (transition.kind === "begin_execution") return this.#cycle(after, transition.cycle_issue_id)?.status === "Executing";
+    if (transition.kind === "begin_verification") return this.#cycle(after, transition.cycle_issue_id)?.status === "Verifying";
+    const desired = transition.kind === "start_stage"
+      ? "In Progress"
+      : transition.kind === "complete_stage"
+        ? "Done"
+        : transition.kind === "fail_stage"
+          ? "Failed"
+          : "Canceled";
+    const cycle = this.#cycle(after, transition.cycle_issue_id);
+    const target = cycle ? stageById(cycle, transition.stage_issue_id) : null;
+    return target?.kind === transition.stage_kind && target.status === desired;
+  }
+
+  #cycle(observation: LinearObservation, cycleId: CycleIssueId): CycleObservation | null {
+    return observation.active_cycle?.issue_id === cycleId ? observation.active_cycle : null;
+  }
+
+  #rootCommand(
+    transition: RootTransition,
+    expected: "Todo" | "In Progress",
+    desired: "In Progress" | "In Review",
+  ): LinearMutation {
+    return {
+      schema_version: 1, kind: "set_root_status", root_id: transition.root_id,
+      correlation_id: transition.correlation_id, expected_status: expected, desired_status: desired,
+    };
+  }
+
+  #cycleCommand(
+    transition: CycleTransition,
+    expected: CycleStatus,
+    desired: CycleStatus,
+  ): LinearMutation {
+    return {
+      schema_version: 1, kind: "set_cycle_status", root_id: transition.root_id,
+      cycle_issue_id: transition.cycle_issue_id, correlation_id: transition.correlation_id,
+      expected_status: expected, desired_status: desired,
+    };
+  }
+
+  #stageCommand(
+    transition: StageTransition,
+    expected: "Todo" | "In Progress",
+    desired: "In Progress" | "Done" | "Failed" | "Canceled",
+  ): LinearMutation {
+    return {
+      schema_version: 1, kind: "set_stage_status", root_id: transition.root_id,
+      cycle_issue_id: transition.cycle_issue_id, stage_issue_id: transition.stage_issue_id,
+      expected_kind: transition.stage_kind, correlation_id: transition.correlation_id,
+      expected_status: expected, desired_status: desired,
+    };
+  }
+
+  async #read(rootId: RootIssueId): Promise<LinearObservation> {
+    const observation = await this.linear.readRoot(rootId);
+    if (observation.root_id !== rootId) throw new Error("lifecycle_root_identity_mismatch");
+    return observation;
+  }
+}
