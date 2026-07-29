@@ -49,6 +49,45 @@ test("Approved Plan validates the complete candidate before creating its first n
   }
 });
 
+test("Approved Plan resumes partial Work materialization after native order changes", () => {
+  const state = fixture();
+  const compiler = new ApprovedPlanDagCompilerImpl();
+  const first = compiler.compile(state.input());
+  assert.equal(first.kind, "effect");
+  if (first.kind !== "effect") return;
+  state.apply(first.command);
+
+  const created = state.tree.issues.find(({ issue_kind }) => issue_kind === "work");
+  assert.ok(created);
+  created.order = 42;
+
+  const resumed = compiler.compile(state.input());
+  assert.equal(resumed.kind, "effect");
+  assert.ok(resumed.kind === "effect" && resumed.command.kind === "create_workflow_issue");
+  if (resumed.kind !== "effect" || resumed.command.kind !== "create_workflow_issue") return;
+  assert.equal(resumed.command.title, "Runtime");
+  assert.equal(resumed.command.order, 2);
+});
+
+test("Approved Plan rejects indistinguishable Work proposals before the first write", () => {
+  const state = fixture((document) => {
+    const first = document.proposedWorkDag.workNodes[0]!;
+    const second = document.proposedWorkDag.workNodes[1]!;
+    Object.assign(second, {
+      title: first.title,
+      description: first.description,
+      expectedOutcome: first.expectedOutcome,
+      requiredChecks: [...first.requiredChecks],
+    });
+  });
+
+  assert.deepEqual(new ApprovedPlanDagCompilerImpl().compile(state.input()), {
+    kind: "invalid_facts",
+    reason: "topology_invalid",
+  });
+  assert.equal(state.tree.issues.filter(({ issue_kind }) => issue_kind === "work").length, 0);
+});
+
 function fixture(mutate?: (document: ReturnType<typeof planDocument>) => void) {
   const document = planDocument();
   mutate?.(document);

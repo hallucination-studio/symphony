@@ -54,7 +54,9 @@ export class ApprovedPlanDagCompilerImpl implements RootMechanicalConvergenceCom
     const workByIndex: Issue[] = [];
     for (let index = 0; index < document.proposedWorkDag.workNodes.length; index += 1) {
       const expected = document.proposedWorkDag.workNodes[index]!;
-      const matches = works.filter(({ order }) => order === index + 1);
+      const expectedDescription = renderWorkDescription(expected);
+      const matches = works.filter((issue) =>
+        matchesPlannedNode(issue, cycle, "work", expected.title, expectedDescription));
       if (matches.length > 1) return invalid("topology_invalid");
       const current = matches[0];
       if (!current) {
@@ -66,11 +68,8 @@ export class ApprovedPlanDagCompilerImpl implements RootMechanicalConvergenceCom
         return {
           kind: "effect",
           command: createNode(root, cycle, todo.status_id, "work", expected.title,
-            renderWorkDescription(expected), index + 1, [plan.issue_id, "work", expected.proposalKey]),
+            expectedDescription, index + 1, [plan.issue_id, "work", expected.proposalKey]),
         };
-      }
-      if (!matchesPlannedNode(current, cycle, "work", expected.title, renderWorkDescription(expected), index + 1)) {
-        return invalid("topology_invalid");
       }
       workByIndex.push(current);
     }
@@ -89,7 +88,7 @@ export class ApprovedPlanDagCompilerImpl implements RootMechanicalConvergenceCom
       };
     }
     if (!matchesPlannedNode(verify, cycle, "verify", document.proposedWorkDag.verifyNode.title,
-      verifyDescription, workByIndex.length + 1)) return invalid("topology_invalid");
+      verifyDescription)) return invalid("topology_invalid");
 
     const keyToWork = new Map(document.proposedWorkDag.workNodes.map((node, index) => [node.proposalKey, workByIndex[index]!]));
     const expectedRelations = document.proposedWorkDag.workNodes.flatMap((node, targetIndex) =>
@@ -167,6 +166,8 @@ function validCandidate(document: ReturnType<typeof parseCanonicalPlanDescriptio
   if (nodes.length === 0 || document.proposedWorkDag.dependencyEdges.length !== 0) return false;
   const keys = nodes.map(({ proposalKey }) => proposalKey);
   if (new Set(keys).size !== keys.length || keys.some((key) => !key.trim())) return false;
+  const visibleSignatures = nodes.map((node) => `${node.title}\u0000${renderWorkDescription(node)}`);
+  if (new Set(visibleSignatures).size !== visibleSignatures.length) return false;
   const dependencies = new Map(nodes.map((node) => [node.proposalKey, node.dependencyProposalKeys]));
   if (nodes.some((node) => new Set(node.dependencyProposalKeys).size !== node.dependencyProposalKeys.length ||
     node.dependencyProposalKeys.some((key) => key === node.proposalKey || !dependencies.has(key)))) return false;
@@ -216,11 +217,11 @@ function updateNode(
 }
 
 function matchesPlannedNode(
-  issue: Issue, cycle: Issue, kind: "work" | "verify", title: string, description: string, order: number,
+  issue: Issue, cycle: Issue, kind: "work" | "verify", title: string, description: string,
 ): boolean {
   return issue.issue_kind === kind && issue.parent_issue_id === cycle.issue_id && issue.project_id === cycle.project_id &&
     issue.status_name === "Todo" && !issue.is_archived && issue.title === title && issue.description === description &&
-    issue.order === order && isDeepStrictEqual(issue.labels, [workflowKindLabel(kind)]);
+    isDeepStrictEqual(issue.labels, [workflowKindLabel(kind)]);
 }
 
 function renderWorkDescription(node: PlanWorkNode): string {
