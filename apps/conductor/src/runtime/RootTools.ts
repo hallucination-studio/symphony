@@ -9,6 +9,7 @@ import {
 import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import type { LinearGatewayInterface } from "../linear/api/LinearGatewayInterface.js";
 import { validatePlanDag } from "../orchestration/PlanDagValidator.js";
+import { WorkDispatcher } from "../orchestration/WorkDispatcher.js";
 import { WorkflowLifecycle } from "../orchestration/WorkflowLifecycle.js";
 import type { StagePerformerInterface } from "../performer/api/StagePerformerInterface.js";
 import type { RootToolsFactoryInput, RootToolsFactoryInterface } from "./RootRuntime.js";
@@ -93,38 +94,15 @@ export class RootTools {
   }
 
   async #work(call: Extract<RootToolCall, { tool: "work" }>): Promise<RootToolResult> {
-    const before = await this.linear.readRoot(this.rootId);
-    this.#assertLinearOwner(before);
-    const cycle = before.active_cycle;
-    const target = matchingStage(before, call.work_issue_id);
-    const byId = new Map(cycle?.stages.map((stage) => [stage.issue_id, stage]));
-    const ready = target?.dependency_issue_ids.every((dependencyId) => {
-      const dependency = byId.get(dependencyId);
-      return dependency?.kind === "work" && dependency.status === "Done";
-    }) ?? false;
-    if (
-      before.root_status !== "In Progress"
-      || !cycle
-      || cycle.status !== "Executing"
-      || target?.kind !== "work"
-      || target.status !== "Todo"
-      || !ready
-    ) return mismatch(before, null);
-
-    const request = {
+    return new WorkDispatcher(this.linear, this.git, this.performer).dispatch({
       schema_version: 1,
       root_id: this.rootId,
       runtime_generation: this.runtimeGeneration,
       correlation_id: call.correlation_id,
-      cycle_issue_id: cycle.issue_id,
       role: "work",
-      work_issue_id: target.issue_id,
-    } as const;
-    const handoff = parseStageHandoff(await this.performer.executeWork(request));
-    this.#assertHandoff(request, handoff);
-    const after = await this.linear.readRoot(this.rootId);
-    this.#assertLinearOwner(after);
-    return Object.freeze({ kind: "performed", handoff, linear: after, git: null });
+      work_issue_id: call.work_issue_id,
+      workspace: this.workspace,
+    });
   }
 
   async #verify(call: Extract<RootToolCall, { tool: "verify" }>): Promise<RootToolResult> {

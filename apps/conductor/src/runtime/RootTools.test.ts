@@ -140,20 +140,28 @@ test("plan dispatch rejects an incomplete fresh DAG without a lifecycle mutation
   assert.deepEqual(f.calls, ["plan"]);
 });
 
-test("work dispatch requires Todo target and all declared Work dependencies freshly Done", async () => {
+test("work dispatch delegates fresh readiness, start transition, and terminal Linear/Git read-back", async () => {
   const ready = linear("Executing", [
-    stage("LIN-3", "work", "Done"), stage("LIN-4", "work", "Todo", ["LIN-3"]), stage("LIN-5", "verify", "Todo"),
+    stage("LIN-6", "plan", "Done"), stage("LIN-3", "work", "Done"),
+    stage("LIN-4", "work", "Todo", ["LIN-3"]), stage("LIN-5", "verify", "Todo", ["LIN-3", "LIN-4"]),
+  ]);
+  const started = linear("Executing", [
+    stage("LIN-6", "plan", "Done"), stage("LIN-3", "work", "Done"),
+    stage("LIN-4", "work", "In Progress", ["LIN-3"]), stage("LIN-5", "verify", "Todo", ["LIN-3", "LIN-4"]),
   ]);
   const after = linear("Executing", [
-    stage("LIN-3", "work", "Done"), stage("LIN-4", "work", "Done", ["LIN-3"]), stage("LIN-5", "verify", "Todo"),
+    stage("LIN-6", "plan", "Done"), stage("LIN-3", "work", "Done"),
+    stage("LIN-4", "work", "Done", ["LIN-3"]), stage("LIN-5", "verify", "Todo", ["LIN-3", "LIN-4"]),
   ]);
-  const f = fixture([ready, after]);
+  const f = fixture([ready, ready, started, after]);
   const result = await f.tools.execute(tool({ tool: "work", work_issue_id: parseStageIssueId("LIN-4") }));
   assert.equal(result.kind, "performed");
-  assert.deepEqual(f.calls, ["work"]);
+  assert.equal(result.git?.workspace_state, "clean");
+  assert.deepEqual(f.calls, ["mutate:set_stage_status", "work", "git:LIN-1"]);
 
   const blocked = linear("Executing", [
-    stage("LIN-3", "work", "Todo"), stage("LIN-4", "work", "Todo", ["LIN-3"]),
+    stage("LIN-6", "plan", "Done"), stage("LIN-3", "work", "Todo"),
+    stage("LIN-4", "work", "Todo", ["LIN-3"]), stage("LIN-5", "verify", "Todo", ["LIN-3", "LIN-4"]),
   ]);
   const stale = fixture([blocked]);
   const mismatch = await stale.tools.execute(tool({ tool: "work", work_issue_id: parseStageIssueId("LIN-4") }));
@@ -199,7 +207,12 @@ test("foreign identity, wrong role target, and mismatched Handoff fail closed", 
   }), /root_tool_identity_mismatch/u);
   assert.deepEqual(foreign.calls, []);
 
-  const ready = linear("Executing", [stage("LIN-4", "work", "Todo")]);
+  const ready = linear("Executing", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Todo"), stage("LIN-5", "verify", "Todo", ["LIN-4"]),
+  ]);
+  const started = linear("Executing", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "In Progress"), stage("LIN-5", "verify", "Todo", ["LIN-4"]),
+  ]);
   const performer: StagePerformerInterface = {
     executePlan: () => Promise.reject(new Error("unexpected_plan")),
     executeWork: (request) => Promise.resolve({
@@ -208,11 +221,18 @@ test("foreign identity, wrong role target, and mismatched Handoff fail closed", 
     executeVerify: () => Promise.reject(new Error("unexpected_verify")),
     closeCycle: () => Promise.resolve(),
   };
+  let readIndex = 0;
   const invalid = new RootTools(rootId, generation, workspace, {
-    discoverRoots: () => Promise.resolve([]), readRoot: () => Promise.resolve(ready), mutate: () => Promise.reject(new Error("unexpected")),
+    discoverRoots: () => Promise.resolve([]),
+    readRoot: () => Promise.resolve([ready, ready, started][Math.min(readIndex++, 2)] as LinearObservation),
+    mutate: (command) => Promise.resolve({
+      schema_version: 1, outcome: "applied",
+      target_id: "stage_issue_id" in command ? command.stage_issue_id : rootId,
+      correlation_id: command.correlation_id,
+    }),
   }, {
     prepare: () => Promise.reject(new Error("unexpected")), commit: () => Promise.reject(new Error("unexpected")),
     read: () => Promise.reject(new Error("unexpected")),
   }, performer);
-  await assert.rejects(invalid.execute(tool({ tool: "work", work_issue_id: parseStageIssueId("LIN-4") })), /stage_handoff_identity_mismatch/u);
+  await assert.rejects(invalid.execute(tool({ tool: "work", work_issue_id: parseStageIssueId("LIN-4") })), /work_handoff_identity_mismatch/u);
 });
