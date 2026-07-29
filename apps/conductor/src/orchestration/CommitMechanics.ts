@@ -49,6 +49,7 @@ function mismatch(linear: LinearObservation, git: GitObservation): CommitMechani
 
 export class CommitMechanics {
   readonly #lifecycle: WorkflowLifecycle;
+  readonly #pendingTransitions = new Map<string, NonNullable<GitObservation["head_revision"]>>();
 
   constructor(
     private readonly linear: LinearGatewayInterface,
@@ -74,53 +75,58 @@ export class CommitMechanics {
     if (cycle.status === "Verifying" && git.workspace_state === "clean") {
       return Object.freeze({ kind: "committed", revision: git.head_revision, linear, git });
     }
-    if (git.workspace_state !== "dirty") return mismatch(linear, git);
-    const expectedHead = git.head_revision;
-    const expectedDiff = git.diff_digest;
+    if (cycle.status !== "Executing") return mismatch(linear, git);
 
-    if (cycle.status === "Executing") {
-      const transition = await this.#lifecycle.apply({
-        kind: "begin_verification",
-        root_id: request.root_id,
-        cycle_issue_id: request.cycle_issue_id,
+    const key = JSON.stringify([request.root_id, request.cycle_issue_id]);
+    let committedRevision = this.#pendingTransitions.get(key) ?? null;
+    if (git.workspace_state === "dirty") {
+      const expectedHead = git.head_revision;
+      const mutation = await this.git.commit({
+        ...request.workspace,
         correlation_id: request.correlation_id,
+        expected_head_revision: expectedHead,
+        expected_diff_digest: git.diff_digest,
       });
-      if (transition.kind !== "transitioned") {
-        return transition.kind === "precondition_mismatch"
-          ? mismatch(transition.observation, git)
-          : Object.freeze({
-              kind: "mutation_unresolved",
-              mutation: transition.mutation,
-              linear: transition.observation,
-              git,
-            });
-      }
-      linear = transition.observation;
-      git = await this.git.read(request.workspace);
+      const afterCommit = await this.git.read(request.workspace);
       if (
-        !gitOwned(git, request.workspace)
-        || git.workspace_state !== "dirty"
-        || git.head_revision === null
-        || git.head_revision !== expectedHead
-        || git.diff_digest !== expectedDiff
-      ) return mismatch(linear, git);
+        (mutation.outcome !== "applied" && mutation.outcome !== "acceptance_unknown")
+        || !gitOwned(afterCommit, request.workspace)
+        || afterCommit.workspace_state !== "clean"
+        || afterCommit.head_revision === null
+        || afterCommit.head_revision === expectedHead
+      ) return Object.freeze({ kind: "mutation_unresolved", mutation, linear, git: afterCommit });
+      committedRevision = afterCommit.head_revision;
+      this.#pendingTransitions.set(key, committedRevision);
+      git = afterCommit;
+    } else if (git.workspace_state !== "clean" || committedRevision !== git.head_revision) {
+      return mismatch(linear, git);
     }
 
-    const mutation = await this.git.commit({
-      ...request.workspace,
+    const transition = await this.#lifecycle.apply({
+      kind: "begin_verification",
+      root_id: request.root_id,
+      cycle_issue_id: request.cycle_issue_id,
       correlation_id: request.correlation_id,
-      expected_head_revision: expectedHead,
-      expected_diff_digest: expectedDiff,
     });
-    const after = await this.git.read(request.workspace);
+    if (transition.kind !== "transitioned") {
+      return transition.kind === "precondition_mismatch"
+        ? mismatch(transition.observation, git)
+        : Object.freeze({
+            kind: "mutation_unresolved",
+            mutation: transition.mutation,
+            linear: transition.observation,
+            git,
+          });
+    }
+    linear = transition.observation;
+    const finalGit = await this.git.read(request.workspace);
     if (
-      (mutation.outcome === "applied" || mutation.outcome === "acceptance_unknown")
-      && gitOwned(after, request.workspace)
-      && after.workspace_state === "clean"
-      && after.head_revision !== null
-      && after.head_revision !== expectedHead
-    ) return Object.freeze({ kind: "committed", revision: after.head_revision, linear, git: after });
-    return Object.freeze({ kind: "mutation_unresolved", mutation, linear, git: after });
+      !gitOwned(finalGit, request.workspace)
+      || finalGit.workspace_state !== "clean"
+      || finalGit.head_revision !== committedRevision
+    ) return mismatch(linear, finalGit);
+    this.#pendingTransitions.delete(key);
+    return Object.freeze({ kind: "committed", revision: committedRevision, linear, git: finalGit });
   }
 
   async #readLinear(rootId: RootIssueId): Promise<LinearObservation> {

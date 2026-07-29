@@ -82,6 +82,7 @@ function fixture(options: {
   linear?: LinearObservation;
   git?: GitObservation;
   transitionOutcome?: MutationResult["outcome"];
+  transitionOutcomes?: readonly MutationResult["outcome"][];
   commitOutcome?: MutationResult["outcome"];
   driftAfterTransition?: boolean;
   mismatchAfterCommit?: boolean;
@@ -97,7 +98,7 @@ function fixture(options: {
     mutate: (command) => {
       events.push(`linear:${command.kind}`);
       transitionCount += 1;
-      const outcome = options.transitionOutcome ?? "applied";
+      const outcome = options.transitionOutcomes?.[transitionCount - 1] ?? options.transitionOutcome ?? "applied";
       if (outcome === "applied" || outcome === "acceptance_unknown") currentLinear = linear("Verifying");
       return Promise.resolve(outcome === "applied" ? {
         schema_version: 1, outcome, target_id: cycleId, correlation_id: command.correlation_id,
@@ -113,7 +114,7 @@ function fixture(options: {
     read: () => {
       reads += 1;
       events.push("git:read");
-      if (options.driftAfterTransition && reads >= 2 && commitCount === 0) {
+      if (options.driftAfterTransition && reads >= 3) {
         currentGit = git("dirty", parseRevision("c".repeat(40)), "diff:drift");
       }
       return Promise.resolve(currentGit);
@@ -153,8 +154,8 @@ test("CommitMechanics advances a freshly complete Work DAG and records one immut
   assert.equal(result.git.workspace_state, "clean");
   assert.deepEqual(f.events, [
     "linear:read", "git:read",
-    "linear:read", "linear:set_cycle_status", "linear:read",
-    "git:read", "git:commit", "git:read",
+    "git:commit", "git:read",
+    "linear:read", "linear:set_cycle_status", "linear:read", "git:read",
   ]);
   assert.deepEqual(f.facts(), {
     currentLinear: linear("Verifying"), currentGit: git("clean", newRevision, "diff:clean"),
@@ -171,13 +172,12 @@ test("CommitMechanics observes the Verifying clean postcondition without another
   assert.equal(f.facts().commitCount, 0);
 });
 
-test("CommitMechanics resumes the Verifying dirty primary path without repeating the Cycle transition", async () => {
+test("CommitMechanics rejects a dirty Verifying Cycle because its committed revision changed", async () => {
   const f = fixture({ linear: linear("Verifying") });
   const result = await f.mechanics.commit(request);
-  assert.equal(result.kind, "committed");
-  if (result.kind === "committed") assert.equal(result.revision, newRevision);
+  assert.equal(result.kind, "precondition_mismatch");
   assert.equal(f.facts().transitionCount, 0);
-  assert.equal(f.facts().commitCount, 1);
+  assert.equal(f.facts().commitCount, 0);
 });
 
 test("CommitMechanics blocks incomplete Work, clean Executing state, and foreign workspace facts", async () => {
@@ -213,14 +213,23 @@ test("CommitMechanics blocks incomplete Work, clean Executing state, and foreign
   }
 });
 
-test("CommitMechanics never commits after an unaccepted transition or changed Git precondition", async () => {
+test("CommitMechanics never advances after an unaccepted transition or changed post-commit Git fact", async () => {
   const rejected = fixture({ transitionOutcome: "precondition_failed" });
   assert.equal((await rejected.mechanics.commit(request)).kind, "mutation_unresolved");
-  assert.equal(rejected.facts().commitCount, 0);
+  assert.equal(rejected.facts().commitCount, 1);
 
   const drifted = fixture({ driftAfterTransition: true });
   assert.equal((await drifted.mechanics.commit(request)).kind, "precondition_mismatch");
-  assert.equal(drifted.facts().commitCount, 0);
+  assert.equal(drifted.facts().commitCount, 1);
+});
+
+test("CommitMechanics retries only the unaccepted Cycle transition after an exact committed read-back", async () => {
+  const f = fixture({ transitionOutcomes: ["precondition_failed", "applied"] });
+  assert.equal((await f.mechanics.commit(request)).kind, "mutation_unresolved");
+  assert.equal(f.facts().commitCount, 1);
+  assert.equal((await f.mechanics.commit(request)).kind, "committed");
+  assert.equal(f.facts().transitionCount, 2);
+  assert.equal(f.facts().commitCount, 1);
 });
 
 test("CommitMechanics accepts only applied or acceptance-unknown commits with an exact fresh postcondition", async () => {
