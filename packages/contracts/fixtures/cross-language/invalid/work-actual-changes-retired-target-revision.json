@@ -1,9 +1,0 @@
-{
-  "schema": "conductor-performer.schema.json#/$defs/ActualChanges",
-  "value": {
-    "baseline_revision": "head-1",
-    "target_revision": "head-1",
-    "changed_paths": ["apps/conductor/src/example.ts"],
-    "summary": "The retired field must not be accepted as Work Git proof."
-  }
-}

@@ -1,9 +1,0 @@
-{
-  "schema": "conductor-performer.schema.json#/$defs/ActualChanges",
-  "value": {
-    "baseline_revision": "head-1",
-    "observed_head_revision": "head-1",
-    "changed_paths": ["apps/conductor/src/example.ts"],
-    "summary": "Updated the selected Work scope without changing Git topology."
-  }
-}

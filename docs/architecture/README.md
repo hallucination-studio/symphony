@@ -1,129 +1,72 @@
-# Symphony目标架构总览
+# Symphony Phase 1 架构
 
-状态：目标架构提案。本文是架构入口，不代表当前实现已经匹配，也不包含迁移或兼容计划。
+状态：目标架构提案。本文定义第一期要实现的产品边界，不表示当前代码已经完成迁移。
 
-## 1. 产品与角色
+## 唯一目标
 
-Symphony是一个产品，由四个职责组成：
+用户创建一个 Linear Root Issue，Symphony 将它交付为一个可审查的 PR：
 
 ```text
-Podium Desktop
-  -> Podium: Linear OAuth, token, project catalog, binding and Linear SDK
-
-Conductor
-  -> read native Linear + Git
-  -> host Root Reconciliation
-  -> converge deterministic native transitions and semantic intents
-  -> manage one Git worktree per Root
-
-Performer
-  -> one Root Reconciler thread per Root
-  -> isolated Plan, Work and Verify threads per Cycle
-  -> Work thread may own bounded recursive descendants scoped to one Work turn
-  -> Provider SDK and tool runtime
+Root Issue
+-> Conductor 创建 Cycle
+-> Plan 在 Linear 中创建 Plan、Work*、Verify 和 Work DAG
+-> Work 按 DAG 修改代码
+-> Conductor 创建 commit
+-> Verify 验证该 commit
+-> Conductor push 并创建 PR
+-> Root 进入 In Review
 ```
 
-Root Reconciler是唯一作业务语义选择的model-driven角色。Conductor不运行模型，但从fresh facts解释closed Plan、Work和Verify
-Result并执行唯一可推导的transition；Stage不修改DAG或作业务策略选择。Provider threads只提供runtime continuity，不是durable authority。
+Phase 1 的产品是这条自主开发闭环，不是通用智能项目管理平台。
 
-## 2. 核心不变量
+## 核心分工
 
-- [Workflow Authority与恢复](workflow-authority-recovery.md)是native Linear + Git authority、重启、禁止重跑和
-  worktree丢失重建的唯一事实源；
-- Linear只保存原生Issue、status、label、parent、relation、archive、comment、Activity、attachment和SCM facts；
-- Linear description/comment不保存Symphony JSON、hidden marker、next-action、Result或usage payload；
-- 不生成Root/Cycle event comment stream；用户从native Activity、Issue Tree、statuses、labels、relations和有意义的comments
-  看到当前状态与历史；
-- Conductor不保存workflow DB、queue、checkpoint、DAG mirror或Provider thread pointer；
-- `performer.md`定义的五层Provider memory注入完整保留：fresh session只注入一次base instructions和role initial context，
-  live turn只追加current command与new/replacement/tombstone fragments；
-- Root、Plan、Work、Verify各自维护独立Provider-visible baseline与opaque continuation，role之间不共享或fork conversation；
-- 同一冻结观察批次可以包含多个独立context fragments；turn期间到达的新事实等待下一批；
-- Root恢复使用完整active/archived Root object graph和Git current facts进行state convergence，不回放旧command；
-- worktree存在时收敛现有树；目录丢失但Git branch/commits完整时重建worktree，只有Git execution authority也无法证明时才
-  invalid旧generation并从Root current facts创建全新任务树；
-- Dispatcher只执行`Todo`，`Done`、`Interrupted`、`Failed`和`Canceled`节点永不自动重跑；
-- Human Action使用Root native comment threads；Finding使用native Issue；二者都不保存JSON；
-- 用户确认的需求在Human Action结束前合并进Root description；approval只对exact related target有效；
-- Conductor始终是Performer caller；Performer不调用Linear或Conductor；
-- 只有Work role可以创建subagent；Work root可跨turn保留，recursive descendants只属于matching Work turn。整棵tree共享一个
-  Root worktree并只形成一个`WorkTurnResponse`，完整规则见[Work Subagents](work-subagents.md)；
-- cross-process communication使用closed versioned schemas和generated types，但这些transient payload不持久化到Linear；
-- Podium独占Linear OAuth、token和SDK；Performer独占Provider SDK；
-- Podium Desktop只提供连接、进程、Binding和Profile控制面，不提供第二个workflow UI。
-
-## 3. 权威来源
-
-| 事实 | Authority | Owner/Interpreter |
+| 角色 | 负责 | 不负责 |
 |---|---|---|
-| OAuth、token、installation、Project catalog、Binding | `podium.db` | Podium |
-| Root routing和initial delegation | Linear native labels/delegate | Human / Podium / Conductor |
-| Root requirement | Root current description + accepted Root human facts | Human / Root Reconciler |
-| Root/Cycle/Node lifecycle | Linear custom status + native archive flag | Conductor mechanical transition / Root semantic gate |
-| Issue kind、scope和DAG | labels + parent/child + relations | Plan contract / Conductor compiler / Root recovery gate |
-| Human Action与approval | Root comment threads + native reactions/resolved state/Activity | Human / Root Reconciler / Conductor |
-| Finding | native Issues + status/labels/comments/Activity | Root Reconciler / Conductor |
-| branch、worktree、commit、diff、checks、PR和delivery | Git/SCM | Conductor / Performer Work |
-| Provider auth和live session | Profile `CODEX_HOME` + Performer memory | Performer / Codex SDK |
-| model、token、turn和tool progress | process logs/metrics | Conductor / Performer observability |
+| Linear / Git | 保存工作流事实与代码交付事实 | 保存模型会话或下一步决策 |
+| Conductor | 重新读取事实、计算内存 diff、串行调度、管理 worktree、commit、push 和 PR | 理解需求、制定 Plan、写代码或判断验证结果 |
+| `RootReconcill` | 根据最新事实决定继续 Cycle、关闭后重新 Plan、交付、等待或停止 | 亲自执行 Plan、Work、Verify，或直接操作 Linear / Git |
+| Plan / Work / Verify Performer | 分别规划、编码和验证，并返回 typed Handoff | 决定 Root 的下一步或把 Handoff 当成事实 |
 
-只有Linear/Git mutation fresh read-back后才成为accepted durable fact。live Provider memory是必须遵守的runtime continuity，
-但不是durable authority；进程丢失时View、baseline、typed Result、handle和transcript都可丢弃并从fresh facts重建。
+Conductor 是静态、机械的状态机。每个 Root 有一个独立的 `RootReconcill`，它是系统中唯一解释需求变化并决定下一步的 ReAct 角色。
 
-## 4. 调用与恢复
+## 一次推进
 
 ```text
-Conductor -> open/advance a Root semantic gate with current facts -> Performer
-Conductor <- one closed gate-specific Root semantic intent        <- Performer
-
-Conductor -> execute Plan | Work | Verify with closed request      -> Performer
-Conductor <- one closed typed Stage response                       <- Performer
+Conductor 重新读取 Linear + Git
+-> 计算完整 bootstrap 或相对上次已接受事实的内存 diff
+-> RootReconcill 选择 plan | work | verify，或返回 RootDecision
+-> Conductor 校验前置条件并执行一个机械动作
+-> Performer 返回 Handoff
+-> Conductor 再次读取 Linear + Git
+-> 将实际 diff 交回 RootReconcill
 ```
 
-Stage response是semantic Result或mechanical `StageTurnFailure`。只有semantic Result进入当前materialization事务：Conductor将其
-收敛成native Issue/status/relation/comment/Git facts并read-back，然后丢弃transport payload。恢复时重新解释current native
-facts，不要求重建旧Result对象。
+Handoff 只是一次调用的 typed response，不是事实。任何 Linear / Git 写入只有在 Conductor 重新读取并确认后才能驱动下一步。需求或执行事实发生变化时也走同一条路径；Conductor 不解释变化，也不自动修复 DAG。
 
-任何Root恢复都先执行worktree gate。完整规则只见
-[Workflow Authority与恢复](workflow-authority-recovery.md)，其他文档不得建立第二套恢复流程。
+## Phase 1 边界
 
-## 5. 文档导航
+| 方面 | 做 | 不做 |
+|---|---|---|
+| 交付 | 一个 Root 生成一个已验证 PR，并进入 `In Review` | 自动 merge、自动设为 `Done`、处理 PR review/rejection |
+| 工作流 | 一个 Cycle 内依次执行 Plan、DAG Work、exact-commit Verify | Human Action、Finding、审批、waiver |
+| 执行 | 同一 Cycle 的 Work Item 共用一个 Work thread，逐 turn 完成 | Work subagent、并行 Work、多个 writer |
+| 调度 | 一个 Conductor 串行处理多个 Root | 并发 Root、抢占、公平调度、多个 Conductor |
+| 运行时 | 每个 Root 独占 Root Reconcill、private Codex Reconcill、process、thread 和 Root Home | 共享、池化、fork 或跨 Root 复用这些资源 |
+| 持久化 | Root Home 的 `state.json` 只保存 thread continuity | workflow SQLite、queue、checkpoint、DAG mirror、next action、Handoff 或 diff 持久化 |
+| 集成 | Linear、Git 和 Codex CLI `app-server` | Provider SDK、第二 Provider、Profile UI、Podium workflow UI |
+| 恢复 | 重启后重新读取事实；无法证明安全时停止并给出原因 | 复杂 replay/repair、自动重建 worktree、精确 cost 恢复 |
 
-- [Workflow Authority与恢复](workflow-authority-recovery.md)：唯一durable authority、restart、no-replay与worktree-loss规则。
-- [Root Issue工作流](root-issue.md)：Root Tree、kind labels、status catalog、DAG和native evidence。
-- [Root Reconciliation](root-reconciliation.md)：唯一语义决策角色和bounded materialization。
-- [Human Action](human-actions.md)：Root comment threads、actor、scope与resolution。
-- [Performer Stage Contracts](stage-orchestration.md)：Plan、Work、Verify transient request/result contracts。
-- [Work Subagents](work-subagents.md)：Work-only agent tree、协作工具、并发、预算、turn retirement与runtime containment。
-- [Git Worktree与交付](git-worktree-delivery.md)：workspace、revision、PR和delivery边界。
-- [Linear端到端流转](linear-flow.md)：Project解析、Root发现、调度、分页和SDK ownership。
-- [契约与接口](contracts.md)：cross-process schemas和public interface边界。
-- [Conductor](conductor.md)：Conductor模块与副作用边界。
-- [Performer](performer.md)：Python Agent runtime和Provider边界。
-- [Performer Profile](performer-profiles.md)：Profile、Codex配置与runtime usage observability。
-- [Podium](podium.md)
-- [Podium Desktop](podium-desktop.md)
-- [Runtime Hardening](runtime-hardening.md)
-- [代码模块与命名规范](code-organization.md)
-- [目标仓库目录](repository-directory.md)
-- [并行黑盒端到端验收](black-box-e2e.md)
-- [Roadmap](roadmap.md)
-- [架构术语表](glossary.md)
+Root 使用程序管理的独立 Root Home；Plan、Work、Verify 使用用户提供的另一个 Performer Home。Root 进入 `In Review` 后保留运行时；Linear 确认 `Done` 后，Conductor 先停止并隔离该 Root 的进程、turn 和迟到输出，再删除对应 Root Home。Performer Home 不受影响。
 
-## 6. Named concern ownership
+## 文档所有权
 
-| Sole owner | Fact or behavior |
-|---|---|
-| [Workflow Authority与恢复](workflow-authority-recovery.md) | native durable facts、recovery、no-replay、worktree-loss rebuild和hard cut |
-| [Root Issue工作流](root-issue.md) | Issue kinds、status subsets、Root Tree、DAG与archive semantics |
-| [Human Action](human-actions.md) | Root Human Action comment threads、actor、scope、resolution与supersession |
-| [Root Reconciliation](root-reconciliation.md) | Root inputs、deterministic transition和Root semantic gates |
-| [Performer Stage Contracts](stage-orchestration.md) | Plan/Work/Verify transient request/result contract |
-| [Work Subagents](work-subagents.md) | Work-only agent tree、tool/context语义、tree limits、write grants、turn retirement与containment |
-| [Git Worktree与交付](git-worktree-delivery.md) | worktree validation、immutable revision、PR和delivery mechanics |
-| [Performer Profile](performer-profiles.md) | Profile control、actual model和runtime usage observability |
-| [契约与接口](contracts.md) | public/cross-process schema、validation与error semantics |
-| [并行黑盒端到端验收](black-box-e2e.md) | foreground E2E topology、assertions、evidence和verdict |
+- [Root Issue](root-issue.md)：Linear 中的 Root、Cycle、Stage 和 DAG 事实。
+- [Conductor](conductor.md)：机械状态机、串行调度和 per-Root runtime 生命周期。
+- [Root Reconciliation](root-reconciliation.md)：Root ReAct 的输入、工具、决策和禁止行为。
+- [Performer](performer.md)：Codex CLI、双 Home、三个 role 和 thread 隔离。
+- [Git Worktree Delivery](git-worktree-delivery.md)：worktree、commit、exact-revision verify、push 和 PR。
+- [Contracts](contracts.md)：模块接口、typed Handoff 和重新读取规则。
+- [Roadmap](roadmap.md)：实施顺序和 Phase 1 完成标准。
 
-同一事实只能在owner文档定义一次。其他文档需要该事实时只描述本模块的输入/输出并链接owner，不复制字段表、transition、
-恢复步骤或hard-cut清单。
+Phase 1 的范围与非目标只由本文定义。其他文档只描述各自拥有的设计，不重复扩展产品范围。

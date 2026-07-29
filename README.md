@@ -1,19 +1,7 @@
 # Symphony
 
-Symphony is one product composed of Podium Desktop, Podium, Conductor, and
-Performer.
-
-The repository is moving toward a Linear-authoritative architecture:
-
-- Podium Desktop hosts the local product experience.
-- Podium owns Linear OAuth, tokens, project catalog, bindings, and the Linear
-  SDK.
-- Conductor is a database-free TypeScript daemon that reconstructs workflow
-  state from Linear and Git.
-- Performer is a short-lived Python process that exclusively owns Provider SDK
-  execution and resumes conversations through an opaque `performer_id`.
-- Roles communicate through closed, versioned contracts rather than importing
-  one another's implementations.
+Symphony turns a Linear Root Issue into a verified pull request. Phase 1 is one
+closed loop: plan, work, verify an exact commit, then create the PR.
 
 ## Architecture
 
@@ -27,22 +15,17 @@ verification is documented separately in the
 Key documents:
 
 - [Root Issue workflow](docs/architecture/root-issue.md)
-- [Linear end-to-end flow](docs/architecture/linear-flow.md)
 - [Conductor](docs/architecture/conductor.md)
+- [Root Reconciliation](docs/architecture/root-reconciliation.md)
 - [Performer](docs/architecture/performer.md)
-- [Performer Profiles](docs/architecture/performer-profiles.md)
-- [Podium](docs/architecture/podium.md)
-- [Podium Desktop](docs/architecture/podium-desktop.md)
+- [Git worktree and delivery](docs/architecture/git-worktree-delivery.md)
 - [Contracts](docs/architecture/contracts.md)
-- [Code organization](docs/architecture/code-organization.md)
-- [Target repository layout](docs/architecture/repository-directory.md)
 - [Roadmap](docs/architecture/roadmap.md)
-- [Glossary](docs/architecture/glossary.md)
 
 ## Repository commands
 
-The legacy runtime has been removed. The current tree is the Roadmap V1 target
-workspace scaffold.
+The repository contains the Phase 1 Conductor workspace and its architecture
+checks.
 
 ```bash
 make install
@@ -58,12 +41,7 @@ make stop
 Focused checks:
 
 ```bash
-npm test -w @symphony/podium-desktop
+npm test -w @symphony/conductor
 npm run typecheck -w @symphony/conductor
-.venv/bin/python -m pytest apps/performer/tests -q
-cd apps/podium-desktop/src-tauri && cargo test
+npm run test:architecture
 ```
-
-Before changing the UI, read
-[`apps/podium-desktop/DESIGN.md`](apps/podium-desktop/DESIGN.md). It owns visual
-tokens only; product behavior remains owned by `docs/architecture/`.

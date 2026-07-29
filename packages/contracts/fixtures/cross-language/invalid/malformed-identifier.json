@@ -1,4 +1,0 @@
-{
-  "schema": "common.schema.json#/$defs/Identifier",
-  "value": "bad identifier with spaces"
-}

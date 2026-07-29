@@ -1,87 +1,27 @@
-# Symphony架构实施Roadmap
+# Phase 1 Roadmap
 
-状态：目标架构实施顺序。本文定义可验收增量，不声明当前实现已经满足目标，也不提供旧设计的迁移或兼容路径。
+状态：目标实施顺序。产品范围与非目标由[架构总览](README.md#phase-1-边界)定义，本文不扩展该边界。
 
-## 1. 实施原则
+## 实施顺序
 
-1. [Workflow Authority与恢复](workflow-authority-recovery.md)是native Linear + Git recovery的唯一规格。
-2. Root Reconciler只作业务语义选择；Conductor从fresh native facts持续机械收敛。
-3. 一个external mutation outcome只代表一个independently durable effect，并必须targeted read-back。
-4. 每个slice先写失败测试；真实边界按progressive acceptance逐层放开，不用full campaign代替定位。
-5. 删除旧surface和replacement属于同一次hard cut；不增加dual-read、adapter、flag、backfill或fallback。
-6. 每个功能点只有一个named concern owner；其他文档和代码只引用。
+1. **接口与运行时外壳**：建立 Linear、Root Reconciliation、Performer、Git 和 Delivery 的 caller-owned interfaces，不让 SDK object、token、process handle 跨 public boundary。
+2. **Per-Root ReAct**：创建独立 Root Home、private `CodexReconcill`、app-server process/thread 和 `state.json` continuity，支持 bootstrap、内存 diff、三个 Performer tool 与 closed RootDecision。
+3. **Plan 与 DAG**：创建 Cycle shell；Plan 通过 Linear skill 持久化 Plan、多个 Work、Verify 和依赖关系；Conductor 重新读取并验证。
+4. **Work**：创建 Root worktree；按 DAG readiness 逐个执行 Work；同一 Cycle 复用一个 Work thread，每个 Work Item 使用一个 turn。
+5. **Verify 与交付**：全部 Work 完成后创建 commit；Verify 检查该 revision；通过后 push、创建 PR，并将 Root 设为 `In Review`。
+6. **串行多 Root 与回收**：当前 Root 进入 `In Review` 后处理下一个 Root；Linear 确认 `Done` 后只回收对应 Root runtime 和 Root Home。
 
-## 2. N0：authority与cutover contract
+每一步先用受控 fixture 验证接口和状态转换；最终闭环必须通过真实 Linear、Codex app-server、Git remote 和 PR 边界验证。
 
-- 统一full recovery、runtime-only canonical state、atomic current-value observation和hidden revision ownership；
-- 分类已有实现为retain、migrate或hard-cut delete，不覆盖未提交用户工作；
-- 建立完整defect closure matrix，把全部历史finding、已实现限制和剩余functional outcome映射到N1-N6。
+## 完成标准
 
-N0只改architecture authority、task evidence与validation tooling，不开始production runtime实现。
+Phase 1 完成必须同时证明：
 
-## 3. N1：canonical observation foundation
+1. 一个 Root 能生成包含多个 Work 的 DAG，并按 Plan -> Work* -> commit -> Verify -> PR 完成。
+2. 同一 Cycle 的多个 Work Item 使用同一个 Work thread 的不同 turn。
+3. 执行中修改 Root 或子 Issue 后，实际 diff 会到达 `RootReconcill`，且它能继续当前 Cycle 或关闭后重新 Plan。
+4. Verify、push 和 PR head 指向同一个 commit。
+5. 一个 Conductor 能串行交付两个 Root，且两者的 Root object、process、thread 和 Home 不共享。
+6. Root `Done` 后只删除对应 Root Home；其他 Root Home 和 Performer Home 不受影响。
 
-- 定义closed canonical Linear/Git fact identity、current value与observed provenance；
-- content digest覆盖canonical value本身；
-- complete observation之间只产生atomic `current_value | replacement | tombstone` batch。
-
-## 4. N2：full recovery
-
-- 完整分页恢复bounded Project Root Header Index；
-- admission后恢复一个Root的complete active/archived Tree与Git facts；
-- same facts在restart后必须生成byte-equivalent current state。
-
-## 5. N3：runtime observation loop
-
-- 串行accept complete observations并在whole frozen batch后wake convergence一次；
-- targeted mutation read-back是mutation后唯一state advancement入口；
-- incomplete coverage、acceptance uncertainty或baseline uncertainty强制fresh recovery。
-
-## 6. N4：hard-cut consumer migration
-
-- discovery、scheduling、safety、transition、compiler和materializer只消费runtime-owned current state；
-- Root与Stage sessions从同一canonical source派生，但各自维护isolated Provider-visible baseline；
-- contract generation只保留new initial/change variants，不允许mixed protocol deploy。
-
-## 7. N5：old runtime removal与closure
-
-- composition root一次切换，并在同一hard cut删除旧state owner、contract、adapter和tests；
-- 证明restart、reconnect、partial read、ambiguous write、late output与session loss恢复；
-- 完成全部control plane、workflow、stage、delivery、observability和security defect closure。
-
-## 8. N6：progressive real-boundary acceptance
-
-- 获得明确外部effect授权后，从one Root L0-L8逐步推进；
-- 验证restart、missing worktree、fair multi-Root scheduling和physical request budgets；
-- 最后运行L9 campaign与全仓检查，并要求closure matrix zero open rows。
-
-## 9. 每个slice的stop conditions
-
-以下任一条件出现都不能推进下一slice：
-
-- credential进入非owner process；
-- accepted/unknown mutation无deterministic read-back recovery；
-- restart无法从native facts推导remaining obligation；
-- terminal node可被redispatch；
-- claimed acceptance遗漏其名称所包含的真实boundary；
-- compatibility或private workflow state成为新authority。
-
-## 10. Final acceptance
-
-1. 完整native Root object graph与Git足以从cold restart推导current state。
-2. Root只在四类semantic gate调用；happy path机械transition不请求模型批准。
-3. Plan/Work/Verify、Provider turn和mutation effect都使用closed discriminated outcomes。
-4. `Todo`是唯一dispatchable Node；所有terminal attempts保持不可重跑。
-5. Human confirmations保存在Root threads/Activity和materialized target facts，不跨replacement target继承。
-6. Stage/Root transport results不落盘，native postconditions fresh read-back后才推进。
-7. Linear可见内容只包含用户需求、计划、任务、Findings、直接交互和有意义结论。
-8. L0-L8的claimed boundaries分别有真实证据，最后的L9 campaign通过。
-
-## 11. 明确延期
-
-- 第二Provider；
-- 同一Root多个active Cycles或并行workspace writers；
-- durable Provider transcript、vector memory或workflow database；
-- Desktop Workflow、Root/Stage/Human Action View或approval control；
-- Work subagent内部架构重设；
-- 精确cross-restart token/cost accounting。
+未通过这些真实边界检查前，不得声称 Phase 1 已跑通。

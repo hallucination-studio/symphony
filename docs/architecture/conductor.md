@@ -1,160 +1,94 @@
-# Conductor职责与模块边界
+# Conductor
 
-状态：目标架构提案。本文定义Conductor角色和模块边界。Root语义由
-[Root Reconciliation](root-reconciliation.md)定义；恢复由
-[Workflow Authority与恢复](workflow-authority-recovery.md)定义。
+状态：Phase 1 目标设计。Conductor 是静态、机械、串行的状态机。
 
-## 1. 职责
+## 职责
 
-Conductor负责：
+Conductor 负责：
 
-- 通过`LinearGatewayInterface`解析Project、routing、delegation和完整native Root object graph；
-- 通过`linear-runtime`恢复Project Root Header Index和每个admitted Root的完整current state；
-- canonicalize每次完整observation，以value-covering content digest比较current state，并发布one frozen observation batch；
-- 运行不调用模型的Root deterministic convergence host；
-- 验证active/archived coverage、status catalog、actor、remote preconditions、capability和Git facts；
-- 从complete native facts推导`mechanical_target | semantic_gate | external_wait | terminal | invalid_facts`；
-- 编译并模拟candidate Root graph，执行initial Cycle creation、complete Plan DAG materialization、ready Work selection、Stage dispatch、
-  immutable Verify target preparation和successful Cycle closure；
-- 把存在业务歧义的topology/lifecycle/Git恢复选择送入matching Root semantic gate；
-- 调用Performer Root Reconciler与Plan/Work/Verify roles；
-- 验证transient typed Stage response，将semantic Result或mechanical failure收敛为native Linear/Git facts；
-- materialize Human Action Root comment threads及ordinary human receipts/replies；
-- 管理Root branch/worktree、immutable revision、PR和delivery；
-- 输出sanitized structured logs/metrics。
+- 发现 Root，重新读取 Linear / Git，并计算内存 diff。
+- 串行选择 Root；任意时刻最多执行一个 Root。
+- 创建、暂停、恢复和回收每个 Root 的独立 runtime。
+- 向 `RootReconcill` 提供 `plan | work | verify` tools，并校验调用目标和前置条件。
+- 调用 Performer、校验 Handoff，然后重新读取实际结果。
+- 机械执行 Cycle create/close、worktree、commit、push、PR 和 Root `In Review` transition。
 
-Conductor不负责：
+Conductor 不理解需求，不生成 Plan，不写代码，不判断 Verify 结论，也不根据 Handoff 补写事实。所有语义决策属于 `RootReconcill`。
 
-- Provider SDK、model prompt loop或transcript；
-- 在存在业务歧义时替代Root Reconciler作决定；
-- 保存workflow DB、DAG mirror、queue、checkpoint或durable command log；
-- 写Root/Cycle event stream、机器JSON comment或内部receipt；
-- Linear OAuth、token、SDK或GraphQL implementation。
-
-## 2. 模块
+## 状态机
 
 ```text
-apps/conductor/src/
-  composition/
-  linear-gateway/
-  linear-runtime/
-  root-discovery/
-  root-scheduling/
-  root-reconciliation/
-  root-reconciler-client/
-  root-transition/
-  root-intent-materialization/
-  performer-agent-client/
-  human-actions/
-  git-workspaces/
-  root-delivery/
-  performer-profiles/
-  runtime-logs/
-  private-ipc/
+discover
+-> admit_root
+-> observe
+-> reconcile
+-> apply_mechanical_action
+-> observe | suspend_in_review | stop
+
+suspend_in_review -> discover
+fresh_done -> retire_root -> discover
 ```
 
-| 模块 | 职责 |
-|---|---|
-| `linear-runtime` | complete observation recovery、canonical current state、content digest和atomic current-value change batch；只存在于memory |
-| `root-discovery` | Project、routing、native delegation与header discovery；未委派Root零副作用 |
-| `root-scheduling` | eligibility、Priority和runtime single-owner lease；不拥有Root语义 |
-| `root-reconciliation` | runtime-owned current view的graph validation、workflow interpretation和mechanical limits；不另存mirror |
-| `root-transition` | pure native facts到mechanical target、semantic gate、external wait、terminal或invalid facts的transition |
-| `root-reconciler-client` | fresh bootstrap/live delta transport与Root Reconciler调用 |
-| `root-intent-materialization` | 编译RootSemanticIntent并收敛required native postconditions和human dispositions |
-| `performer-agent-client` | Root Reconciler与Stage session/turn transport |
-| `human-actions` | Root request thread、actor、reply/reaction/thread-state materialization与Root summary |
-| `git-workspaces` | Root branch/worktree、commit和Git facts |
-| `root-delivery` | push、PR/link和Root `In Review` delivery gate |
+状态与 transition 是 closed union。执行任何 action 前，Conductor 都重新读取并校验前置条件；不匹配时不执行，而是把新的实际 diff 交回对应 `RootReconcill`。
 
-`root-reconciliation`不能import Provider SDK；`root-reconciler-client`不能materialize intent；
-`root-transition`和`root-intent-materialization`不能调用模型。
+## Discovery, admission, and configuration
 
-## 3. Recoverable in-memory runtime
+Root discovery 只查询配置的单一 Linear workspace/team 中带
+`symphony:kind/root`、状态为 `Todo | In Progress | In Review | Done` 的 Issue。
+Conductor 按 `(priority, created_at, issue_id)` 的稳定顺序扫描，但任意时刻只 admit 一个
+可执行 Root。`In Review` 只保留/检查 runtime，`Done` 只触发匹配 runtime 回收，不进入
+执行槽。
+
+Root 只有同时满足以下 fresh facts 才可 admit：kind label 唯一且正确；没有超过一个
+active Cycle；repository identity 和 base branch 能从启动时的静态 Root routing 配置
+唯一解析；该 repository/base branch 可读；不存在已被另一个 Root 占用的 head branch
+或 worktree。缺失、重复或冲突都 fail closed，并记录 sanitized 可操作原因。
+
+Phase 1 启动配置只包含 Linear workspace/team、Root-to-repository routing、每个 repository
+的 base branch、program-data path、Performer Home、Codex executable 和 delivery provider
+endpoint。配置在进程启动时完成解析和验证，运行中不从 Profile、Podium、Issue
+description 或任意 metadata 推导或覆盖。一个 Root 必须精确匹配一条 routing rule。
+
+## Per-Root runtime
+
+每个 Root 独占：
 
 ```text
-LinearRuntimeState
-  project_root_header_index
-  admitted_roots
-    canonical_active_and_archived_root_tree
-    current_git_facts
-    content_digest
+RootReconcill object
+private CodexReconcill
+app-server process
+Root thread
+accepted observation baseline
+Root Home
 ```
 
-`linear-runtime`是Conductor内唯一canonical Linear runtime state owner。runtime creation先发布一次完整`recovered` state；之后每次
-complete observation canonicalize后与current content digest比较，并发布one frozen observation batch。batch按identity canonical排序，
-包含zero or more `current_value | replacement | tombstone` changes；整个batch接受后才唤醒convergence一次。它表达current value变化，
-不声称Linear历史或因果顺序。
-
-该state只存在于memory，不是workflow authority，也不写入checkpoint、database、queue或event log。Podium/Linear coverage不完整、
-canonicalization失败或observation baseline不确定时，不能从旧state、webhook cache或Provider conversation补齐，必须丢弃affected state并
-执行fresh recovery。downstream可以读取runtime的immutable current view，但不能维护第二份revisioned mirror。
-
-## 4. 调用与materialization
-
-Conductor首先执行Workflow Authority文档的worktree gate，再运行deterministic transition。只有结果为`semantic_gate`时才打开或
-推进matching Root Reconciler；live session可以使用delta，session丢失或baseline不连续时fresh bootstrap。
-
-Root Reconciler返回一个gate-specific closed `RootSemanticIntent`或failure。Conductor不持久化output object：它从fresh facts生成
-preconditions，编译完整candidate graph，将target拆为independently durable effects，并在每个targeted read-back后继续机械收敛。
-
-Stage response同样只在当前call中存在；semantic Result按[Root Issue工作流](root-issue.md)转成native facts，mechanical
-`StageTurnFailure`先收敛唯一合法的mechanical consequence；存在业务取舍时按
-[Root Reconciliation](root-reconciliation.md#10-humanfinding与failure)进入`recovery_strategy`。
-
-## 5. Session client
+Root Home 位于：
 
 ```text
-PerformerAgentClientInterface
-  openRootReconciler(input)
-  advanceRootReconciler(input)
-  executePlanTurn(input)
-  executeWorkTurn(input)
-  executeVerifyTurn(input)
-  closeCycleStageSessions(input)
-  closeRootReconciler(input)
+<program-data>/root-reconcills/<root-id>/
+  symphony/state.json
 ```
 
-Conductor拥有process/channel/cancellation。opaque Provider/session handle只存在runtime memory，不进入Linear或public business
-contract。late output必须通过session/turn/digest validation拒绝。
+`state.json` 只保存恢复 Root thread 所需的最小 continuity，例如 Root identity、runtime generation、thread identity、accepted observation digest 和 in-flight correlation。它不保存 Stage、DAG、下一步动作、Handoff 或 Linear / Git 镜像，也不使用 workflow SQLite。
 
-## 6. Human Action
+Root 进入 `In Review` 后暂停但保留 runtime。Linear 确认 `Done` 后，Conductor 停止对应 process 和 turn，隔离 tools 与迟到输出，验证 Home owner，再销毁对象并删除整个对应 Root Home。这些资源不得跨 Root 共享或复用。
 
-Conductor可从Plan Result机械创建exact Plan approval request；其他request由matching semantic gate提出。它验证author、target
-mentions、human actor、replies、reactions和thread state，不能自行解释有歧义的human选择。完整模型只见
-[Human Action](human-actions.md)。
+## 观察与重启
 
-## 7. Git与delivery
+同一进程、同一 runtime generation 的连续 turn 只发送相邻两个已接受 observation 之间
+的 frozen in-memory diff。digest 仅校验这条连续链，不能重建旧 observation。
 
-一个Root固定一个active branch/worktree。Work只能修改workspace；Conductor独占commit、Git topology、push、PR和cleanup。
-Verify与delivery绑定same immutable revision。完整mechanics只见
-[Git Worktree与交付](git-worktree-delivery.md)。
+进程启动或 Root runtime 丢失内存 baseline 后只允许一个 primary restart transition：
 
-## 8. 错误与恢复
+1. 读取并验证 `state.json` identity；取消/隔离其中的 in-flight correlation，旧输出永不接受。
+2. fresh read 完整 Linear / Git facts；若 worktree ownership、branch、HEAD、active Cycle 或
+   PR identity 不唯一，保留现有事实并 fail closed。
+3. 创建递增的 `runtime_generation` 和全新 Root thread，atomic replace `state.json`，向
+   新 thread 发送当前完整 `RootBootstrap`。
+4. 新 thread 接受 bootstrap 后，以当前 observation digest 建立唯一 baseline；此后才可
+   产生 action 和相邻 diff。
 
-- malformed/stale Root semantic intent或Stage response不materialize；
-- process crash不恢复memory decision，按Workflow Authority文档fresh converge；
-- target `In Progress`在process loss后不能重新dispatch；
-- routing/process generation/profile/worktree无法验证时取消matching sessions并拒绝late output；
-- required native mutation/read-back失败时停止Root并记录sanitized actionable error；
-- 只有用户需要采取行动时才写一条human-readable comment；内部细节只进入logs/metrics；
-- Project discovery transient failure进入bounded degraded/backoff，不终止其他Bindings。
-
-## 9. 不变量
-
-1. Conductor运行deterministic convergence host，不运行模型或Provider SDK。
-2. 唯一可推导的workflow transition来自fresh native facts；业务歧义只来自matching Root semantic gate。
-3. Conductor是Linear/Git副作用和Performer调用的唯一owner。
-4. active和archived descendants都必须读取；只有active `Todo` node可dispatch。
-5. Result materialize为native facts并read-back后才影响下一轮。
-6. Conductor不保存workflow数据库、queue、checkpoint、command log或Provider pointer。
-7. Conductor不发布Root/Cycle comment stream，也不持久化机器payload。
-8. transition policy可以选择唯一合法的mechanical status、Stage、DAG和Cycle target，但不能替代semantic gate选择业务策略。
-9. repair-attempt hard limit的唯一后果由fresh native facts编译为mechanical Cycle closure；Root模型不批准hard-policy enforcement。
-10. max-Cycles只关闭terminal review的successor capability；Conductor用fresh Cycle count复核command并在越界topology上zero mutation
-    fail closed，不创建generic limit turn或机械取消Cycle。
-11. Root deadline关闭execution admission但保留已完成success evidence；unfinished Cycle经session fence后先机械`Recovery Abandoned`，
-    下一fresh pass再机械取消Root，terminal delivery review不能在deadline后创建任何successor或delivery recovery execution。
-12. repeated-Finding hard limit只接受相邻Cycle上的directed single-chain lineage；达到上限后Conductor完成session fence并机械关闭exact
-    active Cycle，保留全部Finding evidence，restart进入non-success review而不重复调用Finding recovery gate。
-13. `linear-runtime`是唯一canonical in-memory Linear state owner；consumer只接收一次`recovered` state和后续atomic current-value batches。
+旧 thread 不恢复、不继续，也不作为第二执行路径。旧 command、Handoff、transcript、
+digest 或 session content 均不 replay；外部 facts 在停机期间是否变化不影响这条规则。
+完整 bootstrap 是 restart 的正式输入，不是 fallback。任何一步无法证明安全都停止推进，
+并给出 sanitized 可检查原因。

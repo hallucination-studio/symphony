@@ -1,8 +1,0 @@
-{
-  "schema": "conductor-performer.schema.json#/$defs/RootDelta",
-  "value": {
-    "base_root_digest": "root-digest-before",
-    "target_root_digest": "root-digest-after",
-    "changes": []
-  }
-}

@@ -1,245 +1,94 @@
-# Root Issue工作流事实
+# Root Issue 模型
 
-状态：目标架构提案。本文是Root Tree、Issue kinds、Linear status subsets、DAG和native archive语义的唯一事实源。
-durable authority与恢复规则只见[Workflow Authority与恢复](workflow-authority-recovery.md)。
+状态：Phase 1 目标设计。本文只定义 Linear 中持久化的工作流事实。
 
-## 1. Root Tree
+## 结构
 
 ```text
 Root Issue
-├── Cycle Issue 1
-│   ├── Plan Issue*
-│   ├── Work Issue*
-│   ├── Verify Issue*
-│   └── Finding Issue*
-├── Cycle Issue 2
-│   └── ...
-
-Root comments
-└── Human Action request/resolution threads
+└── Cycle Issue
+    ├── Plan Issue
+    ├── Work Issue 1
+    ├── Work Issue 2
+    ├── ...
+    └── Verify Issue
 ```
 
-Root是workspace、delivery、convergence和恢复单位。Cycle是一次有明确Plan、执行DAG和验证结论的尝试。Plan、Work、
-Verify和Finding必须是Cycle直接子Issue。Human Action只存在于Root comment threads，通过native Issue mention引用exact target；
-完整规则由[Human Action](human-actions.md)定义。
-
-Root current description是当前用户需求的唯一正文authority，包含objective、included/excluded scope、constraints、
-acceptance criteria、verification requirements和明确delivery instruction。会改变重建输入的人类回答必须先合并到Root
-description；不存在Spec Issue、contract record或repository task file。
-
-## 2. Issue kind与身份
-
-每个workflow Issue恰有一个primary kind label。业务kind与native Linear Issue Label使用以下唯一映射；不接受裸业务名label：
-
-| business kind | native Issue Label |
-|---|---|
-| `Root` | `symphony:kind/root` |
-| `Cycle` | `symphony:kind/cycle` |
-| `Plan` | `symphony:kind/plan` |
-| `Work` | `symphony:kind/work` |
-| `Verify` | `symphony:kind/verify` |
-| `Finding` | `symphony:kind/finding` |
-
-Issue identity只使用Linear native ID。kind必须同时满足primary label和parent topology；缺label、多个primary kind labels、
-非法parent或跨Root relation使Root fail closed。title、description文本和创建顺序都不是identity。
-
-附加labels只表达有限枚举，例如Finding severity、Verify conclusion或`Execution Invalidated`；它们不能
-保存任意payload、digest、attempt ID或私有状态。Symphony不在description/comment写JSON、marker或machine envelope。
-
-## 3. Linear status catalog
-
-Team必须配置并验证以下display statuses：
-
-| Linear category | display statuses |
-|---|---|
-| Backlog | `Draft` |
-| Unstarted | `Todo` |
-| Started | `Planning`, `Sealed`, `Executing`, `Verifying`, `In Progress`, `In Review`, `Approved` |
-| Started | `Needs Approval`, `Needs Info`, `Inconclusive`, `Escalated` |
-| Completed | `Succeeded`, `Changes Required`, `Done` |
-| Canceled | `Interrupted`, `Canceled`, `Failed` |
-
-每种kind只允许本文后续列出的status子集。native archive flag与status正交：archive决定active membership，不等于
-`Done`或`Canceled`，也不删除comments、relations或Activity。
-
-## 4. Root lifecycle
+Root 是用户需求和最终 PR 的单位。Cycle 是完成该需求的一次尝试。Plan、Work、Verify 是 Cycle 的直接子 Issue，并分别使用以下 kind label：
 
 ```text
-Todo -> In Progress -> In Review -> Done
-In Progress -> Needs Approval | Needs Info | Escalated -> In Progress
-In Review -> In Progress
-any nonterminal -> Canceled
+symphony:kind/root
+symphony:kind/cycle
+symphony:kind/plan
+symphony:kind/work
+symphony:kind/verify
 ```
 
-| Status | 含义 |
-|---|---|
-| `Todo` | 已delegate但尚未开始 |
-| `In Progress` | 可以推进Root或当前Cycle |
-| `Needs Approval` | 至少一个blocking Approval/Permission Human Action open |
-| `Needs Info` | 至少一个blocking Information Human Action open |
-| `Escalated` | native事实冲突、mechanical failure或需要人工处置 |
-| `In Review` | exact verified Git revision已交付，等待用户或SCM接受 |
-| `Done` | 用户或SCM接受交付 |
-| `Canceled` | Root terminal |
+Linear 原生 Issue ID 是唯一标识。description 只保存人可读内容，不保存 Symphony JSON、隐藏标记、Handoff、diff 或运行时状态。
 
-Human Action并发与Root summary precedence只由[Human Action](human-actions.md)定义。Root `In Review`的Git条件只由
-[Git Worktree与交付](git-worktree-delivery.md)定义。
-
-## 5. Cycle lifecycle
+## 生命周期
 
 ```text
-Draft -> Planning -> Sealed -> Executing -> Verifying
-Planning | Sealed | Executing | Verifying -> Inconclusive | Escalated
-Verifying -> Succeeded | Changes Required
-Inconclusive | Escalated -> Planning | Executing | Verifying | Changes Required
-any nonterminal -> Canceled
+Root:  Todo -> In Progress -> In Review -> Done
+Cycle: Planning -> Executing -> Verifying -> Succeeded
+       Planning | Executing | Verifying -> Canceled
+Stage: Todo -> In Progress -> Done | Failed | Canceled
 ```
 
-| Status | 含义 |
-|---|---|
-| `Draft` | fresh Cycle存在，尚未开始Plan |
-| `Planning` | fresh Plan正在生成或等待review |
-| `Sealed` | exact Plan已批准，initial DAG已materialize并read-back |
-| `Executing` | 正在推进Work DAG |
-| `Verifying` | Verify针对immutable revision运行 |
-| `Inconclusive` | 证据不足，需要fresh决策 |
-| `Escalated` | blocking Human Action或mechanical inconsistency |
-| `Succeeded` | verification和Cycle conclusion成功 |
-| `Changes Required` | 当前Cycle terminal但Root需求未满足 |
-| `Canceled` | 用户取消、supersession、execution generation失效或closed recovery conclusion |
+- 一个 Root 最多有一个 active Cycle。
+- `Todo` 是 Plan、Work、Verify 唯一可执行状态；terminal Stage 不重开或重跑。
+- 当前 Cycle 失效时，先将它设为 `Canceled`，再创建 successor Cycle。
+- 只有已验证 commit 创建 PR 后，Root 才能进入 `In Review`。
+- `Done` 由用户或外部流程在 Linear 中确认，Symphony 不自动设置。
 
-Interrupted Stage的closed recovery conclusion使用`Canceled`，并恰好带一个`Recovery Exhausted`或`Recovery Abandoned`附加label。
-这两个label只编码closed business disposition；bounded explanation和outcome保存在canonical human-readable Cycle description中。
-它们必须具有matching Symphony actor/version provenance，不能由label单独推断或接受human-authored lookalike。该Cycle随后进入
-non-success terminal review，不等于Root已经结束，也不构成交付资格。
+### Mechanical transition table
 
-一个Root最多一个active nonterminal Cycle。Cycle identity不可变；canonical lineage按native `(created_at, issue_id)`全序及
-archive状态推导，successor是该Root中greatest archived predecessor之后的唯一active Cycle。不得为表达内部lineage而伪造
-`blocks`或把对称`relates_to`解释成定向predecessor，也不能建立跨Cycle execution dependency。
-Archive只改变Issue是否参与当前执行，不删除native relation历史。任一endpoint已archive的relation不参与当前DAG readiness，且不能
-仅因保留该历史relation就阻断leaf-first subtree archive；missing endpoint、当前nonterminal Cycle内的非法DAG和active跨Cycle
-execution dependency仍必须fail closed。
+| Object | From -> To | 唯一触发事实 |
+|---|---|---|
+| Root | `Todo -> In Progress` | Root 被 admit，且 Cycle shell 已创建并回读成功 |
+| Cycle | create as `Planning` | admitted Root 没有 active Cycle，且 `StartCycle` 通过 fresh precondition |
+| Plan | `Todo -> In Progress` | Plan tool dispatch 前 fresh facts 仍满足 target/parent/kind/status |
+| Plan | `In Progress -> Done` | Plan Handoff 为 `completed`，且 fresh read 得到唯一合法 Plan、至少一个 Work、唯一 Verify 和完整 DAG |
+| Cycle | `Planning -> Executing` | Plan 为 `Done` 且 fresh DAG 合法 |
+| Work | `Todo -> In Progress` | Work tool dispatch 前自身为 `Todo`，且全部依赖 Work freshly `Done` |
+| Work | `In Progress -> Done` | Work Handoff 为 `completed`，且 fresh Linear read 为 `Done` |
+| Cycle | `Executing -> Verifying` | 全部 required Work freshly `Done`，immutable commit 已创建且 revision 回读一致 |
+| Verify | `Todo -> In Progress` | Verify tool 的 revision 等于 fresh HEAD 和 Cycle immutable revision |
+| Verify | `In Progress -> Done` | Verify Handoff 为 `passed`，且 revision 和 fresh Git facts 一致 |
+| Cycle | `Verifying -> Succeeded` | Verify freshly `Done` 且 verified revision 被接受 |
+| Root | `In Progress -> In Review` | 同一 verified revision 已 push，唯一 PR read-back 的 head 相同 |
+| Any active Stage | `In Progress -> Failed` | 对应 Handoff 为 `failed` 或 `inconclusive`，且该 terminal status 写入并回读成功 |
+| Any active Stage | `Todo | In Progress -> Canceled` | `CloseCycleAndReplan` 或 shutdown cancellation 已被 fresh precondition 接受并回读 |
+| Active Cycle | `Planning | Executing | Verifying -> Canceled` | 当前 Stage 已 terminal/canceled，且 `CloseCycleAndReplan` 通过 fresh precondition |
+| Root | `In Review -> Done` | 仅由用户或外部流程写入，Conductor fresh read 后只执行回收 |
 
-## 6. Plan、Work与Verify lifecycle
+timeout、boundary unavailable、`acceptance_unknown`、`precondition_failed` 和
+`readback_mismatch` 本身都不推进 lifecycle。Conductor fresh read 后将实际 observation
+交给 `RootReconcill`；无法证明 terminal mutation 已发生时保持当前事实并 fail closed。
+`canceled` Handoff 只有在 Stage `Canceled` 被 fresh read 确认后才是 terminal。
 
-```text
-Plan:   Todo -> In Progress -> In Review -> Approved -> Done
-Work:   Todo -> In Progress -> Done
-Verify: Todo -> In Progress -> Done
+## Plan 与 DAG
 
-any In Progress -> Interrupted | Failed | Canceled
-any Todo         -> Canceled
-```
+Conductor 只创建空 Cycle。Plan Performer 负责在 Linear 中创建并回读：
 
-`Todo`是唯一可dispatch状态。`Interrupted`、`Done`、`Failed`和`Canceled`都是terminal attempt；新的执行必须创建fresh
-native identity，不能把旧Issue改回`Todo`。lineage representation由role topology决定：Interrupted Plan可以在同一Planning Cycle
-使用带exact Symphony provenance的fresh Plan sibling；Work与Verify不改写approved DAG，而通过带durable recovery provenance的
-fresh successor Cycle进入new Plan。当前public Linear contract没有directional predecessor/replacement mutation，因此不得把
-`blocks`或对称`relates_to`解释为attempt lineage。
+1. 一个已完成的 Plan Issue。
+2. 至少一个 Work Issue 和一个 Verify Issue。
+3. 完整、无环的 Work 依赖关系。
+4. Verify 对全部 required Work 的依赖关系。
 
-`replan_current_cycle`使用同一Cycle下带`Cycle Replan` authorization的fresh Todo Plan，不把任何terminal identity改回active。
-该Plan与旧DAG短暂共存只在exact Symphony actor/version、canonical description、唯一fresh Plan、matching interrupted role和owning
-Cycle phase全部成立时合法。旧children归档且Cycle为Planning后，fresh Plan是唯一active child；旧Plan/DAG继续作为archived history。
+Conductor 不从 Plan 文本生成或修补 DAG，只重新读取并验证 parent、kind、status 和 relation。
 
-`repair_current_cycle`使用同一Cycle下带`Cycle Repair` authorization的fresh Todo Work，且不改变approved Plan。Interrupted Work的
-依赖迁移完成后才archive predecessor；Interrupted Verify必须创建带`Cycle Repair Verify` provenance的fresh Verify并把Cycle退回
-Executing。repair Work及fresh Verify都是新的native identity；任何Interrupted terminal identity或旧Verify target都不能再次dispatch。
+当前 active Cycle 的 **required Work** 是该 Cycle 下全部且仅有的、parent 直接指向该
+Cycle、带 `symphony:kind/work` 且 identity 唯一的 Work Issue。Plan Handoff 中的
+`work_issue_ids` 必须与这个 fresh read 集合完全相等；集合外的 Issue 不能被暗中忽略，
+集合内的 Issue 也不能因 Handoff 缺失而变为 optional。任一 Work kind/parent/identity
+含糊、依赖指向 Cycle 外或依赖图不完整/有环时，Plan 不可接受并关闭 Cycle 后重新 Plan
+或停止。
 
-Plan `In Review`表示description中human-readable Plan已经固定，等待exact Plan Approval。`Approved`是matching
-`plan_human_decision`已经验证authorized actor、exact target和unchanged Plan content后的durable authorization barrier；它不表示
-DAG已经完整。Conductor只从`Approved` Plan机械收敛完整DAG，全部节点与relations read-back后才把Plan置`Done`并把Cycle置
-`Sealed`。Plan description在`In Review`后发生编辑会使现有approval失效；`Approved`后发生编辑属于invalid topology，不能按编辑后
-内容继续materialize，必须进入recovery并创建fresh Plan。
+一个 Work 只有在自身为 `Todo` 且全部依赖 Work 为 `Done` 时才能执行。全部 required Work 为 `Done` 后，Conductor 才能创建 commit 并调用 Verify。
 
-Work `Done`要求matching Git变化和required checks可验证。Verify `Done`只表示该Verify attempt给出了closed conclusion；
-结论由附加label限定为`Passed`、`Changes Required`、`Inconclusive`或`Contract Violation`，并由Finding Issues和Git evidence
-支持。Cycle状态表达后续业务结论。
+## 事实权威与变化
 
-进程丢失留下的`In Progress`节点按
-[Workflow Authority与恢复](workflow-authority-recovery.md)收敛；本文不复制恢复流程。
+Linear 的 Issue、status、parent、label、relation 和 description 是工作流事实；Git 的 worktree、diff、commit 和 PR 是代码交付事实。
 
-## 7. Plan与DAG
-
-Cycle从一个Plan开始：
-
-```text
-Cycle(Planning)
-└── Plan(Todo | In Progress | In Review | Approved)
-```
-
-Plan description是用户可读、immutable-after-approval的Plan contract，至少包含objective、scope、assumptions、constraints、
-acceptance criteria、verification requirements、Work proposals、dependency proposal和required checks。它不包含机器JSON。
-
-Plan Approval是Root上的Human Action comment thread，正文native-mention exact Plan。批准后Conductor从lossless approved Plan contract
-机械编译完整graph，创建Work/Verify Issues与`blocks` relations并fresh read-back，不调用Root Reconciler逐节点选择：
-
-```text
-Cycle(Sealed | Executing)
-├── Plan(Done)
-├── Work*(Todo or terminal attempt)
-└── Verify*(Todo or terminal attempt)
-```
-
-规则：
-
-- Work ready要求active、`Todo`、全部active dependencies为`Done`且matching Git evidence仍存在；
-- 一个Work turn只执行一个Work Issue，同Cycle Work thread可以跨多个fresh Work Issues复用；
-- approved Plan不原地修改；scope或acceptance变化创建fresh Plan并supersede旧Plan；
-- approved scope内的DAG调整创建、archive或replace native Issues/relations，不保存parallel patch object；
-- Verify只针对所有required active Work完成后的immutable Git revision；
-- archived Issues不参与ready或dependency satisfaction。
-
-## 8. Finding
-
-Finding是Cycle直接子Issue，使用`Finding` primary label、severity/category labels和relation指向matching Verify/Work。
-
-```text
-Todo -> Done | Canceled
-```
-
-- `Todo`：unresolved，阻止不允许该severity的Cycle成功；
-- `Done`：已由fresh evidence证明resolved；
-- `Canceled`：duplicate、invalid或有matching approved Finding Waiver Human Action thread。waiver必须存在exact request、authorized human
-  reply、Symphony adoption reply、originally mentioned complete Finding set及current Activity proof；单独status、label、receipt或resolved
-  thread不能证明waiver。
-
-description和comments保存用户可读的观察、影响、复现与证据。waiver不能只靠comment、reaction或label推断；其scope和actor
-由[Human Action](human-actions.md)定义。
-
-## 9. Native execution evidence
-
-Stage typed Result是transient cross-process output。Conductor在同一bounded materialization中把它转成以下native facts：
-
-| Role | Durable native facts |
-|---|---|
-| Plan | Plan description、status、labels、Plan Approval relation、materialized child DAG |
-| Work | Work status、meaningful result comment、Git diff/commit/check evidence、successor relations |
-| Verify | Verify status/conclusion label、Finding Issues、meaningful evidence comment、verified Git revision |
-| Root Review | Cycle terminal status、successor relation或Root delivery state |
-
-comment只保存用户需要理解的结论、阻塞原因或证据，不保存model output envelope、usage、correlation或内部receipt。精确
-model/token usage属于runtime observability。
-
-attempt、budget和progress从native Issue数量、relation链、timestamps、statuses、Findings及Git current facts推导。不得
-创建parallel assessment、outcome或budget objects。
-
-## 10. 用户与外部修改
-
-用户可以修改description、status、labels、relations、archive和comments。Conductor只验证结构和preconditions；业务语义
-由fresh Root Reconciler解释。
-
-- Root description的semantic change可能使当前Cycle terminal并创建successor；
-- approved Plan被编辑后approval失效，旧Plan归档，fresh Plan重新review；
-- 用户把terminal Work改回active是invalid lifecycle，Root进入`Escalated`等待显式处理；
-- 人类comment通过native receipt/reply进入Root输入，不能当作隐藏command；
-- 外部automation与unknown actor mutation不得静默视为Symphony成功事实。
-
-## 11. 不变量
-
-1. status拥有lifecycle，archive拥有active membership，labels/parent/relations拥有kind与topology。
-2. Issue native ID是唯一identity；description/comment不含Symphony机器payload。
-3. Root description是current requirement authority；Plan description是exact approved Plan authority。
-4. Finding是native Issue；Human Action是Root native comment thread，二者都不使用private machine payload。
-5. Dispatcher只派发`Todo`；terminal attempt只能由fresh successor替代。
-6. Stage transport Result必须转成native Linear/Git facts并read-back后才能影响下一步。
-7. 完整Root读取始终包含active和archived descendants。
+Linear 或 Git 发生变化后，Conductor 重新读取当前值并计算内存 diff。`RootReconcill` 决定继续当前 Cycle、关闭后重新 Plan，或停止。Conductor 不解释变化，也不把历史事件重放为动作。

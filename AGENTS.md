@@ -17,68 +17,12 @@ This file contains the repository-wide working rules for coding agents.
   module-baseline documents unless the user explicitly asks for them. Update
   the appropriate `docs/architecture/` source-of-truth document instead.
 
-## Target architecture invariants
+## Target architecture
 
-- Symphony is one product with four responsibilities: Podium Desktop, Podium,
-  Conductor, and Performer.
-- Podium Desktop, Podium, and Conductor target TypeScript; Performer remains a
-  Python process; the Desktop host uses Tauri/Rust.
-- The complete native Linear Root object graph is workflow authority, and Git
-  is code and delivery authority. Linear descriptions and comments must not
-  contain Symphony machine JSON, hidden markers, or generated Root/Cycle event
-  comment streams. Conductor must not introduce a workflow database,
-  queue, checkpoint store, or mirrored Work Node state.
-- Podium owns Linear OAuth, tokens, project catalog, bindings, the Linear SDK,
-  and `podium.db`. Linear SDK types and credentials must not cross into
-  Conductor.
-- Conductor resolves its project through the Conductor Project Label, rebuilds
-  root state from active and archived Linear facts plus Git, runs deterministic
-  Root convergence, manages one Git worktree per Root, and materializes closed
-  Root semantic intents. It does not run a model or replace Root Reconciler at
-  a semantic gate; it does interpret closed Stage Results and native facts to
-  execute uniquely derivable mechanical transitions.
-- Root, Cycle, and Plan/Work/Verify use kind-restricted subsets of one Linear
-  Team workflow. Findings and Human overrides are native Linear facts;
-  attempts, budgets, and progress are derived from native Linear/Git facts.
-  Root-level convergence limits are mechanical and survive every Conductor or
-  Performer restart.
-- Conductor is always the Performer caller. Performer exclusively owns
-  Provider SDK integrations and gives each Root one Reconciler thread plus
-  isolated Plan, Work, and Verify threads per Cycle; the Work thread spans
-  multiple Work Issues and turns in that Cycle. Performer never calls
-  Conductor, and Provider threads are runtime continuity rather than durable
-  workflow authority.
-- Provider memory uses five injection layers. Fresh sessions receive stable
-  instructions and role-scoped initial context once; live turns append only
-  the current command and new/replacement/tombstone context fragments. Root,
-  Plan, Work, and Verify maintain isolated Provider-visible baselines and
-  opaque continuations.
-- Root Reconciler is the only model-driven workflow semantic-decision role.
-  It reads the complete active and archived Root Tree, handles ordinary human
-  comments with native replies/receipts, and returns one closed, versioned,
-  gate-specific semantic intent. Workspace creation, DAG materialization,
-  ready Work selection, Stage dispatch, waits, and uniquely derivable lifecycle
-  transitions are deterministic Conductor responsibilities.
-  Plan, Work, and Verify return strong typed Results and do not mutate the DAG
-  or create Human Actions directly.
-- Human Action stays in Root-hosted native comment threads. Symphony writes
-  comments only for direct human requests, replies, or meaningful failure,
-  verification, and delivery explanations; native Linear Activity provides
-  lifecycle history. Required native mutations and human replies must read
-  back successfully before the Root can advance.
-- Podium Desktop is a control-plane and observability surface only. It must not
-  expose or mutate Root, Cycle, Stage, Human Action, Result, Finding, delivery,
-  or workflow-next-step state. Workflow interaction stays in Linear; Desktop
-  exposes only Linear connected/disconnected and Conductor online/offline.
-- Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
-  directories, and are controlled through the approved profile-control
-  boundary. Symphony must not read or rewrite Codex-owned configuration files.
-- Cross-process communication uses closed, versioned schemas and generated
-  types. Roles depend on contracts and interfaces, never another role's
-  implementation.
-- Public boundaries use the naming and module rules in
-  `docs/architecture/code-organization.md`; business vocabulary follows
-  `docs/architecture/glossary.md`.
+Architecture details are intentionally not duplicated in this file. Read
+[`docs/architecture/README.md`](docs/architecture/README.md) and the linked
+named-concern owner documents before changing architecture, contracts, module
+boundaries, or product behavior.
 
 ## Scope discipline
 
@@ -118,15 +62,10 @@ make stop
 Focused checks:
 
 ```bash
-npm test -w @symphony/podium-desktop
+npm test -w @symphony/conductor
 npm run typecheck -w @symphony/conductor
-.venv/bin/python -m pytest apps/performer/tests -q
-cd apps/podium-desktop/src-tauri && cargo test
+npm run test:architecture
 ```
-
-Before any Podium UI change, read `apps/podium-desktop/DESIGN.md`. Its visual
-tokens and matching CSS custom properties are normative; architecture and
-product behavior remain owned by `docs/architecture/`.
 
 ## Engineering rules
 
@@ -152,7 +91,7 @@ product behavior remain owned by `docs/architecture/`.
   change warrants it.
 - Documentation-only changes must at least verify links, removed-path
   references, and repository status.
-- UI changes must run the relevant Desktop tests, lint, typecheck, and build.
+- Runtime changes must run the relevant Conductor tests, lint, typecheck, and build.
 - Runtime behavior that spans processes or external systems requires evidence
   from the real boundary; local mocks alone are not sufficient.
 - Final reports must state what was changed, exact verification performed, and
