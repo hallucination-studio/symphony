@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseRootIssueId } from "../contracts/identity.js";
+import { parseRepositoryId, parseRootIssueId } from "../contracts/identity.js";
 import type { RuntimeEvent } from "../runtime-logs/StructuredLogger.js";
 import { SerialRuntimeShell, type RuntimeDependencies } from "./SerialRuntimeShell.js";
 
@@ -48,6 +48,7 @@ test("inert shell returns to idle when discovery has no Roots", async () => {
 test("inert shell fails closed before any unimplemented Root effect", async () => {
   const fixture = dependencies([{
     root_id: parseRootIssueId("LIN-1"), status: "Todo", priority: 1, created_at: "2026-07-29T00:00:00Z",
+    repository_id: parseRepositoryId("repo:1"), base_branch: "main",
   }]);
   const shell = new SerialRuntimeShell(fixture.value);
   await assert.rejects(shell.tick(), /root_execution_not_implemented/u);

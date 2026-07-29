@@ -1,4 +1,10 @@
-import type { CorrelationId, CycleIssueId, RootIssueId, StageIssueId } from "../../contracts/identity.js";
+import type {
+  CorrelationId,
+  CycleIssueId,
+  RepositoryId,
+  RootIssueId,
+  StageIssueId,
+} from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
 import type {
   CycleStatus,
@@ -13,6 +19,8 @@ export interface RootCandidate {
   readonly status: RootStatus;
   readonly priority: number;
   readonly created_at: string;
+  readonly repository_id: RepositoryId;
+  readonly base_branch: string;
 }
 
 export type LinearMutation =
