@@ -8,12 +8,17 @@ import test from "node:test";
 
 import {
   parseCorrelationId,
+  parseObservationDigest,
   parseRepositoryId,
   parseRevision,
   parseRootIssueId,
 } from "../../contracts/identity.js";
 import { createDeliveryIdentity } from "../../delivery/api/DeliveryInterface.js";
-import type { PrepareWorkspaceRequest, RootWorkspaceIdentity } from "../api/GitWorkspaceInterface.js";
+import type {
+  CommitWorkspaceRequest,
+  PrepareWorkspaceRequest,
+  RootWorkspaceIdentity,
+} from "../api/GitWorkspaceInterface.js";
 import { GitWorktree } from "./GitWorktree.js";
 
 const exec = promisify(execFile);
@@ -34,7 +39,8 @@ async function repository(cleanup: (callback: () => Promise<void>) => void) {
   await git(repositoryPath, ["config", "user.name", "Symphony Test"]);
   await git(repositoryPath, ["config", "user.email", "symphony@example.invalid"]);
   await writeFile(path.join(repositoryPath, "README.md"), "baseline\n", "utf8");
-  await git(repositoryPath, ["add", "README.md"]);
+  await writeFile(path.join(repositoryPath, "obsolete.txt"), "remove me\n", "utf8");
+  await git(repositoryPath, ["add", "README.md", "obsolete.txt"]);
   await git(repositoryPath, ["commit", "-m", "baseline"]);
   const revision = parseRevision(await git(repositoryPath, ["rev-parse", "HEAD"]));
   const workspace = await GitWorktree.create({
@@ -69,6 +75,19 @@ function prepare(workspaceIdentity: RootWorkspaceIdentity, revision: ReturnType<
     ...workspaceIdentity,
     correlation_id: parseCorrelationId(`prepare:${workspaceIdentity.root_id}`),
     expected_base_revision: revision,
+  };
+}
+
+function commitRequest(
+  workspaceIdentity: RootWorkspaceIdentity,
+  observation: Awaited<ReturnType<GitWorktree["read"]>>,
+): CommitWorkspaceRequest {
+  assert.ok(observation.head_revision);
+  return {
+    ...workspaceIdentity,
+    correlation_id: parseCorrelationId(`commit:${workspaceIdentity.root_id}`),
+    expected_head_revision: observation.head_revision,
+    expected_diff_digest: observation.diff_digest,
   };
 }
 
@@ -163,4 +182,58 @@ test("two Roots receive disjoint worktrees, branches, and mutable files", async 
   assert.equal(await readFile(path.join(secondPath, "README.md"), "utf8"), "baseline\n");
   assert.equal((await f.workspace.read(first)).workspace_state, "dirty");
   assert.equal((await f.workspace.read(second)).workspace_state, "clean");
+});
+
+test("commit records the entire exact Root worktree once and accepts only its immutable read-back", async (context) => {
+  const f = await repository((callback) => context.after(callback));
+  const root = identity("LIN-1");
+  assert.equal((await f.workspace.prepare(prepare(root, f.revision))).outcome, "applied");
+  const worktreePath = f.workspace.pathFor(root.root_id);
+  await writeFile(path.join(worktreePath, "README.md"), "completed work\n", "utf8");
+  await writeFile(path.join(worktreePath, "artifact.bin"), Buffer.from([0, 1, 2, 255]));
+  await rm(path.join(worktreePath, "obsolete.txt"));
+  const before = await f.workspace.read(root);
+  const request = commitRequest(root, before);
+
+  const first = await f.workspace.commit(request);
+  const committed = await f.workspace.read(root);
+  const second = await f.workspace.commit(request);
+  const repeated = await f.workspace.read(root);
+
+  assert.equal(first.outcome, "applied");
+  assert.equal(second.outcome, "applied");
+  assert.equal(committed.workspace_state, "clean");
+  assert.ok(committed.head_revision);
+  assert.notEqual(committed.head_revision, f.revision);
+  assert.equal(repeated.head_revision, committed.head_revision);
+  assert.equal(await git(worktreePath, ["rev-list", "--count", `${f.revision}..HEAD`]), "1");
+  assert.equal(await git(worktreePath, ["rev-parse", "HEAD^1"]), f.revision);
+  assert.equal(await git(worktreePath, ["show", "HEAD:README.md"]), "completed work");
+  assert.equal(await git(worktreePath, ["ls-tree", "--name-only", "HEAD", "artifact.bin"]), "artifact.bin");
+  assert.equal(await git(worktreePath, ["ls-tree", "--name-only", "HEAD", "obsolete.txt"]), "");
+  assert.deepEqual(await readFile(path.join(worktreePath, "artifact.bin")), Buffer.from([0, 1, 2, 255]));
+  assert.match(await git(worktreePath, ["log", "-1", "--format=%B"]), /Symphony-Diff-Digest:/u);
+});
+
+test("commit refuses clean, stale-diff, and foreign-HEAD inputs without creating a commit", async (context) => {
+  const f = await repository((callback) => context.after(callback));
+  const root = identity("LIN-1");
+  assert.equal((await f.workspace.prepare(prepare(root, f.revision))).outcome, "applied");
+  const worktreePath = f.workspace.pathFor(root.root_id);
+  const clean = await f.workspace.read(root);
+  assert.equal((await f.workspace.commit(commitRequest(root, clean))).outcome, "precondition_failed");
+
+  await writeFile(path.join(worktreePath, "README.md"), "changed\n", "utf8");
+  const dirty = await f.workspace.read(root);
+  const staleDiff = {
+    ...commitRequest(root, dirty),
+    expected_diff_digest: parseObservationDigest("sha256:foreign"),
+  };
+  assert.equal((await f.workspace.commit(staleDiff)).outcome, "precondition_failed");
+  assert.equal(await git(worktreePath, ["rev-parse", "HEAD"]), f.revision);
+
+  await git(worktreePath, ["add", "README.md"]);
+  await git(worktreePath, ["commit", "--no-gpg-sign", "-m", "foreign commit"]);
+  assert.equal((await f.workspace.commit(commitRequest(root, dirty))).outcome, "precondition_failed");
+  assert.equal(await git(worktreePath, ["rev-list", "--count", `${f.revision}..HEAD`]), "1");
 });

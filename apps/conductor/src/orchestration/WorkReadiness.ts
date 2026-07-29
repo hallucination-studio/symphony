@@ -68,3 +68,37 @@ export function readyWorkIssueIds(
     .map(({ issue_id }) => issue_id)
     .sort((left, right) => left.localeCompare(right)));
 }
+
+export function hasCompletedWorkDag(
+  observation: LinearObservation,
+  rootId: RootIssueId,
+  cycleId: CycleIssueId,
+): boolean {
+  const cycle = observation.active_cycle;
+  if (
+    observation.root_id !== rootId
+    || observation.root_status !== "In Progress"
+    || cycle?.issue_id !== cycleId
+    || (cycle.status !== "Executing" && cycle.status !== "Verifying")
+    || !unique(cycle.stages.map(({ issue_id }) => issue_id))
+  ) return false;
+
+  const plans = cycle.stages.filter(({ kind }) => kind === "plan");
+  const works = cycle.stages.filter(({ kind }) => kind === "work");
+  const verifies = cycle.stages.filter(({ kind }) => kind === "verify");
+  if (
+    plans.length !== 1
+    || plans[0]?.status !== "Done"
+    || plans[0].dependency_issue_ids.length !== 0
+    || works.length === 0
+    || works.some(({ status, dependency_issue_ids }) => status !== "Done" || !unique(dependency_issue_ids))
+    || verifies.length !== 1
+    || verifies[0]?.status !== "Todo"
+    || !unique(verifies[0].dependency_issue_ids)
+  ) return false;
+
+  const workIds = new Set(works.map(({ issue_id }) => issue_id));
+  return works.every(({ dependency_issue_ids }) => dependency_issue_ids.every((id) => workIds.has(id)))
+    && exactSet(workIds, new Set(verifies[0].dependency_issue_ids))
+    && isAcyclic(works);
+}

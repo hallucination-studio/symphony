@@ -8,6 +8,7 @@ import {
   parseRepositoryId,
   parseRevision,
   parseRootIssueId,
+  type ObservationDigest,
   type RootIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
@@ -16,6 +17,7 @@ import { parseBoundedString } from "../../contracts/validation.js";
 import { createRootHeadBranch } from "../../delivery/api/DeliveryInterface.js";
 import type {
   GitWorkspaceInterface,
+  CommitWorkspaceRequest,
   PrepareWorkspaceRequest,
   RootWorkspaceIdentity,
 } from "../api/GitWorkspaceInterface.js";
@@ -42,7 +44,7 @@ function contains(parent: string, child: string): boolean {
 }
 
 function mutation(
-  request: PrepareWorkspaceRequest,
+  request: Pick<PrepareWorkspaceRequest, "root_id" | "correlation_id">,
   outcome: MutationResult["outcome"],
   reason?: string,
 ): MutationResult {
@@ -68,7 +70,11 @@ function parseWorktrees(output: Buffer): readonly WorktreeEntry[] {
   return entries;
 }
 
-export class GitWorktree implements Pick<GitWorkspaceInterface, "prepare" | "read"> {
+function commitMessage(rootId: RootIssueId, diffDigest: ObservationDigest): string {
+  return `symphony: complete ${rootId}\n\nSymphony-Diff-Digest: ${diffDigest}`;
+}
+
+export class GitWorktree implements GitWorkspaceInterface {
   readonly #commands: GitCommand;
 
   private constructor(
@@ -189,6 +195,47 @@ export class GitWorktree implements Pick<GitWorkspaceInterface, "prepare" | "rea
     });
   }
 
+  async commit(request: CommitWorkspaceRequest): Promise<MutationResult> {
+    await this.#assertIdentity(request);
+    const normalized = {
+      ...request,
+      correlation_id: parseCorrelationId(request.correlation_id),
+      expected_head_revision: parseRevision(request.expected_head_revision),
+      expected_diff_digest: parseObservationDigest(request.expected_diff_digest),
+    };
+    const before = await this.read(request);
+    if (await this.#isCommitPostcondition(normalized, before)) return mutation(normalized, "applied");
+    if (before.head_revision !== normalized.expected_head_revision) {
+      return mutation(normalized, "precondition_failed", "head_revision_mismatch");
+    }
+    if (before.workspace_state !== "dirty") {
+      return mutation(normalized, "precondition_failed", "workspace_not_dirty");
+    }
+    if (before.diff_digest !== normalized.expected_diff_digest) {
+      return mutation(normalized, "precondition_failed", "diff_digest_mismatch");
+    }
+
+    const worktreePath = this.pathFor(normalized.root_id);
+    try {
+      await this.#commands.run(worktreePath, ["add", "-A", "--"]);
+      const staged = await this.read(normalized);
+      if (
+        staged.head_revision !== normalized.expected_head_revision
+        || staged.workspace_state !== "dirty"
+      ) return mutation(normalized, "precondition_failed", "staged_workspace_mismatch");
+      await this.#commands.run(worktreePath, [
+        "commit", "--no-gpg-sign", "-m",
+        commitMessage(normalized.root_id, normalized.expected_diff_digest),
+      ]);
+    } catch {
+      return this.#classifyFailedCommit(normalized);
+    }
+    const after = await this.read(normalized);
+    return await this.#isCommitPostcondition(normalized, after)
+      ? mutation(normalized, "applied")
+      : mutation(normalized, "readback_mismatch", "commit_postcondition_mismatch");
+  }
+
   async #assertIdentity(identity: RootWorkspaceIdentity): Promise<void> {
     if (
       parseRepositoryId(identity.repository_id) !== this.repositoryId
@@ -227,6 +274,44 @@ export class GitWorktree implements Pick<GitWorkspaceInterface, "prepare" | "rea
       return pathExists || branchExists
         ? mutation(request, "readback_mismatch", "workspace_partial_effect")
         : mutation(request, "not_applied", "git_command_failed");
+    }
+  }
+
+  async #classifyFailedCommit(request: CommitWorkspaceRequest): Promise<MutationResult> {
+    try {
+      const observation = await this.read(request);
+      if (await this.#isCommitPostcondition(request, observation)) return mutation(request, "applied");
+      return observation.head_revision === request.expected_head_revision
+        ? mutation(request, "not_applied", "git_commit_failed")
+        : mutation(request, "readback_mismatch", "commit_head_mismatch");
+    } catch {
+      return mutation(request, "acceptance_unknown", "commit_readback_unavailable");
+    }
+  }
+
+  async #isCommitPostcondition(
+    request: CommitWorkspaceRequest,
+    observation: GitObservation,
+  ): Promise<boolean> {
+    if (
+      observation.workspace_state !== "clean"
+      || observation.head_revision === null
+      || observation.head_revision === request.expected_head_revision
+    ) return false;
+    const worktreePath = this.pathFor(request.root_id);
+    try {
+      const [parent, message] = await Promise.all([
+        this.#commands.run(worktreePath, ["rev-parse", "--verify", `${observation.head_revision}^1`]),
+        this.#commands.run(worktreePath, ["log", "-1", "--format=%B", observation.head_revision]),
+      ]);
+      if (
+        parseRevision(parent.toString("utf8").trim()) !== request.expected_head_revision
+        || message.toString("utf8").trim() !== commitMessage(request.root_id, request.expected_diff_digest)
+      ) return false;
+      const confirmed = await this.read(request);
+      return confirmed.workspace_state === "clean" && confirmed.head_revision === observation.head_revision;
+    } catch {
+      return false;
     }
   }
 
