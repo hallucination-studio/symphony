@@ -1,5 +1,5 @@
 import type { RuntimeGeneration, RootIssueId } from "../contracts/identity.js";
-import type { GitObservation, LinearObservation, StageObservation } from "../contracts/observation.js";
+import type { GitObservation, LinearObservation } from "../contracts/observation.js";
 import { parseRootOutput, type RootToolCall } from "../contracts/root-interaction.js";
 import {
   parseStageHandoff,
@@ -10,6 +10,7 @@ import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/Gi
 import type { LinearGatewayInterface } from "../linear/api/LinearGatewayInterface.js";
 import { validatePlanDag } from "../orchestration/PlanDagValidator.js";
 import { WorkDispatcher } from "../orchestration/WorkDispatcher.js";
+import { VerifyMechanics } from "../orchestration/VerifyMechanics.js";
 import { WorkflowLifecycle } from "../orchestration/WorkflowLifecycle.js";
 import type { StagePerformerInterface } from "../performer/api/StagePerformerInterface.js";
 import type { RootToolsFactoryInput, RootToolsFactoryInterface } from "./RootRuntime.js";
@@ -29,10 +30,6 @@ export type RootToolResult =
 
 function mismatch(linear: LinearObservation, git: GitObservation | null): RootToolResult {
   return Object.freeze({ kind: "precondition_mismatch", linear, git });
-}
-
-function matchingStage(linear: LinearObservation, stageId: string): StageObservation | null {
-  return linear.active_cycle?.stages.find(({ issue_id }) => issue_id === stageId) ?? null;
 }
 
 export class RootTools {
@@ -106,51 +103,15 @@ export class RootTools {
   }
 
   async #verify(call: Extract<RootToolCall, { tool: "verify" }>): Promise<RootToolResult> {
-    const [before, gitBefore] = await Promise.all([
-      this.linear.readRoot(this.rootId),
-      this.git.read(this.workspace),
-    ]);
-    const cycle = before.active_cycle;
-    const target = matchingStage(before, call.verify_issue_id);
-    this.#assertLinearOwner(before);
-    const workStages = cycle?.stages.filter(({ kind }) => kind === "work") ?? [];
-    const requiredWork = new Set(workStages.map(({ issue_id }) => issue_id));
-    const verifyDependencies = new Set(target?.dependency_issue_ids ?? []);
-    const workComplete = workStages.length > 0
-      && workStages.every(({ status }) => status === "Done")
-      && requiredWork.size === verifyDependencies.size
-      && [...requiredWork].every((issueId) => verifyDependencies.has(issueId));
-    const gitOwned = this.#gitOwned(gitBefore);
-    if (
-      before.root_status !== "In Progress"
-      || !cycle
-      || cycle.status !== "Verifying"
-      || target?.kind !== "verify"
-      || target.status !== "Todo"
-      || !workComplete
-      || !gitOwned
-      || gitBefore.head_revision !== call.revision
-    ) return mismatch(before, gitBefore);
-
-    const request = {
+    return new VerifyMechanics(this.linear, this.git, this.performer).verify({
       schema_version: 1,
       root_id: this.rootId,
       runtime_generation: this.runtimeGeneration,
       correlation_id: call.correlation_id,
-      cycle_issue_id: cycle.issue_id,
-      role: "verify",
-      verify_issue_id: target.issue_id,
+      verify_issue_id: call.verify_issue_id,
       revision: call.revision,
-    } as const;
-    const handoff = parseStageHandoff(await this.performer.executeVerify(request));
-    this.#assertHandoff(request, handoff);
-    const [after, gitAfter] = await Promise.all([
-      this.linear.readRoot(this.rootId),
-      this.git.read(this.workspace),
-    ]);
-    this.#assertLinearOwner(after);
-    if (!this.#gitOwned(gitAfter)) throw new Error("git_readback_owner_mismatch");
-    return Object.freeze({ kind: "performed", handoff, linear: after, git: gitAfter });
+      workspace: this.workspace,
+    });
   }
 
   #assertHandoff(request: StageRequest, handoff: StageHandoff): void {
@@ -173,11 +134,6 @@ export class RootTools {
     if (observation.root_id !== this.rootId) throw new Error("linear_readback_owner_mismatch");
   }
 
-  #gitOwned(observation: GitObservation): boolean {
-    return observation.repository_id === this.workspace.repository_id
-      && observation.base_branch === this.workspace.base_branch
-      && observation.head_branch === this.workspace.head_branch;
-  }
 }
 
 export class BoundRootToolsFactory implements RootToolsFactoryInterface {

@@ -170,12 +170,26 @@ test("work dispatch delegates fresh readiness, start transition, and terminal Li
 });
 
 test("verify dispatch requires Verifying Cycle, Todo Verify, all Work Done, and exact fresh HEAD", async () => {
-  const facts = linear("Verifying", [stage("LIN-4", "work", "Done"), stage("LIN-5", "verify", "Todo", ["LIN-4"])]);
-  const after = linear("Verifying", [stage("LIN-4", "work", "Done"), stage("LIN-5", "verify", "Done", ["LIN-4"])]);
-  const f = fixture([facts, after]);
+  const facts = linear("Verifying", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Done"),
+    stage("LIN-5", "verify", "Todo", ["LIN-4"]),
+  ]);
+  const started = linear("Verifying", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Done"),
+    stage("LIN-5", "verify", "In Progress", ["LIN-4"]),
+  ]);
+  const after = linear("Verifying", [
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Done"),
+    stage("LIN-5", "verify", "Done", ["LIN-4"]),
+  ]);
+  const succeeded: LinearObservation = { root_id: rootId, root_status: "In Progress", active_cycle: null };
+  const f = fixture([facts, facts, started, after, after, succeeded]);
   const result = await f.tools.execute(tool({ tool: "verify", verify_issue_id: parseStageIssueId("LIN-5"), revision }));
   assert.equal(result.kind, "performed");
-  assert.deepEqual(f.calls, ["git:LIN-1", "verify", "git:LIN-1"]);
+  assert.deepEqual(f.calls, [
+    "git:LIN-1", "mutate:set_stage_status", "git:LIN-1", "verify", "git:LIN-1",
+    "mutate:set_cycle_status", "git:LIN-1",
+  ]);
 
   const otherRevision = parseRevision("b".repeat(40));
   const stale = fixture([facts], otherRevision);
@@ -185,7 +199,7 @@ test("verify dispatch requires Verifying Cycle, Todo Verify, all Work Done, and 
   assert.equal(mismatch.git?.head_revision, otherRevision);
 
   const incompleteDag = linear("Verifying", [
-    stage("LIN-4", "work", "Done"), stage("LIN-5", "verify", "Todo"),
+    stage("LIN-3", "plan", "Done"), stage("LIN-4", "work", "Done"), stage("LIN-5", "verify", "Todo"),
   ]);
   const missingDependency = fixture([incompleteDag]);
   assert.equal((await missingDependency.tools.execute(tool({
