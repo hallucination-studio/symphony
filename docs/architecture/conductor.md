@@ -1,53 +1,65 @@
 # Conductor
 
-状态：Phase 1 目标设计。Conductor 是静态、机械、串行的状态机。
+状态：Phase 1 目标设计。Conductor 是静态、机械、串行的 runtime host，不是 Symphony workflow state machine。
 
 ## 职责
 
 Conductor 负责：
 
-- 发现 Root，重新读取 Linear / Git，并计算内存 diff。
-- 串行选择 Root；任意时刻最多执行一个 Root。
-- 创建、暂停、恢复和回收每个 Root 的独立 runtime。
-- 向 `RootReconcill` 提供 `plan | work | verify` tools，并校验调用目标和前置条件。
-- 调用 Performer、校验 Handoff，然后重新读取实际结果。
-- 机械执行 Cycle create/close、worktree、commit、push、PR 和 Root `In Review` transition。
+- 承接 validated Root wake，并在 startup 做一次 eligible Root inventory。
+- 串行选择 Root；任意时刻最多运行一个 Root Reconcill turn。
+- fresh read Task Manager/Git snapshot，维护 accepted in-memory baseline，计算 concrete adjacent diff。
+- 创建、暂停、重建和回收 per-Root runtime。
+- 向 Root app-server 暴露 capability-scoped Task Manager MCP、Performer、Git 和 Delivery tools。
+- 对每个 tool call 校验 schema、root ownership、runtime generation、correlation、capability 与 fresh precondition。
+- 执行 provider/process 边界调用，fresh read-back，并把 typed result 交还 Root Reconcill。
+- 管理 cancellation、timeout、late-output fence、structured logs 和 sanitized terminal process failure。
 
-Conductor 不理解需求，不生成 Plan，不写代码，不判断 Verify 结论，也不根据 Handoff 补写事实。所有语义决策属于 `RootReconcill`。
+Conductor 不解释 Root/Cycle/Stage 状态，不计算 DAG readiness，不选择 target Issue，不决定继续或关闭 Cycle，不自动重跑 Plan，也不把 Performer result 翻译成任务 mutation。
 
-## 状态机
+## Mechanical event loop
 
 ```text
-discover
--> admit_root
--> observe
--> reconcile
--> apply_mechanical_action
--> observe | suspend_in_review | stop
+await_wake
+-> fresh_snapshot
+-> bootstrap_or_concrete_diff
+-> run_root_turn
+-> validate_and_serve_one_tool_call
+-> fresh_read_back
+-> run_root_turn | park_root | stop_root
 
-suspend_in_review -> discover
-fresh_done -> retire_root -> discover
+fresh_done -> retire_root -> await_wake
 ```
 
-状态与 transition 是 closed union。执行任何 action 前，Conductor 都重新读取并校验前置条件；不匹配时不执行，而是把新的实际 diff 交回对应 `RootReconcill`。
+这些是 runtime transition，不是 workflow transition。一个 webhook 只产生 wake；同一 Root 的重复 wake 可以 coalesce，但每次处理都重新读取完整当前事实。Conductor 不从 webhook payload 生成 diff，也不 replay provider events。
+
+Root 返回 `quiescent` 时 runtime 停在 accepted facts 上等待新 wake。Root 返回 `stopped` 或发生真正 process-level failure 时，Conductor 停止推进并记录 sanitized 可操作原因。`In Review` Root 保留 runtime 但不占执行槽；Task Manager fresh read 确认 `Done` 后只触发资源回收。
+
+## Fresh precondition semantics
+
+tool dispatch 前的 fresh precondition 只验证机械安全：identity 属于当前 Root、generation/correlation 当前、capability 已声明、expected revision 匹配、资源可唯一定位。它不判断这个 mutation 在 Symphony 语义上“应该”发生。
+
+read 与 write 之间的正常外部变化返回：
+
+```text
+precondition_failed + fresh resource/concrete diff
+```
+
+Conductor 将结果送回同一 Root Reconcill 继续 ReAct。它不会退出进程、重建 runtime、关闭 Cycle 或替 Root 重试。只有 transport/process 崩溃、contract/capability 违规、无法 sanitize 的 boundary corruption 等才是 process-level failure。
 
 ## Discovery, admission, and configuration
 
-Root discovery 只查询配置的单一 Linear workspace/team 中带
-`symphony:kind/root`、状态为 `Todo | In Progress | In Review | Done` 的 Issue。
-Conductor 按 `(priority, created_at, issue_id)` 的稳定顺序扫描，但任意时刻只 admit 一个
-可执行 Root。`In Review` 只保留/检查 runtime，`Done` 只触发匹配 runtime 回收，不进入
-执行槽。
+Startup inventory 和 webhook wake 都只 admit 同时满足以下 fresh facts 的 Root：
 
-Root 只有同时满足以下 fresh facts 才可 admit：kind label 唯一且正确；没有超过一个
-active Cycle；repository identity 和 base branch 能从启动时的静态 Root routing 配置
-唯一解析；该 repository/base branch 可读；不存在已被另一个 Root 占用的 head branch
-或 worktree。缺失、重复或冲突都 fail closed，并记录 sanitized 可操作原因。
+- 位于配置的单一 Linear workspace/team，且 kind 为 `symphony:kind/root`。
+- delegate 精确等于配置的 agent actor；未委托或委托给其他 actor 时不运行。
+- Root status 是 `Todo | In Progress`；`In Review` 只保留观察，`Done` 只回收。
+- active Cycle 不超过一个，Root Tree identity/ancestry 唯一。
+- repository identity 和 base branch 从启动配置唯一解析，且没有跨 Root worktree/head ownership 冲突。
 
-Phase 1 启动配置只包含 Linear workspace/team、Root-to-repository routing、每个 repository
-的 base branch、program-data path、Performer Home、Codex executable 和 delivery provider
-endpoint。配置在进程启动时完成解析和验证，运行中不从 Profile、Podium、Issue
-description 或任意 metadata 推导或覆盖。一个 Root 必须精确匹配一条 routing rule。
+Conductor 按 `(priority, created_at, issue_id)` 稳定排序，但只 admit 一个可执行 Root。eligibility 缺失、重复或冲突时 fail closed，并留下 sanitized reason；它不修改 Task Manager 来修复 admission。
+
+启动配置只包含 Task Manager/Linear webhook 与 API、workspace/team/agent identity、Root-to-repository routing、base branch、program-data path、Performer Home、Codex executable、MCP capability 和 delivery endpoint。配置只在进程启动时解析验证，不从 Issue description、Profile、Podium 或 arbitrary metadata 推导。
 
 ## Per-Root runtime
 
@@ -55,10 +67,9 @@ description 或任意 metadata 推导或覆盖。一个 Root 必须精确匹配�
 
 ```text
 RootReconcill object
-private CodexReconcill
-app-server process
-Root thread
-accepted observation baseline
+private Codex app-server process and thread
+runtime generation and tool capability set
+accepted Task/Git observation baseline
 Root Home
 ```
 
@@ -69,26 +80,17 @@ Root Home 位于：
   symphony/state.json
 ```
 
-`state.json` 只保存恢复 Root thread 所需的最小 continuity，例如 Root identity、runtime generation、thread identity、accepted observation digest 和 in-flight correlation。它不保存 Stage、DAG、下一步动作、Handoff 或 Linear / Git 镜像，也不使用 workflow SQLite。
+`state.json` 只保存 Root identity、runtime generation、thread identity、accepted observation digest 和 in-flight correlation 等最小 continuity。它不保存 Task/Git snapshot、Cycle/DAG mirror、next action、diff、tool result 或 Performer result，也不使用 workflow database。
 
-Root 进入 `In Review` 后暂停但保留 runtime。Linear 确认 `Done` 后，Conductor 停止对应 process 和 turn，隔离 tools 与迟到输出，验证 Home owner，再销毁对象并删除整个对应 Root Home。这些资源不得跨 Root 共享或复用。
+Root `Done` 后，Conductor 先停止 turn/process，撤销 tool capability，隔离旧 generation 与 late output，验证 Home owner，再删除且只删除该 Root Home。Performer Home 和其他 Root Home 不受影响。
 
-## 观察与重启
+## Restart
 
-同一进程、同一 runtime generation 的连续 turn 只发送相邻两个已接受 observation 之间
-的 frozen in-memory diff。digest 仅校验这条连续链，不能重建旧 observation。
+进程启动或内存 baseline 丢失后只有一个 restart path：
 
-进程启动或 Root runtime 丢失内存 baseline 后只允许一个 primary restart transition：
+1. 验证 `state.json` owner/identity，隔离其中的 in-flight correlation 和全部旧输出。
+2. fresh read 完整 Task Manager/Git facts；identity、active Cycle、worktree、branch、HEAD 或 PR 有歧义时保留事实并 fail closed。
+3. 创建递增 generation 和全新 Root thread，atomic replace `state.json`。
+4. 向新 thread 发送当前完整 `RootBootstrap`，以该 observation digest 建立唯一 baseline。
 
-1. 读取并验证 `state.json` identity；取消/隔离其中的 in-flight correlation，旧输出永不接受。
-2. fresh read 完整 Linear / Git facts；若 worktree ownership、branch、HEAD、active Cycle 或
-   PR identity 不唯一，保留现有事实并 fail closed。
-3. 创建递增的 `runtime_generation` 和全新 Root thread，atomic replace `state.json`，向
-   新 thread 发送当前完整 `RootBootstrap`。
-4. 新 thread 接受 bootstrap 后，以当前 observation digest 建立唯一 baseline；此后才可
-   产生 action 和相邻 diff。
-
-旧 thread 不恢复、不继续，也不作为第二执行路径。旧 command、Handoff、transcript、
-digest 或 session content 均不 replay；外部 facts 在停机期间是否变化不影响这条规则。
-完整 bootstrap 是 restart 的正式输入，不是 fallback。任何一步无法证明安全都停止推进，
-并给出 sanitized 可检查原因。
+旧 thread 不恢复、不继续、不 replay，也不构成第二执行路径。旧 transcript、command、tool result、digest 或 event 都不能重建 workflow。完整 bootstrap 是 restart 的正式输入；Phase 1 不提供 compatibility、fallback 或 alternate restart behavior。

@@ -1,72 +1,73 @@
 # Symphony Phase 1 架构
 
-状态：目标架构提案。本文定义第一期要实现的产品边界，不表示当前代码已经完成迁移。
+状态：目标架构提案。本文定义第一期要实现的产品边界，不表示当前代码已经符合该设计，也不隐含任何迁移或兼容方案。
 
 ## 唯一目标
 
-用户创建一个 Linear Root Issue，Symphony 将它交付为一个可审查的 PR：
+用户把一个 Linear Root Issue 委托给配置的 agent actor 后，Symphony 将它交付为一个可审查的 PR：
 
 ```text
-Root Issue
--> Conductor 创建 Cycle
--> Plan 在 Linear 中创建 Plan、Work*、Verify 和 Work DAG
--> Work 按 DAG 修改代码
--> Conductor 创建 commit
--> Verify 验证该 commit
--> Conductor push 并创建 PR
+Task Manager webhook 唤醒 Root
+-> Conductor fresh read 并产生具体事实 diff
+-> Root Reconcill 通过 ReAct 决定下一步
+-> Root Reconcill 调用通用 Task Manager MCP、Performer、Git 或 Delivery tool
+-> Conductor 执行机械边界工作并 fresh read-back
+-> Root Reconcill 继续当前 Cycle，或关闭它并创建 successor Cycle
+-> exact revision 通过 Verify 后交付 PR
 -> Root 进入 In Review
 ```
 
-Phase 1 的产品是这条自主开发闭环，不是通用智能项目管理平台。
+未委托给配置 actor 的 Root 不执行。Phase 1 的产品是这条自主开发闭环，不是通用智能项目管理平台。
 
 ## 核心分工
 
 | 角色 | 负责 | 不负责 |
 |---|---|---|
-| Linear / Git | 保存工作流事实与代码交付事实 | 保存模型会话或下一步决策 |
-| Conductor | 重新读取事实、计算内存 diff、串行调度、管理 worktree、commit、push 和 PR | 理解需求、制定 Plan、写代码或判断验证结果 |
-| `RootReconcill` | 根据最新事实决定继续 Cycle、关闭后重新 Plan、交付、等待或停止 | 亲自执行 Plan、Work、Verify，或直接操作 Linear / Git |
-| Plan / Work / Verify Performer | 分别规划、编码和验证，并返回 typed Handoff | 决定 Root 的下一步或把 Handoff 当成事实 |
+| Task Manager / Git | 保存任务图与代码交付事实 | 保存模型会话、diff 或下一步决策 |
+| `TaskManageWebhook` | 校验 provider 事件并唤醒受影响的 Root | 把 webhook payload 当作事实，或决定工作流动作 |
+| Task Manager MCP | 暴露 provider-neutral 的 Issue、关系、状态与标签查询/写入函数 | 暴露 Symphony 生命周期命令或解释 Cycle |
+| Conductor | 串行调度、fresh snapshot、相邻事实 diff、runtime 隔离、MCP fencing、读回与进程生命周期 | 解释需求、选择 Issue mutation、决定继续或重跑 Cycle |
+| `RootReconcill` | 解释最新事实，选择精确 tool call，并独占所有工作流与 Cycle 决策 | 绕过工具边界、把 transcript 或 tool result 当作持久事实 |
+| Plan / Work / Verify Performer | 分别返回规划、代码执行和验证的 typed result | 修改 Task Manager 或决定 Root 的下一步 |
 
-Conductor 是静态、机械的状态机。每个 Root 有一个独立的 `RootReconcill`，它是系统中唯一解释需求变化并决定下一步的 ReAct 角色。
+Root Reconcill 是唯一的语义决策者。Conductor 是机械执行器，不包含 Root/Cycle/Stage 领域状态机。
 
 ## 一次推进
 
 ```text
-Conductor 重新读取 Linear + Git
--> 计算完整 bootstrap 或相对上次已接受事实的内存 diff
--> RootReconcill 选择 plan | work | verify，或返回 RootDecision
--> Conductor 校验前置条件并执行一个机械动作
--> Performer 返回 Handoff
--> Conductor 再次读取 Linear + Git
--> 将实际 diff 交回 RootReconcill
+validated webhook wake 或 startup discovery
+-> fresh Task Manager + Git snapshot
+-> 完整 bootstrap 或相对 accepted baseline 的具体相邻 diff
+-> Root Reconcill ReAct turn
+-> 一个通用 tool call
+-> fresh precondition、执行、fresh read-back
+-> typed tool result 回到同一个 Root Reconcill
 ```
 
-Handoff 只是一次调用的 typed response，不是事实。任何 Linear / Git 写入只有在 Conductor 重新读取并确认后才能驱动下一步。需求或执行事实发生变化时也走同一条路径；Conductor 不解释变化，也不自动修复 DAG。
+`precondition_failed` 是正常的并发观察结果。它回到 Root Reconcill 触发重新观察和推理，不会升级为 Conductor 进程故障。任何 mutation 都只有在 fresh read-back 后才能成为新的 accepted fact。
 
 ## Phase 1 边界
 
 | 方面 | 做 | 不做 |
 |---|---|---|
-| 交付 | 一个 Root 生成一个已验证 PR，并进入 `In Review` | 自动 merge、自动设为 `Done`、处理 PR review/rejection |
-| 工作流 | 一个 Cycle 内依次执行 Plan、DAG Work、exact-commit Verify | Human Action、Finding、审批、waiver |
-| 执行 | 同一 Cycle 的 Work Item 共用一个 Work thread，逐 turn 完成 | Work subagent、并行 Work、多个 writer |
+| Task Manager | Linear webhook 和 Linear-backed 通用 MCP 是第一版唯一实现 | 向 Codex 暴露 Linear 原生 skill、SDK object 或 provider-specific payload |
+| Cycle | 最多一个 active Cycle；Root 可继续修改，或关闭后创建 successor 并重新 Plan | Conductor 自动判定 Cycle 失效；重开 terminal Cycle |
+| 执行 | Plan、Work、Verify role 隔离；同一 Cycle 的 Work Item 串行执行 | Performer 直接写任务；Work subagent、并行 Work、跨模型编排 |
 | 调度 | 一个 Conductor 串行处理多个 Root | 并发 Root、抢占、公平调度、多个 Conductor |
-| 运行时 | 每个 Root 独占 Root Reconcill、private Codex Reconcill、process、thread 和 Root Home | 共享、池化、fork 或跨 Root 复用这些资源 |
-| 持久化 | Root Home 的 `state.json` 只保存 thread continuity | workflow SQLite、queue、checkpoint、DAG mirror、next action、Handoff 或 diff 持久化 |
-| 集成 | Linear、Git 和 Codex CLI `app-server` | Provider SDK、第二 Provider、Profile UI、Podium workflow UI |
-| 恢复 | 重启后重新读取事实；无法证明安全时停止并给出原因 | 复杂 replay/repair、自动重建 worktree、精确 cost 恢复 |
-
-Root 使用程序管理的独立 Root Home；Plan、Work、Verify 使用用户提供的另一个 Performer Home。Root 进入 `In Review` 后保留运行时；Linear 确认 `Done` 后，Conductor 先停止并隔离该 Root 的进程、turn 和迟到输出，再删除对应 Root Home。Performer Home 不受影响。
+| 运行时 | 每个 Root 独占 Root Reconcill、process、thread、accepted baseline 和 Root Home | 共享、池化、fork 或跨 Root 复用运行时资源 |
+| 持久化 | Task Manager 和 Git 保存外部事实；Root Home 只保存最小 thread continuity | workflow database、durable diff/next action/tool result、事件 replay |
+| 交付 | 一个 Root 生成一个 exact-revision PR，并进入 `In Review` | 自动 merge、自动设为 `Done`、处理 PR review/rejection |
+| 替换策略 | 直接删除旧模块与旧测试，再实现唯一新路径 | adapter、fallback、双读写、兼容 decoder、迁移逻辑或旧路径保留 |
 
 ## 文档所有权
 
-- [Root Issue](root-issue.md)：Linear 中的 Root、Cycle、Stage 和 DAG 事实。
-- [Conductor](conductor.md)：机械状态机、串行调度和 per-Root runtime 生命周期。
-- [Root Reconciliation](root-reconciliation.md)：Root ReAct 的输入、工具、决策和禁止行为。
+- [Task Management](task-management.md)：webhook 唤醒、fresh snapshot/diff、通用 MCP 与 Linear provider boundary。
+- [Root Issue](root-issue.md)：Root、Cycle、Stage 和 DAG 的持久事实及 Cycle 可变规则。
+- [Conductor](conductor.md)：机械调度、事件循环、per-Root runtime 与 restart。
+- [Root Reconciliation](root-reconciliation.md)：Root ReAct、tool surface 和唯一语义决策权。
 - [Performer](performer.md)：Codex CLI、双 Home、三个 role 和 thread 隔离。
-- [Git Worktree Delivery](git-worktree-delivery.md)：worktree、commit、exact-revision verify、push 和 PR。
-- [Contracts](contracts.md)：模块接口、typed Handoff 和重新读取规则。
-- [Roadmap](roadmap.md)：实施顺序和 Phase 1 完成标准。
+- [Git Worktree Delivery](git-worktree-delivery.md)：通用 Git/Delivery tools、exact revision 和 PR。
+- [Contracts](contracts.md)：模块接口、closed contract 和 fresh read-back 规则。
+- [Roadmap](roadmap.md)：hard-cut 实施顺序与黑盒完成标准。
 
-Phase 1 的范围与非目标只由本文定义。其他文档只描述各自拥有的设计，不重复扩展产品范围。
+Phase 1 范围与非目标只由本文定义。其他文档只描述各自拥有的设计，不另建 ADR、任务账本或第二套架构说明。

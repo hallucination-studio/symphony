@@ -1,62 +1,57 @@
 # Contracts and Interfaces
 
-状态：Phase 1 目标设计。本文只定义模块之间必须稳定的 public boundary；SDK 和进程协议都是 private implementation。
+状态：Phase 1 目标设计。本文只定义模块间稳定的 public boundary；provider SDK、Codex app-server protocol、MCP transport 和 command process 都是 private implementation。
 
 ## Public interfaces
 
 | Interface | 唯一职责 |
 |---|---|
-| `LinearGatewayInterface` | 发现 Root、读取 Root Tree、执行带前置条件的机械 Linear mutation |
-| `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建绑定 identity 的 `RootReconcill` |
-| `RootReconcillInterface` | 接收 bootstrap / diff，产生 Performer tool call 或 `RootDecision` |
-| `StagePerformerInterface` | 执行 `plan`、`work`、`verify`，返回对应 typed Handoff |
-| `GitWorkspaceInterface` | 为一个 Root 准备、读取并 commit 独立 worktree |
-| `DeliveryInterface` | push 指定 revision，并创建或读取对应 PR |
+| `TaskManageWebhookInterface` | 接收并验证 provider webhook，解析并发出 Root wake |
+| `TaskManageCommandInterface` | 实现通用 Task Manager MCP query/mutation functions 与 fresh read-back |
+| `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建 identity-bound `RootReconcill` |
+| `RootReconcillInterface` | 接收 bootstrap/diff，运行 ReAct tool loop，返回 quiescent/stop turn outcome |
+| `StagePerformerInterface` | 执行 `plan`、`work`、`verify`，返回不含 Task Manager mutation 的 typed result |
+| `GitWorkspaceInterface` | 实现通用 worktree、status、diff 和 commit operations |
+| `DeliveryInterface` | 实现通用 remote ref 和 pull request operations |
 
-这些接口由 caller 拥有。Linear SDK、Codex app-server protocol 和 Git command/process 只能出现在各接口的 private implementation 内。不存在 public `CodexGateway`。
+这些接口由 caller 拥有。Linear SDK object、Codex event/thread、MCP session、Git process 和 credential 不得跨 public boundary。
 
-## Closed contracts
+## Closed contract families
 
-Phase 1 只需要以下 contract family：
+Phase 1 只需要以下 contract families：
 
 ```text
-RootBootstrap | RootObservationDiff
-RootToolCall | RootDecision
+WakeRoot
+RootBootstrap | RootFactDiff
+TaskSnapshot | GitSnapshot
+TaskMcpCall | TaskMcpResult
 PlanRequest | WorkRequest | VerifyRequest
-PlanHandoff | WorkHandoff | VerifyHandoff
-LinearObservation | GitObservation
-MutationResult | RootRuntimeState
+PlanResult | WorkResult | VerifyResult
+GitToolCall | GitToolResult
+DeliveryToolCall | DeliveryToolResult
+RootTurnOutcome | RootRuntimeState
 ```
 
-所有 contract 都有 `schema_version`、目标 identity 和 correlation。unknown variant、missing identity、stale runtime generation 或 precondition mismatch 必须 fail closed。
+所有跨 public interface 或 process boundary 的 envelope 都有 `schema_version: 1`、target identity、`runtime_generation` 和 correlation。版本不是协商机制；unknown variant、missing identity、非 `1` schema、stale generation 或 capability mismatch 均 fail closed。
 
-`schema_version` 只版本化跨 public interface 或 app-server process boundary 的
-message envelope，Phase 1 唯一接受值为 `1`。Linear description、Git content、
-`state.json` 和 private SDK / CLI payload 不属于 public contract schema。版本不是协商
-机制；收到非 `1` 值必须停止当前动作并返回 sanitized boundary error。
+Public contract 不得包含 SDK object、credential、raw provider payload、Codex config/session、process/thread/filesystem handle、database record、arbitrary metadata、durable next action、persisted diff 或 persisted tool result。
 
-Public contract 不得包含 SDK object、credential、Codex session/config、process/thread/filesystem handle、database record、arbitrary metadata、DAG mirror、durable next action 或 persisted Handoff。
-
-## Observation and runtime shapes
-
-`LinearObservation` 是一次 fresh read 的不可变规范化结果：Root identity/status、唯一
-active Cycle（如有）以及该 Cycle 的直接 Stage identity/kind/status/dependency。它只包含
-做机械前置条件判断所需的 Linear 字段，不包含 SDK record 或历史事件。
-
-`GitObservation` 是对应 Root worktree 的 fresh read：repository identity、base/head
-branch、HEAD revision、工作区 clean/dirty 与 diff digest，以及匹配 PR 的规范化
-identity/state/head revision（如有）。它不包含 credential、command 或 process object。
+## Observation contracts
 
 ```text
-RootBootstrap {
-  schema_version: 1, root_id, runtime_generation, correlation_id,
-  observed_at, linear: LinearObservation, git: GitObservation
+WakeRoot {
+  schema_version: 1, root_id, provider_event_id, received_at
 }
 
-RootObservationDiff {
+RootBootstrap {
+  schema_version: 1, root_id, runtime_generation, correlation_id,
+  observed_at, task: TaskSnapshot, git: GitSnapshot
+}
+
+RootFactDiff {
   schema_version: 1, root_id, runtime_generation, correlation_id,
   from_observation_digest, to_observation_digest,
-  changed_linear_facts, changed_git_facts
+  task_changes: ConcreteTaskChange[], git_changes: ConcreteGitChange[]
 }
 
 RootRuntimeState {
@@ -65,44 +60,60 @@ RootRuntimeState {
 }
 ```
 
-`changed_*_facts` 是 closed typed field changes，只描述 before/after scalar 或 identity
-集合变化；不得嵌入完整 observation、DAG mirror、Handoff 或 next action。digest 只用于
-验证连续性，不能恢复 observation。`RootRuntimeState` 是 Root Home 中唯一由 Symphony
-管理的 continuity payload；写入采用 atomic replace，identity、generation 或 schema
-不匹配时 fail closed。
+`TaskSnapshot` 和 `GitSnapshot` 是 fresh read 的不可变规范化结果。`ConcreteTaskChange` 只允许 `issue_created | issue_archived | field_changed | relation_added | relation_removed`；`field_changed` 的 field 只允许 `status | title | description | parent | labels | delegate | priority`。diff 不包含任何 workflow interpretation。
 
-## Handoff
+digest 只验证同一 generation 内 accepted observation 的连续性，不能恢复旧 snapshot。`RootRuntimeState` 是 Root Home 中唯一由 Symphony 管理的 continuity payload，并使用 atomic replace。
 
-三个 Performer 返回 closed typed response：
+## Task MCP contracts
+
+每个 MCP function 都有独立 typed input/output schema。list function 使用 cursor pagination；mutation input 含 exact target identity、partial desired fields 和 fresh expected revision。provider-specific optional bag 或 arbitrary metadata 均不允许。
 
 ```text
-PlanHandoff   { cycle_issue_id, plan_issue_id, work_issue_ids, verify_issue_id, outcome }
-WorkHandoff   { cycle_issue_id, work_issue_id, outcome, workspace_changed }
-VerifyHandoff { cycle_issue_id, verify_issue_id, revision, conclusion }
+TaskMutationResult {
+  outcome: applied | not_applied | precondition_failed |
+           acceptance_unknown | readback_mismatch,
+  correlation_id, target_identity, fresh_resource?, concrete_diff?, sanitized_reason?
+}
 ```
 
-- `PlanHandoff.outcome` 只能是 `completed | failed | canceled`。
-- `WorkHandoff.outcome` 只能是 `completed | failed | canceled`。
-- `VerifyHandoff.conclusion` 只能是 `passed | failed | inconclusive`。
+MCP schema 只暴露 [Task Management](task-management.md#generic-mcp-functions) 中列出的通用 functions，不暴露 Symphony lifecycle commands。`precondition_failed` 是 tool result，不是 process-level error。
 
-`completed` 只声称 role 已完成调用；`failed` 表示 role 给出 sanitized terminal failure；
-`canceled` 表示 turn 在产生可接受结果前被取消。Handoff 不写入 Linear、Git 或 Root
-Home，也不代表其中声称的写入已经发生。Conductor 对任一 outcome 都重新读取事实；
-Handoff 与 fresh facts 不一致时使用 `readback_mismatch`，不得猜测或补写。
+## Performer results
 
-## Boundary errors
-
-Public interface error 是 closed union：`invalid_contract | stale_generation |
-precondition_failed | timed_out | canceled | boundary_unavailable |
-acceptance_unknown | readback_mismatch`，并带 identity、correlation 和 sanitized reason。
-错误不得携带 raw provider payload、credential、command line 或 stack 中的 secret。
-
-## 重新读取规则
-
-外部 mutation 的返回值只表示调用结果：
+三个 Performer 只返回其 role 的工作结果：
 
 ```text
-applied | not_applied | acceptance_unknown | precondition_failed | readback_mismatch
+PlanResult {
+  outcome: completed | failed | canceled,
+  proposed_plan, proposed_work_items, proposed_relations, verification_intent
+}
+
+WorkResult {
+  outcome: completed | failed | canceled,
+  work_issue_id, workspace_changed, checks, sanitized_summary
+}
+
+VerifyResult {
+  conclusion: passed | failed | inconclusive,
+  verify_issue_id, revision, checks, sanitized_summary
+}
 ```
 
-Conductor 必须重新读取对应 Linear / Git target。只有实际状态符合预期，accepted baseline 才能前进；否则将完整 observation 或实际 diff 交回对应 `RootReconcill`。
+Performer result 不含 provider receipt，不创建或更新 Issue，也不推进 lifecycle。Root Reconcill 根据 result 和 fresh facts 决定后续精确 MCP calls。result 不写入 Root Home；只有被 Task Manager/Git fresh read 确认的状态才是事实。
+
+## Turn outcomes and errors
+
+`RootTurnOutcome` 只表示本轮控制结果：`quiescent | stopped | timed_out | canceled`。它不表达开始、继续、关闭、重跑、完成或交付等 Symphony 领域动作。
+
+Public boundary error 是 closed union：
+
+```text
+invalid_contract | stale_generation | capability_denied | timed_out |
+canceled | boundary_unavailable | acceptance_unknown | readback_mismatch
+```
+
+错误带 identity、correlation 和 sanitized reason，不携带 raw payload、credential、command line 或可能包含 secret 的 stack。
+
+## Fresh read-back rule
+
+所有 Task Manager、Git 和 Delivery mutation 后都必须重新读取同一 exact identity。只有 fresh state 与请求结果一致时，observation baseline 才能前进。并发变化产生 `precondition_failed` 或 concrete diff，交回 Root Reconcill 再次 ReAct；Conductor 不替 Root 选择重试、替代 target 或 workflow transition。

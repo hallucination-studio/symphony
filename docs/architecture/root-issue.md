@@ -1,20 +1,20 @@
 # Root Issue 模型
 
-状态：Phase 1 目标设计。本文只定义 Linear 中持久化的工作流事实。
+状态：Phase 1 目标设计。本文只定义 Task Manager 中持久化的 Symphony 工作流事实；这些事实由 Root Reconcill 通过 generic MCP functions 读取和修改。
 
 ## 结构
 
 ```text
 Root Issue
-└── Cycle Issue
+└── Cycle Issue 1 (active or terminal)
     ├── Plan Issue
     ├── Work Issue 1
     ├── Work Issue 2
-    ├── ...
     └── Verify Issue
+└── Cycle Issue 2 (successor, when replanned)
 ```
 
-Root 是用户需求和最终 PR 的单位。Cycle 是完成该需求的一次尝试。Plan、Work、Verify 是 Cycle 的直接子 Issue，并分别使用以下 kind label：
+Root 是用户需求和最终 PR 的单位。Cycle 是完成该需求的一次尝试。Plan、Work、Verify 是对应 Cycle 的直接子 Issue，并使用：
 
 ```text
 symphony:kind/root
@@ -24,13 +24,9 @@ symphony:kind/work
 symphony:kind/verify
 ```
 
-Linear 原生 Issue ID 是唯一标识。description 只保存人可读内容，不保存 Symphony JSON、隐藏标记、Handoff、diff 或运行时状态。
+Task Manager 原生 Issue identity 是唯一标识。description 只保存人可读内容，不保存 hidden Symphony JSON、Handoff/result、diff、correlation 或 runtime state。
 
-Conductor 创建的空 Cycle shell 使用固定 title `Symphony Cycle`。title 不从 Root
-title/description、模型输出、运行配置或任意 metadata 推导，也不编码 identity、attempt、
-runtime state 或 correlation；Cycle identity 仍只使用 Linear 原生 Issue ID。
-
-## 生命周期
+## Lifecycle facts
 
 ```text
 Root:  Todo -> In Progress -> In Review -> Done
@@ -39,60 +35,43 @@ Cycle: Planning -> Executing -> Verifying -> Succeeded
 Stage: Todo -> In Progress -> Done | Failed | Canceled
 ```
 
-- 一个 Root 最多有一个 active Cycle。
-- `Todo` 是 Plan、Work、Verify 唯一可执行状态；terminal Stage 不重开或重跑。
-- 当前 Cycle 失效时，先将它设为 `Canceled`，再创建 successor Cycle。
-- 只有已验证 commit 创建 PR 后，Root 才能进入 `In Review`。
-- `Done` 由用户或外部流程在 Linear 中确认，Symphony 不自动设置。
+这些状态是 Root Reconcill 可观察和修改的 Task Manager facts，不是 Conductor 内部状态机。Root Reconcill 通过 `list_states` 得到 exact provider state identity，再通过 generic `create_issue`/`update_issue` 表达所选 transition。Conductor 只执行 fresh precondition 与 read-back。
 
-### Mechanical transition table
+- 未委托给配置 agent actor 的 Root 不执行。
+- 一个 Root 任意时刻最多有一个 active Cycle。
+- active Cycle 指状态为 `Planning | Executing | Verifying` 的非 archived Cycle。
+- terminal Cycle 指 `Succeeded | Canceled`；terminal Cycle 保留为历史事实，不 reopen。
+- `Done | Failed | Canceled` Stage 不 reopen。需要重新执行时创建 successor Cycle 中的新 Stage identity。
+- Root 只有在 exact verified revision 已交付并 read-back 后才能进入 `In Review`。
+- Root `Done` 只由用户或外部流程设置；Symphony 不自动 merge 或设置 `Done`。
 
-| Object | From -> To | 唯一触发事实 |
-|---|---|---|
-| Root | `Todo -> In Progress` | Root 被 admit，且 Cycle shell 已创建并回读成功 |
-| Cycle | create as `Planning` | admitted Root 没有 active Cycle，且 `StartCycle` 通过 fresh precondition |
-| Plan | `Todo -> In Progress` | Plan tool dispatch 前 fresh facts 仍满足 target/parent/kind/status |
-| Plan | `In Progress -> Done` | Plan Handoff 为 `completed`，且 fresh read 得到唯一合法 Plan、至少一个 Work、唯一 Verify 和完整 DAG |
-| Cycle | `Planning -> Executing` | Plan 为 `Done` 且 fresh DAG 合法 |
-| Work | `Todo -> In Progress` | Work tool dispatch 前自身为 `Todo`，且全部依赖 Work freshly `Done` |
-| Work | `In Progress -> Done` | Work Handoff 为 `completed`，且 fresh Linear read 为 `Done` |
-| Cycle | `Executing -> Verifying` | 全部 required Work freshly `Done`，immutable commit 已创建且 revision 回读一致 |
-| Verify | `Todo -> In Progress` | Verify tool 的 revision 等于 fresh HEAD 和 Cycle immutable revision |
-| Verify | `In Progress -> Done` | Verify Handoff 为 `passed`，且 revision 和 fresh Git facts 一致 |
-| Cycle | `Verifying -> Succeeded` | Verify freshly `Done` 且 verified revision 被接受 |
-| Root | `In Progress -> In Review` | 同一 verified revision 已 push，唯一 PR read-back 的 head 相同 |
-| Any active Stage | `In Progress -> Failed` | 对应 Handoff 为 `failed` 或 `inconclusive`，且该 terminal status 写入并回读成功 |
-| Any active Stage | `Todo | In Progress -> Canceled` | `CloseCycleAndReplan` 或 shutdown cancellation 已被 fresh precondition 接受并回读 |
-| Active Cycle | `Planning | Executing | Verifying -> Canceled` | 当前 Stage 已 terminal/canceled，且 `CloseCycleAndReplan` 通过 fresh precondition |
-| Root | `In Review -> Done` | 仅由用户或外部流程写入，Conductor fresh read 后只执行回收 |
+## Mutable active Cycle
 
-timeout、boundary unavailable、`acceptance_unknown`、`precondition_failed` 和
-`readback_mismatch` 本身都不推进 lifecycle。Conductor fresh read 后将实际 observation
-交给 `RootReconcill`；无法证明 terminal mutation 已发生时保持当前事实并 fail closed。
-`canceled` Handoff 只有在 Stage `Canceled` 被 fresh read 确认后才是 terminal。
+Cycle 第一版允许在 active 期间变化。Root、Cycle、任一 sub-Issue 或 relation 的 fresh diff 到达后，Root Reconcill 可以：
 
-## Plan 与 DAG
+1. **继续当前 Cycle**：保留 Cycle identity，更新精确 Issue 的 title、description、status、labels、delegate、priority 或 parent，并创建/删除精确 relation；也可以增加新 Stage 或 archive 尚未采用的 Stage。
+2. **关闭并重跑**：先将仍 active 的 Stage 与当前 Cycle 更新为 terminal，fresh read 确认当前 Root 已无 active Cycle，再创建新 Cycle identity，调用 Plan 并创建新的 Stage/DAG。
+3. **等待或停止**：不改写外部事实，等待更多输入或给出无法安全继续的原因。
 
-Conductor 只创建空 Cycle。Plan Performer 负责在 Linear 中创建并回读：
+是否选择其中任何一项只属于 Root Reconcill。Conductor 不从 change type、Stage status、DAG 或 Performer result 推导选择，也不自动修补任务图。
 
-1. 一个已完成的 Plan Issue。
+创建 successor 前必须 fresh read 确认旧 active Cycle 已 terminal；若 precondition 已变化，Root Reconcill 接收实际 diff 后重新决定。successor 可以用普通 relation 指向 predecessor，但 Task Manager MCP 不理解 relation 的 Symphony 含义。
+
+## Plan and Work DAG
+
+Plan Performer 返回 task proposal，不写 Task Manager。Root Reconcill 根据 proposal 使用 generic MCP 创建并 read-back：
+
+1. 一个 Plan Issue。
 2. 至少一个 Work Issue 和一个 Verify Issue。
-3. 完整、无环的 Work 依赖关系。
-4. Verify 对全部 required Work 的依赖关系。
+3. 完整、无环的 Work dependency relations。
+4. Verify 对全部 required Work 的 dependency relations。
 
-Conductor 不从 Plan 文本生成或修补 DAG，只重新读取并验证 parent、kind、status 和 relation。
+active Cycle 的 required Work 是该 Cycle 下全部且仅有的、未 archived、parent 直接指向该 Cycle、kind 为 `symphony:kind/work` 且 identity 唯一的 Work Issues。一个 Work 只有在自身为 `Todo` 且全部 dependency Work 为 `Done` 时语义上 ready；该判断由 Root Reconcill 完成。
 
-当前 active Cycle 的 **required Work** 是该 Cycle 下全部且仅有的、parent 直接指向该
-Cycle、带 `symphony:kind/work` 且 identity 唯一的 Work Issue。Plan Handoff 中的
-`work_issue_ids` 必须与这个 fresh read 集合完全相等；集合外的 Issue 不能被暗中忽略，
-集合内的 Issue 也不能因 Handoff 缺失而变为 optional。任一 Work kind/parent/identity
-含糊、依赖指向 Cycle 外或依赖图不完整/有环时，Plan 不可接受并关闭 Cycle 后重新 Plan
-或停止。
+Root Reconcill 可以在继续 active Cycle 时改变 Work 集合或 relations，但每次修改后都必须基于 fresh complete snapshot 重新判断 DAG。全部 required Work 为 `Done` 后，它才调用 generic Git tool 创建 immutable commit 并调用 Verify。
 
-一个 Work 只有在自身为 `Todo` 且全部依赖 Work 为 `Done` 时才能执行。全部 required Work 为 `Done` 后，Conductor 才能创建 commit 并调用 Verify。
+## Fact authority
 
-## 事实权威与变化
+Task Manager 的 Issue、status、parent、label、delegate、priority、relation 和 description 是任务事实；Git 的 worktree、diff、commit、remote ref 和 PR 是交付事实。Performer proposal/result、MCP receipt、webhook payload、model transcript 和 in-memory diff 都不是持久事实。
 
-Linear 的 Issue、status、parent、label、relation 和 description 是工作流事实；Git 的 worktree、diff、commit 和 PR 是代码交付事实。
-
-Linear 或 Git 发生变化后，Conductor 重新读取当前值并计算内存 diff。`RootReconcill` 决定继续当前 Cycle、关闭后重新 Plan，或停止。Conductor 不解释变化，也不把历史事件重放为动作。
+任何人或外部自动化对 Root Tree 的修改都以 fresh snapshot 为准，形成具体相邻 diff 交给 Root Reconcill；历史 webhook event 本身不作为 action replay。

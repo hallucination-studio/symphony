@@ -66,20 +66,34 @@ test("architecture authority rejects tracked tasks and task references", () => {
   );
 });
 
-test("Phase 1 architecture keeps the approved hard-cut decisions closed", async () => {
-  const [contracts, rootIssue, conductor, delivery] = await Promise.all([
+test("Phase 1 architecture keeps generic tools and Root-owned Cycle decisions closed", async () => {
+  const [taskManagement, contracts, rootIssue, rootReconciliation, conductor, performer, delivery, roadmap] = await Promise.all([
+    readFile("docs/architecture/task-management.md", "utf8"),
     readFile("docs/architecture/contracts.md", "utf8"),
     readFile("docs/architecture/root-issue.md", "utf8"),
+    readFile("docs/architecture/root-reconciliation.md", "utf8"),
     readFile("docs/architecture/conductor.md", "utf8"),
+    readFile("docs/architecture/performer.md", "utf8"),
     readFile("docs/architecture/git-worktree-delivery.md", "utf8"),
+    readFile("docs/architecture/roadmap.md", "utf8"),
   ]);
 
-  assert.match(contracts, /PlanHandoff\.outcome[^\n]+completed \| failed \| canceled/u);
-  assert.match(contracts, /WorkHandoff\.outcome[^\n]+completed \| failed \| canceled/u);
-  assert.match(contracts, /Phase 1 唯一接受值为 `1`/u);
-  assert.match(rootIssue, /required Work[^\n]+全部且仅有/u);
-  assert.match(conductor, /只允许一个 primary restart transition/u);
-  assert.match(conductor, /旧 thread 不恢复、不继续，也不作为第二执行路径/u);
+  assert.match(taskManagement, /`TaskManageWebhook`[^\n]+`WakeRoot`/u);
+  assert.match(taskManagement, /get_issue[\s\S]+create_issue[\s\S]+update_issue[\s\S]+create_relation/u);
+  assert.match(taskManagement, /field_changed: status \| title \| description \| parent \| labels \| delegate \| priority/u);
+  assert.doesNotMatch(taskManagement, /StartCycle|ContinueCycle|CloseCycleAndReplan|DeliverVerifiedRevision/u);
+  assert.doesNotMatch(contracts, /RootDecision|PlanHandoff|WorkHandoff/u);
+  assert.match(contracts, /`precondition_failed` 是 tool result，不是 process-level error/u);
+  assert.match(rootIssue, /一个 Root 任意时刻最多有一个 active Cycle/u);
+  assert.match(rootIssue, /terminal Cycle 保留为历史事实，不 reopen/u);
+  assert.match(rootReconciliation, /继续当前 Cycle/u);
+  assert.match(rootReconciliation, /关闭并重跑/u);
+  assert.match(rootReconciliation, /Conductor 不实现上述选择/u);
+  assert.match(conductor, /不会退出进程、重建 runtime、关闭 Cycle 或替 Root 重试/u);
+  assert.match(conductor, /旧 thread 不恢复、不继续、不 replay/u);
+  assert.match(performer, /Performer 不获得 Task Manager MCP/u);
   assert.match(delivery, /delivery identity 是 closed tuple/u);
-  assert.match(delivery, /不提供\n(?:.*\n)*?fallback provider、alternate branch、force push/u);
+  assert.match(delivery, /Verify 检查的 revision、push 的 revision、remote ref 和 PR head 必须相同/u);
+  assert.match(roadmap, /不得 import Conductor private\/unexported modules/u);
+  assert.match(roadmap, /所有产品效果都来自 Conductor 本身/u);
 });
