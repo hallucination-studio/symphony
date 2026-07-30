@@ -16,7 +16,7 @@ import {
   type LinearObservation,
   type StageKind,
   type StageObservation,
-} from "../../contracts/observation.js";
+} from "../api/LinearObservation.js";
 import { asRecord, assertExactKeys, parseBoundedString, parseEnum } from "../../contracts/validation.js";
 import type { LinearGatewayInterface, RootCandidate } from "../api/LinearGatewayInterface.js";
 

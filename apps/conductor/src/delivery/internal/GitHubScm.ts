@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { parseRevision, type Revision } from "../../contracts/identity.js";
-import type { PullRequestObservation } from "../../contracts/observation.js";
+import type { PullRequestSnapshot } from "../../contracts/observation.js";
 import { asRecord, assertExactKeys, parseBoundedString, parseEnum } from "../../contracts/validation.js";
 import type { DeliveryIdentity } from "../api/DeliveryInterface.js";
 import type { ScmBoundary } from "./GitScmDelivery.js";
@@ -69,7 +69,7 @@ export async function discoverGitHubRepository(command: GitHubCommand): Promise<
   return repository;
 }
 
-function state(value: unknown): PullRequestObservation["state"] {
+function state(value: unknown): PullRequestSnapshot["state"] {
   const parsed = parseEnum(value, ["OPEN", "CLOSED", "MERGED"] as const);
   if (parsed === "OPEN") return "open";
   if (parsed === "MERGED") return "merged";
@@ -84,7 +84,7 @@ export class GitHubScm implements ScmBoundary {
     this.#repository = repository;
   }
 
-  async read(identity: DeliveryIdentity): Promise<readonly PullRequestObservation[]> {
+  async read(identity: DeliveryIdentity): Promise<readonly PullRequestSnapshot[]> {
     this.#assertIdentity(identity);
     let raw: unknown;
     try {
@@ -100,7 +100,7 @@ export class GitHubScm implements ScmBoundary {
     }
     if (!Array.isArray(raw) || raw.length > 1) throw new Error("github_pr_readback_invalid");
     try {
-      return Object.freeze(raw.map((value): PullRequestObservation => {
+      return Object.freeze(raw.map((value): PullRequestSnapshot => {
         const record = asRecord(value);
         assertExactKeys(record, ["url", "state", "baseRefName", "headRefName", "headRefOid"]);
         const url = parseBoundedString(record.url, "invalid_pr_url", 2048);

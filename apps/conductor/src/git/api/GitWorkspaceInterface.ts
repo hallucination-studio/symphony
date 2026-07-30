@@ -6,7 +6,7 @@ import type {
   RootIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
-import type { GitObservation } from "../../contracts/observation.js";
+import type { GitSnapshot } from "../../contracts/observation.js";
 
 export interface RootWorkspaceIdentity {
   readonly root_id: RootIssueId;
@@ -28,6 +28,6 @@ export interface CommitWorkspaceRequest extends RootWorkspaceIdentity {
 
 export interface GitWorkspaceInterface {
   prepare(request: PrepareWorkspaceRequest): Promise<MutationResult>;
-  read(identity: RootWorkspaceIdentity): Promise<GitObservation>;
+  read(identity: RootWorkspaceIdentity): Promise<GitSnapshot>;
   commit(request: CommitWorkspaceRequest): Promise<MutationResult>;
 }

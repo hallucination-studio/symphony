@@ -27,9 +27,22 @@ export function parseBoundedString(value: unknown, code: string, max = 256): str
   return value;
 }
 
-export function parseStringArray(value: unknown, parser: (entry: unknown) => string): readonly string[] {
+export function parseArray<T>(
+  value: unknown,
+  parser: (entry: unknown) => T,
+  max = 5_000,
+): readonly T[] {
   if (!Array.isArray(value)) throw new Error("invalid_contract_array");
-  const parsed = value.map(parser);
+  if (value.length > max) throw new Error("contract_array_limit_exceeded");
+  return Object.freeze(value.map(parser));
+}
+
+export function parseStringArray(
+  value: unknown,
+  parser: (entry: unknown) => string,
+  max = 5_000,
+): readonly string[] {
+  const parsed = parseArray(value, parser, max);
   if (new Set(parsed).size !== parsed.length) throw new Error("duplicate_contract_identity");
-  return Object.freeze(parsed);
+  return parsed;
 }

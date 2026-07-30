@@ -1,5 +1,5 @@
 import { parseMutationResult, type MutationResult } from "../../contracts/mutation.js";
-import type { LinearObservation } from "../../contracts/observation.js";
+import type { LinearObservation } from "../api/LinearObservation.js";
 import { asRecord, assertExactKeys, parseBoundedString } from "../../contracts/validation.js";
 import {
   parseLinearMutation,

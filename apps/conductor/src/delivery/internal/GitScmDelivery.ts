@@ -7,7 +7,7 @@ import {
   type Revision,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
-import type { PullRequestObservation } from "../../contracts/observation.js";
+import type { PullRequestSnapshot } from "../../contracts/observation.js";
 import type {
   DeliverRevisionRequest,
   DeliveryIdentity,
@@ -18,7 +18,7 @@ import { verifiedDelivery } from "../api/DeliveryInterface.js";
 import { GitCommand } from "../../git/internal/GitCommand.js";
 
 export interface ScmBoundary {
-  read(identity: DeliveryIdentity): Promise<readonly PullRequestObservation[]>;
+  read(identity: DeliveryIdentity): Promise<readonly PullRequestSnapshot[]>;
   create(identity: DeliveryIdentity, revision: Revision): Promise<"accepted" | "rejected" | "unknown">;
 }
 

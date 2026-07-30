@@ -12,7 +12,7 @@ import {
   type RootIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
-import type { GitObservation } from "../../contracts/observation.js";
+import type { GitSnapshot } from "../../contracts/observation.js";
 import { parseBoundedString } from "../../contracts/validation.js";
 import { createRootHeadBranch } from "../../delivery/api/DeliveryInterface.js";
 import type {
@@ -166,7 +166,7 @@ export class GitWorktree implements GitWorkspaceInterface {
     }
   }
 
-  async read(identity: RootWorkspaceIdentity): Promise<GitObservation> {
+  async read(identity: RootWorkspaceIdentity): Promise<GitSnapshot> {
     await this.#assertIdentity(identity);
     const expectedPath = this.pathFor(identity.root_id);
     const entries = (await this.#worktrees()).filter((entry) => path.normalize(entry.path) === expectedPath);
@@ -291,7 +291,7 @@ export class GitWorktree implements GitWorkspaceInterface {
 
   async #isCommitPostcondition(
     request: CommitWorkspaceRequest,
-    observation: GitObservation,
+    observation: GitSnapshot,
   ): Promise<boolean> {
     if (
       observation.workspace_state !== "clean"

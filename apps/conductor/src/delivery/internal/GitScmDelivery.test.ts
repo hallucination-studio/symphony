@@ -10,7 +10,7 @@ import {
   parseCorrelationId,
   parseRevision,
 } from "../../contracts/identity.js";
-import type { PullRequestObservation } from "../../contracts/observation.js";
+import type { PullRequestSnapshot } from "../../contracts/observation.js";
 import {
   createDeliveryIdentity,
   type DeliveryIdentity,
@@ -23,11 +23,11 @@ import {
 const exec = promisify(execFile);
 
 class FakeScm implements ScmBoundary {
-  pullRequests: PullRequestObservation[] = [];
+  pullRequests: PullRequestSnapshot[] = [];
   createOutcome: "accepted" | "rejected" | "unknown" = "accepted";
   materialize = true;
 
-  read(): Promise<readonly PullRequestObservation[]> {
+  read(): Promise<readonly PullRequestSnapshot[]> {
     return Promise.resolve(this.pullRequests);
   }
 

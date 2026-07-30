@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { MutationResult } from "../../contracts/mutation.js";
-import type { GitObservation } from "../../contracts/observation.js";
+import type { GitSnapshot } from "../../contracts/observation.js";
 import type {
   CommitWorkspaceRequest,
   GitWorkspaceInterface,
@@ -14,7 +14,7 @@ const git = {
   prepare(request: PrepareWorkspaceRequest): Promise<MutationResult> {
     return Promise.resolve({ schema_version: 1, outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
   },
-  read(): Promise<GitObservation> { return Promise.reject(new Error("inert_fixture")); },
+  read(): Promise<GitSnapshot> { return Promise.reject(new Error("inert_fixture")); },
   commit(request: CommitWorkspaceRequest): Promise<MutationResult> {
     return Promise.resolve({ schema_version: 1, outcome: "not_applied", target_id: request.root_id, correlation_id: request.correlation_id, reason: "inert fixture" });
   },

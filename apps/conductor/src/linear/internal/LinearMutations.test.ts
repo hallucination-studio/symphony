@@ -7,7 +7,7 @@ import {
   parseRootIssueId,
   parseStageIssueId,
 } from "../../contracts/identity.js";
-import type { LinearObservation } from "../../contracts/observation.js";
+import type { LinearObservation } from "../api/LinearObservation.js";
 import type { LinearMutation } from "../api/LinearGatewayInterface.js";
 import {
   LinearMutations,

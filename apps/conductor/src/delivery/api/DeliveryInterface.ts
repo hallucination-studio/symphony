@@ -7,7 +7,7 @@ import {
   type RootIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
-import type { PullRequestObservation } from "../../contracts/observation.js";
+import type { PullRequestSnapshot } from "../../contracts/observation.js";
 import { parseBoundedString } from "../../contracts/validation.js";
 
 export interface DeliveryIdentity {
@@ -21,7 +21,7 @@ export interface DeliveryIdentity {
 export interface DeliveryObservation {
   readonly identity: DeliveryIdentity;
   readonly remote_revision: Revision | null;
-  readonly matching_pull_requests: readonly PullRequestObservation[];
+  readonly matching_pull_requests: readonly PullRequestSnapshot[];
 }
 
 export interface DeliverRevisionRequest {
@@ -60,7 +60,7 @@ export function createDeliveryIdentity(input: {
 export function verifiedDelivery(
   observation: DeliveryObservation,
   revision: Revision,
-): PullRequestObservation {
+): PullRequestSnapshot {
   if (observation.remote_revision !== revision || observation.matching_pull_requests.length !== 1) {
     throw new Error("delivery_readback_mismatch");
   }

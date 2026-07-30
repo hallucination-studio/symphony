@@ -1,81 +1,98 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseRootBootstrap, parseRootObservationDiff } from "./observation.js";
-import { parseRootRuntimeState } from "./runtime.js";
+import { parseRootIssueId, parseRuntimeGeneration } from "./identity.js";
+import { parseRootFactDiff } from "./observation.js";
 
-const bootstrap = {
-  schema_version: 1,
-  root_id: "LIN-1",
-  runtime_generation: 1,
-  correlation_id: "corr:1",
-  observed_at: "2026-07-29T00:00:00.000Z",
-  linear: {
-    root_id: "LIN-1",
-    root_status: "In Progress",
-    active_cycle: {
-      issue_id: "LIN-2",
-      status: "Executing",
-      stages: [
-        { issue_id: "LIN-3", kind: "work", status: "Todo", dependency_issue_ids: [] },
-      ],
-    },
-  },
-  git: {
-    repository_id: "repo:1",
-    base_branch: "main",
-    head_branch: "symphony/root-LIN-1",
-    head_revision: "a".repeat(40),
-    workspace_state: "dirty",
-    diff_digest: "digest:1",
-    pull_request: null,
-  },
+const target = {
+  root_id: parseRootIssueId("LIN-1"),
+  runtime_generation: parseRuntimeGeneration(3),
 };
 
-test("bootstrap validates only approved current Linear and Git facts", () => {
-  const parsed = parseRootBootstrap(bootstrap);
-  assert.equal(parsed.linear.active_cycle?.stages[0]?.issue_id, "LIN-3");
-  assert.equal(parsed.git.head_revision, "a".repeat(40));
-  assert.ok(Object.isFrozen(parsed));
-  assert.throws(() => parseRootBootstrap({ ...bootstrap, next_action: "work" }), /invalid_contract_keys/u);
-  assert.throws(() => parseRootBootstrap({ ...bootstrap, linear: { ...bootstrap.linear, root_id: "LIN-9" } }), /bootstrap_root_mismatch/u);
-});
+const issue = {
+  issue_id: "LIN-2",
+  revision: "revision:2",
+  status: "Todo",
+  title: "Implement the contract",
+  description: null,
+  parent_id: "LIN-1",
+  labels: ["symphony:kind/work"],
+  delegate_id: "actor:1",
+  priority: 2,
+};
 
-test("continuity state rejects workflow mirrors and unknown fields", () => {
-  const state = {
-    schema_version: 1,
-    root_id: "LIN-1",
-    runtime_generation: 2,
-    thread_id: "thread:2",
-    accepted_observation_digest: "digest:2",
-    in_flight_correlation: null,
-  };
-  assert.deepEqual(parseRootRuntimeState(state), state);
-  for (const forbidden of ["dag", "handoff", "next_action", "metadata", "linear"]) {
-    assert.throws(() => parseRootRuntimeState({ ...state, [forbidden]: {} }), /invalid_contract_keys/u);
-  }
-});
+const relation = {
+  relation_id: "relation:1",
+  revision: "revision:relation:1",
+  type: "blocks",
+  source_issue_id: "LIN-2",
+  target_issue_id: "LIN-3",
+};
 
-test("observation diff accepts only closed scalar fact changes", () => {
-  const diff = {
-    schema_version: 1,
-    root_id: "LIN-1",
-    runtime_generation: 2,
-    correlation_id: "corr:2",
-    from_observation_digest: "digest:1",
-    to_observation_digest: "digest:2",
-    changed_linear_facts: [
-      { kind: "stage_changed", stage_id: "LIN-3", before: "Todo", after: "In Progress" },
-    ],
-    changed_git_facts: [],
-  };
-  assert.equal(parseRootObservationDiff(diff).changed_linear_facts.length, 1);
+const diff = {
+  schema_version: 1,
+  root_id: "LIN-1",
+  runtime_generation: 3,
+  correlation_id: "corr:3",
+  from_observation_digest: "digest:2",
+  to_observation_digest: "digest:3",
+  task_changes: [
+    { kind: "issue_created", issue },
+    { kind: "issue_archived", issue },
+    { kind: "field_changed", issue_id: "LIN-2", field: "status", before: "Todo", after: "In Progress" },
+    { kind: "field_changed", issue_id: "LIN-2", field: "title", before: "Old", after: "New" },
+    { kind: "field_changed", issue_id: "LIN-2", field: "description", before: null, after: "Details" },
+    { kind: "field_changed", issue_id: "LIN-2", field: "parent", before: "LIN-1", after: null },
+    { kind: "field_changed", issue_id: "LIN-2", field: "labels", before: ["a"], after: ["b"] },
+    { kind: "field_changed", issue_id: "LIN-2", field: "delegate", before: null, after: "actor:1" },
+    { kind: "field_changed", issue_id: "LIN-2", field: "priority", before: 1, after: 2 },
+    { kind: "relation_added", relation },
+    { kind: "relation_removed", relation },
+  ],
+  git_changes: [
+    { kind: "head_changed", before: "a".repeat(40), after: "b".repeat(40) },
+    { kind: "workspace_changed", before: "dirty", after: "clean" },
+    { kind: "pull_request_changed", before: null, after: "b".repeat(40) },
+  ],
+};
+
+test("RootFactDiff accepts only concrete task and Git fact changes", () => {
+  const parsed = parseRootFactDiff(diff, target);
+
+  assert.equal(parsed.task_changes.length, 11);
+  assert.equal(parsed.git_changes.length, 3);
+  assert.ok(Object.isFrozen(parsed.task_changes));
   assert.throws(
-    () => parseRootObservationDiff({ ...diff, changed_linear_facts: [{ kind: "full_observation", value: bootstrap }] }),
+    () => parseRootFactDiff({ ...diff, task_changes: [{ kind: "active_cycle_changed", before: null, after: "LIN-2" }] }, target),
     /invalid_contract_variant/u,
   );
   assert.throws(
-    () => parseRootObservationDiff({ ...diff, to_observation_digest: "digest:1" }),
+    () => parseRootFactDiff({ ...diff, metadata: {} }, target),
+    /invalid_contract_keys/u,
+  );
+});
+
+test("RootFactDiff rejects stale, unchanged, and unapproved field changes", () => {
+  assert.throws(
+    () => parseRootFactDiff({ ...diff, runtime_generation: 2 }, target),
+    /stale_generation/u,
+  );
+  assert.throws(
+    () => parseRootFactDiff({ ...diff, to_observation_digest: "digest:2" }, target),
     /unchanged_observation_diff/u,
+  );
+  assert.throws(
+    () => parseRootFactDiff({
+      ...diff,
+      task_changes: [{ kind: "field_changed", issue_id: "LIN-2", field: "workflow", before: "a", after: "b" }],
+    }, target),
+    /invalid_contract_variant/u,
+  );
+  assert.throws(
+    () => parseRootFactDiff({
+      ...diff,
+      task_changes: [{ kind: "field_changed", issue_id: "LIN-2", field: "status", before: "Todo", after: "Todo" }],
+    }, target),
+    /unchanged_task_field/u,
   );
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -38,6 +38,9 @@ test("continuity is atomically written and contains only approved state", async 
   const home = await manager.open(parseRootIssueId("LIN-1"));
   await home.continuity.write(state());
   assert.deepEqual(await home.continuity.load(), state());
+  await home.continuity.write({ ...state(), runtime_generation: parseRuntimeGeneration(2) });
+  assert.equal((await home.continuity.load()).runtime_generation, 2);
+  assert.deepEqual(await readdir(path.dirname(home.continuity.statePath)), ["state.json"]);
   assert.deepEqual(Object.keys(JSON.parse(await readFile(home.continuity.statePath, "utf8"))).sort(), [
     "accepted_observation_digest", "in_flight_correlation", "root_id", "runtime_generation", "schema_version", "thread_id",
   ]);

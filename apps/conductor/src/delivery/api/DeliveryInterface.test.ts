@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseRevision } from "../../contracts/identity.js";
-import type { PullRequestObservation } from "../../contracts/observation.js";
+import type { PullRequestSnapshot } from "../../contracts/observation.js";
 import { createDeliveryIdentity, verifiedDelivery } from "./DeliveryInterface.js";
 
 test("delivery identity encodes Root identity injectively and deterministically", () => {
@@ -16,7 +16,7 @@ test("delivery identity encodes Root identity injectively and deterministically"
 test("delivery is accepted only for one open PR at the exact verified revision", () => {
   const identity = createDeliveryIdentity({ provider: "github", root_id: "LIN-1", repository_id: "repo:1", base_branch: "main" });
   const revision = parseRevision("a".repeat(40));
-  const pullRequest: PullRequestObservation = {
+  const pullRequest: PullRequestSnapshot = {
     provider: identity.provider,
     repository_id: identity.repository_id,
     base_branch: identity.base_branch,

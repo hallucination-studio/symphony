@@ -22,7 +22,7 @@ import {
   type RootStatus,
   type StageKind,
   type StageStatus,
-} from "../../contracts/observation.js";
+} from "./LinearObservation.js";
 import { asRecord, assertExactKeys, parseEnum } from "../../contracts/validation.js";
 
 export interface RootCandidate {

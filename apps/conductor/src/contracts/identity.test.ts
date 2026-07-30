@@ -27,6 +27,7 @@ test("identity parsers brand only bounded external values", () => {
 
 test("boundary errors remain closed and sanitized", () => {
   const error = boundaryError({
+    schema_version: 1,
     code: "boundary_unavailable",
     root_id: parseRootIssueId("LIN-123"),
     runtime_generation: parseRuntimeGeneration(1),
@@ -34,7 +35,7 @@ test("boundary errors remain closed and sanitized", () => {
     reason: "linear request unavailable",
   });
   assert.deepEqual(Object.keys(error).sort(), [
-    "code", "correlation_id", "reason", "root_id", "runtime_generation",
+    "code", "correlation_id", "reason", "root_id", "runtime_generation", "schema_version",
   ]);
-  assert.throws(() => boundaryError({ ...error, reason: "token\nsecret" }), /invalid_boundary_error/u);
+  assert.throws(() => boundaryError({ ...error, reason: "token\nsecret" }), /invalid_boundary_reason/u);
 });

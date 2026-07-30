@@ -2,6 +2,10 @@ const IDENTITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const REVISION_PATTERN = /^[0-9a-f]{40,64}$/u;
 
 declare const rootIssueIdBrand: unique symbol;
+declare const taskIssueIdBrand: unique symbol;
+declare const taskRelationIdBrand: unique symbol;
+declare const taskRevisionBrand: unique symbol;
+declare const providerEventIdBrand: unique symbol;
 declare const cycleIssueIdBrand: unique symbol;
 declare const stageIssueIdBrand: unique symbol;
 declare const repositoryIdBrand: unique symbol;
@@ -11,6 +15,10 @@ declare const threadIdBrand: unique symbol;
 declare const observationDigestBrand: unique symbol;
 
 export type RootIssueId = string & { readonly [rootIssueIdBrand]: true };
+export type TaskIssueId = string & { readonly [taskIssueIdBrand]: true };
+export type TaskRelationId = string & { readonly [taskRelationIdBrand]: true };
+export type TaskRevision = string & { readonly [taskRevisionBrand]: true };
+export type ProviderEventId = string & { readonly [providerEventIdBrand]: true };
 export type CycleIssueId = string & { readonly [cycleIssueIdBrand]: true };
 export type StageIssueId = string & { readonly [stageIssueIdBrand]: true };
 export type RepositoryId = string & { readonly [repositoryIdBrand]: true };
@@ -31,6 +39,14 @@ function parseIdentity<T extends string>(value: unknown, name: string): T {
 
 export const parseRootIssueId = (value: unknown): RootIssueId =>
   parseIdentity<RootIssueId>(value, "root_issue_id");
+export const parseTaskIssueId = (value: unknown): TaskIssueId =>
+  parseIdentity<TaskIssueId>(value, "task_issue_id");
+export const parseTaskRelationId = (value: unknown): TaskRelationId =>
+  parseIdentity<TaskRelationId>(value, "task_relation_id");
+export const parseTaskRevision = (value: unknown): TaskRevision =>
+  parseIdentity<TaskRevision>(value, "task_revision");
+export const parseProviderEventId = (value: unknown): ProviderEventId =>
+  parseIdentity<ProviderEventId>(value, "provider_event_id");
 export const parseCycleIssueId = (value: unknown): CycleIssueId =>
   parseIdentity<CycleIssueId>(value, "cycle_issue_id");
 export const parseStageIssueId = (value: unknown): StageIssueId =>
