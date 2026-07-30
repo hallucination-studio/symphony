@@ -16,7 +16,6 @@
     "lint": "npm run lint --workspaces --if-present",
     "test:architecture": "node --test tests/architecture/*.test.mjs",
     "test:typescript": "npm test -w @symphony/conductor",
-    "test:e2e:one-root": "npm run build && node --env-file=.env --test tests/e2e/one-root.test.mjs",
     "test": "npm run test:architecture && npm run test:typescript"
   },
   "devDependencies": {
