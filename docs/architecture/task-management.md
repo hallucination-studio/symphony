@@ -1,6 +1,6 @@
 # Task Management
 
-状态：Phase 1 目标设计。本文拥有 Task Manager 的 provider-neutral 边界、webhook ingress、fresh snapshot/diff 和 MCP tool surface。Linear 是第一版唯一 provider implementation。
+状态：Phase 1 目标设计。本文拥有 Task Manager 的 provider-neutral 边界、定时 Root Tree observation、fresh snapshot/diff 和 MCP tool surface。Linear 是第一版唯一 provider implementation。
 
 ## 两个边界
 
@@ -8,24 +8,27 @@ Task Manager 集成拆成两个互不替代的边界：
 
 | Boundary | 输入 | 输出 | 职责 |
 |---|---|---|---|
-| `TaskManageWebhook` | provider webhook request | `WakeRoot` | 验证来源、去重、解析受影响 identity，并唤醒对应 Root |
+| `TaskManageObserver` | bounded scheduled tick | `TaskObservationEvent` | fresh read Root inventory/Tree，检测具体事实变化并发出完整观察 |
 | `TaskManageCommand` | generic MCP function call | typed result + fresh read-back | 查询或修改 Issue graph，不解释 Symphony workflow |
 
-Linear webhook payload 不是任务事实，也不直接进入 Root prompt。`TaskManageWebhook` 可以使用 payload 中的 provider event/Issue identity 定位 Root，但必须通过 fresh query 验证 ancestry、delegation 和当前值。重复事件只产生幂等 wake；Phase 1 不增加 polling、event replay 或第二条 intake path。
+Symphony 是没有公网 ingress 的本地客户端，因此 Phase 1 不依赖 Linear webhook。`TaskManageObserver` 是唯一 intake：进程启动后立即执行一次 observation，此后按配置的有界间隔串行 fresh poll。每个 tick 从配置 team 中不按 delegate/status 预过滤的 Root inventory，以及已有 polling baseline 的 Root identity 开始，读取完整 Root Tree；这样 delegation/status 的移除和 inventory 变化仍可观察。provider cursor、`updatedAt` 或局部 Issue 不得代替完整 snapshot。
 
 ```text
-Linear webhook
--> validate signature and event identity
--> resolve affected Root from fresh provider reads
--> enqueue/coalesce WakeRoot(root_id)
--> Conductor serially reads a complete snapshot
+bounded scheduled tick
+-> fresh Root inventory + complete Root Tree snapshots
+-> canonicalize and compare with the prior polling observation
+-> unchanged: emit nothing
+-> first/change: emit TaskObservationEvent(current complete snapshot + concrete task changes)
+-> coalesce by Root to the latest complete observation
 ```
 
-未委托给配置 agent actor 的 Root 不会进入执行槽；delegation 的新增、移除或变化只负责唤醒，实际 eligibility 由 fresh snapshot 确认。
+polling observation baseline 只用于判断是否应发事件，且仅在某个 Root 的完整 poll 成功后前进；读取不完整或失败时保留旧 baseline 并在下个 tick 重试，不发猜测 diff。事件必须携带当前完整 snapshot 和 digest，不能只携带一步 diff，否则串行调度期间的事件合并会丢失事实。事件中的 changes 和 from/to digest 描述 observer 相邻两次成功 poll；事件被合并后，`from_task_digest` 不要求等于 runtime 已接受的 digest。Conductor 另行维护 runtime accepted baseline，并在消费最新事件时从 accepted baseline 到事件 snapshot 重新计算 Root-facing diff；polling baseline 不能替代 accepted baseline。
+
+未委托给配置 agent actor 的 Root 不会进入执行槽；delegation 的新增、移除或变化由下一次 fresh poll 观察，实际 eligibility 由事件中的完整 snapshot 在 admission 时确认。Phase 1 不提供 webhook fallback、增量 cursor intake、provider event replay 或第二条 observation path。
 
 ## Snapshot 与具体 diff
 
-`TaskSnapshot` 是某个 Root 在一个时点的规范化完整任务图，包含 Root、其 Cycle/Stage descendants、相关 relations，以及这些对象的 identity、revision、status、title、description、parent、labels、delegate 和 priority。SDK object、raw webhook、credential 和任意 provider metadata 不得进入 snapshot。
+`TaskSnapshot` 是某个 Root 在一个时点的规范化完整任务图，包含 Root、其 Cycle/Stage descendants、相关 relations，以及这些对象的 identity、revision、status、title、description、parent、labels、delegate 和 priority。SDK object、poll cursor、credential 和任意 provider metadata 不得进入 snapshot。
 
 首次运行或 restart 向 Root Reconcill 发送完整 `RootBootstrap`。之后，Conductor 只比较相邻两个 accepted snapshot，生成 closed concrete diff：
 
@@ -77,6 +80,6 @@ accepted baseline 只在 Root Reconcill 接受 fresh observation 后前进。MCP
 
 ## Provider boundary
 
-Linear SDK、webhook payload、OAuth token、workspace/team objects、raw state/label records 和 provider error 只存在于 private Linear implementation。所有外部数据在边界处验证并规范化；所有错误在离开边界前 sanitize。
+Linear SDK、OAuth token、workspace/team objects、raw state/label records 和 provider error 只存在于 private Linear implementation。所有外部数据在边界处验证并规范化；所有错误在离开边界前 sanitize。
 
-Codex 不获得 Linear 原生 skill、SDK、token 或任意未声明 provider operation。Phase 1 只有一个 Linear webhook implementation 和一个 Linear-backed Task Manager MCP implementation；不提供 compatibility adapter、fallback command、dual path 或 migration behavior。
+Codex 不获得 Linear 原生 skill、SDK、token 或任意未声明 provider operation。Phase 1 只有一个 Linear polling implementation 和一个 Linear-backed Task Manager MCP implementation；不提供 webhook、compatibility adapter、fallback command、dual path 或 migration behavior。

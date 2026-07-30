@@ -72,6 +72,6 @@ Root Reconcill 可以在继续 active Cycle 时改变 Work 集合或 relations�
 
 ## Fact authority
 
-Task Manager 的 Issue、status、parent、label、delegate、priority、relation 和 description 是任务事实；Git 的 worktree、diff、commit、remote ref 和 PR 是交付事实。Performer proposal/result、MCP receipt、webhook payload、model transcript 和 in-memory diff 都不是持久事实。
+Task Manager 的 Issue、status、parent、label、delegate、priority、relation 和 description 是任务事实；Git 的 worktree、diff、commit、remote ref 和 PR 是交付事实。Performer proposal/result、MCP receipt、polling cursor/event、model transcript 和 in-memory diff 都不是持久事实。
 
-任何人或外部自动化对 Root Tree 的修改都以 fresh snapshot 为准，形成具体相邻 diff 交给 Root Reconcill；历史 webhook event 本身不作为 action replay。
+任何人或外部自动化对 Root Tree 的修改都由下一次 scheduled fresh poll 观察，以完整 snapshot 为准形成具体相邻 diff 交给 Root Reconcill；历史 polling event 本身不作为 action replay。

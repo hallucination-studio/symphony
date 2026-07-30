@@ -66,7 +66,7 @@ test("architecture authority rejects tracked tasks and task references", () => {
   );
 });
 
-test("Phase 1 architecture keeps generic tools and Root-owned Cycle decisions closed", async () => {
+test("Phase 1 architecture keeps polling observation, generic tools, and Root-owned Cycle decisions closed", async () => {
   const [taskManagement, contracts, rootIssue, rootReconciliation, conductor, performer, delivery, roadmap] = await Promise.all([
     readFile("docs/architecture/task-management.md", "utf8"),
     readFile("docs/architecture/contracts.md", "utf8"),
@@ -78,7 +78,18 @@ test("Phase 1 architecture keeps generic tools and Root-owned Cycle decisions cl
     readFile("docs/architecture/roadmap.md", "utf8"),
   ]);
 
-  assert.match(taskManagement, /`TaskManageWebhook`[^\n]+`WakeRoot`/u);
+  assert.match(taskManagement, /`TaskManageObserver`[^\n]+`TaskObservationEvent`/u);
+  assert.match(taskManagement, /没有公网 ingress[^\n]+不依赖 Linear webhook/u);
+  assert.match(taskManagement, /polling observation baseline[^\n]+runtime accepted baseline/u);
+  assert.match(taskManagement, /不按 delegate\/status 预过滤[^\n]+移除[^\n]+仍可观察/u);
+  assert.match(taskManagement, /`from_task_digest` 不要求等于 runtime 已接受的 digest/u);
+  assert.match(taskManagement, /不提供 webhook fallback/u);
+  assert.match(contracts, /TaskObservationEvent \{[\s\S]+from_task_digest: digest \| null, to_task_digest,[\s\S]+task: TaskSnapshot, task_changes: ConcreteTaskChange\[\]/u);
+  assert.match(contracts, /首次观察使用 `from_task_digest: null`、完整 snapshot 和空 changes/u);
+  assert.doesNotMatch(
+    [taskManagement, contracts, conductor, roadmap].join("\n"),
+    /TaskManageWebhook|WakeRoot|provider_event_id/u,
+  );
   assert.match(taskManagement, /get_issue[\s\S]+create_issue[\s\S]+update_issue[\s\S]+create_relation/u);
   assert.match(taskManagement, /field_changed: status \| title \| description \| parent \| labels \| delegate \| priority/u);
   assert.doesNotMatch(taskManagement, /StartCycle|ContinueCycle|CloseCycleAndReplan|DeliverVerifiedRevision/u);

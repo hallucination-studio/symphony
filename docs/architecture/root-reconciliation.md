@@ -39,7 +39,7 @@ Cycle 第一版不是不可变计划。每次 fresh Root/Cycle/sub-Issue/relatio
 | 没有 active Cycle | 创建一个 Cycle Issue，调用 Plan，并用 generic MCP 创建/连接精确的 Stage Issues |
 | 继续当前 Cycle | 保留 Cycle identity；按需要更新确切子 Issue/关系，或继续调用 ready Performer |
 | 关闭并重跑 | 先把当前 Cycle 及仍 active 的 Stage 更新为 terminal 并 fresh read-back；再创建 successor Cycle、重新 Plan 和重建其子图 |
-| 等待 | 不发 mutation，结束为 `quiescent`，等待下一次 wake |
+| 等待 | 不发 mutation，结束为 `quiescent`，等待下一次 changed observation |
 | 无法安全继续 | 结束为 `stopped`，给出 sanitized、可操作原因 |
 
 Conductor 不实现上述选择，也不根据 diff 自动取消、修复或重建 Cycle。terminal Cycle 是历史事实，不重新打开；successor 是新 identity。任意时刻最多一个 active Cycle，创建 successor 前必须 fresh read 确认旧 Cycle 已 terminal。

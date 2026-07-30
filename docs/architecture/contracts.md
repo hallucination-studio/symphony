@@ -6,7 +6,7 @@
 
 | Interface | 唯一职责 |
 |---|---|
-| `TaskManageWebhookInterface` | 接收并验证 provider webhook，解析并发出 Root wake |
+| `TaskManageObserverInterface` | 在有界 tick 上 fresh poll Root Tree，并发出 changed-only 完整观察事件 |
 | `TaskManageCommandInterface` | 实现通用 Task Manager MCP query/mutation functions 与 fresh read-back |
 | `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建 identity-bound `RootReconcill` |
 | `RootReconcillInterface` | 接收 bootstrap/diff，运行 ReAct tool loop，返回 quiescent/stop turn outcome |
@@ -21,7 +21,7 @@
 Phase 1 只需要以下 contract families：
 
 ```text
-WakeRoot
+TaskObservationEvent
 RootBootstrap | RootFactDiff
 TaskSnapshot | GitSnapshot
 TaskMcpCall | TaskMcpResult
@@ -32,15 +32,17 @@ DeliveryToolCall | DeliveryToolResult
 RootTurnOutcome | RootRuntimeState
 ```
 
-所有跨 public interface 或 process boundary 的 envelope 都有 `schema_version: 1`、target identity、`runtime_generation` 和 correlation。版本不是协商机制；unknown variant、missing identity、非 `1` schema、stale generation 或 capability mismatch 均 fail closed。
+所有跨 public interface 或 process boundary 的 envelope 都有 `schema_version: 1`、target identity 和 correlation。绑定已创建 runtime 的 envelope 还必须有 `runtime_generation`；pre-runtime 的 `TaskObservationEvent` 用 from/to task digest 描述 observer 相邻两次成功 poll，不绑定 runtime generation 或 accepted baseline。版本不是协商机制；unknown variant、missing identity、非 `1` schema、stale generation 或 capability mismatch 均 fail closed。
 
 Public contract 不得包含 SDK object、credential、raw provider payload、Codex config/session、process/thread/filesystem handle、database record、arbitrary metadata、durable next action、persisted diff 或 persisted tool result。
 
 ## Observation contracts
 
 ```text
-WakeRoot {
-  schema_version: 1, root_id, provider_event_id, received_at
+TaskObservationEvent {
+  schema_version: 1, root_id, correlation_id, observed_at,
+  from_task_digest: digest | null, to_task_digest,
+  task: TaskSnapshot, task_changes: ConcreteTaskChange[]
 }
 
 RootBootstrap {
@@ -60,9 +62,11 @@ RootRuntimeState {
 }
 ```
 
-`TaskSnapshot` 和 `GitSnapshot` 是 fresh read 的不可变规范化结果。`ConcreteTaskChange` 只允许 `issue_created | issue_archived | field_changed | relation_added | relation_removed`；`field_changed` 的 field 只允许 `status | title | description | parent | labels | delegate | priority`。diff 不包含任何 workflow interpretation。
+`TaskSnapshot` 和 `GitSnapshot` 是 fresh read 的不可变规范化结果。`TaskObservationEvent` 首次观察使用 `from_task_digest: null`、完整 snapshot 和空 changes；后续只在 digest 改变时发出，并包含相对上次完整 polling observation 的 concrete changes。事件可以按 Root 合并为最新完整 snapshot，不作为 action replay；合并后 Conductor 不要求 event `from_task_digest` 等于 runtime accepted digest，而是从完整 snapshot 重新计算 Root-facing diff。
 
-digest 只验证同一 generation 内 accepted observation 的连续性，不能恢复旧 snapshot。`RootRuntimeState` 是 Root Home 中唯一由 Symphony 管理的 continuity payload，并使用 atomic replace。
+`ConcreteTaskChange` 只允许 `issue_created | issue_archived | field_changed | relation_added | relation_removed`；`field_changed` 的 field 只允许 `status | title | description | parent | labels | delegate | priority`。diff 不包含任何 workflow interpretation。
+
+task observation digest 只描述 polling baseline 上的相邻观察；runtime observation digest 验证同一 generation 内 accepted observation 的连续性。digest 不能恢复旧 snapshot。`RootRuntimeState` 是 Root Home 中唯一由 Symphony 管理的 continuity payload，并使用 atomic replace。
 
 ## Task MCP contracts
 
@@ -116,4 +120,4 @@ canceled | boundary_unavailable | acceptance_unknown | readback_mismatch
 
 ## Fresh read-back rule
 
-所有 Task Manager、Git 和 Delivery mutation 后都必须重新读取同一 exact identity。只有 fresh state 与请求结果一致时，observation baseline 才能前进。并发变化产生 `precondition_failed` 或 concrete diff，交回 Root Reconcill 再次 ReAct；Conductor 不替 Root 选择重试、替代 target 或 workflow transition。
+所有 Task Manager、Git 和 Delivery mutation 后都必须重新读取同一 exact identity。只有 fresh state 与请求结果一致时，对应的 runtime accepted facts 才能前进；polling observation baseline 仍只由 observer 的完整成功 poll 推进。并发变化产生 `precondition_failed` 或 concrete diff，交回 Root Reconcill 再次 ReAct；Conductor 不替 Root 选择重试、替代 target 或 workflow transition。

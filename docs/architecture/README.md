@@ -7,8 +7,8 @@
 用户把一个 Linear Root Issue 委托给配置的 agent actor 后，Symphony 将它交付为一个可审查的 PR：
 
 ```text
-Task Manager webhook 唤醒 Root
--> Conductor fresh read 并产生具体事实 diff
+Task Manager 定时 fresh poll Root Tree 并产生观察事件
+-> Conductor 从最新完整 snapshot 产生相对 accepted baseline 的具体事实 diff
 -> Root Reconcill 通过 ReAct 决定下一步
 -> Root Reconcill 调用通用 Task Manager MCP、Performer、Git 或 Delivery tool
 -> Conductor 执行机械边界工作并 fresh read-back
@@ -24,7 +24,7 @@ Task Manager webhook 唤醒 Root
 | 角色 | 负责 | 不负责 |
 |---|---|---|
 | Task Manager / Git | 保存任务图与代码交付事实 | 保存模型会话、diff 或下一步决策 |
-| `TaskManageWebhook` | 校验 provider 事件并唤醒受影响的 Root | 把 webhook payload 当作事实，或决定工作流动作 |
+| `TaskManageObserver` | 定时 fresh read Root Tree，检测事实变化并发出完整观察事件 | 依赖公网 webhook、解释变化或决定工作流动作 |
 | Task Manager MCP | 暴露 provider-neutral 的 Issue、关系、状态与标签查询/写入函数 | 暴露 Symphony 生命周期命令或解释 Cycle |
 | Conductor | 串行调度、fresh snapshot、相邻事实 diff、runtime 隔离、MCP fencing、读回与进程生命周期 | 解释需求、选择 Issue mutation、决定继续或重跑 Cycle |
 | `RootReconcill` | 解释最新事实，选择精确 tool call，并独占所有工作流与 Cycle 决策 | 绕过工具边界、把 transcript 或 tool result 当作持久事实 |
@@ -35,8 +35,8 @@ Root Reconcill 是唯一的语义决策者。Conductor 是机械执行器，不�
 ## 一次推进
 
 ```text
-validated webhook wake 或 startup discovery
--> fresh Task Manager + Git snapshot
+startup/polling Task observation
+-> fresh Git snapshot，并以最新完整 Task snapshot 对齐 accepted baseline
 -> 完整 bootstrap 或相对 accepted baseline 的具体相邻 diff
 -> Root Reconcill ReAct turn
 -> 一个通用 tool call
@@ -50,7 +50,7 @@ validated webhook wake 或 startup discovery
 
 | 方面 | 做 | 不做 |
 |---|---|---|
-| Task Manager | Linear webhook 和 Linear-backed 通用 MCP 是第一版唯一实现 | 向 Codex 暴露 Linear 原生 skill、SDK object 或 provider-specific payload |
+| Task Manager | Linear 定时 Root Tree polling 和 Linear-backed 通用 MCP 是第一版唯一实现 | 公网 webhook intake；向 Codex 暴露 Linear 原生 skill、SDK object 或 provider-specific payload |
 | Cycle | 最多一个 active Cycle；Root 可继续修改，或关闭后创建 successor 并重新 Plan | Conductor 自动判定 Cycle 失效；重开 terminal Cycle |
 | 执行 | Plan、Work、Verify role 隔离；同一 Cycle 的 Work Item 串行执行 | Performer 直接写任务；Work subagent、并行 Work、跨模型编排 |
 | 调度 | 一个 Conductor 串行处理多个 Root | 并发 Root、抢占、公平调度、多个 Conductor |
@@ -61,7 +61,7 @@ validated webhook wake 或 startup discovery
 
 ## 文档所有权
 
-- [Task Management](task-management.md)：webhook 唤醒、fresh snapshot/diff、通用 MCP 与 Linear provider boundary。
+- [Task Management](task-management.md)：定时 Root Tree observation、fresh snapshot/diff、通用 MCP 与 Linear provider boundary。
 - [Root Issue](root-issue.md)：Root、Cycle、Stage 和 DAG 的持久事实及 Cycle 可变规则。
 - [Conductor](conductor.md)：机械调度、事件循环、per-Root runtime 与 restart。
 - [Root Reconciliation](root-reconciliation.md)：Root ReAct、tool surface 和唯一语义决策权。

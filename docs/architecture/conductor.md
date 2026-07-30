@@ -6,9 +6,9 @@
 
 Conductor 负责：
 
-- 承接 validated Root wake，并在 startup 做一次 eligible Root inventory。
+- 承接 changed-only `TaskObservationEvent`；startup 立即 poll，此后按有界间隔持续 fresh observation。
 - 串行选择 Root；任意时刻最多运行一个 Root Reconcill turn。
-- fresh read Task Manager/Git snapshot，维护 accepted in-memory baseline，计算 concrete adjacent diff。
+- 消费 observation 中的完整 Task snapshot、fresh read Git snapshot，维护 accepted in-memory baseline，并计算 concrete adjacent diff。
 - 创建、暂停、重建和回收 per-Root runtime。
 - 向 Root app-server 暴露 capability-scoped Task Manager MCP、Performer、Git 和 Delivery tools。
 - 对每个 tool call 校验 schema、root ownership、runtime generation、correlation、capability 与 fresh precondition。
@@ -20,20 +20,21 @@ Conductor 不解释 Root/Cycle/Stage 状态，不计算 DAG readiness，不选�
 ## Mechanical event loop
 
 ```text
-await_wake
--> fresh_snapshot
+await_observation
+-> align_latest_task_snapshot
+-> fresh_git_snapshot
 -> bootstrap_or_concrete_diff
 -> run_root_turn
 -> validate_and_serve_one_tool_call
 -> fresh_read_back
 -> run_root_turn | park_root | stop_root
 
-fresh_done -> retire_root -> await_wake
+fresh_done -> retire_root -> await_observation
 ```
 
-这些是 runtime transition，不是 workflow transition。一个 webhook 只产生 wake；同一 Root 的重复 wake 可以 coalesce，但每次处理都重新读取完整当前事实。Conductor 不从 webhook payload 生成 diff，也不 replay provider events。
+这些是 runtime transition，不是 workflow transition。同一 Root 尚未处理的 polling observations 可以合并，但只能保留最新完整 snapshot；不能只合并一步 diff。Conductor 从 runtime accepted baseline 到该最新 snapshot 生成 Root-facing concrete diff，不 replay 中间 observation，也不从 polling cadence 推导 workflow 动作。
 
-Root 返回 `quiescent` 时 runtime 停在 accepted facts 上等待新 wake。Root 返回 `stopped` 或发生真正 process-level failure 时，Conductor 停止推进并记录 sanitized 可操作原因。`In Review` Root 保留 runtime 但不占执行槽；Task Manager fresh read 确认 `Done` 后只触发资源回收。
+Root 返回 `quiescent` 时 runtime 停在 accepted facts 上等待新的 changed observation。Root 返回 `stopped` 或发生真正 process-level failure 时，Conductor 停止推进并记录 sanitized 可操作原因。`In Review` Root 保留 runtime 但不占执行槽；Task Manager fresh observation 确认 `Done` 后只触发资源回收。
 
 ## Fresh precondition semantics
 
@@ -49,7 +50,7 @@ Conductor 将结果送回同一 Root Reconcill 继续 ReAct。它不会退出进
 
 ## Discovery, admission, and configuration
 
-Startup inventory 和 webhook wake 都只 admit 同时满足以下 fresh facts 的 Root：
+每次 polling observation 都只 admit 同时满足以下 fresh facts 的 Root：
 
 - 位于配置的单一 Linear workspace/team，且 kind 为 `symphony:kind/root`。
 - delegate 精确等于配置的 agent actor；未委托或委托给其他 actor 时不运行。
@@ -59,7 +60,7 @@ Startup inventory 和 webhook wake 都只 admit 同时满足以下 fresh facts �
 
 Conductor 按 `(priority, created_at, issue_id)` 稳定排序，但只 admit 一个可执行 Root。eligibility 缺失、重复或冲突时 fail closed，并留下 sanitized reason；它不修改 Task Manager 来修复 admission。
 
-启动配置只包含 Task Manager/Linear webhook 与 API、workspace/team/agent identity、Root-to-repository routing、base branch、program-data path、Performer Home、Codex executable、MCP capability 和 delivery endpoint。配置只在进程启动时解析验证，不从 Issue description、Profile、Podium 或 arbitrary metadata 推导。
+启动配置只包含 Task Manager/Linear API、bounded polling interval、workspace/team/agent identity、Root-to-repository routing、base branch、program-data path、Performer Home、Codex executable、MCP capability 和 delivery endpoint。配置只在进程启动时解析验证，不从 Issue description、Profile、Podium 或 arbitrary metadata 推导；不包含 webhook URL 或 signing secret。
 
 ## Per-Root runtime
 
@@ -89,7 +90,7 @@ Root `Done` 后，Conductor 先停止 turn/process，撤销 tool capability，�
 进程启动或内存 baseline 丢失后只有一个 restart path：
 
 1. 验证 `state.json` owner/identity，隔离其中的 in-flight correlation 和全部旧输出。
-2. fresh read 完整 Task Manager/Git facts；identity、active Cycle、worktree、branch、HEAD 或 PR 有歧义时保留事实并 fail closed。
+2. 由 startup immediate poll 产生完整 Task observation，Conductor fresh read Git facts；identity、active Cycle、worktree、branch、HEAD 或 PR 有歧义时保留事实并 fail closed。
 3. 创建递增 generation 和全新 Root thread，atomic replace `state.json`。
 4. 向新 thread 发送当前完整 `RootBootstrap`，以该 observation digest 建立唯一 baseline。
 

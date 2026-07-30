@@ -4,10 +4,10 @@
 
 ## Hard-cut sequence
 
-1. **Architecture checkpoint**：冻结 Task Manager webhook/MCP、concrete diff、Root ReAct、mutable Cycle 和 black-box acceptance contracts。
+1. **Architecture checkpoint**：冻结 Task Manager polling observation/MCP、concrete diff、Root ReAct、mutable Cycle 和 black-box acceptance contracts。
 2. **Remove retired runtime**：硬删除旧 Symphony domain state machine、dynamic Linear skills/tools、compatibility code、fallback path 和绑定旧架构的大型 tests。
 3. **Task Manager foundation**：实现 generic contracts/MCP schemas，以及第一版唯一 Linear command/query provider。
-4. **Webhook and observation**：实现 Linear webhook validation/wake、startup inventory、fresh complete snapshot、accepted baseline 与 concrete adjacent diff。
+4. **Polling observation**：实现 Linear 定时 Root inventory/Tree fresh reads、changed-only complete observation、accepted baseline 与 concrete adjacent diff。
 5. **Root ReAct runtime**：实现 per-Root Codex runtime、capability-scoped MCP loop、normal precondition conflict handling 和 Root-owned Cycle choice。
 6. **Performer isolation**：实现不写 Task Manager 的 Plan/Work/Verify typed results，并由 Root Reconcill 执行 exact task mutations。
 7. **Git and delivery**：实现 generic Git/Delivery tools、worktree ownership、immutable commit、exact-revision Verify/push/PR。
@@ -24,7 +24,7 @@
 2. 使用 production configuration 启动/停止 built Conductor process。
 3. 通过 Linear public boundary 查询 Root/Cycle/Stage/relation 最终事实用于验收。
 
-runner 不得 import Conductor private/unexported modules，不得调用 Root Reconcill、Task Manager MCP、Codex、Git、push 或 PR internals，也不得替 Conductor 执行任何产品 mutation。未正确 delegate 的 Root 必须保持不运行；delegate 后 webhook/fresh observation 才能唤醒执行。
+runner 不得 import Conductor private/unexported modules，不得调用 Root Reconcill、Task Manager MCP、Codex、Git、push 或 PR internals，也不得替 Conductor 执行任何产品 mutation。未正确 delegate 的 Root 必须保持不运行；delegate 后下一次 scheduled fresh observation 才能触发执行。
 
 ## Completion standard
 
