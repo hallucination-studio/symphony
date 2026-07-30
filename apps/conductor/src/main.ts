@@ -35,6 +35,11 @@ function line(stream: NodeJS.WritableStream, value: Record<string, unknown>): vo
   stream.write(`${JSON.stringify(value)}\n`);
 }
 
+function reasonCode(error: unknown): string {
+  if (error instanceof Error && /^[a-z][a-z0-9_]{0,63}$/u.test(error.message)) return error.message;
+  return "startup_or_runtime_failed";
+}
+
 async function main(): Promise<void> {
   let stopping = false;
   let releaseWait: (() => void) | null = null;
@@ -58,8 +63,8 @@ async function main(): Promise<void> {
       }),
     });
     line(process.stdout, { event: "conductor_stopped" });
-  } catch {
-    line(process.stderr, { event: "conductor_failed", reason_code: "startup_or_runtime_failed" });
+  } catch (error) {
+    line(process.stderr, { event: "conductor_failed", reason_code: reasonCode(error) });
     process.exitCode = 1;
   }
 }

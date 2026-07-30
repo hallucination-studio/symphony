@@ -57,6 +57,19 @@ test("startup rejects missing, relative, duplicate, and unknown arguments", asyn
   }
 });
 
+test("startup accepts an explicit credential-free HTTP Codex endpoint", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-startup-"));
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(configPath, JSON.stringify(config(directory)), { mode: 0o600 });
+
+  const startup = await loadStartup(["--config", configPath], {
+    ...secrets,
+    SYMPHONY_CODEX_BASE_URL: "http://codex.internal/v1",
+  });
+
+  assert.equal(startup.codex_base_url, "http://codex.internal/v1");
+});
+
 test("startup fails closed without exposing missing or malformed secrets and config", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-startup-"));
   const configPath = path.join(directory, "conductor.json");

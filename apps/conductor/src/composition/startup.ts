@@ -52,7 +52,14 @@ export async function loadStartup(
   const codexApiKey = secret(env, "SYMPHONY_CODEX_API_KEY", "missing_codex_api_key", "invalid_codex_api_key");
   const codexModel = secret(env, "SYMPHONY_CODEX_MODEL", "missing_codex_model", "invalid_codex_model");
   const codexBaseUrl = env.SYMPHONY_CODEX_BASE_URL;
-  if (!codexBaseUrl || !URL.canParse(codexBaseUrl) || new URL(codexBaseUrl).protocol !== "https:") {
+  const parsedBaseUrl = codexBaseUrl && URL.canParse(codexBaseUrl) ? new URL(codexBaseUrl) : null;
+  if (
+    !codexBaseUrl
+    || !parsedBaseUrl
+    || !["http:", "https:"].includes(parsedBaseUrl.protocol)
+    || parsedBaseUrl.username !== ""
+    || parsedBaseUrl.password !== ""
+  ) {
     throw new Error("invalid_codex_base_url");
   }
   let config: ConductorConfig;

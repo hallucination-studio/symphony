@@ -33,6 +33,7 @@ async function issueRecord(issue: Issue) {
     status: state.name,
     priority: issue.priority,
     created_at: issue.createdAt.toISOString(),
+    delegate_id: issue.delegateId ?? null,
   });
 }
 
@@ -49,8 +50,8 @@ async function issuePage(connection: IssueConnection) {
 export class LinearSdkReadClient implements LinearReadClient, LinearMutationClient {
   constructor(private readonly client: LinearClient) {}
 
-  static fromApiKey(apiKey: string): LinearSdkReadClient {
-    return new LinearSdkReadClient(new LinearClient({ apiKey }));
+  static fromAccessToken(accessToken: string): LinearSdkReadClient {
+    return new LinearSdkReadClient(new LinearClient({ accessToken }));
   }
 
   async listTeamIssues(teamId: string, cursor: string | null, pageSize: number): Promise<unknown> {

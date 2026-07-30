@@ -10,6 +10,7 @@ import {
 import { LinearSdkReadClient } from "./LinearSdkReadClient.js";
 
 const TEAM_ID = "team-1";
+const DELEGATE_ACTOR_ID = "agent-1";
 
 function page(nodes: readonly unknown[], endCursor: string | null = null) {
   return {
@@ -35,6 +36,7 @@ function issue(
     status,
     priority,
     created_at: createdAt,
+    delegate_id: DELEGATE_ACTOR_ID,
   };
 }
 
@@ -81,7 +83,7 @@ function route(rootId: string, repositoryId = `repo:${rootId}`): LinearReaderRou
 }
 
 function reader(client: FakeLinearReadClient, routes = [route("root-1")]) {
-  return new LinearReader(client, { team_id: TEAM_ID, routes });
+  return new LinearReader(client, { team_id: TEAM_ID, delegate_actor_id: DELEGATE_ACTOR_ID, routes });
 }
 
 function setLabels(client: FakeLinearReadClient, issueId: string, ...labels: string[]) {
@@ -121,6 +123,17 @@ test("discovery consumes every page, validates Root kind, binds routes, and sort
       base_branch: "main",
     },
   ]);
+});
+
+test("discovery ignores an undelegated Root and readRoot rejects delegation drift", async () => {
+  const client = new FakeLinearReadClient();
+  const undelegated = { ...issue("root-1", "Todo"), delegate_id: null };
+  client.teamPages.set("first", page([undelegated]));
+  client.issues.set("root-1", undelegated);
+  setLabels(client, "root-1", "symphony:kind/root");
+
+  assert.deepEqual(await reader(client).discoverRoots(), []);
+  await assert.rejects(reader(client).readRoot(parseRootIssueId("root-1")), /linear_root_delegate_mismatch/u);
 });
 
 test("readRoot projects one complete active Cycle and incoming blocks dependencies", async () => {
@@ -239,6 +252,7 @@ test("SDK adapter applies the exact team page request and returns data-only snap
     parentId: undefined,
     priority: 1,
     createdAt: new Date("2026-07-29T00:00:00.000Z"),
+    delegateId: DELEGATE_ACTOR_ID,
     state: Promise.resolve({ name: "Todo" }),
     labels: async (variables: unknown) => {
       calls.push({ labels: variables });

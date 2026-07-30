@@ -8,6 +8,7 @@ import { bindDynamicTools, type DynamicToolBinding } from "../../codex-app-serve
 import type { CorrelationId, RootIssueId, ThreadId } from "../../contracts/identity.js";
 import type { WorkHandoff, WorkRequest } from "../../contracts/stage-interaction.js";
 import { parseStageHandoff } from "../../contracts/stage-interaction.js";
+import type { StageIssueContext } from "./StageIssueContext.js";
 
 export interface WorkTurnResult {
   readonly status: "completed" | "interrupted" | "failed";
@@ -52,10 +53,11 @@ function cycleKey(rootId: string, cycleId: string): string {
   return JSON.stringify([rootId, cycleId]);
 }
 
-function workPrompt(request: WorkRequest): string {
+function workPrompt(request: WorkRequest, context?: StageIssueContext): string {
   return [
     "You are the isolated Symphony Work role.",
     `For Root ${request.root_id}, Cycle ${request.cycle_issue_id}, execute Work ${request.work_issue_id}.`,
+    ...(context ? [`Work title: ${context.title}`, `Work description:\n${context.description}`] : []),
     "Edit only the current Root worktree and run focused checks for this Work Item.",
     `Call linear_complete_work exactly once to update and read back only Work Issue ${request.work_issue_id}.`,
     "You must not modify the Work DAG, commit, push, or create a PR.",
@@ -158,12 +160,14 @@ export interface CodexWorkSessionOptions {
   readonly networkAccess: boolean;
   readonly spawner?: CodexSpawner;
   readonly bindings?: (request: WorkRequest) => readonly DynamicToolBinding[];
+  readonly issueContext?: (request: WorkRequest) => Promise<StageIssueContext>;
 }
 
 export class CodexWorkSessionFactory implements WorkSessionFactory {
   constructor(private readonly options: CodexWorkSessionOptions) {}
 
   async start(request: WorkRequest): Promise<WorkSession> {
+    const context = await this.options.issueContext?.(request);
     const configuredPath = await this.options.worktreePath(request.root_id);
     if (!path.isAbsolute(configuredPath)) throw new Error("worktree_path_not_absolute");
     const worktreePath = await realpath(configuredPath);
@@ -200,8 +204,8 @@ export class CodexWorkSessionFactory implements WorkSessionFactory {
     let closed = false;
     return {
       threadId: thread.threadId,
-      turn: async (input, correlationId, outputSchema) => {
-        const result = await thread.turn(input, correlationId, this.options.turnTimeoutMs, { ...outputSchema });
+      turn: async (_input, correlationId, outputSchema) => {
+        const result = await thread.turn(workPrompt(request, context), correlationId, this.options.turnTimeoutMs, { ...outputSchema });
         return { status: result.status, ...(result.output === undefined ? {} : { output: result.output }) };
       },
       close: async () => {

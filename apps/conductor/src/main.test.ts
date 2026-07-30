@@ -55,6 +55,6 @@ test("public process fails closed on missing startup input without reporting rea
   assert.equal(Buffer.concat(stdout).toString("utf8"), "");
   assert.deepEqual(JSON.parse(Buffer.concat(stderr).toString("utf8")), {
     event: "conductor_failed",
-    reason_code: "startup_or_runtime_failed",
+    reason_code: "invalid_startup_arguments",
   });
 });

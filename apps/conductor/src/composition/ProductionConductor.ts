@@ -30,6 +30,7 @@ import type { StagePerformerInterface } from "../performer/api/StagePerformerInt
 import { CodexPlanSessionFactory, PlanPerformer } from "../performer/internal/PlanPerformer.js";
 import { CodexVerifySessionFactory, VerifyPerformer } from "../performer/internal/VerifyPerformer.js";
 import { CodexWorkSessionFactory, WorkPerformer } from "../performer/internal/WorkPerformer.js";
+import { LinearStageIssueContextReader } from "../performer/internal/StageIssueContext.js";
 import { CodexRootTurnTransportFactory, RootReconcillFactory } from "../root-reconcill/internal/RootReconcill.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
 import { JsonLineLogger, type StructuredLoggerInterface } from "../runtime-logs/StructuredLogger.js";
@@ -155,6 +156,7 @@ function performer(
   git: RoutedGit,
   routeByRoot: ReadonlyMap<RootIssueId, RouteResources>,
   tools: LinearPerformerTools,
+  contexts: LinearStageIssueContextReader,
 ): StagePerformerInterface {
   const common = {
     executable: startup.config.codex_executable,
@@ -174,9 +176,11 @@ function performer(
   };
   const plan = new PlanPerformer(new CodexPlanSessionFactory({
     ...common, cwd: startup.config.performer_home, bindings: (request) => [tools.plan(request)],
+    issueContext: (request) => contexts.read(request.root_id),
   }));
   const work = new WorkPerformer(new CodexWorkSessionFactory({
     ...common, worktreePath, networkAccess: false, bindings: (request) => [tools.work(request)],
+    issueContext: (request) => contexts.read(request.work_issue_id),
   }));
   const verify = new VerifyPerformer(new CodexVerifySessionFactory({
     ...common, worktreePath, bindings: (request) => [tools.verify(request)],
@@ -245,9 +249,12 @@ export async function createProductionConductor(
     routeByRoot.set(route.root_id, resources);
   }
 
-  const sdk = LinearSdkReadClient.fromApiKey(startup.linear_token);
+  const linearClient = new LinearClient({ accessToken: startup.linear_token });
+  const delegateActorId = (await linearClient.viewer).id;
+  const sdk = new LinearSdkReadClient(linearClient);
   const linear = new LinearGateway(sdk, {
     team_id: startup.config.linear_team_id,
+    delegate_actor_id: delegateActorId,
     routes: startup.config.root_routing.map(({ root_id, repository_id, base_branch }) => ({
       root_id, repository_id, base_branch,
     })),
@@ -255,11 +262,13 @@ export async function createProductionConductor(
   const homes = await RootHomeManager.create(startup.config.program_data_path, startup.config.performer_home);
   const routedGit = new RoutedGit(routeResources);
   const routedDelivery = new RoutedDelivery(routeResources);
+  const performerClient = linearClient;
   const stages = performer(
     startup,
     routedGit,
     routeByRoot,
-    new LinearPerformerTools(new LinearClient({ apiKey: startup.linear_token }), startup.config.linear_team_id, linear),
+    new LinearPerformerTools(performerClient, startup.config.linear_team_id, linear),
+    new LinearStageIssueContextReader(performerClient, startup.config.linear_team_id),
   );
   const reconcills = new RootReconcillFactory(new CodexRootTurnTransportFactory({
     executable: startup.config.codex_executable,

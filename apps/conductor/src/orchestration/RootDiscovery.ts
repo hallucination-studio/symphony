@@ -18,7 +18,7 @@ export class RootDiscovery {
         throw new Error("root_admission_identity_mismatch");
       }
       if (observation.root_status !== candidate.status) {
-        throw new Error("root_admission_facts_changed");
+        continue;
       }
       return Object.freeze({ candidate, observation });
     }

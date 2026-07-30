@@ -4,6 +4,7 @@ import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
 import { bindDynamicTools, type DynamicToolBinding } from "../../codex-app-server/internal/DynamicToolBridge.js";
 import type { PlanHandoff, PlanRequest } from "../../contracts/stage-interaction.js";
 import { parseStageHandoff } from "../../contracts/stage-interaction.js";
+import type { StageIssueContext } from "./StageIssueContext.js";
 
 export interface PlanTurnResult {
   readonly status: "completed" | "interrupted" | "failed";
@@ -40,10 +41,11 @@ const PLAN_HANDOFF_SCHEMA = Object.freeze({
   additionalProperties: false,
 } as const);
 
-function planPrompt(request: PlanRequest): string {
+function planPrompt(request: PlanRequest, context?: StageIssueContext): string {
   return [
     "You are the isolated Symphony Plan role.",
     `Plan Root ${request.root_id} in Cycle ${request.cycle_issue_id}.`,
+    ...(context ? [`Root title: ${context.title}`, `Root description:\n${context.description}`] : []),
     "Call linear_create_plan_dag exactly once to create and read back one Done Plan, at least one Todo Work,",
     "exactly one Todo Verify, a complete acyclic Work dependency graph, and Verify dependencies on every Work.",
     "Use the returned issue IDs in the PlanHandoff.",
@@ -88,12 +90,14 @@ export interface CodexPlanSessionOptions {
   readonly model: string;
   readonly spawner?: CodexSpawner;
   readonly bindings?: (request: PlanRequest) => readonly DynamicToolBinding[];
+  readonly issueContext?: (request: PlanRequest) => Promise<StageIssueContext>;
 }
 
 export class CodexPlanSessionFactory implements PlanSessionFactory {
   constructor(private readonly options: CodexPlanSessionOptions) {}
 
   async start(request: PlanRequest): Promise<PlanSession> {
+    const context = await this.options.issueContext?.(request);
     const process = await CodexProcess.start({
       executable: this.options.executable,
       codexHome: this.options.performerHome,
@@ -121,8 +125,8 @@ export class CodexPlanSessionFactory implements PlanSessionFactory {
     }
     const unbind = bindDynamicTools(process, thread.threadId, bindings);
     return {
-      turn: async (input, outputSchema) => {
-        const result = await thread.turn(input, request.correlation_id, this.options.turnTimeoutMs, { ...outputSchema });
+      turn: async (_input, outputSchema) => {
+        const result = await thread.turn(planPrompt(request, context), request.correlation_id, this.options.turnTimeoutMs, { ...outputSchema });
         return { status: result.status, ...(result.output === undefined ? {} : { output: result.output }) };
       },
       close: async () => {

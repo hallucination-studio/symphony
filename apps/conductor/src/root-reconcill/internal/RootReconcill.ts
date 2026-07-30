@@ -80,7 +80,16 @@ export function bootstrapObservationDigest(input: Pick<RootBootstrap, "linear" |
 function prompt(kind: "RootBootstrap" | "RootObservationDiff", observation: RootBootstrap | RootObservationDiff): string {
   return JSON.stringify({
     role: "RootReconcill",
-    instruction: "Choose exactly one closed RootOutput from the supplied current facts.",
+    instruction: [
+      "Choose exactly one closed RootOutput from the supplied facts and return no prose.",
+      "Use the observation envelope root_id, runtime_generation, and correlation_id exactly.",
+      "Choose StartCycle for a Todo Root without an active Cycle.",
+      "Choose ContinueCycle for Planning with no stages, Executing with ready or completed Work, or Verifying with a Todo Verify.",
+      "Choose DeliverVerifiedRevision only after the Cycle is Succeeded, using the exact clean Git head revision.",
+      "Choose CloseCycleAndReplan only when changed facts invalidate the active Cycle.",
+      "Choose Wait only when facts are valid but no action is currently executable; choose Stop only when facts cannot be advanced safely.",
+      "Never invent an issue identity or revision.",
+    ].join(" "),
     kind,
     observation,
   });

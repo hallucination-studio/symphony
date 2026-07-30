@@ -60,12 +60,12 @@ test("discovery returns null when only In Review or Done Roots exist", async () 
   assert.deepEqual(fixture.readIds, []);
 });
 
-test("admission fails closed when fresh Root identity or status differs from discovery", async () => {
+test("admission skips changed status and fails closed on foreign identity", async () => {
   const todo = candidate("LIN-1", "Todo", 1);
   const staleStatus = gateway([todo], new Map([
     [todo.root_id, { ...observation(todo), root_status: "In Progress" }],
   ]));
-  await assert.rejects(staleStatus.discovery.nextExecutable(), /root_admission_facts_changed/u);
+  assert.equal(await staleStatus.discovery.nextExecutable(), null);
 
   const wrongIdentity = gateway([todo], new Map([
     [todo.root_id, { ...observation(todo), root_id: parseRootIssueId("LIN-9") }],

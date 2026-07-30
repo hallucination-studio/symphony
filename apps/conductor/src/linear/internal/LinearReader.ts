@@ -34,6 +34,7 @@ export interface LinearReaderRoute {
 
 export interface LinearReaderOptions {
   readonly team_id: string;
+  readonly delegate_actor_id: string;
   readonly routes: readonly LinearReaderRoute[];
 }
 
@@ -58,6 +59,7 @@ interface IssueRecord {
   readonly status: string;
   readonly priority: number;
   readonly createdAt: string;
+  readonly delegateId: string | null;
 }
 
 export interface LinearTargetObservation {
@@ -101,7 +103,7 @@ function parsePage<T>(value: unknown, parseNode: (node: unknown) => T): Page<T> 
 function parseIssue(value: unknown): IssueRecord {
   try {
     const record = asRecord(value);
-    assertExactKeys(record, ["id", "team_id", "parent_id", "status", "priority", "created_at"]);
+    assertExactKeys(record, ["id", "team_id", "parent_id", "status", "priority", "created_at", "delegate_id"]);
     const id = parseBoundedString(record.id, "invalid_issue_id", 128);
     const teamId = parseBoundedString(record.team_id, "invalid_team_id", 128);
     const parentId = record.parent_id === null
@@ -112,8 +114,11 @@ function parseIssue(value: unknown): IssueRecord {
       invalidPayload();
     }
     const createdAt = parseBoundedString(record.created_at, "invalid_created_at", 64);
+    const delegateId = record.delegate_id === null
+      ? null
+      : parseBoundedString(record.delegate_id, "invalid_delegate_id", 128);
     if (Number.isNaN(Date.parse(createdAt))) invalidPayload();
-    return Object.freeze({ id, teamId, parentId, status, priority: record.priority as number, createdAt });
+    return Object.freeze({ id, teamId, parentId, status, priority: record.priority as number, createdAt, delegateId });
   } catch (error) {
     if (error instanceof Error && error.message === "linear_invalid_payload") throw error;
     return invalidPayload();
@@ -154,9 +159,11 @@ function workflowKind(labels: readonly string[]): "root" | "cycle" | StageKind |
 export class LinearReader implements Pick<LinearGatewayInterface, "discoverRoots" | "readRoot"> {
   readonly #routes: ReadonlyMap<RootIssueId, LinearReaderRoute>;
   readonly #teamId: string;
+  readonly #delegateActorId: string;
 
   constructor(private readonly client: LinearReadClient, options: LinearReaderOptions) {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
+    this.#delegateActorId = parseBoundedString(options.delegate_actor_id, "invalid_delegate_actor_id", 128);
     const routes = new Map<RootIssueId, LinearReaderRoute>();
     for (const route of options.routes) {
       const rootId = parseRootIssueId(route.root_id);
@@ -178,6 +185,7 @@ export class LinearReader implements Pick<LinearGatewayInterface, "discoverRoots
       this.#assertTeam(issue);
       const labels = await this.#labels(issue.id);
       if (workflowKind(labels) !== "root") continue;
+      if (issue.delegateId !== this.#delegateActorId) continue;
       if (issue.parentId !== null) throw new Error("linear_root_has_parent");
       const rootId = parseRootIssueId(issue.id);
       const route = this.#routes.get(rootId);
@@ -204,6 +212,7 @@ export class LinearReader implements Pick<LinearGatewayInterface, "discoverRoots
     this.#assertTeam(root);
     if (root.id !== parsedRootId) throw new Error("linear_root_identity_mismatch");
     if (root.parentId !== null) throw new Error("linear_root_has_parent");
+    if (root.delegateId !== this.#delegateActorId) throw new Error("linear_root_delegate_mismatch");
     if (workflowKind(await this.#labels(root.id)) !== "root") throw new Error("linear_root_kind_mismatch");
     const rootStatus = parseEnum(root.status, ROOT_STATUSES);
 
