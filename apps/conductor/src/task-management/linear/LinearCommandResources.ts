@@ -6,8 +6,8 @@ import {
   type TaskRelationSnapshot,
 } from "../../contracts/observation.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString } from "../../contracts/validation.js";
+import { taskStringSetsEqual } from "../../observation/TaskFacts.js";
 import type { UpdateIssueDesired } from "../mcp/TaskMcpSchemas.js";
-import { sameTaskStrings } from "./LinearTaskChanges.js";
 
 export interface LinearCommandIssueRecord {
   readonly snapshot: TaskIssueSnapshot;
@@ -94,7 +94,7 @@ export function linearIssueMatches(issue: TaskIssueSnapshot, desired: UpdateIssu
     && (desired.description === undefined || issue.description === desired.description)
     && (desired.state_id === undefined || issue.status === desired.state_id)
     && (desired.parent_id === undefined || issue.parent_id === desired.parent_id)
-    && (desired.label_ids === undefined || sameTaskStrings(issue.labels, desired.label_ids))
+    && (desired.label_ids === undefined || taskStringSetsEqual(issue.labels, desired.label_ids))
     && (desired.delegate_id === undefined || issue.delegate_id === desired.delegate_id)
     && (desired.priority === undefined || priorityMatches(issue.priority, desired.priority));
 }

@@ -12,6 +12,7 @@ import {
   type TaskRelationSnapshot,
 } from "../../contracts/observation.js";
 import { parseBoundedString } from "../../contracts/validation.js";
+import { taskIssueChanges } from "../../observation/TaskFacts.js";
 import {
   parseTaskMcpResult,
   type ArchiveIssueCall,
@@ -40,7 +41,6 @@ import {
   type LinearCommandPage,
   type LinearProviderOutcome,
 } from "./LinearCommandResources.js";
-import { linearIssueDiff } from "./LinearTaskChanges.js";
 
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
@@ -195,7 +195,7 @@ export class LinearCommands {
       return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
     }
     if (!after.archived && linearIssueMatches(after.snapshot, call.input.desired)) {
-      const changes = linearIssueDiff(before.snapshot, after.snapshot);
+      const changes = taskIssueChanges(before.snapshot, after.snapshot);
       if (changes.length > 0) return this.#result(call, target, "applied", after.snapshot, changes, null);
     }
     return this.#postconditionFailure(call, target, provider, after.snapshot);

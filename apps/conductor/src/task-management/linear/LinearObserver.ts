@@ -1,21 +1,18 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   parseCorrelationId,
-  parseTaskDigest,
   type CorrelationId,
   type RootIssueId,
   type TaskDigest,
 } from "../../contracts/identity.js";
 import {
   parseTaskObservationEvent,
-  type ConcreteTaskChange,
   type TaskObservationEvent,
-  type TaskRelationSnapshot,
   type TaskSnapshot,
 } from "../../contracts/observation.js";
+import { taskSnapshotChanges, taskSnapshotDigest } from "../../observation/TaskFacts.js";
 import type { TaskManageObserverInterface } from "../api/TaskManageObserverInterface.js";
-import { linearIssueDiff } from "./LinearTaskChanges.js";
 
 type FailureReason = "boundary_unavailable" | "invalid_inventory" | "invalid_root_tree";
 
@@ -53,73 +50,6 @@ export interface LinearObserverOptions {
   readonly log: (entry: TaskObservationLog) => void;
   readonly identity_factory?: () => string;
   readonly now?: () => Date;
-}
-
-function taskDigest(snapshot: TaskSnapshot): TaskDigest {
-  const canonical = {
-    root_id: snapshot.root_id,
-    issues: [...snapshot.issues]
-      .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
-      .map((issue) => ({
-        issue_id: issue.issue_id,
-        revision: issue.revision,
-        status: issue.status,
-        title: issue.title,
-        description: issue.description,
-        parent_id: issue.parent_id,
-        labels: [...issue.labels].sort(),
-        delegate_id: issue.delegate_id,
-        priority: issue.priority,
-      })),
-    relations: [...snapshot.relations]
-      .sort((left, right) => left.relation_id.localeCompare(right.relation_id))
-      .map((relation) => ({
-        relation_id: relation.relation_id,
-        revision: relation.revision,
-        type: relation.type,
-        source_issue_id: relation.source_issue_id,
-        target_issue_id: relation.target_issue_id,
-      })),
-  };
-  const digest = createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
-  return parseTaskDigest(`sha256:${digest}`);
-}
-
-function sameRelation(left: TaskRelationSnapshot, right: TaskRelationSnapshot): boolean {
-  return left.type === right.type
-    && left.source_issue_id === right.source_issue_id
-    && left.target_issue_id === right.target_issue_id;
-}
-
-function taskChanges(before: TaskSnapshot, after: TaskSnapshot): readonly ConcreteTaskChange[] {
-  const changes: ConcreteTaskChange[] = [];
-  const beforeIssues = new Map(before.issues.map((issue) => [issue.issue_id, issue]));
-  const afterIssues = new Map(after.issues.map((issue) => [issue.issue_id, issue]));
-  const issueIds = new Set([...beforeIssues.keys(), ...afterIssues.keys()]);
-  for (const issueId of [...issueIds].sort()) {
-    const previous = beforeIssues.get(issueId);
-    const current = afterIssues.get(issueId);
-    if (previous === undefined && current !== undefined) changes.push({ kind: "issue_created", issue: current });
-    else if (previous !== undefined && current === undefined) changes.push({ kind: "issue_archived", issue: previous });
-    else if (previous !== undefined && current !== undefined) changes.push(...linearIssueDiff(previous, current));
-  }
-
-  const beforeRelations = new Map(before.relations.map((relation) => [relation.relation_id, relation]));
-  const afterRelations = new Map(after.relations.map((relation) => [relation.relation_id, relation]));
-  const relationIds = new Set([...beforeRelations.keys(), ...afterRelations.keys()]);
-  for (const relationId of [...relationIds].sort()) {
-    const previous = beforeRelations.get(relationId);
-    const current = afterRelations.get(relationId);
-    if (previous === undefined && current !== undefined) changes.push({ kind: "relation_added", relation: current });
-    else if (previous !== undefined && current === undefined) changes.push({ kind: "relation_removed", relation: previous });
-    else if (previous !== undefined && current !== undefined && !sameRelation(previous, current)) {
-      changes.push(
-        { kind: "relation_removed", relation: previous },
-        { kind: "relation_added", relation: current },
-      );
-    }
-  }
-  return Object.freeze(changes);
 }
 
 function failureReason(error: unknown, phase: "inventory" | "root"): FailureReason {
@@ -162,7 +92,7 @@ export class LinearObserver implements TaskManageObserverInterface {
     for (const rootId of [...rootIds].sort()) {
       try {
         const current = await this.queries.readRootSnapshot(rootId);
-        const digest = taskDigest(current);
+        const digest = taskSnapshotDigest(current);
         const previous = this.#baselines.get(rootId);
         if (previous?.digest === digest) {
           this.#baselines.set(rootId, Object.freeze({ digest, snapshot: current }));
@@ -176,7 +106,7 @@ export class LinearObserver implements TaskManageObserverInterface {
           from_task_digest: previous?.digest ?? null,
           to_task_digest: digest,
           task: current,
-          task_changes: previous === undefined ? [] : taskChanges(previous.snapshot, current),
+          task_changes: previous === undefined ? [] : taskSnapshotChanges(previous.snapshot, current),
         });
         this.#baselines.set(rootId, Object.freeze({ digest, snapshot: current }));
         events.push(event);
