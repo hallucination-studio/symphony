@@ -32,7 +32,6 @@ import {
 } from "../mcp/TaskMcpSchemas.js";
 import {
   assertLinearIssueIdentity,
-  linearIssueDiff,
   linearIssueMatches,
   parseLinearCommandIssue,
   parseLinearMutationReceipt,
@@ -41,6 +40,7 @@ import {
   type LinearCommandPage,
   type LinearProviderOutcome,
 } from "./LinearCommandResources.js";
+import { linearIssueDiff } from "./LinearTaskChanges.js";
 
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;

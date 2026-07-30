@@ -99,7 +99,7 @@ class FakeLinearQueryClient implements LinearQueryClient {
 }
 
 function options(): LinearQueryOptions {
-  return { team_id: TEAM_ID, delegate_actor_id: ACTOR_ID };
+  return { team_id: TEAM_ID };
 }
 
 function call(functionName: "get_issue" | "list_issues" | "list_children" | "list_relations" | "list_states" | "list_labels", input: unknown) {
@@ -177,7 +177,7 @@ test("generic query functions return only normalized closed resources with stabl
   ]);
 });
 
-test("startup inventory paginates and returns only delegated, unarchived Root facts in stable order", async () => {
+test("startup inventory paginates every Root without delegate filtering in stable order", async () => {
   const client = new FakeLinearQueryClient();
   client.teamIssues = [
     issue("root-2", null, "In Progress", ["symphony:kind/root"], { priority: 2 }),
@@ -202,6 +202,13 @@ test("startup inventory paginates and returns only delegated, unarchived Root fa
       created_at: "2026-07-30T00:00:00.000Z",
     },
     {
+      root_id: "other",
+      revision: "revision:other",
+      status: "Todo",
+      priority: 2,
+      created_at: "2026-07-30T00:00:00.000Z",
+    },
+    {
       root_id: "root-2",
       revision: "revision:root-2",
       status: "In Progress",
@@ -209,6 +216,16 @@ test("startup inventory paginates and returns only delegated, unarchived Root fa
       created_at: "2026-07-30T00:00:00.000Z",
     },
   ]);
+});
+
+test("complete Root reads preserve delegation changes for admission consumers", async () => {
+  const client = new FakeLinearQueryClient();
+  client.issues.set("root-1", issue("root-1", null, "Todo", ["symphony:kind/root"], {
+    delegate_id: null,
+  }));
+
+  const snapshot = await new LinearQueries(client, options()).readRootSnapshot(parseRootIssueId("root-1"));
+  assert.equal(snapshot.issues[0]?.delegate_id, null);
 });
 
 test("complete Root snapshot includes every descendant and internal relation without workflow derivation", async () => {
@@ -262,7 +279,7 @@ test("inventory and snapshot fail closed on malformed facts, ambiguity, and raw 
   );
 });
 
-test("Root reads reject wrong team, revision, ancestry, kind, and delegation facts", async () => {
+test("Root reads reject wrong team, revision, ancestry, and kind facts", async () => {
   const cases = [
     {
       code: /linear_team_mismatch/u,
@@ -282,11 +299,6 @@ test("Root reads reject wrong team, revision, ancestry, kind, and delegation fac
     {
       code: /linear_root_kind_mismatch/u,
       root: issue("root-1", null, "Todo", ["symphony:kind/cycle"]),
-      children: [],
-    },
-    {
-      code: /linear_root_delegate_mismatch/u,
-      root: issue("root-1", null, "Todo", ["symphony:kind/root"], { delegate_id: "actor:other" }),
       children: [],
     },
     {

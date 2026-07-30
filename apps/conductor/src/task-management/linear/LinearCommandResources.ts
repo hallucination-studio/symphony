@@ -2,12 +2,12 @@ import type { TaskIssueId } from "../../contracts/identity.js";
 import {
   parseTaskIssueSnapshot,
   parseTaskRelationSnapshot,
-  type ConcreteTaskChange,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
 } from "../../contracts/observation.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString } from "../../contracts/validation.js";
 import type { UpdateIssueDesired } from "../mcp/TaskMcpSchemas.js";
+import { sameTaskStrings } from "./LinearTaskChanges.js";
 
 export interface LinearCommandIssueRecord {
   readonly snapshot: TaskIssueSnapshot;
@@ -85,13 +85,6 @@ export function parseLinearMutationReceipt(value: unknown): Exclude<LinearProvid
   }
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
 function priorityMatches(actual: number | null, desired: number | null): boolean {
   return actual === desired || (actual === null && desired === 0);
 }
@@ -101,35 +94,9 @@ export function linearIssueMatches(issue: TaskIssueSnapshot, desired: UpdateIssu
     && (desired.description === undefined || issue.description === desired.description)
     && (desired.state_id === undefined || issue.status === desired.state_id)
     && (desired.parent_id === undefined || issue.parent_id === desired.parent_id)
-    && (desired.label_ids === undefined || sameStrings(issue.labels, desired.label_ids))
+    && (desired.label_ids === undefined || sameTaskStrings(issue.labels, desired.label_ids))
     && (desired.delegate_id === undefined || issue.delegate_id === desired.delegate_id)
     && (desired.priority === undefined || priorityMatches(issue.priority, desired.priority));
-}
-
-export function linearIssueDiff(before: TaskIssueSnapshot, after: TaskIssueSnapshot): ConcreteTaskChange[] {
-  const changes: ConcreteTaskChange[] = [];
-  if (before.title !== after.title) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "title", before: before.title, after: after.title });
-  }
-  if (before.description !== after.description) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "description", before: before.description, after: after.description });
-  }
-  if (before.status !== after.status) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "status", before: before.status, after: after.status });
-  }
-  if (before.parent_id !== after.parent_id) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "parent", before: before.parent_id, after: after.parent_id });
-  }
-  if (!sameStrings(before.labels, after.labels)) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "labels", before: before.labels, after: after.labels });
-  }
-  if (before.delegate_id !== after.delegate_id) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "delegate", before: before.delegate_id, after: after.delegate_id });
-  }
-  if (before.priority !== after.priority) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "priority", before: before.priority, after: after.priority });
-  }
-  return changes;
 }
 
 export function assertLinearIssueIdentity(

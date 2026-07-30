@@ -55,7 +55,6 @@ export interface LinearQueryClient {
 
 export interface LinearQueryOptions {
   readonly team_id: string;
-  readonly delegate_actor_id: string;
 }
 
 export interface RootInventoryItem {
@@ -233,11 +232,9 @@ function parseProviderEnum<const T extends readonly string[]>(value: unknown, al
 
 export class LinearQueries {
   readonly #teamId: string;
-  readonly #delegateActorId: string;
 
   constructor(private readonly client: LinearQueryClient, options: LinearQueryOptions) {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
-    this.#delegateActorId = parseBoundedString(options.delegate_actor_id, "invalid_delegate_actor_id", 128);
   }
 
   get_issue(call: GetIssueCall): Promise<GetIssueResult> {
@@ -356,7 +353,6 @@ export class LinearQueries {
       const roots: RootInventoryItem[] = [];
       for (const issue of issues) {
         if (issueKind(issue, labelNames) !== "root") continue;
-        if (issue.snapshot.delegate_id !== this.#delegateActorId) continue;
         if (issue.snapshot.parent_id !== null) fail("linear_root_has_parent");
         roots.push(Object.freeze({
           root_id: parseRootIssueId(issue.snapshot.issue_id),
@@ -382,7 +378,6 @@ export class LinearQueries {
       this.#assertTeam([root]);
       if (root.snapshot.issue_id !== parseTaskIssueId(parsedRootId)) fail("linear_root_identity_mismatch");
       if (root.snapshot.parent_id !== null) fail("linear_root_has_parent");
-      if (root.snapshot.delegate_id !== this.#delegateActorId) fail("linear_root_delegate_mismatch");
       if (issueKind(root, labelNames) !== "root") fail("linear_root_kind_mismatch");
       parseProviderEnum(stateNames.get(root.snapshot.status), ROOT_STATUSES);
 
