@@ -86,6 +86,9 @@ test("Codex Verify session binds the read-only turn to the exact Root worktree a
     requestTimeoutMs: 1,
     turnTimeoutMs: 1,
     shutdownTimeoutMs: 1,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
     spawner: (options) => {
       received.push(options);
       throw new Error("controlled_spawn_stop");

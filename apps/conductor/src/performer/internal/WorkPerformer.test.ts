@@ -172,6 +172,9 @@ test("Codex Work session binds the request to one real Root worktree and the Per
     requestTimeoutMs: 1,
     turnTimeoutMs: 1,
     shutdownTimeoutMs: 1,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
     networkAccess: true,
     spawner: (options) => {
       received.push(options);
@@ -192,6 +195,9 @@ test("Codex Work session binds the request to one real Root worktree and the Per
     requestTimeoutMs: 1,
     turnTimeoutMs: 1,
     shutdownTimeoutMs: 1,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
     networkAccess: false,
   });
   await assert.rejects(relative.start(current), /worktree_path_not_absolute/u);

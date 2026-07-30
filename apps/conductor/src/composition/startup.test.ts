@@ -1,0 +1,76 @@
+import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { loadStartup } from "./startup.js";
+
+const secrets = {
+  SYMPHONY_LINEAR_TOKEN: "runtime-secret",
+  SYMPHONY_CODEX_API_KEY: "codex-secret",
+  SYMPHONY_CODEX_BASE_URL: "https://api.example.com/v1",
+  SYMPHONY_CODEX_MODEL: "model-1",
+};
+
+function config(programData: string) {
+  return {
+    linear_team_id: "team-1",
+    program_data_path: programData,
+    performer_home: path.join(programData, "performer"),
+    codex_executable: "/usr/local/bin/codex",
+    delivery_provider_endpoint: "https://api.github.com",
+    root_routing: [{
+      root_id: "ROOT-1",
+      repository_id: "repo-1",
+      repository_path: path.join(programData, "repository"),
+      base_branch: "main",
+    }],
+  };
+}
+
+test("startup loads one strict public config and required Linear secret", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-startup-"));
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(configPath, JSON.stringify(config(directory)), { mode: 0o600 });
+
+  const startup = await loadStartup(["--config", configPath], secrets);
+
+  assert.equal(startup.config.linear_team_id, "team-1");
+  assert.equal(startup.config_path, configPath);
+  assert.equal(startup.linear_token, "runtime-secret");
+  assert.equal(startup.codex_api_key, "codex-secret");
+  assert.equal(startup.codex_base_url, "https://api.example.com/v1");
+  assert.equal(startup.codex_model, "model-1");
+  assert.ok(Object.isFrozen(startup));
+});
+
+test("startup rejects missing, relative, duplicate, and unknown arguments", async () => {
+  for (const argv of [
+    [],
+    ["--config"],
+    ["--config", "relative.json"],
+    ["--config", "/tmp/a.json", "--config", "/tmp/b.json"],
+    ["--unknown", "/tmp/a.json"],
+  ]) {
+    await assert.rejects(loadStartup(argv, secrets), /invalid_startup_arguments/u);
+  }
+});
+
+test("startup fails closed without exposing missing or malformed secrets and config", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-startup-"));
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(configPath, "{", { mode: 0o600 });
+
+  await assert.rejects(loadStartup(["--config", configPath], {}), /missing_linear_token/u);
+  await assert.rejects(
+    loadStartup(["--config", configPath], { ...secrets, SYMPHONY_LINEAR_TOKEN: " secret-with-spaces " }),
+    /invalid_linear_token/u,
+  );
+  await assert.rejects(
+    loadStartup(["--config", configPath], { ...secrets, SYMPHONY_LINEAR_TOKEN: "secret-value" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "invalid_startup_config"
+      && !error.message.includes("secret-value"),
+  );
+});

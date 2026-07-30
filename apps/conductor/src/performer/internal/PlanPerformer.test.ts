@@ -110,6 +110,9 @@ test("Codex Plan session binds the request to the user-supplied Performer Home",
     requestTimeoutMs: 1,
     turnTimeoutMs: 1,
     shutdownTimeoutMs: 1,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
     spawner: (options) => {
       received.push(options);
       throw new Error("controlled_spawn_stop");

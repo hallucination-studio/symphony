@@ -1,6 +1,7 @@
 import type { CodexSpawner } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexProcess } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
+import { bindDynamicTools, type DynamicToolBinding } from "../../codex-app-server/internal/DynamicToolBridge.js";
 import type { PlanHandoff, PlanRequest } from "../../contracts/stage-interaction.js";
 import { parseStageHandoff } from "../../contracts/stage-interaction.js";
 
@@ -43,8 +44,9 @@ function planPrompt(request: PlanRequest): string {
   return [
     "You are the isolated Symphony Plan role.",
     `Plan Root ${request.root_id} in Cycle ${request.cycle_issue_id}.`,
-    "Use the installed Linear skill to create and read back exactly one Done Plan, at least one Todo Work,",
+    "Call linear_create_plan_dag exactly once to create and read back one Done Plan, at least one Todo Work,",
     "exactly one Todo Verify, a complete acyclic Work dependency graph, and Verify dependencies on every Work.",
+    "Use the returned issue IDs in the PlanHandoff.",
     "Do not modify code. Do not return prose. Return only the requested PlanHandoff object.",
     `Set schema_version=1, runtime_generation=${request.runtime_generation}, correlation_id=${request.correlation_id}, role=plan.`,
   ].join("\n");
@@ -81,7 +83,11 @@ export interface CodexPlanSessionOptions {
   readonly requestTimeoutMs: number;
   readonly turnTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly model: string;
   readonly spawner?: CodexSpawner;
+  readonly bindings?: (request: PlanRequest) => readonly DynamicToolBinding[];
 }
 
 export class CodexPlanSessionFactory implements PlanSessionFactory {
@@ -96,12 +102,16 @@ export class CodexPlanSessionFactory implements PlanSessionFactory {
       startupTimeoutMs: this.options.startupTimeoutMs,
       requestTimeoutMs: this.options.requestTimeoutMs,
       shutdownTimeoutMs: this.options.shutdownTimeoutMs,
+      apiKey: this.options.apiKey,
+      baseUrl: this.options.baseUrl,
+      model: this.options.model,
     }, this.options.spawner);
     let thread: CodexThread;
+    const bindings = this.options.bindings?.(request) ?? [];
     try {
       thread = await CodexThread.create(process, {
         cwd: this.options.cwd,
-        tools: [],
+        tools: bindings.map(({ spec }) => spec),
         correlationId: request.correlation_id,
         access: { kind: "read_only" },
       });
@@ -109,12 +119,14 @@ export class CodexPlanSessionFactory implements PlanSessionFactory {
       await process.shutdown();
       throw error;
     }
+    const unbind = bindDynamicTools(process, thread.threadId, bindings);
     return {
       turn: async (input, outputSchema) => {
         const result = await thread.turn(input, request.correlation_id, this.options.turnTimeoutMs, { ...outputSchema });
         return { status: result.status, ...(result.output === undefined ? {} : { output: result.output }) };
       },
       close: async () => {
+        unbind();
         thread.close();
         await process.shutdown();
       },

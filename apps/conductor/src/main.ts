@@ -1,44 +1,67 @@
 import { pathToFileURL } from "node:url";
 
-export type RuntimeStatus = "idle" | "running" | "stopped";
+import { createProductionConductor, type ProductionConductor } from "./composition/ProductionConductor.js";
+import { loadStartup } from "./composition/startup.js";
 
-export class ConductorRuntime {
-  #status: RuntimeStatus = "idle";
+const POLL_INTERVAL_MS = 1_000;
 
-  get status(): RuntimeStatus {
-    return this.#status;
-  }
+interface ForegroundControl {
+  stopRequested(): boolean;
+  wait(): Promise<void>;
+}
 
-  start(): void {
-    if (this.#status !== "idle") {
-      throw new Error("conductor_runtime_already_started");
+export async function runForeground(
+  production: ProductionConductor,
+  control: ForegroundControl,
+): Promise<void> {
+  try {
+    while (!control.stopRequested()) {
+      const candidates = await production.linear.discoverRoots();
+      for (const candidate of candidates) {
+        if (candidate.status === "Done" && production.runtimes.has(candidate.root_id)) {
+          await production.retirement.retireIfDone(candidate.root_id);
+        }
+      }
+      if (control.stopRequested()) break;
+      await production.serial.tick();
+      if (!control.stopRequested()) await control.wait();
     }
-    this.#status = "running";
-  }
-
-  stop(): void {
-    if (this.#status === "running") {
-      this.#status = "stopped";
-    }
+  } finally {
+    await production.runtimes.closeAll();
   }
 }
 
-async function main(): Promise<void> {
-  const runtime = new ConductorRuntime();
-  runtime.start();
-  process.stdout.write(`${JSON.stringify({ event: "conductor_ready" })}\n`);
+function line(stream: NodeJS.WritableStream, value: Record<string, unknown>): void {
+  stream.write(`${JSON.stringify(value)}\n`);
+}
 
-  await new Promise<void>((resolve) => {
-    const keepAlive = setInterval(() => undefined, 2_147_483_647);
-    const stop = () => {
-      clearInterval(keepAlive);
-      runtime.stop();
-      process.stdout.write(`${JSON.stringify({ event: "conductor_stopped" })}\n`);
-      resolve();
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  });
+async function main(): Promise<void> {
+  let stopping = false;
+  let releaseWait: (() => void) | null = null;
+  const stop = () => {
+    stopping = true;
+    releaseWait?.();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    const startup = await loadStartup(process.argv.slice(2), process.env);
+    const production = await createProductionConductor(startup);
+    line(process.stdout, { event: "conductor_ready" });
+    await runForeground(production, {
+      stopRequested: () => stopping,
+      wait: () => new Promise<void>((resolve) => {
+        releaseWait = resolve;
+        const timer = setTimeout(resolve, POLL_INTERVAL_MS);
+        const release = releaseWait;
+        releaseWait = () => { clearTimeout(timer); release(); };
+      }),
+    });
+    line(process.stdout, { event: "conductor_stopped" });
+  } catch {
+    line(process.stderr, { event: "conductor_failed", reason_code: "startup_or_runtime_failed" });
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

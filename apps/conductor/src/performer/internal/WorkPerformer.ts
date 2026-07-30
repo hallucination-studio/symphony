@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import type { CodexSpawner } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexProcess } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
+import { bindDynamicTools, type DynamicToolBinding } from "../../codex-app-server/internal/DynamicToolBridge.js";
 import type { CorrelationId, RootIssueId, ThreadId } from "../../contracts/identity.js";
 import type { WorkHandoff, WorkRequest } from "../../contracts/stage-interaction.js";
 import { parseStageHandoff } from "../../contracts/stage-interaction.js";
@@ -56,7 +57,7 @@ function workPrompt(request: WorkRequest): string {
     "You are the isolated Symphony Work role.",
     `For Root ${request.root_id}, Cycle ${request.cycle_issue_id}, execute Work ${request.work_issue_id}.`,
     "Edit only the current Root worktree and run focused checks for this Work Item.",
-    `Use the installed Linear skill to update and read back only Work Issue ${request.work_issue_id}.`,
+    `Call linear_complete_work exactly once to update and read back only Work Issue ${request.work_issue_id}.`,
     "You must not modify the Work DAG, commit, push, or create a PR.",
     "Do not access or expose secrets. Return no prose; return only the requested WorkHandoff object.",
     `Set schema_version=1, root_id=${request.root_id}, runtime_generation=${request.runtime_generation},`,
@@ -151,8 +152,12 @@ export interface CodexWorkSessionOptions {
   readonly requestTimeoutMs: number;
   readonly turnTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly model: string;
   readonly networkAccess: boolean;
   readonly spawner?: CodexSpawner;
+  readonly bindings?: (request: WorkRequest) => readonly DynamicToolBinding[];
 }
 
 export class CodexWorkSessionFactory implements WorkSessionFactory {
@@ -170,12 +175,16 @@ export class CodexWorkSessionFactory implements WorkSessionFactory {
       startupTimeoutMs: this.options.startupTimeoutMs,
       requestTimeoutMs: this.options.requestTimeoutMs,
       shutdownTimeoutMs: this.options.shutdownTimeoutMs,
+      apiKey: this.options.apiKey,
+      baseUrl: this.options.baseUrl,
+      model: this.options.model,
     }, this.options.spawner);
     let thread: CodexThread;
+    const bindings = this.options.bindings?.(request) ?? [];
     try {
       thread = await CodexThread.create(process, {
         cwd: worktreePath,
-        tools: [],
+        tools: bindings.map(({ spec }) => spec),
         correlationId: request.correlation_id,
         access: {
           kind: "workspace_write",
@@ -187,6 +196,7 @@ export class CodexWorkSessionFactory implements WorkSessionFactory {
       await process.shutdown();
       throw error;
     }
+    const unbind = bindDynamicTools(process, thread.threadId, bindings);
     let closed = false;
     return {
       threadId: thread.threadId,
@@ -197,6 +207,7 @@ export class CodexWorkSessionFactory implements WorkSessionFactory {
       close: async () => {
         if (closed) return;
         closed = true;
+        unbind();
         thread.close();
         await process.shutdown();
       },

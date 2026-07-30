@@ -72,7 +72,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function bootstrapObservationDigest(input: RootBootstrap): ObservationDigest {
+export function bootstrapObservationDigest(input: Pick<RootBootstrap, "linear" | "git">): ObservationDigest {
   const facts = canonical({ linear: input.linear, git: input.git });
   return parseObservationDigest(`sha256:${createHash("sha256").update(facts).digest("hex")}`);
 }

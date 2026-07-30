@@ -11,11 +11,18 @@ export class GitCommand {
 
   run(cwd: string, args: readonly string[], acceptedExitCodes: readonly number[] = [0]): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
-      const child = spawn(this.options.executable, ["-c", "core.hooksPath=/dev/null", ...args], {
+      const child = spawn(this.options.executable, [
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=!gh auth git-credential",
+        "-c", "user.name=Symphony",
+        "-c", "user.email=symphony@localhost",
+        ...args,
+      ], {
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         env: {
+          HOME: process.env.HOME,
           PATH: process.env.PATH,
           LANG: "C.UTF-8",
           LC_ALL: "C",

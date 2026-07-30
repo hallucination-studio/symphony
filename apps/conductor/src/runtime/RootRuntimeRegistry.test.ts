@@ -165,6 +165,9 @@ test("two registry Roots start and stop separate installed Codex process boundar
     startupTimeoutMs: 10_000,
     requestTimeoutMs: 10_000,
     shutdownTimeoutMs: 2_000,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
   });
   const registry = new RootRuntimeRegistry(
     fixture.manager,

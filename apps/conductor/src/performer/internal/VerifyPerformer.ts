@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import type { CodexSpawner } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexProcess } from "../../codex-app-server/internal/CodexProcess.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
+import { bindDynamicTools, type DynamicToolBinding } from "../../codex-app-server/internal/DynamicToolBridge.js";
 import type { RootIssueId } from "../../contracts/identity.js";
 import type { VerifyHandoff, VerifyRequest } from "../../contracts/stage-interaction.js";
 import { parseStageHandoff } from "../../contracts/stage-interaction.js";
@@ -48,7 +49,7 @@ function verifyPrompt(request: VerifyRequest): string {
     "You are the isolated Symphony Verify role operating in a read-only worktree.",
     `For Root ${request.root_id}, Cycle ${request.cycle_issue_id}, verify only immutable revision ${request.revision}.`,
     "Inspect that exact revision and run the relevant verification checks. You must not modify or repair code.",
-    `Use the installed Linear skill to update and read back only Verify Issue ${request.verify_issue_id}.`,
+    `Call linear_complete_verify exactly once to update and read back only Verify Issue ${request.verify_issue_id}.`,
     "Set it Done only for passed; set it Failed for failed or inconclusive.",
     "Do not access or expose secrets. Return no prose and return only the requested VerifyHandoff object.",
     `Set schema_version=1, root_id=${request.root_id}, runtime_generation=${request.runtime_generation},`,
@@ -91,7 +92,11 @@ export interface CodexVerifySessionOptions {
   readonly requestTimeoutMs: number;
   readonly turnTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly model: string;
   readonly spawner?: CodexSpawner;
+  readonly bindings?: (request: VerifyRequest) => readonly DynamicToolBinding[];
 }
 
 export class CodexVerifySessionFactory implements VerifySessionFactory {
@@ -109,12 +114,16 @@ export class CodexVerifySessionFactory implements VerifySessionFactory {
       startupTimeoutMs: this.options.startupTimeoutMs,
       requestTimeoutMs: this.options.requestTimeoutMs,
       shutdownTimeoutMs: this.options.shutdownTimeoutMs,
+      apiKey: this.options.apiKey,
+      baseUrl: this.options.baseUrl,
+      model: this.options.model,
     }, this.options.spawner);
     let thread: CodexThread;
+    const bindings = this.options.bindings?.(request) ?? [];
     try {
       thread = await CodexThread.create(process, {
         cwd: worktreePath,
-        tools: [],
+        tools: bindings.map(({ spec }) => spec),
         correlationId: request.correlation_id,
         access: { kind: "read_only" },
       });
@@ -122,6 +131,7 @@ export class CodexVerifySessionFactory implements VerifySessionFactory {
       await process.shutdown();
       throw error;
     }
+    const unbind = bindDynamicTools(process, thread.threadId, bindings);
     let closed = false;
     return {
       turn: async (input, outputSchema) => {
@@ -131,6 +141,7 @@ export class CodexVerifySessionFactory implements VerifySessionFactory {
       close: async () => {
         if (closed) return;
         closed = true;
+        unbind();
         thread.close();
         await process.shutdown();
       },

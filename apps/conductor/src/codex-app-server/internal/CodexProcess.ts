@@ -27,6 +27,9 @@ export interface CodexProcessOptions {
   readonly startupTimeoutMs: number;
   readonly requestTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  readonly apiKey: string;
+  readonly baseUrl: string;
+  readonly model: string;
 }
 
 export interface SpawnedCodexProcess {
@@ -40,13 +43,17 @@ export interface SpawnedCodexProcess {
 export type CodexSpawner = (options: CodexProcessOptions) => SpawnedCodexProcess;
 
 const nodeSpawner: CodexSpawner = (options) => {
-  const child = spawn(options.executable, ["app-server", "--stdio", "--strict-config"], {
+  const child = spawn(options.executable, [
+    "app-server", "--stdio", "--strict-config", "-c", `model=${JSON.stringify(options.model)}`,
+  ], {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       PATH: process.env.PATH,
       LANG: process.env.LANG ?? "C.UTF-8",
       TMPDIR: process.env.TMPDIR,
       CODEX_HOME: options.codexHome,
+      OPENAI_API_KEY: options.apiKey,
+      OPENAI_BASE_URL: options.baseUrl,
       RUST_LOG: "error",
     },
   });
@@ -229,5 +236,8 @@ export function testCodexOptions(codexHome: string): CodexProcessOptions {
     startupTimeoutMs: 5_000,
     requestTimeoutMs: 5_000,
     shutdownTimeoutMs: 2_000,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
   };
 }
