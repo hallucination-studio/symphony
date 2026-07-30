@@ -1,24 +1,24 @@
 import {
   parseCorrelationId,
   parseObservationDigest,
-  parseProviderEventId,
   parseRepositoryId,
   parseRevision,
   parseRootIssueId,
   parseRuntimeGeneration,
   parseSchemaVersion,
   parseTaskIssueId,
+  parseTaskDigest,
   parseTaskRelationId,
   parseTaskRevision,
   type CorrelationId,
   type ObservationDigest,
-  type ProviderEventId,
   type RepositoryId,
   type Revision,
   type RootIssueId,
   type RuntimeGeneration,
   type SchemaVersion,
   type TaskIssueId,
+  type TaskDigest,
   type TaskRelationId,
   type TaskRevision,
 } from "./identity.js";
@@ -32,13 +32,6 @@ export const TASK_FIELDS = [
   "status", "title", "description", "parent", "labels", "delegate", "priority",
 ] as const;
 export const PR_STATES = ["open", "closed", "merged"] as const;
-
-export interface WakeRoot {
-  readonly schema_version: SchemaVersion;
-  readonly root_id: RootIssueId;
-  readonly provider_event_id: ProviderEventId;
-  readonly received_at: string;
-}
 
 export interface TaskIssueSnapshot {
   readonly issue_id: TaskIssueId;
@@ -64,6 +57,17 @@ export interface TaskSnapshot {
   readonly root_id: RootIssueId;
   readonly issues: readonly TaskIssueSnapshot[];
   readonly relations: readonly TaskRelationSnapshot[];
+}
+
+export interface TaskObservationEvent {
+  readonly schema_version: SchemaVersion;
+  readonly root_id: RootIssueId;
+  readonly correlation_id: CorrelationId;
+  readonly observed_at: string;
+  readonly from_task_digest: TaskDigest | null;
+  readonly to_task_digest: TaskDigest;
+  readonly task: TaskSnapshot;
+  readonly task_changes: readonly ConcreteTaskChange[];
 }
 
 export interface PullRequestSnapshot {
@@ -178,17 +182,6 @@ export function parseTaskRelationSnapshot(value: unknown): TaskRelationSnapshot 
   });
   if (relation.source_issue_id === relation.target_issue_id) throw new Error("self_task_relation");
   return relation;
-}
-
-export function parseWakeRoot(value: unknown): WakeRoot {
-  const record = asRecord(value);
-  assertExactKeys(record, ["schema_version", "root_id", "provider_event_id", "received_at"]);
-  return Object.freeze({
-    schema_version: parseSchemaVersion(record.schema_version),
-    root_id: parseRootIssueId(record.root_id),
-    provider_event_id: parseProviderEventId(record.provider_event_id),
-    received_at: parseTimestamp(record.received_at, "invalid_received_at"),
-  });
 }
 
 export function parseTaskSnapshot(value: unknown): TaskSnapshot {
@@ -306,6 +299,34 @@ export function parseConcreteTaskChange(value: unknown): ConcreteTaskChange {
     before,
     after,
   }) as ConcreteTaskChange;
+}
+
+export function parseTaskObservationEvent(value: unknown): TaskObservationEvent {
+  const record = asRecord(value);
+  assertExactKeys(record, [
+    "schema_version", "root_id", "correlation_id", "observed_at",
+    "from_task_digest", "to_task_digest", "task", "task_changes",
+  ]);
+  const rootId = parseRootIssueId(record.root_id);
+  const task = parseTaskSnapshot(record.task);
+  if (task.root_id !== rootId) throw new Error("task_observation_root_mismatch");
+  const fromTaskDigest = parseNullable(record.from_task_digest, parseTaskDigest);
+  const toTaskDigest = parseTaskDigest(record.to_task_digest);
+  if (fromTaskDigest === toTaskDigest) throw new Error("unchanged_task_observation");
+  const taskChanges = parseArray(record.task_changes, parseConcreteTaskChange);
+  if (fromTaskDigest === null && taskChanges.length > 0) {
+    throw new Error("initial_task_changes_forbidden");
+  }
+  return Object.freeze({
+    schema_version: parseSchemaVersion(record.schema_version),
+    root_id: rootId,
+    correlation_id: parseCorrelationId(record.correlation_id),
+    observed_at: parseTimestamp(record.observed_at, "invalid_observed_at"),
+    from_task_digest: fromTaskDigest,
+    to_task_digest: toTaskDigest,
+    task,
+    task_changes: taskChanges,
+  });
 }
 
 function parseConcreteGitChange(value: unknown): ConcreteGitChange {

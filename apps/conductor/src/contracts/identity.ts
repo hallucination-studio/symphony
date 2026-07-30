@@ -7,7 +7,6 @@ declare const taskRelationIdBrand: unique symbol;
 declare const taskRevisionBrand: unique symbol;
 declare const taskStateIdBrand: unique symbol;
 declare const taskLabelIdBrand: unique symbol;
-declare const providerEventIdBrand: unique symbol;
 declare const cycleIssueIdBrand: unique symbol;
 declare const stageIssueIdBrand: unique symbol;
 declare const repositoryIdBrand: unique symbol;
@@ -15,6 +14,7 @@ declare const revisionBrand: unique symbol;
 declare const correlationIdBrand: unique symbol;
 declare const threadIdBrand: unique symbol;
 declare const observationDigestBrand: unique symbol;
+declare const taskDigestBrand: unique symbol;
 
 export type RootIssueId = string & { readonly [rootIssueIdBrand]: true };
 export type TaskIssueId = string & { readonly [taskIssueIdBrand]: true };
@@ -22,7 +22,6 @@ export type TaskRelationId = string & { readonly [taskRelationIdBrand]: true };
 export type TaskRevision = string & { readonly [taskRevisionBrand]: true };
 export type TaskStateId = string & { readonly [taskStateIdBrand]: true };
 export type TaskLabelId = string & { readonly [taskLabelIdBrand]: true };
-export type ProviderEventId = string & { readonly [providerEventIdBrand]: true };
 export type CycleIssueId = string & { readonly [cycleIssueIdBrand]: true };
 export type StageIssueId = string & { readonly [stageIssueIdBrand]: true };
 export type RepositoryId = string & { readonly [repositoryIdBrand]: true };
@@ -30,6 +29,7 @@ export type Revision = string & { readonly [revisionBrand]: true };
 export type CorrelationId = string & { readonly [correlationIdBrand]: true };
 export type ThreadId = string & { readonly [threadIdBrand]: true };
 export type ObservationDigest = string & { readonly [observationDigestBrand]: true };
+export type TaskDigest = string & { readonly [taskDigestBrand]: true };
 
 export type RuntimeGeneration = number & { readonly __runtimeGeneration: true };
 export type SchemaVersion = 1;
@@ -53,8 +53,6 @@ export const parseTaskStateId = (value: unknown): TaskStateId =>
   parseIdentity<TaskStateId>(value, "task_state_id");
 export const parseTaskLabelId = (value: unknown): TaskLabelId =>
   parseIdentity<TaskLabelId>(value, "task_label_id");
-export const parseProviderEventId = (value: unknown): ProviderEventId =>
-  parseIdentity<ProviderEventId>(value, "provider_event_id");
 export const parseCycleIssueId = (value: unknown): CycleIssueId =>
   parseIdentity<CycleIssueId>(value, "cycle_issue_id");
 export const parseStageIssueId = (value: unknown): StageIssueId =>
@@ -67,6 +65,8 @@ export const parseThreadId = (value: unknown): ThreadId =>
   parseIdentity<ThreadId>(value, "thread_id");
 export const parseObservationDigest = (value: unknown): ObservationDigest =>
   parseIdentity<ObservationDigest>(value, "observation_digest");
+export const parseTaskDigest = (value: unknown): TaskDigest =>
+  parseIdentity<TaskDigest>(value, "task_digest");
 
 export function parseRevision(value: unknown): Revision {
   if (typeof value !== "string" || !REVISION_PATTERN.test(value)) {

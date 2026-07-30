@@ -4,8 +4,8 @@ import test from "node:test";
 import { parseRootIssueId, parseRuntimeGeneration } from "./identity.js";
 import {
   parseRootBootstrap,
+  parseTaskObservationEvent,
   parseTaskSnapshot,
-  parseWakeRoot,
 } from "./observation.js";
 
 const task = {
@@ -60,18 +60,93 @@ const target = {
   runtime_generation: parseRuntimeGeneration(3),
 };
 
-test("WakeRoot accepts only the versioned root wake identity", () => {
-  const wake = parseWakeRoot({
+const initialObservation = {
+  schema_version: 1,
+  root_id: "LIN-1",
+  correlation_id: "corr:poll:1",
+  observed_at: "2026-07-30T10:00:00.000Z",
+  from_task_digest: null,
+  to_task_digest: "task-digest:1",
+  task,
+  task_changes: [],
+};
+
+const changedObservation = {
+  ...initialObservation,
+  correlation_id: "corr:poll:2",
+  from_task_digest: "task-digest:1",
+  to_task_digest: "task-digest:2",
+  task_changes: [
+    {
+      kind: "field_changed",
+      issue_id: "LIN-2",
+      field: "status",
+      before: "Executing",
+      after: "Completed",
+    },
+  ],
+};
+
+test("TaskObservationEvent accepts complete initial and changed polling observations", () => {
+  const initial = parseTaskObservationEvent(initialObservation);
+  const changed = parseTaskObservationEvent(changedObservation);
+
+  assert.equal(initial.from_task_digest, null);
+  assert.deepEqual(initial.task_changes, []);
+  assert.equal(changed.from_task_digest, "task-digest:1");
+  assert.equal(changed.task_changes[0]?.kind, "field_changed");
+  assert.ok(Object.isFrozen(initial));
+  assert.ok(Object.isFrozen(initial.task));
+  assert.ok(Object.isFrozen(changed.task_changes));
+});
+
+test("TaskObservationEvent rejects provider, runtime, incomplete, and non-adjacent input", () => {
+  assert.throws(
+    () => parseTaskObservationEvent({ ...initialObservation, task_changes: changedObservation.task_changes }),
+    /initial_task_changes_forbidden/u,
+  );
+  assert.throws(
+    () => parseTaskObservationEvent({ ...changedObservation, to_task_digest: "task-digest:1" }),
+    /unchanged_task_observation/u,
+  );
+  assert.throws(
+    () => parseTaskObservationEvent({ ...changedObservation, root_id: "LIN-9" }),
+    /task_observation_root_mismatch/u,
+  );
+  assert.throws(
+    () => parseTaskObservationEvent({
+      ...changedObservation,
+      task: { ...task, issues: task.issues.slice(1) },
+    }),
+    /missing_root_identity/u,
+  );
+  assert.throws(
+    () => parseTaskObservationEvent({
+      ...changedObservation,
+      task_changes: [{ kind: "cycle_invalid", issue_id: "LIN-2" }],
+    }),
+    /invalid_contract_variant/u,
+  );
+
+  for (const forbidden of [
+    { provider_cursor: "cursor:1" },
+    { provider_event_id: "event:1" },
+    { provider_payload: {} },
+    { runtime_generation: 1 },
+    { accepted_observation_digest: "runtime-digest:1" },
+  ]) {
+    assert.throws(
+      () => parseTaskObservationEvent({ ...changedObservation, ...forbidden }),
+      /invalid_contract_keys/u,
+    );
+  }
+
+  assert.throws(() => parseTaskObservationEvent({
     schema_version: 1,
     root_id: "LIN-1",
     provider_event_id: "event:1",
     received_at: "2026-07-30T10:00:00.000Z",
-  });
-
-  assert.equal(wake.provider_event_id, "event:1");
-  assert.ok(Object.isFrozen(wake));
-  assert.throws(() => parseWakeRoot({ ...wake, payload: {} }), /invalid_contract_keys/u);
-  assert.throws(() => parseWakeRoot({ ...wake, schema_version: 2 }), /unsupported_schema_version/u);
+  }), /invalid_contract_keys/u);
 });
 
 test("TaskSnapshot contains only a complete normalized issue and relation graph", () => {
