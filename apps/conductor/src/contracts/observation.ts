@@ -148,7 +148,7 @@ function parsePriority(value: unknown): number | null {
   return value as number;
 }
 
-function parseTaskIssue(value: unknown): TaskIssueSnapshot {
+export function parseTaskIssueSnapshot(value: unknown): TaskIssueSnapshot {
   const record = asRecord(value);
   assertExactKeys(record, [
     "issue_id", "revision", "status", "title", "description", "parent_id", "labels", "delegate_id", "priority",
@@ -166,7 +166,7 @@ function parseTaskIssue(value: unknown): TaskIssueSnapshot {
   });
 }
 
-function parseTaskRelation(value: unknown): TaskRelationSnapshot {
+export function parseTaskRelationSnapshot(value: unknown): TaskRelationSnapshot {
   const record = asRecord(value);
   assertExactKeys(record, ["relation_id", "revision", "type", "source_issue_id", "target_issue_id"]);
   const relation = Object.freeze({
@@ -196,7 +196,7 @@ export function parseTaskSnapshot(value: unknown): TaskSnapshot {
   assertExactKeys(record, ["root_id", "issues", "relations"]);
   const rootId = parseRootIssueId(record.root_id);
   const taskRootId = parseTaskIssueId(rootId);
-  const issues = parseArray(record.issues, parseTaskIssue);
+  const issues = parseArray(record.issues, parseTaskIssueSnapshot);
   const issueIds = new Set(issues.map(({ issue_id }) => issue_id));
   if (issueIds.size !== issues.length) throw new Error("duplicate_issue_identity");
   if (!issueIds.has(taskRootId)) throw new Error("missing_root_identity");
@@ -204,7 +204,7 @@ export function parseTaskSnapshot(value: unknown): TaskSnapshot {
     if (issue.issue_id === taskRootId && issue.parent_id !== null) throw new Error("root_parent_forbidden");
     if (issue.parent_id !== null && !issueIds.has(issue.parent_id)) throw new Error("unknown_parent_identity");
   }
-  const relations = parseArray(record.relations, parseTaskRelation);
+  const relations = parseArray(record.relations, parseTaskRelationSnapshot);
   if (new Set(relations.map(({ relation_id }) => relation_id)).size !== relations.length) {
     throw new Error("duplicate_relation_identity");
   }
@@ -283,16 +283,16 @@ function parseTaskFieldValue(field: typeof TASK_FIELDS[number], value: unknown):
   }
 }
 
-function parseConcreteTaskChange(value: unknown): ConcreteTaskChange {
+export function parseConcreteTaskChange(value: unknown): ConcreteTaskChange {
   const record = asRecord(value);
   const kind = parseEnum(record.kind, TASK_CHANGE_KINDS);
   if (kind === "issue_created" || kind === "issue_archived") {
     assertExactKeys(record, ["kind", "issue"]);
-    return Object.freeze({ kind, issue: parseTaskIssue(record.issue) });
+    return Object.freeze({ kind, issue: parseTaskIssueSnapshot(record.issue) });
   }
   if (kind === "relation_added" || kind === "relation_removed") {
     assertExactKeys(record, ["kind", "relation"]);
-    return Object.freeze({ kind, relation: parseTaskRelation(record.relation) });
+    return Object.freeze({ kind, relation: parseTaskRelationSnapshot(record.relation) });
   }
   assertExactKeys(record, ["kind", "issue_id", "field", "before", "after"]);
   const field = parseEnum(record.field, TASK_FIELDS);

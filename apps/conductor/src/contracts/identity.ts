@@ -5,6 +5,8 @@ declare const rootIssueIdBrand: unique symbol;
 declare const taskIssueIdBrand: unique symbol;
 declare const taskRelationIdBrand: unique symbol;
 declare const taskRevisionBrand: unique symbol;
+declare const taskStateIdBrand: unique symbol;
+declare const taskLabelIdBrand: unique symbol;
 declare const providerEventIdBrand: unique symbol;
 declare const cycleIssueIdBrand: unique symbol;
 declare const stageIssueIdBrand: unique symbol;
@@ -18,6 +20,8 @@ export type RootIssueId = string & { readonly [rootIssueIdBrand]: true };
 export type TaskIssueId = string & { readonly [taskIssueIdBrand]: true };
 export type TaskRelationId = string & { readonly [taskRelationIdBrand]: true };
 export type TaskRevision = string & { readonly [taskRevisionBrand]: true };
+export type TaskStateId = string & { readonly [taskStateIdBrand]: true };
+export type TaskLabelId = string & { readonly [taskLabelIdBrand]: true };
 export type ProviderEventId = string & { readonly [providerEventIdBrand]: true };
 export type CycleIssueId = string & { readonly [cycleIssueIdBrand]: true };
 export type StageIssueId = string & { readonly [stageIssueIdBrand]: true };
@@ -45,6 +49,10 @@ export const parseTaskRelationId = (value: unknown): TaskRelationId =>
   parseIdentity<TaskRelationId>(value, "task_relation_id");
 export const parseTaskRevision = (value: unknown): TaskRevision =>
   parseIdentity<TaskRevision>(value, "task_revision");
+export const parseTaskStateId = (value: unknown): TaskStateId =>
+  parseIdentity<TaskStateId>(value, "task_state_id");
+export const parseTaskLabelId = (value: unknown): TaskLabelId =>
+  parseIdentity<TaskLabelId>(value, "task_label_id");
 export const parseProviderEventId = (value: unknown): ProviderEventId =>
   parseIdentity<ProviderEventId>(value, "provider_event_id");
 export const parseCycleIssueId = (value: unknown): CycleIssueId =>
