@@ -11,6 +11,7 @@ import {
   type RuntimeGeneration,
 } from "../../contracts/identity.js";
 import { asRecord, parseBoundedString } from "../../contracts/validation.js";
+import { MAX_ROOT_TOOL_RESPONSE_BYTES } from "../../runtime/RootToolBoundary.js";
 import {
   CodexCorrelationRegistry,
   parseCodexInbound,
@@ -157,7 +158,7 @@ export class CodexProcess {
 
   async respondToTool(requestId: string, success: boolean, text: string): Promise<void> {
     parseBoundedString(requestId, "invalid_codex_request_id", 128);
-    parseBoundedString(text, "invalid_codex_tool_response", 4096);
+    parseBoundedString(text, "invalid_codex_tool_response", MAX_ROOT_TOOL_RESPONSE_BYTES);
     await this.#write({
       id: requestId,
       result: { success, contentItems: [{ type: "inputText", text }] },

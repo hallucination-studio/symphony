@@ -5,15 +5,9 @@ import {
   type ThreadId,
 } from "../../contracts/identity.js";
 import { asRecord, parseBoundedString } from "../../contracts/validation.js";
+import type { RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { CodexInboundMessage } from "./CodexProtocol.js";
 import { CodexProcess } from "./CodexProcess.js";
-
-export interface DynamicToolSpec {
-  readonly type: "function";
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: Record<string, unknown>;
-}
 
 export interface CodexTurnResult {
   readonly turnId: string;
@@ -50,7 +44,7 @@ export class CodexThread {
     process: CodexProcess,
     input: {
       readonly cwd: string;
-      readonly tools: readonly DynamicToolSpec[];
+      readonly tools: readonly RootToolSpec[];
       readonly correlationId: CorrelationId;
       readonly access: CodexThreadAccess;
     },

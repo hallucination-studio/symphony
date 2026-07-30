@@ -7,6 +7,7 @@ import { LinearCommands, type LinearCommandClient } from "./LinearCommands.js";
 
 const TEAM_ID = "team:1";
 const target = { root_id: parseRootIssueId("root-1"), runtime_generation: parseRuntimeGeneration(1) };
+const ACTIVE_EXECUTION = Object.freeze({ assertActive: () => undefined });
 
 function issue(id: string, revision: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -229,7 +230,7 @@ test("all five generic mutations apply one exact effect after fresh precondition
   for (const entry of cases) {
     const client = new FakeCommandClient();
     entry.arrange(client);
-    const result = await commands(client, entry.ids).execute(entry.call);
+    const result = await commands(client, entry.ids).execute(entry.call, ACTIVE_EXECUTION);
     assert.equal(result.output.outcome, "applied", entry.call.function);
     assert.deepEqual(result.output.target, entry.expectedTarget);
     assert.equal(result.output.concrete_diff.length > 0, true);
@@ -250,7 +251,7 @@ test("fresh revision mismatches return ordinary precondition_failed results befo
       client.enqueueIssue("source-1", issue("source-1", "revision:stale"));
       client.enqueueIssue("target-1", issue("target-1", "revision:target:1"));
     }
-    const result = await commands(client, ["unused-id"]).execute(call);
+    const result = await commands(client, ["unused-id"]).execute(call, ACTIVE_EXECUTION);
     assert.equal(result.output.outcome, "precondition_failed", call.function);
     assert.equal(result.output.sanitized_reason, "fresh_precondition_mismatch");
     assert.deepEqual(client.effects, []);
@@ -284,7 +285,7 @@ test("provider acknowledgement and exact read-back produce all five closed outco
     client.enqueueIssue("issue-1", issue("issue-1", entry.beforeRevision), ...(entry.after === undefined ? [] : [entry.after]));
     if (entry.response !== undefined) client.response = entry.response;
     if (entry.failure !== undefined) client.failure = entry.failure;
-    const result = await commands(client).execute(calls.updateIssue);
+    const result = await commands(client).execute(calls.updateIssue, ACTIVE_EXECUTION);
     assert.equal(result.output.outcome, entry.outcome, entry.name);
     assert.equal(client.effects.length, entry.outcome === "precondition_failed" ? 0 : 1);
     assert.equal(JSON.stringify(result).includes("provider-secret"), false);
@@ -301,7 +302,7 @@ test("an uncertain provider call is accepted only from same-identity read-back a
     }));
   client.failure = new Error("Authorization provider-secret");
 
-  const result = await commands(client).execute(calls.updateIssue);
+  const result = await commands(client).execute(calls.updateIssue, ACTIVE_EXECUTION);
 
   assert.equal(result.output.outcome, "applied");
   assert.equal(client.effects.length, 1);
@@ -309,10 +310,28 @@ test("an uncertain provider call is accepted only from same-identity read-back a
 
   const unavailable = new FakeCommandClient();
   unavailable.enqueueIssue("issue-1", issue("issue-1", "revision:issue:1"), new Error("readback-secret"));
-  const unknown = await commands(unavailable).execute(calls.updateIssue);
+  const unknown = await commands(unavailable).execute(calls.updateIssue, ACTIVE_EXECUTION);
   assert.equal(unknown.output.outcome, "acceptance_unknown");
   assert.equal(unavailable.effects.length, 1);
   assert.equal(JSON.stringify(unknown).includes("readback-secret"), false);
+});
+
+test("revocation after fresh preconditions fences the provider effect", async () => {
+  const client = new FakeCommandClient();
+  let resolvePrecondition: ((value: unknown) => void) | null = null;
+  client.enqueueIssue("issue-1", new Promise((resolve) => { resolvePrecondition = resolve; }));
+  let active = true;
+  const pending = commands(client).execute(calls.updateIssue, {
+    assertActive: () => {
+      if (!active) throw new Error("canceled");
+    },
+  });
+
+  active = false;
+  (resolvePrecondition as ((value: unknown) => void) | null)?.(issue("issue-1", "revision:issue:1"));
+
+  await assert.rejects(pending, /canceled/u);
+  assert.deepEqual(client.effects, []);
 });
 
 test("relation preconditions scan every bounded page and reject duplicate or foreign identities before effect", async () => {
@@ -329,7 +348,7 @@ test("relation preconditions scan every bounded page and reject duplicate or for
     client.enqueueIssue("target-1", issue("target-1", "revision:target:1"));
     client.enqueueRelations("source-1", ...pages);
 
-    const result = await commands(client).execute(calls.deleteRelation);
+    const result = await commands(client).execute(calls.deleteRelation, ACTIVE_EXECUTION);
 
     assert.equal(result.output.outcome, "not_applied");
     assert.equal(result.output.sanitized_reason, "fresh_precondition_unavailable");
@@ -348,7 +367,7 @@ test("update read-back reports concurrent non-desired field changes in the concr
     issue("issue-1", "revision:issue:1"),
     issue("issue-1", "revision:issue:2", { title: "Updated", delegate_id: "actor:other" }));
 
-  const result = await commands(client).execute(call);
+  const result = await commands(client).execute(call, ACTIVE_EXECUTION);
 
   assert.equal(result.output.outcome, "applied");
   assert.deepEqual(result.output.concrete_diff.map((change) => "field" in change ? change.field : change.kind), [
@@ -367,14 +386,17 @@ test("Linear no-priority normalization and malformed receipts remain closed", as
   noPriority.enqueueIssue("issue-1",
     issue("issue-1", "revision:issue:1"),
     issue("issue-1", "revision:issue:2", { priority: null }));
-  assert.equal((await commands(noPriority).execute(noPriorityCall)).output.outcome, "applied");
+  assert.equal(
+    (await commands(noPriority).execute(noPriorityCall, ACTIVE_EXECUTION)).output.outcome,
+    "applied",
+  );
 
   const malformed = new FakeCommandClient();
   malformed.response = { success: "yes", provider_secret: "do-not-return" };
   malformed.enqueueIssue("issue-1",
     issue("issue-1", "revision:issue:1"),
     issue("issue-1", "revision:issue:1"));
-  const result = await commands(malformed).execute(calls.updateIssue);
+  const result = await commands(malformed).execute(calls.updateIssue, ACTIVE_EXECUTION);
   assert.equal(result.output.outcome, "readback_mismatch");
   assert.equal(JSON.stringify(result).includes("do-not-return"), false);
   assert.equal(malformed.effects.length, 1);

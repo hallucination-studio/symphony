@@ -223,6 +223,12 @@ test("tool response uses the official request id and bounded content shape", asy
     id: "tool-request-1",
     result: { success: true, contentItems: [{ type: "inputText", text: "accepted" }] },
   });
+  const large = "x".repeat(100_000);
+  await process.respondToTool("tool-request-2", true, large);
+  const largeResponse = fake.requests.at(-1) as {
+    result?: { contentItems?: Array<{ text?: unknown }> };
+  };
+  assert.equal(largeResponse.result?.contentItems?.[0]?.text, large);
   await process.shutdown();
 });
 

@@ -13,6 +13,7 @@ import {
 } from "../../contracts/observation.js";
 import { parseBoundedString } from "../../contracts/validation.js";
 import { taskIssueChanges } from "../../observation/TaskFacts.js";
+import type { TaskManageExecution } from "../api/TaskManageCommandInterface.js";
 import {
   parseTaskMcpResult,
   type ArchiveIssueCall,
@@ -114,23 +115,26 @@ export class LinearCommands {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
   }
 
-  execute(call: CreateIssueCall): Promise<CreateIssueResult>;
-  execute(call: UpdateIssueCall): Promise<UpdateIssueResult>;
-  execute(call: ArchiveIssueCall): Promise<ArchiveIssueResult>;
-  execute(call: CreateRelationCall): Promise<CreateRelationResult>;
-  execute(call: DeleteRelationCall): Promise<DeleteRelationResult>;
-  execute(call: TaskMcpMutationCall): Promise<TaskMcpMutationResult>;
-  async execute(call: TaskMcpMutationCall): Promise<TaskMcpMutationResult> {
+  execute(call: CreateIssueCall, execution: TaskManageExecution): Promise<CreateIssueResult>;
+  execute(call: UpdateIssueCall, execution: TaskManageExecution): Promise<UpdateIssueResult>;
+  execute(call: ArchiveIssueCall, execution: TaskManageExecution): Promise<ArchiveIssueResult>;
+  execute(call: CreateRelationCall, execution: TaskManageExecution): Promise<CreateRelationResult>;
+  execute(call: DeleteRelationCall, execution: TaskManageExecution): Promise<DeleteRelationResult>;
+  execute(call: TaskMcpMutationCall, execution: TaskManageExecution): Promise<TaskMcpMutationResult>;
+  async execute(
+    call: TaskMcpMutationCall,
+    execution: TaskManageExecution,
+  ): Promise<TaskMcpMutationResult> {
     switch (call.function) {
-      case "create_issue": return this.#createIssue(call);
-      case "update_issue": return this.#updateIssue(call);
-      case "archive_issue": return this.#archiveIssue(call);
-      case "create_relation": return this.#createRelation(call);
-      case "delete_relation": return this.#deleteRelation(call);
+      case "create_issue": return this.#createIssue(call, execution);
+      case "update_issue": return this.#updateIssue(call, execution);
+      case "archive_issue": return this.#archiveIssue(call, execution);
+      case "create_relation": return this.#createRelation(call, execution);
+      case "delete_relation": return this.#deleteRelation(call, execution);
     }
   }
 
-  async #createIssue(call: CreateIssueCall): Promise<CreateIssueResult> {
+  async #createIssue(call: CreateIssueCall, execution: TaskManageExecution): Promise<CreateIssueResult> {
     const issueId = parseTaskIssueId(this.identityFactory());
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: issueId });
     const parent = await this.#preconditionIssue(call.input.parent_issue_id);
@@ -141,7 +145,7 @@ export class LinearCommands {
     if (call.input.desired.priority !== null && call.input.desired.priority > 4) {
       return this.#result(call, target, "not_applied", null, [], "linear_invalid_priority");
     }
-    const provider = await this.#effect(() => this.client.createIssue({
+    const provider = await this.#effect(execution, () => this.client.createIssue({
       id: issueId,
       team_id: this.#teamId,
       parent_issue_id: call.input.parent_issue_id,
@@ -174,7 +178,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #updateIssue(call: UpdateIssueCall): Promise<UpdateIssueResult> {
+  async #updateIssue(call: UpdateIssueCall, execution: TaskManageExecution): Promise<UpdateIssueResult> {
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: call.input.issue_id });
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -187,7 +191,10 @@ export class LinearCommands {
     if (linearIssueMatches(before.snapshot, call.input.desired)) {
       return this.#result(call, target, "not_applied", before.snapshot, [], "desired_state_already_present");
     }
-    const provider = await this.#effect(() => this.client.updateIssue(call.input.issue_id, this.#updateInput(call.input.desired)));
+    const provider = await this.#effect(
+      execution,
+      () => this.client.updateIssue(call.input.issue_id, this.#updateInput(call.input.desired)),
+    );
     let after: LinearCommandIssueRecord;
     try {
       after = await this.#readIssue(call.input.issue_id);
@@ -201,7 +208,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #archiveIssue(call: ArchiveIssueCall): Promise<ArchiveIssueResult> {
+  async #archiveIssue(call: ArchiveIssueCall, execution: TaskManageExecution): Promise<ArchiveIssueResult> {
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: call.input.issue_id });
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -209,7 +216,7 @@ export class LinearCommands {
       return this.#result(call, target, "precondition_failed", before.snapshot, [], "fresh_precondition_mismatch");
     }
     if (before.archived) return this.#result(call, target, "not_applied", before.snapshot, [], "desired_state_already_present");
-    const provider = await this.#effect(() => this.client.archiveIssue(call.input.issue_id));
+    const provider = await this.#effect(execution, () => this.client.archiveIssue(call.input.issue_id));
     let after: LinearCommandIssueRecord;
     try {
       after = await this.#readIssue(call.input.issue_id);
@@ -222,7 +229,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #createRelation(call: CreateRelationCall): Promise<CreateRelationResult> {
+  async #createRelation(call: CreateRelationCall, execution: TaskManageExecution): Promise<CreateRelationResult> {
     const relationId = parseTaskRelationId(this.identityFactory());
     const target = this.#relationTarget(relationId, call.input.source_issue_id, call.input.target_issue_id);
     const endpoints = await this.#preconditionEndpoints(call.input.source_issue_id, call.input.target_issue_id);
@@ -234,7 +241,7 @@ export class LinearCommands {
     if (!RELATION_TYPES.has(call.input.relation_type)) {
       return this.#result(call, target, "not_applied", null, [], "linear_invalid_relation_type");
     }
-    const provider = await this.#effect(() => this.client.createRelation({
+    const provider = await this.#effect(execution, () => this.client.createRelation({
       id: relationId,
       type: call.input.relation_type,
       source_issue_id: call.input.source_issue_id,
@@ -255,7 +262,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after);
   }
 
-  async #deleteRelation(call: DeleteRelationCall): Promise<DeleteRelationResult> {
+  async #deleteRelation(call: DeleteRelationCall, execution: TaskManageExecution): Promise<DeleteRelationResult> {
     const target = this.#relationTarget(call.input.relation_id, call.input.source_issue_id, call.input.target_issue_id);
     const endpoints = await this.#preconditionEndpoints(call.input.source_issue_id, call.input.target_issue_id);
     if (endpoints === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -275,7 +282,7 @@ export class LinearCommands {
       || before.source_issue_id !== call.input.source_issue_id
       || before.target_issue_id !== call.input.target_issue_id
     ) return this.#result(call, target, "precondition_failed", before, [], "fresh_precondition_mismatch");
-    const provider = await this.#effect(() => this.client.deleteRelation(call.input.relation_id));
+    const provider = await this.#effect(execution, () => this.client.deleteRelation(call.input.relation_id));
     let after: TaskRelationSnapshot | null;
     try {
       after = await this.#readRelation(call.input.source_issue_id, call.input.relation_id);
@@ -343,7 +350,11 @@ export class LinearCommands {
     throw new Error("linear_page_limit_exceeded");
   }
 
-  async #effect(operation: () => Promise<unknown>): Promise<LinearProviderOutcome> {
+  async #effect(
+    execution: TaskManageExecution,
+    operation: () => Promise<unknown>,
+  ): Promise<LinearProviderOutcome> {
+    execution.assertActive();
     try {
       return parseLinearMutationReceipt(await operation());
     } catch {
