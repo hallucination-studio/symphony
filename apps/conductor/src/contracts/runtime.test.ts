@@ -96,3 +96,16 @@ test("RootTurnOutcome contains only mechanical control outcomes", () => {
     /invalid_contract_keys/u,
   );
 });
+
+test("RootTurnOutcome rejects unsanitized terminal reasons", () => {
+  for (const sanitized_reason of ["line one\nline two", "contains\u0000nul", "x".repeat(257)]) {
+    assert.throws(() => parseRootTurnOutcome({
+      schema_version: 1,
+      root_id: state.root_id,
+      runtime_generation: state.runtime_generation,
+      correlation_id: "corr:turn:unsafe",
+      outcome: "stopped",
+      sanitized_reason,
+    }, target), /invalid_turn_reason/u);
+  }
+});

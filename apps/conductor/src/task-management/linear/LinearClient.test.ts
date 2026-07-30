@@ -49,7 +49,11 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
   }]);
   const sdk = {
     issue: async (id: string) => { calls.push({ issue: id }); return id === "no-priority" ? noPriority : root; },
-    issues: async (variables: unknown) => { calls.push({ issues: variables }); return connection([root]); },
+    issues: async (variables: unknown) => {
+      calls.push({ issues: variables });
+      const issueId = (variables as { filter?: { id?: { eq?: unknown } } }).filter?.id?.eq;
+      return connection([issueId === "no-priority" ? noPriority : root]);
+    },
     workflowStates: async (variables: unknown) => {
       calls.push({ workflowStates: variables });
       return connection([{
@@ -158,7 +162,9 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     nodes: [{ id: "label:root", revision: "2026-07-30T00:00:00.000Z", name: "symphony:kind/root", team_id: null }],
     page_info: { has_next_page: false, end_cursor: null },
   });
-  assert.deepEqual(calls.find((entry) => "issues" in (entry as object)), {
+  assert.deepEqual(calls.find((entry) => (
+    (entry as { issues?: { filter?: { team?: unknown } } }).issues?.filter?.team !== undefined
+  )), {
     issues: { after: "issues:1", first: 20, filter: { team: { id: { eq: "team:1" } } } },
   });
   assert.deepEqual(calls.find((entry) => "workflowStates" in (entry as object)), {
@@ -222,4 +228,53 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     deleteIssueRelation: "relation:new",
   });
   assert.equal(JSON.stringify(await client.getIssue("root-1")).includes("sdk_private"), false);
+});
+
+test("exact getIssue includes archived issues and returns null when the identity is absent", async () => {
+  const calls: unknown[] = [];
+  const client = new LinearSdkQueryClient({
+    issues: async (variables: unknown) => {
+      calls.push(variables);
+      return connection([]);
+    },
+  } as never);
+
+  assert.equal(await client.getIssue("missing-1"), null);
+  assert.deepEqual(calls, [{
+    first: 2,
+    includeArchived: true,
+    filter: { id: { eq: "missing-1" } },
+  }]);
+});
+
+test("exact getIssue maps an archived exact identity to typed absence without dropping archived lookup", async () => {
+  const calls: unknown[] = [];
+  const archived = {
+    ...sdkIssue("archived-1"),
+    archivedAt: new Date("2026-07-30T00:00:00.000Z"),
+  };
+  const client = new LinearSdkQueryClient({
+    issues: async (variables: unknown) => {
+      calls.push(variables);
+      return connection([archived]);
+    },
+  } as never);
+
+  assert.equal(await client.getIssue("archived-1"), null);
+  assert.deepEqual(calls, [{
+    first: 2,
+    includeArchived: true,
+    filter: { id: { eq: "archived-1" } },
+  }]);
+});
+
+test("exact getIssue does not infer absence from an incomplete provider page", async () => {
+  const client = new LinearSdkQueryClient({
+    issues: async () => connection([], true, "cursor:next"),
+  } as never);
+
+  await assert.rejects(
+    client.getIssue("missing-1"),
+    /linear_issue_lookup_incomplete/u,
+  );
 });

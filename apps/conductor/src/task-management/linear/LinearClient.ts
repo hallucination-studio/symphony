@@ -129,7 +129,18 @@ export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandCli
   }
 
   async getIssue(issueId: string): Promise<unknown> {
-    return issueRecord(await this.client.issue(issueId));
+    const issues = await this.client.issues({
+      first: 2,
+      includeArchived: true,
+      filter: { id: { eq: issueId } },
+    });
+    if (issues.pageInfo.hasNextPage) throw new Error("linear_issue_lookup_incomplete");
+    if (issues.nodes.length === 0) return null;
+    if (issues.nodes.length !== 1 || issues.nodes[0]?.id !== issueId) {
+      throw new Error("linear_issue_identity_mismatch");
+    }
+    if (issues.nodes[0].archivedAt != null) return null;
+    return issueRecord(issues.nodes[0]);
   }
 
   async readIssue(issueId: string): Promise<unknown> {

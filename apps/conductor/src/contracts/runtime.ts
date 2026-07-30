@@ -67,8 +67,14 @@ export function parseRootTurnOutcome(value: unknown, expected: RuntimeTarget): R
   return Object.freeze({
     ...envelope,
     outcome,
-    sanitized_reason: parseBoundedString(record.sanitized_reason, "invalid_turn_reason"),
+    sanitized_reason: parseTurnReason(record.sanitized_reason),
   });
+}
+
+function parseTurnReason(value: unknown): string {
+  const reason = parseBoundedString(value, "invalid_turn_reason", 256);
+  if (!/^[\x20-\x7E]+$/u.test(reason)) throw new Error("invalid_turn_reason");
+  return reason;
 }
 
 export function parseRootRuntimeState(value: unknown): RootRuntimeState {

@@ -118,6 +118,8 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
           },
         },
         turn: {
+          rootId: createdRootId,
+          runtimeGeneration: parseRuntimeGeneration(1),
           run: async (input: RootTurnInput) => {
             turnInputs.push(input);
             return {
@@ -126,8 +128,9 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
               runtime_generation: input.runtime_generation,
               correlation_id: input.correlation_id,
               outcome: "quiescent",
-            };
+            } as const;
           },
+          close: () => Promise.resolve(),
         },
       });
     },

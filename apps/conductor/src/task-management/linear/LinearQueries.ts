@@ -239,8 +239,15 @@ export class LinearQueries {
 
   get_issue(call: GetIssueCall): Promise<GetIssueResult> {
     return this.#boundary(async () => {
-      const issue = await this.#issue(call.input.issue_id);
+      const issue = await this.#optionalIssue(call.input.issue_id);
+      if (issue === null) {
+        return Object.freeze({
+          ...resultEnvelope(call),
+          output: Object.freeze({ issue: null }),
+        });
+      }
       this.#assertTeam([issue]);
+      if (issue.snapshot.issue_id !== call.input.issue_id) fail("linear_issue_identity_mismatch");
       return Object.freeze({
         ...resultEnvelope(call),
         output: Object.freeze({ issue: issue.snapshot }),
@@ -433,7 +440,12 @@ export class LinearQueries {
   }
 
   async #issue(issueId: TaskIssueId): Promise<LinearIssueRecord> {
-    return parseIssue(await this.client.getIssue(issueId));
+    return (await this.#optionalIssue(issueId)) ?? fail("linear_invalid_payload");
+  }
+
+  async #optionalIssue(issueId: TaskIssueId): Promise<LinearIssueRecord | null> {
+    const value = await this.client.getIssue(issueId);
+    return value === null ? null : parseIssue(value);
   }
 
   #children(issueId: TaskIssueId): Promise<readonly LinearIssueRecord[]> {

@@ -10,10 +10,10 @@ import {
 import { parseGitSnapshot, parseTaskObservationEvent, parseTaskSnapshot } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
+import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
 import {
   RootRuntimeRegistry,
   type RootRuntimeBinding,
-  type RootTurnInput,
 } from "./RootRuntimeRegistry.js";
 
 const rootId = parseRootIssueId("LIN-1");
@@ -46,7 +46,10 @@ function taskEvent() {
   });
 }
 
-function binding(run: (input: RootTurnInput) => Promise<unknown>): RootRuntimeBinding {
+function binding(
+  run: RootReconcillInterface["run"],
+  close: RootReconcillInterface["close"] = () => Promise.resolve(),
+): RootRuntimeBinding {
   const workspace = Object.freeze({
     root_id: rootId,
     repository_id: parseRepositoryId("repo:1"),
@@ -67,7 +70,12 @@ function binding(run: (input: RootTurnInput) => Promise<unknown>): RootRuntimeBi
         pull_request: null,
       }),
     },
-    turn: Object.freeze({ run }),
+    turn: Object.freeze({
+      rootId,
+      runtimeGeneration: parseRuntimeGeneration(1),
+      run,
+      close,
+    }),
   });
 }
 
@@ -98,8 +106,8 @@ test("registry creates one identity-bound runtime under concurrent lookup", asyn
   assert.equal(registry.has(rootId), true);
 });
 
-test("runtime validates turn identity and correlation before accepting an observation", async () => {
-  let outputCorrelation = parseCorrelationId("corr:poll:1");
+test("runtime validates turn correlation before accepting an observation", async () => {
+  const outputCorrelation = parseCorrelationId("corr:stale");
   const registry = new RootRuntimeRegistry({
     create: async () => binding(async (input) => ({
       schema_version: 1,
@@ -114,31 +122,42 @@ test("runtime validates turn identity and correlation before accepting an observ
   assert.equal(prepared.kind, "bootstrap");
   if (prepared.kind !== "bootstrap") return;
 
-  assert.equal((await runtime.run(prepared)).outcome, "quiescent");
-  outputCorrelation = parseCorrelationId("corr:stale");
   await assert.rejects(runtime.run(prepared), /turn_correlation_mismatch/u);
+  assert.throws(() => runtime.accept(prepared), /root_runtime_turn_not_completed/u);
 });
 
 test("registry rejects wrong-root and aliased turn resources", async () => {
   const wrongRoot = parseRootIssueId("LIN-2");
+  let wrongRootCloses = 0;
   const wrongRegistry = new RootRuntimeRegistry({
-    create: async () => binding(async () => ({
-      schema_version: 1,
-      root_id: rootId,
-      runtime_generation: 1,
-      correlation_id: "corr:1",
-      outcome: "quiescent",
-    })),
+    create: async () => binding(
+      async (input) => ({
+        schema_version: 1,
+        root_id: input.root_id,
+        runtime_generation: input.runtime_generation,
+        correlation_id: input.correlation_id,
+        outcome: "quiescent",
+      }),
+      async () => {
+        wrongRootCloses += 1;
+        throw new Error("private_close_failure");
+      },
+    ),
   });
   await assert.rejects(wrongRegistry.getOrCreate(wrongRoot), /root_runtime_identity_mismatch/u);
+  assert.equal(wrongRootCloses, 1);
 
-  const sharedTurn = binding(async (input) => ({
-    schema_version: 1,
-    root_id: input.root_id,
-    runtime_generation: input.runtime_generation,
-    correlation_id: input.correlation_id,
-    outcome: "quiescent",
-  })).turn;
+  let aliasCloses = 0;
+  const sharedTurn = binding(
+    async (input) => ({
+      schema_version: 1,
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+      correlation_id: input.correlation_id,
+      outcome: "quiescent",
+    }),
+    async () => { aliasCloses += 1; },
+  ).turn;
   const aliasRegistry = new RootRuntimeRegistry({
     create: async (requestedRootId) => {
       const created = binding(sharedTurn.run);
@@ -152,4 +171,33 @@ test("registry rejects wrong-root and aliased turn resources", async () => {
   });
   await aliasRegistry.getOrCreate(rootId);
   await assert.rejects(aliasRegistry.getOrCreate(wrongRoot), /root_runtime_resource_alias/u);
+  assert.equal(aliasCloses, 0);
+});
+
+test("registry closes a unique Reconcill rejected by aggregate validation", async () => {
+  let closes = 0;
+  const registry = new RootRuntimeRegistry({
+    create: async () => {
+      const created = binding(
+        async (input) => ({
+          schema_version: 1,
+          root_id: input.root_id,
+          runtime_generation: input.runtime_generation,
+          correlation_id: input.correlation_id,
+          outcome: "quiescent",
+        }),
+        async () => { closes += 1; },
+      );
+      return Object.freeze({
+        ...created,
+        turn: Object.freeze({
+          ...created.turn,
+          runtimeGeneration: parseRuntimeGeneration(2),
+        }),
+      });
+    },
+  });
+
+  await assert.rejects(registry.getOrCreate(rootId), /root_runtime_generation_mismatch/u);
+  assert.equal(closes, 1);
 });

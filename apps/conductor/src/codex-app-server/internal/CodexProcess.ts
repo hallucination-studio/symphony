@@ -80,9 +80,11 @@ const SUPPRESSED_NOTIFICATIONS = [
   "thread/realtime/sdp", "thread/realtime/started", "thread/realtime/transcript/delta",
   "thread/realtime/transcript/done", "thread/settings/updated", "thread/started",
   "thread/status/changed", "thread/tokenUsage/updated", "thread/unarchived", "turn/diff/updated",
-  "turn/moderationMetadata", "turn/plan/updated", "turn/started", "warning",
+  "turn/moderationMetadata", "turn/plan/updated", "warning",
   "windows/worldWritableWarning", "windowsSandbox/setupCompleted",
 ] as const;
+
+const MAX_CODEX_TOOL_RESPONSE_FRAME_BYTES = MAX_ROOT_TOOL_RESPONSE_BYTES * 6 + 1024;
 
 interface PendingRequest {
   readonly timer: NodeJS.Timeout;
@@ -91,8 +93,9 @@ interface PendingRequest {
 }
 
 export class CodexProcess {
-  readonly #decoder = new JsonlFrameDecoder();
+  readonly #decoder = new JsonlFrameDecoder(MAX_CODEX_TOOL_RESPONSE_FRAME_BYTES);
   readonly #correlations = new CodexCorrelationRegistry();
+  readonly #failures = new Set<(code: string) => void>();
   readonly #pending = new Map<string, PendingRequest>();
   readonly #notifications = new Set<(message: CodexInboundMessage) => void>();
   #closed = false;
@@ -110,28 +113,42 @@ export class CodexProcess {
 
   static async start(options: CodexProcessOptions, spawner: CodexSpawner = nodeSpawner): Promise<CodexProcess> {
     const instance = new CodexProcess(options, spawner(options));
-    const result = asRecord(await instance.request(
-      "initialize",
-      {
-        clientInfo: { name: "symphony", title: "Symphony", version: "0.1.0" },
-        capabilities: {
-          experimentalApi: true,
-          optOutNotificationMethods: SUPPRESSED_NOTIFICATIONS,
+    try {
+      const result = asRecord(await instance.request(
+        "initialize",
+        {
+          clientInfo: { name: "symphony", title: "Symphony", version: "0.1.0" },
+          capabilities: {
+            experimentalApi: true,
+            optOutNotificationMethods: SUPPRESSED_NOTIFICATIONS,
+          },
         },
-      },
-      parseCorrelationId("initialize:1"),
-      options.startupTimeoutMs,
-    ), "invalid_codex_initialize_response");
-    for (const key of ["codexHome", "platformFamily", "platformOs", "userAgent"] as const) {
-      parseBoundedString(result[key], "invalid_codex_initialize_response", 1024);
+        parseCorrelationId("initialize:1"),
+        options.startupTimeoutMs,
+      ), "invalid_codex_initialize_response");
+      for (const key of ["codexHome", "platformFamily", "platformOs", "userAgent"] as const) {
+        parseBoundedString(result[key], "invalid_codex_initialize_response", 1024);
+      }
+      await instance.#write({ method: "initialized", params: {} });
+      return instance;
+    } catch (error) {
+      await instance.shutdown().catch(() => undefined);
+      throw error;
     }
-    await instance.#write({ method: "initialized", params: {} });
-    return instance;
   }
 
   onNotification(listener: (message: CodexInboundMessage) => void): () => void {
     this.#notifications.add(listener);
     return () => this.#notifications.delete(listener);
+  }
+
+  onFailure(listener: (code: string) => void): () => void {
+    if (this.#closed) {
+      queueMicrotask(() => listener("codex_process_closed"));
+      return () => undefined;
+    }
+    this.#failures.add(listener);
+    return () => this.#failures.delete(listener);
   }
 
   request(
@@ -159,16 +176,20 @@ export class CodexProcess {
   async respondToTool(requestId: string, success: boolean, text: string): Promise<void> {
     parseBoundedString(requestId, "invalid_codex_request_id", 128);
     parseBoundedString(text, "invalid_codex_tool_response", MAX_ROOT_TOOL_RESPONSE_BYTES);
+    if (Buffer.byteLength(text, "utf8") > MAX_ROOT_TOOL_RESPONSE_BYTES) {
+      throw new Error("invalid_codex_tool_response");
+    }
     await this.#write({
       id: requestId,
       result: { success, contentItems: [{ type: "inputText", text }] },
-    });
+    }, MAX_CODEX_TOOL_RESPONSE_FRAME_BYTES);
   }
 
   async shutdown(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
     this.#rejectPending("codex_process_shutdown");
+    this.#notifyFailure("codex_process_shutdown");
     this.process.stdin.end();
     if (!this.process.kill("SIGTERM")) return;
     await new Promise<void>((resolve) => {
@@ -203,9 +224,9 @@ export class CodexProcess {
     for (const listener of this.#notifications) listener(message);
   }
 
-  async #write(message: Record<string, unknown>): Promise<void> {
+  async #write(message: Record<string, unknown>, maxFrameBytes?: number): Promise<void> {
     if (this.#closed) throw new Error("codex_process_closed");
-    const frame = encodeJsonl(message);
+    const frame = encodeJsonl(message, maxFrameBytes);
     await new Promise<void>((resolve, reject) => {
       this.process.stdin.write(frame, (error) => error ? reject(new Error("codex_process_write_failed")) : resolve());
     });
@@ -215,7 +236,15 @@ export class CodexProcess {
     if (this.#closed) return;
     this.#closed = true;
     this.#rejectPending(code);
+    this.#notifyFailure(code);
     this.process.kill("SIGKILL");
+  }
+
+  #notifyFailure(code: string): void {
+    for (const listener of this.#failures) {
+      try { listener(code); } catch { /* failure observers cannot reopen the boundary */ }
+    }
+    this.#failures.clear();
   }
 
   #rejectPending(code: string): void {

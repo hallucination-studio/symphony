@@ -6,6 +6,10 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
 } from "../contracts/identity.js";
+import {
+  parseTaskSnapshot,
+  type TaskSnapshot,
+} from "../contracts/observation.js";
 import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   TASK_MCP_CAPABILITIES,
@@ -16,10 +20,64 @@ import {
   RootTools,
   type DeclaredRootTool,
 } from "./RootTools.js";
+import {
+  bindRootTaskManageCommand,
+  type RootTaskManageCommandBinding,
+} from "./RootTaskManageCommand.js";
+import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
+
+function rootTaskSnapshot(
+  relations: readonly unknown[] = [{
+    relation_id: "REL-1",
+    revision: "revision:relation:1",
+    type: "blocks",
+    source_issue_id: "LIN-2",
+    target_issue_id: "LIN-3",
+  }, {
+    relation_id: "REL-OTHER",
+    revision: "revision:other:1",
+    type: "blocks",
+    source_issue_id: "LIN-2",
+    target_issue_id: "LIN-4",
+  }],
+): TaskSnapshot {
+  const issue = (issueId: string, parentId: string | null) => ({
+    issue_id: issueId,
+    revision: `revision:${issueId}`,
+    status: "Todo",
+    title: issueId,
+    description: null,
+    parent_id: parentId,
+    labels: [],
+    delegate_id: null,
+    priority: null,
+  });
+  return parseTaskSnapshot({
+    root_id: rootId,
+    issues: [
+      issue("LIN-1", null),
+      issue("LIN-2", "LIN-1"),
+      issue("LIN-3", "LIN-1"),
+      issue("LIN-4", "LIN-1"),
+    ],
+    relations,
+  });
+}
+
+function bindTaskManager(
+  manager: TaskManageCommandInterface,
+  readRootSnapshot: () => Promise<TaskSnapshot> = async () => rootTaskSnapshot(),
+): RootTaskManageCommandBinding {
+  return bindRootTaskManageCommand({
+    root_id: rootId,
+    task_manager: manager,
+    snapshot_reader: { readRootSnapshot },
+  });
+}
 
 function taskManager(calls: string[]): TaskManageCommandInterface {
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected_${name}`));
@@ -60,6 +118,110 @@ function getIssueCall(overrides: Record<string, unknown> = {}): Record<string, u
     input: { issue_id: "LIN-2" },
     ...overrides,
   };
+}
+
+function updateIssueCall(issueId: string, expectedRevision: string): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "update_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.update_issue,
+    input: {
+      issue_id: issueId,
+      expected_revision: expectedRevision,
+      desired: { title: "Updated title" },
+    },
+  };
+}
+
+function archiveIssueCall(issueId: string): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "archive_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.archive_issue,
+    input: { issue_id: issueId, expected_revision: "revision:issue:1" },
+  };
+}
+
+function createIssueCall(expectedParentRevision: string): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "create_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.create_issue,
+    input: {
+      parent_issue_id: "LIN-1",
+      expected_parent_revision: expectedParentRevision,
+      desired: {
+        title: "Created issue",
+        description: null,
+        state_id: "STATE-1",
+        label_ids: [],
+        delegate_id: null,
+        priority: null,
+      },
+    },
+  };
+}
+
+function createRelationCall(expectedSourceRevision: string): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "create_relation",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.create_relation,
+    input: {
+      relation_type: "blocks",
+      source_issue_id: "LIN-2",
+      expected_source_revision: expectedSourceRevision,
+      target_issue_id: "LIN-3",
+      expected_target_revision: "revision:target:1",
+    },
+  };
+}
+
+function deleteRelationCall(): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "delete_relation",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.delete_relation,
+    input: {
+      relation_id: "REL-1",
+      expected_relation_revision: "revision:relation:1",
+      source_issue_id: "LIN-2",
+      expected_source_revision: "revision:source:1",
+      target_issue_id: "LIN-3",
+      expected_target_revision: "revision:target:1",
+    },
+  };
+}
+
+function listRelationsCall(issueId: string, cursor: string | null, pageSize = 32): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    function: "list_relations",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.list_relations,
+    input: { issue_id: issueId, cursor, page_size: pageSize },
+  };
+}
+
+function isAcceptanceUnknown(error: unknown): boolean {
+  return error instanceof RootToolCallError && error.code === "acceptance_unknown";
 }
 
 function planDeclaration(calls: string[]): DeclaredRootTool<Record<string, unknown>, { readonly outcome: "completed" }> {
@@ -111,7 +273,7 @@ test("Root tools expose only capability-approved generic schemas", () => {
       "git:get_status",
       "delivery:get_remote_ref",
     ],
-    task_manager: taskManager(calls),
+    task_manager: bindTaskManager(taskManager(calls)),
     declared_tools: [plan, git, delivery],
   });
 
@@ -134,7 +296,7 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: Object.values(TASK_MCP_CAPABILITIES),
-    task_manager: taskManager([]),
+    task_manager: bindTaskManager(taskManager([])),
   });
   assert.deepEqual(tools.specs.map(({ name }) => name), TASK_MCP_FUNCTIONS);
   for (const spec of tools.specs) {
@@ -156,7 +318,7 @@ test("Root tools dispatch a typed Task MCP result after all identity fences pass
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [TASK_MCP_CAPABILITIES.get_issue],
-    task_manager: taskManager(calls),
+    task_manager: bindTaskManager(taskManager(calls)),
   });
   const binding = tools.bindings(correlationId)[0];
   assert.ok(binding);
@@ -173,6 +335,43 @@ test("Root tools dispatch a typed Task MCP result after all identity fences pass
     output: { issue: null },
   });
   assert.equal(Object.isFrozen(result), true);
+});
+
+test("Root tools reject a get_issue result for a different identity as a fatal contract violation", async () => {
+  const manager = taskManager([]);
+  manager.get_issue = async (call) => parseTaskMcpResult({
+    schema_version: 1,
+    function: call.function,
+    root_id: call.root_id,
+    runtime_generation: call.runtime_generation,
+    correlation_id: call.correlation_id,
+    capability: call.capability,
+    output: {
+      issue: {
+        issue_id: "LIN-3",
+        revision: "revision:issue:3",
+        status: "Todo",
+        title: "Foreign issue",
+        description: null,
+        parent_id: null,
+        labels: [],
+        delegate_id: null,
+        priority: null,
+      },
+    },
+  }, call);
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: bindTaskManager(manager),
+  });
+  const read = tools.bindings(correlationId)[0];
+  assert.ok(read);
+
+  await assert.rejects(
+    read.execute(getIssueCall(), { assertActive: () => undefined }),
+    (error: unknown) => error instanceof RootToolFatalError && error.code === "invalid_contract",
+  );
 });
 
 test("Root tools return a typed mutation result with fresh resource and concrete read-back diff", async () => {
@@ -196,7 +395,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
           status: "Todo",
           title: "New title",
           description: null,
-          parent_id: null,
+          parent_id: "LIN-1",
           labels: [],
           delegate_id: null,
           priority: null,
@@ -215,7 +414,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [TASK_MCP_CAPABILITIES.update_issue],
-    task_manager: manager,
+    task_manager: bindTaskManager(manager),
   });
   const binding = tools.bindings(correlationId)[0];
   assert.ok(binding);
@@ -241,7 +440,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     status: "Todo",
     title: "New title",
     description: null,
-    parent_id: null,
+    parent_id: "LIN-1",
     labels: [],
     delegate_id: null,
     priority: null,
@@ -254,6 +453,326 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     after: "New title",
   }]);
   assert.equal(Object.isFrozen(result), true);
+});
+
+test("acceptance_unknown blocks every mutation until get_issue reads the exact target", async () => {
+  const effects: string[] = [];
+  const manager = taskManager([]);
+  let firstUnknown = true;
+  manager.update_issue = async (call) => {
+    effects.push(`update:${call.input.issue_id}`);
+    const outcome = call.input.issue_id === "LIN-2" && firstUnknown
+      ? "acceptance_unknown"
+      : "not_applied";
+    if (outcome === "acceptance_unknown") firstUnknown = false;
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome,
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: outcome === "acceptance_unknown"
+          ? "provider_acceptance_unknown"
+          : "requested_state_not_applied",
+      },
+    }, call);
+  };
+  manager.get_issue = async (call) => {
+    effects.push(`read:${call.input.issue_id}`);
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: { issue: null },
+    }, call);
+  };
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [
+      TASK_MCP_CAPABILITIES.get_issue,
+      TASK_MCP_CAPABILITIES.update_issue,
+      TASK_MCP_CAPABILITIES.archive_issue,
+    ],
+    task_manager: bindTaskManager(manager),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const update = bindings.get("update_issue");
+  const archive = bindings.get("archive_issue");
+  const read = bindings.get("get_issue");
+  assert.ok(update);
+  assert.ok(archive);
+  assert.ok(read);
+  assert.equal(tools.hasPendingAcceptance(), false);
+
+  const unknown = await update.execute(
+    updateIssueCall("LIN-2", "revision:issue:1"),
+    { assertActive: () => undefined },
+  );
+  assert.equal((unknown as { output?: { outcome?: unknown } }).output?.outcome, "acceptance_unknown");
+  assert.equal(tools.hasPendingAcceptance(), true);
+  await assert.rejects(
+    update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await assert.rejects(
+    update.execute(updateIssueCall("LIN-3", "revision:other:1"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await assert.rejects(
+    archive.execute(archiveIssueCall("LIN-3"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await read.execute(getIssueCall({ input: { issue_id: "LIN-3" } }), { assertActive: () => undefined });
+  await assert.rejects(
+    update.execute(updateIssueCall("LIN-3", "revision:other:1"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  assert.equal(tools.hasPendingAcceptance(), true);
+
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
+  assert.equal(tools.hasPendingAcceptance(), false);
+  await update.execute(updateIssueCall("LIN-3", "revision:other:2"), { assertActive: () => undefined });
+  assert.deepEqual(effects, [
+    "update:LIN-2",
+    "read:LIN-3",
+    "read:LIN-2",
+    "update:LIN-3",
+  ]);
+});
+
+test("acceptance_unknown blocks every declared tool while an exact Task mutation is unresolved", async () => {
+  const effects: string[] = [];
+  const manager = taskManager([]);
+  manager.update_issue = async (call) => {
+    effects.push(`update:${call.input.issue_id}`);
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "acceptance_unknown",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: "provider_acceptance_unknown",
+      },
+    }, call);
+  };
+  const plan = planDeclaration(effects);
+  const git = {
+    ...plan,
+    family: "git" as const,
+    capability: "git:get_status" as const,
+    spec: { ...plan.spec, name: "get_status" },
+  };
+  const delivery = {
+    ...plan,
+    family: "delivery" as const,
+    capability: "delivery:get_remote_ref" as const,
+    spec: { ...plan.spec, name: "get_remote_ref" },
+  };
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [
+      TASK_MCP_CAPABILITIES.update_issue,
+      "performer:plan",
+      "git:get_status",
+      "delivery:get_remote_ref",
+    ],
+    task_manager: bindTaskManager(manager),
+    declared_tools: [plan, git, delivery],
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const update = bindings.get("update_issue");
+  assert.ok(update);
+  await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
+
+  for (const name of ["plan", "get_status", "get_remote_ref"]) {
+    const binding = bindings.get(name);
+    assert.ok(binding);
+    await assert.rejects(binding.execute({
+      schema_version: 1,
+      root_id: rootId,
+      runtime_generation: generation,
+      correlation_id: correlationId,
+      capability: binding.spec.name === "plan"
+        ? "performer:plan"
+        : binding.spec.name === "get_status"
+          ? "git:get_status"
+          : "delivery:get_remote_ref",
+    }, { assertActive: () => undefined }), isAcceptanceUnknown);
+  }
+  assert.deepEqual(effects, ["update:LIN-2"]);
+});
+
+test("acceptance_unknown from create_issue blocks create retries until the generated issue is read", async () => {
+  const effects: string[] = [];
+  const manager = taskManager([]);
+  let creations = 0;
+  manager.create_issue = async (call) => {
+    creations += 1;
+    effects.push(`create:${creations}`);
+    const outcome = creations === 1 ? "acceptance_unknown" : "not_applied";
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome,
+        target: { kind: "issue", issue_id: "LIN-CREATED" },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: outcome === "acceptance_unknown"
+          ? "provider_acceptance_unknown"
+          : "requested_state_not_applied",
+      },
+    }, call);
+  };
+  manager.get_issue = async (call) => {
+    effects.push(`read:${call.input.issue_id}`);
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: { issue: null },
+    }, call);
+  };
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.create_issue],
+    task_manager: bindTaskManager(manager),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const create = bindings.get("create_issue");
+  const read = bindings.get("get_issue");
+  assert.ok(create);
+  assert.ok(read);
+
+  await create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined });
+  await assert.rejects(
+    create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await read.execute(
+    getIssueCall({ input: { issue_id: "LIN-CREATED" } }),
+    { assertActive: () => undefined },
+  );
+  await create.execute(createIssueCall("revision:root:2"), { assertActive: () => undefined });
+  assert.deepEqual(effects, ["create:1", "read:LIN-CREATED", "create:2"]);
+});
+
+test("create_relation unknown acceptance clears after complete source scans for presence or absence", async () => {
+  const effects: string[] = [];
+  const manager = taskManager([]);
+  let creations = 0;
+  manager.create_relation = async (call) => {
+    creations += 1;
+    effects.push(`create:${creations}`);
+    const outcome = creations <= 2 ? "acceptance_unknown" : "not_applied";
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome,
+        target: {
+          kind: "relation",
+          relation_id: `REL-${creations}`,
+          source_issue_id: call.input.source_issue_id,
+          target_issue_id: call.input.target_issue_id,
+        },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: outcome === "acceptance_unknown"
+          ? "provider_acceptance_unknown"
+          : "requested_state_not_applied",
+      },
+    }, call);
+  };
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [
+      TASK_MCP_CAPABILITIES.list_relations,
+      TASK_MCP_CAPABILITIES.create_relation,
+      TASK_MCP_CAPABILITIES.delete_relation,
+    ],
+    task_manager: bindTaskManager(manager, async () => rootTaskSnapshot(
+      creations === 1
+        ? [{
+          relation_id: "REL-1",
+          revision: "revision:relation:1",
+          type: "blocks",
+          source_issue_id: "LIN-2",
+          target_issue_id: "LIN-3",
+        }]
+        : creations >= 2
+          ? [{
+            relation_id: "REL-OTHER",
+            revision: "revision:other:1",
+            type: "blocks",
+            source_issue_id: "LIN-2",
+            target_issue_id: "LIN-4",
+          }]
+          : [],
+    )),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const create = bindings.get("create_relation");
+  const remove = bindings.get("delete_relation");
+  const read = bindings.get("list_relations");
+  assert.ok(create);
+  assert.ok(remove);
+  assert.ok(read);
+
+  await create.execute(createRelationCall("revision:source:1"), { assertActive: () => undefined });
+  await assert.rejects(
+    create.execute(createRelationCall("revision:source:1"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await assert.rejects(
+    remove.execute(deleteRelationCall(), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await read.execute(listRelationsCall("LIN-2", null), { assertActive: () => undefined });
+  await create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined });
+
+  await assert.rejects(
+    create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await read.execute(listRelationsCall("LIN-3", null), { assertActive: () => undefined });
+  await assert.rejects(
+    create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined }),
+    isAcceptanceUnknown,
+  );
+  await read.execute(listRelationsCall("LIN-2", null), { assertActive: () => undefined });
+  await create.execute(createRelationCall("revision:source:3"), { assertActive: () => undefined });
+  assert.deepEqual(effects, [
+    "create:1",
+    "create:2",
+    "create:3",
+  ]);
 });
 
 test("Root tools reject cross-Root, stale-generation, wrong-correlation, and capability substitution before effects", async () => {
@@ -269,7 +788,7 @@ test("Root tools reject cross-Root, stale-generation, wrong-correlation, and cap
     const tools = new RootTools({
       target: { root_id: rootId, runtime_generation: generation },
       capabilities: [TASK_MCP_CAPABILITIES.get_issue],
-      task_manager: taskManager(calls),
+      task_manager: bindTaskManager(taskManager(calls)),
     });
     const binding = tools.bindings(correlationId)[0];
     assert.ok(binding);
@@ -278,10 +797,82 @@ test("Root tools reject cross-Root, stale-generation, wrong-correlation, and cap
   }
 });
 
-test("Root tools enforce the advertised one-item Task page before dispatch", async () => {
+test("Root tools deny a same-team foreign Issue before the shared manager observes the call", async () => {
+  const effects: string[] = [];
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: bindTaskManager(taskManager(effects)),
+  });
+  const read = tools.bindings(correlationId)[0];
+  assert.ok(read);
+
+  await assert.rejects(
+    read.execute(
+      getIssueCall({ input: { issue_id: "ROOT-B-ISSUE" } }),
+      { assertActive: () => undefined },
+    ),
+    (error: unknown) => error instanceof RootToolCallError && error.code === "capability_denied",
+  );
+  assert.deepEqual(effects, []);
+});
+
+test("Root tools map a snapshot reader rejection to boundary_unavailable", async () => {
+  const effects: string[] = [];
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: bindTaskManager(taskManager(effects), () => Promise.reject(new Error("snapshot_reader_failed"))),
+  });
+  const read = tools.bindings(correlationId)[0];
+  assert.ok(read);
+
+  await assert.rejects(
+    read.execute(getIssueCall(), { assertActive: () => undefined }),
+    (error: unknown) => error instanceof RootToolFatalError && error.code === "boundary_unavailable",
+  );
+  assert.deepEqual(effects, []);
+});
+
+test("Root tools fail composition closed for raw or differently bound Task managers", () => {
+  assert.throws(() => new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: taskManager([]) as unknown as RootTaskManageCommandBinding,
+  }), /unbound_root_task_manager/u);
+
+  const otherRootId = parseRootIssueId("ROOT-B");
+  const otherSnapshot = parseTaskSnapshot({
+    root_id: otherRootId,
+    issues: [{
+      issue_id: otherRootId,
+      revision: "revision:root-b",
+      status: "Todo",
+      title: "Root B",
+      description: null,
+      parent_id: null,
+      labels: [],
+      delegate_id: null,
+      priority: null,
+    }],
+    relations: [],
+  });
+  const otherBinding = bindRootTaskManageCommand({
+    root_id: otherRootId,
+    task_manager: taskManager([]),
+    snapshot_reader: { readRootSnapshot: async () => otherSnapshot },
+  });
+  assert.throws(() => new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: otherBinding,
+  }), /unbound_root_task_manager/u);
+});
+
+test("Root tools advertise and enforce 32-item relation pages so 100 relations fit the turn budget", async () => {
   const calls: string[] = [];
   const manager = taskManager(calls);
-  manager.list_issues = async (call) => {
+  manager.list_relations = async (call) => {
     calls.push(call.function);
     return {
       schema_version: 1,
@@ -290,27 +881,36 @@ test("Root tools enforce the advertised one-item Task page before dispatch", asy
       runtime_generation: call.runtime_generation,
       correlation_id: call.correlation_id,
       capability: call.capability,
-      output: { issues: [], next_cursor: null },
+      output: { relations: rootTaskSnapshot().relations, next_cursor: null },
     };
   };
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
-    capabilities: [TASK_MCP_CAPABILITIES.list_issues],
-    task_manager: manager,
+    capabilities: [TASK_MCP_CAPABILITIES.list_relations],
+    task_manager: bindTaskManager(manager),
   });
   const binding = tools.bindings(correlationId)[0];
   assert.ok(binding);
+  const schema = binding.spec.inputSchema as {
+    properties?: { input?: { properties?: { page_size?: { const?: unknown } } } };
+  };
+  assert.equal(schema.properties?.input?.properties?.page_size?.const, 32);
+
+  const page = await binding.execute(
+    listRelationsCall("LIN-2", null, 32),
+    { assertActive: () => undefined },
+  ) as { output: { relations: readonly unknown[] } };
+  assert.equal(page.output.relations.length, 2);
 
   await assert.rejects(binding.execute({
     schema_version: 1,
-    function: "list_issues",
+    function: "list_relations",
     root_id: rootId,
     runtime_generation: generation,
     correlation_id: correlationId,
-    capability: TASK_MCP_CAPABILITIES.list_issues,
-    input: { cursor: null, page_size: 100 },
+    capability: TASK_MCP_CAPABILITIES.list_relations,
+    input: { issue_id: "LIN-2", cursor: null, page_size: 1 },
   }, { assertActive: () => undefined }), /invalid_contract/u);
-  assert.deepEqual(calls, []);
 });
 
 test("Root tools reject oversized typed mutation diffs as a fatal contract violation", async () => {
@@ -339,7 +939,7 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [TASK_MCP_CAPABILITIES.update_issue],
-    task_manager: manager,
+    task_manager: bindTaskManager(manager),
   });
   const binding = tools.bindings(correlationId)[0];
   assert.ok(binding);
@@ -365,7 +965,7 @@ test("declared Performer tools retain typed parsing while unknown capabilities a
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: ["performer:plan"],
-    task_manager: taskManager(calls),
+    task_manager: bindTaskManager(taskManager(calls)),
     declared_tools: [declaration],
   });
   const binding = tools.bindings(correlationId)[0];
@@ -383,12 +983,12 @@ test("declared Performer tools retain typed parsing while unknown capabilities a
   assert.throws(() => new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: ["performer:unknown"],
-    task_manager: taskManager([]),
+    task_manager: bindTaskManager(taskManager([])),
   }), /unknown_root_capability/u);
   assert.throws(() => new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: ["performer:plan"],
-    task_manager: taskManager([]),
+    task_manager: bindTaskManager(taskManager([])),
     declared_tools: [{ ...declaration, spec: { ...declaration.spec, name: "shell" } }],
   }), /unapproved_root_tool/u);
 });

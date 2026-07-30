@@ -16,6 +16,7 @@ import {
 } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
+import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
 import { RootRuntimeRegistry, type RootTurnInput } from "./RootRuntimeRegistry.js";
 import { SerialConductor, type SerialConductorLog } from "./SerialConductor.js";
 
@@ -73,7 +74,7 @@ interface Harness {
   readonly registry: RootRuntimeRegistry;
 }
 
-function harness(run?: (input: RootTurnInput) => Promise<unknown>): Harness {
+function harness(run?: RootReconcillInterface["run"]): Harness {
   const creations: RootIssueId[] = [];
   const inputs: RootTurnInput[] = [];
   const logs: SerialConductorLog[] = [];
@@ -103,6 +104,8 @@ function harness(run?: (input: RootTurnInput) => Promise<unknown>): Harness {
           }),
         },
         turn: {
+          rootId,
+          runtimeGeneration: parseRuntimeGeneration(1),
           run: async (input: RootTurnInput) => {
             inputs.push(input);
             active += 1;
@@ -114,11 +117,12 @@ function harness(run?: (input: RootTurnInput) => Promise<unknown>): Harness {
                 runtime_generation: input.runtime_generation,
                 correlation_id: input.correlation_id,
                 outcome: "quiescent",
-              } : await run(input);
+              } as const : await run(input);
             } finally {
               active -= 1;
             }
           },
+          close: () => Promise.resolve(),
         },
       });
     },

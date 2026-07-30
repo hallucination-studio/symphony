@@ -7,10 +7,7 @@ import {
 } from "../contracts/identity.js";
 import type { RuntimeTarget } from "../contracts/runtime.js";
 import { asRecord, parseBoundedString } from "../contracts/validation.js";
-import type {
-  TaskManageCommandInterface,
-  TaskManageExecution,
-} from "../task-management/api/TaskManageCommandInterface.js";
+import type { TaskManageExecution } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   TASK_MCP_CAPABILITIES,
   TASK_MCP_FUNCTIONS,
@@ -19,7 +16,12 @@ import {
   type TaskMcpCall,
   type TaskMcpFunction,
   type TaskMcpResult,
+  type TaskMutationTarget,
 } from "../task-management/mcp/TaskMcpSchemas.js";
+import {
+  RootTaskManageBindingError,
+  RootTaskManageCommandBinding,
+} from "./RootTaskManageCommand.js";
 import {
   RootToolCallError,
   RootToolFatalError,
@@ -48,13 +50,13 @@ export interface DeclaredRootTool<Call, Result> {
 export interface RootToolsOptions {
   readonly target: RuntimeTarget;
   readonly capabilities: readonly string[];
-  readonly task_manager: TaskManageCommandInterface;
+  readonly task_manager: RootTaskManageCommandBinding;
   readonly declared_tools?: readonly DeclaredRootTool<unknown, unknown>[];
 }
 
 type JsonSchema = Record<string, unknown>;
 
-const ROOT_TASK_PAGE_SIZE = 1;
+const ROOT_TASK_PAGE_SIZE = 32;
 const MAX_ROOT_TASK_CHANGES = 8;
 const IDENTITY_SCHEMA = Object.freeze({ type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
 const NULLABLE_IDENTITY_SCHEMA = Object.freeze({ anyOf: [IDENTITY_SCHEMA, { type: "null" }] });
@@ -230,7 +232,7 @@ function assertEnvelope(
 }
 
 async function dispatchTask(
-  taskManager: TaskManageCommandInterface,
+  taskManager: RootTaskManageCommandBinding,
   call: TaskMcpCall,
   execution: TaskManageExecution,
 ): Promise<unknown> {
@@ -251,6 +253,12 @@ async function dispatchTask(
 
 function parseTaskResult(value: unknown, call: TaskMcpCall): TaskMcpResult {
   const result = parseTaskMcpResult(value, call);
+  if (
+    call.function === "get_issue"
+    && result.function === "get_issue"
+    && result.output.issue !== null
+    && result.output.issue.issue_id !== call.input.issue_id
+  ) throw new Error("task_resource_identity_mismatch");
   if ("concrete_diff" in result.output && result.output.concrete_diff.length > MAX_ROOT_TASK_CHANGES) {
     throw new Error("root_task_change_limit_exceeded");
   }
@@ -268,18 +276,42 @@ function assertRootPageSize(call: TaskMcpCall): void {
   ) throw new RootToolCallError("invalid_contract");
 }
 
+type IssueMutationTarget = Extract<TaskMutationTarget, { readonly kind: "issue" }>;
+type RelationMutationTarget = Extract<TaskMutationTarget, { readonly kind: "relation" }>;
+
+type UnknownAcceptance =
+  | { readonly kind: "issue"; readonly target: IssueMutationTarget }
+  | {
+    readonly kind: "relation";
+    readonly target: RelationMutationTarget;
+    readonly next_cursor: string | null;
+  };
+
+function isTaskMutation(call: TaskMcpCall): boolean {
+  return call.function === "create_issue"
+    || call.function === "update_issue"
+    || call.function === "archive_issue"
+    || call.function === "create_relation"
+    || call.function === "delete_relation";
+}
+
 export class RootTools {
+  readonly target: RuntimeTarget;
   readonly specs: readonly RootToolSpec[];
-  readonly #target: RuntimeTarget;
-  readonly #taskManager: TaskManageCommandInterface;
+  readonly #taskManager: RootTaskManageCommandBinding;
   readonly #taskFunctions: ReadonlySet<TaskMcpFunction>;
   readonly #declaredTools: ReadonlyMap<string, DeclaredRootTool<unknown, unknown>>;
+  #unknownAcceptance: UnknownAcceptance | null = null;
 
   constructor(options: RootToolsOptions) {
-    this.#target = Object.freeze({
+    this.target = Object.freeze({
       root_id: parseRootIssueId(options.target.root_id),
       runtime_generation: parseRuntimeGeneration(options.target.runtime_generation),
     });
+    if (
+      !(options.task_manager instanceof RootTaskManageCommandBinding)
+      || options.task_manager.root_id !== this.target.root_id
+    ) throw new Error("unbound_root_task_manager");
     this.#taskManager = options.task_manager;
     const capabilities = options.capabilities.map((capability) =>
       parseBoundedString(capability, "invalid_root_capability", 128));
@@ -308,12 +340,12 @@ export class RootTools {
       knownCapabilities.add(capability);
       if (capabilities.includes(capability)) {
         taskFunctions.add(functionName);
-        specs.push(taskSpec(functionName, this.#target));
+        specs.push(taskSpec(functionName, this.target));
       }
     }
     for (const declaration of declarations) {
       knownCapabilities.add(declaration.capability);
-      if (capabilities.includes(declaration.capability)) specs.push(declaredSpec(declaration, this.#target));
+      if (capabilities.includes(declaration.capability)) specs.push(declaredSpec(declaration, this.target));
     }
     if (capabilities.some((capability) => !knownCapabilities.has(capability))) {
       throw new Error("unknown_root_capability");
@@ -321,6 +353,10 @@ export class RootTools {
     this.#taskFunctions = taskFunctions;
     this.#declaredTools = declaredTools;
     this.specs = Object.freeze(specs);
+  }
+
+  hasPendingAcceptance(): boolean {
+    return this.#unknownAcceptance !== null;
   }
 
   bindings(correlationId: CorrelationId): readonly RootToolBinding[] {
@@ -342,10 +378,11 @@ export class RootTools {
     if (this.#taskFunctions.has(toolName as TaskMcpFunction)) {
       let call: TaskMcpCall;
       try {
-        call = parseTaskMcpCall(value, this.#target);
+        call = parseTaskMcpCall(value, this.target);
         if (call.function !== toolName) throw new Error("function_mismatch");
         if (call.correlation_id !== correlationId) throw new Error("correlation_mismatch");
         assertRootPageSize(call);
+        this.#assertAcceptanceKnown(call);
       } catch (error) {
         throw mapCallError(error);
       }
@@ -355,11 +392,21 @@ export class RootTools {
         rawResult = await dispatchTask(this.#taskManager, call, execution);
       } catch (error) {
         if (error instanceof RootToolCallError) throw error;
+        if (error instanceof RootTaskManageBindingError) {
+          if (error.fatal) {
+            throw new RootToolFatalError(
+              error.code === "boundary_unavailable" ? "boundary_unavailable" : "invalid_contract",
+            );
+          }
+          throw new RootToolCallError(error.code);
+        }
         throw new RootToolFatalError("boundary_unavailable");
       }
       execution.assertActive();
       try {
-        return parseTaskResult(rawResult, call);
+        const result = parseTaskResult(rawResult, call);
+        this.#observeTaskResult(call, result);
+        return result;
       } catch {
         throw new RootToolFatalError("invalid_contract");
       }
@@ -369,7 +416,8 @@ export class RootTools {
     if (declaration === undefined || !this.specs.some(({ name }) => name === toolName)) {
       throw new RootToolCallError("capability_denied");
     }
-    assertEnvelope(value, this.#target, correlationId, declaration.capability);
+    if (this.#unknownAcceptance !== null) throw new RootToolCallError("acceptance_unknown");
+    assertEnvelope(value, this.target, correlationId, declaration.capability);
     let call: unknown;
     try {
       call = declaration.parseCall(value);
@@ -389,5 +437,63 @@ export class RootTools {
     } catch {
       throw new RootToolFatalError("invalid_contract");
     }
+  }
+
+  #assertAcceptanceKnown(call: TaskMcpCall): void {
+    if (this.#unknownAcceptance !== null && isTaskMutation(call)) {
+      throw new RootToolCallError("acceptance_unknown");
+    }
+  }
+
+  #observeTaskResult(call: TaskMcpCall, result: TaskMcpResult): void {
+    if ("outcome" in result.output && result.output.outcome === "acceptance_unknown") {
+      const target = result.output.target;
+      this.#unknownAcceptance = target.kind === "issue"
+        ? Object.freeze({ kind: "issue", target })
+        : Object.freeze({ kind: "relation", target, next_cursor: null });
+      return;
+    }
+    const unknown = this.#unknownAcceptance;
+    if (unknown === null) return;
+    if (unknown.kind === "issue" && call.function === "get_issue" && result.function === "get_issue") {
+      if (
+        call.input.issue_id === unknown.target.issue_id
+        && (result.output.issue === null || result.output.issue.issue_id === unknown.target.issue_id)
+      ) {
+        this.#unknownAcceptance = null;
+      }
+      return;
+    }
+    if (unknown.kind !== "relation" || call.function !== "list_relations" || result.function !== "list_relations") {
+      return;
+    }
+    const targetMismatch = result.output.relations.some((relation) => (
+      relation.relation_id === unknown.target.relation_id
+      && (
+        relation.source_issue_id !== unknown.target.source_issue_id
+        || relation.target_issue_id !== unknown.target.target_issue_id
+      )
+    ));
+    if (targetMismatch) throw new Error("task_relation_identity_mismatch");
+    const targetPresent = result.output.relations.some((relation) => (
+      relation.relation_id === unknown.target.relation_id
+      && relation.source_issue_id === unknown.target.source_issue_id
+      && relation.target_issue_id === unknown.target.target_issue_id
+    ));
+    if (targetPresent) {
+      this.#unknownAcceptance = null;
+      return;
+    }
+    if (
+      call.input.issue_id !== unknown.target.source_issue_id
+      || call.input.cursor !== unknown.next_cursor
+      || result.output.relations.some((relation) => (
+        relation.source_issue_id !== call.input.issue_id
+        && relation.target_issue_id !== call.input.issue_id
+      ))
+    ) return;
+    this.#unknownAcceptance = result.output.next_cursor === null
+      ? null
+      : Object.freeze({ ...unknown, next_cursor: result.output.next_cursor });
   }
 }

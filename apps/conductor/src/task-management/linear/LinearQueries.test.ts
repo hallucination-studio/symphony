@@ -70,7 +70,7 @@ class FakeLinearQueryClient implements LinearQueryClient {
   }));
   failure: unknown = null;
 
-  async getIssue(issueId: string) { this.#fail(); return this.issues.get(issueId); }
+  async getIssue(issueId: string) { this.#fail(); return this.issues.get(issueId) ?? null; }
   async listIssues(_teamId: string, cursor: string | null, pageSize: number) {
     this.#fail(); return this.#slice(this.teamIssues, cursor, pageSize);
   }
@@ -175,6 +175,21 @@ test("generic query functions return only normalized closed resources with stabl
     "label:root",
     "label:shared",
   ]);
+});
+
+test("get_issue returns typed null for exact absence and sanitizes provider failures", async () => {
+  const client = new FakeLinearQueryClient();
+  const getCall = call("get_issue", { issue_id: "missing-1" });
+  if (getCall.function !== "get_issue") assert.fail("expected get_issue");
+  const queries = new LinearQueries(client, options());
+
+  assert.deepEqual((await queries.get_issue(getCall)).output, { issue: null });
+
+  client.failure = new Error("Authorization bearer-secret provider-stack");
+  await assert.rejects(
+    queries.get_issue(getCall),
+    (error: Error) => error.message === "linear_boundary_unavailable",
+  );
 });
 
 test("startup inventory paginates every Root without delegate filtering in stable order", async () => {

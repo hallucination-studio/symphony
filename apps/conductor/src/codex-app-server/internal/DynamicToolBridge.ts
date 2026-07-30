@@ -26,6 +26,14 @@ const FAILURE_REASONS = Object.freeze({
   readback_mismatch: "fresh read-back did not match the requested effect",
 } as const satisfies Record<BoundaryErrorCode, string>);
 
+const HARD_TOOL_DENIALS = new Set<BoundaryErrorCode>([
+  "invalid_contract", "stale_generation", "capability_denied", "timed_out", "boundary_unavailable",
+]);
+
+export function isHardToolDenial(reasonCode: BoundaryErrorCode): boolean {
+  return HARD_TOOL_DENIALS.has(reasonCode);
+}
+
 interface ToolProcess {
   onNotification(listener: (message: CodexInboundMessage) => void): () => void;
   respondToTool(requestId: string, success: boolean, text: string): Promise<void>;
@@ -36,6 +44,7 @@ interface RootToolLogIdentity {
   readonly runtime_generation: RuntimeGeneration;
   readonly correlation_id: CorrelationId;
   readonly thread_id: ThreadId;
+  readonly turn_id: string;
   readonly tool: string;
   readonly call_sequence: number;
 }
@@ -60,6 +69,18 @@ export interface DynamicToolBridgeOptions {
   readonly bindings: readonly RootToolBinding[];
   readonly log: (entry: RootToolBridgeLog) => void;
   readonly on_fatal: (reasonCode: "boundary_unavailable" | "invalid_contract") => void;
+  readonly on_budget_exhausted?: () => void;
+  readonly on_denied?: (reasonCode: BoundaryErrorCode) => void;
+}
+
+export interface DynamicToolBridgeControl {
+  (): void;
+  seal(): void;
+  didBudgetOverlapEffect(): boolean;
+  didTerminalOverlapEffect(): boolean;
+  hasEffectInFlight(): boolean;
+  hasInFlight(): boolean;
+  waitForIdle(): Promise<void>;
 }
 
 function response(value: unknown): string {
@@ -89,7 +110,7 @@ function failureResponse(options: DynamicToolBridgeOptions, code: BoundaryErrorC
 export function bindDynamicTools(
   process: ToolProcess,
   options: DynamicToolBridgeOptions,
-): () => void {
+): DynamicToolBridgeControl {
   if (!Number.isSafeInteger(options.max_calls) || options.max_calls < 1 || options.max_calls > 100) {
     throw new Error("invalid_root_tool_call_budget");
   }
@@ -97,19 +118,45 @@ export function bindDynamicTools(
   if (byName.size !== options.bindings.length) throw new Error("duplicate_dynamic_tool");
   const seenCalls = new Map<string, string>();
   const seenRequests = new Set<string>();
+  const seenStaleRequests = new Set<string>();
   let active = true;
+  let accepting = true;
   let inFlight = false;
+  let effectInFlight = false;
+  let pendingCount = 0;
+  let resolveIdle: (() => void) | null = null;
+  let idle = Promise.resolve();
+  let budgetExhausted = false;
+  let budgetOverlappedEffect = false;
+  let terminalOverlappedEffect = false;
   let callSequence = 0;
   let currentCallCount = 0;
+  let staleCallCount = 0;
   let unsubscribe: () => void = () => undefined;
 
+  const seal = (): void => {
+    accepting = false;
+  };
+  const beginPending = (): void => {
+    if (pendingCount === 0) {
+      idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
+    }
+    pendingCount += 1;
+  };
+  const endPending = (): void => {
+    pendingCount -= 1;
+    if (pendingCount !== 0) return;
+    resolveIdle?.();
+    resolveIdle = null;
+  };
   const close = (): void => {
     if (!active) return;
     active = false;
-    inFlight = false;
+    seal();
     unsubscribe();
     seenCalls.clear();
     seenRequests.clear();
+    seenStaleRequests.clear();
   };
   const execution: RootToolExecution = Object.freeze({
     assertActive: () => {
@@ -121,16 +168,20 @@ export function bindDynamicTools(
     runtime_generation: options.target.runtime_generation,
     correlation_id: options.correlation_id,
     thread_id: options.thread_id,
+    turn_id: options.turn_id,
     tool,
     call_sequence: sequence,
   });
+  const log = (entry: RootToolBridgeLog): void => {
+    try { options.log(entry); } catch { /* log observers cannot alter tool execution */ }
+  };
   const fatal = (
     tool: string,
     sequence: number,
     reasonCode: "boundary_unavailable" | "invalid_contract",
   ): void => {
     if (!active) return;
-    options.log(Object.freeze({
+    log(Object.freeze({
       event: "root_tool_call_failed",
       ...identity(tool, sequence),
       reason_code: reasonCode,
@@ -143,20 +194,37 @@ export function bindDynamicTools(
     tool: string,
     sequence: number,
     reasonCode: BoundaryErrorCode,
-  ): Promise<void> => {
-    if (!active) return;
-    try {
-      await process.respondToTool(message.request_id, false, failureResponse(options, reasonCode));
-    } catch {
-      fatal(tool, sequence, "boundary_unavailable");
-      return;
-    }
-    if (!active) return;
-    options.log(Object.freeze({
+    notifyOwner = true,
+  ): Promise<boolean> => {
+    if (!active) return false;
+    if (isHardToolDenial(reasonCode)) seal();
+    log(Object.freeze({
       event: "root_tool_call_denied",
       ...identity(tool, sequence),
       reason_code: reasonCode,
     }));
+    if (
+      notifyOwner
+      && message.turn_id === options.turn_id
+      && reasonCode !== "canceled"
+    ) options.on_denied?.(reasonCode);
+    try {
+      await process.respondToTool(message.request_id, false, failureResponse(options, reasonCode));
+    } catch {
+      fatal(tool, sequence, "boundary_unavailable");
+      return false;
+    }
+    if (!active) return false;
+    return true;
+  };
+  const scheduleDeny = (
+    message: Extract<CodexInboundMessage, { kind: "tool_call" }>,
+    tool: string,
+    sequence: number,
+    reasonCode: BoundaryErrorCode,
+  ): void => {
+    if (isHardToolDenial(reasonCode)) seal();
+    queueMicrotask(() => { void deny(message, tool, sequence, reasonCode); });
   };
   const dispatch = async (
     message: Extract<CodexInboundMessage, { kind: "tool_call" }>,
@@ -164,17 +232,23 @@ export function bindDynamicTools(
     sequence: number,
   ): Promise<void> => {
     try {
+      if (!accepting) {
+        effectInFlight = false;
+        return;
+      }
+      execution.assertActive();
       const value = await Promise.resolve().then(() => binding.execute(message.arguments, execution));
       execution.assertActive();
       const text = response(value);
       await process.respondToTool(message.request_id, true, text);
-      options.log(Object.freeze({
+      effectInFlight = false;
+      log(Object.freeze({
         event: "root_tool_call_accepted",
         ...identity(binding.spec.name, sequence),
       }));
     } catch (error) {
       if (!active) {
-        options.log(Object.freeze({
+        log(Object.freeze({
           event: "root_tool_call_denied",
           ...identity(binding.spec.name, sequence),
           reason_code: "canceled",
@@ -193,47 +267,79 @@ export function bindDynamicTools(
         );
       }
     } finally {
-      if (active) inFlight = false;
+      effectInFlight = false;
+      inFlight = false;
+      endPending();
     }
   };
 
   unsubscribe = process.onNotification((message) => {
-    if (!active || message.kind !== "tool_call" || message.thread_id !== options.thread_id) return;
+    if (!active) return;
+    if (message.kind === "turn_completed") {
+      if (message.thread_id === options.thread_id && message.turn_id === options.turn_id) {
+        terminalOverlappedEffect ||= effectInFlight;
+        seal();
+      }
+      return;
+    }
+    if (!accepting || message.kind !== "tool_call" || message.thread_id !== options.thread_id) return;
+    if (budgetExhausted) return;
     const binding = byName.get(message.tool);
     const tool = binding?.spec.name ?? "unknown";
     const sequence = ++callSequence;
+    if (message.turn_id !== options.turn_id) {
+      if (seenStaleRequests.has(message.request_id)) return;
+      if (staleCallCount >= options.max_calls) {
+        fatal(tool, sequence, "invalid_contract");
+        return;
+      }
+      staleCallCount += 1;
+      seenStaleRequests.add(message.request_id);
+      scheduleDeny(message, tool, sequence, "canceled");
+      return;
+    }
     const previousRequest = seenCalls.get(message.call_id);
     if (previousRequest !== undefined) {
       if (previousRequest !== message.request_id) {
         if (seenRequests.has(message.request_id)) return;
         seenRequests.add(message.request_id);
-        queueMicrotask(() => { void deny(message, tool, sequence, "invalid_contract"); });
+        scheduleDeny(message, tool, sequence, "invalid_contract");
       }
       return;
     }
     if (seenRequests.has(message.request_id)) return;
     seenCalls.set(message.call_id, message.request_id);
     seenRequests.add(message.request_id);
-    if (message.turn_id !== options.turn_id) {
-      queueMicrotask(() => { void deny(message, tool, sequence, "canceled"); });
-      return;
-    }
     currentCallCount += 1;
     if (currentCallCount > options.max_calls) {
-      queueMicrotask(() => { void deny(message, tool, sequence, "invalid_contract"); });
+      budgetOverlappedEffect ||= effectInFlight;
+      budgetExhausted = true;
+      seal();
+      beginPending();
+      void deny(message, tool, sequence, "invalid_contract", false).finally(endPending);
+      options.on_budget_exhausted?.();
       return;
     }
     if (binding === undefined) {
-      queueMicrotask(() => { void deny(message, tool, sequence, "capability_denied"); });
+      scheduleDeny(message, tool, sequence, "capability_denied");
       return;
     }
     if (inFlight) {
-      queueMicrotask(() => { void deny(message, tool, sequence, "invalid_contract"); });
+      scheduleDeny(message, tool, sequence, "invalid_contract");
       return;
     }
     inFlight = true;
+    effectInFlight = true;
+    beginPending();
     queueMicrotask(() => { void dispatch(message, binding, sequence); });
   });
 
-  return close;
+  return Object.assign(close, {
+    seal,
+    didBudgetOverlapEffect: () => budgetOverlappedEffect,
+    didTerminalOverlapEffect: () => terminalOverlappedEffect,
+    hasEffectInFlight: () => effectInFlight,
+    hasInFlight: () => pendingCount > 0,
+    waitForIdle: () => idle,
+  });
 }
