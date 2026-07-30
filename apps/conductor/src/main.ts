@@ -1,35 +1,6 @@
 import { pathToFileURL } from "node:url";
 
-import { createProductionConductor, type ProductionConductor } from "./composition/ProductionConductor.js";
 import { loadStartup } from "./composition/startup.js";
-
-const POLL_INTERVAL_MS = 1_000;
-
-interface ForegroundControl {
-  stopRequested(): boolean;
-  wait(): Promise<void>;
-}
-
-export async function runForeground(
-  production: ProductionConductor,
-  control: ForegroundControl,
-): Promise<void> {
-  try {
-    while (!control.stopRequested()) {
-      const candidates = await production.linear.discoverRoots();
-      for (const candidate of candidates) {
-        if (candidate.status === "Done" && production.runtimes.has(candidate.root_id)) {
-          await production.retirement.retireIfDone(candidate.root_id);
-        }
-      }
-      if (control.stopRequested()) break;
-      await production.serial.tick();
-      if (!control.stopRequested()) await control.wait();
-    }
-  } finally {
-    await production.runtimes.closeAll();
-  }
-}
 
 function line(stream: NodeJS.WritableStream, value: Record<string, unknown>): void {
   stream.write(`${JSON.stringify(value)}\n`);
@@ -41,28 +12,9 @@ function reasonCode(error: unknown): string {
 }
 
 async function main(): Promise<void> {
-  let stopping = false;
-  let releaseWait: (() => void) | null = null;
-  const stop = () => {
-    stopping = true;
-    releaseWait?.();
-  };
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
   try {
-    const startup = await loadStartup(process.argv.slice(2), process.env);
-    const production = await createProductionConductor(startup);
-    line(process.stdout, { event: "conductor_ready" });
-    await runForeground(production, {
-      stopRequested: () => stopping,
-      wait: () => new Promise<void>((resolve) => {
-        releaseWait = resolve;
-        const timer = setTimeout(resolve, POLL_INTERVAL_MS);
-        const release = releaseWait;
-        releaseWait = () => { clearTimeout(timer); release(); };
-      }),
-    });
-    line(process.stdout, { event: "conductor_stopped" });
+    await loadStartup(process.argv.slice(2), process.env);
+    throw new Error("target_runtime_not_ready");
   } catch (error) {
     line(process.stderr, { event: "conductor_failed", reason_code: reasonCode(error) });
     process.exitCode = 1;
