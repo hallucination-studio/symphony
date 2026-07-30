@@ -5,12 +5,21 @@ import {
   type IssueLabelConnection,
   type IssueRelation,
   type IssueRelationConnection,
+  IssueRelationType,
   type WorkflowStateConnection,
 } from "@linear/sdk";
 
+import type {
+  LinearCommandClient,
+  LinearCreateIssueInput,
+  LinearCreateRelationInput,
+  LinearUpdateIssueInput,
+} from "./LinearCommands.js";
 import type { LinearQueryClient } from "./LinearQueries.js";
 
 const RELATION_CURSOR_PREFIX = "relation:";
+type IssueCreateInput = Parameters<LinearClient["createIssue"]>[0];
+type IssueUpdateInput = Parameters<LinearClient["updateIssue"]>[1];
 
 function projectedPage<T, U>(connection: {
   readonly nodes: readonly T[];
@@ -36,8 +45,15 @@ function issueRecord(issue: Issue) {
     description: issue.description ?? null,
     labels: Object.freeze(issue.labelIds),
     delegate_id: issue.delegateId ?? null,
-    priority: issue.priority,
+    priority: issue.priority === 0 ? null : issue.priority,
     created_at: issue.createdAt.toISOString(),
+  });
+}
+
+function mutationIssueRecord(issue: Issue) {
+  return Object.freeze({
+    ...issueRecord(issue),
+    archived: issue.archivedAt != null,
   });
 }
 
@@ -101,7 +117,11 @@ function relationPage(issueId: string, connection: IssueRelationConnection, dire
   });
 }
 
-export class LinearSdkQueryClient implements LinearQueryClient {
+function mutationReceipt(receipt: { readonly success: boolean }) {
+  return Object.freeze({ success: receipt.success });
+}
+
+export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandClient {
   constructor(private readonly client: LinearClient) {}
 
   static fromAccessToken(accessToken: string): LinearSdkQueryClient {
@@ -110,6 +130,10 @@ export class LinearSdkQueryClient implements LinearQueryClient {
 
   async getIssue(issueId: string): Promise<unknown> {
     return issueRecord(await this.client.issue(issueId));
+  }
+
+  async readIssue(issueId: string): Promise<unknown> {
+    return mutationIssueRecord(await this.client.issue(issueId));
   }
 
   async listIssues(teamId: string, cursor: string | null, pageSize: number): Promise<unknown> {
@@ -160,5 +184,49 @@ export class LinearSdkQueryClient implements LinearQueryClient {
       name: label.name,
       team_id: label.teamId ?? null,
     }));
+  }
+
+  async createIssue(input: LinearCreateIssueInput): Promise<unknown> {
+    const sdkInput: IssueCreateInput = {
+      id: input.id,
+      teamId: input.team_id,
+      parentId: input.parent_issue_id,
+      title: input.title,
+      description: input.description,
+      stateId: input.state_id,
+      labelIds: [...input.label_ids],
+      delegateId: input.delegate_id,
+      priority: input.priority,
+    };
+    return mutationReceipt(await this.client.createIssue(sdkInput));
+  }
+
+  async updateIssue(issueId: string, input: LinearUpdateIssueInput): Promise<unknown> {
+    const sdkInput: IssueUpdateInput = {};
+    if (input.title !== undefined) sdkInput.title = input.title;
+    if (input.description !== undefined) sdkInput.description = input.description;
+    if (input.state_id !== undefined) sdkInput.stateId = input.state_id;
+    if (input.parent_issue_id !== undefined) sdkInput.parentId = input.parent_issue_id;
+    if (input.label_ids !== undefined) sdkInput.labelIds = [...input.label_ids];
+    if (input.delegate_id !== undefined) sdkInput.delegateId = input.delegate_id;
+    if (input.priority !== undefined) sdkInput.priority = input.priority;
+    return mutationReceipt(await this.client.updateIssue(issueId, sdkInput));
+  }
+
+  async archiveIssue(issueId: string): Promise<unknown> {
+    return mutationReceipt(await this.client.archiveIssue(issueId));
+  }
+
+  async createRelation(input: LinearCreateRelationInput): Promise<unknown> {
+    return mutationReceipt(await this.client.createIssueRelation({
+      id: input.id,
+      type: input.type as IssueRelationType,
+      issueId: input.source_issue_id,
+      relatedIssueId: input.target_issue_id,
+    }));
+  }
+
+  async deleteRelation(relationId: string): Promise<unknown> {
+    return mutationReceipt(await this.client.deleteIssueRelation(relationId));
   }
 }

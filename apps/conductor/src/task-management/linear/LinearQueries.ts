@@ -99,7 +99,8 @@ function parseNullableText(value: unknown, code: string, max: number): string | 
   return value === null ? null : parseBoundedString(value, code, max);
 }
 
-function parsePriority(value: unknown): number {
+function parsePriority(value: unknown): number | null {
+  if (value === null) return null;
   if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 4) {
     return fail("linear_invalid_payload");
   }
