@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, open, readdir, unlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import type {
+  CodexProcessLaunch,
   CodexSpawner,
   SpawnedCodexProcess,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -28,8 +29,11 @@ import {
   type RootFactDiff,
 } from "../../contracts/observation.js";
 import { rootObservationDigest } from "../../observation/RootObservationFacts.js";
-import { RootTools } from "../../runtime/RootTools.js";
-import { bindRootTaskManageCommand } from "../../runtime/RootTaskManageCommand.js";
+import { RootTools, type DeclaredRootTool } from "../../runtime/RootTools.js";
+import {
+  bindRootTaskManageCommand,
+  RootTaskManageCommandBinding,
+} from "../../runtime/RootTaskManageCommand.js";
 import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
 import {
@@ -57,6 +61,12 @@ import {
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
+const deploymentPolicy = Object.freeze({
+  managedMcpDenyAll: true as const,
+  managedRemoteControlDisabled: true as const,
+  remoteEnvironmentsAbsent: true as const,
+  configurationImmutable: true as const,
+});
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root", cycle: "label:cycle", plan: "label:plan",
@@ -163,6 +173,7 @@ function completed(
 interface ControlledAppServer extends SpawnedCodexProcess {
   readonly input: PassThrough;
   readonly output: PassThrough;
+  readonly launch: CodexProcessLaunch;
   send(message: Record<string, unknown>): void;
   sendMany(messages: readonly Record<string, unknown>[]): void;
 }
@@ -172,11 +183,12 @@ function controlledAppServer(
 ): { readonly spawner: CodexSpawner; readonly requests: Record<string, unknown>[]; readonly spawns: ControlledAppServer[] } {
   const requests: Record<string, unknown>[] = [];
   const spawns: ControlledAppServer[] = [];
-  const spawner: CodexSpawner = () => {
+  const spawner: CodexSpawner = (_options, launch) => {
     const input = new PassThrough();
     const output = new PassThrough();
     const stderr = new PassThrough();
     const events = new EventEmitter();
+    const requestMethods = new Map<unknown, unknown>();
     let running = true;
     events.once("exit", () => { running = false; });
     const decoder = new JsonlFrameDecoder();
@@ -187,18 +199,70 @@ function controlledAppServer(
       events,
       input,
       output,
+      launch,
       isRunning: () => running,
       kill: () => {
         queueMicrotask(() => events.emit("exit", 0, null));
         return true;
       },
-      send: (message) => output.write(`${JSON.stringify(message)}\n`),
-      sendMany: (messages) => output.write(`${messages.map((message) => JSON.stringify(message)).join("\n")}\n`),
+      send: (message) => {
+        const method = requestMethods.get(message.id);
+        const localOnly = launch.localOnly;
+        const result = message.result;
+        const response = method === "thread/start"
+          && localOnly !== undefined
+          && typeof result === "object"
+          && result !== null
+          ? {
+              ...message,
+              result: {
+                ...result,
+                cwd: localOnly.workspaceRoot,
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                activePermissionProfile: { id: localOnly.readPermissionProfile, extends: null },
+                instructionSources: [],
+                runtimeWorkspaceRoots: [localOnly.workspaceRoot],
+              },
+            }
+          : message;
+        output.write(`${JSON.stringify(response)}\n`);
+      },
+      sendMany: (messages) => {
+        for (const message of messages) server.send(message);
+      },
     };
     input.on("data", (chunk: Buffer) => {
       for (const message of decoder.push(chunk)) {
         setImmediate(() => {
           requests.push(message);
+          requestMethods.set(message.id, message.method);
+          const localOnly = launch.localOnly;
+          if (localOnly !== undefined) {
+            if (message.method === "config/read") {
+              server.send({ id: message.id, result: { config: localOnly.expectedConfig, origins: {} } });
+              return;
+            }
+            if (message.method === "configRequirements/read") {
+              server.send({ id: message.id, result: { requirements: { allowRemoteControl: false } } });
+              return;
+            }
+            if (message.method === "permissionProfile/list") {
+              server.send({
+                id: message.id,
+                result: {
+                  data: [...new Set([localOnly.readPermissionProfile, localOnly.writePermissionProfile])]
+                    .map((id) => ({ id, allowed: true })),
+                  nextCursor: null,
+                },
+              });
+              return;
+            }
+            if (message.method === "mcpServerStatus/list") {
+              server.send({ id: message.id, result: { data: [], nextCursor: null } });
+              return;
+            }
+          }
           handle(message, server);
         });
       }
@@ -214,10 +278,10 @@ function initializeResponse(message: Record<string, unknown>, server: Controlled
   server.send({
     id: message.id,
     result: {
-      codexHome: "/tmp/codex",
+      codexHome: server.launch.env.CODEX_HOME,
       platformFamily: "unix",
       platformOs: "macos",
-      userAgent: "codex-test",
+      userAgent: "symphony/0.146.0 (Mac OS; arm64)",
     },
   });
   return true;
@@ -377,6 +441,43 @@ function taskManager(
   };
 }
 
+function trustedCodexTools(
+  capabilities: readonly string[] = [],
+  declaredTools: readonly DeclaredRootTool<unknown, unknown>[] = [],
+): RootTools {
+  return new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities,
+    task_manager: bindRootTaskManageCommand({
+      target: { root_id: rootId, runtime_generation: generation },
+      workflow,
+      caller_issuer: callerAuthority.issuer,
+      task_manager: taskManager(() => Promise.reject(new Error("unexpected_task_manager_call"))),
+      snapshot_reader: { readRootSnapshot: async () => bootstrap().task },
+      approved_cycle_reader: { readApprovedCycle: async () => null },
+    }),
+    declared_tools: declaredTools,
+  });
+}
+
+test("Root tool construction rejects a structurally forged Task Manager binding before effects", () => {
+  let effects = 0;
+  const forged = Object.assign(Object.create(RootTaskManageCommandBinding.prototype) as object, {
+    root_id: rootId,
+    forCorrelation: () => {
+      effects += 1;
+      return {};
+    },
+  }) as unknown as RootTaskManageCommandBinding;
+
+  assert.throws(() => new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue],
+    task_manager: forged,
+  }), /unbound_root_task_manager/u);
+  assert.equal(effects, 0);
+});
+
 async function controlledFixture(
   appServer: ReturnType<typeof controlledAppServer>,
   manager: TaskManageCommandInterface,
@@ -386,6 +487,7 @@ async function controlledFixture(
   readRootSnapshot: () => Promise<ReturnType<typeof parseTaskSnapshot>> = async () => bootstrap().task,
 ) {
   const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-r52-controlled-"));
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-code-"));
   await mkdir(path.join(rootHome, "symphony"));
   const toolLogs: unknown[] = [];
   const transportFactory = new CodexRootTurnTransportFactory({
@@ -399,6 +501,8 @@ async function controlledFixture(
   }, {
     spawner: appServer.spawner,
     log: (entry) => toolLogs.push(entry),
+    resolveWorkspaceRoot: async () => workspaceRoot,
+    deploymentPolicy,
   });
   const factory = new RootReconcillFactory(transportFactory, {
     create: (target) => new RootTools({
@@ -478,6 +582,399 @@ const noTools: RootReconcillToolSet = Object.freeze({
 });
 
 const toolFactory: RootReconcillToolSetFactory = { create: () => noTools };
+
+test("Codex Root transport enforces local read-only authority and executes branded code inspection", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-root-transport-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspace = path.join(temporary, "workspace");
+  const workspaceAlias = path.join(temporary, "workspace-alias");
+  await Promise.all([
+    mkdir(path.join(rootHome, "symphony"), { recursive: true }),
+    mkdir(workspace),
+  ]);
+  await writeFile(path.join(workspace, "README.md"), "Root bridge inspection\n", "utf8");
+  await symlink(workspace, workspaceAlias);
+  const canonicalWorkspace = await realpath(workspaceAlias);
+  const resolvedRoots: string[] = [];
+  const codeResponses: { readonly success: boolean; readonly body: unknown }[] = [];
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-root" } } });
+      return;
+    }
+    if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-code-read" } } });
+      setImmediate(() => server.send({
+        id: "request:code-read",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-root",
+          turnId: "turn-code-read",
+          callId: "call:code-read",
+          tool: "read_code_file",
+          arguments: {
+            schema_version: 1,
+            root_id: rootId,
+            runtime_generation: generation,
+            correlation_id: "corr:bootstrap:1",
+            capability: "code_inspection:read_file",
+            path: "README.md",
+            start_line: 1,
+            max_lines: 200,
+          },
+        },
+      }));
+      return;
+    }
+    if (message.id === "request:code-read" && message.result !== undefined) {
+      codeResponses.push(toolResponse(message));
+      completedTurn(server, "turn-code-read");
+    }
+  });
+  const callerCodexOptions = {
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+    capabilityMode: { kind: "standard" as const },
+  };
+  const factory = new CodexRootTurnTransportFactory(callerCodexOptions, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async (requestedRootId) => {
+      resolvedRoots.push(requestedRootId);
+      return workspaceAlias;
+    },
+    deploymentPolicy,
+  });
+
+  const transport = await factory.create({
+    root_id: rootId,
+    runtime_generation: generation,
+    root_home: rootHome,
+    tools: trustedCodexTools(),
+  });
+  try {
+    assert.deepEqual(resolvedRoots, [rootId]);
+    const launch = appServer.spawns[0]?.launch;
+    assert.ok(launch?.localOnly);
+    assert.equal(launch.localOnly.role, "root");
+    assert.equal(launch.localOnly.workspaceRoot, canonicalWorkspace);
+    assert.equal(launch.cwd, canonicalWorkspace);
+    assert.equal(launch.env.CODEX_HOME, rootHome);
+    assert.equal("HOME" in launch.env, false);
+    assert.equal("SYMPHONY_LINEAR_TOKEN" in launch.env, false);
+    assert.deepEqual(
+      appServer.requests.find(({ method }) => method === "thread/start")?.params,
+      {
+        cwd: canonicalWorkspace,
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        permissions: launch.localOnly.readPermissionProfile,
+        dynamicTools: launch.localOnly.dynamicTools,
+        ephemeral: true,
+        environments: [{
+          environmentId: "local",
+          cwd: canonicalWorkspace,
+          runtimeWorkspaceRoots: [canonicalWorkspace],
+        }],
+        runtimeWorkspaceRoots: [canonicalWorkspace],
+        selectedCapabilityRoots: [],
+        baseInstructions: launch.localOnly.baseInstructions,
+        developerInstructions: launch.localOnly.developerInstructions,
+        config: launch.localOnly.threadConfig,
+      },
+    );
+    assert.deepEqual(
+      launch.localOnly.dynamicTools.map(({ name }) => name),
+      ["list_code_directory", "read_code_file", "search_code"],
+    );
+    assert.equal(
+      Object.values(launch.localOnly.threadConfig.features as Readonly<Record<string, boolean>>)
+        .every((enabled) => enabled === false),
+      true,
+    );
+    const result = await transport.turn({
+      input: "Inspect the bounded code file.",
+      correlation_id: bootstrap().correlation_id,
+      output_schema: { type: "object" },
+      max_tool_calls: 3,
+      timeout_ms: 2_000,
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(codeResponses.length, 1);
+    assert.equal(codeResponses[0]?.success, true);
+    assert.equal(
+      (codeResponses[0]?.body as { readonly content?: unknown }).content,
+      "Root bridge inspection\n",
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+test("Codex Root transport rejects an invalid routed workspace before process allocation", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-invalid-workspace-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const filePath = path.join(temporary, "not-a-directory");
+  await mkdir(rootHome);
+  const file = await open(filePath, "wx");
+  await file.close();
+  const appServer = controlledAppServer(() => undefined);
+  let resolvedWorkspace = filePath;
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async () => resolvedWorkspace,
+    deploymentPolicy,
+  });
+
+  for (const invalid of [filePath, path.join(temporary, "missing"), "relative/workspace"]) {
+    resolvedWorkspace = invalid;
+    await assert.rejects(factory.create({
+      root_id: rootId,
+      runtime_generation: generation,
+      root_home: rootHome,
+      tools: trustedCodexTools(),
+    }), /invalid_root_workspace/u);
+  }
+  assert.equal(appServer.spawns.length, 0);
+});
+
+test("Codex Root transport rejects Performer and write-capable Git tools before process allocation", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-denied-tools-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspace = path.join(temporary, "workspace");
+  await Promise.all([mkdir(rootHome), mkdir(workspace)]);
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-forbidden" } } });
+    }
+  });
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async () => workspace,
+    deploymentPolicy,
+  });
+
+  for (const [name, capability] of [
+    ["plan", "performer:plan"],
+    ["prepare_worktree", "git:prepare_worktree"],
+    ["create_commit", "git:create_commit"],
+  ] as const) {
+    const family = name === "plan" ? "performer" as const : "git" as const;
+    const declaration: DeclaredRootTool<unknown, unknown> = Object.freeze({
+      family,
+      capability,
+      spec: Object.freeze({
+        type: "function" as const,
+        name,
+        description: "Forbidden Root capability",
+        inputSchema: Object.freeze({
+          type: "object",
+          additionalProperties: false,
+          properties: Object.freeze({}),
+          required: Object.freeze([]),
+        }),
+      }),
+      parseCall: (value: unknown) => value,
+      execute: (value: unknown) => Promise.resolve(value),
+      parseResult: (value: unknown) => value,
+    });
+    const forbiddenTools = trustedCodexTools([capability], [declaration]);
+    const outcome = await factory.create({
+      root_id: rootId,
+      runtime_generation: generation,
+      root_home: rootHome,
+      tools: forbiddenTools,
+    }).then(async (transport) => {
+      await transport.close();
+      return "created";
+    }, (error: Error) => error.message);
+    assert.equal(outcome, "root_local_only_tool_denied", capability);
+  }
+  assert.equal(appServer.spawns.length, 0);
+});
+
+test("Codex Root transport rejects caller-declared read tool callbacks before process allocation", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-declared-tool-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspace = path.join(temporary, "workspace");
+  await Promise.all([mkdir(rootHome), mkdir(workspace)]);
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-declared" } } });
+    }
+  });
+  let effects = 0;
+  const declaration: DeclaredRootTool<unknown, unknown> = Object.freeze({
+    family: "git",
+    capability: "git:get_diff",
+    spec: Object.freeze({
+      type: "function" as const,
+      name: "get_diff",
+      description: "Caller-declared repository diff reader",
+      inputSchema: Object.freeze({
+        type: "object",
+        additionalProperties: false,
+        properties: Object.freeze({}),
+        required: Object.freeze([]),
+      }),
+    }),
+    parseCall: (value: unknown) => value,
+    execute: (value: unknown) => {
+      effects += 1;
+      return Promise.resolve(value);
+    },
+    parseResult: (value: unknown) => value,
+  });
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async () => workspace,
+    deploymentPolicy,
+  });
+
+  const outcome = await factory.create({
+    root_id: rootId,
+    runtime_generation: generation,
+    root_home: rootHome,
+    tools: trustedCodexTools([declaration.capability], [declaration]),
+  }).then(async (transport) => {
+    await transport.close();
+    return "created";
+  }, (error: Error) => error.message);
+  assert.equal(outcome, "root_local_only_tool_denied");
+  assert.equal(effects, 0);
+  assert.equal(appServer.spawns.length, 0);
+});
+
+test("Codex Root transport rejects an untrusted same-identity tool implementation before process allocation", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-tool-drift-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspace = path.join(temporary, "workspace");
+  await Promise.all([mkdir(rootHome), mkdir(workspace)]);
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-tool-drift" } } });
+    }
+  });
+  const toolSpec = (name: string, capability: string): RootToolSpec => Object.freeze({
+    type: "function",
+    name,
+    description: "Bounded Root capability",
+    inputSchema: Object.freeze({
+      type: "object",
+      additionalProperties: false,
+      properties: Object.freeze({ capability: Object.freeze({ const: capability }) }),
+    }),
+  });
+  const initialSpec = toolSpec("get_issue", TASK_MCP_CAPABILITIES.get_issue);
+  const tools: RootReconcillToolSet = Object.freeze({
+    ...noTools,
+    specs: Object.freeze([initialSpec]),
+    bindings: () => Object.freeze([Object.freeze({
+      spec: initialSpec,
+      execute: () => Promise.resolve({}),
+    })]),
+  });
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async () => workspace,
+    deploymentPolicy,
+  });
+
+  await assert.rejects(factory.create({
+    root_id: rootId,
+    runtime_generation: generation,
+    root_home: rootHome,
+    tools,
+  }), /root_local_only_tool_denied/u);
+  assert.equal(appServer.spawns.length, 0);
+});
+
+test("Codex Root transport bounds workspace resolution by its startup timeout", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-workspace-timeout-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  await mkdir(rootHome);
+  const appServer = controlledAppServer(() => undefined);
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 10,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: () => new Promise<string>(() => undefined),
+    deploymentPolicy,
+  });
+
+  const outcome = await Promise.race([
+    factory.create({
+      root_id: rootId,
+      runtime_generation: generation,
+      root_home: rootHome,
+      tools: trustedCodexTools(),
+    }).then(async (transport) => {
+      await transport.close();
+      return "created";
+    }, (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve("external_timeout"), 100)),
+  ]);
+  assert.equal(outcome, "invalid_root_workspace");
+  assert.equal(appServer.spawns.length, 0);
+});
 
 async function fixture(scripts: TurnScript[]) {
   const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-r52-reconcill-"));

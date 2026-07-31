@@ -17,11 +17,15 @@ const CREDENTIAL_MATERIAL = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
   /\bAuthorization\s*[:=]\s*[A-Za-z][A-Za-z0-9_-]{1,31}\s+[A-Za-z0-9._~+/-]{8,}={0,2}/iu,
   /\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]{8,}/iu,
-  /\b(?:api[_-]?key|client[_-]?secret|password|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}/iu,
+  /\b(?:api[_-]?key|client[_-]?secret|password|access[_-]?token)["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}/iu,
   /\bAKIA[0-9A-Z]{16}\b/u,
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
   /\bsk-[A-Za-z0-9_-]{20,}\b/u,
 ] as const;
+
+export function containsCredentialMaterial(value: string): boolean {
+  return CREDENTIAL_MATERIAL.some((pattern) => pattern.test(value));
+}
 
 function hasUnpairedSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -71,7 +75,7 @@ export function parseMarkdownText(
     || value.includes("\0")
     || hasUnpairedSurrogate(value)
     || isBareJsonContainer(value)
-    || CREDENTIAL_MATERIAL.some((pattern) => pattern.test(value))
+    || containsCredentialMaterial(value)
   ) throw new Error(code);
 
   const tree = fromMarkdown(value) as MarkdownNode;

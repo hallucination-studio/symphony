@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { lstat } from "node:fs/promises";
+import { lstat, mkdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 
@@ -29,6 +29,7 @@ import {
   createCodexLocalOnlyRuntime,
   type CodexLocalOnlyMode,
   type CodexLocalOnlyRuntime,
+  type CodexRootLocalOnlyMode,
 } from "./CodexLocalOnly.js";
 import { encodeJsonl, JsonlFrameDecoder } from "./JsonlPeer.js";
 
@@ -43,7 +44,7 @@ export interface CodexProcessOptions {
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly model: string;
-  readonly capabilityMode?: { readonly kind: "standard" } | CodexLocalOnlyMode;
+  readonly capabilityMode?: { readonly kind: "standard" } | CodexLocalOnlyMode | CodexRootLocalOnlyMode;
 }
 
 export interface CodexProcessLaunch {
@@ -67,6 +68,51 @@ export type CodexSpawner = (
   options: CodexProcessOptions,
   launch: CodexProcessLaunch,
 ) => SpawnedCodexProcess;
+
+interface RootHomeAuthorityReservation {
+  readonly key: string;
+  readonly directory: string;
+  release: Promise<void> | null;
+}
+
+const ROOT_HOME_AUTHORITIES = new Map<string, RootHomeAuthorityReservation>();
+const ROOT_HOME_AUTHORITY_DIRECTORY = ".symphony-root-authority";
+
+function rootHomeAuthorityKey(rootHome: string): string {
+  const normalized = path.normalize(rootHome).replace(/[\\/]+$/u, "");
+  return process.platform === "darwin" || process.platform === "win32"
+    ? normalized.toLocaleLowerCase("en-US")
+    : normalized;
+}
+
+async function reserveRootHomeAuthority(rootHome: string): Promise<RootHomeAuthorityReservation> {
+  const key = rootHomeAuthorityKey(rootHome);
+  if (ROOT_HOME_AUTHORITIES.has(key)) throw new Error("codex_root_home_authority_retained");
+  const directory = path.join(rootHome, ROOT_HOME_AUTHORITY_DIRECTORY);
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("codex_root_home_authority_retained");
+    }
+    throw new Error("codex_root_home_authority_unavailable");
+  }
+  const reservation: RootHomeAuthorityReservation = { key, directory, release: null };
+  ROOT_HOME_AUTHORITIES.set(key, reservation);
+  return reservation;
+}
+
+function releaseRootHomeAuthority(reservation: RootHomeAuthorityReservation): Promise<void> {
+  if (reservation.release !== null) return reservation.release;
+  reservation.release = rmdir(reservation.directory).then(() => {
+    if (ROOT_HOME_AUTHORITIES.get(reservation.key) === reservation) {
+      ROOT_HOME_AUTHORITIES.delete(reservation.key);
+    }
+  }, () => {
+    throw new Error("codex_root_home_authority_release_failed");
+  });
+  return reservation.release;
+}
 
 const nodeSpawner: CodexSpawner = (_options, launch) => {
   const isolatedProcessGroup = launch.localOnly !== undefined && process.platform !== "win32";
@@ -135,7 +181,10 @@ async function resolveLaunch(options: CodexProcessOptions): Promise<CodexProcess
     OPENAI_BASE_URL: options.baseUrl,
     RUST_LOG: "error",
   };
-  if (options.capabilityMode?.kind !== "local_only") {
+  if (
+    options.capabilityMode?.kind !== "local_only"
+    && options.capabilityMode?.kind !== "root_local_only"
+  ) {
     return Object.freeze({
       executable: options.executable,
       args: Object.freeze(baseArgs),
@@ -197,22 +246,38 @@ export class CodexProcess {
   readonly #notifications = new Set<(message: CodexInboundMessage) => void>();
   #closed = false;
   #shutdown: Promise<void> | null = null;
+  #rootHomeAuthority: RootHomeAuthorityReservation | null;
 
   private constructor(
     private readonly options: CodexProcessOptions,
     private readonly process: SpawnedCodexProcess,
     readonly localOnly: CodexLocalOnlyRuntime | undefined,
+    rootHomeAuthority: RootHomeAuthorityReservation | null,
   ) {
+    this.#rootHomeAuthority = rootHomeAuthority;
     process.stdout.on("data", (chunk: Buffer) => this.#receive(chunk));
     process.stdout.on("end", () => this.#fail("codex_process_stream_ended"));
     process.stderr.on("data", () => undefined);
     process.events.once("error", () => this.#fail("codex_process_error"));
-    process.events.once("exit", () => this.#fail("codex_process_exited"));
+    process.events.once("exit", () => {
+      void this.#releaseRootHomeIfTerminated().catch(() => undefined);
+      this.#fail("codex_process_exited");
+    });
   }
 
   static async start(options: CodexProcessOptions, spawner: CodexSpawner = nodeSpawner): Promise<CodexProcess> {
     const launch = await resolveLaunch(options);
-    const instance = new CodexProcess(options, spawner(options, launch), launch.localOnly);
+    const rootHomeAuthority = launch.localOnly?.role === "root"
+      ? await reserveRootHomeAuthority(launch.localOnly.codexHome)
+      : null;
+    let spawned: SpawnedCodexProcess;
+    try {
+      spawned = spawner(options, launch);
+    } catch (error) {
+      if (rootHomeAuthority !== null) await releaseRootHomeAuthority(rootHomeAuthority).catch(() => undefined);
+      throw error;
+    }
+    const instance = new CodexProcess(options, spawned, launch.localOnly, rootHomeAuthority);
     try {
       const result = asRecord(await instance.request(
         "initialize",
@@ -333,7 +398,7 @@ export class CodexProcess {
     this.#closed = true;
     this.#rejectPending("codex_process_shutdown");
     this.process.stdin.end();
-    this.#shutdown = this.#terminate("SIGTERM");
+    this.#shutdown = this.#terminateAndRelease("SIGTERM");
     this.#notifyFailure("codex_process_shutdown");
     return this.#shutdown;
   }
@@ -374,7 +439,7 @@ export class CodexProcess {
     this.#closed = true;
     this.#rejectPending(code);
     this.process.stdin.end();
-    this.#shutdown = this.#terminate("SIGKILL");
+    this.#shutdown = this.#terminateAndRelease("SIGKILL");
     void this.#shutdown.catch(() => undefined);
     this.#notifyFailure(code);
   }
@@ -388,6 +453,17 @@ export class CodexProcess {
       if (await this.#waitForTermination()) return;
     }
     throw new Error("codex_process_termination_failed");
+  }
+
+  async #terminateAndRelease(initialSignal: "SIGTERM" | "SIGKILL"): Promise<void> {
+    await this.#terminate(initialSignal);
+    await this.#releaseRootHomeIfTerminated();
+  }
+
+  async #releaseRootHomeIfTerminated(): Promise<void> {
+    if (this.process.isRunning() || this.#rootHomeAuthority === null) return;
+    await releaseRootHomeAuthority(this.#rootHomeAuthority);
+    this.#rootHomeAuthority = null;
   }
 
   async #waitForTermination(): Promise<boolean> {

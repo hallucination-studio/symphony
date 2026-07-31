@@ -19,8 +19,10 @@ import {
   type TaskMutationTarget,
 } from "../task-management/mcp/TaskMcpSchemas.js";
 import {
+  bindRootTaskManageCommandCorrelation,
+  isRootTaskManageCommandBinding,
   RootTaskManageBindingError,
-  RootTaskManageCommandBinding,
+  type RootTaskManageCommandBinding,
 } from "./RootTaskManageCommand.js";
 import {
   RootToolCallError,
@@ -287,6 +289,9 @@ type UnknownAcceptance =
     readonly next_cursor: string | null;
   };
 
+type RootToolBinder = (correlationId: CorrelationId) => readonly RootToolBinding[];
+const ROOT_TOOL_BINDERS = new WeakMap<object, RootToolBinder>();
+
 function isTaskMutation(call: TaskMcpCall): boolean {
   return call.function === "create_issue"
     || call.function === "update_issue"
@@ -309,7 +314,7 @@ export class RootTools {
       runtime_generation: parseRuntimeGeneration(options.target.runtime_generation),
     });
     if (
-      !(options.task_manager instanceof RootTaskManageCommandBinding)
+      !isRootTaskManageCommandBinding(options.task_manager)
       || options.task_manager.root_id !== this.target.root_id
     ) throw new Error("unbound_root_task_manager");
     this.#taskManager = options.task_manager;
@@ -353,6 +358,8 @@ export class RootTools {
     this.#taskFunctions = taskFunctions;
     this.#declaredTools = declaredTools;
     this.specs = Object.freeze(specs);
+    ROOT_TOOL_BINDERS.set(this, (correlationId) => this.#bindings(correlationId));
+    Object.freeze(this);
   }
 
   hasPendingAcceptance(): boolean {
@@ -360,8 +367,12 @@ export class RootTools {
   }
 
   bindings(correlationId: CorrelationId): readonly RootToolBinding[] {
+    return bindRootTools(this, correlationId);
+  }
+
+  #bindings(correlationId: CorrelationId): readonly RootToolBinding[] {
     const currentCorrelation = parseCorrelationId(correlationId);
-    const taskManager = this.#taskManager.forCorrelation(currentCorrelation);
+    const taskManager = bindRootTaskManageCommandCorrelation(this.#taskManager, currentCorrelation);
     return Object.freeze(this.specs.map((spec): RootToolBinding => Object.freeze({
       spec,
       execute: (value: unknown, execution: RootToolExecution) =>
@@ -498,4 +509,22 @@ export class RootTools {
       ? null
       : Object.freeze({ ...unknown, next_cursor: result.output.next_cursor });
   }
+}
+
+export function isRootTools(value: unknown): value is RootTools {
+  return typeof value === "object"
+    && value !== null
+    && Object.getPrototypeOf(value) === RootTools.prototype
+    && Object.isFrozen(value)
+    && ROOT_TOOL_BINDERS.has(value);
+}
+
+export function bindRootTools(
+  tools: RootTools,
+  correlationId: CorrelationId,
+): readonly RootToolBinding[] {
+  if (!isRootTools(tools)) throw new Error("unbound_root_tools");
+  const binder = ROOT_TOOL_BINDERS.get(tools);
+  if (binder === undefined) throw new Error("unbound_root_tools");
+  return binder(correlationId);
 }

@@ -90,11 +90,15 @@ export class CodexThread {
       (input.toolMode === "local_only") !== (process.localOnly !== undefined)
       || (localOnly !== undefined && (
         input.cwd !== localOnly.workspaceRoot
-        || input.tools.length !== 0
-        || (input.access.kind === "workspace_write" && (
-          input.access.writableRoot !== localOnly.workspaceRoot
-          || input.access.networkAccess
-        ))
+        || (localOnly.role === "root"
+          ? input.access.kind !== "read_only"
+            || input.tools !== localOnly.dynamicTools
+            || input.nativeTools !== false
+          : input.tools.length !== 0
+            || (input.access.kind === "workspace_write" && (
+              input.access.writableRoot !== localOnly.workspaceRoot
+              || input.access.networkAccess
+            )))
       ))
     ) throw new Error("codex_local_only_capability_mismatch");
     const params = localOnly === undefined
@@ -114,7 +118,7 @@ export class CodexThread {
           approvalPolicy: "never",
           approvalsReviewer: "user",
           permissions: localOnly.readPermissionProfile,
-          dynamicTools: [],
+          dynamicTools: localOnly.dynamicTools,
           ephemeral: true,
           environments: localOnlyEnvironment(localOnly),
           runtimeWorkspaceRoots: [localOnly.workspaceRoot],

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -119,6 +119,98 @@ test("initialization failure reports when the spawned process cannot be terminat
     /codex_process_termination_failed/u,
   );
   assert.deepEqual(fake.signals(), ["SIGTERM", "SIGKILL"]);
+});
+
+test("unconfirmed Root process termination retains exclusive Root Home authority", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-root-authority-retained-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspaceRoot = path.join(temporary, "workspace");
+  await Promise.all([mkdir(rootHome), mkdir(workspaceRoot)]);
+  const options = {
+    ...testCodexOptions(rootHome),
+    shutdownTimeoutMs: 2,
+    capabilityMode: {
+      kind: "root_local_only" as const,
+      workspaceRoot,
+      deploymentPolicy: {
+        managedMcpDenyAll: true as const,
+        managedRemoteControlDisabled: true as const,
+        remoteEnvironmentsAbsent: true as const,
+        configurationImmutable: true as const,
+      },
+    },
+  };
+  const surviving = fakeSpawner((message, server) => {
+    if (message.method === "initialize") {
+      server.send({ id: message.id, result: { codexHome: rootHome } });
+    }
+  }, false);
+
+  await assert.rejects(
+    CodexProcess.start(options, surviving.spawner),
+    /codex_process_termination_failed/u,
+  );
+
+  let duplicateSpawns = 0;
+  const duplicateSpawner: CodexSpawner = () => {
+    duplicateSpawns += 1;
+    throw new Error("duplicate_root_process_spawned");
+  };
+  await assert.rejects(
+    CodexProcess.start(options, duplicateSpawner),
+    /codex_root_home_authority_retained/u,
+  );
+  assert.equal(duplicateSpawns, 0);
+
+  surviving.server().events.emit("exit", 0, null);
+  const authorityDirectory = path.join(rootHome, ".symphony-root-authority");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await lstat(authorityDirectory);
+      await new Promise((resolve) => setImmediate(resolve));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+  }
+  await assert.rejects(lstat(authorityDirectory), { code: "ENOENT" });
+  await assert.rejects(
+    CodexProcess.start(options, duplicateSpawner),
+    /duplicate_root_process_spawned/u,
+  );
+  assert.equal(duplicateSpawns, 1);
+});
+
+test("a persistent Root Home authority blocks a restarted Conductor before process allocation", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-root-authority-restart-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspaceRoot = path.join(temporary, "workspace");
+  await Promise.all([
+    mkdir(path.join(rootHome, ".symphony-root-authority"), { recursive: true }),
+    mkdir(workspaceRoot),
+  ]);
+  let spawns = 0;
+  const spawner: CodexSpawner = () => {
+    spawns += 1;
+    throw new Error("unexpected_root_process_spawn");
+  };
+
+  await assert.rejects(CodexProcess.start({
+    ...testCodexOptions(rootHome),
+    capabilityMode: {
+      kind: "root_local_only",
+      workspaceRoot,
+      deploymentPolicy: {
+        managedMcpDenyAll: true,
+        managedRemoteControlDisabled: true,
+        remoteEnvironmentsAbsent: true,
+        configurationImmutable: true,
+      },
+    },
+  }, spawner), /codex_root_home_authority_retained/u);
+  assert.equal(spawns, 0);
 });
 
 test("concurrent shutdown callers wait for the same process termination", async () => {

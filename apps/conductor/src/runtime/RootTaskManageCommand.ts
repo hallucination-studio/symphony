@@ -270,6 +270,8 @@ function assertScopedIssue(
   }
 }
 
+const ROOT_TASK_MANAGE_BINDINGS = new WeakSet<object>();
+
 export class RootTaskManageCommandBinding {
   readonly root_id: RootIssueId;
   readonly #provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>;
@@ -287,6 +289,8 @@ export class RootTaskManageCommandBinding {
   ) {
     this.root_id = rootId;
     this.#provisionalIssues = provisionalIssues;
+    ROOT_TASK_MANAGE_BINDINGS.add(this);
+    Object.freeze(this);
   }
 
   static bind(options: BindRootTaskManageCommandOptions): RootTaskManageCommandBinding {
@@ -872,6 +876,26 @@ export class RootTaskManageCommandBinding {
     }
   }
 
+}
+
+const FOR_ROOT_TASK_CORRELATION = RootTaskManageCommandBinding.prototype.forCorrelation;
+
+export function isRootTaskManageCommandBinding(
+  value: unknown,
+): value is RootTaskManageCommandBinding {
+  return typeof value === "object"
+    && value !== null
+    && Object.getPrototypeOf(value) === RootTaskManageCommandBinding.prototype
+    && Object.isFrozen(value)
+    && ROOT_TASK_MANAGE_BINDINGS.has(value);
+}
+
+export function bindRootTaskManageCommandCorrelation(
+  binding: RootTaskManageCommandBinding,
+  correlationId: CorrelationId,
+): RootTaskManageCommandBinding {
+  if (!isRootTaskManageCommandBinding(binding)) throw new Error("unbound_root_task_manager");
+  return FOR_ROOT_TASK_CORRELATION.call(binding, correlationId);
 }
 
 export function bindRootTaskManageCommand(

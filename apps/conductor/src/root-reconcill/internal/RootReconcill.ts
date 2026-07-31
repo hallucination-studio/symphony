@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   CodexProcess,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
+import {
+  snapshotCodexRootLocalOnlyTools,
+  type CodexLocalOnlyDeploymentPolicy,
+} from "../../codex-app-server/internal/CodexLocalOnly.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
 import {
   bindDynamicTools,
@@ -14,6 +19,10 @@ import {
   type DynamicToolBridgeControl,
   type RootToolBridgeLog,
 } from "../../codex-app-server/internal/DynamicToolBridge.js";
+import {
+  bindRootCodeInspection,
+  RootCodeInspection,
+} from "../../codex-app-server/internal/RootCodeInspection.js";
 import {
   parseCorrelationId,
   parseObservationDigest,
@@ -39,7 +48,12 @@ import {
 } from "../../contracts/runtime.js";
 import { asRecord, assertExactKeys, parseBoundedString } from "../../contracts/validation.js";
 import { rootObservationDigest } from "../../observation/RootObservationFacts.js";
-import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
+import type {
+  RootToolBinding,
+  RootToolExecution,
+  RootToolSpec,
+} from "../../runtime/RootToolBoundary.js";
+import { bindRootTools, isRootTools, type RootTools } from "../../runtime/RootTools.js";
 import type {
   RootReconcillFactoryInput,
   RootReconcillFactoryInterface,
@@ -129,6 +143,38 @@ async function canonicalRootHome(value: unknown): Promise<string> {
     return path.normalize(actual);
   } catch {
     throw new Error("invalid_root_home");
+  }
+}
+
+async function canonicalRootWorkspace(value: unknown): Promise<string> {
+  const workspaceRoot = parseBoundedString(value, "invalid_root_workspace", 4_096);
+  if (!path.isAbsolute(workspaceRoot)) throw new Error("invalid_root_workspace");
+  try {
+    const actual = path.normalize(await realpath(workspaceRoot));
+    if (!(await lstat(actual)).isDirectory()) throw new Error("invalid_root_workspace");
+    return actual;
+  } catch {
+    throw new Error("invalid_root_workspace");
+  }
+}
+
+async function resolveRootWorkspace(
+  resolveWorkspaceRoot: (rootId: RootIssueId) => Promise<string>,
+  rootId: RootIssueId,
+  timeoutMs: number,
+): Promise<string> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      resolveWorkspaceRoot(rootId).then(canonicalRootWorkspace),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("invalid_root_workspace")), timeoutMs);
+      }),
+    ]);
+  } catch {
+    throw new Error("invalid_root_workspace");
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 
@@ -668,6 +714,8 @@ export class RootReconcillFactory implements RootReconcillFactoryInterface {
 interface CodexTransportFactoryOptions {
   readonly spawner?: CodexSpawner;
   readonly log: (entry: RootToolBridgeLog) => void;
+  readonly resolveWorkspaceRoot: (rootId: RootIssueId) => Promise<string>;
+  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
 }
 
 type TransportAbort =
@@ -694,7 +742,9 @@ class CodexRootTurnTransport implements RootTurnTransport {
     private readonly process: CodexProcess,
     private readonly thread: CodexThread,
     private readonly target: RuntimeTarget,
-    private readonly tools: RootReconcillToolSet,
+    private readonly tools: RootTools,
+    private readonly codeInspection: RootCodeInspection,
+    private readonly toolSpecs: readonly RootToolSpec[],
     private readonly log: (entry: RootToolBridgeLog) => void,
   ) {}
 
@@ -702,6 +752,7 @@ class CodexRootTurnTransport implements RootTurnTransport {
 
   async turn(request: RootTurnRequest): Promise<RootTurnTransportResult> {
     if (this.#closed) throw new Error("codex_thread_closed");
+    const bindings = this.#bindings(request.correlation_id);
     const deadline = performance.now() + request.timeout_ms;
     let deadlineTimer: NodeJS.Timeout | null = null;
     const deadlineReached = new Promise<void>((resolve) => {
@@ -739,7 +790,7 @@ class CodexRootTurnTransport implements RootTurnTransport {
             target: this.target,
             correlation_id: request.correlation_id,
             max_calls: request.max_tool_calls,
-            bindings: this.tools.bindings(request.correlation_id),
+            bindings,
             log: this.log,
             on_fatal: () => signal({ kind: "failure", turn_id: turnId }),
             on_budget_exhausted: () => signal({ kind: "budget", turn_id: turnId }),
@@ -827,34 +878,93 @@ class CodexRootTurnTransport implements RootTurnTransport {
     bridge();
     if (this.#activeBridge === bridge) this.#activeBridge = null;
   }
+
+  #bindings(correlationId: CorrelationId): readonly RootToolBinding[] {
+    const bindings = [
+      ...bindRootTools(this.tools, correlationId),
+      ...bindRootCodeInspection(this.codeInspection, correlationId),
+    ];
+    if (bindings.length !== this.toolSpecs.length) throw new Error("root_local_only_tool_denied");
+    const expectedByName = new Map(this.toolSpecs.map((spec) => [spec.name, spec]));
+    const boundNames = new Set<string>();
+    return Object.freeze(bindings.map((binding): RootToolBinding => {
+      const expected = expectedByName.get(binding.spec.name);
+      if (
+        expected === undefined
+        || boundNames.has(binding.spec.name)
+        || !isDeepStrictEqual(binding.spec, expected)
+      ) throw new Error("root_local_only_tool_denied");
+      boundNames.add(binding.spec.name);
+      const execute = binding.execute;
+      return Object.freeze({
+        spec: expected,
+        execute: (argumentsValue: unknown, execution: RootToolExecution) =>
+          execute.call(binding, argumentsValue, execution),
+      });
+    }));
+  }
 }
 
 export class CodexRootTurnTransportFactory implements RootTurnTransportFactory {
   constructor(
-    private readonly codex: Omit<CodexProcessOptions, "codexHome" | "rootId" | "runtimeGeneration">,
+    private readonly codex: Omit<
+      CodexProcessOptions,
+      "capabilityMode" | "codexHome" | "rootId" | "runtimeGeneration"
+    >,
     private readonly options: CodexTransportFactoryOptions,
   ) {}
 
   async create(input: RootTurnTransportFactoryInput): Promise<RootTurnTransport> {
+    if (!isRootTools(input.tools)) throw new Error("root_local_only_tool_denied");
+    const tools = input.tools;
+    if (
+      tools.target.root_id !== input.root_id
+      || tools.target.runtime_generation !== input.runtime_generation
+    ) throw new Error("root_local_only_tool_denied");
+    const target = Object.freeze({
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+    });
+    const workspaceRoot = await resolveRootWorkspace(
+      this.options.resolveWorkspaceRoot,
+      input.root_id,
+      this.codex.startupTimeoutMs,
+    );
+    const codeInspection = await RootCodeInspection.create({ target, workspaceRoot });
+    const toolSpecs = snapshotCodexRootLocalOnlyTools([
+      ...tools.specs,
+      ...codeInspection.specs,
+    ]);
     const process = await CodexProcess.start({
       ...this.codex,
       codexHome: input.root_home,
       rootId: input.root_id,
       runtimeGeneration: input.runtime_generation,
+      capabilityMode: {
+        kind: "root_local_only",
+        workspaceRoot,
+        dynamicTools: toolSpecs,
+        deploymentPolicy: this.options.deploymentPolicy,
+      },
     }, this.options.spawner);
     try {
+      const runtime = process.localOnly;
+      if (runtime?.role !== "root") throw new Error("codex_local_only_capability_mismatch");
       const thread = await CodexThread.create(process, {
-        cwd: input.root_home,
-        tools: input.tools.specs,
+        cwd: workspaceRoot,
+        tools: runtime.dynamicTools,
         correlationId: parseCorrelationId(`thread:${randomUUID()}`),
         access: { kind: "read_only" },
-        toolMode: "dynamic_only",
+        toolMode: "local_only",
+        nativeTools: false,
       });
       return new CodexRootTurnTransport(
         process,
         thread,
-        Object.freeze({ root_id: input.root_id, runtime_generation: input.runtime_generation }),
-        input.tools,
+        target,
+        tools,
+        codeInspection,
+        runtime.dynamicTools,
         this.options.log,
       );
     } catch (error) {
