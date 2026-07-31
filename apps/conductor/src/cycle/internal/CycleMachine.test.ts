@@ -551,7 +551,7 @@ test("Cycle host permits one action and fences output that arrives after retirem
     workflow,
     reader: { read: async (request) => snapshot(request.correlation_id) },
     machine: { advance: () => pending },
-    machine_lifecycle: { retire: () => { lifecycleRetirements += 1; } },
+    machine_lifecycle: { retire: async () => { lifecycleRetirements += 1; } },
   });
   const prepared = await host.prepare(
     taskSnapshot("in_progress"),

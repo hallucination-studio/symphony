@@ -1,5 +1,7 @@
 import type { BoundaryErrorCode } from "../contracts/common-outcomes.js";
 import {
+  parseCycleIssueId,
+  parseStageIssueId,
   parseTaskIssueId,
   parseTaskLabelId,
   parseTaskStateId,
@@ -7,7 +9,9 @@ import {
   type CycleIssueId,
   type RootIssueId,
   type RuntimeGeneration,
+  type StageIssueId,
   type TaskLabelId,
+  type TaskRevision,
   type TaskStateId,
 } from "../contracts/identity.js";
 import {
@@ -31,10 +35,39 @@ type AdmissionParkReason =
 type RuntimeFailureReason =
   | "cycle_boundary_failed"
   | "cycle_preparation_failed"
+  | "root_home_cleanup_failed"
   | "runtime_preparation_failed"
+  | "runtime_shutdown_failed"
   | "turn_boundary_failed";
 
+interface RootCleanupStageLog {
+  readonly stage_id: StageIssueId;
+  readonly revision: TaskRevision;
+}
+
+interface RootCleanupCycleLog {
+  readonly cycle_id: CycleIssueId;
+  readonly revision: TaskRevision;
+  readonly stages: readonly RootCleanupStageLog[];
+}
+
+interface RootCleanupLogIdentity {
+  readonly root_id: RootIssueId;
+  readonly root_revision: TaskRevision;
+  readonly runtime_generation: RuntimeGeneration | null;
+  readonly correlation_id: CorrelationId;
+  readonly cycles: readonly RootCleanupCycleLog[];
+}
+
 export type SerialConductorLog =
+  | (RootCleanupLogIdentity & {
+    readonly event: "root_cleanup_started" | "root_cleanup_completed";
+    readonly reason_code: "root_done";
+  })
+  | (RootCleanupLogIdentity & {
+    readonly event: "root_cleanup_failed";
+    readonly reason_code: "root_home_cleanup_failed" | "runtime_shutdown_failed";
+  })
   | {
     readonly event: "root_observation_buffered";
     readonly root_id: RootIssueId;
@@ -125,6 +158,10 @@ export type SerialConductorLog =
 export type SerialRunResult =
   | { readonly kind: "idle" }
   | {
+    readonly kind: "root_cleanup_completed";
+    readonly root_id: RootIssueId;
+  }
+  | {
     readonly kind: "turn_completed";
     readonly root_id: RootIssueId;
     readonly outcome: RootTurnOutcome["outcome"];
@@ -162,6 +199,24 @@ function rootIssue(observation: TaskObservationEvent): TaskIssueSnapshot {
   const issue = observation.task.issues.find(({ issue_id }) => issue_id === rootTaskId);
   if (issue === undefined) throw new Error("missing_root_identity");
   return issue;
+}
+
+function cleanupCycles(observation: TaskObservationEvent): readonly RootCleanupCycleLog[] {
+  const rootTaskId = parseTaskIssueId(observation.root_id);
+  return Object.freeze(observation.task.issues
+    .filter(({ parent_id }) => parent_id === rootTaskId)
+    .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
+    .map((cycle) => Object.freeze({
+      cycle_id: parseCycleIssueId(cycle.issue_id),
+      revision: cycle.revision,
+      stages: Object.freeze(observation.task.issues
+        .filter(({ parent_id }) => parent_id === cycle.issue_id)
+        .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
+        .map((stage) => Object.freeze({
+          stage_id: parseStageIssueId(stage.issue_id),
+          revision: stage.revision,
+        }))),
+    })));
 }
 
 function admissionReason(
@@ -243,11 +298,19 @@ export class SerialConductor {
   }
 
   async #runNext(): Promise<SerialRunResult> {
+    const observations = [...this.#pending.values()]
+      .sort((left, right) => left.root_id.localeCompare(right.root_id));
+    for (const observation of observations) {
+      if (this.#pending.get(observation.root_id) !== observation) continue;
+      const issue = rootIssue(observation);
+      if (issue.status !== this.#rootStates.done) continue;
+      this.#pending.delete(observation.root_id);
+      return this.#cleanupDoneRoot(observation, issue);
+    }
+
     const continuation = await this.#runCycleContinuation();
     if (continuation !== null) return continuation;
 
-    const observations = [...this.#pending.values()]
-      .sort((left, right) => left.root_id.localeCompare(right.root_id));
     for (const observation of observations) {
       if (this.#pending.get(observation.root_id) !== observation) continue;
       const parkReason = admissionReason(
@@ -354,6 +417,45 @@ export class SerialConductor {
       });
     }
     return Object.freeze({ kind: "idle" });
+  }
+
+  async #cleanupDoneRoot(
+    observation: TaskObservationEvent,
+    issue: TaskIssueSnapshot,
+  ): Promise<SerialRunResult> {
+    const rootId = observation.root_id;
+    this.#cycleContinuations.delete(rootId);
+    this.#stopped.add(rootId);
+    const identity = Object.freeze({
+      root_id: rootId,
+      root_revision: issue.revision,
+      runtime_generation: this.registry.generation(rootId),
+      correlation_id: observation.correlation_id,
+      cycles: cleanupCycles(observation),
+    });
+    this.options.log(Object.freeze({
+      event: "root_cleanup_started",
+      ...identity,
+      reason_code: "root_done",
+    }));
+    const result = await this.registry.retire(rootId);
+    const completedIdentity = result.runtime_generation === identity.runtime_generation
+      ? identity
+      : Object.freeze({ ...identity, runtime_generation: result.runtime_generation });
+    if (result.outcome === "failed") {
+      this.options.log(Object.freeze({
+        event: "root_cleanup_failed",
+        ...completedIdentity,
+        reason_code: result.reason_code,
+      }));
+      return Object.freeze({ kind: "failed", root_id: rootId, reason_code: result.reason_code });
+    }
+    this.options.log(Object.freeze({
+      event: "root_cleanup_completed",
+      ...completedIdentity,
+      reason_code: "root_done",
+    }));
+    return Object.freeze({ kind: "root_cleanup_completed", root_id: rootId });
   }
 
   async #runCycleContinuation(): Promise<SerialRunResult | null> {

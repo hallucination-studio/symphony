@@ -1385,8 +1385,10 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
 
 test("retirement closes Plan and fences its late output from graph and status effects", async () => {
   const events: string[] = [];
+  let releaseClose: (() => void) | undefined;
   let releasePlan: (() => void) | undefined;
   let markPlanStarted: (() => void) | undefined;
+  const closeReleased = new Promise<void>((resolve) => { releaseClose = resolve; });
   const planStarted = new Promise<void>((resolve) => { markPlanStarted = resolve; });
   const planReleased = new Promise<void>((resolve) => { releasePlan = resolve; });
   const manager = unexpectedManager();
@@ -1424,7 +1426,11 @@ test("retirement closes Plan and fences its late output from graph and status ef
       await planReleased;
       throw new Error("late_plan_output");
     },
-    close: async () => { events.push("close_plan_performer"); },
+    close: async () => {
+      events.push("close_plan_performer");
+      await closeReleased;
+      throw new Error("private_process_group_failure");
+    },
   };
   const machine = new CyclePlanMachine({
     workflow,
@@ -1438,10 +1444,19 @@ test("retirement closes Plan and fences its late output from graph and status ef
 
   const running = machine.advance(planOnlyRequest(), LIVE_EXECUTION);
   await planStarted;
-  machine.retire();
+  const retirement = machine.retire();
+  let retirementSettled = false;
+  void retirement.then(
+    () => { retirementSettled = true; },
+    () => { retirementSettled = true; },
+  );
   releasePlan?.();
 
   await assert.rejects(running, /cycle_machine_late_output/u);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(retirementSettled, false);
+  releaseClose?.();
+  await assert.rejects(retirement, /cycle_machine_retirement_failed/u);
   assert.deepEqual(events, ["plan_in_progress", "plan_turn", "close_plan_performer"]);
 });
 

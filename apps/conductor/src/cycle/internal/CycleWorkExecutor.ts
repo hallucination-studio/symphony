@@ -230,6 +230,7 @@ export class CycleWorkExecutor {
   #active = false;
   #epoch = 0;
   #performer: WorkPerformerInterface | null = null;
+  #retirement: Promise<void> | null = null;
   #retired = false;
 
   constructor(options: CycleWorkExecutorOptions) {
@@ -306,13 +307,22 @@ export class CycleWorkExecutor {
     }
   }
 
-  retire(): void {
-    if (this.#retired) return;
+  retire(): Promise<void> {
+    if (this.#retirement !== null) return this.#retirement;
     this.#retired = true;
     this.#epoch += 1;
     const performer = this.#performer;
     this.#performer = null;
-    if (performer !== null) void performer.close().catch(() => undefined);
+    let retirement: Promise<void>;
+    try {
+      retirement = performer?.close() ?? Promise.resolve();
+    } catch {
+      retirement = Promise.reject(new Error("cycle_work_retirement_failed"));
+    }
+    this.#retirement = retirement.catch(() => {
+      throw new Error("cycle_work_retirement_failed");
+    });
+    return this.#retirement;
   }
 
   async #transition(

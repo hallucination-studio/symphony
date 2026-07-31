@@ -92,7 +92,7 @@ function rootAvailableCycle(): CycleMachineHostInterface {
     prepare: async () => Object.freeze({ kind: "root_available" }),
     prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
     run: async () => { throw new Error("unexpected_cycle_action"); },
-    retire: () => undefined,
+    retire: async () => undefined,
   };
 }
 

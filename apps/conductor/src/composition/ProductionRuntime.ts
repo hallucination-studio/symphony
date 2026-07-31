@@ -14,6 +14,7 @@ import {
   type CorrelationId,
   type CycleIssueId,
   type RootIssueId,
+  type Revision,
   type RuntimeGeneration,
   type StageIssueId,
   type TaskIssueId,
@@ -45,6 +46,7 @@ import {
   parseBoundedString,
 } from "../contracts/validation.js";
 import { isSensitiveWorkspacePath } from "../codex-app-server/internal/SensitiveWorkspacePaths.js";
+import type { RootToolBridgeLog } from "../codex-app-server/internal/DynamicToolBridge.js";
 import { CycleMachineHost, type CycleMachineReadRequest, type FreshCycleExecutionReader } from "../cycle/internal/CycleMachine.js";
 import { CyclePlanMachine } from "../cycle/internal/CyclePlanMachine.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
@@ -62,10 +64,12 @@ import type {
 import {
   CodexRootTurnTransportFactory,
   RootReconcillFactory,
+  type RootReconcillLog,
 } from "../root-reconcill/internal/RootReconcill.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
 import {
   AcceptedRevisionDeliveryCoordinator,
+  type AcceptedRevisionDeliveryFailureCode,
   type AcceptedRevisionDeliveryResult,
 } from "../runtime/AcceptedRevisionDelivery.js";
 import { createAcceptedRevisionAuthority } from "../runtime/RootAcceptedRevision.js";
@@ -101,7 +105,30 @@ export interface ProductionRoute extends RootRoutingConfig {
   readonly delivery: DeliveryInterface;
 }
 
-export type ProductionRuntimeLog = object;
+type AcceptedRevisionDeliveryLog =
+  | {
+    readonly event: "accepted_revision_delivery_started";
+    readonly root_id: RootIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly cycle_id: CycleIssueId;
+    readonly revision: Revision;
+  }
+  | {
+    readonly event: "accepted_revision_delivery_completed";
+    readonly root_id: RootIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly cycle_id: CycleIssueId;
+    readonly revision: Revision;
+    readonly outcome: AcceptedRevisionDeliveryResult["outcome"];
+    readonly reason_code?: AcceptedRevisionDeliveryFailureCode;
+  };
+
+export type ProductionRuntimeLog =
+  | AcceptedRevisionDeliveryLog
+  | RootReconcillLog
+  | RootToolBridgeLog;
 
 function kindOf(
   issue: TaskIssueSnapshot,

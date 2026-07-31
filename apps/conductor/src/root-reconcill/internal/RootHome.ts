@@ -64,6 +64,12 @@ export class RootHomeManager {
   async delete(rootId: RootIssueId, isLive: (rootId: RootIssueId) => boolean): Promise<void> {
     if (isLive(rootId)) throw new Error("root_runtime_is_live");
     const rootPath = this.pathFor(rootId);
+    try {
+      await lstat(rootPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new Error("invalid_root_home");
+    }
     await this.#assertOwnedPath(rootId, rootPath);
     const continuity = new RootContinuityStore(rootPath);
     const state = await continuity.load();

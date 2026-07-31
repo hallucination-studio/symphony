@@ -47,6 +47,7 @@ export interface RegisteredRootRuntime {
   run(prepared: PreparedRootObservation): Promise<RootTurnOutcome>;
   runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
   accept(prepared: PreparedRootObservation): void;
+  retire(): Promise<void>;
 }
 
 export type RootRuntimePreparation = RootObservationAttempt | PreparedCycleAction;
@@ -61,6 +62,7 @@ export class RootRuntime implements RegisteredRootRuntime {
   readonly #target: RuntimeTarget;
   readonly #turn: RootReconcillInterface;
   readonly #workspace: RootWorkspaceIdentity;
+  #retirement: Promise<void> | null = null;
 
   constructor(binding: RootRuntimeBinding) {
     const target = Object.freeze({
@@ -152,5 +154,26 @@ export class RootRuntime implements RegisteredRootRuntime {
     this.#observations.accept(prepared);
     this.#prepared.delete(prepared);
     this.#outcomes.delete(prepared);
+  }
+
+  retire(): Promise<void> {
+    if (this.#retirement !== null) return this.#retirement;
+    const retirements: Promise<void>[] = [];
+    try {
+      retirements.push(this.#cycle.retire());
+    } catch {
+      retirements.push(Promise.reject(new Error("root_runtime_retirement_failed")));
+    }
+    try {
+      retirements.push(this.#turn.close());
+    } catch {
+      retirements.push(Promise.reject(new Error("root_runtime_retirement_failed")));
+    }
+    this.#retirement = Promise.allSettled(retirements).then((results) => {
+      if (results.some(({ status }) => status === "rejected")) {
+        throw new Error("root_runtime_retirement_failed");
+      }
+    });
+    return this.#retirement;
   }
 }

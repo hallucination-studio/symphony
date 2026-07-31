@@ -9,12 +9,13 @@ import { GitWorktree } from "../git/internal/GitWorktree.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
 import { RootRuntimeRegistry } from "../runtime/RootRuntimeRegistry.js";
 import { SerialConductor } from "../runtime/SerialConductor.js";
-import type { SerialRunResult } from "../runtime/SerialConductor.js";
+import type { SerialConductorLog, SerialRunResult } from "../runtime/SerialConductor.js";
 import { createTaskManageCallerAuthority } from "../task-management/api/TaskManageCapability.js";
 import type { TaskManageObserverInterface } from "../task-management/api/TaskManageObserverInterface.js";
 import { LinearSdkQueryClient } from "../task-management/linear/LinearClient.js";
 import { LinearCommands } from "../task-management/linear/LinearCommands.js";
 import { LinearObserver } from "../task-management/linear/LinearObserver.js";
+import type { TaskObservationLog } from "../task-management/linear/LinearObserver.js";
 import { LinearQueries } from "../task-management/linear/LinearQueries.js";
 import type { ConductorStartup } from "./startup.js";
 import {
@@ -51,7 +52,7 @@ export interface ProductionConductor extends ProductionPollTarget {
   readonly polling_interval_ms: number;
 }
 
-export type ProductionLog = ProductionRuntimeLog;
+export type ProductionLog = ProductionRuntimeLog | SerialConductorLog | TaskObservationLog;
 
 export interface ProductionPollResult {
   readonly observations: number;
@@ -170,7 +171,7 @@ export async function createProductionConductor(
     homes,
     routes,
     log,
-  }));
+  }), homes);
   const scheduler = new SerialConductor(registry, {
     agent_actor_id: startup.config.agent_actor_id,
     root_kind_label_id: startup.config.workflow.labels.root,

@@ -256,6 +256,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
   readonly #workflow: TaskWorkflowIdentities;
   readonly #workExecutor: CycleWorkExecutor;
   #epoch = 0;
+  #retirement: Promise<void> | null = null;
   #retired = false;
 
   constructor(options: CyclePlanMachineOptions) {
@@ -298,15 +299,25 @@ export class CyclePlanMachine implements CycleMachineInterface {
     return outcome;
   }
 
-  retire(): void {
-    if (this.#retired) return;
+  retire(): Promise<void> {
+    if (this.#retirement !== null) return this.#retirement;
     this.#retired = true;
     this.#epoch += 1;
     const planPerformer = this.#planPerformer;
     this.#planPerformer = null;
-    if (planPerformer !== null) void planPerformer.close().catch(() => undefined);
-    this.#workExecutor.retire();
-    this.#commitVerifier.retire();
+    const retirements: Promise<void>[] = [];
+    try {
+      retirements.push(planPerformer?.close() ?? Promise.resolve());
+    } catch {
+      retirements.push(Promise.reject(new Error("cycle_plan_retirement_failed")));
+    }
+    retirements.push(this.#workExecutor.retire(), this.#commitVerifier.retire());
+    this.#retirement = Promise.allSettled(retirements).then((results) => {
+      if (results.some(({ status }) => status === "rejected")) {
+        throw new Error("cycle_machine_retirement_failed");
+      }
+    });
+    return this.#retirement;
   }
 
   async #advance(

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, symlink } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -88,4 +88,40 @@ test("delete refuses live runtime, mismatched owner, and path escape", async () 
   await mkdir(path.dirname(escapingPath), { recursive: true });
   await symlink(fixture.performerHome, escapingPath, "dir");
   await assert.rejects(escapingManager.delete(rootId, () => false), /invalid_root_home/u);
+});
+
+test("delete removes only the canonical owned Root Home", async () => {
+  const fixture = await directories();
+  const userCode = path.join(fixture.root, "user-code");
+  await mkdir(userCode);
+  await Promise.all([
+    writeFile(path.join(fixture.performerHome, "performer-marker"), "performer", "utf8"),
+    writeFile(path.join(userCode, "source.ts"), "export const ownedByUser = true;\n", "utf8"),
+  ]);
+  const manager = await RootHomeManager.create(fixture.programData, fixture.performerHome);
+  const firstRootId = parseRootIssueId("LIN-1");
+  const secondRootId = parseRootIssueId("LIN-2");
+  const first = await manager.open(firstRootId);
+  const second = await manager.open(secondRootId);
+  await Promise.all([
+    first.continuity.write(state("LIN-1")),
+    second.continuity.write(state("LIN-2")),
+  ]);
+
+  await manager.delete(firstRootId, () => false);
+
+  await assert.rejects(lstat(first.path), { code: "ENOENT" });
+  assert.equal((await second.continuity.load()).root_id, secondRootId);
+  assert.equal(await readFile(path.join(fixture.performerHome, "performer-marker"), "utf8"), "performer");
+  assert.equal(
+    await readFile(path.join(userCode, "source.ts"), "utf8"),
+    "export const ownedByUser = true;\n",
+  );
+});
+
+test("delete is idempotent when the canonical Root Home does not exist", async () => {
+  const fixture = await directories();
+  const manager = await RootHomeManager.create(fixture.programData, fixture.performerHome);
+
+  await assert.doesNotReject(manager.delete(parseRootIssueId("LIN-404"), () => false));
 });

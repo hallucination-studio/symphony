@@ -316,6 +316,7 @@ export class CycleCommitVerifier {
   #performer: VerifyPerformerInterface | null = null;
   readonly #performerFactory: CycleVerifyPerformerFactory;
   readonly #reader: FreshCycleExecutionReader;
+  #retirement: Promise<void> | null = null;
   #retired = false;
   readonly #taskManager: TaskManageCommandInterface;
   readonly #workflow: TaskWorkflowIdentities;
@@ -458,13 +459,22 @@ export class CycleCommitVerifier {
     }
   }
 
-  retire(): void {
-    if (this.#retired) return;
+  retire(): Promise<void> {
+    if (this.#retirement !== null) return this.#retirement;
     this.#retired = true;
     this.#epoch += 1;
     const performer = this.#performer;
     this.#performer = null;
-    if (performer !== null) void performer.close().catch(() => undefined);
+    let retirement: Promise<void>;
+    try {
+      retirement = performer?.close() ?? Promise.resolve();
+    } catch {
+      retirement = Promise.reject(new Error("cycle_verify_retirement_failed"));
+    }
+    this.#retirement = retirement.catch(() => {
+      throw new Error("cycle_verify_retirement_failed");
+    });
+    return this.#retirement;
   }
 
   async #transitionVerify(

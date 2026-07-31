@@ -68,11 +68,11 @@ export interface CycleMachineHostInterface {
   ): Promise<CycleMachinePreparation>;
   prepareContinuation(): Promise<CycleMachinePreparation>;
   run(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
-  retire(): void;
+  retire(): Promise<void>;
 }
 
 export interface CycleMachineLifecycle {
-  retire(): void;
+  retire(): Promise<void>;
 }
 
 export interface CycleMachineHostOptions {
@@ -203,6 +203,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
   #epoch = 0;
   #inFlight: PreparedCycleAction | null = null;
   #ready: PreparedCycleAction | null = null;
+  #retirement: Promise<void> | null = null;
   #retired = false;
 
   constructor(options: CycleMachineHostOptions) {
@@ -373,14 +374,23 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     return result;
   }
 
-  retire(): void {
-    if (this.#retired) return;
+  retire(): Promise<void> {
+    if (this.#retirement !== null) return this.#retirement;
     this.#retired = true;
     this.#active = null;
     this.#acceptanceEvidence = null;
     this.#ready = null;
     this.#epoch += 1;
-    this.#machineLifecycle?.retire();
+    let retirement: Promise<void>;
+    try {
+      retirement = this.#machineLifecycle?.retire() ?? Promise.resolve();
+    } catch {
+      retirement = Promise.reject(new Error("cycle_machine_retirement_failed"));
+    }
+    this.#retirement = retirement.catch(() => {
+      throw new Error("cycle_machine_retirement_failed");
+    });
+    return this.#retirement;
   }
 
   async #readAction(

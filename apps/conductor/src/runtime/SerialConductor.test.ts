@@ -7,6 +7,7 @@ import {
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseStageIssueId,
   parseTaskRevision,
   type RootIssueId,
 } from "../contracts/identity.js";
@@ -63,6 +64,50 @@ function task(rootId: RootIssueId, options: TaskOptions = {}): TaskSnapshot {
   });
 }
 
+function doneTask(rootId: RootIssueId): TaskSnapshot {
+  const cycleId = parseCycleIssueId(`${rootId}:CYCLE`);
+  const stageId = parseStageIssueId(`${rootId}:STAGE`);
+  return parseTaskSnapshot({
+    root_id: rootId,
+    issues: [
+      {
+        issue_id: rootId,
+        revision: "revision:root:done",
+        status: rootStates.done,
+        title: `Done ${rootId}`,
+        description: "root-description-secret",
+        parent_id: null,
+        labels: [rootLabelId],
+        delegate_id: agentActor,
+        priority: 1,
+      },
+      {
+        issue_id: cycleId,
+        revision: "revision:cycle:done",
+        status: "state:cycle:succeeded",
+        title: "Completed Cycle",
+        description: "cycle-handoff-secret",
+        parent_id: rootId,
+        labels: ["label:cycle"],
+        delegate_id: null,
+        priority: null,
+      },
+      {
+        issue_id: stageId,
+        revision: "revision:stage:done",
+        status: "state:stage:done",
+        title: "Completed Work",
+        description: "credential-secret",
+        parent_id: cycleId,
+        labels: ["label:work"],
+        delegate_id: null,
+        priority: null,
+      },
+    ],
+    relations: [],
+  });
+}
+
 function event(
   snapshot: TaskSnapshot,
   correlationId: string,
@@ -96,7 +141,7 @@ function rootAvailableCycle(rootId: RootIssueId): CycleMachineHostInterface {
     prepare: async () => Object.freeze({ kind: "root_available" }),
     prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
     run: async () => { throw new Error("unexpected_cycle_action"); },
-    retire: () => undefined,
+    retire: async () => undefined,
   };
 }
 
@@ -136,6 +181,9 @@ function cycleResult(
 function harness(
   run?: RootReconcillInterface["run"],
   cycleFactory: (rootId: RootIssueId) => CycleMachineHostInterface = rootAvailableCycle,
+  cleanup?: {
+    delete(rootId: RootIssueId, isLive: (candidate: RootIssueId) => boolean): Promise<void>;
+  },
 ): Harness {
   const creations: RootIssueId[] = [];
   const inputs: RootTurnInput[] = [];
@@ -189,7 +237,7 @@ function harness(
         },
       });
     },
-  });
+  }, cleanup);
   return {
     conductor: new SerialConductor(registry, {
       agent_actor_id: agentActor,
@@ -240,7 +288,7 @@ test("Cycle actions park Root turns, own the global slot, and continue before an
         }
         return cycleResult(prepared, "no_action");
       },
-      retire: () => undefined,
+      retire: async () => undefined,
     };
   });
   f.conductor.admit([
@@ -298,7 +346,7 @@ test("Root resumes after a Cycle reaches Awaiting Acceptance and a fresh observa
         active = false;
         return cycleResult(prepared, "awaiting_acceptance");
       },
-      retire: () => undefined,
+      retire: async () => undefined,
     };
   });
 
@@ -347,7 +395,7 @@ test("a Cycle precondition failure refreshes before another Root runs", async ()
         order.push(`cycle:${rootId}`);
         return cycleResult(prepared, actions === 1 ? "precondition_failed" : "no_action");
       },
-      retire: () => undefined,
+      retire: async () => undefined,
     };
   });
   f.conductor.admit([
@@ -371,7 +419,7 @@ test("Cycle boundary failures are correlated, sanitized, and stop the Root runti
     prepare: async (_task, correlationId) => cycleAction(createdRootId, correlationId),
     prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
     run: async () => { throw new Error("secret-provider-cycle-payload"); },
-    retire: () => undefined,
+    retire: async () => undefined,
   }));
   const initial = task(rootId);
   f.conductor.admit([event(initial, "corr:cycle:failed")]);
@@ -551,4 +599,135 @@ test("turn boundary failures are sanitized and never advance the accepted baseli
   const prepared = await (await f.registry.getOrCreate(rootId))
     .prepare(event(latest, "corr:poll:2", initial));
   assert.equal(prepared.kind, "bootstrap");
+});
+
+test("fresh Done fences an active Cycle continuation before another action", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  let actions = 0;
+  let retirements = 0;
+  const f = harness(undefined, (requestedRootId) => ({
+    ...rootAvailableCycle(requestedRootId),
+    prepare: async (_task, correlationId) => cycleAction(requestedRootId, correlationId),
+    prepareContinuation: async () => cycleAction(requestedRootId, "corr:cycle:continuation"),
+    run: async (prepared) => {
+      actions += 1;
+      return cycleResult(prepared, "advanced");
+    },
+    retire: async () => { retirements += 1; },
+  }));
+  const initial = task(rootId);
+  f.conductor.admit([event(initial, "corr:root:active")]);
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "cycle_action_completed",
+    root_id: rootId,
+    outcome: "advanced",
+  });
+  f.conductor.admit([event(doneTask(rootId), "corr:root:done", initial)]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "root_cleanup_completed",
+    root_id: rootId,
+  });
+  assert.equal(actions, 1);
+  assert.equal(retirements, 1);
+});
+
+test("fresh Done retires the Root runtime and logs only correlated cleanup facts", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  const lifecycle: string[] = [];
+  const f = harness(undefined, (requestedRootId) => ({
+    ...rootAvailableCycle(requestedRootId),
+    retire: async () => { lifecycle.push("cycle_retired"); },
+  }), {
+    delete: async (deletedRootId, isLive) => {
+      assert.equal(deletedRootId, rootId);
+      assert.equal(isLive(rootId), false);
+      lifecycle.push("root_home_deleted");
+    },
+  });
+  const initial = task(rootId);
+  f.conductor.admit([event(initial, "corr:root:active")]);
+  await f.conductor.runNext();
+  const done = doneTask(rootId);
+  f.conductor.admit([event(done, "corr:root:done", initial)]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "root_cleanup_completed",
+    root_id: rootId,
+  });
+
+  assert.equal(f.registry.has(rootId), false);
+  assert.deepEqual(lifecycle, ["cycle_retired", "root_home_deleted"]);
+  const started = f.logs.find((entry) => entry.event === "root_cleanup_started");
+  assert.deepEqual(started, {
+    event: "root_cleanup_started",
+    root_id: rootId,
+    root_revision: parseTaskRevision("revision:root:done"),
+    runtime_generation: parseRuntimeGeneration(1),
+    correlation_id: parseCorrelationId("corr:root:done"),
+    reason_code: "root_done",
+    cycles: [{
+      cycle_id: parseCycleIssueId(`${rootId}:CYCLE`),
+      revision: parseTaskRevision("revision:cycle:done"),
+      stages: [{
+        stage_id: parseStageIssueId(`${rootId}:STAGE`),
+        revision: parseTaskRevision("revision:stage:done"),
+      }],
+    }],
+  });
+  assert.equal(f.logs.some((entry) => entry.event === "root_cleanup_completed"), true);
+  const serialized = JSON.stringify(f.logs);
+  assert.equal(serialized.includes("root-description-secret"), false);
+  assert.equal(serialized.includes("cycle-handoff-secret"), false);
+  assert.equal(serialized.includes("credential-secret"), false);
+});
+
+test("a first fresh Done observation cleans a persisted Home without creating a runtime", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  const deleted: RootIssueId[] = [];
+  const f = harness(undefined, rootAvailableCycle, {
+    delete: async (deletedRootId, isLive) => {
+      assert.equal(isLive(deletedRootId), false);
+      deleted.push(deletedRootId);
+    },
+  });
+  f.conductor.admit([event(doneTask(rootId), "corr:root:already-done")]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "root_cleanup_completed",
+    root_id: rootId,
+  });
+
+  assert.deepEqual(f.creations, []);
+  assert.deepEqual(deleted, [rootId]);
+  const started = f.logs.find((entry) => entry.event === "root_cleanup_started");
+  assert.ok(started?.event === "root_cleanup_started");
+  assert.equal(started.runtime_generation, null);
+});
+
+test("failed process retirement stays visible, blocks Home cleanup, and hides raw errors", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  let deletes = 0;
+  const f = harness(undefined, (requestedRootId) => ({
+    ...rootAvailableCycle(requestedRootId),
+    retire: async () => { throw new Error("raw-process-error-with-credential"); },
+  }), {
+    delete: async () => { deletes += 1; },
+  });
+  const initial = task(rootId);
+  f.conductor.admit([event(initial, "corr:root:active")]);
+  await f.conductor.runNext();
+  f.conductor.admit([event(doneTask(rootId), "corr:root:done", initial)]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "failed",
+    root_id: rootId,
+    reason_code: "runtime_shutdown_failed",
+  });
+
+  assert.equal(f.registry.has(rootId), true);
+  assert.equal(deletes, 0);
+  assert.equal(f.logs.some((entry) => entry.event === "root_cleanup_failed"
+    && entry.reason_code === "runtime_shutdown_failed"), true);
+  assert.equal(JSON.stringify(f.logs).includes("raw-process-error-with-credential"), false);
 });

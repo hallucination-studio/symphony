@@ -51,6 +51,7 @@ function taskEvent() {
 function binding(
   run: RootReconcillInterface["run"],
   close: RootReconcillInterface["close"] = () => Promise.resolve(),
+  cycle: CycleMachineHostInterface = rootAvailableCycle(rootId),
 ): RootRuntimeBinding {
   const workspace = Object.freeze({
     root_id: rootId,
@@ -61,7 +62,7 @@ function binding(
   return Object.freeze({
     target: Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) }),
     workspace,
-    cycle: rootAvailableCycle(rootId),
+    cycle,
     git: {
       read: async () => parseGitSnapshot({
         repository_id: workspace.repository_id,
@@ -92,7 +93,7 @@ function rootAvailableCycle(cycleRootId: RootIssueId): CycleMachineHostInterface
     prepare: async () => Object.freeze({ kind: "root_available" }),
     prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
     run: async () => { throw new Error("unexpected_cycle_action"); },
-    retire: () => undefined,
+    retire: async () => undefined,
   };
 }
 
@@ -121,6 +122,36 @@ test("registry creates one identity-bound runtime under concurrent lookup", asyn
   assert.equal(creations, 1);
   assert.equal(registry.size, 1);
   assert.equal(registry.has(rootId), true);
+});
+
+test("retirement fences every caller waiting on the same runtime creation", async () => {
+  let releaseCreation: (() => void) | undefined;
+  const creationReleased = new Promise<void>((resolve) => { releaseCreation = resolve; });
+  const registry = new RootRuntimeRegistry({
+    create: async () => {
+      await creationReleased;
+      return binding(async (input) => ({
+        schema_version: 1,
+        root_id: input.root_id,
+        runtime_generation: input.runtime_generation,
+        correlation_id: input.correlation_id,
+        outcome: "quiescent",
+      }));
+    },
+  });
+
+  const first = registry.getOrCreate(rootId);
+  const second = registry.getOrCreate(rootId);
+  const retirement = registry.retire(rootId);
+  releaseCreation?.();
+
+  await assert.rejects(first, /root_runtime_retiring/u);
+  await assert.rejects(second, /root_runtime_retiring/u);
+  assert.deepEqual(await retirement, {
+    outcome: "completed",
+    runtime_generation: parseRuntimeGeneration(1),
+  });
+  assert.equal(registry.has(rootId), false);
 });
 
 test("runtime validates turn correlation before accepting an observation", async () => {
@@ -244,4 +275,105 @@ test("registry closes a unique Reconcill rejected by aggregate validation", asyn
 
   await assert.rejects(registry.getOrCreate(rootId), /root_runtime_generation_mismatch/u);
   assert.equal(closes, 1);
+});
+
+test("runtime retirement is joinable and deletes the Root Home only after every resource stops", async () => {
+  const events: string[] = [];
+  let releaseCycle: (() => void) | undefined;
+  let releaseTurn: (() => void) | undefined;
+  const cycleClosed = new Promise<void>((resolve) => { releaseCycle = resolve; });
+  const turnClosed = new Promise<void>((resolve) => { releaseTurn = resolve; });
+  const cycle = rootAvailableCycle(rootId);
+  const registry = new RootRuntimeRegistry({
+    create: async () => binding(
+      async (input) => ({
+        schema_version: 1,
+        root_id: input.root_id,
+        runtime_generation: input.runtime_generation,
+        correlation_id: input.correlation_id,
+        outcome: "quiescent",
+      }),
+      async () => {
+        events.push("turn_close_started");
+        await turnClosed;
+        events.push("turn_close_completed");
+      },
+      {
+        ...cycle,
+        retire: async () => {
+          events.push("cycle_retire_started");
+          await cycleClosed;
+          events.push("cycle_retire_completed");
+        },
+      },
+    ),
+  }, {
+    delete: async (retiredRootId, isLive) => {
+      assert.equal(retiredRootId, rootId);
+      assert.equal(isLive(rootId), false);
+      events.push("root_home_deleted");
+    },
+  });
+  await registry.getOrCreate(rootId);
+
+  const first = registry.retire(rootId);
+  const second = registry.retire(rootId);
+  assert.equal(first, second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registry.has(rootId), true);
+  assert.deepEqual(events, ["cycle_retire_started", "turn_close_started"]);
+
+  releaseCycle?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registry.has(rootId), true);
+  assert.equal(events.includes("root_home_deleted"), false);
+  releaseTurn?.();
+
+  assert.deepEqual(await first, {
+    outcome: "completed",
+    runtime_generation: parseRuntimeGeneration(1),
+  });
+  assert.equal(registry.has(rootId), false);
+  assert.deepEqual(events, [
+    "cycle_retire_started",
+    "turn_close_started",
+    "cycle_retire_completed",
+    "turn_close_completed",
+    "root_home_deleted",
+  ]);
+});
+
+test("failed runtime retirement remains live, visible, and blocks Root Home cleanup", async () => {
+  let deletes = 0;
+  const cycle = rootAvailableCycle(rootId);
+  const registry = new RootRuntimeRegistry({
+    create: async () => binding(
+      async (input) => ({
+        schema_version: 1,
+        root_id: input.root_id,
+        runtime_generation: input.runtime_generation,
+        correlation_id: input.correlation_id,
+        outcome: "quiescent",
+      }),
+      async () => undefined,
+      {
+        ...cycle,
+        retire: async () => { throw new Error("private_process_group_failure"); },
+      },
+    ),
+  }, {
+    delete: async () => { deletes += 1; },
+  });
+  await registry.getOrCreate(rootId);
+
+  const retirement = registry.retire(rootId);
+  assert.deepEqual(await retirement, {
+    outcome: "failed",
+    runtime_generation: parseRuntimeGeneration(1),
+    reason_code: "runtime_shutdown_failed",
+  });
+  assert.equal(registry.has(rootId), true);
+  assert.equal(deletes, 0);
+  assert.equal(registry.retire(rootId), retirement);
+  await assert.rejects(registry.getOrCreate(rootId), /root_runtime_retiring/u);
 });

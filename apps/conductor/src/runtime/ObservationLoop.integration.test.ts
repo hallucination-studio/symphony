@@ -120,7 +120,7 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
           prepare: async () => Object.freeze({ kind: "root_available" as const }),
           prepareContinuation: async () => Object.freeze({ kind: "root_available" as const }),
           run: async () => { throw new Error("unexpected_cycle_action"); },
-          retire: () => undefined,
+          retire: async () => undefined,
         } satisfies CycleMachineHostInterface,
         git: {
           read: async () => {
