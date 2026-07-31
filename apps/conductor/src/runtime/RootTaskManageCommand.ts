@@ -12,14 +12,22 @@ import {
   type RuntimeGeneration,
   type TaskIssueId,
 } from "../contracts/identity.js";
-import type { CycleExecutionSnapshot } from "../contracts/cycle.js";
+import {
+  parseCycleDraftForRoot,
+  parseRootDefinition,
+  parseRootDefinitionMarkdown,
+  sealCycleSpecification,
+  type CycleExecutionSnapshot,
+  type CycleSealDigest,
+  type RootDefinition,
+} from "../contracts/cycle.js";
 import {
   parseTaskSnapshot,
   type ConcreteTaskChange,
   type TaskIssueSnapshot,
   type TaskSnapshot,
 } from "../contracts/observation.js";
-import { taskSnapshotDigest } from "../observation/TaskFacts.js";
+import { taskSnapshotDigest, taskStringSetsEqual } from "../observation/TaskFacts.js";
 import type {
   TaskManageBoundaryExecution,
   TaskManageCommandInterface,
@@ -111,6 +119,24 @@ interface CallerCycleContext {
   readonly graph_seal_digest: CycleExecutionSnapshot["sealed_graph_digest"];
 }
 
+interface RootUpdateAuthorization {
+  readonly caller_cycle: CallerCycleContext | null;
+  readonly approval_definition: RootDefinition | null;
+}
+
+interface PendingCycleApproval {
+  readonly definition: RootDefinition;
+  readonly draft: TaskIssueSnapshot;
+}
+
+export type RootGetIssueResult = GetIssueResult & {
+  readonly seal_digest: CycleSealDigest | null;
+};
+
+export type RootUpdateIssueResult = UpdateIssueResult & {
+  readonly seal_digest: CycleSealDigest | null;
+};
+
 function callDenied(): never {
   throw new RootTaskManageBindingError("capability_denied", false);
 }
@@ -173,6 +199,7 @@ function assertWorkflowScope(scope: RootScope, workflow: TaskWorkflowIdentities)
       parent === undefined
       || parent.parent_id !== scope.root_issue_id
       || issueKind(parent, workflow) !== "cycle"
+      || parent.status === workflow.cycle_states.draft
       || !["plan", "work", "verify"].includes(issueKind(issue, workflow))
       || !Object.values(workflow.stage_states).some((stateId) => stateId === issue.status)
     ) invalidBoundary();
@@ -275,6 +302,8 @@ const ROOT_TASK_MANAGE_BINDINGS = new WeakSet<object>();
 export class RootTaskManageCommandBinding {
   readonly root_id: RootIssueId;
   readonly #provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>;
+  readonly #pendingCycleApprovals: Map<TaskIssueId, PendingCycleApproval>;
+  readonly #observedIssues: Map<TaskIssueId, TaskIssueSnapshot>;
 
   private constructor(
     rootId: RootIssueId,
@@ -286,9 +315,13 @@ export class RootTaskManageCommandBinding {
     private readonly approvedCycleReader: RootApprovedCycleReader,
     private readonly correlationId: CorrelationId | null,
     provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>,
+    pendingCycleApprovals: Map<TaskIssueId, PendingCycleApproval>,
+    observedIssues: Map<TaskIssueId, TaskIssueSnapshot>,
   ) {
     this.root_id = rootId;
     this.#provisionalIssues = provisionalIssues;
+    this.#pendingCycleApprovals = pendingCycleApprovals;
+    this.#observedIssues = observedIssues;
     ROOT_TASK_MANAGE_BINDINGS.add(this);
     Object.freeze(this);
   }
@@ -303,6 +336,8 @@ export class RootTaskManageCommandBinding {
       options.snapshot_reader,
       options.approved_cycle_reader,
       null,
+      new Map(),
+      new Map(),
       new Map(),
     );
   }
@@ -319,13 +354,22 @@ export class RootTaskManageCommandBinding {
       this.approvedCycleReader,
       parseCorrelationId(correlationId),
       this.#provisionalIssues,
+      this.#pendingCycleApprovals,
+      new Map(),
     );
   }
 
-  async get_issue(call: GetIssueCall, execution: TaskManageBoundaryExecution): Promise<GetIssueResult> {
+  async get_issue(
+    call: GetIssueCall,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<GetIssueResult | RootGetIssueResult> {
     const scope = await this.#scope(call, "get_issue", execution);
     const owned = scope.issues.has(call.input.issue_id);
     const provisional = this.#provisionalIssues.get(call.input.issue_id);
+    const pendingApprovalCandidate = this.#pendingCycleApprovals.get(call.input.issue_id);
+    const pendingApproval = pendingApprovalCandidate?.definition.correlation_id === call.correlation_id
+      ? pendingApprovalCandidate
+      : undefined;
     if (!owned && provisional === undefined) callDenied();
     if (
       provisional !== undefined
@@ -347,8 +391,15 @@ export class RootTaskManageCommandBinding {
       }
       if (issue !== null) assertScopedIssue(scope, issue);
     });
+    const observedIssue = result.output.issue;
+    if (observedIssue === null) this.#observedIssues.delete(call.input.issue_id);
+    else this.#observedIssues.set(call.input.issue_id, observedIssue);
     if (provisional !== undefined) this.#provisionalIssues.delete(call.input.issue_id);
-    return result;
+    if (pendingApproval === undefined) return result;
+    const approvalScope = await this.#scope(call, "get_issue", execution);
+    const sealDigest = this.#resolvePendingApproval(result, pendingApproval, approvalScope);
+    this.#pendingCycleApprovals.delete(call.input.issue_id);
+    return Object.freeze({ ...result, seal_digest: sealDigest });
   }
 
   async list_issues(call: ListIssuesCall, execution: TaskManageBoundaryExecution): Promise<ListIssuesResult> {
@@ -407,14 +458,55 @@ export class RootTaskManageCommandBinding {
     return result;
   }
 
-  async update_issue(call: UpdateIssueCall, execution: TaskManageBoundaryExecution): Promise<UpdateIssueResult> {
+  async update_issue(
+    call: UpdateIssueCall,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<RootUpdateIssueResult> {
     const scope = await this.#scope(call, "update_issue", execution);
-    const cycle = await this.#authorizeUpdateIssue(scope, call);
+    const authorization = await this.#authorizeUpdateIssue(scope, call);
     const value = await this.#callProvider(() => this.taskManager.update_issue(
-      call, this.#providerExecution(call, execution, cycle),
+      call, this.#providerExecution(call, execution, authorization.caller_cycle),
     ));
     execution.assertActive();
-    return this.#validateIssueMutationResult<UpdateIssueResult>(scope, call, value, execution);
+    const result = await this.#validateIssueMutationResult<UpdateIssueResult>(
+      scope,
+      call,
+      value,
+      execution,
+    );
+    const approvalScope = authorization.approval_definition !== null
+      && result.output.outcome === "applied"
+      ? await this.#scope(call, "update_issue", execution)
+      : null;
+    const sealDigest = this.#approvalSeal(
+      result,
+      authorization.approval_definition,
+      approvalScope,
+    );
+    if (
+      authorization.approval_definition !== null
+      && result.output.outcome === "acceptance_unknown"
+    ) {
+      const draft = scope.issues.get(call.input.issue_id);
+      const existing = this.#pendingCycleApprovals.get(call.input.issue_id);
+      if (
+        draft === undefined
+        || (this.#pendingCycleApprovals.size >= 1
+          && !this.#pendingCycleApprovals.has(call.input.issue_id))
+        || (
+          existing !== undefined
+          && existing.definition.correlation_id !== call.correlation_id
+        )
+      ) invalidBoundary();
+      this.#pendingCycleApprovals.set(call.input.issue_id, Object.freeze({
+        definition: authorization.approval_definition,
+        draft,
+      }));
+    }
+    return Object.freeze({
+      ...result,
+      seal_digest: sealDigest,
+    });
   }
 
   async archive_issue(call: ArchiveIssueCall, execution: TaskManageBoundaryExecution): Promise<ArchiveIssueResult> {
@@ -548,12 +640,15 @@ export class RootTaskManageCommandBinding {
       || call.input.desired.delegate_id !== null
       || call.input.desired.priority !== null
     ) callDenied();
+    const description = call.input.desired.description;
+    if (description === null) callDenied();
+    this.#assertCycleDraft(description, this.#rootDefinition(scope));
   }
 
   async #authorizeUpdateIssue(
     scope: RootScope,
     call: UpdateIssueCall,
-  ): Promise<CallerCycleContext | null> {
+  ): Promise<RootUpdateAuthorization> {
     const issue = scope.issues.get(call.input.issue_id);
     if (issue === undefined || call.input.expected_revision !== issue.revision) return callDenied();
     const desiredKeys = Object.keys(call.input.desired);
@@ -563,12 +658,14 @@ export class RootTaskManageCommandBinding {
         desiredKeys.length !== 1
         || desiredKeys[0] !== "description"
         || call.input.desired.description === null
-        || this.#activeCycles(scope).some((cycle) => (
-          cycle.status === this.workflow.cycle_states.in_progress
-          || cycle.status === this.workflow.cycle_states.awaiting_acceptance
-        ))
+        || this.#activeCycles(scope).length !== 0
       ) callDenied();
-      return null;
+      try {
+        parseRootDefinitionMarkdown(call.input.desired.description);
+      } catch {
+        return callDenied();
+      }
+      return Object.freeze({ caller_cycle: null, approval_definition: null });
     }
     if (kind !== "cycle") return callDenied();
     if (issue.status === this.workflow.cycle_states.draft) {
@@ -579,7 +676,17 @@ export class RootTaskManageCommandBinding {
         && desiredKeys[0] === "state_id"
         && call.input.desired.state_id === this.workflow.cycle_states.in_progress;
       if (!draftDescription && !draftApproval) callDenied();
-      return null;
+      const observed = this.#observedIssues.get(issue.issue_id);
+      if (observed === undefined || !this.#sameIssue(observed, issue)) callDenied();
+      this.#observedIssues.delete(issue.issue_id);
+      const definition = this.#rootDefinition(scope);
+      const description = draftDescription ? call.input.desired.description : issue.description;
+      if (typeof description !== "string") callDenied();
+      this.#assertCycleDraft(description, definition);
+      return Object.freeze({
+        caller_cycle: null,
+        approval_definition: draftApproval ? definition : null,
+      });
     }
     if (
       issue.status !== this.workflow.cycle_states.awaiting_acceptance
@@ -590,7 +697,130 @@ export class RootTaskManageCommandBinding {
         && call.input.desired.state_id !== this.workflow.cycle_states.rejected
       )
     ) callDenied();
-    return this.#approvedCycleContext(issue);
+    return Object.freeze({
+      caller_cycle: await this.#approvedCycleContext(issue),
+      approval_definition: null,
+    });
+  }
+
+  #rootDefinition(scope: RootScope): RootDefinition {
+    const root = scope.issues.get(scope.root_issue_id);
+    const correlationId = this.correlationId;
+    if (root === undefined || root.description === null || correlationId === null) return callDenied();
+    try {
+      return parseRootDefinition({
+        schema_version: 1,
+        root_id: this.root_id,
+        root_revision: root.revision,
+        correlation_id: correlationId,
+        root_description_markdown: root.description,
+      }, {
+        root_id: this.root_id,
+        root_revision: root.revision,
+        correlation_id: correlationId,
+      });
+    } catch {
+      return callDenied();
+    }
+  }
+
+  #assertCycleDraft(description: string, definition: RootDefinition): void {
+    try {
+      parseCycleDraftForRoot(description, definition);
+    } catch {
+      callDenied();
+    }
+  }
+
+  #approvalSeal(
+    result: UpdateIssueResult,
+    definition: RootDefinition | null,
+    approvalScope: RootScope | null,
+  ): CycleSealDigest | null {
+    if (definition === null || result.output.outcome !== "applied") return null;
+    const fresh = result.output.fresh_resource;
+    if (
+      fresh === null
+      || !("issue_id" in fresh)
+      || approvalScope === null
+    ) return invalidBoundary();
+    return this.#sealApprovedCycleIssue(
+      this.#approvedIssueFromScope(approvalScope, fresh),
+      definition,
+    );
+  }
+
+  #resolvePendingApproval(
+    result: GetIssueResult,
+    pending: PendingCycleApproval,
+    approvalScope: RootScope,
+  ): CycleSealDigest | null {
+    const issue = result.output.issue;
+    if (issue === null) return invalidBoundary();
+    const current = approvalScope.issues.get(issue.issue_id);
+    if (current === undefined || !this.#sameIssue(current, issue)) return invalidBoundary();
+    if (issue.status === this.workflow.cycle_states.draft) return null;
+    const draft = pending.draft;
+    if (
+      issue.status !== this.workflow.cycle_states.in_progress
+      || issue.revision === draft.revision
+      || issue.issue_id !== draft.issue_id
+      || issue.title !== draft.title
+      || issue.description !== draft.description
+      || issue.parent_id !== draft.parent_id
+      || !this.#sameValues(issue.labels, draft.labels)
+      || issue.delegate_id !== draft.delegate_id
+      || issue.priority !== draft.priority
+    ) invalidBoundary();
+    return this.#sealApprovedCycleIssue(
+      this.#approvedIssueFromScope(approvalScope, issue),
+      pending.definition,
+    );
+  }
+
+  #approvedIssueFromScope(
+    scope: RootScope,
+    issue: TaskIssueSnapshot,
+  ): TaskIssueSnapshot {
+    const current = scope.issues.get(issue.issue_id);
+    if (
+      current === undefined
+      || !this.#sameIssue(current, issue)
+      || [...scope.issues.values()].some(({ parent_id }) => parent_id === issue.issue_id)
+    ) return invalidBoundary();
+    return current;
+  }
+
+  #sealApprovedCycleIssue(
+    issue: TaskIssueSnapshot,
+    definition: RootDefinition,
+  ): CycleSealDigest {
+    const correlationId = this.correlationId;
+    if (
+      issue.description === null
+      || issue.status !== this.workflow.cycle_states.in_progress
+      || correlationId === null
+    ) return invalidBoundary();
+    try {
+      const cycleId = parseCycleIssueId(issue.issue_id);
+      const draft = parseCycleDraftForRoot(issue.description, definition);
+      const target = Object.freeze({
+        root_id: this.root_id,
+        cycle_id: cycleId,
+        root_definition_revision: definition.root_revision,
+        cycle_revision: issue.revision,
+        correlation_id: correlationId,
+      });
+      return sealCycleSpecification({
+        schema_version: 1,
+        ...target,
+        cycle_description_markdown: issue.description,
+        root_adr_markdown: draft.root_adr_markdown,
+        status: "in_progress",
+      }, definition, target).seal_digest;
+    } catch {
+      return invalidBoundary();
+    }
   }
 
   async #approvedCycleContext(issue: TaskIssueSnapshot): Promise<CallerCycleContext> {
@@ -806,7 +1036,11 @@ export class RootTaskManageCommandBinding {
   }
 
   #assertSameIssue(left: TaskIssueSnapshot, right: TaskIssueSnapshot): void {
-    if (
+    if (!this.#sameIssue(left, right)) invalidBoundary();
+  }
+
+  #sameIssue(left: TaskIssueSnapshot, right: TaskIssueSnapshot): boolean {
+    return (
       left.issue_id !== right.issue_id
       || left.revision !== right.revision
       || left.status !== right.status
@@ -816,11 +1050,11 @@ export class RootTaskManageCommandBinding {
       || !this.#sameValues(left.labels, right.labels)
       || left.delegate_id !== right.delegate_id
       || left.priority !== right.priority
-    ) invalidBoundary();
+    ) === false;
   }
 
   #sameValues(left: readonly string[], right: readonly string[]): boolean {
-    return left.length === right.length && left.every((value, index) => value === right[index]);
+    return taskStringSetsEqual(left, right);
   }
 
   #assertMutationChange(

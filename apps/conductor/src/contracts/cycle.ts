@@ -32,12 +32,23 @@ import {
   type UnknownRecord,
 } from "./validation.js";
 
-const ROOT_SECTION_NAMES = [
+export const ROOT_DEFINITION_SECTION_NAMES = Object.freeze([
   "Requirement",
   "Domain Knowledge",
   "Root ADR",
   "Acceptance",
-] as const;
+] as const);
+
+export const CYCLE_DRAFT_SECTION_NAMES = Object.freeze([
+  "Root Definition Revision",
+  ...ROOT_DEFINITION_SECTION_NAMES,
+  "Architecture",
+  "Feature Design",
+  "Code Design",
+  "Boundaries",
+  "Acceptance Mapping",
+  "Failure Strategy",
+] as const);
 
 interface MarkdownPosition {
   readonly start: { readonly offset?: number };
@@ -48,6 +59,7 @@ interface MarkdownNode {
   readonly type: string;
   readonly depth?: number;
   readonly value?: string;
+  readonly alt?: string;
   readonly children?: readonly MarkdownNode[];
   readonly position?: MarkdownPosition;
 }
@@ -63,6 +75,19 @@ export interface RootDefinition extends RootDefinitionTarget {
   readonly requirement_markdown: MarkdownText;
   readonly root_adr_markdown: MarkdownText;
   readonly acceptance_markdown: MarkdownText;
+}
+
+export interface CycleDraftDocument {
+  readonly root_definition_revision: TaskRevision;
+  readonly requirement_markdown: MarkdownText;
+  readonly root_adr_markdown: MarkdownText;
+  readonly acceptance_markdown: MarkdownText;
+  readonly architecture_markdown: MarkdownText;
+  readonly feature_design_markdown: MarkdownText;
+  readonly code_design_markdown: MarkdownText;
+  readonly boundaries_markdown: MarkdownText;
+  readonly acceptance_mapping_markdown: MarkdownText;
+  readonly failure_strategy_markdown: MarkdownText;
 }
 
 declare const cycleSealDigestBrand: unique symbol;
@@ -224,60 +249,187 @@ function headingName(node: MarkdownNode): string | null {
   return child?.type === "text" ? child.value ?? null : null;
 }
 
-function nodeOffset(node: MarkdownNode, edge: "start" | "end"): number {
+function nodeOffset(node: MarkdownNode, edge: "start" | "end", code: string): number {
   const offset = node.position?.[edge].offset;
-  if (offset === undefined) throw new Error("invalid_root_definition_markdown");
+  if (offset === undefined) throw new Error(code);
   return offset;
 }
 
-function rootSections(markdown: MarkdownText): {
-  readonly requirement_markdown: MarkdownText;
-  readonly root_adr_markdown: MarkdownText;
-  readonly acceptance_markdown: MarkdownText;
-} {
+function hasClosedMarkdownContent(nodes: readonly MarkdownNode[]): boolean {
+  let meaningful = false;
+  const pending = [...nodes];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) break;
+    if (current.type === "definition") return false;
+    if (
+      (current.type === "text" || current.type === "inlineCode" || current.type === "code")
+      && current.value !== undefined
+      && current.value.trim().length > 0
+    ) meaningful = true;
+    if (
+      (current.type === "image" || current.type === "imageReference")
+      && current.alt !== undefined
+      && current.alt.trim().length > 0
+    ) meaningful = true;
+    for (const child of current.children ?? []) pending.push(child);
+  }
+  return meaningful;
+}
+
+interface ClosedMarkdownDocument {
+  readonly markdown: MarkdownText;
+  readonly children: readonly MarkdownNode[];
+  readonly headings: readonly MarkdownNode[];
+  readonly code: string;
+}
+
+function closedMarkdownDocument(
+  markdown: MarkdownText,
+  sectionNames: readonly string[],
+  code: string,
+): ClosedMarkdownDocument {
   const tree = fromMarkdown(markdown) as MarkdownNode;
   const children = tree.children ?? [];
-  const sectionHeadings = children.filter((node) => node.type === "heading" && node.depth === 2);
-  const names = sectionHeadings.map(headingName);
+  const headings = children.filter((node) => node.type === "heading" && node.depth === 2);
+  const names = headings.map(headingName);
   if (
-    names.length !== ROOT_SECTION_NAMES.length
-    || names.some((name, index) => name !== ROOT_SECTION_NAMES[index])
-  ) throw new Error("invalid_root_definition_markdown");
+    names.length !== sectionNames.length
+    || names.some((name, index) => name !== sectionNames[index])
+  ) throw new Error(code);
 
-  const firstSectionIndex = children.indexOf(sectionHeadings[0] as MarkdownNode);
+  const firstSectionIndex = children.indexOf(headings[0] as MarkdownNode);
   const prefix = children.slice(0, firstSectionIndex);
   if (
     prefix.length > 1
     || (prefix.length === 1 && (prefix[0]?.type !== "heading" || prefix[0].depth !== 1))
-  ) throw new Error("invalid_root_definition_markdown");
+  ) throw new Error(code);
+  const documentTitles = children.filter((node) => node.type === "heading" && node.depth === 1);
+  if (documentTitles.length !== prefix.length) throw new Error(code);
 
-  const descriptionEnd = markdown.length;
-  const sectionEnds = [
-    nodeOffset(sectionHeadings[1] as MarkdownNode, "start"),
-    nodeOffset(sectionHeadings[2] as MarkdownNode, "start"),
-    nodeOffset(sectionHeadings[3] as MarkdownNode, "start"),
-    descriptionEnd,
-  ];
-  for (let index = 0; index < sectionHeadings.length; index += 1) {
-    const bodyStart = nodeOffset(sectionHeadings[index] as MarkdownNode, "end");
-    if (markdown.slice(bodyStart, sectionEnds[index]).trim().length === 0) {
-      throw new Error("invalid_root_definition_markdown");
-    }
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index];
+    const nextHeading = headings[index + 1];
+    const bodyStartIndex = heading === undefined ? -1 : children.indexOf(heading) + 1;
+    const bodyEndIndex = nextHeading === undefined
+      ? children.length
+      : children.indexOf(nextHeading);
+    const body = children.slice(bodyStartIndex, bodyEndIndex);
+    if (
+      heading === undefined
+      || bodyStartIndex < 1
+      || !hasClosedMarkdownContent(body)
+    ) throw new Error(code);
   }
-
   return Object.freeze({
-    requirement_markdown: parseMarkdownText(markdown.slice(
-      nodeOffset(sectionHeadings[0] as MarkdownNode, "start"),
-      nodeOffset(sectionHeadings[2] as MarkdownNode, "start"),
-    ).trim()),
-    root_adr_markdown: parseMarkdownText(markdown.slice(
-      nodeOffset(sectionHeadings[2] as MarkdownNode, "start"),
-      nodeOffset(sectionHeadings[3] as MarkdownNode, "start"),
-    ).trim()),
-    acceptance_markdown: parseMarkdownText(markdown.slice(
-      nodeOffset(sectionHeadings[3] as MarkdownNode, "start"),
-    ).trim()),
+    markdown,
+    children: Object.freeze(children),
+    headings: Object.freeze(headings),
+    code,
   });
+}
+
+function documentInlineCode(
+  document: ClosedMarkdownDocument,
+  sectionIndex: number,
+): string {
+  const heading = document.headings[sectionIndex];
+  const nextHeading = document.headings[sectionIndex + 1];
+  if (heading === undefined) throw new Error(document.code);
+  const start = document.children.indexOf(heading) + 1;
+  const end = nextHeading === undefined
+    ? document.children.length
+    : document.children.indexOf(nextHeading);
+  const nodes = document.children.slice(start, end);
+  const paragraph = nodes[0];
+  const inline = paragraph?.children?.[0];
+  if (
+    nodes.length !== 1
+    || paragraph?.type !== "paragraph"
+    || paragraph.children?.length !== 1
+    || inline?.type !== "inlineCode"
+    || inline.value === undefined
+  ) throw new Error(document.code);
+  return inline.value;
+}
+
+function documentSection(
+  document: ClosedMarkdownDocument,
+  startIndex: number,
+  endIndex: number,
+): MarkdownText {
+  const start = document.headings[startIndex];
+  const end = document.headings[endIndex];
+  if (start === undefined) throw new Error(document.code);
+  return parseMarkdownText(document.markdown.slice(
+    nodeOffset(start, "start", document.code),
+    end === undefined
+      ? document.markdown.length
+      : nodeOffset(end, "start", document.code),
+  ).trim(), document.code);
+}
+
+export function parseRootDefinitionMarkdown(value: unknown): {
+  readonly requirement_markdown: MarkdownText;
+  readonly root_adr_markdown: MarkdownText;
+  readonly acceptance_markdown: MarkdownText;
+} {
+  const document = closedMarkdownDocument(
+    parseMarkdownText(value, "invalid_root_definition_markdown"),
+    ROOT_DEFINITION_SECTION_NAMES,
+    "invalid_root_definition_markdown",
+  );
+  return Object.freeze({
+    requirement_markdown: documentSection(document, 0, 2),
+    root_adr_markdown: documentSection(document, 2, 3),
+    acceptance_markdown: documentSection(document, 3, 4),
+  });
+}
+
+export function parseCycleDraftMarkdown(value: unknown): CycleDraftDocument {
+  const document = closedMarkdownDocument(
+    parseMarkdownText(value, "invalid_cycle_draft_markdown"),
+    CYCLE_DRAFT_SECTION_NAMES,
+    "invalid_cycle_draft_markdown",
+  );
+  let rootDefinitionRevision: TaskRevision;
+  try {
+    rootDefinitionRevision = parseTaskRevision(documentInlineCode(document, 0));
+  } catch {
+    throw new Error("invalid_cycle_draft_markdown");
+  }
+  return Object.freeze({
+    root_definition_revision: rootDefinitionRevision,
+    requirement_markdown: documentSection(document, 1, 3),
+    root_adr_markdown: documentSection(document, 3, 4),
+    acceptance_markdown: documentSection(document, 4, 5),
+    architecture_markdown: documentSection(document, 5, 6),
+    feature_design_markdown: documentSection(document, 6, 7),
+    code_design_markdown: documentSection(document, 7, 8),
+    boundaries_markdown: documentSection(document, 8, 9),
+    acceptance_mapping_markdown: documentSection(document, 9, 10),
+    failure_strategy_markdown: documentSection(document, 10, 11),
+  });
+}
+
+export function parseCycleDraftForRoot(
+  value: unknown,
+  rootDefinition: RootDefinition,
+): CycleDraftDocument {
+  const draft = parseCycleDraftMarkdown(value);
+  if (draft.root_definition_revision !== rootDefinition.root_revision) {
+    throw new Error("cycle_root_revision_snapshot_mismatch");
+  }
+  if (draft.requirement_markdown !== rootDefinition.requirement_markdown) {
+    throw new Error("cycle_requirement_snapshot_mismatch");
+  }
+  if (draft.root_adr_markdown !== rootDefinition.root_adr_markdown) {
+    throw new Error("cycle_root_adr_snapshot_mismatch");
+  }
+  if (draft.acceptance_markdown !== rootDefinition.acceptance_markdown) {
+    throw new Error("cycle_acceptance_snapshot_mismatch");
+  }
+  return draft;
 }
 
 export function parseRootDefinition(value: unknown, expected: RootDefinitionTarget): RootDefinition {
@@ -298,7 +450,7 @@ export function parseRootDefinition(value: unknown, expected: RootDefinitionTarg
   if (correlationId !== expected.correlation_id) {
     throw new Error("root_definition_correlation_mismatch");
   }
-  const sections = rootSections(parseMarkdownText(record.root_description_markdown));
+  const sections = parseRootDefinitionMarkdown(record.root_description_markdown);
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     root_id: rootId,
@@ -327,21 +479,29 @@ function parseCycleSpecificationFields(
   record: UnknownRecord,
   expected: CycleSpecificationTarget,
 ): CycleSpecificationFields {
+  const cycleDescription = parseMarkdownText(
+    record.cycle_description_markdown,
+    "invalid_cycle_description_markdown",
+  );
+  const draft = parseCycleDraftMarkdown(cycleDescription);
+  const rootAdr = parseMarkdownText(record.root_adr_markdown, "invalid_cycle_root_adr_markdown");
+  const rootDefinitionRevision = parseTaskRevision(record.root_definition_revision);
   const fields = Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     root_id: parseRootIssueId(record.root_id),
     cycle_id: parseCycleIssueId(record.cycle_id),
-    root_definition_revision: parseTaskRevision(record.root_definition_revision),
+    root_definition_revision: rootDefinitionRevision,
     cycle_revision: parseTaskRevision(record.cycle_revision),
     correlation_id: parseCorrelationId(record.correlation_id),
-    cycle_description_markdown: parseMarkdownText(
-      record.cycle_description_markdown,
-      "invalid_cycle_description_markdown",
-    ),
-    root_adr_markdown: parseMarkdownText(record.root_adr_markdown, "invalid_cycle_root_adr_markdown"),
+    cycle_description_markdown: cycleDescription,
+    root_adr_markdown: rootAdr,
     status: parseEnum(record.status, CYCLE_SPECIFICATION_STATUSES),
   });
   assertCycleSpecificationTarget(fields, expected);
+  if (rootDefinitionRevision !== draft.root_definition_revision) {
+    throw new Error("cycle_root_revision_mismatch");
+  }
+  if (rootAdr !== draft.root_adr_markdown) throw new Error("cycle_root_adr_mismatch");
   return fields;
 }
 
@@ -352,6 +512,7 @@ function cycleSealDigest(fields: CycleSpecificationFields): CycleSealDigest {
     fields.cycle_id,
     fields.root_definition_revision,
     fields.cycle_revision,
+    fields.correlation_id,
     fields.cycle_description_markdown,
     fields.root_adr_markdown,
     fields.status,
@@ -359,7 +520,7 @@ function cycleSealDigest(fields: CycleSpecificationFields): CycleSealDigest {
   return createHash("sha256").update(canonical, "utf8").digest("hex") as CycleSealDigest;
 }
 
-function parseCycleSealDigest(value: unknown): CycleSealDigest {
+export function parseCycleSealDigest(value: unknown): CycleSealDigest {
   if (typeof value !== "string" || !CYCLE_SEAL_PATTERN.test(value)) {
     throw new Error("invalid_cycle_seal_digest");
   }
@@ -384,13 +545,11 @@ export function sealCycleSpecification(
     "status",
   ]);
   const fields = parseCycleSpecificationFields(record, expected);
+  parseCycleDraftForRoot(fields.cycle_description_markdown, rootDefinition);
   if (
     fields.root_id !== rootDefinition.root_id
     || fields.root_definition_revision !== rootDefinition.root_revision
   ) throw new Error("cycle_specification_target_mismatch");
-  if (fields.root_adr_markdown !== rootDefinition.root_adr_markdown) {
-    throw new Error("cycle_root_adr_mismatch");
-  }
   return Object.freeze({ ...fields, seal_digest: cycleSealDigest(fields) });
 }
 

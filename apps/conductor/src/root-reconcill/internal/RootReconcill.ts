@@ -61,71 +61,9 @@ import type {
   RootReconcillInterface,
 } from "../api/RootReconcillInterface.js";
 import { RootContinuityStore } from "./RootContinuityStore.js";
+import { rootReconcillOutputSchema, rootReconcillPrompt } from "./RootPrompt.js";
 
-const MAX_ROOT_PROMPT_BYTES = 256 * 1024;
-
-function jsonStringFits(value: string, consume: (bytes: number) => boolean): boolean {
-  if (!consume(2)) return false;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09
-      || code === 0x0a || code === 0x0c || code === 0x0d) {
-      if (!consume(2)) return false;
-    } else if (code <= 0x1f) {
-      if (!consume(6)) return false;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        index += 1;
-        if (!consume(4)) return false;
-      } else if (!consume(6)) return false;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      if (!consume(6)) return false;
-    } else if (code <= 0x7f) {
-      if (!consume(1)) return false;
-    } else if (code <= 0x7ff) {
-      if (!consume(2)) return false;
-    } else if (!consume(3)) return false;
-  }
-  return true;
-}
-
-function jsonFitsByteBudget(value: unknown, maxBytes: number): boolean {
-  let remaining = maxBytes;
-  const consume = (bytes: number): boolean => {
-    remaining -= bytes;
-    return remaining >= 0;
-  };
-  const visit = (entry: unknown): boolean => {
-    if (entry === null) return consume(4);
-    if (typeof entry === "string") return jsonStringFits(entry, consume);
-    if (typeof entry === "boolean") return consume(entry ? 4 : 5);
-    if (typeof entry === "number" && Number.isFinite(entry)) return consume(String(entry).length);
-    if (Array.isArray(entry)) {
-      if (!consume(2)) return false;
-      for (let index = 0; index < entry.length; index += 1) {
-        if ((index > 0 && !consume(1)) || !visit(entry[index])) return false;
-      }
-      return true;
-    }
-    if (typeof entry !== "object" || entry === null) return false;
-    if (!consume(2)) return false;
-    const record = entry as Record<string, unknown>;
-    const keys = Object.keys(record);
-    for (let index = 0; index < keys.length; index += 1) {
-      const key = keys[index];
-      if (
-        key === undefined
-        || (index > 0 && !consume(1))
-        || !jsonStringFits(key, consume)
-        || !consume(1)
-        || !visit(record[key])
-      ) return false;
-    }
-    return true;
-  };
-  return Number.isSafeInteger(maxBytes) && maxBytes >= 0 && visit(value);
-}
+export { rootReconcillOutputSchema } from "./RootPrompt.js";
 
 function homeKey(rootHome: string): string {
   const normalized = path.normalize(rootHome).replace(/[\\/]+$/u, "");
@@ -254,36 +192,6 @@ export interface RootReconcillOptions {
   readonly log: (entry: RootReconcillLog) => void;
 }
 
-export function rootReconcillOutputSchema(
-  target: RuntimeTarget,
-  correlationId: CorrelationId,
-): Record<string, unknown> {
-  const properties = Object.freeze({
-    schema_version: { const: 1 },
-    root_id: { const: target.root_id },
-    runtime_generation: { const: target.runtime_generation },
-    correlation_id: { const: correlationId },
-    outcome: { enum: ["quiescent", "stopped"] },
-    sanitized_reason: {
-      anyOf: [
-        {
-          type: "string",
-          minLength: 1,
-          maxLength: 256,
-          pattern: "^[\\x20-\\x7E]+$",
-        },
-        { type: "null" },
-      ],
-    },
-  });
-  return Object.freeze({
-    type: "object",
-    additionalProperties: false,
-    properties,
-    required: Object.keys(properties),
-  });
-}
-
 function parseModelTurnOutcome(value: unknown, target: RuntimeTarget): RootTurnOutcome {
   const record = asRecord(value);
   assertExactKeys(record, [
@@ -308,31 +216,6 @@ function parseModelTurnOutcome(value: unknown, target: RuntimeTarget): RootTurnO
     throw new Error("invalid_model_outcome");
   }
   return parseRootTurnOutcome(record, target);
-}
-
-function rootPrompt(input: RootReconcillInput, inputKind: "bootstrap" | "diff"): string {
-  const prompt = {
-    role: "RootReconcill",
-    instruction: [
-      "Interpret the supplied fresh Root facts and remain the sole workflow semantic decision maker.",
-      "Use only declared generic tools, carrying the exact Root, generation, correlation, capability, target identity, and fresh revision from current facts.",
-      "Call at most one tool at a time and observe every typed result before choosing another minimum next action.",
-      "Treat precondition_failed as fresh facts and reason again in this same turn without asking the host to retry.",
-      "After acceptance_unknown, fresh-read that exact identity before any further mutation.",
-      "Express workflow choices through exact generic tool calls, never through a lifecycle decision field.",
-      "Finish with quiescent when waiting for a changed external observation, or stopped with a sanitized actionable reason when safe progress is impossible.",
-    ].join(" "),
-    input_kind: inputKind,
-    observation: input,
-  };
-  if (!jsonFitsByteBudget(prompt, MAX_ROOT_PROMPT_BYTES)) {
-    throw new Error("root_reconcill_input_too_large");
-  }
-  const encoded = JSON.stringify(prompt);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_ROOT_PROMPT_BYTES) {
-    throw new Error("root_reconcill_input_too_large");
-  }
-  return encoded;
 }
 
 function controlOutcome(
@@ -461,7 +344,7 @@ class BoundRootReconcill implements RootReconcillInterface {
     let result: RootTurnTransportResult;
     try {
       result = await this.#transport.turn(Object.freeze({
-        input: rootPrompt(input, inputKind),
+        input: rootReconcillPrompt(input, inputKind),
         correlation_id: input.correlation_id,
         output_schema: rootReconcillOutputSchema(this.#target, input.correlation_id),
         max_tool_calls: this.#options.max_tool_calls,

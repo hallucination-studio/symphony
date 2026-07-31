@@ -10,6 +10,7 @@ import {
 } from "./identity.js";
 import {
   parseCycleAdvanceResult,
+  parseCycleDraftMarkdown,
   parseCycleExecutionSnapshot,
   parseCycleSpecification,
   parsePlanGraph,
@@ -126,6 +127,19 @@ test("RootDefinition rejects missing, reordered, duplicate, extra, or empty clos
     rootDescription.replace("## Domain Knowledge", "## Context"),
     reordered,
     `${rootDescription}\n\n## Notes\n\nUnapproved section.`,
+    rootDescription.replace(
+      "Task Manager and Git are the durable fact authorities.",
+      "Task Manager and Git are the durable fact authorities.\n\n# Runtime State\n\nUnapproved control text.",
+    ),
+    rootDescription.replace(
+      "Task Manager and Git are the durable fact authorities.",
+      "Visible [runtime details][runtime].\n\n[runtime]: data:application/json,%7B%22next_action%22%3A%22mutate%22%7D",
+    ),
+    rootDescription.replace(
+      "Task Manager and Git are the durable fact authorities.",
+      "> Visible [runtime details][runtime].\n>\n> [runtime]: data:application/json,%7B%22next_action%22%3A%22mutate%22%7D",
+    ),
+    rootDescription.replace("Keep semantic decisions at Cycle boundaries.", "---"),
     rootDescription.replace("Keep semantic decisions at Cycle boundaries.", ""),
     `Preamble outside the schema.\n\n${rootDescription}`,
   ];
@@ -147,6 +161,19 @@ test("RootDefinition rejects missing, reordered, duplicate, extra, or empty clos
   );
 });
 
+test("RootDefinition validates deeply nested visible section content without recursion failure", () => {
+  const nestedRequirement = `${"> ".repeat(10_000)}Deliver the approved immutable Cycle workflow.`;
+  const parsed = parseRootDefinition({
+    ...rootSource,
+    root_description_markdown: rootDescription.replace(
+      "Deliver the approved immutable Cycle workflow.",
+      nestedRequirement,
+    ),
+  }, rootTarget);
+
+  assert.equal(parsed.requirement_markdown.includes(nestedRequirement), true);
+});
+
 const cycleTarget = Object.freeze({
   root_id: rootTarget.root_id,
   cycle_id: parseCycleIssueId("LIN-CYCLE"),
@@ -155,15 +182,59 @@ const cycleTarget = Object.freeze({
   correlation_id: parseCorrelationId("corr:cycle:seal"),
 });
 
+const cycleDescription = [
+  "# Cycle Draft",
+  "",
+  "## Root Definition Revision",
+  "",
+  "`revision:root:1`",
+  "",
+  "## Requirement",
+  "",
+  "Deliver the approved immutable Cycle workflow.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Task Manager and Git are the durable fact authorities.",
+  "",
+  "## Root ADR",
+  "",
+  "Keep semantic decisions at Cycle boundaries.",
+  "",
+  "## Acceptance",
+  "",
+  "The exact verified revision reaches one reviewable PR.",
+  "",
+  "## Architecture",
+  "",
+  "Keep semantic approval in Root and mechanical execution in Conductor.",
+  "",
+  "## Feature Design",
+  "",
+  "Define, review, and approve one complete Cycle Draft.",
+  "",
+  "## Code Design",
+  "",
+  "Validate closed Markdown before every Root mutation.",
+  "",
+  "## Boundaries",
+  "",
+  "Root can update only the Root definition or an unapproved Draft.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Map the Root acceptance criterion to exact revision and seal checks.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Fail closed on malformed Markdown, stale revisions, or read-back mismatch.",
+].join("\n");
+
 function unsealedCycleSpecification() {
   return {
     schema_version: 1,
     ...cycleTarget,
-    cycle_description_markdown: [
-      "## Approved Design",
-      "",
-      "Execute one immutable Cycle through a mechanical state machine.",
-    ].join("\n"),
+    cycle_description_markdown: cycleDescription,
     root_adr_markdown: parsedRootDefinition().root_adr_markdown,
     status: "in_progress",
   };
@@ -204,13 +275,132 @@ test("CycleSpecification seal binds exact Root/Cycle revisions and the pinned Ro
   );
 });
 
+test("Cycle Draft Markdown is a complete closed decision snapshot", () => {
+  const parsed = parseCycleDraftMarkdown(cycleDescription);
+
+  assert.equal(parsed.root_definition_revision, rootTarget.root_revision);
+  assert.equal(parsed.requirement_markdown, parsedRootDefinition().requirement_markdown);
+  assert.equal(parsed.root_adr_markdown, parsedRootDefinition().root_adr_markdown);
+  assert.equal(parsed.acceptance_markdown, parsedRootDefinition().acceptance_markdown);
+  assert.match(parsed.architecture_markdown, /^## Architecture[\s\S]+Conductor\.$/u);
+  assert.match(parsed.feature_design_markdown, /^## Feature Design[\s\S]+Draft\.$/u);
+  assert.match(parsed.code_design_markdown, /^## Code Design[\s\S]+mutation\.$/u);
+  assert.match(parsed.boundaries_markdown, /^## Boundaries[\s\S]+Draft\.$/u);
+  assert.match(parsed.acceptance_mapping_markdown, /^## Acceptance Mapping[\s\S]+checks\.$/u);
+  assert.match(parsed.failure_strategy_markdown, /^## Failure Strategy[\s\S]+mismatch\.$/u);
+  assert.ok(Object.isFrozen(parsed));
+});
+
+test("Cycle Draft Markdown rejects missing, reordered, duplicate, extra, or empty sections", () => {
+  const architecture = [
+    "## Architecture",
+    "",
+    "Keep semantic approval in Root and mechanical execution in Conductor.",
+  ].join("\n");
+  const feature = [
+    "## Feature Design",
+    "",
+    "Define, review, and approve one complete Cycle Draft.",
+  ].join("\n");
+  const invalidDescriptions = [
+    cycleDescription.replace("`revision:root:1`", "revision:root:1"),
+    cycleDescription.replace("## Failure Strategy", "## Recovery"),
+    cycleDescription.replace(`${architecture}\n\n${feature}`, `${feature}\n\n${architecture}`),
+    `${cycleDescription}\n\n## Notes\n\nUnapproved section.`,
+    cycleDescription.replace(
+      "Keep semantic approval in Root and mechanical execution in Conductor.",
+      "Keep semantic approval in Root and mechanical execution in Conductor.\n\n# Runtime State\n\nUnapproved control text.",
+    ),
+    cycleDescription.replace(
+      "Fail closed on malformed Markdown, stale revisions, or read-back mismatch.",
+      "",
+    ),
+    cycleDescription.replace(
+      "Keep semantic approval in Root and mechanical execution in Conductor.",
+      "[hidden]: data:application/json,%7B%22next_action%22%3A%22mutate%22%7D",
+    ),
+    cycleDescription.replace(
+      "Keep semantic approval in Root and mechanical execution in Conductor.",
+      "Visible [runtime details][runtime].\n\n[runtime]: data:application/json,%7B%22next_action%22%3A%22mutate%22%7D",
+    ),
+    cycleDescription.replace(
+      "Keep semantic approval in Root and mechanical execution in Conductor.",
+      "---",
+    ),
+    `Preamble outside the schema.\n\n${cycleDescription}`,
+  ];
+
+  for (const description of invalidDescriptions) {
+    assert.throws(() => parseCycleDraftMarkdown(description), /invalid_cycle_draft_markdown/u);
+  }
+});
+
+test("Cycle sealing rejects Requirement, ADR, or Acceptance snapshot drift", () => {
+  const changes = [
+    ["Deliver the approved immutable Cycle workflow.", "Deliver a different workflow."],
+    ["Keep semantic decisions at Cycle boundaries.", "Move decisions into execution."],
+    ["The exact verified revision reaches one reviewable PR.", "Any revision may be delivered."],
+  ] as const;
+
+  for (const [before, after] of changes) {
+    assert.throws(
+      () => sealCycleSpecification(
+        {
+          ...unsealedCycleSpecification(),
+          cycle_description_markdown: cycleDescription.replace(before, after),
+        },
+        parsedRootDefinition(),
+        cycleTarget,
+      ),
+      /cycle_(?:(?:requirement|root_adr|acceptance)_snapshot|root_adr)_mismatch/u,
+    );
+  }
+
+  assert.throws(
+    () => sealCycleSpecification(
+      {
+        ...unsealedCycleSpecification(),
+        cycle_description_markdown: cycleDescription.replace(
+          "`revision:root:1`",
+          "`revision:root:other`",
+        ),
+      },
+      parsedRootDefinition(),
+      cycleTarget,
+    ),
+    /cycle_root_revision(?:_snapshot)?_mismatch/u,
+  );
+});
+
+test("Cycle sealing snapshots an untrusted description accessor exactly once", () => {
+  let descriptionReads = 0;
+  const changingDescription = cycleDescription
+    .replace("Deliver the approved immutable Cycle workflow.", "EVIL requirement.")
+    .replace("The exact verified revision reaches one reviewable PR.", "NOPE acceptance.");
+  const value = {
+    ...unsealedCycleSpecification(),
+    get cycle_description_markdown() {
+      descriptionReads += 1;
+      return descriptionReads === 1 ? cycleDescription : changingDescription;
+    },
+  };
+
+  const sealed = sealCycleSpecification(value, parsedRootDefinition(), cycleTarget);
+
+  assert.equal(descriptionReads, 1);
+  assert.equal(sealed.cycle_description_markdown, cycleDescription);
+});
+
 test("CycleSpecification rejects stale seals, unknown states, mutable fields, and envelope mismatches", () => {
   const sealed = sealedCycleSpecification();
 
   assert.throws(
     () => parseCycleSpecification({
       ...sealed,
-      cycle_description_markdown: "## Approved Design\n\nChanged after approval.",
+      cycle_description_markdown: cycleDescription.replace(
+        "Validate closed Markdown before every Root mutation.",
+        "Changed after approval.",
+      ),
     }, cycleTarget),
     /cycle_seal_mismatch/u,
   );
@@ -229,6 +419,29 @@ test("CycleSpecification rejects stale seals, unknown states, mutable fields, an
   assert.throws(
     () => parseCycleSpecification({ ...sealed, metadata: {} }, cycleTarget),
     /invalid_contract_keys/u,
+  );
+});
+
+test("CycleSpecification seal binds the approval correlation", () => {
+  const sealed = sealedCycleSpecification();
+  const otherTarget = Object.freeze({
+    ...cycleTarget,
+    correlation_id: parseCorrelationId("corr:cycle:other"),
+  });
+
+  assert.throws(
+    () => parseCycleSpecification({
+      ...sealed,
+      correlation_id: otherTarget.correlation_id,
+    }, otherTarget),
+    /cycle_seal_mismatch/u,
+  );
+  assert.notEqual(
+    sealCycleSpecification({
+      ...unsealedCycleSpecification(),
+      correlation_id: otherTarget.correlation_id,
+    }, parsedRootDefinition(), otherTarget).seal_digest,
+    sealed.seal_digest,
   );
 });
 

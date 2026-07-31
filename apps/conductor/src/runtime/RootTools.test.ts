@@ -3,9 +3,15 @@ import test from "node:test";
 
 import {
   parseCorrelationId,
+  parseCycleIssueId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskRevision,
 } from "../contracts/identity.js";
+import {
+  parseRootDefinition,
+  sealCycleSpecification,
+} from "../contracts/cycle.js";
 import {
   parseTaskSnapshot,
   type TaskSnapshot,
@@ -50,6 +56,78 @@ const workflow = parseTaskWorkflowIdentities({
   },
 });
 
+const rootDescription = [
+  "# Root",
+  "",
+  "## Requirement",
+  "",
+  "Implement the Root semantic boundary.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Task Manager Markdown is durable fact.",
+  "",
+  "## Root ADR",
+  "",
+  "Seal one complete Cycle Draft before execution.",
+  "",
+  "## Acceptance",
+  "",
+  "Approval returns the digest of the fresh exact revision.",
+].join("\n");
+
+const cycleDescription = [
+  "# Cycle Draft",
+  "",
+  "## Root Definition Revision",
+  "",
+  "`revision:root:1`",
+  "",
+  "## Requirement",
+  "",
+  "Implement the Root semantic boundary.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Task Manager Markdown is durable fact.",
+  "",
+  "## Root ADR",
+  "",
+  "Seal one complete Cycle Draft before execution.",
+  "",
+  "## Acceptance",
+  "",
+  "Approval returns the digest of the fresh exact revision.",
+  "",
+  "## Architecture",
+  "",
+  "Keep semantic approval in the Root boundary.",
+  "",
+  "## Feature Design",
+  "",
+  "Define, review, correct, and approve one Draft.",
+  "",
+  "## Code Design",
+  "",
+  "Derive the seal only from fresh read-back.",
+  "",
+  "## Boundaries",
+  "",
+  "Do not mutate approved Cycle content.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Map approval to the exact revision and digest assertion.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Reject malformed, stale, or substituted facts.",
+].join("\n");
+const correctedCycleDescription = cycleDescription.replace(
+  "Derive the seal only from fresh read-back.",
+  "Derive and return the seal only from fresh read-back.",
+);
+
 function rootTaskSnapshot(
   relations: readonly unknown[] = [{
     relation_id: "REL-1",
@@ -71,7 +149,11 @@ function rootTaskSnapshot(
     revision,
     status,
     title: issueId,
-    description: `## ${issueId}\n\nFixture facts.`,
+    description: issueId === "LIN-1"
+      ? rootDescription
+      : issueId === "LIN-2"
+        ? cycleDescription
+        : `## ${issueId}\n\nFixture facts.`,
     parent_id: parentId,
     labels: [label],
     delegate_id: null,
@@ -83,8 +165,8 @@ function rootTaskSnapshot(
       ? [
         issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root),
         issue("LIN-2", "LIN-1", "revision:issue:1", workflow.cycle_states.draft, workflow.labels.cycle),
-        issue("LIN-3", "LIN-2", "revision:other:1", workflow.stage_states.todo, workflow.labels.work),
-        issue("LIN-4", "LIN-2", "revision:other:2", workflow.stage_states.todo, workflow.labels.verify),
+        issue("LIN-3", "LIN-1", "revision:other:1", workflow.cycle_states.succeeded, workflow.labels.cycle),
+        issue("LIN-4", "LIN-1", "revision:other:2", workflow.cycle_states.rejected, workflow.labels.cycle),
       ]
       : [issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root)],
     relations: includeCycle ? relations : [],
@@ -133,6 +215,54 @@ function taskManager(calls: string[]): TaskManageCommandInterface {
   } as TaskManageCommandInterface;
 }
 
+function serveSnapshotIssues(
+  manager: TaskManageCommandInterface,
+  readSnapshot: () => TaskSnapshot = () => rootTaskSnapshot(),
+  observe: (issueId: string) => void = () => undefined,
+): void {
+  manager.get_issue = async (call) => {
+    observe(call.input.issue_id);
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        issue: readSnapshot().issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
+      },
+    }, call);
+  };
+}
+
+function expectedApprovalSeal(cycleRevision: string): string {
+  const definitionTarget = Object.freeze({
+    root_id: rootId,
+    root_revision: parseTaskRevision("revision:root:1"),
+    correlation_id: correlationId,
+  });
+  const definition = parseRootDefinition({
+    schema_version: 1,
+    ...definitionTarget,
+    root_description_markdown: rootDescription,
+  }, definitionTarget);
+  const target = Object.freeze({
+    root_id: rootId,
+    cycle_id: parseCycleIssueId("LIN-2"),
+    root_definition_revision: definition.root_revision,
+    cycle_revision: parseTaskRevision(cycleRevision),
+    correlation_id: correlationId,
+  });
+  return sealCycleSpecification({
+    schema_version: 1,
+    ...target,
+    cycle_description_markdown: cycleDescription,
+    root_adr_markdown: definition.root_adr_markdown,
+    status: "in_progress",
+  }, definition, target).seal_digest;
+}
+
 function getIssueCall(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schema_version: 1,
@@ -157,7 +287,9 @@ function updateIssueCall(issueId: string, expectedRevision: string): Record<stri
     input: {
       issue_id: issueId,
       expected_revision: expectedRevision,
-      desired: { description: "## Draft\n\nUpdated description." },
+      desired: {
+        description: issueId === "LIN-1" ? `${rootDescription}\n` : correctedCycleDescription,
+      },
     },
   };
 }
@@ -187,7 +319,7 @@ function createIssueCall(expectedParentRevision: string): Record<string, unknown
       expected_parent_revision: expectedParentRevision,
       desired: {
         title: "Created issue",
-        description: "## Draft\n\nCreated Cycle proposal.",
+        description: cycleDescription,
         state_id: workflow.cycle_states.draft,
         label_ids: [workflow.labels.cycle],
         delegate_id: null,
@@ -403,6 +535,7 @@ test("Root tools reject a get_issue result for a different identity as a fatal c
 test("Root tools return a typed mutation result with fresh resource and concrete read-back diff", async () => {
   const calls: string[] = [];
   const manager = taskManager(calls);
+  serveSnapshotIssues(manager, undefined, () => calls.push("get_issue"));
   manager.update_issue = async (call) => {
     calls.push(call.function);
     return parseTaskMcpResult({
@@ -420,7 +553,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
           revision: "revision:issue:2",
           status: workflow.cycle_states.draft,
           title: "LIN-2",
-          description: "## Draft\n\nNew description.",
+          description: correctedCycleDescription,
           parent_id: "LIN-1",
           labels: [workflow.labels.cycle],
           delegate_id: null,
@@ -430,8 +563,8 @@ test("Root tools return a typed mutation result with fresh resource and concrete
           kind: "field_changed",
           issue_id: call.input.issue_id,
           field: "description",
-          before: "## LIN-2\n\nFixture facts.",
-          after: "## Draft\n\nNew description.",
+          before: cycleDescription,
+          after: correctedCycleDescription,
         }],
         sanitized_reason: null,
       },
@@ -439,12 +572,16 @@ test("Root tools return a typed mutation result with fresh resource and concrete
   };
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
-    capabilities: [TASK_MCP_CAPABILITIES.update_issue],
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
     task_manager: bindTaskManager(manager),
   });
-  const binding = tools.bindings(correlationId)[0];
-  assert.ok(binding);
-  const result = await binding.execute({
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const read = bindings.get("get_issue");
+  const update = bindings.get("update_issue");
+  assert.ok(read);
+  assert.ok(update);
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
+  const result = await update.execute({
     schema_version: 1,
     function: "update_issue",
     root_id: rootId,
@@ -454,18 +591,18 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     input: {
       issue_id: "LIN-2",
       expected_revision: "revision:issue:1",
-      desired: { description: "## Draft\n\nNew description." },
+      desired: { description: correctedCycleDescription },
     },
   }, { assertActive: () => undefined });
 
-  assert.deepEqual(calls, ["update_issue"]);
+  assert.deepEqual(calls, ["get_issue", "update_issue"]);
   assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "applied");
   assert.deepEqual((result as { output?: { fresh_resource?: unknown } }).output?.fresh_resource, {
     issue_id: "LIN-2",
     revision: "revision:issue:2",
     status: workflow.cycle_states.draft,
     title: "LIN-2",
-    description: "## Draft\n\nNew description.",
+    description: correctedCycleDescription,
     parent_id: "LIN-1",
     labels: [workflow.labels.cycle],
     delegate_id: null,
@@ -475,10 +612,236 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     kind: "field_changed",
     issue_id: "LIN-2",
     field: "description",
-    before: "## LIN-2\n\nFixture facts.",
-    after: "## Draft\n\nNew description.",
+    before: cycleDescription,
+    after: correctedCycleDescription,
   }]);
+  assert.equal((result as { seal_digest?: unknown }).seal_digest, null);
   assert.equal(Object.isFrozen(result), true);
+});
+
+test("Root tools return a seal digest only from an applied approval fresh read-back", async () => {
+  let currentTask = rootTaskSnapshot([], true);
+  const manager = taskManager([]);
+  serveSnapshotIssues(manager, () => currentTask);
+  manager.update_issue = async (call) => {
+    const approved = {
+      issue_id: call.input.issue_id,
+      revision: "revision:issue:sealed",
+      status: workflow.cycle_states.in_progress,
+      title: "LIN-2",
+      description: cycleDescription,
+      parent_id: "LIN-1",
+      labels: [workflow.labels.cycle],
+      delegate_id: null,
+      priority: null,
+    };
+    currentTask = parseTaskSnapshot({
+      ...currentTask,
+      issues: currentTask.issues.map((issue) => issue.issue_id === approved.issue_id ? approved : issue),
+    });
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: approved,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: call.input.issue_id,
+          field: "status",
+          before: workflow.cycle_states.draft,
+          after: workflow.cycle_states.in_progress,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
+    task_manager: bindTaskManager(manager, async () => currentTask),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const read = bindings.get("get_issue");
+  const approve = bindings.get("update_issue");
+  assert.ok(read);
+  assert.ok(approve);
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
+
+  const result = await approve.execute({
+    schema_version: 1,
+    function: "update_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.update_issue,
+    input: {
+      issue_id: "LIN-2",
+      expected_revision: "revision:issue:1",
+      desired: { state_id: workflow.cycle_states.in_progress },
+    },
+  }, { assertActive: () => undefined });
+
+  assert.equal(
+    (result as { seal_digest?: unknown }).seal_digest,
+    expectedApprovalSeal("revision:issue:sealed"),
+  );
+  assert.equal(
+    (result as { output?: { fresh_resource?: { revision?: unknown } } }).output?.fresh_resource?.revision,
+    "revision:issue:sealed",
+  );
+});
+
+test("Root tools do not return a seal for a stale approval precondition", async () => {
+  const manager = taskManager([]);
+  serveSnapshotIssues(manager);
+  manager.update_issue = async (call) => parseTaskMcpResult({
+    schema_version: 1,
+    function: call.function,
+    root_id: call.root_id,
+    runtime_generation: call.runtime_generation,
+    correlation_id: call.correlation_id,
+    capability: call.capability,
+    output: {
+      outcome: "precondition_failed",
+      target: { kind: "issue", issue_id: call.input.issue_id },
+      fresh_resource: {
+        issue_id: call.input.issue_id,
+        revision: "revision:issue:concurrent",
+        status: workflow.cycle_states.draft,
+        title: "LIN-2",
+        description: correctedCycleDescription,
+        parent_id: "LIN-1",
+        labels: [workflow.labels.cycle],
+        delegate_id: null,
+        priority: null,
+      },
+      concrete_diff: [{
+        kind: "field_changed",
+        issue_id: call.input.issue_id,
+        field: "description",
+        before: cycleDescription,
+        after: correctedCycleDescription,
+      }],
+      sanitized_reason: "fresh_precondition_failed",
+    },
+  }, call);
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
+    task_manager: bindTaskManager(manager),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const read = bindings.get("get_issue");
+  const approve = bindings.get("update_issue");
+  assert.ok(read);
+  assert.ok(approve);
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
+
+  const result = await approve.execute({
+    schema_version: 1,
+    function: "update_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.update_issue,
+    input: {
+      issue_id: "LIN-2",
+      expected_revision: "revision:issue:1",
+      desired: { state_id: workflow.cycle_states.in_progress },
+    },
+  }, { assertActive: () => undefined });
+
+  assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "precondition_failed");
+  assert.equal((result as { seal_digest?: unknown }).seal_digest, null);
+});
+
+test("an exact read resolves an unknown applied approval with the sealed fresh revision", async () => {
+  let currentTask = rootTaskSnapshot([], true);
+  const manager = taskManager([]);
+  manager.update_issue = async (call) => {
+    const before = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id);
+    assert.ok(before);
+    const approved = {
+      ...before,
+      revision: "revision:issue:sealed-after-unknown",
+      status: workflow.cycle_states.in_progress,
+    };
+    currentTask = parseTaskSnapshot({
+      ...currentTask,
+      issues: currentTask.issues.map((issue) => issue.issue_id === call.input.issue_id ? approved : issue),
+    });
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "acceptance_unknown",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: "fresh_readback_unavailable",
+      },
+    }, call);
+  };
+  manager.get_issue = async (call) => parseTaskMcpResult({
+    schema_version: 1,
+    function: call.function,
+    root_id: call.root_id,
+    runtime_generation: call.runtime_generation,
+    correlation_id: call.correlation_id,
+    capability: call.capability,
+    output: {
+      issue: currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
+    },
+  }, call);
+  const tools = new RootTools({
+    target: { root_id: rootId, runtime_generation: generation },
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
+    task_manager: bindTaskManager(manager, async () => currentTask),
+  });
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const approve = bindings.get("update_issue");
+  const read = bindings.get("get_issue");
+  assert.ok(approve);
+  assert.ok(read);
+
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
+
+  const unknown = await approve.execute({
+    schema_version: 1,
+    function: "update_issue",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    capability: TASK_MCP_CAPABILITIES.update_issue,
+    input: {
+      issue_id: "LIN-2",
+      expected_revision: "revision:issue:1",
+      desired: { state_id: workflow.cycle_states.in_progress },
+    },
+  }, { assertActive: () => undefined });
+  assert.equal((unknown as { seal_digest?: unknown }).seal_digest, null);
+  assert.equal(tools.hasPendingAcceptance(), true);
+
+  const resolved = await read.execute(getIssueCall(), { assertActive: () => undefined });
+  assert.equal(
+    (resolved as { output?: { issue?: { revision?: unknown } } }).output?.issue?.revision,
+    "revision:issue:sealed-after-unknown",
+  );
+  assert.equal(
+    (resolved as { seal_digest?: unknown }).seal_digest,
+    expectedApprovalSeal("revision:issue:sealed-after-unknown"),
+  );
+  assert.equal(tools.hasPendingAcceptance(), false);
 });
 
 test("acceptance_unknown blocks every mutation until get_issue reads the exact target", async () => {
@@ -509,18 +872,7 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
       },
     }, call);
   };
-  manager.get_issue = async (call) => {
-    effects.push(`read:${call.input.issue_id}`);
-    return parseTaskMcpResult({
-      schema_version: 1,
-      function: call.function,
-      root_id: call.root_id,
-      runtime_generation: call.runtime_generation,
-      correlation_id: call.correlation_id,
-      capability: call.capability,
-      output: { issue: null },
-    }, call);
-  };
+  serveSnapshotIssues(manager, undefined, (issueId) => effects.push(`read:${issueId}`));
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [
@@ -538,6 +890,8 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
   assert.ok(archive);
   assert.ok(read);
   assert.equal(tools.hasPendingAcceptance(), false);
+
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
 
   const unknown = await update.execute(
     updateIssueCall("LIN-2", "revision:issue:1"),
@@ -566,18 +920,20 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
 
   await read.execute(getIssueCall(), { assertActive: () => undefined });
   assert.equal(tools.hasPendingAcceptance(), false);
-  await update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined });
+  await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
   assert.deepEqual(effects, [
+    "read:LIN-2",
     "update:LIN-2",
     "read:LIN-3",
     "read:LIN-2",
-    "update:LIN-1",
+    "update:LIN-2",
   ]);
 });
 
 test("acceptance_unknown blocks every declared tool while an exact Task mutation is unresolved", async () => {
   const effects: string[] = [];
   const manager = taskManager([]);
+  serveSnapshotIssues(manager, undefined, (issueId) => effects.push(`read:${issueId}`));
   manager.update_issue = async (call) => {
     effects.push(`update:${call.input.issue_id}`);
     return parseTaskMcpResult({
@@ -612,6 +968,7 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [
+      TASK_MCP_CAPABILITIES.get_issue,
       TASK_MCP_CAPABILITIES.update_issue,
       "performer:plan",
       "git:get_status",
@@ -621,8 +978,11 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
     declared_tools: [plan, git, delivery],
   });
   const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const read = bindings.get("get_issue");
   const update = bindings.get("update_issue");
+  assert.ok(read);
   assert.ok(update);
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
   await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
 
   for (const name of ["plan", "get_status", "get_remote_ref"]) {
@@ -640,7 +1000,7 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
           : "delivery:get_remote_ref",
     }, { assertActive: () => undefined }), isAcceptanceUnknown);
   }
-  assert.deepEqual(effects, ["update:LIN-2"]);
+  assert.deepEqual(effects, ["read:LIN-2", "update:LIN-2"]);
 });
 
 test("acceptance_unknown from create_issue blocks create retries until the generated issue is read", async () => {
@@ -927,6 +1287,7 @@ test("Root tools advertise and enforce 32-item relation pages so 100 relations f
 
 test("Root tools reject oversized typed mutation diffs as a fatal contract violation", async () => {
   const manager = taskManager([]);
+  serveSnapshotIssues(manager);
   manager.update_issue = async (call) => ({
     schema_version: 1,
     function: call.function,
@@ -950,13 +1311,17 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
   });
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
-    capabilities: [TASK_MCP_CAPABILITIES.update_issue],
+    capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
     task_manager: bindTaskManager(manager),
   });
-  const binding = tools.bindings(correlationId)[0];
-  assert.ok(binding);
+  const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
+  const read = bindings.get("get_issue");
+  const update = bindings.get("update_issue");
+  assert.ok(read);
+  assert.ok(update);
+  await read.execute(getIssueCall(), { assertActive: () => undefined });
 
-  await assert.rejects(binding.execute({
+  await assert.rejects(update.execute({
     schema_version: 1,
     function: "update_issue",
     root_id: rootId,
@@ -966,7 +1331,7 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
     input: {
       issue_id: "LIN-2",
       expected_revision: "revision:issue:1",
-      desired: { description: "## Draft\n\nNew description." },
+      desired: { description: correctedCycleDescription },
     },
   }, { assertActive: () => undefined }), /invalid_contract/u);
 });

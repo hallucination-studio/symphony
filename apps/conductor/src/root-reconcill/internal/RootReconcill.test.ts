@@ -84,6 +84,114 @@ const workflow = parseTaskWorkflowIdentities({
 });
 const callerAuthority = createTaskManageCallerAuthority();
 
+const reconciledRootDescription = [
+  "# Root",
+  "",
+  "## Requirement",
+  "",
+  "Build the Root runtime.",
+  "",
+  "- Authorized: define the Root, review and correct one Cycle Draft, then approve its exact revision.",
+  "- Required consequences: preserve fresh Task Manager facts and return the approval seal digest.",
+  "- Out of scope: Cycle execution, acceptance, delivery, migrations, and compatibility behavior.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "- Fresh Task Manager Markdown and structured Issue facts are authoritative.",
+  "- Transcript, repository search output, and temporary reasoning are ephemeral.",
+  "",
+  "## Root ADR",
+  "",
+  "Decision: keep semantic decisions at the Root boundary and mechanical execution in Conductor.",
+  "",
+  "Rationale: only Root Reconcill owns requirement and design interpretation.",
+  "",
+  "Constraints: Root has code-read-only authority and may mutate only Root or Draft Markdown before approval.",
+  "",
+  "Consequences: an approved Cycle is immutable and later changes require a terminal successor.",
+  "",
+  "## Acceptance",
+  "",
+  "- Define persists every closed Root section and reads the exact Root revision back.",
+  "- Draft review reads and corrects the complete copied Root snapshot and design.",
+  "- Approval changes only the reviewed exact Draft to In Progress and returns its seal digest.",
+].join("\n");
+const concurrentRootDescription = reconciledRootDescription.replace(
+  "Build the Root runtime.",
+  "Build the concurrently revised Root runtime.",
+);
+const cycleDraftDescription = [
+  "# Cycle Draft",
+  "",
+  "## Root Definition Revision",
+  "",
+  "`revision:root:2`",
+  "",
+  "## Requirement",
+  "",
+  "Build the Root runtime.",
+  "",
+  "- Authorized: define the Root, review and correct one Cycle Draft, then approve its exact revision.",
+  "- Required consequences: preserve fresh Task Manager facts and return the approval seal digest.",
+  "- Out of scope: Cycle execution, acceptance, delivery, migrations, and compatibility behavior.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "- Fresh Task Manager Markdown and structured Issue facts are authoritative.",
+  "- Transcript, repository search output, and temporary reasoning are ephemeral.",
+  "",
+  "## Root ADR",
+  "",
+  "Decision: keep semantic decisions at the Root boundary and mechanical execution in Conductor.",
+  "",
+  "Rationale: only Root Reconcill owns requirement and design interpretation.",
+  "",
+  "Constraints: Root has code-read-only authority and may mutate only Root or Draft Markdown before approval.",
+  "",
+  "Consequences: an approved Cycle is immutable and later changes require a terminal successor.",
+  "",
+  "## Acceptance",
+  "",
+  "- Define persists every closed Root section and reads the exact Root revision back.",
+  "- Draft review reads and corrects the complete copied Root snapshot and design.",
+  "- Approval changes only the reviewed exact Draft to In Progress and returns its seal digest.",
+  "",
+  "## Architecture",
+  "",
+  "Root Reconcill owns semantic Define and Draft approval; Task Manager owns durable Markdown and exact revisions.",
+  "Conductor receives authority only after the one-way In Progress transition and cannot reinterpret the design.",
+  "",
+  "## Feature Design",
+  "",
+  "Define persists the full Root document, creates one Draft, reviews every copied and designed section,",
+  "corrects only Draft Markdown, re-reads it, and approves that exact revision once.",
+  "",
+  "## Code Design",
+  "",
+  "Validate closed Markdown and exact revisions at the Root boundary.",
+  "Derive the seal only from the applied In Progress fresh resource and expose it only on the Root tool result.",
+  "",
+  "## Boundaries",
+  "",
+  "Authorized changes are Root definition, one Draft creation, Draft-only description correction, and exact approval.",
+  "Stage creation, execution, acceptance, delivery, migrations, and post-approval specification edits are excluded.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "- Root sections: assert the applied Root resource and subsequent exact Root read.",
+  "- Draft correction: assert the fresh Draft Markdown before and after correction.",
+  "- Approval: assert the exact corrected revision becomes In Progress and returns a non-null seal digest.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Fail closed on malformed or incomplete Markdown, stale revisions, snapshot drift, conflicting graph facts,",
+  "unknown acceptance without exact resolution, or any read-back mismatch.",
+].join("\n");
+const correctedCycleDraftDescription = cycleDraftDescription.replace(
+  "Validate closed Markdown and exact revisions at the Root boundary.",
+  "Validate closed Markdown, copied Root facts, and exact revisions at the Root boundary.",
+);
+
 function bootstrap(
   correlation = "corr:bootstrap:1",
   runtimeGeneration = generation,
@@ -131,6 +239,14 @@ function taskAtRootRevision(revision: string, description: string | null) {
       ? { ...issue, revision, description }
       : issue),
   });
+}
+
+function completeRootBootstrap(): RootBootstrap {
+  const initial = bootstrap();
+  return parseRootBootstrap({
+    ...initial,
+    task: taskAtRootRevision("revision:root:2", reconciledRootDescription),
+  }, { root_id: rootId, runtime_generation: generation });
 }
 
 function diff(
@@ -287,10 +403,11 @@ function initializeResponse(message: Record<string, unknown>, server: Controlled
   return true;
 }
 
-function updateIssueToolCall(
+function taskToolCall(
   requestId: string,
   turnId: string,
-  expectedRevision: string,
+  functionName: keyof typeof TASK_MCP_CAPABILITIES,
+  input: Record<string, unknown>,
   runtimeGeneration = generation,
 ): Record<string, unknown> {
   return {
@@ -300,22 +417,31 @@ function updateIssueToolCall(
       threadId: "thread-root",
       turnId,
       callId: `call:${requestId}`,
-      tool: "update_issue",
+      tool: functionName,
       arguments: {
         schema_version: 1,
-        function: "update_issue",
+        function: functionName,
         root_id: rootId,
         runtime_generation: runtimeGeneration,
         correlation_id: "corr:bootstrap:1",
-        capability: TASK_MCP_CAPABILITIES.update_issue,
-        input: {
-          issue_id: rootId,
-          expected_revision: expectedRevision,
-          desired: { description: "## Requirement\n\nReconciled description." },
-        },
+        capability: TASK_MCP_CAPABILITIES[functionName],
+        input,
       },
     },
   };
+}
+
+function updateIssueToolCall(
+  requestId: string,
+  turnId: string,
+  expectedRevision: string,
+  runtimeGeneration = generation,
+): Record<string, unknown> {
+  return taskToolCall(requestId, turnId, "update_issue", {
+    issue_id: rootId,
+    expected_revision: expectedRevision,
+    desired: { description: reconciledRootDescription },
+  }, runtimeGeneration);
 }
 
 function getIssueToolCall(
@@ -323,25 +449,7 @@ function getIssueToolCall(
   turnId: string,
   issueId: string = rootId,
 ): Record<string, unknown> {
-  return {
-    id: requestId,
-    method: "item/tool/call",
-    params: {
-      threadId: "thread-root",
-      turnId,
-      callId: `call:${requestId}`,
-      tool: "get_issue",
-      arguments: {
-        schema_version: 1,
-        function: "get_issue",
-        root_id: rootId,
-        runtime_generation: generation,
-        correlation_id: "corr:bootstrap:1",
-        capability: TASK_MCP_CAPABILITIES.get_issue,
-        input: { issue_id: issueId },
-      },
-    },
-  };
+  return taskToolCall(requestId, turnId, "get_issue", { issue_id: issueId });
 }
 
 function completedTurn(server: ControlledAppServer, turnId = "turn-root"): void {
@@ -399,8 +507,8 @@ function updateResult(
         status: "Todo",
         title: "Build the Root runtime",
         description: outcome === "applied"
-          ? "## Requirement\n\nReconciled description."
-          : "## Requirement\n\nConcurrent description.",
+          ? reconciledRootDescription
+          : concurrentRootDescription,
         parent_id: null,
         labels: ["label:root"],
         delegate_id: "actor:agent",
@@ -412,10 +520,10 @@ function updateResult(
         field: "description",
         before: call.input.expected_revision === "revision:root:1"
           ? null
-          : "## Requirement\n\nConcurrent description.",
+          : concurrentRootDescription,
         after: outcome === "applied"
-          ? "## Requirement\n\nReconciled description."
-          : "## Requirement\n\nConcurrent description.",
+          ? reconciledRootDescription
+          : concurrentRootDescription,
       }],
       sanitized_reason: outcome === "applied" ? null : "Issue revision changed",
     },
@@ -1851,6 +1959,394 @@ test("tool-call budget abort cannot accept while an earlier effect is in flight"
   }
 });
 
+test("controlled app-server resumes from complete Root Markdown by creating the Draft directly", async () => {
+  const cycleId = parseTaskIssueId("LIN-CYCLE-RESUME");
+  const responses: Array<ReturnType<typeof toolResponse>> = [];
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-root" } } });
+      return;
+    }
+    if (message.method === "turn/start") {
+      server.sendMany([
+        { id: message.id as string, result: { turn: { id: "turn-root" } } },
+        {
+          method: "turn/started",
+          params: {
+            threadId: "thread-root",
+            turn: { id: "turn-root", status: "inProgress", items: [], error: null },
+          },
+        },
+        taskToolCall("tool:create-resumed-draft", "turn-root", "create_issue", {
+          parent_issue_id: rootId,
+          expected_parent_revision: "revision:root:2",
+          desired: {
+            title: "Implement the Root runtime",
+            description: cycleDraftDescription,
+            state_id: workflow.cycle_states.draft,
+            label_ids: [workflow.labels.cycle],
+            delegate_id: null,
+            priority: null,
+          },
+        }),
+      ]);
+      return;
+    }
+    if (message.id === "tool:create-resumed-draft" && message.result !== undefined) {
+      responses.push(toolResponse(message));
+      completedTurn(server);
+    }
+  });
+
+  let currentTask = completeRootBootstrap().task;
+  const managerCalls: string[] = [];
+  const manager = taskManager(async () => {
+    managerCalls.push("update");
+    throw new Error("unexpected_root_rewrite");
+  });
+  manager.create_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    const parent = currentTask.issues.find(({ issue_id }) => issue_id === call.input.parent_issue_id);
+    assert.ok(parent);
+    assert.equal(call.input.expected_parent_revision, parent.revision);
+    const fresh = {
+      issue_id: cycleId,
+      revision: "revision:cycle:1",
+      status: call.input.desired.state_id,
+      title: call.input.desired.title,
+      description: call.input.desired.description,
+      parent_id: call.input.parent_issue_id,
+      labels: call.input.desired.label_ids,
+      delegate_id: call.input.desired.delegate_id,
+      priority: call.input.desired.priority,
+    };
+    currentTask = parseTaskSnapshot({
+      ...currentTask,
+      issues: [...currentTask.issues, fresh],
+    });
+    managerCalls.push(`create:${call.input.parent_issue_id}:${call.input.expected_parent_revision}`);
+    return parseTaskMcpResult({
+      schema_version: call.schema_version,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: fresh.issue_id },
+        fresh_resource: fresh,
+        concrete_diff: [{ kind: "issue_created", issue: fresh }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const f = await controlledFixture(
+    appServer,
+    manager,
+    [TASK_MCP_CAPABILITIES.create_issue, TASK_MCP_CAPABILITIES.update_issue],
+    1,
+    2_000,
+    async () => currentTask,
+  );
+
+  try {
+    assert.equal((await f.root.run(completeRootBootstrap())).outcome, "quiescent");
+    assert.deepEqual(managerCalls, [`create:${rootId}:revision:root:2`]);
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0]?.success, true);
+    assert.equal(currentTask.issues.some(({ issue_id }) => issue_id === cycleId), true);
+    assert.equal(
+      currentTask.issues.find(({ issue_id }) => issue_id === parseTaskIssueId(rootId))?.description,
+      reconciledRootDescription,
+    );
+  } finally {
+    await f.root.close();
+  }
+});
+
+test("controlled app-server completes fresh Define, Draft review, correction, and one-way seal", async () => {
+  const rootTaskIssueId = parseTaskIssueId(rootId);
+  const cycleId = parseTaskIssueId("LIN-CYCLE-1");
+  const responses = new Map<string, ReturnType<typeof toolResponse>>();
+  const reviewedDraftDescriptions: string[] = [];
+  const readIssue = (response: ReturnType<typeof toolResponse>) => {
+    const issue = (response.body as {
+      readonly output?: {
+        readonly issue?: {
+          readonly issue_id?: unknown;
+          readonly revision?: unknown;
+          readonly status?: unknown;
+          readonly description?: unknown;
+        } | null;
+      };
+    }).output?.issue;
+    if (issue === undefined || issue === null) throw new Error("missing_controlled_issue_readback");
+    return {
+      issue_id: String(issue.issue_id),
+      revision: String(issue.revision),
+      status: String(issue.status),
+      description: typeof issue.description === "string" ? issue.description : null,
+    };
+  };
+  const createdIssue = (response: ReturnType<typeof toolResponse>) => {
+    const issue = (response.body as {
+      readonly output?: {
+        readonly fresh_resource?: {
+          readonly issue_id?: unknown;
+          readonly revision?: unknown;
+        } | null;
+      };
+    }).output?.fresh_resource;
+    if (issue === undefined || issue === null) throw new Error("missing_controlled_create_readback");
+    return { issue_id: String(issue.issue_id), revision: String(issue.revision) };
+  };
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-root" } } });
+      return;
+    }
+    if (message.method === "turn/start") {
+      server.sendMany([
+        { id: message.id as string, result: { turn: { id: "turn-root" } } },
+        {
+          method: "turn/started",
+          params: {
+            threadId: "thread-root",
+            turn: { id: "turn-root", status: "inProgress", items: [], error: null },
+          },
+        },
+        updateIssueToolCall("tool:define", "turn-root", "revision:root:1"),
+      ]);
+      return;
+    }
+    if (typeof message.id !== "string" || !message.id.startsWith("tool:")) return;
+    const response = toolResponse(message);
+    responses.set(message.id, response);
+    switch (message.id) {
+      case "tool:define":
+        setImmediate(() => server.send(getIssueToolCall("tool:read-root", "turn-root")));
+        return;
+      case "tool:read-root": {
+        const root = readIssue(response);
+        assert.equal(root.description, reconciledRootDescription);
+        setImmediate(() => server.send(taskToolCall("tool:create-draft", "turn-root", "create_issue", {
+          parent_issue_id: root.issue_id,
+          expected_parent_revision: root.revision,
+          desired: {
+            title: "Implement the Root runtime",
+            description: cycleDraftDescription,
+            state_id: workflow.cycle_states.draft,
+            label_ids: [workflow.labels.cycle],
+            delegate_id: null,
+            priority: null,
+          },
+        })));
+        return;
+      }
+      case "tool:create-draft": {
+        const created = createdIssue(response);
+        setImmediate(() => server.send(getIssueToolCall(
+          "tool:read-draft",
+          "turn-root",
+          created.issue_id,
+        )));
+        return;
+      }
+      case "tool:read-draft": {
+        const draft = readIssue(response);
+        assert.equal(draft.description, cycleDraftDescription);
+        assert.ok(draft.description);
+        reviewedDraftDescriptions.push(draft.description);
+        const correctedDescription = draft.description.replace(
+          "Validate closed Markdown and exact revisions at the Root boundary.",
+          "Validate closed Markdown, copied Root facts, and exact revisions at the Root boundary.",
+        );
+        assert.equal(correctedDescription, correctedCycleDraftDescription);
+        setImmediate(() => server.send(taskToolCall("tool:correct-draft", "turn-root", "update_issue", {
+          issue_id: draft.issue_id,
+          expected_revision: draft.revision,
+          desired: { description: correctedDescription },
+        })));
+        return;
+      }
+      case "tool:correct-draft":
+        setImmediate(() => server.send(getIssueToolCall("tool:read-corrected", "turn-root", cycleId)));
+        return;
+      case "tool:read-corrected": {
+        const draft = readIssue(response);
+        assert.equal(draft.description, correctedCycleDraftDescription);
+        assert.ok(draft.description);
+        reviewedDraftDescriptions.push(draft.description);
+        setImmediate(() => server.send(taskToolCall("tool:approve", "turn-root", "update_issue", {
+          issue_id: draft.issue_id,
+          expected_revision: draft.revision,
+          desired: { state_id: workflow.cycle_states.in_progress },
+        })));
+        return;
+      }
+      case "tool:approve":
+        setImmediate(() => server.send(getIssueToolCall("tool:read-sealed", "turn-root", cycleId)));
+        return;
+      case "tool:read-sealed":
+        completedTurn(server);
+    }
+  });
+
+  let currentTask = bootstrap().task;
+  const managerCalls: string[] = [];
+  const manager = taskManager(async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    const before = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id);
+    assert.ok(before);
+    assert.equal(call.input.expected_revision, before.revision);
+    const descriptionUpdate = call.input.desired.description !== undefined;
+    const statusUpdate = call.input.desired.state_id !== undefined;
+    assert.notEqual(descriptionUpdate, statusUpdate);
+    const revision = before.issue_id === rootTaskIssueId
+      ? "revision:root:2"
+      : descriptionUpdate ? "revision:cycle:2" : "revision:cycle:3";
+    const field = descriptionUpdate ? "description" : "status";
+    const beforeValue = descriptionUpdate ? before.description : before.status;
+    const afterValue = descriptionUpdate ? call.input.desired.description : call.input.desired.state_id;
+    const fresh = {
+      ...before,
+      revision,
+      description: descriptionUpdate ? call.input.desired.description ?? null : before.description,
+      status: statusUpdate ? call.input.desired.state_id ?? before.status : before.status,
+    };
+    currentTask = parseTaskSnapshot({
+      ...currentTask,
+      issues: currentTask.issues.map((issue) => issue.issue_id === fresh.issue_id ? fresh : issue),
+    });
+    managerCalls.push(`update:${call.input.issue_id}:${call.input.expected_revision}`);
+    return parseTaskMcpResult({
+      schema_version: call.schema_version,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: fresh,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: call.input.issue_id,
+          field,
+          before: beforeValue,
+          after: afterValue,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  });
+  manager.create_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    const parent = currentTask.issues.find(({ issue_id }) => issue_id === call.input.parent_issue_id);
+    assert.ok(parent);
+    assert.equal(call.input.expected_parent_revision, parent.revision);
+    const fresh = {
+      issue_id: cycleId,
+      revision: "revision:cycle:1",
+      status: call.input.desired.state_id,
+      title: call.input.desired.title,
+      description: call.input.desired.description,
+      parent_id: call.input.parent_issue_id,
+      labels: call.input.desired.label_ids,
+      delegate_id: call.input.desired.delegate_id,
+      priority: call.input.desired.priority,
+    };
+    currentTask = parseTaskSnapshot({
+      ...currentTask,
+      issues: [...currentTask.issues, fresh],
+    });
+    managerCalls.push(`create:${call.input.parent_issue_id}:${call.input.expected_parent_revision}`);
+    return parseTaskMcpResult({
+      schema_version: call.schema_version,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: fresh.issue_id },
+        fresh_resource: fresh,
+        concrete_diff: [{ kind: "issue_created", issue: fresh }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  manager.get_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    const issue = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null;
+    managerCalls.push(`get:${call.input.issue_id}`);
+    return parseTaskMcpResult({
+      schema_version: call.schema_version,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: { issue },
+    }, call);
+  };
+  const f = await controlledFixture(
+    appServer,
+    manager,
+    [
+      TASK_MCP_CAPABILITIES.get_issue,
+      TASK_MCP_CAPABILITIES.create_issue,
+      TASK_MCP_CAPABILITIES.update_issue,
+    ],
+    8,
+    2_000,
+    async () => currentTask,
+  );
+
+  try {
+    assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
+    assert.deepEqual(managerCalls, [
+      `update:${rootId}:revision:root:1`,
+      `get:${rootId}`,
+      `create:${rootId}:revision:root:2`,
+      `get:${cycleId}`,
+      `update:${cycleId}:revision:cycle:1`,
+      `get:${cycleId}`,
+      `update:${cycleId}:revision:cycle:2`,
+      `get:${cycleId}`,
+    ]);
+    assert.equal([...responses.values()].every(({ success }) => success), true);
+    assert.equal((responses.get("tool:define")?.body as { readonly seal_digest?: unknown }).seal_digest, null);
+    assert.equal(
+      (responses.get("tool:correct-draft")?.body as { readonly seal_digest?: unknown }).seal_digest,
+      null,
+    );
+    assert.match(
+      String((responses.get("tool:approve")?.body as { readonly seal_digest?: unknown }).seal_digest),
+      /^[0-9a-f]{64}$/u,
+    );
+    const sealedRead = responses.get("tool:read-sealed");
+    assert.ok(sealedRead);
+    assert.equal(readIssue(sealedRead).status, workflow.cycle_states.in_progress);
+    assert.equal(readIssue(sealedRead).description, correctedCycleDraftDescription);
+    assert.deepEqual(reviewedDraftDescriptions, [
+      cycleDraftDescription,
+      correctedCycleDraftDescription,
+    ]);
+    const sealed = currentTask.issues.find(({ issue_id }) => issue_id === cycleId);
+    assert.equal(sealed?.description, correctedCycleDraftDescription);
+    assert.equal(sealed?.revision, "revision:cycle:3");
+    assert.equal(f.toolLogs.length, 8);
+  } finally {
+    await f.root.close();
+  }
+});
+
 test("a precondition conflict is re-observed in the same process, thread, and turn", async () => {
   const responses: Array<{ readonly success: boolean; readonly body: unknown }> = [];
   const revisions: string[] = [];
@@ -1896,7 +2392,7 @@ test("a precondition conflict is re-observed in the same process, thread, and tu
     if (revisions.length === 1) {
       currentTask = taskAtRootRevision(
         "revision:root:2",
-        "## Requirement\n\nConcurrent description.",
+        concurrentRootDescription,
       );
       return updateResult(call, "precondition_failed", "revision:root:2");
     }
@@ -2002,7 +2498,7 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
     managerCalls.push(`read:${call.input.issue_id}`);
     currentTask = taskAtRootRevision(
       "revision:root:2",
-      "## Requirement\n\nConcurrent description.",
+      concurrentRootDescription,
     );
     return parseTaskMcpResult({
       schema_version: 1,
@@ -2017,7 +2513,7 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
           revision: "revision:root:2",
           status: "Todo",
           title: "Build the Root runtime",
-          description: "## Requirement\n\nConcurrent description.",
+          description: concurrentRootDescription,
           parent_id: null,
           labels: ["label:root"],
           delegate_id: "actor:agent",

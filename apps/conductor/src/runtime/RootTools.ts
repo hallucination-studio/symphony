@@ -1,4 +1,8 @@
 import {
+  parseCycleSealDigest,
+  type CycleSealDigest,
+} from "../contracts/cycle.js";
+import {
   parseCorrelationId,
   parseRootIssueId,
   parseRuntimeGeneration,
@@ -22,6 +26,8 @@ import {
   bindRootTaskManageCommandCorrelation,
   isRootTaskManageCommandBinding,
   RootTaskManageBindingError,
+  type RootGetIssueResult,
+  type RootUpdateIssueResult,
   type RootTaskManageCommandBinding,
 } from "./RootTaskManageCommand.js";
 import {
@@ -253,8 +259,24 @@ async function dispatchTask(
   }
 }
 
-function parseTaskResult(value: unknown, call: TaskMcpCall): TaskMcpResult {
-  const result = parseTaskMcpResult(value, call);
+type RootTaskToolResult = TaskMcpResult | RootGetIssueResult | RootUpdateIssueResult;
+
+function parseTaskResult(value: unknown, call: TaskMcpCall): RootTaskToolResult {
+  let sealDigest: CycleSealDigest | null | undefined;
+  let taskValue = value;
+  if (call.function === "update_issue" || call.function === "get_issue") {
+    const record = asRecord(value);
+    if (call.function === "update_issue" && !("seal_digest" in record)) {
+      throw new Error("missing_root_seal_digest");
+    }
+    if ("seal_digest" in record) {
+      sealDigest = record.seal_digest === null ? null : parseCycleSealDigest(record.seal_digest);
+      const genericResult = { ...record };
+      delete genericResult.seal_digest;
+      taskValue = genericResult;
+    }
+  }
+  const result = parseTaskMcpResult(taskValue, call);
   if (
     call.function === "get_issue"
     && result.function === "get_issue"
@@ -264,7 +286,9 @@ function parseTaskResult(value: unknown, call: TaskMcpCall): TaskMcpResult {
   if ("concrete_diff" in result.output && result.output.concrete_diff.length > MAX_ROOT_TASK_CHANGES) {
     throw new Error("root_task_change_limit_exceeded");
   }
-  return result;
+  return sealDigest === undefined
+    ? result
+    : Object.freeze({ ...result, seal_digest: sealDigest });
 }
 
 function assertRootPageSize(call: TaskMcpCall): void {
@@ -458,7 +482,7 @@ export class RootTools {
     }
   }
 
-  #observeTaskResult(call: TaskMcpCall, result: TaskMcpResult): void {
+  #observeTaskResult(call: TaskMcpCall, result: RootTaskToolResult): void {
     if ("outcome" in result.output && result.output.outcome === "acceptance_unknown") {
       const target = result.output.target;
       this.#unknownAcceptance = target.kind === "issue"

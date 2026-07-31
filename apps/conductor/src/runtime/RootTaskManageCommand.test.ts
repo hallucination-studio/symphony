@@ -88,7 +88,57 @@ const rootDescription = [
   "",
   "Only exact role-owned mutations reach the provider.",
 ].join("\n");
-const cycleDescription = "## Approved Design\n\nExecute one frozen attempt mechanically.";
+const cycleDescription = [
+  "# Cycle Draft",
+  "",
+  "## Root Definition Revision",
+  "",
+  "`revision:root:1`",
+  "",
+  "## Requirement",
+  "",
+  "Implement one immutable Cycle.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Task facts are authoritative.",
+  "",
+  "## Root ADR",
+  "",
+  "Keep caller roles separate.",
+  "",
+  "## Acceptance",
+  "",
+  "Only exact role-owned mutations reach the provider.",
+  "",
+  "## Architecture",
+  "",
+  "Keep Root semantics separate from mechanical Cycle execution.",
+  "",
+  "## Feature Design",
+  "",
+  "Define, review, and approve one complete Draft.",
+  "",
+  "## Code Design",
+  "",
+  "Validate Markdown and exact revisions at the Root boundary.",
+  "",
+  "## Boundaries",
+  "",
+  "Only Draft descriptions can change before approval.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Map exact role-owned mutations to focused boundary tests.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Fail closed on malformed documents, stale facts, or read-back mismatch.",
+].join("\n");
+const correctedCycleDescription = cycleDescription.replace(
+  "Validate Markdown and exact revisions at the Root boundary.",
+  "Validate closed Markdown and exact revisions at the Root boundary.",
+);
 
 function issue(
   issueId: string,
@@ -115,17 +165,24 @@ const rootIssue = () => issue(
   "ROOT-A", null, "revision:root:1", "state:root-in-progress", workflow.labels.root, rootDescription,
 );
 
-function snapshot(cycles: readonly TaskIssueSnapshot[] = []): TaskSnapshot {
-  return parseTaskSnapshot({ root_id: rootId, issues: [rootIssue(), ...cycles], relations: [] });
+function snapshot(
+  cycles: readonly TaskIssueSnapshot[] = [],
+  relations: readonly unknown[] = [],
+): TaskSnapshot {
+  return parseTaskSnapshot({ root_id: rootId, issues: [rootIssue(), ...cycles], relations });
 }
 
 const draftCycle = () => issue(
   "CYCLE-A", "ROOT-A", "revision:cycle:draft", workflow.cycle_states.draft,
-  workflow.labels.cycle, "## Draft\n\nProposed design.",
+  workflow.labels.cycle, cycleDescription,
 );
 const secondDraftCycle = () => issue(
   "CYCLE-B", "ROOT-A", "revision:cycle:other", workflow.cycle_states.draft,
-  workflow.labels.cycle, "## Draft\n\nCompeting design.",
+  workflow.labels.cycle, cycleDescription,
+);
+const draftWork = () => issue(
+  "WORK-A", "CYCLE-A", "revision:work:draft", workflow.stage_states.todo,
+  workflow.labels.work, "## Work\n\nPrematerialized before approval.",
 );
 const awaitingCycle = () => issue(
   "CYCLE-A", "ROOT-A", "revision:cycle:awaiting", workflow.cycle_states.awaiting_acceptance,
@@ -192,6 +249,33 @@ function approvedCycle(): CycleExecutionSnapshot {
       pull_request: null,
     },
   }, target);
+}
+
+function expectedApprovalSeal(cycleRevision: string): string {
+  const definitionTarget = Object.freeze({
+    root_id: rootId,
+    root_revision: parseTaskRevision("revision:root:1"),
+    correlation_id: correlationId,
+  });
+  const definition = parseRootDefinition({
+    schema_version: 1,
+    ...definitionTarget,
+    root_description_markdown: rootDescription,
+  }, definitionTarget);
+  const target = Object.freeze({
+    root_id: rootId,
+    cycle_id: parseCycleIssueId("CYCLE-A"),
+    root_definition_revision: definition.root_revision,
+    cycle_revision: parseTaskRevision(cycleRevision),
+    correlation_id: correlationId,
+  });
+  return sealCycleSpecification({
+    schema_version: 1,
+    ...target,
+    cycle_description_markdown: cycleDescription,
+    root_adr_markdown: definition.root_adr_markdown,
+    status: "in_progress",
+  }, definition, target).seal_digest;
 }
 
 function recordingManager(effects: string[]): TaskManageCommandInterface {
@@ -276,7 +360,7 @@ function createDraft(): CreateIssueCall {
       expected_parent_revision: parseTaskRevision("revision:root:1"),
       desired: {
         title: "Cycle draft",
-        description: "## Draft\n\nProposed design.",
+        description: cycleDescription,
         state_id: workflow.cycle_states.draft,
         label_ids: [workflow.labels.cycle],
         delegate_id: null,
@@ -379,7 +463,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
     { current: snapshot(), call: createDraft() },
     {
       current: snapshot([draftCycle()]),
-      call: update("CYCLE-A", "revision:cycle:draft", { description: "## Draft\n\nCorrected design." }),
+      call: update("CYCLE-A", "revision:cycle:draft", { description: correctedCycleDescription }),
     },
     {
       current: snapshot([draftCycle()]),
@@ -395,6 +479,18 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
   for (const entry of allowed) {
     const effects: string[] = [];
     const manager = recordingManager(effects);
+    let current = entry.current;
+    manager.get_issue = async (call, providerExecution) => {
+      callerAuthority.verifier.assert(providerExecution.caller, call);
+      effects.push(call.function);
+      return parseTaskMcpResult({
+        ...envelope("get_issue"),
+        function: "get_issue",
+        output: {
+          issue: current.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
+        },
+      }, call);
+    };
     if (entry.call.function === "create_issue") {
       manager.create_issue = async (call, providerExecution) => {
         callerAuthority.verifier.assert(providerExecution.caller, call);
@@ -444,6 +540,10 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
           description: field === "description" ? call.input.desired.description ?? null : before.description,
           status: field === "status" ? call.input.desired.state_id ?? before.status : before.status,
         };
+        current = parseTaskSnapshot({
+          ...current,
+          issues: current.issues.map((issue) => issue.issue_id === fresh.issue_id ? fresh : issue),
+        });
         return parseTaskMcpResult({
           ...envelope("update_issue"), function: "update_issue",
           output: {
@@ -468,19 +568,176 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
         return entry.approved ?? null;
       },
     };
-    const bound = bind(() => entry.current, manager, reader);
+    const bound = bind(() => current, manager, reader);
+    let draftMutation = false;
+    const candidateCall = entry.call;
+    if (candidateCall.function === "update_issue") {
+      draftMutation = current.issues.find(
+        ({ issue_id }) => issue_id === candidateCall.input.issue_id,
+      )?.status === workflow.cycle_states.draft;
+    }
+    if (draftMutation) await bound.get_issue(getIssue("CYCLE-A"), execution);
     const result = entry.call.function === "create_issue"
       ? await bound.create_issue(entry.call, execution)
       : await bound.update_issue(entry.call, execution);
     assert.equal(result.output.outcome, "applied");
-    assert.deepEqual(effects, [entry.call.function]);
+    if ("seal_digest" in result) {
+      const approval = entry.call.input.desired.state_id === workflow.cycle_states.in_progress;
+      assert.equal(
+        result.seal_digest === null,
+        !approval,
+      );
+      if (approval) {
+        assert.equal(result.seal_digest, expectedApprovalSeal("revision:cycle:draft:next"));
+      }
+    }
+    assert.deepEqual(effects, draftMutation
+      ? ["get_issue", entry.call.function]
+      : [entry.call.function]);
   }
+});
+
+test("Root validates Define and Cycle Draft Markdown before mutation provider effects", async () => {
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call) => {
+    effects.push("get_issue");
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+      function: "get_issue",
+      output: { issue: draftCycle() },
+    }, call);
+  };
+  const invalidDefine = update("ROOT-A", "revision:root:1", {
+    description: "## Requirement\n\nIncomplete Root definition.",
+  });
+  const invalidCreate = {
+    ...createDraft(),
+    input: {
+      ...createDraft().input,
+      desired: { ...createDraft().input.desired, description: "## Draft\n\nIncomplete Cycle." },
+    },
+  };
+  const invalidCorrection = update("CYCLE-A", "revision:cycle:draft", {
+    description: cycleDescription.replace(
+      "Only exact role-owned mutations reach the provider.",
+      "A substituted acceptance snapshot.",
+    ),
+  });
+
+  await assert.rejects(bind(() => snapshot(), manager).update_issue(invalidDefine, execution), denied);
+  await assert.rejects(bind(() => snapshot(), manager).create_issue(invalidCreate, execution), denied);
+  const correctionBinding = bind(() => snapshot([draftCycle()]), manager);
+  await correctionBinding.get_issue(getIssue("CYCLE-A"), execution);
+  await assert.rejects(
+    correctionBinding.update_issue(invalidCorrection, execution),
+    denied,
+  );
+  assert.deepEqual(effects, ["get_issue"]);
+});
+
+test("Root definition is frozen while a non-terminal Draft exists", async () => {
+  const effects: string[] = [];
+  await assert.rejects(
+    bind(() => snapshot([draftCycle()]), recordingManager(effects)).update_issue(
+      update("ROOT-A", "revision:root:1", { description: `${rootDescription}\n` }),
+      execution,
+    ),
+    denied,
+  );
+  assert.deepEqual(effects, []);
+});
+
+test("Root does not let an exact Draft read in one correlation authorize another", async () => {
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    effects.push("get_issue");
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+      function: "get_issue",
+      output: { issue: draftCycle() },
+    }, call);
+  };
+  const base = bindBase(() => snapshot([draftCycle()]), manager);
+  const otherCorrelation = parseCorrelationId("corr:root:other");
+
+  await assert.rejects(
+    base.forCorrelation(correlationId).update_issue(
+      update("CYCLE-A", "revision:cycle:draft", { description: correctedCycleDescription }),
+      execution,
+    ),
+    denied,
+  );
+  const observedInFirstCorrelation = base.forCorrelation(correlationId);
+  await observedInFirstCorrelation.get_issue(getIssue("CYCLE-A"), execution);
+  const otherBinding = base.forCorrelation(otherCorrelation);
+  for (const attempt of [
+    update("CYCLE-A", "revision:cycle:draft", { description: correctedCycleDescription }),
+    update("CYCLE-A", "revision:cycle:draft", {
+      state_id: workflow.cycle_states.in_progress,
+    }),
+  ]) {
+    await assert.rejects(otherBinding.update_issue({
+      ...attempt,
+      correlation_id: otherCorrelation,
+    }, execution), denied);
+  }
+  assert.deepEqual(effects, ["get_issue"]);
+});
+
+test("Root compares Draft labels as facts independent of provider order", async () => {
+  const auxiliaryLabel = "label:review";
+  const currentDraft = { ...draftCycle(), labels: [workflow.labels.cycle, auxiliaryLabel] };
+  const providerDraft = { ...currentDraft, labels: [auxiliaryLabel, workflow.labels.cycle] };
+  let current = snapshot([currentDraft]);
+  const manager = recordingManager([]);
+  manager.get_issue = async (call) => parseTaskMcpResult({
+    ...envelope("get_issue"),
+    function: "get_issue",
+    output: { issue: providerDraft },
+  }, call);
+  manager.update_issue = async (call) => {
+    const fresh = {
+      ...providerDraft,
+      revision: parseTaskRevision("revision:cycle:corrected"),
+      description: call.input.desired.description ?? providerDraft.description,
+    };
+    current = snapshot([fresh]);
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: fresh,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: call.input.issue_id,
+          field: "description",
+          before: providerDraft.description,
+          after: fresh.description,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const bound = bind(() => current, manager);
+
+  await bound.get_issue(getIssue("CYCLE-A"), execution);
+  const result = await bound.update_issue(
+    update("CYCLE-A", "revision:cycle:draft", { description: correctedCycleDescription }),
+    execution,
+  );
+
+  assert.equal(result.output.outcome, "applied");
 });
 
 test("Root rejects target, correlation, capability, and fresh revision substitution before provider effects", async () => {
   const effects: string[] = [];
   const manager = recordingManager(effects);
-  const valid = update("CYCLE-A", "revision:cycle:draft", { description: "## Draft\n\nCorrected." });
+  const valid = update("CYCLE-A", "revision:cycle:draft", { description: correctedCycleDescription });
   const attempts: UpdateIssueCall[] = [
     { ...valid, root_id: parseRootIssueId("ROOT-B") },
     { ...valid, runtime_generation: parseRuntimeGeneration(8) },
@@ -498,7 +755,7 @@ test("Root rejects multiple non-terminal Cycles before provider effects", async 
   const call = update(
     "CYCLE-A",
     "revision:cycle:draft",
-    { description: "## Draft\n\nCorrected design." },
+    { description: correctedCycleDescription },
   );
 
   await assert.rejects(
@@ -510,14 +767,218 @@ test("Root rejects multiple non-terminal Cycles before provider effects", async 
   assert.deepEqual(effects, []);
 });
 
+test("Root rejects a Draft with a prematerialized execution graph before approval", async () => {
+  const effects: string[] = [];
+  const current = snapshot([draftCycle(), draftWork()], [{
+    relation_id: "REL-DRAFT-WORK",
+    revision: "revision:relation:draft-work",
+    type: "blocks",
+    source_issue_id: "CYCLE-A",
+    target_issue_id: "WORK-A",
+  }]);
+
+  await assert.rejects(
+    bind(() => current, recordingManager(effects)).update_issue(
+      update(
+        "CYCLE-A",
+        "revision:cycle:draft",
+        { state_id: workflow.cycle_states.in_progress },
+      ),
+      execution,
+    ),
+    (error: unknown) => error instanceof RootTaskManageBindingError
+      && error.code === "invalid_contract" && error.fatal === true,
+  );
+  assert.deepEqual(effects, []);
+});
+
+test("Root rejects a Stage inserted while an approval is being applied", async () => {
+  const effects: string[] = [];
+  let current = snapshot([draftCycle()]);
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call) => {
+    effects.push("get_issue");
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+      function: "get_issue",
+      output: { issue: draftCycle() },
+    }, call);
+  };
+  manager.update_issue = async (call) => {
+    effects.push("update_issue");
+    const approved = {
+      ...draftCycle(),
+      revision: parseTaskRevision("revision:cycle:sealed"),
+      status: workflow.cycle_states.in_progress,
+    };
+    current = snapshot([approved, draftWork()]);
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "applied",
+        target: { kind: "issue", issue_id: approved.issue_id },
+        fresh_resource: approved,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: approved.issue_id,
+          field: "status",
+          before: workflow.cycle_states.draft,
+          after: workflow.cycle_states.in_progress,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const bound = bind(() => current, manager);
+
+  await bound.get_issue(getIssue("CYCLE-A"), execution);
+  await assert.rejects(
+    bound.update_issue(
+      update("CYCLE-A", "revision:cycle:draft", {
+        state_id: workflow.cycle_states.in_progress,
+      }),
+      execution,
+    ),
+    (error: unknown) => error instanceof RootTaskManageBindingError
+      && error.code === "invalid_contract" && error.fatal === true,
+  );
+  assert.deepEqual(effects, ["get_issue", "update_issue"]);
+});
+
+test("Root rejects a Stage present when an unknown approval is resolved", async () => {
+  let current = snapshot([draftCycle()]);
+  const manager = recordingManager([]);
+  manager.get_issue = async (call) => parseTaskMcpResult({
+    ...envelope("get_issue"),
+    function: "get_issue",
+    output: {
+      issue: current.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
+    },
+  }, call);
+  manager.update_issue = async (call) => {
+    const approved = {
+      ...draftCycle(),
+      revision: parseTaskRevision("revision:cycle:sealed-after-unknown"),
+      status: workflow.cycle_states.in_progress,
+    };
+    current = snapshot([approved, draftWork()]);
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "acceptance_unknown",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: "fresh_readback_unavailable",
+      },
+    }, call);
+  };
+  const bound = bind(() => current, manager);
+  await bound.get_issue(getIssue("CYCLE-A"), execution);
+  const unknown = await bound.update_issue(
+    update("CYCLE-A", "revision:cycle:draft", {
+      state_id: workflow.cycle_states.in_progress,
+    }),
+    execution,
+  );
+  assert.equal(unknown.output.outcome, "acceptance_unknown");
+
+  await assert.rejects(
+    bound.get_issue(getIssue("CYCLE-A"), execution),
+    (error: unknown) => error instanceof RootTaskManageBindingError
+      && error.code === "invalid_contract" && error.fatal === true,
+  );
+});
+
+test("Root resolves an unknown approval only in its originating correlation", async () => {
+  const otherCorrelation = parseCorrelationId("corr:root:other");
+  const auxiliaryLabel = "label:review";
+  const originalDraft = {
+    ...draftCycle(),
+    labels: [workflow.labels.cycle, auxiliaryLabel],
+  };
+  let current = snapshot([originalDraft]);
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    effects.push(`get:${call.correlation_id}`);
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+      correlation_id: call.correlation_id,
+      function: "get_issue",
+      output: {
+        issue: current.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
+      },
+    }, call);
+  };
+  manager.update_issue = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    effects.push(`update:${call.correlation_id}`);
+    const approved = {
+      ...originalDraft,
+      revision: parseTaskRevision("revision:cycle:sealed-after-unknown"),
+      status: workflow.cycle_states.in_progress,
+      labels: [auxiliaryLabel, workflow.labels.cycle],
+    };
+    current = snapshot([approved]);
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "acceptance_unknown",
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: null,
+        concrete_diff: [],
+        sanitized_reason: "fresh_readback_unavailable",
+      },
+    }, call);
+  };
+  const base = bindBase(() => current, manager);
+  const approvalBinding = base.forCorrelation(correlationId);
+  await approvalBinding.get_issue(getIssue("CYCLE-A"), execution);
+  const unknown = await approvalBinding.update_issue(
+    update("CYCLE-A", "revision:cycle:draft", {
+      state_id: workflow.cycle_states.in_progress,
+    }),
+    execution,
+  );
+  assert.equal(unknown.output.outcome, "acceptance_unknown");
+
+  const otherRead = await base.forCorrelation(otherCorrelation).get_issue({
+    ...getIssue("CYCLE-A"),
+    correlation_id: otherCorrelation,
+  }, execution);
+  assert.equal("seal_digest" in otherRead, false);
+
+  const resolved = await approvalBinding.get_issue(getIssue("CYCLE-A"), execution);
+  assert.equal(
+    "seal_digest" in resolved ? resolved.seal_digest : null,
+    expectedApprovalSeal("revision:cycle:sealed-after-unknown"),
+  );
+  assert.deepEqual(effects, [
+    `get:${correlationId}`,
+    `update:${correlationId}`,
+    `get:${otherCorrelation}`,
+    `get:${correlationId}`,
+  ]);
+});
+
 test("Root rejects an applied read-back that changes a field outside the exact grant", async () => {
   const current = snapshot([draftCycle()]);
   const call = update(
     "CYCLE-A",
     "revision:cycle:draft",
-    { description: "## Draft\n\nCorrected design." },
+    { description: correctedCycleDescription },
   );
   const manager = recordingManager([]);
+  manager.get_issue = async (received) => parseTaskMcpResult({
+    ...envelope("get_issue"),
+    function: "get_issue",
+    output: { issue: draftCycle() },
+  }, received);
   manager.update_issue = async (received, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, received);
     const fresh = {
@@ -545,8 +1006,10 @@ test("Root rejects an applied read-back that changes a field outside the exact g
     }, received);
   };
 
+  const bound = bind(() => current, manager);
+  await bound.get_issue(getIssue("CYCLE-A"), execution);
   await assert.rejects(
-    bind(() => current, manager).update_issue(call, execution),
+    bound.update_issue(call, execution),
     (error: unknown) => error instanceof RootTaskManageBindingError
       && error.code === "invalid_contract" && error.fatal === true,
   );

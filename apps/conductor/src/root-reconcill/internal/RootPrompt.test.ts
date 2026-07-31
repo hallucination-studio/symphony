@@ -1,0 +1,153 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  rootReconcillOutputSchema,
+  rootReconcillPrompt,
+} from "./RootPrompt.js";
+import {
+  parseCorrelationId,
+  parseRootIssueId,
+  parseRuntimeGeneration,
+} from "../../contracts/identity.js";
+import type { RootReconcillInput } from "../api/RootReconcillInterface.js";
+
+const target = Object.freeze({
+  root_id: parseRootIssueId("ROOT-A"),
+  runtime_generation: parseRuntimeGeneration(4),
+});
+const correlationId = parseCorrelationId("corr:root:4");
+
+test("Root prompt declares the closed Define, Draft review, and seal workflow", () => {
+  const observation = Object.freeze({ fresh: "Task Manager facts" }) as unknown as RootReconcillInput;
+  const prompt = JSON.parse(rootReconcillPrompt(observation, "bootstrap")) as {
+    readonly input_kind?: unknown;
+    readonly observation?: unknown;
+    readonly markdown_contracts?: {
+      readonly root_description_sections?: unknown;
+      readonly cycle_description_sections?: unknown;
+      readonly root_definition_revision_format?: unknown;
+      readonly root_section_requirements?: unknown;
+      readonly cycle_section_requirements?: unknown;
+    };
+    readonly freshness_contract?: unknown;
+    readonly define_contract?: unknown;
+    readonly phase_stop_contract?: unknown;
+    readonly instruction?: unknown;
+  };
+
+  assert.equal(prompt.input_kind, "bootstrap");
+  assert.deepEqual(prompt.observation, observation);
+  assert.deepEqual(prompt.markdown_contracts?.root_description_sections, [
+    "Requirement",
+    "Domain Knowledge",
+    "Root ADR",
+    "Acceptance",
+  ]);
+  assert.deepEqual(prompt.markdown_contracts?.cycle_description_sections, [
+    "Root Definition Revision",
+    "Requirement",
+    "Domain Knowledge",
+    "Root ADR",
+    "Acceptance",
+    "Architecture",
+    "Feature Design",
+    "Code Design",
+    "Boundaries",
+    "Acceptance Mapping",
+    "Failure Strategy",
+  ]);
+  assert.equal(
+    prompt.markdown_contracts?.root_definition_revision_format,
+    "one inline-code Task Manager revision and no other section content",
+  );
+  assert.deepEqual(prompt.markdown_contracts?.root_section_requirements, {
+    Requirement: [
+      "State the complete intended outcome and user-visible behavior.",
+      "State authorized scope, required consequences, out-of-scope behavior, and approval-blocking assumptions.",
+    ],
+    "Domain Knowledge": [
+      "Record repository and domain facts needed across Cycles, with ephemeral investigation excluded.",
+    ],
+    "Root ADR": [
+      "Record every Root-wide decision with its rationale, constraints, and consequences.",
+    ],
+    Acceptance: [
+      "List individually verifiable criteria for the complete Root outcome.",
+    ],
+  });
+  assert.deepEqual(prompt.markdown_contracts?.cycle_section_requirements, {
+    "Root Definition Revision": [
+      "Copy the exact revision from the fresh Root read-back used for this Draft.",
+    ],
+    Requirement: ["Copy the complete Root Requirement section without alteration."],
+    "Domain Knowledge": ["Copy the complete Root Domain Knowledge section without alteration."],
+    "Root ADR": ["Copy the complete Root ADR section without alteration."],
+    Acceptance: ["Copy the complete Root Acceptance section without alteration."],
+    Architecture: ["Specify concrete component ownership, boundaries, and interactions."],
+    "Feature Design": ["Specify the complete behavior and edge cases of this attempt."],
+    "Code Design": ["Specify concrete modules, contracts, state changes, and verification points."],
+    Boundaries: ["State authorized changes, required consequences, and explicit exclusions."],
+    "Acceptance Mapping": [
+      "Map every Root acceptance criterion individually to implementation and verification evidence.",
+    ],
+    "Failure Strategy": ["Specify fail-closed behavior for stale, partial, conflicting, or unknown facts."],
+  });
+  assert.deepEqual(prompt.freshness_contract, {
+    prior_turn_tool_results_are_current: false,
+    current_turn_get_issue_required_before: ["Draft correction", "Draft approval"],
+    approval_after_correction_requires_another_get_issue: true,
+  });
+  assert.deepEqual(prompt.define_contract, {
+    cycle_creation_requires: "complete Root Markdown in current-turn fresh Task Manager facts",
+    root_update_required_when: "the current-turn fresh Root Markdown is absent or incomplete",
+  });
+  assert.deepEqual(prompt.phase_stop_contract, {
+    in_progress: "quiescent with no mutation; Conductor owns mechanical execution",
+    awaiting_acceptance: "quiescent with no acceptance, rejection, delivery, or successor mutation",
+    terminal_cycle: "quiescent with no successor creation",
+  });
+
+  const instruction = String(prompt.instruction);
+  for (const required of [
+    "fresh Task Manager read-back",
+    "same current turn",
+    "transcript",
+    "code-inspection output",
+    "Draft",
+    "expected revision",
+    "seal_digest",
+    "In Progress",
+    "criterion-by-criterion",
+    "constraints and consequences",
+    "resolving exact get_issue",
+    "In Progress, remain quiescent without mutation",
+    "Awaiting Acceptance, do not accept, reject, deliver, or create a successor",
+    "terminal Cycle, do not create a successor",
+  ]) assert.equal(instruction.includes(required), true, required);
+  assert.equal(instruction.includes("Plan Performer"), false);
+  assert.equal(instruction.includes("Work Performer"), false);
+  assert.equal(instruction.includes("Verify Performer"), false);
+});
+
+test("Root output schema remains a closed semantic-turn outcome", () => {
+  const schema = rootReconcillOutputSchema(target, correlationId) as {
+    readonly additionalProperties?: unknown;
+    readonly properties?: Record<string, { readonly const?: unknown; readonly enum?: unknown }>;
+    readonly required?: readonly string[];
+  };
+
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties?.root_id?.const, target.root_id);
+  assert.equal(schema.properties?.runtime_generation?.const, target.runtime_generation);
+  assert.equal(schema.properties?.correlation_id?.const, correlationId);
+  assert.deepEqual(schema.properties?.outcome?.enum, ["quiescent", "stopped"]);
+  assert.deepEqual(schema.required, [
+    "schema_version",
+    "root_id",
+    "runtime_generation",
+    "correlation_id",
+    "outcome",
+    "sanitized_reason",
+  ]);
+});
