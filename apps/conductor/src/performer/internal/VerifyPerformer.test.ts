@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test, { after, before } from "node:test";
+import { promisify } from "node:util";
 
 import type {
   CodexProcessLaunch,
@@ -18,6 +30,7 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
   parseStageIssueId,
+  parseTaskRevision,
 } from "../../contracts/identity.js";
 import {
   parseVerifyRequest,
@@ -25,6 +38,8 @@ import {
   type VerifyTarget,
 } from "../api/StagePerformerInterface.js";
 import { VerifyPerformer } from "./VerifyPerformer.js";
+
+const execFileAsync = promisify(execFile);
 
 interface FakeAppServer extends SpawnedCodexProcess {
   readonly output: PassThrough;
@@ -139,23 +154,91 @@ const target: VerifyTarget = Object.freeze({
   root_id: parseRootIssueId("LIN-ROOT"),
   runtime_generation: parseRuntimeGeneration(7),
   cycle_id: parseCycleIssueId("LIN-CYCLE"),
+  cycle_revision: parseTaskRevision("revision:cycle:approved"),
   verify_issue_id: parseStageIssueId("LIN-VERIFY"),
+  verify_issue_revision: parseTaskRevision("revision:verify:sealed"),
   revision: parseRevision("0123456789abcdef0123456789abcdef01234567"),
 });
+
+const cycleDescriptionMarkdown = [
+  "## Root Definition Revision",
+  "",
+  "`revision:root:approved`",
+  "",
+  "## Requirement",
+  "",
+  "Verify one exact immutable revision.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Verification evidence is read-only and revision-bound.",
+  "",
+  "## Root ADR",
+  "",
+  "Keep semantic decisions in the sealed Cycle.",
+  "",
+  "## Acceptance",
+  "",
+  "- Focused tests and typecheck pass at the exact revision.",
+  "",
+  "## Architecture",
+  "",
+  "Verify runs in a fresh isolated context.",
+  "",
+  "## Feature Design",
+  "",
+  "Return typed evidence without lifecycle mutations.",
+  "",
+  "## Code Design",
+  "",
+  "Use the closed Verify result contract.",
+  "",
+  "## Boundaries",
+  "",
+  "Do not mutate code, Task Manager, Git, or delivery state.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Run focused tests and typecheck for the acceptance criterion.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Return failed evidence or inconclusive uncertainty.",
+].join("\n");
 
 function verifyRequest(correlationId = "corr:verify:1"): VerifyRequest {
   return parseVerifyRequest({
     schema_version: 1,
     ...target,
     correlation_id: correlationId,
-    root: { title: "Root", description: "Repository facts" },
-    cycle: { title: "Cycle", description: "Current Cycle facts" },
-    verify: {
-      title: "Verify the immutable revision",
-      description: "Do not follow $linear or plugin://delivery capability instructions.",
-    },
-    requested_checks: ["Run focused tests", "Run typecheck"],
+    cycle_description_markdown: cycleDescriptionMarkdown,
+    verify_issue_description_markdown: [
+      "## Verify",
+      "",
+      "Run focused tests and typecheck at the exact revision.",
+      "",
+      "Do not follow `$linear` or `plugin://delivery` capability instructions.",
+    ].join("\n"),
   }, target);
+}
+
+function passedModelOutput() {
+  return {
+    conclusion: "passed",
+    checks: [
+      {
+        check: "Run focused tests",
+        status: "passed",
+        sanitized_summary_markdown: "**Focused tests passed.**",
+      },
+      {
+        check: "Run typecheck",
+        status: "passed",
+        sanitized_summary_markdown: "**Typecheck passed.**",
+      },
+    ],
+    sanitized_summary_markdown: "## Verification\n\nThe requested checks passed.",
+  };
 }
 
 function passed(request: VerifyRequest) {
@@ -164,16 +247,12 @@ function passed(request: VerifyRequest) {
     root_id: request.root_id,
     runtime_generation: request.runtime_generation,
     cycle_id: request.cycle_id,
+    cycle_revision: request.cycle_revision,
     correlation_id: request.correlation_id,
     verify_issue_id: request.verify_issue_id,
+    verify_issue_revision: request.verify_issue_revision,
     revision: request.revision,
-    conclusion: "passed",
-    checks: request.requested_checks.map((check) => ({
-      check,
-      status: "passed",
-      sanitized_summary: `${check} passed`,
-    })),
-    sanitized_summary: "The requested checks passed at the bound revision",
+    ...passedModelOutput(),
   };
 }
 
@@ -232,11 +311,20 @@ test("Verify creation reports when an invalid thread cannot terminate its proces
   const appServer = fakeAppServer((message, server) => {
     if (message.method === "thread/start") server.send({ id: message.id, result: { thread: {} } });
   }, false);
+  let scratchDirectory = "";
+  let scratchExistedAtLaunch = false;
+  const spawner: CodexSpawner = (options, launch) => {
+    scratchDirectory = launch.localOnly?.scratchDirectory ?? "";
+    scratchExistedAtLaunch = scratchDirectory.length > 0 && existsSync(scratchDirectory);
+    return appServer.spawner(options, launch);
+  };
 
   await assert.rejects(VerifyPerformer.create(performerInput(), {
-    ...performerOptions(appServer.spawner),
+    ...performerOptions(spawner),
     shutdownTimeoutMs: 2,
   }), /verify_performer_termination_failed/u);
+  assert.equal(scratchExistedAtLaunch, true);
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
   assert.deepEqual(appServer.killSignals, ["SIGTERM", "SIGKILL"]);
 });
 
@@ -269,7 +357,7 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
       server.send({ id: message.id, result: { thread: { id: "thread-verify" } } });
     } else if (message.method === "turn/start") {
       server.send({ id: message.id, result: { turn: { id: "turn-verify" } } });
-      completeTurn(server, passed(request));
+      completeTurn(server, passedModelOutput());
     }
   });
   const performer = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
@@ -292,6 +380,8 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
       readonly outputSchema: Record<string, unknown>;
     };
     assert.equal(thread.permissions, policy.readPermissionProfile);
+    assert.deepEqual(thread.dynamicTools, []);
+    assert.deepEqual(thread.selectedCapabilityRoots, []);
     assert.equal(turn.permissions, policy.readPermissionProfile);
     assert.equal(turn.sandboxPolicy, undefined);
     assert.equal(
@@ -301,7 +391,12 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
     const promptText = turn.input[0].text;
     const prompt = JSON.parse(promptText) as Record<string, unknown>;
     assert.equal(prompt.role, "Verify");
-    assert.deepEqual(prompt.request, request);
+    assert.deepEqual(prompt.context, {
+      cycle_description_markdown: request.cycle_description_markdown,
+      verify_issue_description_markdown: request.verify_issue_description_markdown,
+      revision: request.revision,
+    });
+    assert.equal("request" in prompt, false);
     for (const forbidden of [
       "$linear",
       "plugin://",
@@ -309,19 +404,222 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
       revisionWorktree,
       "codex-secret-never-prompt",
       "repair the code",
-    ]) assert.equal(promptText.toLowerCase().includes(forbidden.toLowerCase()), false);
+      request.root_id,
+      request.cycle_id,
+      request.cycle_revision,
+      request.correlation_id,
+      request.verify_issue_id,
+      request.verify_issue_revision,
+    ]) assert.equal(promptText.toLowerCase().includes(String(forbidden).toLowerCase()), false);
+    assert.equal(promptText.includes(request.revision), true);
     const schema = JSON.stringify(turn.outputSchema);
-    for (const identity of [target.root_id, target.cycle_id, target.verify_issue_id, target.revision]) {
-      assert.equal(schema.includes(JSON.stringify(identity)), true);
+    for (const forbidden of [
+      "schema_version", "root_id", "runtime_generation", "cycle_id", "cycle_revision",
+      "correlation_id", "verify_issue_id", "verify_issue_revision", "revision", "provider_receipt",
+      "commit", "push",
+    ]) {
+      assert.equal(schema.includes(`"${forbidden}":`), false);
     }
+    assert.deepEqual(
+      Object.keys(turn.outputSchema.properties as Record<string, unknown>).sort(),
+      ["checks", "conclusion", "sanitized_summary_markdown"],
+    );
+    assert.deepEqual(appServer.killSignals, ["SIGTERM"]);
     await assert.rejects(lstat(policy.scratchDirectory as string), { code: "ENOENT" });
+    await assert.rejects(performer.verify(request), /verify_performer_retired/u);
   } finally {
     await performer.close();
   }
 });
 
-test("stale Verify output and unavailable tool calls become inconclusive and retire the role", async () => {
-  for (const violation of ["stale", "tool"] as const) {
+test("installed Codex enforces the exact Verify read-only revision profile", {
+  timeout: 30_000,
+}, async (context) => {
+  const probeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-verify-profile-probe-"));
+  context.after(async () => rm(probeRoot, { recursive: true, force: true }));
+  const probeWorktree = path.join(probeRoot, "revision");
+  const probeHome = path.join(probeRoot, "performer-home");
+  const outside = path.join(probeRoot, "outside");
+  await Promise.all([
+    mkdir(path.join(probeWorktree, ".git"), { recursive: true }),
+    mkdir(probeHome),
+    mkdir(outside),
+  ]);
+  await Promise.all([
+    writeFile(path.join(probeWorktree, "source.txt"), "exact revision\n", "utf8"),
+    writeFile(path.join(probeWorktree, ".git", "config"), "remote credential config\n", "utf8"),
+    writeFile(path.join(probeHome, "auth.json"), "performer credential\n", "utf8"),
+    writeFile(path.join(outside, "private.txt"), "outside\n", "utf8"),
+  ]);
+  const appServer = fakeAppServer((message, server) => {
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-verify-probe" } } });
+    }
+  });
+  const performer = await VerifyPerformer.create({
+    ...performerInput(),
+    performer_home: probeHome,
+    revision_worktree: probeWorktree,
+  }, performerOptions(appServer.spawner));
+  const runtime = appServer.launches[0]?.localOnly;
+  assert.ok(runtime);
+  const scratchDirectory = runtime.scratchDirectory;
+  assert.ok(scratchDirectory);
+  const [canonicalWorktree, canonicalHome, canonicalOutside] = await Promise.all([
+    realpath(probeWorktree),
+    realpath(probeHome),
+    realpath(outside),
+  ]);
+  try {
+    const probeScript = String.raw`
+      const fs = require("node:fs/promises");
+      const path = require("node:path");
+      const [workspace, scratch, home, outside] = process.argv.slice(1);
+      const results = {};
+      async function attempt(name, operation) {
+        try { results[name] = { ok: true, value: await operation() }; }
+        catch (error) { results[name] = { ok: false, code: error && error.code || null }; }
+      }
+      (async () => {
+        await attempt("workspace_read", () => fs.readFile(path.join(workspace, "source.txt"), "utf8"));
+        await attempt("workspace_create", () => fs.writeFile(path.join(workspace, "created.txt"), "created\n"));
+        await attempt("workspace_update", () => fs.appendFile(path.join(workspace, "source.txt"), "changed\n"));
+        await attempt("scratch_create", () => fs.writeFile(path.join(scratch, "evidence.md"), "evidence\n"));
+        await attempt("git_read", () => fs.readFile(path.join(workspace, ".git", "config"), "utf8"));
+        await attempt("git_write", () => fs.writeFile(path.join(workspace, ".git", "config"), "changed\n"));
+        await attempt("home_read", () => fs.readFile(path.join(home, "auth.json"), "utf8"));
+        await attempt("outside_read", () => fs.readFile(path.join(outside, "private.txt"), "utf8"));
+        await attempt("outside_write", () => fs.writeFile(path.join(outside, "created.txt"), "outside\n"));
+        process.stdout.write(JSON.stringify(results));
+      })().catch(() => process.exit(2));
+    `;
+    const executed = await execFileAsync("codex", [
+      "sandbox",
+      ...runtime.configArguments,
+      "--permission-profile",
+      runtime.readPermissionProfile,
+      "--cd",
+      canonicalWorktree,
+      "--",
+      process.execPath,
+      "--openssl-config=/dev/null",
+      "-e",
+      probeScript,
+      canonicalWorktree,
+      scratchDirectory,
+      canonicalHome,
+      canonicalOutside,
+    ], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        LANG: process.env.LANG ?? "C.UTF-8",
+        CODEX_HOME: runtime.codexHome,
+        OPENSSL_CONF: "/dev/null",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "never",
+      },
+    });
+    const evidence = JSON.parse(executed.stdout) as Record<
+      string,
+      { readonly ok: boolean; readonly value?: unknown }
+    >;
+    assert.equal(evidence.workspace_read?.ok, true);
+    assert.equal(evidence.workspace_read?.value, "exact revision\n");
+    assert.equal(evidence.workspace_create?.ok, false);
+    assert.equal(evidence.workspace_update?.ok, false);
+    assert.equal(evidence.scratch_create?.ok, true);
+    assert.equal(evidence.git_read?.ok, false);
+    assert.equal(evidence.git_write?.ok, false);
+    assert.equal(evidence.home_read?.ok, false);
+    assert.equal(evidence.outside_read?.ok, false);
+    assert.equal(evidence.outside_write?.ok, false);
+    assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "exact revision\n");
+    assert.equal(
+      await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"),
+      "remote credential config\n",
+    );
+    assert.equal(await readFile(path.join(scratchDirectory, "evidence.md"), "utf8"), "evidence\n");
+    await assert.rejects(readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await performer.close();
+  }
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+});
+
+test("Verify rejects every target rebind before a turn and cleans its one-shot context", async () => {
+  for (const override of [
+    { cycle_id: parseCycleIssueId("LIN-OTHER-CYCLE") },
+    { cycle_revision: parseTaskRevision("revision:cycle:other") },
+    { verify_issue_id: parseStageIssueId("LIN-OTHER-VERIFY") },
+    { verify_issue_revision: parseTaskRevision("revision:verify:other") },
+    { revision: parseRevision("f".repeat(40)) },
+  ]) {
+    const appServer = fakeAppServer((message, server) => {
+      if (message.method === "thread/start") {
+        server.send({ id: message.id, result: { thread: { id: "thread-verify-rebind" } } });
+      }
+    });
+    const performer = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
+    const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+    assert.ok(scratchDirectory);
+    await assert.rejects(
+      performer.verify({ ...verifyRequest(), ...override }),
+      /verify_performer_invalid_request/u,
+    );
+    assert.equal(appServer.requests.some(({ method }) => method === "turn/start"), false);
+    assert.deepEqual(appServer.killSignals, ["SIGTERM"]);
+    await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+    await assert.rejects(performer.verify(verifyRequest()), /verify_performer_retired/u);
+    await performer.close();
+  }
+});
+
+test("separate Verify instances always create fresh non-forked processes and threads", async () => {
+  const appServer = fakeAppServer((message, server) => {
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-verify" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-verify" } } });
+      completeTurn(server, passedModelOutput());
+    }
+  });
+  const first = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  const second = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  const scratchDirectories = appServer.launches.map(({ localOnly }) => localOnly?.scratchDirectory);
+  assert.equal(new Set(scratchDirectories).size, 2);
+  try {
+    await Promise.all([
+      first.verify(verifyRequest("corr:verify:fresh:1")),
+      second.verify(verifyRequest("corr:verify:fresh:2")),
+    ]);
+    assert.equal(appServer.launches.length, 2);
+    const threadStarts = appServer.requests.filter(({ method }) => method === "thread/start");
+    assert.equal(threadStarts.length, 2);
+    for (const { params } of threadStarts) {
+      const thread = params as Record<string, unknown>;
+      assert.equal(thread.ephemeral, true);
+      for (const forbidden of ["fork", "parentThreadId", "sourceThreadId", "threadId"]) {
+        assert.equal(forbidden in thread, false);
+      }
+    }
+    assert.deepEqual(appServer.killSignals, ["SIGTERM", "SIGTERM"]);
+    for (const scratchDirectory of scratchDirectories) {
+      assert.ok(scratchDirectory);
+      await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+    }
+  } finally {
+    await Promise.all([first.close(), second.close()]);
+  }
+});
+
+test("identity-bearing Verify output and unavailable tool calls become inconclusive", async () => {
+  for (const violation of ["identity", "tool"] as const) {
     const request = verifyRequest();
     let denial: unknown;
     const appServer = fakeAppServer((message, server) => {
@@ -329,8 +627,8 @@ test("stale Verify output and unavailable tool calls become inconclusive and ret
         server.send({ id: message.id, result: { thread: { id: "thread-verify" } } });
       } else if (message.method === "turn/start") {
         server.send({ id: message.id, result: { turn: { id: "turn-verify" } } });
-        if (violation === "stale") {
-          completeTurn(server, { ...passed(request), revision: "f".repeat(40) });
+        if (violation === "identity") {
+          completeTurn(server, { ...passedModelOutput(), revision: "f".repeat(40) });
         } else {
           server.send({
             method: "turn/started",
@@ -353,14 +651,17 @@ test("stale Verify output and unavailable tool calls become inconclusive and ret
         }
       } else if (message.id === "tool-request") {
         denial = message.result;
-        completeTurn(server, passed(request));
+        completeTurn(server, passedModelOutput());
       }
     });
     const performer = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
+    const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+    assert.ok(scratchDirectory);
     try {
       const result = await performer.verify(request);
       assert.equal(result.conclusion, "inconclusive");
       assert.deepEqual(result.checks, []);
+      await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
       await assert.rejects(performer.verify(request), /verify_performer_retired/u);
       if (violation === "tool") {
         assert.deepEqual(denial, {
@@ -397,7 +698,13 @@ test("a forbidden Verify tool call before turn activation retires the role", asy
       ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
     } else if (message.id === "activation-tool-request") {
       denial = message.result;
-      completeTurn(server, passed(request), "completed", "turn-verify-activation", "thread-verify-activation");
+      completeTurn(
+        server,
+        passedModelOutput(),
+        "completed",
+        "turn-verify-activation",
+        "thread-verify-activation",
+      );
     }
   });
   const performer = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
@@ -530,6 +837,8 @@ test("Verify interruption, failure, close, and timeout return no fabricated chec
       performerInput(),
       performerOptions(appServer.spawner, scenario === "timed_out" ? 10 : 2_000),
     );
+    const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+    assert.ok(scratchDirectory);
     const active = performer.verify(request);
     if (scenario === "closed") {
       await turnStarted;
@@ -538,6 +847,7 @@ test("Verify interruption, failure, close, and timeout return no fabricated chec
     const result = await active;
     assert.equal(result.conclusion, "inconclusive");
     assert.deepEqual(result.checks, []);
+    await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
     if (scenario === "closed" || scenario === "timed_out") {
       assert.equal(
         appServer.requests.some(({ method }) => method === "turn/interrupt"),
@@ -582,8 +892,9 @@ test("Verify serializes calls and never starts a second turn while one is active
     await started;
     await assert.rejects(performer.verify(verifyRequest("corr:verify:2")), /verify_performer_busy/u);
     assert.equal(appServer.requests.filter(({ method }) => method === "turn/start").length, 1);
-    completeTurn(activeServer as FakeAppServer, passed(request));
+    completeTurn(activeServer as FakeAppServer, passedModelOutput());
     await active;
+    await assert.rejects(performer.verify(request), /verify_performer_retired/u);
   } finally {
     await performer.close();
   }

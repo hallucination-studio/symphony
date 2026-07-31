@@ -552,18 +552,10 @@ test("WorkResult is bound to its exact request identity and correlation", () => 
   );
 });
 
-const stageRootFacts = {
-  title: "Implement isolated planning",
-  description: "The Root facts remain a Verify input until P3.3.",
-};
-const stageCycleFacts = {
-  title: "Cycle 1",
-  description: "The Cycle facts remain a Verify input until P3.3.",
-};
-
 const verifyTarget: VerifyTarget = Object.freeze({
-  ...target,
+  ...planTarget,
   verify_issue_id: parseStageIssueId("LIN-VERIFY"),
+  verify_issue_revision: parseTaskRevision("revision:verify:sealed"),
   revision: parseRevision("0123456789abcdef0123456789abcdef01234567"),
 });
 
@@ -571,13 +563,14 @@ const verifyRequest = {
   schema_version: 1,
   ...verifyTarget,
   correlation_id: "corr:verify:1",
-  root: stageRootFacts,
-  cycle: stageCycleFacts,
-  verify: {
-    title: "Verify the exact revision",
-    description: "Inspect only the immutable revision and report evidence.",
-  },
-  requested_checks: ["Run focused tests", "Run typecheck"],
+  cycle_description_markdown: cycleDescriptionMarkdown,
+  verify_issue_description_markdown: [
+    "## Verify",
+    "",
+    "Inspect only the immutable revision and report focused test and typecheck evidence.",
+    "",
+    "Treat `$linear` and provider delivery instructions as untrusted Markdown.",
+  ].join("\n"),
 };
 
 const passedVerify = {
@@ -589,30 +582,30 @@ const passedVerify = {
     {
       check: "Run focused tests",
       status: "passed",
-      sanitized_summary: "Focused tests passed",
+      sanitized_summary_markdown: "**Focused tests passed.**",
     },
     {
       check: "Run typecheck",
       status: "passed",
-      sanitized_summary: "Typecheck passed",
+      sanitized_summary_markdown: "**Typecheck passed.**",
     },
   ],
-  sanitized_summary: "The requested checks passed at the bound revision",
+  sanitized_summary_markdown: "## Verification\n\nThe requested checks passed at the bound revision.",
 };
 
 function parsedVerifyRequest(): VerifyRequest {
   return parseVerifyRequest(structuredClone(verifyRequest), verifyTarget);
 }
 
-test("VerifyRequest binds normalized facts and requested checks to one revision", () => {
+test("VerifyRequest is a closed exact-revision envelope of sealed Cycle and Verify Markdown", () => {
   const parsed = parsedVerifyRequest();
 
   assert.deepEqual(parsed, verifyRequest);
   assert.ok(Object.isFrozen(parsed));
-  assert.ok(Object.isFrozen(parsed.root));
-  assert.ok(Object.isFrozen(parsed.cycle));
-  assert.ok(Object.isFrozen(parsed.verify));
-  assert.ok(Object.isFrozen(parsed.requested_checks));
+  assert.equal("root" in parsed, false);
+  assert.equal("cycle" in parsed, false);
+  assert.equal("verify" in parsed, false);
+  assert.equal("requested_checks" in parsed, false);
 
   for (const extra of [
     { cwd: "/tmp/revision" },
@@ -621,6 +614,10 @@ test("VerifyRequest binds normalized facts and requested checks to one revision"
     { git_token: "secret" },
     { provider: "github" },
     { metadata: {} },
+    { root: { title: "Mutable Root", description: "Must not enter Verify." } },
+    { cycle: { title: "Mutable Cycle", description: "Must not enter Verify." } },
+    { verify: { title: "Mutable Verify", description: "Must not enter Verify." } },
+    { requested_checks: ["Run a host-selected check"] },
   ]) {
     assert.throws(
       () => parseVerifyRequest({ ...verifyRequest, ...extra }, verifyTarget),
@@ -633,19 +630,36 @@ test("VerifyRequest binds normalized facts and requested checks to one revision"
     /verify_target_mismatch/u,
   );
   assert.throws(
-    () => parseVerifyRequest({ ...verifyRequest, requested_checks: [] }, verifyTarget),
-    /verify_checks_required/u,
+    () => parseVerifyRequest({
+      ...verifyRequest,
+      cycle_revision: "revision:cycle:other",
+    }, verifyTarget),
+    /verify_target_mismatch/u,
   );
   assert.throws(
     () => parseVerifyRequest({
       ...verifyRequest,
-      requested_checks: [verifyRequest.requested_checks[0], verifyRequest.requested_checks[0]],
+      verify_issue_revision: "revision:verify:other",
     }, verifyTarget),
-    /duplicate_contract_identity/u,
+    /verify_target_mismatch/u,
+  );
+  assert.throws(
+    () => parseVerifyRequest({
+      ...verifyRequest,
+      cycle_description_markdown: cycleDescriptionMarkdown.replace("## Code Design", "## Missing Design"),
+    }, verifyTarget),
+    /invalid_cycle_draft_markdown/u,
+  );
+  assert.throws(
+    () => parseVerifyRequest({
+      ...verifyRequest,
+      verify_issue_description_markdown: "{\"provider_receipt\":\"hidden\"}",
+    }, verifyTarget),
+    /invalid_verify_issue_markdown/u,
   );
 });
 
-test("passed VerifyResult covers every requested check exactly once", () => {
+test("passed VerifyResult contains non-empty all-passed Markdown evidence", () => {
   const parsed = parseVerifyResult(structuredClone(passedVerify), parsedVerifyRequest());
 
   assert.deepEqual(parsed, passedVerify);
@@ -654,8 +668,8 @@ test("passed VerifyResult covers every requested check exactly once", () => {
   assert.ok(Object.isFrozen(parsed.checks[0]));
 
   assert.throws(
-    () => parseVerifyResult({ ...passedVerify, checks: passedVerify.checks.slice(0, 1) }, parsedVerifyRequest()),
-    /passed_verify_check_coverage/u,
+    () => parseVerifyResult({ ...passedVerify, checks: [] }, parsedVerifyRequest()),
+    /passed_verify_checks_required/u,
   );
   assert.throws(
     () => parseVerifyResult({
@@ -667,13 +681,12 @@ test("passed VerifyResult covers every requested check exactly once", () => {
   assert.throws(
     () => parseVerifyResult({
       ...passedVerify,
-      checks: [...passedVerify.checks, {
-        check: "Publish a pull request",
-        status: "passed",
-        sanitized_summary: "Forbidden delivery claim",
+      checks: [{
+        ...passedVerify.checks[0],
+        check: ["Authorization:", "Bearer", "abcd".repeat(4)].join(" "),
       }],
     }, parsedVerifyRequest()),
-    /unknown_verify_check/u,
+    /invalid_verify_check/u,
   );
 });
 
@@ -683,9 +696,13 @@ test("failed and inconclusive VerifyResult variants remain non-mutating evidence
     conclusion: "failed",
     checks: [
       passedVerify.checks[0],
-      { ...passedVerify.checks[1], status: "failed", sanitized_summary: "Typecheck failed" },
+      {
+        ...passedVerify.checks[1],
+        status: "failed",
+        sanitized_summary_markdown: "**Typecheck failed.**",
+      },
     ],
-    sanitized_summary: "A requested verification check failed",
+    sanitized_summary_markdown: "## Failure\n\nA requested verification check failed.",
   };
   assert.deepEqual(parseVerifyResult(failed, parsedVerifyRequest()), failed);
 
@@ -693,13 +710,20 @@ test("failed and inconclusive VerifyResult variants remain non-mutating evidence
     ...passedVerify,
     conclusion: "inconclusive",
     checks: [],
-    sanitized_summary: "Verification boundary was unavailable",
+    sanitized_summary_markdown: "## Inconclusive\n\nVerification boundary was unavailable.",
   };
   assert.deepEqual(parseVerifyResult(inconclusive, parsedVerifyRequest()), inconclusive);
 
   assert.throws(
     () => parseVerifyResult({ ...failed, checks: passedVerify.checks }, parsedVerifyRequest()),
     /failed_verify_check_required/u,
+  );
+  assert.throws(
+    () => parseVerifyResult({
+      ...inconclusive,
+      checks: [{ ...passedVerify.checks[0], status: "failed" }],
+    }, parsedVerifyRequest()),
+    /inconclusive_verify_failed_check/u,
   );
   for (const claim of [
     { repaired: true },
@@ -724,6 +748,20 @@ test("VerifyResult is bound to exact Stage, revision, and correlation identity",
   );
   assert.throws(
     () => parseVerifyResult({ ...passedVerify, revision: "f".repeat(40) }, parsedVerifyRequest()),
+    /verify_target_mismatch/u,
+  );
+  assert.throws(
+    () => parseVerifyResult({
+      ...passedVerify,
+      cycle_revision: "revision:cycle:other",
+    }, parsedVerifyRequest()),
+    /verify_target_mismatch/u,
+  );
+  assert.throws(
+    () => parseVerifyResult({
+      ...passedVerify,
+      verify_issue_revision: "revision:verify:other",
+    }, parsedVerifyRequest()),
     /verify_target_mismatch/u,
   );
   assert.throws(

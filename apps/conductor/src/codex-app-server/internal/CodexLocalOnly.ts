@@ -287,7 +287,9 @@ function filesystemProfile(
   filesystem[codexHome] = "deny";
   filesystem[workspaceRoot] = access;
   if (scratchDirectory !== undefined) filesystem[scratchDirectory] = "write";
-  if (access === "write") {
+  if (access === "read") {
+    filesystem[path.join(workspaceRoot, ".git")] = "deny";
+  } else {
     for (const protectedPath of [".git", ".agents", ".codex"]) {
       filesystem[path.join(workspaceRoot, protectedPath)] = "read";
     }

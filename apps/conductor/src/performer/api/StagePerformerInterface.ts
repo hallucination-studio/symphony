@@ -25,11 +25,11 @@ import type { RuntimeTarget } from "../../contracts/runtime.js";
 import {
   asRecord,
   assertExactKeys,
+  containsCredentialMaterial,
   parseArray,
   parseBoundedString,
   parseEnum,
   parseMarkdownText,
-  parseStringArray,
   type MarkdownText,
   type UnknownRecord,
 } from "../../contracts/validation.js";
@@ -44,18 +44,12 @@ export const WORK_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export const VERIFY_CONCLUSIONS = ["passed", "failed", "inconclusive"] as const;
 export const CHECK_STATUSES = ["passed", "failed", "not_run"] as const;
 
-const MAX_FACT_DESCRIPTION_LENGTH = 100_000;
 export interface PlanTarget extends RuntimeTarget {
   readonly cycle_id: CycleIssueId;
 }
 
 export interface PlanRequestTarget extends PlanTarget {
   readonly cycle_revision: TaskRevision;
-}
-
-export interface PlanIssueFacts {
-  readonly title: string;
-  readonly description: string | null;
 }
 
 export interface PlanRequest extends PlanRequestTarget {
@@ -110,10 +104,10 @@ export interface WorkRequest extends WorkRequestTarget {
   readonly work_issue_description_markdown: MarkdownText;
 }
 
-export interface CheckEvidence {
+export interface VerifyCheckEvidence {
   readonly check: string;
   readonly status: typeof CHECK_STATUSES[number];
-  readonly sanitized_summary: string | null;
+  readonly sanitized_summary_markdown: MarkdownText | null;
 }
 
 export interface WorkCheckEvidence {
@@ -155,18 +149,17 @@ export interface WorkPerformerInterface extends StagePerformerLifecycle {
   work(request: WorkRequest): Promise<WorkResult>;
 }
 
-export interface VerifyTarget extends PlanTarget {
+export interface VerifyTarget extends PlanRequestTarget {
   readonly verify_issue_id: StageIssueId;
+  readonly verify_issue_revision: TaskRevision;
   readonly revision: Revision;
 }
 
 export interface VerifyRequest extends VerifyTarget {
   readonly schema_version: SchemaVersion;
   readonly correlation_id: CorrelationId;
-  readonly root: PlanIssueFacts;
-  readonly cycle: PlanIssueFacts;
-  readonly verify: PlanIssueFacts;
-  readonly requested_checks: readonly string[];
+  readonly cycle_description_markdown: MarkdownText;
+  readonly verify_issue_description_markdown: MarkdownText;
 }
 
 interface VerifyResultEnvelope extends VerifyTarget {
@@ -176,8 +169,8 @@ interface VerifyResultEnvelope extends VerifyTarget {
 
 export interface VerifyResult extends VerifyResultEnvelope {
   readonly conclusion: typeof VERIFY_CONCLUSIONS[number];
-  readonly checks: readonly CheckEvidence[];
-  readonly sanitized_summary: string;
+  readonly checks: readonly VerifyCheckEvidence[];
+  readonly sanitized_summary_markdown: MarkdownText;
 }
 
 export interface VerifyPerformerInterface extends StagePerformerLifecycle {
@@ -204,12 +197,6 @@ const PLAN_RESULT_KEYS = [
   "traceability_markdown",
   "sanitized_reason",
 ] as const;
-
-function parseDescription(value: unknown, code: string, max: number): string | null {
-  if (value === null) return null;
-  if (typeof value !== "string" || value.length > max || /\0/u.test(value)) throw new Error(code);
-  return value;
-}
 
 function parsedTarget(record: UnknownRecord): PlanTarget {
   return Object.freeze({
@@ -360,38 +347,15 @@ const VERIFY_RESULT_KEYS = [
   "root_id",
   "runtime_generation",
   "cycle_id",
+  "cycle_revision",
   "correlation_id",
   "verify_issue_id",
+  "verify_issue_revision",
   "revision",
   "conclusion",
   "checks",
-  "sanitized_summary",
+  "sanitized_summary_markdown",
 ] as const;
-
-function parseRoleFacts(value: unknown, role: "work" | "verify"): PlanIssueFacts {
-  const record = asRecord(value);
-  assertExactKeys(record, ["title", "description"]);
-  return Object.freeze({
-    title: parseBoundedString(record.title, `invalid_${role}_fact_title`, 1_024),
-    description: parseDescription(
-      record.description,
-      `invalid_${role}_fact_description`,
-      MAX_FACT_DESCRIPTION_LENGTH,
-    ),
-  });
-}
-
-function assertCycleTarget(
-  actual: PlanTarget,
-  expected: PlanTarget,
-  code: "work_target_mismatch" | "verify_target_mismatch",
-): void {
-  if (
-    actual.root_id !== expected.root_id
-    || actual.runtime_generation !== expected.runtime_generation
-    || actual.cycle_id !== expected.cycle_id
-  ) throw new Error(code);
-}
 
 function assertWorkCycleTarget(
   actual: PlanRequestTarget,
@@ -440,32 +404,28 @@ export function parseWorkRequest(value: unknown, expected: PlanRequestTarget): W
   });
 }
 
-function parseSanitizedSummary(
-  value: unknown,
-  code: "invalid_work_summary" | "invalid_verify_summary" | "invalid_check_summary",
-  max = MAX_PERFORMER_SUMMARY_LENGTH,
-): string {
-  const summary = parseBoundedString(value, code, max);
-  if (!/^[\x20-\x7E]+$/u.test(summary)) throw new Error(code);
-  return summary;
-}
-
-function parseCheckEvidence(value: unknown): CheckEvidence {
+function parseVerifyCheckEvidence(value: unknown): VerifyCheckEvidence {
   const record = asRecord(value);
-  assertExactKeys(record, ["check", "status", "sanitized_summary"]);
+  assertExactKeys(record, ["check", "status", "sanitized_summary_markdown"]);
+  const check = parseBoundedString(record.check, "invalid_verify_check", 1_024);
+  if (containsCredentialMaterial(check)) throw new Error("invalid_verify_check");
   return Object.freeze({
-    check: parseBoundedString(record.check, "invalid_verify_check", 1_024),
+    check,
     status: parseEnum(record.status, CHECK_STATUSES),
-    sanitized_summary: record.sanitized_summary === null
+    sanitized_summary_markdown: record.sanitized_summary_markdown === null
       ? null
-      : parseSanitizedSummary(record.sanitized_summary, "invalid_check_summary", 1_024),
+      : parseMarkdownText(
+        record.sanitized_summary_markdown,
+        "invalid_verify_check_summary_markdown",
+        1_024,
+      ),
   });
 }
 
-function parseVerifyChecks(value: unknown): readonly CheckEvidence[] {
+function parseVerifyChecks(value: unknown): readonly VerifyCheckEvidence[] {
   const checks = parseArray(
     value,
-    parseCheckEvidence,
+    parseVerifyCheckEvidence,
     MAX_PERFORMER_CHECKS,
   );
   if (new Set(checks.map(({ check }) => check)).size !== checks.length) {
@@ -573,16 +533,23 @@ export function parseWorkResult(value: unknown, request: WorkRequest): WorkResul
 
 function parsedVerifyTarget(record: UnknownRecord): VerifyTarget {
   return Object.freeze({
-    ...parsedTarget(record),
+    ...parsedPlanRequestTarget(record),
     verify_issue_id: parseStageIssueId(record.verify_issue_id),
+    verify_issue_revision: parseTaskRevision(record.verify_issue_revision),
     revision: parseRevision(record.revision),
   });
 }
 
 function assertVerifyTarget(actual: VerifyTarget, expected: VerifyTarget): void {
-  assertCycleTarget(actual, expected, "verify_target_mismatch");
+  if (
+    actual.root_id !== expected.root_id
+    || actual.runtime_generation !== expected.runtime_generation
+    || actual.cycle_id !== expected.cycle_id
+    || actual.cycle_revision !== expected.cycle_revision
+  ) throw new Error("verify_target_mismatch");
   if (
     actual.verify_issue_id !== expected.verify_issue_id
+    || actual.verify_issue_revision !== expected.verify_issue_revision
     || actual.revision !== expected.revision
   ) throw new Error("verify_target_mismatch");
 }
@@ -594,30 +561,30 @@ export function parseVerifyRequest(value: unknown, expected: VerifyTarget): Veri
     "root_id",
     "runtime_generation",
     "cycle_id",
+    "cycle_revision",
     "correlation_id",
     "verify_issue_id",
+    "verify_issue_revision",
     "revision",
-    "root",
-    "cycle",
-    "verify",
-    "requested_checks",
+    "cycle_description_markdown",
+    "verify_issue_description_markdown",
   ]);
   const target = parsedVerifyTarget(record);
   assertVerifyTarget(target, expected);
-  const requestedChecks = parseStringArray(
-    record.requested_checks,
-    (entry) => parseBoundedString(entry, "invalid_verify_check", 1_024),
-    MAX_PERFORMER_CHECKS,
+  const cycleDescription = parseMarkdownText(
+    record.cycle_description_markdown,
+    "invalid_verify_cycle_markdown",
   );
-  if (requestedChecks.length === 0) throw new Error("verify_checks_required");
+  parseCycleDraftMarkdown(cycleDescription);
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     ...target,
     correlation_id: parseCorrelationId(record.correlation_id),
-    root: parseRoleFacts(record.root, "verify"),
-    cycle: parseRoleFacts(record.cycle, "verify"),
-    verify: parseRoleFacts(record.verify, "verify"),
-    requested_checks: requestedChecks,
+    cycle_description_markdown: cycleDescription,
+    verify_issue_description_markdown: parseMarkdownText(
+      record.verify_issue_description_markdown,
+      "invalid_verify_issue_markdown",
+    ),
   });
 }
 
@@ -642,15 +609,9 @@ export function parseVerifyResult(value: unknown, request: VerifyRequest): Verif
   const envelope = parseVerifyResultEnvelope(record, request);
   const conclusion = parseEnum(record.conclusion, VERIFY_CONCLUSIONS);
   const checks = parseVerifyChecks(record.checks);
-  const requestedChecks = new Set(request.requested_checks);
-  if (checks.some(({ check }) => !requestedChecks.has(check))) {
-    throw new Error("unknown_verify_check");
-  }
 
   if (conclusion === "passed") {
-    if (checks.length !== request.requested_checks.length) {
-      throw new Error("passed_verify_check_coverage");
-    }
+    if (checks.length === 0) throw new Error("passed_verify_checks_required");
     if (checks.some(({ status }) => status !== "passed")) {
       throw new Error("passed_verify_check_failed");
     }
@@ -666,6 +627,10 @@ export function parseVerifyResult(value: unknown, request: VerifyRequest): Verif
     ...envelope,
     conclusion,
     checks,
-    sanitized_summary: parseSanitizedSummary(record.sanitized_summary, "invalid_verify_summary"),
+    sanitized_summary_markdown: parseMarkdownText(
+      record.sanitized_summary_markdown,
+      "invalid_verify_summary_markdown",
+      MAX_PERFORMER_SUMMARY_LENGTH,
+    ),
   });
 }
