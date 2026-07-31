@@ -9,6 +9,7 @@ import {
   type TaskStateId,
 } from "../../contracts/identity.js";
 import type { TaskIssueSnapshot } from "../../contracts/observation.js";
+import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.js";
 import { parseMarkdownText } from "../../contracts/validation.js";
 import {
   parsePlanRequest,
@@ -40,6 +41,11 @@ import type { FreshCycleExecutionReader } from "./CycleMachine.js";
 import { CycleGraphMaterializer } from "./CycleGraphMaterializer.js";
 import { reduceCycleTransition } from "./CycleTransition.js";
 import {
+  CycleCommitVerificationError,
+  CycleCommitVerifier,
+  type CycleVerifyPerformerFactory,
+} from "./CycleCommitVerifier.js";
+import {
   CycleWorkExecutionError,
   CycleWorkExecutor,
   type CycleWorkPerformerFactory,
@@ -55,9 +61,10 @@ const NOOP_EXECUTION: TaskManageBoundaryExecution = Object.freeze({
 });
 
 type PlanTerminalStatus = "failed" | "canceled";
-type PlanPhaseFailureReason =
+type CycleExecutionFailureReason =
   | "plan_phase_failed"
   | "work_phase_failed"
+  | "verify_phase_failed"
   | "plan_stage_failure_unconfirmed"
   | "lost_execution_context"
   | "cycle_transition_failed";
@@ -71,13 +78,16 @@ export interface CyclePlanMachineOptions {
   readonly caller_issuer: TaskManageCallerIssuer;
   readonly task_manager: TaskManageCommandInterface;
   readonly reader: FreshCycleExecutionReader;
+  readonly git_workspace: GitWorkspaceInterface;
   readonly plan_performer_factory: CyclePlanPerformerFactory;
   readonly work_performer_factory: CycleWorkPerformerFactory;
+  readonly verify_performer_factory: CycleVerifyPerformerFactory;
 }
 
 function result(
   request: CycleAdvanceRequest,
-  outcome: "advanced" | "no_action",
+  outcome: "advanced" | "awaiting_acceptance" | "no_action",
+  toCycleRevision = request.cycle_revision,
 ): CycleAdvanceResult {
   return Object.freeze({
     schema_version: 1,
@@ -87,7 +97,7 @@ function result(
     correlation_id: request.correlation_id,
     seal_digest: request.specification.seal_digest,
     from_cycle_revision: request.cycle_revision,
-    to_cycle_revision: request.cycle_revision,
+    to_cycle_revision: toCycleRevision,
     outcome,
     reason_markdown: null,
   });
@@ -97,11 +107,13 @@ function failedResult(
   request: CycleAdvanceRequest,
   outcome: "terminal_failed" | "precondition_failed",
   toCycleRevision: CycleAdvanceResult["to_cycle_revision"],
-  reason: PlanPhaseFailureReason,
+  reason: CycleExecutionFailureReason,
 ): CycleAdvanceResult {
   const reasonMarkdown = parseMarkdownText(
     reason === "lost_execution_context"
       ? "Cycle failed because the live Plan execution context was lost."
+      : reason === "verify_phase_failed"
+        ? "Cycle failed during exact commit or Verify execution."
       : reason === "work_phase_failed"
         ? "Cycle failed during Work execution or Work status confirmation."
       : reason === "cycle_transition_failed"
@@ -198,9 +210,10 @@ export class CyclePlanMachine implements CycleMachineInterface {
   #activeCycleKey: string | null = null;
   #activeCycleId: CycleAdvanceRequest["cycle_id"] | null = null;
   readonly #callerIssuer: TaskManageCallerIssuer;
+  readonly #commitVerifier: CycleCommitVerifier;
   readonly #materializer: CycleGraphMaterializer;
   readonly #pendingFailures = new Map<string, {
-    readonly reason: PlanPhaseFailureReason;
+    readonly reason: CycleExecutionFailureReason;
     readonly plan_status: PlanTerminalStatus;
   }>();
   readonly #planCreations = new Set<string>();
@@ -218,6 +231,14 @@ export class CyclePlanMachine implements CycleMachineInterface {
     this.#callerIssuer = options.caller_issuer;
     this.#taskManager = options.task_manager;
     this.#planPerformerFactory = options.plan_performer_factory;
+    this.#commitVerifier = new CycleCommitVerifier({
+      workflow: this.#workflow,
+      caller_issuer: this.#callerIssuer,
+      task_manager: this.#taskManager,
+      reader: options.reader,
+      git_workspace: options.git_workspace,
+      performer_factory: options.verify_performer_factory,
+    });
     this.#materializer = new CycleGraphMaterializer({
       workflow: this.#workflow,
       caller_issuer: this.#callerIssuer,
@@ -246,6 +267,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
     this.#retired = true;
     this.#epoch += 1;
     this.#workExecutor.retire();
+    this.#commitVerifier.retire();
   }
 
   async #advance(request: CycleAdvanceRequest, epoch: number): Promise<CycleAdvanceResult> {
@@ -302,6 +324,27 @@ export class CyclePlanMachine implements CycleMachineInterface {
         return this.#failCycle(
           error instanceof CycleWorkExecutionError ? error.snapshot : request,
           "work_phase_failed",
+          "failed",
+        );
+      }
+    }
+    if (transition.action === "commit_and_verify") {
+      try {
+        const execution = await this.#commitVerifier.execute(request, transition);
+        this.#assertActive(epoch);
+        return execution.outcome === "awaiting_acceptance"
+          ? result(request, "awaiting_acceptance", execution.snapshot.cycle_revision)
+          : failedResult(
+            request,
+            "terminal_failed",
+            execution.snapshot.cycle_revision,
+            "verify_phase_failed",
+          );
+      } catch (error) {
+        this.#assertActive(epoch);
+        return this.#failCycle(
+          error instanceof CycleCommitVerificationError ? error.snapshot : request,
+          "verify_phase_failed",
           "failed",
         );
       }
@@ -424,7 +467,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
 
   async #failCycle(
     request: CycleAdvanceRequest,
-    reason: PlanPhaseFailureReason,
+    reason: CycleExecutionFailureReason,
     planStatus: PlanTerminalStatus,
   ): Promise<CycleAdvanceResult> {
     const cycleKey = this.#cycleKey(request);
