@@ -22,6 +22,10 @@ Root 和 Performer 都通过已安装 Codex CLI `app-server` 的本地 stdio JSO
 
 Root app-server 获得 capability-scoped Task Manager MCP 和其他 declared tools。Performer 不获得 Task Manager MCP、Linear 原生 skill、provider credential 或 delivery capability。
 
+Performer process 启动有一个 fail-closed deployment precondition：managed policy 全局禁用 MCP 和 remote control，Performer Home 不含 remote environment 配置，并且 process lifetime 内的有效配置不可变。实现必须 pin 并验证所支持的 Codex CLI version；用不可预测的 per-process permission profile 隔离 readable workspace、唯一 writable Root worktree、Verify scratch 和禁用 network；在创建 thread 前通过 non-secret effective-config、permission-profile 和空 MCP inventory read-back 验证这些限制。thread/start 和每个 turn 都显式重复 local environment、cwd、runtime workspace roots、approval policy 和 permission profile；不能依赖用户默认值或 project trust。
+
+Work shell environment 不继承 app-server 的 `CODEX_HOME`、provider API key 或其他 ambient credential。Plan 不获得 native tools；Work 只在 canonical Root worktree 和 process-owned in-worktree scratch 中写；Verify 对 revision worktree 只读，只能写 process-owned、调用后删除的 scratch。所有 role 都禁用 project instructions、skills、apps、plugins、hooks、remote environments、web search 和额外 permission requests。
+
 ## Three roles
 
 | Role | Input / output | 不做 |

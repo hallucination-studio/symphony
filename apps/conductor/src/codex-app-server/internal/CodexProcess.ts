@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import {
@@ -18,6 +20,16 @@ import {
   type CodexInboundMessage,
   type CodexRequestMethod,
 } from "./CodexProtocol.js";
+import {
+  assertCodexLocalOnlyConfig,
+  assertCodexLocalOnlyInitialize,
+  assertCodexLocalOnlyMcpInventory,
+  assertCodexLocalOnlyPermissionProfiles,
+  assertCodexLocalOnlyRequirements,
+  createCodexLocalOnlyRuntime,
+  type CodexLocalOnlyMode,
+  type CodexLocalOnlyRuntime,
+} from "./CodexLocalOnly.js";
 import { encodeJsonl, JsonlFrameDecoder } from "./JsonlPeer.js";
 
 export interface CodexProcessOptions {
@@ -31,6 +43,15 @@ export interface CodexProcessOptions {
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly model: string;
+  readonly capabilityMode?: { readonly kind: "standard" } | CodexLocalOnlyMode;
+}
+
+export interface CodexProcessLaunch {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd?: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly localOnly?: CodexLocalOnlyRuntime;
 }
 
 export interface SpawnedCodexProcess {
@@ -38,28 +59,104 @@ export interface SpawnedCodexProcess {
   readonly stdout: Readable;
   readonly stderr: Readable;
   readonly events: EventEmitter;
+  isRunning(): boolean;
   kill(signal: NodeJS.Signals): boolean;
 }
 
-export type CodexSpawner = (options: CodexProcessOptions) => SpawnedCodexProcess;
+export type CodexSpawner = (
+  options: CodexProcessOptions,
+  launch: CodexProcessLaunch,
+) => SpawnedCodexProcess;
 
-const nodeSpawner: CodexSpawner = (options) => {
-  const child = spawn(options.executable, [
-    "app-server", "--stdio", "--strict-config", "-c", `model=${JSON.stringify(options.model)}`,
-  ], {
+const nodeSpawner: CodexSpawner = (_options, launch) => {
+  const isolatedProcessGroup = launch.localOnly !== undefined && process.platform !== "win32";
+  const child = spawn(launch.executable, launch.args, {
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      PATH: process.env.PATH,
-      LANG: process.env.LANG ?? "C.UTF-8",
-      TMPDIR: process.env.TMPDIR,
-      CODEX_HOME: options.codexHome,
-      OPENAI_API_KEY: options.apiKey,
-      OPENAI_BASE_URL: options.baseUrl,
-      RUST_LOG: "error",
-    },
+    ...(launch.cwd === undefined ? {} : { cwd: launch.cwd }),
+    ...(isolatedProcessGroup ? { detached: true } : {}),
+    env: launch.env,
   });
-  return { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, events: child, kill: (signal) => child.kill(signal) };
+  let spawnFailed = false;
+  child.once("error", () => {
+    if (child.pid === undefined) spawnFailed = true;
+  });
+  return {
+    stdin: child.stdin,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    events: child,
+    isRunning: () => {
+      if (!isolatedProcessGroup || child.pid === undefined) {
+        return !spawnFailed && child.exitCode === null && child.signalCode === null;
+      }
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    },
+    kill: (signal) => {
+      if (!isolatedProcessGroup || child.pid === undefined) return child.kill(signal);
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
 };
+
+async function assertNoRemoteEnvironmentConfig(codexHome: string): Promise<void> {
+  try {
+    await lstat(path.join(codexHome, "environments.toml"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("codex_local_only_preflight_failed");
+  }
+  throw new Error("codex_local_only_preflight_failed");
+}
+
+async function resolveLaunch(options: CodexProcessOptions): Promise<CodexProcessLaunch> {
+  const baseArgs = [
+    "app-server",
+    "--stdio",
+    "--strict-config",
+    "-c",
+    `model=${JSON.stringify(options.model)}`,
+  ];
+  const baseEnv = {
+    PATH: process.env.PATH,
+    LANG: process.env.LANG ?? "C.UTF-8",
+    TMPDIR: process.env.TMPDIR,
+    CODEX_HOME: options.codexHome,
+    OPENAI_API_KEY: options.apiKey,
+    OPENAI_BASE_URL: options.baseUrl,
+    RUST_LOG: "error",
+  };
+  if (options.capabilityMode?.kind !== "local_only") {
+    return Object.freeze({
+      executable: options.executable,
+      args: Object.freeze(baseArgs),
+      env: Object.freeze(baseEnv),
+    });
+  }
+  if (process.platform === "win32") throw new Error("codex_local_only_platform_unsupported");
+
+  const localOnly = createCodexLocalOnlyRuntime(options.capabilityMode, options.codexHome);
+  await assertNoRemoteEnvironmentConfig(options.codexHome);
+  return Object.freeze({
+    executable: options.executable,
+    args: Object.freeze([...baseArgs, ...localOnly.configArguments]),
+    cwd: localOnly.workspaceRoot,
+    env: Object.freeze({
+      ...baseEnv,
+      CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
+    }),
+    localOnly,
+  });
+}
 
 const SUPPRESSED_NOTIFICATIONS = [
   "account/login/completed", "account/rateLimits/updated", "account/updated", "app/list/updated",
@@ -99,10 +196,12 @@ export class CodexProcess {
   readonly #pending = new Map<string, PendingRequest>();
   readonly #notifications = new Set<(message: CodexInboundMessage) => void>();
   #closed = false;
+  #shutdown: Promise<void> | null = null;
 
   private constructor(
     private readonly options: CodexProcessOptions,
     private readonly process: SpawnedCodexProcess,
+    readonly localOnly: CodexLocalOnlyRuntime | undefined,
   ) {
     process.stdout.on("data", (chunk: Buffer) => this.#receive(chunk));
     process.stdout.on("end", () => this.#fail("codex_process_stream_ended"));
@@ -112,7 +211,8 @@ export class CodexProcess {
   }
 
   static async start(options: CodexProcessOptions, spawner: CodexSpawner = nodeSpawner): Promise<CodexProcess> {
-    const instance = new CodexProcess(options, spawner(options));
+    const launch = await resolveLaunch(options);
+    const instance = new CodexProcess(options, spawner(options, launch), launch.localOnly);
     try {
       const result = asRecord(await instance.request(
         "initialize",
@@ -129,11 +229,54 @@ export class CodexProcess {
       for (const key of ["codexHome", "platformFamily", "platformOs", "userAgent"] as const) {
         parseBoundedString(result[key], "invalid_codex_initialize_response", 1024);
       }
+      if (instance.localOnly !== undefined) assertCodexLocalOnlyInitialize(result, instance.localOnly);
       await instance.#write({ method: "initialized", params: {} });
+      if (instance.localOnly !== undefined) await instance.#preflightLocalOnly();
       return instance;
     } catch (error) {
-      await instance.shutdown().catch(() => undefined);
+      try {
+        await instance.shutdown();
+      } catch {
+        throw new Error("codex_process_termination_failed");
+      }
       throw error;
+    }
+  }
+
+  async #preflightLocalOnly(): Promise<void> {
+    const runtime = this.localOnly;
+    if (runtime === undefined) return;
+    let stage: "config" | "requirements" | "permissions" | "mcp" = "config";
+    try {
+      assertCodexLocalOnlyConfig(await this.request(
+        "config/read",
+        { cwd: runtime.workspaceRoot, includeLayers: false },
+        parseCorrelationId("local-only:config"),
+        this.options.startupTimeoutMs,
+      ), runtime);
+      stage = "requirements";
+      assertCodexLocalOnlyRequirements(await this.request(
+        "configRequirements/read",
+        {},
+        parseCorrelationId("local-only:requirements"),
+        this.options.startupTimeoutMs,
+      ));
+      stage = "permissions";
+      assertCodexLocalOnlyPermissionProfiles(await this.request(
+        "permissionProfile/list",
+        { cwd: runtime.workspaceRoot, limit: 1_000 },
+        parseCorrelationId("local-only:permissions"),
+        this.options.startupTimeoutMs,
+      ), runtime);
+      stage = "mcp";
+      assertCodexLocalOnlyMcpInventory(await this.request(
+        "mcpServerStatus/list",
+        { cursor: null, detail: "toolsAndAuthOnly", limit: 100 },
+        parseCorrelationId("local-only:mcp"),
+        this.options.startupTimeoutMs,
+      ));
+    } catch {
+      throw new Error(`codex_local_only_preflight_failed:${stage}`);
     }
   }
 
@@ -185,20 +328,14 @@ export class CodexProcess {
     }, MAX_CODEX_TOOL_RESPONSE_FRAME_BYTES);
   }
 
-  async shutdown(): Promise<void> {
-    if (this.#closed) return;
+  shutdown(): Promise<void> {
+    if (this.#shutdown !== null) return this.#shutdown;
     this.#closed = true;
     this.#rejectPending("codex_process_shutdown");
-    this.#notifyFailure("codex_process_shutdown");
     this.process.stdin.end();
-    if (!this.process.kill("SIGTERM")) return;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.process.kill("SIGKILL");
-        resolve();
-      }, this.options.shutdownTimeoutMs);
-      this.process.events.once("exit", () => { clearTimeout(timer); resolve(); });
-    });
+    this.#shutdown = this.#terminate("SIGTERM");
+    this.#notifyFailure("codex_process_shutdown");
+    return this.#shutdown;
   }
 
   #receive(chunk: Buffer): void {
@@ -236,8 +373,31 @@ export class CodexProcess {
     if (this.#closed) return;
     this.#closed = true;
     this.#rejectPending(code);
+    this.process.stdin.end();
+    this.#shutdown = this.#terminate("SIGKILL");
+    void this.#shutdown.catch(() => undefined);
     this.#notifyFailure(code);
-    this.process.kill("SIGKILL");
+  }
+
+  async #terminate(initialSignal: "SIGTERM" | "SIGKILL"): Promise<void> {
+    if (!this.process.isRunning()) return;
+    this.process.kill(initialSignal);
+    if (await this.#waitForTermination()) return;
+    if (initialSignal === "SIGTERM") {
+      this.process.kill("SIGKILL");
+      if (await this.#waitForTermination()) return;
+    }
+    throw new Error("codex_process_termination_failed");
+  }
+
+  async #waitForTermination(): Promise<boolean> {
+    const deadline = performance.now() + this.options.shutdownTimeoutMs;
+    while (this.process.isRunning()) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return false;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(10, remaining)));
+    }
+    return true;
   }
 
   #notifyFailure(code: string): void {

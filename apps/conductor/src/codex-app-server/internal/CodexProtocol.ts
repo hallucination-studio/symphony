@@ -2,7 +2,14 @@ import type { CorrelationId, RootIssueId, RuntimeGeneration } from "../../contra
 import { asRecord, assertExactKeys, parseBoundedString, parseEnum } from "../../contracts/validation.js";
 
 export const CODEX_REQUEST_METHODS = [
-  "initialize", "thread/start", "turn/start", "turn/interrupt",
+  "initialize",
+  "config/read",
+  "configRequirements/read",
+  "permissionProfile/list",
+  "mcpServerStatus/list",
+  "thread/start",
+  "turn/start",
+  "turn/interrupt",
 ] as const;
 export type CodexRequestMethod = typeof CODEX_REQUEST_METHODS[number];
 

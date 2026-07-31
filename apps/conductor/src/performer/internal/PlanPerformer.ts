@@ -6,6 +6,7 @@ import {
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
+import type { CodexLocalOnlyDeploymentPolicy } from "../../codex-app-server/internal/CodexLocalOnly.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
 import {
   parseCorrelationId,
@@ -27,9 +28,10 @@ import {
   type PlanRequest,
   type PlanResult,
   type PlanTarget,
-  type StagePerformerInterface,
+  type PlanPerformerInterface,
   type TerminalPlanResult,
 } from "../api/StagePerformerInterface.js";
+import { encodePerformerPrompt } from "./PerformerPrompt.js";
 
 const MAX_PLAN_PROMPT_BYTES = 256 * 1024;
 const WORK_KEY_PATTERN = "^[a-z][a-z0-9-]{0,63}$";
@@ -43,8 +45,12 @@ export interface PlanPerformerCreateInput extends PlanTarget {
 }
 
 export interface PlanPerformerOptions
-  extends Omit<CodexProcessOptions, "codexHome" | "rootId" | "runtimeGeneration"> {
+  extends Omit<
+    CodexProcessOptions,
+    "codexHome" | "rootId" | "runtimeGeneration" | "capabilityMode"
+  > {
   readonly turnTimeoutMs: number;
+  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
   readonly spawner?: CodexSpawner;
 }
 
@@ -183,14 +189,11 @@ function planPrompt(request: PlanRequest): string {
     ].join(" "),
     request,
   };
-  const encoded = JSON.stringify(prompt);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_PLAN_PROMPT_BYTES) {
-    throw new Error("plan_prompt_too_large");
-  }
-  return encoded;
+  return encodePerformerPrompt(prompt, MAX_PLAN_PROMPT_BYTES, "plan_prompt_too_large");
 }
 
-export class PlanPerformer implements StagePerformerInterface {
+export class PlanPerformer implements PlanPerformerInterface {
+  readonly role = "plan" as const;
   readonly rootId: RootIssueId;
   readonly runtimeGeneration: RuntimeGeneration;
   readonly cycleId: CycleIssueId;
@@ -239,7 +242,7 @@ export class PlanPerformer implements StagePerformerInterface {
     if (!Number.isSafeInteger(options.turnTimeoutMs) || options.turnTimeoutMs < 1) {
       throw new Error("invalid_plan_turn_timeout");
     }
-    const { spawner, turnTimeoutMs, ...codexOptions } = options;
+    const { deploymentPolicy, spawner, turnTimeoutMs, ...codexOptions } = options;
     let process: CodexProcess;
     try {
       process = await CodexProcess.start({
@@ -247,6 +250,11 @@ export class PlanPerformer implements StagePerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
+        capabilityMode: {
+          kind: "local_only",
+          workspaceRoot: cwd,
+          deploymentPolicy,
+        },
       }, spawner);
     } catch {
       throw new Error("plan_performer_creation_failed");
@@ -257,7 +265,8 @@ export class PlanPerformer implements StagePerformerInterface {
         tools: [],
         correlationId: parseCorrelationId(`thread:${randomUUID()}`),
         access: { kind: "read_only" },
-        toolMode: "dynamic_only",
+        toolMode: "local_only",
+        nativeTools: false,
       });
       return new PlanPerformer(target, process, thread, turnTimeoutMs);
     } catch {
@@ -285,10 +294,11 @@ export class PlanPerformer implements StagePerformerInterface {
   close(): Promise<void> {
     if (this.#closing !== null) return this.#closing;
     this.#closed = true;
-    this.#unsubscribe();
-    this.#thread.close();
     const activeRun = this.#activeRun;
     this.#closing = (async () => {
+      await this.#thread.interrupt(parseCorrelationId(`interrupt:${randomUUID()}`)).catch(() => undefined);
+      this.#unsubscribe();
+      this.#thread.close();
       await activeRun?.catch(() => undefined);
       try {
         await this.#process.shutdown();

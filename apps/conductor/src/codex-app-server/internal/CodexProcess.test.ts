@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -19,15 +19,22 @@ interface FakeServer extends SpawnedCodexProcess {
   sendMany(messages: readonly Record<string, unknown>[]): void;
 }
 
-function fakeSpawner(handle: (message: Record<string, unknown>, server: FakeServer) => void) {
+function fakeSpawner(
+  handle: (message: Record<string, unknown>, server: FakeServer) => void,
+  autoExitOnKill = true,
+  runningOverride?: () => boolean,
+) {
   let server: FakeServer | undefined;
   let kills = 0;
+  let running = true;
+  const signals: NodeJS.Signals[] = [];
   const requests: Record<string, unknown>[] = [];
   const spawner: CodexSpawner = () => {
     const input = new PassThrough();
     const output = new PassThrough();
     const stderr = new PassThrough();
     const events = new EventEmitter();
+    events.once("exit", () => { running = false; });
     const decoder = new JsonlFrameDecoder(MAX_ROOT_TOOL_RESPONSE_BYTES * 2 + 1024);
     server = {
       stdin: input,
@@ -36,7 +43,13 @@ function fakeSpawner(handle: (message: Record<string, unknown>, server: FakeServ
       events,
       input,
       output,
-      kill: () => { kills += 1; queueMicrotask(() => events.emit("exit", 0, null)); return true; },
+      isRunning: () => runningOverride?.() ?? running,
+      kill: (signal) => {
+        kills += 1;
+        signals.push(signal);
+        if (autoExitOnKill) queueMicrotask(() => events.emit("exit", 0, null));
+        return true;
+      },
       send: (message) => output.write(`${JSON.stringify(message)}\n`),
       sendMany: (messages) => output.write(messages.map((message) => JSON.stringify(message)).join("\n") + "\n"),
     };
@@ -46,9 +59,15 @@ function fakeSpawner(handle: (message: Record<string, unknown>, server: FakeServ
         handle(message, server as FakeServer);
       }
     });
-    return server;
+    return server as FakeServer;
   };
-  return { spawner, requests, server: () => server as FakeServer, kills: () => kills };
+  return {
+    spawner,
+    requests,
+    server: () => server as FakeServer,
+    kills: () => kills,
+    signals: () => signals,
+  };
 }
 
 function initializeResponse(message: Record<string, unknown>, server: FakeServer): boolean {
@@ -85,6 +104,238 @@ test("invalid initialization closes the spawned private process", async () => {
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fake.kills(), 1);
+});
+
+test("initialization failure reports when the spawned process cannot be terminated", async () => {
+  const fake = fakeSpawner((message, server) => {
+    if (message.method === "initialize") server.send({ id: message.id, result: { codexHome: "/tmp/codex" } });
+  }, false);
+
+  await assert.rejects(
+    CodexProcess.start({
+      ...testCodexOptions("/tmp/codex"),
+      shutdownTimeoutMs: 2,
+    }, fake.spawner),
+    /codex_process_termination_failed/u,
+  );
+  assert.deepEqual(fake.signals(), ["SIGTERM", "SIGKILL"]);
+});
+
+test("concurrent shutdown callers wait for the same process termination", async () => {
+  const fake = fakeSpawner((message, server) => { initializeResponse(message, server); }, false);
+  const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
+
+  const first = process.shutdown();
+  let secondSettled = false;
+  const second = process.shutdown().finally(() => { secondSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false);
+
+  fake.server().events.emit("exit", 0, null);
+  await Promise.all([first, second]);
+  assert.equal(secondSettled, true);
+  assert.equal(fake.kills(), 1);
+});
+
+test("forced shutdown remains pending until process exit", async () => {
+  const fake = fakeSpawner((message, server) => { initializeResponse(message, server); }, false);
+  const process = await CodexProcess.start({
+    ...testCodexOptions("/tmp/codex"),
+    shutdownTimeoutMs: 5,
+  }, fake.spawner);
+
+  let settled = false;
+  const stopping = process.shutdown().finally(() => { settled = true; });
+  while (fake.signals().length < 2) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(fake.signals(), ["SIGTERM", "SIGKILL"]);
+  assert.equal(settled, false);
+
+  fake.server().events.emit("exit", 0, null);
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test("shutdown fails closed when the process survives forced termination", async () => {
+  const fake = fakeSpawner((message, server) => { initializeResponse(message, server); }, false);
+  const process = await CodexProcess.start({
+    ...testCodexOptions("/tmp/codex"),
+    shutdownTimeoutMs: 2,
+  }, fake.spawner);
+
+  await assert.rejects(process.shutdown(), /codex_process_termination_failed/u);
+  assert.deepEqual(fake.signals(), ["SIGTERM", "SIGKILL"]);
+});
+
+test("failure-driven shutdown stays joinable until process exit", async () => {
+  const fake = fakeSpawner((message, server) => { initializeResponse(message, server); }, false);
+  const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
+
+  fake.server().output.end();
+  while (fake.signals().length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  let settled = false;
+  const stopping = process.shutdown().finally(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.deepEqual(fake.signals(), ["SIGKILL"]);
+
+  fake.server().events.emit("exit", 0, null);
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test("local-only shutdown waits for the detached process group after leader exit", async () => {
+  let groupRunning = true;
+  const fake = fakeSpawner(
+    (message, server) => { initializeResponse(message, server); },
+    false,
+    () => groupRunning,
+  );
+  const process = await CodexProcess.start({
+    ...testCodexOptions("/tmp/codex"),
+    shutdownTimeoutMs: 5,
+  }, fake.spawner);
+
+  let settled = false;
+  const stopping = process.shutdown().finally(() => { settled = true; });
+  fake.server().events.emit("exit", 0, null);
+  const signalDeadline = performance.now() + 50;
+  while (fake.signals().length < 2 && performance.now() < signalDeadline) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(fake.signals(), ["SIGTERM", "SIGKILL"]);
+  assert.equal(settled, false);
+
+  groupRunning = false;
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test("unexpected leader exit terminates the remaining detached process group", async () => {
+  let groupRunning = true;
+  const fake = fakeSpawner(
+    (message, server) => { initializeResponse(message, server); },
+    false,
+    () => groupRunning,
+  );
+  const process = await CodexProcess.start({
+    ...testCodexOptions("/tmp/codex"),
+    shutdownTimeoutMs: 5,
+  }, fake.spawner);
+
+  fake.server().events.emit("exit", 1, null);
+  const signalDeadline = performance.now() + 50;
+  while (fake.signals().length === 0 && performance.now() < signalDeadline) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(fake.signals(), ["SIGKILL"]);
+
+  let settled = false;
+  const stopping = process.shutdown().finally(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  groupRunning = false;
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test("native local-only shutdown removes descendants after the process-group leader exits", {
+  skip: process.platform === "win32",
+}, async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-process-group-"));
+  const codexHome = path.join(temporary, "codex-home");
+  const workspaceRoot = path.join(temporary, "workspace");
+  const pidFile = path.join(temporary, "pids");
+  const executable = path.join(temporary, "codex-stub.cjs");
+  let groupLeaderPid: number | undefined;
+  let descendantPid: number | undefined;
+  try {
+    await Promise.all([mkdir(codexHome), mkdir(workspaceRoot)]);
+    const descendantSource = [
+      "process.on('SIGTERM', () => undefined);",
+      "process.stdout.write('ready\\n');",
+      "setInterval(() => undefined, 1_000);",
+    ].join("");
+    const stubSource = `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(descendantSource)}], {
+  env: { PATH: process.env.PATH },
+  stdio: ["ignore", "pipe", "ignore"],
+});
+writeFileSync(${JSON.stringify(pidFile)}, process.pid + "\\n" + descendant.pid + "\\n", "utf8");
+let input = "";
+let ready = false;
+const pending = [];
+function respond(line) {
+  const message = JSON.parse(line);
+  process.stdout.write(JSON.stringify({ id: message.id, result: { codexHome: "invalid" } }) + "\\n");
+}
+function drain() {
+  while (ready && pending.length > 0) respond(pending.shift());
+}
+descendant.stdout.once("data", () => { ready = true; drain(); });
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  for (;;) {
+    const newline = input.indexOf("\\n");
+    if (newline < 0) break;
+    const line = input.slice(0, newline);
+    input = input.slice(newline + 1);
+    if (line.length > 0) pending.push(line);
+  }
+  drain();
+});
+setInterval(() => undefined, 1_000);
+`;
+    await writeFile(executable, stubSource, { mode: 0o700 });
+
+    await assert.rejects(CodexProcess.start({
+      ...testCodexOptions(codexHome),
+      executable,
+      shutdownTimeoutMs: 25,
+      capabilityMode: {
+        kind: "local_only",
+        workspaceRoot,
+        deploymentPolicy: {
+          managedMcpDenyAll: true,
+          managedRemoteControlDisabled: true,
+          remoteEnvironmentsAbsent: true,
+          configurationImmutable: true,
+        },
+      },
+    }), /invalid_codex_initialize_response/u);
+
+    [groupLeaderPid, descendantPid] = (await readFile(pidFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((value) => Number.parseInt(value, 10));
+    assert.ok(Number.isSafeInteger(groupLeaderPid));
+    assert.ok(descendantPid !== undefined && Number.isSafeInteger(descendantPid));
+
+    const deadline = performance.now() + 2_000;
+    let descendantRunning = true;
+    while (descendantRunning && performance.now() < deadline) {
+      try {
+        process.kill(descendantPid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        descendantRunning = false;
+      }
+    }
+    assert.equal(descendantRunning, false);
+  } finally {
+    if (groupLeaderPid !== undefined) {
+      try { process.kill(-groupLeaderPid, "SIGKILL"); } catch { /* already terminated */ }
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("turn-start activation observes a coalesced first tool call before the caller resumes", async () => {

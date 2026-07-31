@@ -7,6 +7,11 @@ import {
 import { asRecord, parseBoundedString } from "../../contracts/validation.js";
 import type { RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { CodexInboundMessage } from "./CodexProtocol.js";
+import {
+  localOnlyEnvironment,
+  localOnlyThreadConfig,
+  type CodexLocalOnlyRuntime,
+} from "./CodexLocalOnly.js";
 import { CodexProcess } from "./CodexProcess.js";
 
 export interface CodexTurnResult {
@@ -23,7 +28,7 @@ export type CodexThreadAccess =
       readonly networkAccess: boolean;
     };
 
-export type CodexThreadToolMode = "codex" | "dynamic_only";
+export type CodexThreadToolMode = "codex" | "dynamic_only" | "local_only";
 
 const DYNAMIC_ONLY_CONFIG = Object.freeze({
   web_search: "disabled",
@@ -62,6 +67,7 @@ export class CodexThread {
     readonly threadId: ThreadId,
     private readonly cwd: string,
     private readonly access: CodexThreadAccess,
+    private readonly localOnly: CodexLocalOnlyRuntime | undefined,
   ) {
     this.#unsubscribe = process.onNotification((message) => this.#handle(message));
     this.#unsubscribeFailure = process.onFailure((code) => this.#failTurn(code));
@@ -75,22 +81,66 @@ export class CodexThread {
       readonly correlationId: CorrelationId;
       readonly access: CodexThreadAccess;
       readonly toolMode?: CodexThreadToolMode;
+      readonly nativeTools?: boolean;
     },
   ): Promise<CodexThread> {
     const dynamicOnly = input.toolMode === "dynamic_only";
-    const response = asRecord(await process.request("thread/start", {
-      cwd: input.cwd,
-      approvalPolicy: "never",
-      sandbox: input.access.kind === "read_only" ? "read-only" : "workspace-write",
-      dynamicTools: input.tools,
-      ...(dynamicOnly ? {
-        ephemeral: true,
-        environments: [],
-        config: DYNAMIC_ONLY_CONFIG,
-      } : {}),
-    }, input.correlationId), "invalid_codex_thread_response");
+    const localOnly = input.toolMode === "local_only" ? process.localOnly : undefined;
+    if (
+      (input.toolMode === "local_only") !== (process.localOnly !== undefined)
+      || (localOnly !== undefined && (
+        input.cwd !== localOnly.workspaceRoot
+        || input.tools.length !== 0
+        || (input.access.kind === "workspace_write" && (
+          input.access.writableRoot !== localOnly.workspaceRoot
+          || input.access.networkAccess
+        ))
+      ))
+    ) throw new Error("codex_local_only_capability_mismatch");
+    const params = localOnly === undefined
+      ? {
+          cwd: input.cwd,
+          approvalPolicy: "never",
+          sandbox: input.access.kind === "read_only" ? "read-only" : "workspace-write",
+          dynamicTools: input.tools,
+          ...(dynamicOnly ? {
+            ephemeral: true,
+            environments: [],
+            config: DYNAMIC_ONLY_CONFIG,
+          } : {}),
+        }
+      : {
+          cwd: localOnly.workspaceRoot,
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          permissions: localOnly.readPermissionProfile,
+          dynamicTools: [],
+          ephemeral: true,
+          environments: localOnlyEnvironment(localOnly),
+          runtimeWorkspaceRoots: [localOnly.workspaceRoot],
+          selectedCapabilityRoots: [],
+          baseInstructions: localOnly.baseInstructions,
+          developerInstructions: localOnly.developerInstructions,
+          config: localOnlyThreadConfig(localOnly, input.nativeTools !== false),
+        };
+    const response = asRecord(await process.request("thread/start", params, input.correlationId), "invalid_codex_thread_response");
+    if (localOnly !== undefined) {
+      const profile = asRecord(response.activePermissionProfile, "codex_local_only_capability_mismatch");
+      if (
+        response.cwd !== localOnly.workspaceRoot
+        || response.approvalPolicy !== "never"
+        || response.approvalsReviewer !== "user"
+        || profile.id !== localOnly.readPermissionProfile
+        || profile.extends !== null
+        || !Array.isArray(response.instructionSources)
+        || response.instructionSources.length !== 0
+        || !Array.isArray(response.runtimeWorkspaceRoots)
+        || response.runtimeWorkspaceRoots.length !== 1
+        || response.runtimeWorkspaceRoots[0] !== localOnly.workspaceRoot
+      ) throw new Error("codex_local_only_capability_mismatch");
+    }
     const thread = asRecord(response.thread, "invalid_codex_thread_response");
-    return new CodexThread(process, parseThreadId(thread.id), input.cwd, input.access);
+    return new CodexThread(process, parseThreadId(thread.id), input.cwd, input.access, localOnly);
   }
 
   async turn(
@@ -117,18 +167,30 @@ export class CodexThread {
       startTimer = setTimeout(() => reject(new Error("codex_turn_timed_out")), timeoutMs);
     });
     try {
+      const access = this.localOnly === undefined
+        ? {
+            sandboxPolicy: this.access.kind === "read_only"
+              ? { type: "readOnly" }
+              : {
+                  type: "workspaceWrite",
+                  writableRoots: [this.access.writableRoot],
+                  networkAccess: this.access.networkAccess,
+                },
+          }
+        : {
+            approvalsReviewer: "user",
+            permissions: this.access.kind === "read_only"
+              ? this.localOnly.readPermissionProfile
+              : this.localOnly.writePermissionProfile,
+            environments: localOnlyEnvironment(this.localOnly),
+            runtimeWorkspaceRoots: [this.localOnly.workspaceRoot],
+          };
       const start = this.process.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: input }],
         cwd: this.cwd,
         approvalPolicy: "never",
-        sandboxPolicy: this.access.kind === "read_only"
-          ? { type: "readOnly" }
-          : {
-              type: "workspaceWrite",
-              writableRoots: [this.access.writableRoot],
-              networkAccess: this.access.networkAccess,
-            },
+        ...access,
         ...(outputSchema === undefined ? {} : { outputSchema }),
       }, correlationId);
       response = asRecord(await Promise.race([start, startTimeout]), "invalid_codex_turn_response");

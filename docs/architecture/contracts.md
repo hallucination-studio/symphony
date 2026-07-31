@@ -10,7 +10,7 @@
 | `TaskManageCommandInterface` | 实现通用 Task Manager MCP query/mutation functions 与 fresh read-back |
 | `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建 identity-bound `RootReconcill` |
 | `RootReconcillInterface` | 接收 bootstrap/diff，运行 ReAct tool loop，返回 quiescent/stop turn outcome |
-| `StagePerformerInterface` | 执行 `plan`、`work`、`verify`，返回不含 Task Manager mutation 的 typed result |
+| `StagePerformerInterface` | 以 `role` 区分的 `PlanPerformerInterface | WorkPerformerInterface | VerifyPerformerInterface` closed family；每个隔离实例只执行自己的 operation，并返回不含 Task Manager mutation 的 typed result |
 | `GitWorkspaceInterface` | 实现通用 worktree、status、diff 和 commit operations |
 | `DeliveryInterface` | 实现通用 remote ref 和 pull request operations |
 
@@ -104,6 +104,10 @@ VerifyResult {
 ```
 
 Performer result 不含 provider receipt，不创建或更新 Issue，也不推进 lifecycle。Root Reconcill 根据 result 和 fresh facts 决定后续精确 MCP calls。result 不写入 Root Home；只有被 Task Manager/Git fresh read 确认的状态才是事实。
+
+调用 Work 前，Root Reconcill 必须从 fresh complete Root Tree 确认 Work Issue 属于当前 Root/Cycle，并在每次 `WorkRequest` 中提供该次调用观察到的完整、bounded、identity-unique 当前 Cycle Work Issue authority set；`work_issue_id` 必须属于该 set。每个 Issue 的 normalized facts 放入对应 request，但 authority set 不进入 Performer prompt。Task Manager-free、Cycle-bound Work Performer 不重新查询 ownership；同一实例和 thread 可以依次接受 fresh authority 新增的 Work Issue。每次调用使用 fresh correlation。`completed` Work 必须有已知 `workspace_changed` 和至少一个全部通过的 check；`canceled` Work 的 workspace 状态必须为 `null`；`failed` 可以保留 partial checks，但不能把未知 workspace 状态变成事实。
+
+Verify Performer instance 绑定一个 Verify Issue 和一个 revision，只能用 read-only workspace capability 检查该 target。`passed` 必须 exact coverage 全部 requested checks 且全部通过；`failed` 必须至少有一个失败 check；缺少确定证据时使用 `inconclusive`。P6 Performer boundary 绑定 request、prompt、schema 和 read-only cwd；cwd/HEAD 与 revision 的 Git precondition 和调用后的 fresh read-back 由 `GitWorkspaceInterface` owner 负责，见 [Git and Delivery](git-worktree-delivery.md)。
 
 ## Turn outcomes and errors
 

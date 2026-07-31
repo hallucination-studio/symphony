@@ -146,6 +146,8 @@ function controlledAppServer(
     const output = new PassThrough();
     const stderr = new PassThrough();
     const events = new EventEmitter();
+    let running = true;
+    events.once("exit", () => { running = false; });
     const decoder = new JsonlFrameDecoder();
     const server: ControlledAppServer = {
       stdin: input,
@@ -154,6 +156,7 @@ function controlledAppServer(
       events,
       input,
       output,
+      isRunning: () => running,
       kill: () => {
         queueMicrotask(() => events.emit("exit", 0, null));
         return true;
