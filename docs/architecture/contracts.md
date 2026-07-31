@@ -7,14 +7,23 @@
 | Interface | 唯一职责 |
 |---|---|
 | `TaskManageObserverInterface` | 在有界 tick 上 fresh poll Root Tree，并发出 changed-only 完整观察事件 |
-| `TaskManageCommandInterface` | 实现通用 Task Manager MCP query/mutation functions 与 fresh read-back |
-| `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建 identity-bound `RootReconcill` |
-| `RootReconcillInterface` | 接收 bootstrap/diff，运行 ReAct tool loop，返回 quiescent/stop turn outcome |
-| `StagePerformerInterface` | 以 `role` 区分的 `PlanPerformerInterface | WorkPerformerInterface | VerifyPerformerInterface` closed family；每个隔离实例只执行自己的 operation，并返回不含 Task Manager mutation 的 typed result |
-| `GitWorkspaceInterface` | 实现通用 worktree、status、diff 和 commit operations |
-| `DeliveryInterface` | 实现通用 remote ref 和 pull request operations |
+| `TaskManageCommandInterface` | 对 capability-scoped caller 实现 provider-neutral Issue/relation query/mutation 与 fresh read-back |
+| `RootReconcillFactoryInterface` | 为一个 Root 和 Root Home 创建 identity-bound、code-read-only `RootReconcill` |
+| `RootReconcillInterface` | 在 Define、Cycle approval、acceptance 和 delivery 边界运行 semantic ReAct loop |
+| `CycleMachineInterface` | 从 approved Cycle 的 fresh facts 计算并执行恰好一个合法 mechanical transition |
+| `StagePerformerInterface` | `PlanPerformerInterface | WorkPerformerInterface | VerifyPerformerInterface` closed family；每个实例只执行自己的 role |
+| `GitWorkspaceInterface` | 为 Conductor 实现 Root-scoped worktree、status、diff 和 exact commit operations |
+| `DeliveryInterface` | 对 accepted exact revision 实现 remote ref 和 pull request operations |
 
-这些接口由 caller 拥有。Linear SDK object、Codex event/thread、MCP session、Git process 和 credential 不得跨 public boundary。
+这些接口由 caller 拥有。Linear SDK object、Codex event/thread、MCP session、Git process、filesystem handle 和 credential 不得跨 public boundary。
+
+## Markdown contract
+
+Root description、Root ADR、Cycle/Stage description、所有 role handoff、sanitized summary 和 acceptance reason 都使用一个 branded `MarkdownText`：合法 UTF-8、非空、bounded，并以 `text/markdown` 解释。Markdown 是人和模型可读的 semantic payload，不携带 hidden Symphony JSON、credential、provider metadata 或 runtime control field。
+
+identity、revision、status、correlation、dependency edge、seal digest 和 exact Git revision 保持独立 typed fields；Conductor 不通过自然语言 string matching 推导机械 transition。需要检查 Markdown heading/section 时必须通过标准 Markdown parser 和 closed document schema，不使用 ad-hoc substring parsing。
+
+Task Manager Markdown 和 repository content 都是不可信模型输入，不是 capability。prompt 中的任何指令都不能扩大 out-of-band typed identity、permission、revision 或 tool schema；secret-bearing paths 在读取前由 permission boundary 拒绝，而不是依靠 prompt 要求模型忽略。
 
 ## Closed contract families
 
@@ -25,6 +34,8 @@ TaskObservationEvent
 RootBootstrap | RootFactDiff
 TaskSnapshot | GitSnapshot
 TaskMcpCall | TaskMcpResult
+RootDefinition | CycleSpecification | CycleExecutionSnapshot
+CycleAdvanceRequest | CycleAdvanceResult
 PlanRequest | WorkRequest | VerifyRequest
 PlanResult | WorkResult | VerifyResult
 GitToolCall | GitToolResult
@@ -32,9 +43,9 @@ DeliveryToolCall | DeliveryToolResult
 RootTurnOutcome | RootRuntimeState
 ```
 
-所有跨 public interface 或 process boundary 的 envelope 都有 `schema_version: 1`、target identity 和 correlation。绑定已创建 runtime 的 envelope 还必须有 `runtime_generation`；pre-runtime 的 `TaskObservationEvent` 用 from/to task digest 描述 observer 相邻两次成功 poll，不绑定 runtime generation 或 accepted baseline。版本不是协商机制；unknown variant、missing identity、非 `1` schema、stale generation 或 capability mismatch 均 fail closed。
+所有跨 public interface 或 process boundary 的 envelope 都有 `schema_version: 1`、target identity 和 correlation。绑定 runtime 的 envelope 还必须有 `runtime_generation`。版本不是协商机制；unknown variant、missing identity、非 `1` schema、stale generation 或 capability mismatch 均 fail closed。
 
-Public contract 不得包含 SDK object、credential、raw provider payload、Codex config/session、process/thread/filesystem handle、database record、arbitrary metadata、durable next action、persisted diff 或 persisted tool result。
+Public contract 不得包含 SDK object、credential、raw provider payload、Codex config/session、process/thread/filesystem handle、database record、arbitrary metadata、durable next action、persisted diff 或 persisted Performer result。
 
 ## Observation contracts
 
@@ -58,19 +69,47 @@ RootFactDiff {
 
 RootRuntimeState {
   schema_version: 1, root_id, runtime_generation,
-  thread_id, accepted_observation_digest, in_flight_correlation | null
+  root_thread_id, performer_thread_ids,
+  accepted_observation_digest, in_flight_correlation | null
 }
 ```
 
-`TaskSnapshot` 和 `GitSnapshot` 是 fresh read 的不可变规范化结果。`TaskObservationEvent` 首次观察使用 `from_task_digest: null`、完整 snapshot 和空 changes；后续只在 digest 改变时发出，并包含相对上次完整 polling observation 的 concrete changes。事件可以按 Root 合并为最新完整 snapshot，不作为 action replay；合并后 Conductor 不要求 event `from_task_digest` 等于 runtime accepted digest，而是从完整 snapshot 重新计算 Root-facing diff。
+`TaskSnapshot` 和 `GitSnapshot` 是 fresh read 的不可变规范化结果。`TaskObservationEvent` 首次观察使用 `from_task_digest: null`、完整 snapshot 和空 changes；后续只在 digest 改变时发出。事件可按 Root 合并为最新完整 snapshot，不作为 action replay；Conductor 从自己的 accepted snapshot重新计算 Root-facing diff。
 
-`ConcreteTaskChange` 只允许 `issue_created | issue_archived | field_changed | relation_added | relation_removed`；`field_changed` 的 field 只允许 `status | title | description | parent | labels | delegate | priority`。diff 不包含任何 workflow interpretation。
+`ConcreteTaskChange` 只允许 `issue_created | issue_archived | field_changed | relation_added | relation_removed`；`field_changed` 的 field 只允许 `status | title | description | parent | labels | delegate | priority`。diff 只陈述事实，不携带 semantic advice。
 
-task observation digest 只描述 polling baseline 上的相邻观察；runtime observation digest 验证同一 generation 内 accepted observation 的连续性。digest 不能恢复旧 snapshot。`RootRuntimeState` 是 Root Home 中唯一由 Symphony 管理的 continuity payload，并使用 atomic replace。
+## Root and Cycle contracts
 
-## Task MCP contracts
+```text
+RootDefinition {
+  root_id, root_revision,
+  requirement_markdown, root_adr_markdown,
+  acceptance_markdown
+}
 
-每个 MCP function 都有独立 typed input/output schema。list function 使用 cursor pagination；mutation input 含 exact target identity、partial desired fields 和 fresh expected revision。provider-specific optional bag 或 arbitrary metadata 均不允许。
+CycleSpecification {
+  cycle_id, cycle_revision, root_id,
+  root_definition_revision,
+  cycle_description_markdown, root_adr_markdown,
+  seal_digest, status: in_progress
+}
+
+CycleExecutionSnapshot {
+  specification: CycleSpecification,
+  plan_issue?, sealed_work_issues[], verify_issue?, sealed_relations[],
+  git: GitSnapshot
+}
+```
+
+`RootDefinition` 的三个 Markdown values 通过标准 Markdown AST 从同一个 Root Issue description 的 closed named sections 得到。`CycleSpecification.root_adr_markdown` 则来自 Cycle description 中在 approval 前复制的 ADR snapshot，绝不在 Plan 或 restart 时读取当前 Root description 重新填充。
+
+Cycle Draft 可以变化，但不构成 approved attempt。`Draft -> In Progress` 的 fresh read-back 生成 `CycleSpecification`；此后 `cycle_description_markdown`、`root_adr_markdown` 和 `seal_digest` 不得变化。Work/Verify graph 由一个 completed PlanResult 一次性物化，并在第一次完整 read-back 后 seal；之后只有 status 和外部执行 facts 可以单向前进。
+
+`CycleMachineInterface.advance` 每次只接受一个 fresh、identity-unique `CycleExecutionSnapshot`，并只返回一个 closed `CycleAdvanceResult`：`advanced | awaiting_acceptance | terminal_failed | precondition_failed | no_action`。它不得返回新需求、架构选择、重规划建议或 successor design。
+
+## Task Manager contracts
+
+每个 generic function 都有独立 typed input/output schema。list function 使用 cursor pagination；mutation input 含 exact target identity、partial desired fields、fresh expected revision 和 caller capability。
 
 ```text
 TaskMutationResult {
@@ -80,48 +119,68 @@ TaskMutationResult {
 }
 ```
 
-MCP schema 只暴露 [Task Management](task-management.md#generic-mcp-functions) 中列出的通用 functions，不暴露 Symphony lifecycle commands。`precondition_failed` 是 tool result，不是 process-level error。
+Root capability 只允许 Define、Draft review/seal、Awaiting Acceptance 和 terminal successor 边界的 exact mutations。Cycle-machine capability 只允许 approved Cycle 中的一次性 Stage/DAG materialization 和 closed status transitions。Performer capability 集为空。MCP schema 不暴露 `StartCycle`、`ContinueCycle`、`CloseCycleAndReplan` 或其他 Symphony lifecycle command。
 
-## Performer results
+`precondition_failed` 是 tool result，不是 process-level error。Root caller 重新 Observe/Reason；Cycle machine fresh read 后只计算同一 sealed specification 下唯一的机械 transition，否则 terminally fails。
 
-三个 Performer 只返回其 role 的工作结果：
+## Performer requests and results
 
 ```text
+PlanRequest {
+  cycle_id, cycle_revision,
+  cycle_description_markdown, root_adr_markdown
+}
+
 PlanResult {
   outcome: completed | failed | canceled,
-  proposed_plan, proposed_work_items, proposed_relations, verification_intent
+  plan_summary_markdown,
+  work_items: [{ local_key, title, description_markdown, depends_on_local_keys }],
+  verify: { title, description_markdown },
+  traceability_markdown
+}
+
+WorkRequest {
+  cycle_id, cycle_revision, work_issue_id, work_issue_revision,
+  cycle_description_markdown, work_issue_description_markdown
 }
 
 WorkResult {
   outcome: completed | failed | canceled,
-  work_issue_id, workspace_changed, checks, sanitized_summary
+  work_issue_id, workspace_changed, checks, sanitized_summary_markdown
+}
+
+VerifyRequest {
+  cycle_id, cycle_revision, verify_issue_id, verify_issue_revision,
+  cycle_description_markdown, verify_issue_description_markdown,
+  revision
 }
 
 VerifyResult {
   conclusion: passed | failed | inconclusive,
-  verify_issue_id, revision, checks, sanitized_summary
+  verify_issue_id, revision, checks, sanitized_summary_markdown
 }
 ```
 
-Performer result 不含 provider receipt，不创建或更新 Issue，也不推进 lifecycle。Root Reconcill 根据 result 和 fresh facts 决定后续精确 MCP calls。result 不写入 Root Home；只有被 Task Manager/Git fresh read 确认的状态才是事实。
+Plan request 不含 code capability；Plan 不能补做 Define 或增加 decision。PlanResult 的 local keys 只用于一次 materialization，不能伪装 provider identity。Work Performer instance 绑定一个 Cycle/worktree；同一实例和 thread 可按 sealed graph 依次处理多个 Work Issues，但每个 turn 的显式 input 只有 Cycle Markdown 和当前 Work Markdown。Verify instance 绑定一个 Verify Issue 与 exact revision，并在 fresh context 中只读检查。
 
-调用 Work 前，Root Reconcill 必须从 fresh complete Root Tree 确认 Work Issue 属于当前 Root/Cycle，并在每次 `WorkRequest` 中提供该次调用观察到的完整、bounded、identity-unique 当前 Cycle Work Issue authority set；`work_issue_id` 必须属于该 set。每个 Issue 的 normalized facts 放入对应 request，但 authority set 不进入 Performer prompt。Task Manager-free、Cycle-bound Work Performer 不重新查询 ownership；同一实例和 thread 可以依次接受 fresh authority 新增的 Work Issue。每次调用使用 fresh correlation。`completed` Work 必须有已知 `workspace_changed` 和至少一个全部通过的 check；`canceled` Work 的 workspace 状态必须为 `null`；`failed` 可以保留 partial checks，但不能把未知 workspace 状态变成事实。
-
-Verify Performer instance 绑定一个 Verify Issue 和一个 revision，只能用 read-only workspace capability 检查该 target。`passed` 必须 exact coverage 全部 requested checks 且全部通过；`failed` 必须至少有一个失败 check；缺少确定证据时使用 `inconclusive`。P6 Performer boundary 绑定 request、prompt、schema 和 read-only cwd；cwd/HEAD 与 revision 的 Git precondition 和调用后的 fresh read-back 由 `GitWorkspaceInterface` owner 负责，见 [Git and Delivery](git-worktree-delivery.md)。
+Performer result 不创建或更新 Issue，不推进 status，不包含 provider receipt。Conductor只验证 closed evidence、执行被状态机唯一确定的 exact mutation并 fresh read-back；它不解释 summary Markdown。
 
 ## Turn outcomes and errors
 
-`RootTurnOutcome` 只表示本轮控制结果：`quiescent | stopped | timed_out | canceled`。它不表达开始、继续、关闭、重跑、完成或交付等 Symphony 领域动作。
+`RootTurnOutcome` 只表示 semantic boundary turn 的 `quiescent | stopped | timed_out | canceled`，不驱动 approved Cycle 的 Stage。Cycle transitions 只通过 `CycleAdvanceResult` 表达。
 
 Public boundary error 是 closed union：
 
 ```text
 invalid_contract | stale_generation | capability_denied | timed_out |
-canceled | boundary_unavailable | acceptance_unknown | readback_mismatch
+canceled | boundary_unavailable | acceptance_unknown | readback_mismatch |
+sealed_spec_changed | execution_graph_invalid | lost_execution_context
 ```
 
-错误带 identity、correlation 和 sanitized reason，不携带 raw payload、credential、command line 或可能包含 secret 的 stack。
+错误带 identity、correlation 和 sanitized Markdown reason，不携带 raw payload、credential、command line 或可能包含 secret 的 stack。
 
 ## Fresh read-back rule
 
-所有 Task Manager、Git 和 Delivery mutation 后都必须重新读取同一 exact identity。只有 fresh state 与请求结果一致时，对应的 runtime accepted facts 才能前进；polling observation baseline 仍只由 observer 的完整成功 poll 推进。并发变化产生 `precondition_failed` 或 concrete diff，交回 Root Reconcill 再次 ReAct；Conductor 不替 Root 选择重试、替代 target 或 workflow transition。
+所有 Task Manager、Git 和 Delivery mutation 后都必须重新读取同一 exact identity。只有 fresh state 与请求结果一致时，对应事实才能前进；polling observation baseline 仍只由完整成功 poll 推进。
+
+Root boundary 的并发变化返回 Root Reconcill；Cycle machine 的并发变化只允许按相同 seal digest 重新计算机械 transition。sealed specification、graph、HEAD 或 exact revision 无法唯一确认时，不修改当前设计、不选择替代 target，直接产生可见 terminal failure。

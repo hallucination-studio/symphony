@@ -3,20 +3,16 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
-const forbiddenWorkflowVocabulary = [
+const forbiddenSemanticDecisionVocabulary = [
   /\bStartCycle\b/u,
   /\bContinueCycle\b/u,
   /\bCloseCycleAndReplan\b/u,
   /\bDeliverVerifiedRevision\b/u,
   /\bRootDecision\b/u,
-  /\bwork_ready\b/u,
-  /\bcycle_invalid\b/u,
-  /\bnext_action\b/u,
   /\bshould_continue\b/u,
   /\bshould_replan\b/u,
-  /\b(?:workReady|cycleInvalid|nextAction|shouldContinue|shouldReplan)\b/u,
-  /\b(?:cycle|root|workflow|lifecycle)(?:Transitions?|StateMachine|TransitionTable|DecisionTable)\b/iu,
-  /\b(?:cycle|root|workflow|lifecycle)_(?:transitions?|state_machine|transition_table|decision_table)\b/iu,
+  /\b(?:shouldContinue|shouldReplan|shouldChangeDesign)\b/u,
+  /\b(?:choose|revise|redesign)(?:Cycle|Architecture|Requirement)\b/u,
 ];
 
 async function productionTypescriptFiles(directory) {
@@ -34,7 +30,7 @@ async function productionTypescriptFiles(directory) {
 function inspectMechanicalSources(sources) {
   const findings = [];
   for (const [file, source] of sources) {
-    for (const pattern of forbiddenWorkflowVocabulary) {
+    for (const pattern of forbiddenSemanticDecisionVocabulary) {
       if (pattern.test(source)) findings.push({ file, pattern: pattern.source });
     }
   }
@@ -45,26 +41,23 @@ function mechanicalConductorFiles(files, rootReconcillDirectory) {
   return files.filter((file) => !file.startsWith(rootReconcillDirectory));
 }
 
-test("workflow vocabulary guard detects representative lifecycle tables and derived decisions", () => {
+test("workflow vocabulary guard detects legacy commands and semantic Cycle decisions", () => {
   const sources = new Map([
     ["lifecycle-command.ts", "const command = StartCycle;"],
-    ["cycle-camel.ts", "const cycleTransitions = {};"],
-    ["cycle-snake.ts", "const cycle_transition_table = {};"],
-    ["root-machine.ts", "const rootStateMachine = {};"],
-    ["derived-decision.ts", "const next_action = decide();"],
     ["derived-camel.ts", "const shouldContinue = decide();"],
+    ["architecture.ts", "const choice = reviseArchitecture();"],
   ]);
 
   assert.deepEqual(inspectMechanicalSources(sources).map(({ file }) => file), [...sources.keys()]);
 });
 
-test("workflow vocabulary guard permits mechanical transitions and excludes RootReconcill", () => {
+test("workflow vocabulary guard permits mechanical Cycle state machines and excludes RootReconcill", () => {
   const sourceDirectory = path.resolve("apps/conductor/src");
   const rootReconcillDirectory = path.join(sourceDirectory, "root-reconcill") + path.sep;
   const runtimeFile = path.join(sourceDirectory, "runtime", "Scheduler.ts");
   const rootReconcillFile = path.join(rootReconcillDirectory, "RootReconcill.ts");
   const allSources = new Map([
-    [runtimeFile, "const runtimeTransition = transitionTable[currentState];"],
+    [runtimeFile, "const cycleStateMachine = cycleTransitions[currentState]; const workReady = true;"],
     [rootReconcillFile, "const command = StartCycle;"],
   ]);
   const protectedFiles = mechanicalConductorFiles([...allSources.keys()], rootReconcillDirectory);
@@ -74,7 +67,7 @@ test("workflow vocabulary guard permits mechanical transitions and excludes Root
   assert.deepEqual(inspectMechanicalSources(protectedSources), []);
 });
 
-test("non-Root-Reconcill production code contains no workflow transition vocabulary", async () => {
+test("non-Root-Reconcill production code contains no semantic workflow-decision vocabulary", async () => {
   const sourceDirectory = path.resolve("apps/conductor/src");
   const rootReconcillDirectory = path.join(sourceDirectory, "root-reconcill") + path.sep;
   const allFiles = await productionTypescriptFiles(sourceDirectory);

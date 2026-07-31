@@ -66,8 +66,9 @@ test("architecture authority rejects tracked tasks and task references", () => {
   );
 });
 
-test("Phase 1 architecture keeps polling observation, generic tools, and Root-owned Cycle decisions closed", async () => {
-  const [taskManagement, contracts, rootIssue, rootReconciliation, conductor, performer, delivery, roadmap] = await Promise.all([
+test("Phase 1 architecture keeps polling observation, immutable Cycles, and mechanical execution closed", async () => {
+  const [overview, taskManagement, contracts, rootIssue, rootReconciliation, conductor, performer, delivery, roadmap] = await Promise.all([
+    readFile("docs/architecture/README.md", "utf8"),
     readFile("docs/architecture/task-management.md", "utf8"),
     readFile("docs/architecture/contracts.md", "utf8"),
     readFile("docs/architecture/root-issue.md", "utf8"),
@@ -95,16 +96,30 @@ test("Phase 1 architecture keeps polling observation, generic tools, and Root-ow
   assert.doesNotMatch(taskManagement, /StartCycle|ContinueCycle|CloseCycleAndReplan|DeliverVerifiedRevision/u);
   assert.doesNotMatch(contracts, /RootDecision|PlanHandoff|WorkHandoff/u);
   assert.match(contracts, /`precondition_failed` 是 tool result，不是 process-level error/u);
-  assert.match(rootIssue, /一个 Root 任意时刻最多有一个 active Cycle/u);
-  assert.match(rootIssue, /terminal Cycle 保留为历史事实，不 reopen/u);
-  assert.match(rootReconciliation, /继续当前 Cycle/u);
-  assert.match(rootReconciliation, /关闭并重跑/u);
-  assert.match(rootReconciliation, /Conductor 不实现上述选择/u);
-  assert.match(conductor, /不会退出进程、重建 runtime、关闭 Cycle 或替 Root 重试/u);
+  assert.match(overview, /Define[\s\S]+Cycle Draft[\s\S]+Awaiting Acceptance/u);
+  assert.match(rootIssue, /Root description、Root ADR、Cycle description[^\n]+Markdown/u);
+  assert.match(rootIssue, /`In Progress`[^\n]+seal/u);
+  assert.match(rootIssue, /规格事实不可变/u);
+  assert.match(rootIssue, /一次性物化/u);
+  assert.match(rootIssue, /terminal Cycle[^\n]+不 reopen/u);
+  assert.match(rootReconciliation, /用户代码目录始终只读/u);
+  assert.match(rootReconciliation, /只在 Cycle 边界/u);
+  assert.match(rootReconciliation, /不得调用 Plan、Work 或 Verify Performer/u);
+  assert.match(conductor, /确定性的 Cycle 状态机/u);
+  assert.match(conductor, /不解释需求、架构或验收标准/u);
   assert.match(conductor, /旧 thread 不恢复、不继续、不 replay/u);
   assert.match(performer, /Performer 不获得 Task Manager MCP/u);
+  assert.match(performer, /Plan[^\n]+Cycle description Markdown[^\n]+Root ADR Markdown/u);
+  assert.match(performer, /同一 Cycle 的全部 Work Items 共用一个 Work thread/u);
+  assert.match(performer, /Verify[^\n]+fresh isolated context/u);
+  assert.match(performer, /不使用 fork/u);
+  assert.match(performer, /read-only capability[^\n]+排除 secret-bearing paths/u);
   assert.match(delivery, /delivery identity 是 closed tuple/u);
-  assert.match(delivery, /Verify 检查的 revision、push 的 revision、remote ref 和 PR head 必须相同/u);
+  assert.match(delivery, /Verify 检查的 revision、Root Reconcill验收的 revision、push 的 revision、remote ref 和 PR head 必须相同/u);
   assert.match(roadmap, /不得 import Conductor private\/unexported modules/u);
   assert.match(roadmap, /所有产品效果都来自 Conductor 本身/u);
+  assert.doesNotMatch(
+    [overview, rootIssue, rootReconciliation, conductor, performer, contracts, roadmap].join("\n"),
+    /Mutable active Cycle|active Cycles are mutable|Root-owned mutable Cycle|继续当前 Cycle|改变 Work 集合或 relations|Conductor 不实现上述选择/u,
+  );
 });
