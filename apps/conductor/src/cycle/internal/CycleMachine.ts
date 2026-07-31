@@ -63,11 +63,16 @@ export interface CycleMachineHostInterface {
   retire(): void;
 }
 
+export interface CycleMachineLifecycle {
+  retire(): void;
+}
+
 export interface CycleMachineHostOptions {
   readonly target: RuntimeTarget;
   readonly workflow: TaskWorkflowIdentities;
   readonly reader: FreshCycleExecutionReader;
   readonly machine: CycleMachineInterface;
+  readonly machine_lifecycle?: CycleMachineLifecycle;
   readonly identity_factory?: () => string;
 }
 
@@ -159,6 +164,7 @@ function hasOnlyTaskKind(
 export class CycleMachineHost implements CycleMachineHostInterface {
   readonly #identityFactory: () => string;
   readonly #machine: CycleMachineInterface;
+  readonly #machineLifecycle: CycleMachineLifecycle | null;
   readonly #prepared = new WeakSet<PreparedCycleAction>();
   readonly #reader: FreshCycleExecutionReader;
   readonly #started = new WeakSet<PreparedCycleAction>();
@@ -178,6 +184,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     this.#workflow = parseTaskWorkflowIdentities(options.workflow);
     this.#reader = options.reader;
     this.#machine = options.machine;
+    this.#machineLifecycle = options.machine_lifecycle ?? null;
     this.#identityFactory = options.identity_factory ?? randomUUID;
   }
 
@@ -293,6 +300,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     this.#active = null;
     this.#ready = null;
     this.#epoch += 1;
+    this.#machineLifecycle?.retire();
   }
 
   async #readAction(

@@ -490,12 +490,14 @@ test("Cycle host rejects a fresh Stage whose configured kind label does not matc
 
 test("Cycle host permits one action and fences output that arrives after retirement", async () => {
   let release: ((value: CycleAdvanceResult) => void) | undefined;
+  let lifecycleRetirements = 0;
   const pending = new Promise<CycleAdvanceResult>((resolve) => { release = resolve; });
   const host = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },
     workflow,
     reader: { read: async (request) => snapshot(request.correlation_id) },
     machine: { advance: () => pending },
+    machine_lifecycle: { retire: () => { lifecycleRetirements += 1; } },
   });
   const prepared = await host.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:late"));
   assert.equal(prepared.kind, "cycle_action");
@@ -506,6 +508,8 @@ test("Cycle host permits one action and fences output that arrives after retirem
   await assert.rejects(host.run(prepared), /cycle_machine_action_already_started/u);
   await assert.rejects(host.prepareContinuation(), /cycle_machine_busy/u);
   host.retire();
+  host.retire();
+  assert.equal(lifecycleRetirements, 1);
   release?.(result(prepared.request, "advanced", "revision:cycle:late"));
   await assert.rejects(running, /cycle_machine_late_output/u);
 });

@@ -39,6 +39,11 @@ import {
 import type { FreshCycleExecutionReader } from "./CycleMachine.js";
 import { CycleGraphMaterializer } from "./CycleGraphMaterializer.js";
 import { reduceCycleTransition } from "./CycleTransition.js";
+import {
+  CycleWorkExecutionError,
+  CycleWorkExecutor,
+  type CycleWorkPerformerFactory,
+} from "./CycleWorkExecutor.js";
 
 const PLAN_TITLE = "Plan approved Cycle";
 const PLAN_DESCRIPTION = parseMarkdownText(
@@ -52,6 +57,7 @@ const NOOP_EXECUTION: TaskManageBoundaryExecution = Object.freeze({
 type PlanTerminalStatus = "failed" | "canceled";
 type PlanPhaseFailureReason =
   | "plan_phase_failed"
+  | "work_phase_failed"
   | "plan_stage_failure_unconfirmed"
   | "lost_execution_context"
   | "cycle_transition_failed";
@@ -66,6 +72,7 @@ export interface CyclePlanMachineOptions {
   readonly task_manager: TaskManageCommandInterface;
   readonly reader: FreshCycleExecutionReader;
   readonly plan_performer_factory: CyclePlanPerformerFactory;
+  readonly work_performer_factory: CycleWorkPerformerFactory;
 }
 
 function result(
@@ -95,6 +102,8 @@ function failedResult(
   const reasonMarkdown = parseMarkdownText(
     reason === "lost_execution_context"
       ? "Cycle failed because the live Plan execution context was lost."
+      : reason === "work_phase_failed"
+        ? "Cycle failed during Work execution or Work status confirmation."
       : reason === "cycle_transition_failed"
         ? "Cycle failure could not be confirmed from the current exact revision."
         : reason === "plan_stage_failure_unconfirmed"
@@ -200,6 +209,9 @@ export class CyclePlanMachine implements CycleMachineInterface {
   #sealedGraphDigest: ExecutionGraphSealDigest | null = null;
   readonly #taskManager: TaskManageCommandInterface;
   readonly #workflow: TaskWorkflowIdentities;
+  readonly #workExecutor: CycleWorkExecutor;
+  #epoch = 0;
+  #retired = false;
 
   constructor(options: CyclePlanMachineOptions) {
     this.#workflow = parseTaskWorkflowIdentities(options.workflow);
@@ -212,13 +224,31 @@ export class CyclePlanMachine implements CycleMachineInterface {
       task_manager: this.#taskManager,
       reader: options.reader,
     });
+    this.#workExecutor = new CycleWorkExecutor({
+      workflow: this.#workflow,
+      caller_issuer: this.#callerIssuer,
+      task_manager: this.#taskManager,
+      reader: options.reader,
+      performer_factory: options.work_performer_factory,
+    });
   }
 
   async advance(value: CycleAdvanceRequest): Promise<CycleAdvanceResult> {
-    return this.#advance(bindCycleAdvanceRequest(value));
+    if (this.#retired) throw new Error("cycle_machine_retired");
+    const epoch = this.#epoch;
+    const outcome = await this.#advance(bindCycleAdvanceRequest(value), epoch);
+    this.#assertActive(epoch);
+    return outcome;
   }
 
-  async #advance(request: CycleAdvanceRequest): Promise<CycleAdvanceResult> {
+  retire(): void {
+    if (this.#retired) return;
+    this.#retired = true;
+    this.#epoch += 1;
+    this.#workExecutor.retire();
+  }
+
+  async #advance(request: CycleAdvanceRequest, epoch: number): Promise<CycleAdvanceResult> {
     const cycleKey = this.#cycleKey(request);
     if (this.#activeCycleId === request.cycle_id && this.#activeCycleKey !== cycleKey) {
       return this.#failCycle(request, "cycle_transition_failed", "failed");
@@ -260,6 +290,22 @@ export class CyclePlanMachine implements CycleMachineInterface {
       && request.sealed_work_issues.length === 0
       && request.verify_issue === null
     ) return this.#failCycle(request, "lost_execution_context", "failed");
+    if (transition.action === "run_work") {
+      try {
+        const execution = await this.#workExecutor.execute(request, transition.work_issue_id);
+        this.#assertActive(epoch);
+        return execution.outcome === "completed"
+          ? result(request, "advanced")
+          : this.#failCycle(execution.snapshot, "work_phase_failed", "failed");
+      } catch (error) {
+        this.#assertActive(epoch);
+        return this.#failCycle(
+          error instanceof CycleWorkExecutionError ? error.snapshot : request,
+          "work_phase_failed",
+          "failed",
+        );
+      }
+    }
     if (transition.action !== "create_plan") return result(request, "no_action");
 
     if (this.#planCreations.has(cycleKey)) {
@@ -441,5 +487,9 @@ export class CyclePlanMachine implements CycleMachineInterface {
 
   #cycleKey(request: CycleAdvanceRequest): string {
     return `${request.cycle_id}\0${request.specification.seal_digest}`;
+  }
+
+  #assertActive(epoch: number): void {
+    if (this.#retired || epoch !== this.#epoch) throw new Error("cycle_machine_late_output");
   }
 }

@@ -49,6 +49,9 @@ validate sealed Cycle specification
 -> failed/inconclusive/ambiguous: Failed
 ```
 
+稳定拓扑执行只选择 sealed dependencies 均为 `Done` 的 `Todo` Work；多个 Work 同时 ready 时，
+按 provider-neutral `StageIssueId` 升序打破并列。
+
 多个 Work Items 必须在同一个 Cycle-bound Work thread 中用不同 turns 串行执行。Plan、Work、Verify 互不共享 context；Verify 永远不复用 Plan/Work thread。Conductor 不使用 fork 构造任何 role context。
 
 Plan 通过表示 typed shape、Markdown、boundedness、DAG、coverage 和 no-new-decision validation 通过，不是 Conductor 对计划质量作语义判断。Plan failure、Work failure、Verify failure、partial graph materialization、sealed fact mutation、lost in-flight context 或无法唯一 read-back 都按 closed table 进入 terminal `Failed`；Conductor不修补、不重做设计、不向当前 Cycle 追加 Work。

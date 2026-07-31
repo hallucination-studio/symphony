@@ -21,7 +21,10 @@ import {
 } from "../../contracts/cycle.js";
 import {
   parsePlanResult,
+  parseWorkResult,
   type PlanPerformerInterface,
+  type WorkPerformerInterface,
+  type WorkResult,
 } from "../../performer/api/StagePerformerInterface.js";
 import type {
   TaskIssueSnapshot,
@@ -223,6 +226,12 @@ function unexpectedManager(): TaskManageCommandInterface {
   } as TaskManageCommandInterface;
 }
 
+const unexpectedWorkPerformerFactory = Object.freeze({
+  create: async (): Promise<WorkPerformerInterface> => {
+    throw new Error("unexpected_work_performer");
+  },
+});
+
 const planSource = Object.freeze({
   issue_id: parseStageIssueId("PLAN-CREATED"),
   sealed_revision: parseTaskRevision("revision:plan:created"),
@@ -238,7 +247,9 @@ function requestWithGraph(
     readonly plan_status?: "todo" | "in_progress" | "done" | "failed" | "canceled";
     readonly plan_revision?: string;
     readonly work_issues?: readonly TaskIssueSnapshot[];
+    readonly work_statuses?: readonly ("todo" | "in_progress" | "done" | "failed" | "canceled")[];
     readonly verify_issue?: TaskIssueSnapshot | null;
+    readonly verify_status?: "todo" | "in_progress" | "done" | "failed" | "canceled";
   } = {},
 ): CycleAdvanceRequest {
   const cycleRevision = parseTaskRevision("revision:cycle:current");
@@ -247,6 +258,7 @@ function requestWithGraph(
   const stageFromIssue = (
     issue: TaskIssueSnapshot,
     kind: "work" | "verify",
+    status: "todo" | "in_progress" | "done" | "failed" | "canceled",
   ) => ({
     issue_id: parseStageIssueId(issue.issue_id),
     revision: issue.revision,
@@ -254,7 +266,7 @@ function requestWithGraph(
     title: issue.title,
     description_markdown: issue.description,
     parent_cycle_id: cycleId,
-    status: "todo" as const,
+    status,
   });
   return parseCycleExecutionSnapshot({
     schema_version: 1,
@@ -274,10 +286,14 @@ function requestWithGraph(
       parent_cycle_id: planSource.parent_cycle_id,
       status: planStatus,
     },
-    sealed_work_issues: (input.work_issues ?? []).map((issue) => stageFromIssue(issue, "work")),
+    sealed_work_issues: (input.work_issues ?? []).map((issue, index) => stageFromIssue(
+      issue,
+      "work",
+      input.work_statuses?.[index] ?? "todo",
+    )),
     verify_issue: input.verify_issue === undefined || input.verify_issue === null
       ? null
-      : stageFromIssue(input.verify_issue, "verify"),
+      : stageFromIssue(input.verify_issue, "verify", input.verify_status ?? "todo"),
     sealed_relations: graph.relations,
     git: {
       repository_id: "repo:symphony",
@@ -514,6 +530,74 @@ function failedCycleIssue(revision: string): TaskIssueSnapshot {
   });
 }
 
+function singleWorkGraph() {
+  const work = Object.freeze({
+    issue_id: parseTaskIssueId("WORK-ONLY"),
+    revision: parseTaskRevision("revision:work:only:sealed"),
+    status: workflow.stage_states.todo,
+    title: "Execute one Work item",
+    description: "## Work\n\nExecute the one sealed Work item.",
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.work]),
+    delegate_id: null,
+    priority: null,
+  });
+  const verify = Object.freeze({
+    issue_id: parseTaskIssueId("VERIFY-ONLY"),
+    revision: parseTaskRevision("revision:verify:only:sealed"),
+    status: workflow.stage_states.todo,
+    title: "Verify one Work item",
+    description: "## Verify\n\nVerify the sealed Work item.",
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.verify]),
+    delegate_id: null,
+    priority: null,
+  });
+  const relation = Object.freeze({
+    relation_id: parseTaskRelationId("REL-WORK-ONLY"),
+    revision: parseTaskRevision("revision:relation:work:only"),
+    type: "blocks" as const,
+    source_issue_id: work.issue_id,
+    target_issue_id: verify.issue_id,
+  });
+  const graph = parseSealedExecutionGraph({
+    plan_issue: planSource,
+    work_issues: [{
+      issue_id: parseStageIssueId(work.issue_id),
+      sealed_revision: work.revision,
+      kind: "work",
+      title: work.title,
+      description_markdown: work.description,
+      parent_cycle_id: cycleId,
+    }],
+    verify_issue: {
+      issue_id: parseStageIssueId(verify.issue_id),
+      sealed_revision: verify.revision,
+      kind: "verify",
+      title: verify.title,
+      description_markdown: verify.description,
+      parent_cycle_id: cycleId,
+    },
+    relations: [{
+      relation_id: relation.relation_id,
+      revision: relation.revision,
+      prerequisite_issue_id: parseStageIssueId(work.issue_id),
+      dependent_issue_id: parseStageIssueId(verify.issue_id),
+    }],
+  }, cycleId);
+  const snapshot = (
+    currentWork: TaskIssueSnapshot,
+    status: "todo" | "in_progress" | "done" | "failed" | "canceled",
+  ) => requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done",
+    work_issues: [currentWork],
+    work_statuses: [status],
+    verify_issue: verify,
+  });
+  return Object.freeze({ work, verify, graph, snapshot });
+}
+
 function nonAppliedIssueResult(
   call: CreateIssueCall,
   outcome: "not_applied" | "acceptance_unknown",
@@ -589,6 +673,7 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
     plan_performer_factory: {
       create: async () => {
         performerCreates += 1;
@@ -645,6 +730,7 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
     plan_performer_factory: {
       create: async () => {
         performerCreates += 1;
@@ -753,6 +839,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     reader,
+    work_performer_factory: unexpectedWorkPerformerFactory,
     plan_performer_factory: {
       create: async () => {
         performerCreates += 1;
@@ -886,6 +973,7 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
         return materializedRequest(createdIssues, createdRelations, true);
       },
     },
+    work_performer_factory: unexpectedWorkPerformerFactory,
     plan_performer_factory: { create: async () => completedPerformer(events) },
   });
 
@@ -952,6 +1040,7 @@ for (const outcome of ["failed", "canceled"] as const) {
       caller_issuer: callerAuthority.issuer,
       task_manager: manager,
       reader: { read: async () => { throw new Error("unexpected_read"); } },
+      work_performer_factory: unexpectedWorkPerformerFactory,
       plan_performer_factory: { create: async () => performer },
     });
 
@@ -994,6 +1083,7 @@ test("an In Progress Plan after restart fails closed without creating a performe
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
     plan_performer_factory: {
       create: async () => {
         performerCreates += 1;
@@ -1007,4 +1097,566 @@ test("an In Progress Plan after restart fails closed without creating a performe
   assert.equal(result.outcome, "terminal_failed");
   assert.equal(performerCreates, 0);
   assert.deepEqual(events, ["plan_failed", "cycle_failed"]);
+});
+
+test("ready Work advances in stable order through separate turns on one Cycle performer", async () => {
+  const workB = Object.freeze({
+    issue_id: parseTaskIssueId("WORK-B"),
+    revision: parseTaskRevision("revision:work:b:sealed"),
+    status: workflow.stage_states.todo,
+    title: "Second ready Work",
+    description: "## Work\n\nRun second after the identity-first ready Work.",
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.work]),
+    delegate_id: null,
+    priority: null,
+  });
+  const workA = Object.freeze({
+    issue_id: parseTaskIssueId("WORK-A"),
+    revision: parseTaskRevision("revision:work:a:sealed"),
+    status: workflow.stage_states.todo,
+    title: "First ready Work",
+    description: "## Work\n\nRun this identity-first ready Work.",
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.work]),
+    delegate_id: null,
+    priority: null,
+  });
+  const verify = Object.freeze({
+    issue_id: parseTaskIssueId("VERIFY-WORK"),
+    revision: parseTaskRevision("revision:verify:sealed"),
+    status: workflow.stage_states.todo,
+    title: "Verify Work",
+    description: "## Verify\n\nVerify both Work items.",
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.verify]),
+    delegate_id: null,
+    priority: null,
+  });
+  const relations = [workB, workA].map((work, index) => Object.freeze({
+    relation_id: parseTaskRelationId(`REL-WORK-${index + 1}`),
+    revision: parseTaskRevision(`revision:relation:work:${index + 1}`),
+    type: "blocks" as const,
+    source_issue_id: work.issue_id,
+    target_issue_id: verify.issue_id,
+  }));
+  const graph = parseSealedExecutionGraph({
+    plan_issue: planSource,
+    work_issues: [workB, workA].map((work) => ({
+      issue_id: parseStageIssueId(work.issue_id),
+      sealed_revision: work.revision,
+      kind: "work" as const,
+      title: work.title,
+      description_markdown: work.description,
+      parent_cycle_id: cycleId,
+    })),
+    verify_issue: {
+      issue_id: parseStageIssueId(verify.issue_id),
+      sealed_revision: verify.revision,
+      kind: "verify",
+      title: verify.title,
+      description_markdown: verify.description,
+      parent_cycle_id: cycleId,
+    },
+    relations: relations.map((relation) => ({
+      relation_id: relation.relation_id,
+      revision: relation.revision,
+      prerequisite_issue_id: parseStageIssueId(relation.source_issue_id),
+      dependent_issue_id: parseStageIssueId(relation.target_issue_id),
+    })),
+  }, cycleId);
+  const initial = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done",
+    work_issues: [workB, workA],
+    verify_issue: verify,
+  });
+  const startedA = Object.freeze({
+    ...workA,
+    revision: parseTaskRevision("revision:work:a:started"),
+    status: workflow.stage_states.in_progress,
+  });
+  const doneA = Object.freeze({
+    ...workA,
+    revision: parseTaskRevision("revision:work:a:done"),
+    status: workflow.stage_states.done,
+  });
+  const startedB = Object.freeze({
+    ...workB,
+    revision: parseTaskRevision("revision:work:b:started"),
+    status: workflow.stage_states.in_progress,
+  });
+  const doneB = Object.freeze({
+    ...workB,
+    revision: parseTaskRevision("revision:work:b:done"),
+    status: workflow.stage_states.done,
+  });
+  const afterA = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done",
+    work_issues: [workB, doneA],
+    work_statuses: ["todo", "done"],
+    verify_issue: verify,
+  });
+  const events: string[] = [];
+  let readCount = 0;
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.desired.state_id === workflow.stage_states.in_progress) {
+      const startingA = call.input.issue_id === workA.issue_id;
+      events.push(startingA ? "work_a_in_progress" : "work_b_in_progress");
+      return appliedIssueResult(call, startingA ? startedA : startedB);
+    }
+    assert.equal(call.input.desired.state_id, workflow.stage_states.done);
+    const finishingA = call.input.issue_id === workA.issue_id;
+    events.push(finishingA ? "work_a_done" : "work_b_done");
+    return appliedIssueResult(
+      call,
+      finishingA ? doneA : doneB,
+      workflow.stage_states.in_progress,
+    );
+  };
+  const reader = {
+    read: async () => {
+      readCount += 1;
+      const snapshots = [
+        requestWithGraph(graph, {
+          plan_status: "done",
+          plan_revision: "revision:plan:done",
+          work_issues: [workB, startedA],
+          work_statuses: ["todo", "in_progress"],
+          verify_issue: verify,
+        }),
+        afterA,
+        requestWithGraph(graph, {
+          plan_status: "done",
+          plan_revision: "revision:plan:done",
+          work_issues: [startedB, doneA],
+          work_statuses: ["in_progress", "done"],
+          verify_issue: verify,
+        }),
+        requestWithGraph(graph, {
+          plan_status: "done",
+          plan_revision: "revision:plan:done",
+          work_issues: [doneB, doneA],
+          work_statuses: ["done", "done"],
+          verify_issue: verify,
+        }),
+      ];
+      const snapshot = snapshots[readCount - 1];
+      assert.notEqual(snapshot, undefined);
+      events.push(["read_started_a", "read_done_a", "read_started_b", "read_done_b"][readCount - 1]!);
+      return snapshot!;
+    },
+  };
+  let workTurns = 0;
+  const performer: WorkPerformerInterface = {
+    role: "work",
+    rootId,
+    runtimeGeneration: generation,
+    cycleId,
+    work: async (request) => {
+      workTurns += 1;
+      events.push(`work_${request.work_issue_id}`);
+      const expected = workTurns === 1 ? startedA : startedB;
+      assert.equal(request.work_issue_id, parseStageIssueId(expected.issue_id));
+      assert.equal(request.work_issue_revision, expected.revision);
+      return parseWorkResult({
+        schema_version: 1,
+        root_id: rootId,
+        runtime_generation: generation,
+        cycle_id: cycleId,
+        cycle_revision: request.cycle_revision,
+        correlation_id: request.correlation_id,
+        work_issue_id: request.work_issue_id,
+        work_issue_revision: request.work_issue_revision,
+        outcome: "completed",
+        workspace_changed: true,
+        checks: [{ check: "focused Work test", status: "passed", sanitized_summary_markdown: null }],
+        sanitized_summary_markdown: "Work completed.",
+      }, request);
+    },
+    close: async () => { events.push("close_work_performer"); },
+  };
+  let performerCreates = 0;
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    reader,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    work_performer_factory: {
+      create: async () => {
+        performerCreates += 1;
+        events.push("create_work_performer");
+        return performer;
+      },
+    },
+  });
+
+  const first = await machine.advance(initial);
+
+  assert.equal(first.outcome, "advanced");
+  assert.deepEqual(events, [
+    "work_a_in_progress",
+    "read_started_a",
+    "create_work_performer",
+    "work_WORK-A",
+    "work_a_done",
+    "read_done_a",
+  ]);
+
+  const second = await machine.advance(afterA);
+
+  assert.equal(second.outcome, "advanced");
+  assert.equal(performerCreates, 1);
+  assert.equal(workTurns, 2);
+  assert.deepEqual(events, [
+    "work_a_in_progress",
+    "read_started_a",
+    "create_work_performer",
+    "work_WORK-A",
+    "work_a_done",
+    "read_done_a",
+    "work_b_in_progress",
+    "read_started_b",
+    "work_WORK-B",
+    "work_b_done",
+    "read_done_b",
+    "close_work_performer",
+  ]);
+});
+
+for (const scenario of ["failed", "canceled", "invalid"] as const) {
+  test(`${scenario} Work output closes the Work status and fails the Cycle`, async () => {
+    const fixture = singleWorkGraph();
+    const started = Object.freeze({
+      ...fixture.work,
+      revision: parseTaskRevision(`revision:work:only:started:${scenario}`),
+      status: workflow.stage_states.in_progress,
+    });
+    const terminalStatus = scenario === "canceled" ? "canceled" : "failed";
+    const terminal = Object.freeze({
+      ...fixture.work,
+      revision: parseTaskRevision(`revision:work:only:${terminalStatus}:${scenario}`),
+      status: workflow.stage_states[terminalStatus],
+    });
+    const events: string[] = [];
+    const manager = unexpectedManager();
+    manager.update_issue = async (call, execution) => {
+      callerAuthority.verifier.assert(execution.caller, call);
+      if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+        events.push("cycle_failed");
+        return appliedIssueResult(
+          call,
+          failedCycleIssue(`revision:cycle:failed:${scenario}`),
+          workflow.cycle_states.in_progress,
+        );
+      }
+      assert.equal(call.input.issue_id, fixture.work.issue_id);
+      if (call.input.desired.state_id === workflow.stage_states.in_progress) {
+        events.push("work_in_progress");
+        return appliedIssueResult(call, started);
+      }
+      assert.equal(call.input.desired.state_id, workflow.stage_states[terminalStatus]);
+      events.push(`work_${terminalStatus}`);
+      return appliedIssueResult(call, terminal, workflow.stage_states.in_progress);
+    };
+    let reads = 0;
+    const machine = new CyclePlanMachine({
+      workflow,
+      caller_issuer: callerAuthority.issuer,
+      task_manager: manager,
+      reader: {
+        read: async () => {
+          reads += 1;
+          events.push(reads === 1 ? "read_started" : `read_${terminalStatus}`);
+          return reads === 1
+            ? fixture.snapshot(started, "in_progress")
+            : fixture.snapshot(terminal, terminalStatus);
+        },
+      },
+      plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+      work_performer_factory: {
+        create: async () => ({
+          role: "work",
+          rootId,
+          runtimeGeneration: generation,
+          cycleId,
+          work: async (request): Promise<WorkResult> => {
+            events.push("work_turn");
+            const valid = parseWorkResult({
+              schema_version: 1,
+              root_id: rootId,
+              runtime_generation: generation,
+              cycle_id: cycleId,
+              cycle_revision: request.cycle_revision,
+              correlation_id: request.correlation_id,
+              work_issue_id: request.work_issue_id,
+              work_issue_revision: request.work_issue_revision,
+              outcome: scenario === "invalid" ? "failed" : scenario,
+              workspace_changed: scenario === "canceled" ? null : false,
+              checks: [],
+              sanitized_summary_markdown: "Controlled terminal Work output.",
+            }, request);
+            return scenario === "invalid"
+              ? { ...valid, correlation_id: parseCorrelationId("corr:forged-work-result") } as WorkResult
+              : valid;
+          },
+          close: async () => { events.push("close_work_performer"); },
+        }),
+      },
+    });
+
+    const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+
+    assert.equal(outcome.outcome, "terminal_failed");
+    assert.deepEqual(events, [
+      "work_in_progress",
+      "read_started",
+      "work_turn",
+      `work_${terminalStatus}`,
+      `read_${terminalStatus}`,
+      "close_work_performer",
+      "cycle_failed",
+    ]);
+  });
+}
+
+test("a mismatched aggregate Work status read-back fails before performer creation", async () => {
+  const fixture = singleWorkGraph();
+  const appliedStart = Object.freeze({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:only:started:applied"),
+    status: workflow.stage_states.in_progress,
+  });
+  const changedStart = Object.freeze({
+    ...appliedStart,
+    revision: parseTaskRevision("revision:work:only:started:changed"),
+  });
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+      events.push("cycle_failed");
+      return appliedIssueResult(
+        call,
+        failedCycleIssue("revision:cycle:failed:work-readback"),
+        workflow.cycle_states.in_progress,
+      );
+    }
+    events.push("work_in_progress");
+    return appliedIssueResult(call, appliedStart);
+  };
+  let performerCreates = 0;
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    reader: {
+      read: async () => {
+        events.push("read_changed_start");
+        return fixture.snapshot(changedStart, "in_progress");
+      },
+    },
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    work_performer_factory: {
+      create: async () => {
+        performerCreates += 1;
+        throw new Error("unexpected_work_performer");
+      },
+    },
+  });
+
+  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(performerCreates, 0);
+  assert.deepEqual(events, ["work_in_progress", "read_changed_start", "cycle_failed"]);
+});
+
+test("a cross-Cycle Work performer is closed before any turn and fails the current Cycle", async () => {
+  const fixture = singleWorkGraph();
+  const started = Object.freeze({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:only:started:cross-cycle"),
+    status: workflow.stage_states.in_progress,
+  });
+  const failed = Object.freeze({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:only:failed:cross-cycle"),
+    status: workflow.stage_states.failed,
+  });
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+      events.push("cycle_failed");
+      return appliedIssueResult(
+        call,
+        failedCycleIssue("revision:cycle:failed:cross-cycle"),
+        workflow.cycle_states.in_progress,
+      );
+    }
+    if (call.input.desired.state_id === workflow.stage_states.in_progress) {
+      events.push("work_in_progress");
+      return appliedIssueResult(call, started);
+    }
+    events.push("work_failed");
+    return appliedIssueResult(call, failed, workflow.stage_states.in_progress);
+  };
+  let reads = 0;
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    reader: {
+      read: async () => {
+        reads += 1;
+        events.push(reads === 1 ? "read_started" : "read_failed");
+        return reads === 1
+          ? fixture.snapshot(started, "in_progress")
+          : fixture.snapshot(failed, "failed");
+      },
+    },
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    work_performer_factory: {
+      create: async () => ({
+        role: "work",
+        rootId,
+        runtimeGeneration: generation,
+        cycleId: parseCycleIssueId("CYCLE-FOREIGN-WORK-PERFORMER"),
+        work: async () => {
+          events.push("foreign_work_turn");
+          throw new Error("foreign_work_turn");
+        },
+        close: async () => { events.push("close_foreign_performer"); },
+      }),
+    },
+  });
+
+  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.deepEqual(events, [
+    "work_in_progress",
+    "read_started",
+    "close_foreign_performer",
+    "work_failed",
+    "read_failed",
+    "cycle_failed",
+  ]);
+});
+
+test("retirement revokes an active Work Task boundary before its provider effect", async () => {
+  const fixture = singleWorkGraph();
+  const events: string[] = [];
+  let markBoundaryReady: (() => void) | undefined;
+  let releaseBoundary: (() => void) | undefined;
+  const boundaryReady = new Promise<void>((resolve) => { markBoundaryReady = resolve; });
+  const boundaryReleased = new Promise<void>((resolve) => { releaseBoundary = resolve; });
+  const manager = unexpectedManager();
+  manager.update_issue = async (_call, execution) => {
+    events.push("provider_precondition");
+    markBoundaryReady?.();
+    await boundaryReleased;
+    execution.assertActive();
+    events.push("provider_effect");
+    throw new Error("unreachable_provider_effect");
+  };
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+  });
+
+  const running = machine.advance(fixture.snapshot(fixture.work, "todo"));
+  await boundaryReady;
+  machine.retire();
+  releaseBoundary?.();
+
+  await assert.rejects(running, /cycle_machine_late_output/u);
+  assert.deepEqual(events, ["provider_precondition"]);
+});
+
+test("retirement closes the active Work performer and fences its late result from Task effects", async () => {
+  const fixture = singleWorkGraph();
+  const started = Object.freeze({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:only:started:retired"),
+    status: workflow.stage_states.in_progress,
+  });
+  const events: string[] = [];
+  let releaseWork: (() => void) | undefined;
+  let markWorkStarted: (() => void) | undefined;
+  const workStarted = new Promise<void>((resolve) => { markWorkStarted = resolve; });
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    assert.equal(call.input.issue_id, fixture.work.issue_id);
+    assert.equal(call.input.desired.state_id, workflow.stage_states.in_progress);
+    events.push("work_in_progress");
+    return appliedIssueResult(call, started);
+  };
+  const performer: WorkPerformerInterface = {
+    role: "work",
+    rootId,
+    runtimeGeneration: generation,
+    cycleId,
+    work: async (request) => {
+      events.push("work_turn");
+      markWorkStarted?.();
+      return new Promise<WorkResult>((resolve) => {
+        releaseWork = () => resolve(parseWorkResult({
+          schema_version: 1,
+          root_id: rootId,
+          runtime_generation: generation,
+          cycle_id: cycleId,
+          cycle_revision: request.cycle_revision,
+          correlation_id: request.correlation_id,
+          work_issue_id: request.work_issue_id,
+          work_issue_revision: request.work_issue_revision,
+          outcome: "completed",
+          workspace_changed: true,
+          checks: [{ check: "late check", status: "passed", sanitized_summary_markdown: null }],
+          sanitized_summary_markdown: "Late output must be fenced.",
+        }, request));
+      });
+    },
+    close: async () => {
+      events.push("close_work_performer");
+      releaseWork?.();
+    },
+  };
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    reader: {
+      read: async () => {
+        events.push("read_started");
+        return fixture.snapshot(started, "in_progress");
+      },
+    },
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    work_performer_factory: { create: async () => performer },
+  });
+
+  const running = machine.advance(fixture.snapshot(fixture.work, "todo"));
+  await workStarted;
+  machine.retire();
+
+  await assert.rejects(running, /cycle_machine_late_output/u);
+  assert.deepEqual(events, [
+    "work_in_progress",
+    "read_started",
+    "work_turn",
+    "close_work_performer",
+  ]);
 });
