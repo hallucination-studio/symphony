@@ -15,6 +15,8 @@ const forbiddenSemanticDecisionVocabulary = [
   /\b(?:choose|revise|redesign)(?:Cycle|Architecture|Requirement)\b/u,
 ];
 
+const performerTaskManagerImport = /\b(?:from\s*|import\s*\()\s*["'][^"']*(?:task-management|RootTaskManageCommand|CycleTaskManageCommand)[^"']*["']/u;
+
 async function productionTypescriptFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = await Promise.all(entries.map(async (entry) => {
@@ -35,6 +37,12 @@ function inspectMechanicalSources(sources) {
     }
   }
   return findings;
+}
+
+function inspectPerformerTaskManagerImports(sources) {
+  return [...sources]
+    .filter(([, source]) => performerTaskManagerImport.test(source))
+    .map(([file]) => file);
 }
 
 function mechanicalConductorFiles(files, rootReconcillDirectory) {
@@ -80,4 +88,21 @@ test("non-Root-Reconcill production code contains no semantic workflow-decision 
   ])));
 
   assert.deepEqual(inspectMechanicalSources(sources), []);
+});
+
+test("Performer production code has no Task Manager import path", async () => {
+  assert.deepEqual(inspectPerformerTaskManagerImports(new Map([
+    ["direct.ts", 'import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";'],
+    ["root-binding.ts", 'import { bindRootTaskManageCommand } from "../../runtime/RootTaskManageCommand.js";'],
+    ["cycle-binding.ts", 'const module = import("../../runtime/CycleTaskManageCommand.js");'],
+  ])), ["direct.ts", "root-binding.ts", "cycle-binding.ts"]);
+
+  const performerDirectory = path.resolve("apps/conductor/src/performer");
+  const files = await productionTypescriptFiles(performerDirectory);
+  const sources = new Map(await Promise.all(files.map(async (file) => [
+    path.relative(process.cwd(), file),
+    await readFile(file, "utf8"),
+  ])));
+  assert.notEqual(sources.size, 0);
+  assert.deepEqual(inspectPerformerTaskManagerImports(sources), []);
 });

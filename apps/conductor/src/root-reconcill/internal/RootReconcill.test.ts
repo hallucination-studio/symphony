@@ -16,6 +16,7 @@ import {
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskIssueId,
   parseThreadId,
 } from "../../contracts/identity.js";
 import {
@@ -31,6 +32,10 @@ import { RootTools } from "../../runtime/RootTools.js";
 import { bindRootTaskManageCommand } from "../../runtime/RootTaskManageCommand.js";
 import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
+import {
+  createTaskManageCallerAuthority,
+  parseTaskWorkflowIdentities,
+} from "../../task-management/api/TaskManageCapability.js";
 import {
   TASK_MCP_CAPABILITIES,
   parseTaskMcpResult,
@@ -52,6 +57,22 @@ import {
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
+const workflow = parseTaskWorkflowIdentities({
+  labels: {
+    root: "label:root", cycle: "label:cycle", plan: "label:plan",
+    work: "label:work", verify: "label:verify",
+  },
+  cycle_states: {
+    draft: "state:draft", in_progress: "state:cycle-in-progress",
+    awaiting_acceptance: "state:awaiting-acceptance", succeeded: "state:succeeded",
+    rejected: "state:rejected", failed: "state:cycle-failed", canceled: "state:cycle-canceled",
+  },
+  stage_states: {
+    todo: "state:stage-todo", in_progress: "state:stage-in-progress", done: "state:stage-done",
+    failed: "state:stage-failed", canceled: "state:stage-canceled",
+  },
+});
+const callerAuthority = createTaskManageCallerAuthority();
 
 function bootstrap(
   correlation = "corr:bootstrap:1",
@@ -66,7 +87,7 @@ function bootstrap(
       title: "Build the Root runtime",
       description: null,
       parent_id: null,
-      labels: ["symphony:kind/root"],
+      labels: ["label:root"],
       delegate_id: "actor:agent",
       priority: 1,
     }],
@@ -90,6 +111,16 @@ function bootstrap(
     task,
     git,
   }, { root_id: rootId, runtime_generation: runtimeGeneration });
+}
+
+function taskAtRootRevision(revision: string, description: string | null) {
+  const task = bootstrap().task;
+  return parseTaskSnapshot({
+    ...task,
+    issues: task.issues.map((issue) => issue.issue_id === parseTaskIssueId(rootId)
+      ? { ...issue, revision, description }
+      : issue),
+  });
 }
 
 function diff(
@@ -216,7 +247,7 @@ function updateIssueToolCall(
         input: {
           issue_id: rootId,
           expected_revision: expectedRevision,
-          desired: { title: "Reconciled title" },
+          desired: { description: "## Requirement\n\nReconciled description." },
         },
       },
     },
@@ -302,19 +333,25 @@ function updateResult(
         issue_id: call.input.issue_id,
         revision,
         status: "Todo",
-        title: outcome === "applied" ? "Reconciled title" : "Concurrent title",
-        description: null,
+        title: "Build the Root runtime",
+        description: outcome === "applied"
+          ? "## Requirement\n\nReconciled description."
+          : "## Requirement\n\nConcurrent description.",
         parent_id: null,
-        labels: ["symphony:kind/root"],
+        labels: ["label:root"],
         delegate_id: "actor:agent",
         priority: 1,
       },
       concrete_diff: [{
         kind: "field_changed",
         issue_id: call.input.issue_id,
-        field: "title",
-        before: outcome === "applied" ? "Concurrent title" : "Build the Root runtime",
-        after: outcome === "applied" ? "Reconciled title" : "Concurrent title",
+        field: "description",
+        before: call.input.expected_revision === "revision:root:1"
+          ? null
+          : "## Requirement\n\nConcurrent description.",
+        after: outcome === "applied"
+          ? "## Requirement\n\nReconciled description."
+          : "## Requirement\n\nConcurrent description.",
       }],
       sanitized_reason: outcome === "applied" ? null : "Issue revision changed",
     },
@@ -346,6 +383,7 @@ async function controlledFixture(
   capabilities: readonly string[] = [TASK_MCP_CAPABILITIES.update_issue],
   maxToolCalls = 4,
   turnTimeoutMs = 2_000,
+  readRootSnapshot: () => Promise<ReturnType<typeof parseTaskSnapshot>> = async () => bootstrap().task,
 ) {
   const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-r52-controlled-"));
   await mkdir(path.join(rootHome, "symphony"));
@@ -366,9 +404,12 @@ async function controlledFixture(
     create: (target) => new RootTools({
       target,
       task_manager: bindRootTaskManageCommand({
-        root_id: target.root_id,
+        target,
+        workflow,
+        caller_issuer: callerAuthority.issuer,
         task_manager: manager,
-        snapshot_reader: { readRootSnapshot: async () => bootstrap().task },
+        snapshot_reader: { readRootSnapshot },
+        approved_cycle_reader: { readApprovedCycle: async () => null },
       }),
       capabilities,
     }),
@@ -1352,13 +1393,26 @@ test("a precondition conflict is re-observed in the same process, thread, and tu
       completedTurn(server);
     }
   });
+  let currentTask = bootstrap().task;
   const manager = taskManager(async (call) => {
     revisions.push(call.input.expected_revision);
-    return revisions.length === 1
-      ? updateResult(call, "precondition_failed", "revision:root:2")
-      : updateResult(call, "applied", "revision:root:3");
+    if (revisions.length === 1) {
+      currentTask = taskAtRootRevision(
+        "revision:root:2",
+        "## Requirement\n\nConcurrent description.",
+      );
+      return updateResult(call, "precondition_failed", "revision:root:2");
+    }
+    return updateResult(call, "applied", "revision:root:3");
   });
-  const f = await controlledFixture(appServer, manager);
+  const f = await controlledFixture(
+    appServer,
+    manager,
+    [TASK_MCP_CAPABILITIES.update_issue],
+    4,
+    2_000,
+    async () => currentTask,
+  );
 
   assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
   assert.deepEqual(revisions, ["revision:root:1", "revision:root:2"]);
@@ -1449,6 +1503,10 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
   });
   manager.get_issue = async (call) => {
     managerCalls.push(`read:${call.input.issue_id}`);
+    currentTask = taskAtRootRevision(
+      "revision:root:2",
+      "## Requirement\n\nConcurrent description.",
+    );
     return parseTaskMcpResult({
       schema_version: 1,
       function: call.function,
@@ -1461,20 +1519,25 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
           issue_id: call.input.issue_id,
           revision: "revision:root:2",
           status: "Todo",
-          title: "Concurrent title",
-          description: null,
+          title: "Build the Root runtime",
+          description: "## Requirement\n\nConcurrent description.",
           parent_id: null,
-          labels: ["symphony:kind/root"],
+          labels: ["label:root"],
           delegate_id: "actor:agent",
           priority: 1,
         },
       },
     }, call);
   };
-  const f = await controlledFixture(appServer, manager, [
-    TASK_MCP_CAPABILITIES.get_issue,
-    TASK_MCP_CAPABILITIES.update_issue,
-  ]);
+  let currentTask = bootstrap().task;
+  const f = await controlledFixture(
+    appServer,
+    manager,
+    [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.update_issue],
+    4,
+    2_000,
+    async () => currentTask,
+  );
 
   assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
   assert.deepEqual(managerCalls, [

@@ -54,8 +54,8 @@ class FakeLinearQueryClient implements LinearQueryClient {
   readonly relations = new Map<string, readonly unknown[]>();
   teamIssues: readonly unknown[] = [];
   states: readonly unknown[] = [
-    "Todo", "In Progress", "In Review", "Done", "Planning", "Executing", "Verifying", "Succeeded",
-    "Canceled", "Failed",
+    "Todo", "In Progress", "In Review", "Done", "Draft", "Awaiting Acceptance", "Succeeded",
+    "Rejected", "Canceled", "Failed",
   ].map((name) => ({
     id: `state:${name.toLowerCase().replaceAll(" ", "-")}`,
     revision: `revision:state:${name.toLowerCase().replaceAll(" ", "-")}`,
@@ -119,9 +119,9 @@ test("generic query functions return only normalized closed resources with stabl
   client.issues.set("root-1", issue("root-1", null, "Todo", ["symphony:kind/root"]));
   client.teamIssues = [
     issue("root-1", null, "Todo", ["symphony:kind/root"]),
-    issue("cycle-1", "root-1", "Planning", ["symphony:kind/cycle"]),
+    issue("cycle-1", "root-1", "Draft", ["symphony:kind/cycle"]),
   ];
-  client.children.set("root-1", [issue("cycle-1", "root-1", "Planning", ["symphony:kind/cycle"])]);
+  client.children.set("root-1", [issue("cycle-1", "root-1", "Draft", ["symphony:kind/cycle"])]);
   client.relations.set("cycle-1", [{
     id: "relation:1",
     revision: "revision:relation:1",
@@ -198,7 +198,7 @@ test("startup inventory paginates every Root without delegate filtering in stabl
     issue("root-2", null, "In Progress", ["symphony:kind/root"], { priority: 2 }),
     issue("other", null, "Todo", ["symphony:kind/root"], { delegate_id: "actor:other" }),
     issue("root-1", null, "Todo", ["symphony:kind/root"], { priority: 1 }),
-    issue("cycle-1", "root-1", "Planning", ["symphony:kind/cycle"]),
+    issue("cycle-1", "root-1", "Draft", ["symphony:kind/cycle"]),
     ...Array.from({ length: 50 }, (_, index) => issue(
       `other-${index}`,
       null,
@@ -246,7 +246,7 @@ test("complete Root reads preserve delegation changes for admission consumers", 
 test("complete Root snapshot includes every descendant and internal relation without workflow derivation", async () => {
   const client = new FakeLinearQueryClient();
   const root = issue("root-1", null, "In Progress", ["symphony:kind/root"]);
-  const cycle = issue("cycle-1", "root-1", "Executing", ["symphony:kind/cycle"]);
+  const cycle = issue("cycle-1", "root-1", "In Progress", ["symphony:kind/cycle"]);
   const work = issue("work-1", "cycle-1", "Todo", ["symphony:kind/work"]);
   const verify = issue("verify-1", "cycle-1", "Todo", ["symphony:kind/verify"]);
   client.issues.set("root-1", root);
@@ -278,8 +278,8 @@ test("inventory and snapshot fail closed on malformed facts, ambiguity, and raw 
   const ambiguous = new FakeLinearQueryClient();
   ambiguous.issues.set("root-1", issue("root-1", null, "In Progress", ["symphony:kind/root"]));
   ambiguous.children.set("root-1", [
-    issue("cycle-1", "root-1", "Planning", ["symphony:kind/cycle"]),
-    issue("cycle-2", "root-1", "Executing", ["symphony:kind/cycle"]),
+    issue("cycle-1", "root-1", "Draft", ["symphony:kind/cycle"]),
+    issue("cycle-2", "root-1", "In Progress", ["symphony:kind/cycle"]),
   ]);
   await assert.rejects(
     new LinearQueries(ambiguous, options()).readRootSnapshot(parseRootIssueId("root-1")),
@@ -319,12 +319,12 @@ test("Root reads reject wrong team, revision, ancestry, and kind facts", async (
     {
       code: /linear_cycle_parent_mismatch/u,
       root: issue("root-1", null, "Todo", ["symphony:kind/root"]),
-      children: [issue("cycle-1", "root-2", "Planning", ["symphony:kind/cycle"])],
+      children: [issue("cycle-1", "root-2", "Draft", ["symphony:kind/cycle"])],
     },
     {
       code: /linear_cycle_kind_mismatch/u,
       root: issue("root-1", null, "Todo", ["symphony:kind/root"]),
-      children: [issue("cycle-1", "root-1", "Planning", ["symphony:kind/work"])],
+      children: [issue("cycle-1", "root-1", "Draft", ["symphony:kind/work"])],
     },
   ];
 

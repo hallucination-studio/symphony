@@ -22,9 +22,14 @@ import type {
   UpdateIssueCall,
   UpdateIssueResult,
 } from "../mcp/TaskMcpSchemas.js";
+import type { TaskManageCallerCapability } from "./TaskManageCapability.js";
 
-export interface TaskManageExecution {
+export interface TaskManageBoundaryExecution {
   assertActive(): void;
+}
+
+export interface TaskManageExecution extends TaskManageBoundaryExecution {
+  readonly caller: TaskManageCallerCapability;
 }
 
 export interface TaskManageCommandInterface {

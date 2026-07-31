@@ -13,7 +13,7 @@ import {
 } from "../../contracts/observation.js";
 import { parseBoundedString } from "../../contracts/validation.js";
 import { taskIssueChanges } from "../../observation/TaskFacts.js";
-import type { TaskManageExecution } from "../api/TaskManageCommandInterface.js";
+import type { TaskManageBoundaryExecution } from "../api/TaskManageCommandInterface.js";
 import {
   parseTaskMcpResult,
   type ArchiveIssueCall,
@@ -115,15 +115,15 @@ export class LinearCommands {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
   }
 
-  execute(call: CreateIssueCall, execution: TaskManageExecution): Promise<CreateIssueResult>;
-  execute(call: UpdateIssueCall, execution: TaskManageExecution): Promise<UpdateIssueResult>;
-  execute(call: ArchiveIssueCall, execution: TaskManageExecution): Promise<ArchiveIssueResult>;
-  execute(call: CreateRelationCall, execution: TaskManageExecution): Promise<CreateRelationResult>;
-  execute(call: DeleteRelationCall, execution: TaskManageExecution): Promise<DeleteRelationResult>;
-  execute(call: TaskMcpMutationCall, execution: TaskManageExecution): Promise<TaskMcpMutationResult>;
+  execute(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult>;
+  execute(call: UpdateIssueCall, execution: TaskManageBoundaryExecution): Promise<UpdateIssueResult>;
+  execute(call: ArchiveIssueCall, execution: TaskManageBoundaryExecution): Promise<ArchiveIssueResult>;
+  execute(call: CreateRelationCall, execution: TaskManageBoundaryExecution): Promise<CreateRelationResult>;
+  execute(call: DeleteRelationCall, execution: TaskManageBoundaryExecution): Promise<DeleteRelationResult>;
+  execute(call: TaskMcpMutationCall, execution: TaskManageBoundaryExecution): Promise<TaskMcpMutationResult>;
   async execute(
     call: TaskMcpMutationCall,
-    execution: TaskManageExecution,
+    execution: TaskManageBoundaryExecution,
   ): Promise<TaskMcpMutationResult> {
     switch (call.function) {
       case "create_issue": return this.#createIssue(call, execution);
@@ -134,7 +134,7 @@ export class LinearCommands {
     }
   }
 
-  async #createIssue(call: CreateIssueCall, execution: TaskManageExecution): Promise<CreateIssueResult> {
+  async #createIssue(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult> {
     const issueId = parseTaskIssueId(this.identityFactory());
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: issueId });
     const parent = await this.#preconditionIssue(call.input.parent_issue_id);
@@ -178,7 +178,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #updateIssue(call: UpdateIssueCall, execution: TaskManageExecution): Promise<UpdateIssueResult> {
+  async #updateIssue(call: UpdateIssueCall, execution: TaskManageBoundaryExecution): Promise<UpdateIssueResult> {
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: call.input.issue_id });
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -208,7 +208,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #archiveIssue(call: ArchiveIssueCall, execution: TaskManageExecution): Promise<ArchiveIssueResult> {
+  async #archiveIssue(call: ArchiveIssueCall, execution: TaskManageBoundaryExecution): Promise<ArchiveIssueResult> {
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: call.input.issue_id });
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -229,7 +229,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
-  async #createRelation(call: CreateRelationCall, execution: TaskManageExecution): Promise<CreateRelationResult> {
+  async #createRelation(call: CreateRelationCall, execution: TaskManageBoundaryExecution): Promise<CreateRelationResult> {
     const relationId = parseTaskRelationId(this.identityFactory());
     const target = this.#relationTarget(relationId, call.input.source_issue_id, call.input.target_issue_id);
     const endpoints = await this.#preconditionEndpoints(call.input.source_issue_id, call.input.target_issue_id);
@@ -262,7 +262,7 @@ export class LinearCommands {
     return this.#postconditionFailure(call, target, provider, after);
   }
 
-  async #deleteRelation(call: DeleteRelationCall, execution: TaskManageExecution): Promise<DeleteRelationResult> {
+  async #deleteRelation(call: DeleteRelationCall, execution: TaskManageBoundaryExecution): Promise<DeleteRelationResult> {
     const target = this.#relationTarget(call.input.relation_id, call.input.source_issue_id, call.input.target_issue_id);
     const endpoints = await this.#preconditionEndpoints(call.input.source_issue_id, call.input.target_issue_id);
     if (endpoints === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
@@ -351,7 +351,7 @@ export class LinearCommands {
   }
 
   async #effect(
-    execution: TaskManageExecution,
+    execution: TaskManageBoundaryExecution,
     operation: () => Promise<unknown>,
   ): Promise<LinearProviderOutcome> {
     execution.assertActive();

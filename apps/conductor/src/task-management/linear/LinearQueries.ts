@@ -39,8 +39,10 @@ const MAX_PAGES = 100;
 const MAX_NODES = 5_000;
 const KIND_PREFIX = "symphony:kind/";
 const ROOT_STATUSES = ["Todo", "In Progress", "In Review", "Done"] as const;
-const CYCLE_STATUSES = ["Planning", "Executing", "Verifying", "Succeeded", "Canceled"] as const;
-const ACTIVE_CYCLE_STATUSES = new Set(["Planning", "Executing", "Verifying"]);
+const CYCLE_STATUSES = [
+  "Draft", "In Progress", "Awaiting Acceptance", "Succeeded", "Rejected", "Failed", "Canceled",
+] as const;
+const ACTIVE_CYCLE_STATUSES = new Set(["Draft", "In Progress", "Awaiting Acceptance"]);
 const STAGE_KINDS = ["plan", "work", "verify"] as const;
 const STAGE_STATUSES = ["Todo", "In Progress", "Done", "Failed", "Canceled"] as const;
 

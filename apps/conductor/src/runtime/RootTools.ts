@@ -7,7 +7,7 @@ import {
 } from "../contracts/identity.js";
 import type { RuntimeTarget } from "../contracts/runtime.js";
 import { asRecord, parseBoundedString } from "../contracts/validation.js";
-import type { TaskManageExecution } from "../task-management/api/TaskManageCommandInterface.js";
+import type { TaskManageBoundaryExecution } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   TASK_MCP_CAPABILITIES,
   TASK_MCP_FUNCTIONS,
@@ -234,7 +234,7 @@ function assertEnvelope(
 async function dispatchTask(
   taskManager: RootTaskManageCommandBinding,
   call: TaskMcpCall,
-  execution: TaskManageExecution,
+  execution: TaskManageBoundaryExecution,
 ): Promise<unknown> {
   switch (call.function) {
     case "get_issue": return taskManager.get_issue(call, execution);
@@ -361,10 +361,11 @@ export class RootTools {
 
   bindings(correlationId: CorrelationId): readonly RootToolBinding[] {
     const currentCorrelation = parseCorrelationId(correlationId);
+    const taskManager = this.#taskManager.forCorrelation(currentCorrelation);
     return Object.freeze(this.specs.map((spec): RootToolBinding => Object.freeze({
       spec,
       execute: (value: unknown, execution: RootToolExecution) =>
-        this.#execute(spec.name, value, currentCorrelation, execution),
+        this.#execute(spec.name, value, currentCorrelation, taskManager, execution),
     })));
   }
 
@@ -372,6 +373,7 @@ export class RootTools {
     toolName: string,
     value: unknown,
     correlationId: CorrelationId,
+    taskManager: RootTaskManageCommandBinding,
     execution: RootToolExecution,
   ): Promise<unknown> {
     execution.assertActive();
@@ -389,7 +391,7 @@ export class RootTools {
       execution.assertActive();
       let rawResult: unknown;
       try {
-        rawResult = await dispatchTask(this.#taskManager, call, execution);
+        rawResult = await dispatchTask(taskManager, call, execution);
       } catch (error) {
         if (error instanceof RootToolCallError) throw error;
         if (error instanceof RootTaskManageBindingError) {

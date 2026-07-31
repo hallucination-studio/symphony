@@ -12,6 +12,10 @@ import {
 } from "../contracts/observation.js";
 import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
+  createTaskManageCallerAuthority,
+  parseTaskWorkflowIdentities,
+} from "../task-management/api/TaskManageCapability.js";
+import {
   TASK_MCP_CAPABILITIES,
   TASK_MCP_FUNCTIONS,
   parseTaskMcpResult,
@@ -29,6 +33,22 @@ import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
+const callerAuthority = createTaskManageCallerAuthority();
+const workflow = parseTaskWorkflowIdentities({
+  labels: {
+    root: "label:root", cycle: "label:cycle", plan: "label:plan",
+    work: "label:work", verify: "label:verify",
+  },
+  cycle_states: {
+    draft: "state:draft", in_progress: "state:cycle-in-progress",
+    awaiting_acceptance: "state:awaiting-acceptance", succeeded: "state:succeeded",
+    rejected: "state:rejected", failed: "state:cycle-failed", canceled: "state:cycle-canceled",
+  },
+  stage_states: {
+    todo: "state:stage-todo", in_progress: "state:stage-in-progress", done: "state:stage-done",
+    failed: "state:stage-failed", canceled: "state:stage-canceled",
+  },
+});
 
 function rootTaskSnapshot(
   relations: readonly unknown[] = [{
@@ -44,27 +64,30 @@ function rootTaskSnapshot(
     source_issue_id: "LIN-2",
     target_issue_id: "LIN-4",
   }],
+  includeCycle = true,
 ): TaskSnapshot {
-  const issue = (issueId: string, parentId: string | null) => ({
+  const issue = (issueId: string, parentId: string | null, revision: string, status: string, label: string) => ({
     issue_id: issueId,
-    revision: `revision:${issueId}`,
-    status: "Todo",
+    revision,
+    status,
     title: issueId,
-    description: null,
+    description: `## ${issueId}\n\nFixture facts.`,
     parent_id: parentId,
-    labels: [],
+    labels: [label],
     delegate_id: null,
     priority: null,
   });
   return parseTaskSnapshot({
     root_id: rootId,
-    issues: [
-      issue("LIN-1", null),
-      issue("LIN-2", "LIN-1"),
-      issue("LIN-3", "LIN-1"),
-      issue("LIN-4", "LIN-1"),
-    ],
-    relations,
+    issues: includeCycle
+      ? [
+        issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root),
+        issue("LIN-2", "LIN-1", "revision:issue:1", workflow.cycle_states.draft, workflow.labels.cycle),
+        issue("LIN-3", "LIN-2", "revision:other:1", workflow.stage_states.todo, workflow.labels.work),
+        issue("LIN-4", "LIN-2", "revision:other:2", workflow.stage_states.todo, workflow.labels.verify),
+      ]
+      : [issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root)],
+    relations: includeCycle ? relations : [],
   });
 }
 
@@ -73,9 +96,12 @@ function bindTaskManager(
   readRootSnapshot: () => Promise<TaskSnapshot> = async () => rootTaskSnapshot(),
 ): RootTaskManageCommandBinding {
   return bindRootTaskManageCommand({
-    root_id: rootId,
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     snapshot_reader: { readRootSnapshot },
+    approved_cycle_reader: { readApprovedCycle: async () => null },
   });
 }
 
@@ -131,7 +157,7 @@ function updateIssueCall(issueId: string, expectedRevision: string): Record<stri
     input: {
       issue_id: issueId,
       expected_revision: expectedRevision,
-      desired: { title: "Updated title" },
+      desired: { description: "## Draft\n\nUpdated description." },
     },
   };
 }
@@ -161,9 +187,9 @@ function createIssueCall(expectedParentRevision: string): Record<string, unknown
       expected_parent_revision: expectedParentRevision,
       desired: {
         title: "Created issue",
-        description: null,
-        state_id: "STATE-1",
-        label_ids: [],
+        description: "## Draft\n\nCreated Cycle proposal.",
+        state_id: workflow.cycle_states.draft,
+        label_ids: [workflow.labels.cycle],
         delegate_id: null,
         priority: null,
       },
@@ -392,20 +418,20 @@ test("Root tools return a typed mutation result with fresh resource and concrete
         fresh_resource: {
           issue_id: call.input.issue_id,
           revision: "revision:issue:2",
-          status: "Todo",
-          title: "New title",
-          description: null,
+          status: workflow.cycle_states.draft,
+          title: "LIN-2",
+          description: "## Draft\n\nNew description.",
           parent_id: "LIN-1",
-          labels: [],
+          labels: [workflow.labels.cycle],
           delegate_id: null,
           priority: null,
         },
         concrete_diff: [{
           kind: "field_changed",
           issue_id: call.input.issue_id,
-          field: "title",
-          before: "Old title",
-          after: "New title",
+          field: "description",
+          before: "## LIN-2\n\nFixture facts.",
+          after: "## Draft\n\nNew description.",
         }],
         sanitized_reason: null,
       },
@@ -428,7 +454,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     input: {
       issue_id: "LIN-2",
       expected_revision: "revision:issue:1",
-      desired: { title: "New title" },
+      desired: { description: "## Draft\n\nNew description." },
     },
   }, { assertActive: () => undefined });
 
@@ -437,20 +463,20 @@ test("Root tools return a typed mutation result with fresh resource and concrete
   assert.deepEqual((result as { output?: { fresh_resource?: unknown } }).output?.fresh_resource, {
     issue_id: "LIN-2",
     revision: "revision:issue:2",
-    status: "Todo",
-    title: "New title",
-    description: null,
+    status: workflow.cycle_states.draft,
+    title: "LIN-2",
+    description: "## Draft\n\nNew description.",
     parent_id: "LIN-1",
-    labels: [],
+    labels: [workflow.labels.cycle],
     delegate_id: null,
     priority: null,
   });
   assert.deepEqual((result as { output?: { concrete_diff?: unknown } }).output?.concrete_diff, [{
     kind: "field_changed",
     issue_id: "LIN-2",
-    field: "title",
-    before: "Old title",
-    after: "New title",
+    field: "description",
+    before: "## LIN-2\n\nFixture facts.",
+    after: "## Draft\n\nNew description.",
   }]);
   assert.equal(Object.isFrozen(result), true);
 });
@@ -524,7 +550,7 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
     isAcceptanceUnknown,
   );
   await assert.rejects(
-    update.execute(updateIssueCall("LIN-3", "revision:other:1"), { assertActive: () => undefined }),
+    update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   await assert.rejects(
@@ -533,19 +559,19 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
   );
   await read.execute(getIssueCall({ input: { issue_id: "LIN-3" } }), { assertActive: () => undefined });
   await assert.rejects(
-    update.execute(updateIssueCall("LIN-3", "revision:other:1"), { assertActive: () => undefined }),
+    update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   assert.equal(tools.hasPendingAcceptance(), true);
 
   await read.execute(getIssueCall(), { assertActive: () => undefined });
   assert.equal(tools.hasPendingAcceptance(), false);
-  await update.execute(updateIssueCall("LIN-3", "revision:other:2"), { assertActive: () => undefined });
+  await update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined });
   assert.deepEqual(effects, [
     "update:LIN-2",
     "read:LIN-3",
     "read:LIN-2",
-    "update:LIN-3",
+    "update:LIN-1",
   ]);
 });
 
@@ -658,7 +684,7 @@ test("acceptance_unknown from create_issue blocks create retries until the gener
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.create_issue],
-    task_manager: bindTaskManager(manager),
+    task_manager: bindTaskManager(manager, async () => rootTaskSnapshot([], false)),
   });
   const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
   const create = bindings.get("create_issue");
@@ -675,11 +701,11 @@ test("acceptance_unknown from create_issue blocks create retries until the gener
     getIssueCall({ input: { issue_id: "LIN-CREATED" } }),
     { assertActive: () => undefined },
   );
-  await create.execute(createIssueCall("revision:root:2"), { assertActive: () => undefined });
+  await create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined });
   assert.deepEqual(effects, ["create:1", "read:LIN-CREATED", "create:2"]);
 });
 
-test("create_relation unknown acceptance clears after complete source scans for presence or absence", async () => {
+test("Root relation mutations are denied before provider effects", async () => {
   const effects: string[] = [];
   const manager = taskManager([]);
   let creations = 0;
@@ -745,34 +771,17 @@ test("create_relation unknown acceptance clears after complete source scans for 
   assert.ok(remove);
   assert.ok(read);
 
-  await create.execute(createRelationCall("revision:source:1"), { assertActive: () => undefined });
-  await assert.rejects(
-    create.execute(createRelationCall("revision:source:1"), { assertActive: () => undefined }),
-    isAcceptanceUnknown,
-  );
-  await assert.rejects(
-    remove.execute(deleteRelationCall(), { assertActive: () => undefined }),
-    isAcceptanceUnknown,
-  );
-  await read.execute(listRelationsCall("LIN-2", null), { assertActive: () => undefined });
-  await create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined });
-
-  await assert.rejects(
-    create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined }),
-    isAcceptanceUnknown,
-  );
-  await read.execute(listRelationsCall("LIN-3", null), { assertActive: () => undefined });
-  await assert.rejects(
-    create.execute(createRelationCall("revision:source:2"), { assertActive: () => undefined }),
-    isAcceptanceUnknown,
-  );
-  await read.execute(listRelationsCall("LIN-2", null), { assertActive: () => undefined });
-  await create.execute(createRelationCall("revision:source:3"), { assertActive: () => undefined });
-  assert.deepEqual(effects, [
-    "create:1",
-    "create:2",
-    "create:3",
-  ]);
+  for (const invoke of [
+    () => create.execute(createRelationCall("revision:source:1"), { assertActive: () => undefined }),
+    () => remove.execute(deleteRelationCall(), { assertActive: () => undefined }),
+  ]) {
+    await assert.rejects(
+      invoke(),
+      (error: unknown) => error instanceof RootToolCallError && error.code === "capability_denied",
+    );
+  }
+  assert.equal(read.spec.name, "list_relations");
+  assert.deepEqual(effects, []);
 });
 
 test("Root tools reject cross-Root, stale-generation, wrong-correlation, and capability substitution before effects", async () => {
@@ -858,9 +867,12 @@ test("Root tools fail composition closed for raw or differently bound Task manag
     relations: [],
   });
   const otherBinding = bindRootTaskManageCommand({
-    root_id: otherRootId,
+    target: { root_id: otherRootId, runtime_generation: generation },
+    workflow,
+    caller_issuer: callerAuthority.issuer,
     task_manager: taskManager([]),
     snapshot_reader: { readRootSnapshot: async () => otherSnapshot },
+    approved_cycle_reader: { readApprovedCycle: async () => null },
   });
   assert.throws(() => new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
@@ -929,7 +941,7 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
       concrete_diff: Array.from({ length: 9 }, (_, index) => ({
         kind: "field_changed",
         issue_id: call.input.issue_id,
-        field: "title",
+        field: "description",
         before: `before-${index}`,
         after: `after-${index}`,
       })),
@@ -954,7 +966,7 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
     input: {
       issue_id: "LIN-2",
       expected_revision: "revision:issue:1",
-      desired: { title: "New title" },
+      desired: { description: "## Draft\n\nNew description." },
     },
   }, { assertActive: () => undefined }), /invalid_contract/u);
 });
