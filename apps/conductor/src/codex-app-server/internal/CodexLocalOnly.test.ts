@@ -228,6 +228,50 @@ test("local-only process launch pins and preflights one isolated Codex capabilit
   }
 });
 
+test("local-only profiles apply only bounded workspace-contained deny paths", () => {
+  const deniedPath = path.join(workspaceRoot, "nested", ".env.production");
+  const runtime = createCodexLocalOnlyRuntime({
+    kind: "local_only",
+    workspaceRoot,
+    deniedWorkspacePaths: [deniedPath, deniedPath],
+    deploymentPolicy,
+  }, codexHome);
+  const permissions = runtime.expectedConfig.permissions as Record<
+    string,
+    { readonly filesystem: Record<string, string> }
+  >;
+  assert.equal(permissions[runtime.readPermissionProfile]?.filesystem[deniedPath], "deny");
+  assert.equal(permissions[runtime.writePermissionProfile]?.filesystem[deniedPath], "deny");
+
+  for (const invalid of [
+    [workspaceRoot],
+    [path.dirname(workspaceRoot)],
+    ["relative/.env"],
+    [`${workspaceRoot}${path.sep}nested${path.sep}..${path.sep}.env`],
+    Array.from({ length: 257 }, (_, index) => path.join(workspaceRoot, `.env.${index}`)),
+    Array.from(
+      { length: 200 },
+      (_, index) => path.join(workspaceRoot, `${String(index).padStart(3, "0")}-${"x".repeat(180)}.pem`),
+    ),
+  ]) {
+    assert.throws(() => createCodexLocalOnlyRuntime({
+      kind: "local_only",
+      workspaceRoot,
+      deniedWorkspacePaths: invalid,
+      deploymentPolicy,
+    }, codexHome), /invalid_codex_local_only_denied_path/u);
+  }
+
+  const scratchDirectory = path.join(workspaceRoot, "scratch");
+  assert.throws(() => createCodexLocalOnlyRuntime({
+    kind: "local_only",
+    workspaceRoot,
+    scratchDirectory,
+    deniedWorkspacePaths: [path.join(scratchDirectory, ".env")],
+    deploymentPolicy,
+  }, codexHome), /invalid_codex_local_only_scratch/u);
+});
+
 test("Root local-only authority exposes no native filesystem access and repeats every turn boundary", async (context) => {
   const testRootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-root-policy-"));
   context.after(async () => rm(testRootHome, { recursive: true, force: true }));

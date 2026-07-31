@@ -6,6 +6,7 @@ import path from "node:path";
 import { asRecord, assertExactKeys, parseBoundedString } from "../../contracts/validation.js";
 import type { RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import { ROOT_CODE_INSPECTION_CAPABILITIES } from "./RootCodeInspection.js";
+import { snapshotDeniedWorkspacePaths } from "./SensitiveWorkspacePaths.js";
 
 export const SUPPORTED_LOCAL_ONLY_CODEX_VERSION = "0.146.0";
 
@@ -20,6 +21,7 @@ export interface CodexLocalOnlyMode {
   readonly kind: "local_only";
   readonly workspaceRoot: string;
   readonly scratchDirectory?: string;
+  readonly deniedWorkspacePaths?: readonly string[];
   readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
 }
 
@@ -259,6 +261,7 @@ function filesystemProfile(
   workspaceRoot: string,
   codexHome: string,
   scratchDirectory: string | undefined,
+  deniedWorkspacePaths: readonly string[],
   access: "read" | "write",
 ): Readonly<Record<string, "read" | "write" | "deny">> {
   const userHome = path.normalize(os.homedir());
@@ -294,6 +297,7 @@ function filesystemProfile(
       filesystem[path.join(workspaceRoot, protectedPath)] = "read";
     }
   }
+  for (const deniedPath of deniedWorkspacePaths) filesystem[deniedPath] = "deny";
   return Object.freeze(filesystem);
 }
 
@@ -301,11 +305,12 @@ function expectedFilesystemProfile(
   workspaceRoot: string,
   codexHome: string,
   scratchDirectory: string | undefined,
+  deniedWorkspacePaths: readonly string[],
   access: "read" | "write",
 ): Readonly<Record<string, unknown>> {
   return Object.freeze({
     glob_scan_max_depth: null,
-    ...filesystemProfile(workspaceRoot, codexHome, scratchDirectory, access),
+    ...filesystemProfile(workspaceRoot, codexHome, scratchDirectory, deniedWorkspacePaths, access),
   });
 }
 
@@ -447,6 +452,9 @@ export function createCodexLocalOnlyRuntime(
   const scratchDirectory = scratchValue === undefined
     ? undefined
     : absolutePath(scratchValue, "invalid_codex_local_only_scratch");
+  const deniedWorkspacePaths = mode.kind === "local_only"
+    ? snapshotDeniedWorkspacePaths(workspaceRoot, mode.deniedWorkspacePaths)
+    : Object.freeze([]) as readonly string[];
   const userHome = path.normalize(os.homedir());
   if (
     workspaceRoot === path.parse(workspaceRoot).root
@@ -461,6 +469,9 @@ export function createCodexLocalOnlyRuntime(
       || (!overlaps(workspaceRoot, scratchDirectory) && !overlaps(systemTmp, scratchDirectory))
       || overlaps(codexHome, scratchDirectory)
     ) throw new Error("invalid_codex_local_only_scratch");
+    if (deniedWorkspacePaths.some((deniedPath) => (
+      overlaps(deniedPath, scratchDirectory) || overlaps(scratchDirectory, deniedPath)
+    ))) throw new Error("invalid_codex_local_only_scratch");
   }
 
   const readPermissionProfile = profileName(role === "root" ? "root" : "read", nonce);
@@ -484,14 +495,26 @@ export function createCodexLocalOnlyRuntime(
           description: null,
           extends: null,
           workspace_roots: null,
-          filesystem: expectedFilesystemProfile(workspaceRoot, codexHome, scratchDirectory, "read"),
+          filesystem: expectedFilesystemProfile(
+            workspaceRoot,
+            codexHome,
+            scratchDirectory,
+            deniedWorkspacePaths,
+            "read",
+          ),
           network: EXPECTED_NETWORK_PROFILE,
         }),
         [writePermissionProfile]: Object.freeze({
           description: null,
           extends: null,
           workspace_roots: null,
-          filesystem: expectedFilesystemProfile(workspaceRoot, codexHome, scratchDirectory, "write"),
+          filesystem: expectedFilesystemProfile(
+            workspaceRoot,
+            codexHome,
+            scratchDirectory,
+            deniedWorkspacePaths,
+            "write",
+          ),
           network: EXPECTED_NETWORK_PROFILE,
         }),
       });

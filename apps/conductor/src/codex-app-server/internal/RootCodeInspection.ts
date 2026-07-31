@@ -24,6 +24,7 @@ import {
   type RootToolExecution,
   type RootToolSpec,
 } from "../../runtime/RootToolBoundary.js";
+import { isSensitiveWorkspacePath } from "./SensitiveWorkspacePaths.js";
 
 export const ROOT_CODE_INSPECTION_CAPABILITIES = Object.freeze({
   list_code_directory: "code_inspection:list_directory",
@@ -53,48 +54,6 @@ const PRIVATE_KEY_MATERIAL = [
   /\bAGE-SECRET-KEY-[A-Z0-9]+\b/u,
   /PuTTY-User-Key-File-[0-9]+\s*:/u,
 ] as const;
-
-const SENSITIVE_SEGMENTS = new Set([
-  ".aws",
-  ".azure",
-  ".docker",
-  ".git",
-  ".gnupg",
-  ".kube",
-  ".ssh",
-  ".terraform.d",
-]);
-
-const SENSITIVE_BASENAMES = new Set([
-  ".git-credentials",
-  ".gitconfig",
-  ".gitmodules",
-  ".lfsconfig",
-  ".netrc",
-  ".npmrc",
-  ".pypirc",
-  ".terraformrc",
-  ".yarnrc",
-  ".yarnrc.yml",
-  "auth.json",
-  "application_default_credentials.json",
-  "credentials",
-  "credentials.json",
-  "credentials.toml",
-  "credentials.yaml",
-  "credentials.yml",
-]);
-
-const SENSITIVE_EXTENSIONS = new Set([
-  ".jks",
-  ".key",
-  ".keystore",
-  ".p12",
-  ".pem",
-  ".pfx",
-  ".pk8",
-  ".ppk",
-]);
 
 function deepFreeze<T>(value: T): T {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
@@ -182,24 +141,6 @@ function compareCodeNames(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isSensitivePath(relativePath: string): boolean {
-  const segments = relativePath.split("/").map((segment) => segment.toLowerCase());
-  if (segments.some((segment) => segment.startsWith(".env") || SENSITIVE_SEGMENTS.has(segment))) {
-    return true;
-  }
-  const basename = segments.at(-1) ?? "";
-  if (
-    SENSITIVE_BASENAMES.has(basename)
-    || SENSITIVE_EXTENSIONS.has(basename)
-    || SENSITIVE_EXTENSIONS.has(path.posix.extname(basename))
-    || /^id_(?:dsa|ecdsa|ed25519|rsa)(?:\.|$)/u.test(basename)
-  ) return true;
-  return segments.some((segment, index) => (
-    segment === ".config"
-    && ["gcloud", "gh", "git", "glab-cli", "hub", "op"].includes(segments[index + 1] ?? "")
-  ));
-}
-
 function codePath(value: unknown): string {
   const parsed = parseBoundedString(value, "invalid_code_path", MAX_CODE_PATH_LENGTH);
   if (parsed === ".") return parsed;
@@ -209,7 +150,7 @@ function codePath(value: unknown): string {
     || parsed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
   ) throw new RootToolCallError("capability_denied");
   const normalized = path.posix.normalize(parsed);
-  if (normalized !== parsed || isSensitivePath(normalized)) {
+  if (normalized !== parsed || isSensitiveWorkspacePath(normalized)) {
     throw new RootToolCallError("capability_denied");
   }
   return normalized;
@@ -571,7 +512,7 @@ export class RootCodeInspection {
         const childPath = relativePath === "." ? entry.name : `${relativePath}/${entry.name}`;
         if (
           entry.isSymbolicLink()
-          || isSensitivePath(childPath)
+          || isSensitiveWorkspacePath(childPath)
           || (!entry.isDirectory() && !entry.isFile())
         ) continue;
         entries.push(Object.freeze({

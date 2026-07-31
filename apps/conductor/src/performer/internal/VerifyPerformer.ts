@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { CodexLocalOnlyDeploymentPolicy } from "../../codex-app-server/internal/CodexLocalOnly.js";
+import { scanSensitiveWorkspacePaths } from "../../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import {
   CodexProcess,
   type CodexProcessOptions,
@@ -271,6 +272,12 @@ export class VerifyPerformer implements VerifyPerformerInterface {
     if (!Number.isSafeInteger(options.turnTimeoutMs) || options.turnTimeoutMs < 1) {
       throw new Error("invalid_verify_turn_timeout");
     }
+    let deniedWorkspacePaths: readonly string[];
+    try {
+      deniedWorkspacePaths = await scanSensitiveWorkspacePaths(revisionWorktree);
+    } catch {
+      throw new Error("verify_performer_creation_failed");
+    }
     const temporaryRoot = await realpath(os.tmpdir()).catch(() => path.normalize(os.tmpdir()));
     const scratchDirectory = path.join(temporaryRoot, `symphony-verify-${randomUUID()}`);
     try {
@@ -290,6 +297,7 @@ export class VerifyPerformer implements VerifyPerformerInterface {
           kind: "local_only",
           workspaceRoot: revisionWorktree,
           scratchDirectory,
+          deniedWorkspacePaths,
           deploymentPolicy,
         },
       }, spawner);

@@ -10,6 +10,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -328,6 +329,26 @@ test("Verify creation reports when an invalid thread cannot terminate its proces
   assert.deepEqual(appServer.killSignals, ["SIGTERM", "SIGKILL"]);
 });
 
+test("Verify creation fails before process allocation when sensitive paths exceed the deny bound", async (context) => {
+  const probeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-verify-sensitive-limit-"));
+  context.after(async () => rm(probeRoot, { recursive: true, force: true }));
+  const probeWorktree = path.join(probeRoot, "revision");
+  const probeHome = path.join(probeRoot, "performer-home");
+  await Promise.all([mkdir(probeWorktree), mkdir(probeHome)]);
+  await Promise.all(Array.from(
+    { length: 257 },
+    (_, index) => writeFile(path.join(probeWorktree, `.env.${index}`), "secret\n", "utf8"),
+  ));
+  const appServer = fakeAppServer(() => undefined);
+
+  await assert.rejects(VerifyPerformer.create({
+    ...performerInput(),
+    performer_home: probeHome,
+    revision_worktree: probeWorktree,
+  }, performerOptions(appServer.spawner)), /verify_performer_creation_failed/u);
+  assert.equal(appServer.launches.length, 0);
+});
+
 test("Verify close reports final scratch cleanup failure", {
   skip: process.platform === "win32",
 }, async () => {
@@ -442,12 +463,25 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
   const outside = path.join(probeRoot, "outside");
   await Promise.all([
     mkdir(path.join(probeWorktree, ".git"), { recursive: true }),
+    mkdir(path.join(probeWorktree, "nested", "auth"), { recursive: true }),
+    mkdir(path.join(probeWorktree, "nested", "certs"), { recursive: true }),
     mkdir(probeHome),
     mkdir(outside),
   ]);
   await Promise.all([
     writeFile(path.join(probeWorktree, "source.txt"), "exact revision\n", "utf8"),
     writeFile(path.join(probeWorktree, ".git", "config"), "remote credential config\n", "utf8"),
+    writeFile(path.join(probeWorktree, "nested", ".env.production"), "provider secret\n", "utf8"),
+    writeFile(path.join(probeWorktree, "nested", "certs", "deploy.pem"), "private key\n", "utf8"),
+    writeFile(
+      path.join(probeWorktree, "nested", "auth", "credentials.json"),
+      "credential store\n",
+      "utf8",
+    ),
+    symlink(
+      path.join("nested", ".env.production"),
+      path.join(probeWorktree, "environment-alias"),
+    ),
     writeFile(path.join(probeHome, "auth.json"), "performer credential\n", "utf8"),
     writeFile(path.join(outside, "private.txt"), "outside\n", "utf8"),
   ]);
@@ -487,6 +521,10 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
         await attempt("scratch_create", () => fs.writeFile(path.join(scratch, "evidence.md"), "evidence\n"));
         await attempt("git_read", () => fs.readFile(path.join(workspace, ".git", "config"), "utf8"));
         await attempt("git_write", () => fs.writeFile(path.join(workspace, ".git", "config"), "changed\n"));
+        await attempt("env_read", () => fs.readFile(path.join(workspace, "nested", ".env.production"), "utf8"));
+        await attempt("private_key_read", () => fs.readFile(path.join(workspace, "nested", "certs", "deploy.pem"), "utf8"));
+        await attempt("credentials_read", () => fs.readFile(path.join(workspace, "nested", "auth", "credentials.json"), "utf8"));
+        await attempt("sensitive_alias_read", () => fs.readFile(path.join(workspace, "environment-alias"), "utf8"));
         await attempt("home_read", () => fs.readFile(path.join(home, "auth.json"), "utf8"));
         await attempt("outside_read", () => fs.readFile(path.join(outside, "private.txt"), "utf8"));
         await attempt("outside_write", () => fs.writeFile(path.join(outside, "created.txt"), "outside\n"));
@@ -535,6 +573,10 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
     assert.equal(evidence.scratch_create?.ok, true);
     assert.equal(evidence.git_read?.ok, false);
     assert.equal(evidence.git_write?.ok, false);
+    assert.equal(evidence.env_read?.ok, false);
+    assert.equal(evidence.private_key_read?.ok, false);
+    assert.equal(evidence.credentials_read?.ok, false);
+    assert.equal(evidence.sensitive_alias_read?.ok, false);
     assert.equal(evidence.home_read?.ok, false);
     assert.equal(evidence.outside_read?.ok, false);
     assert.equal(evidence.outside_write?.ok, false);
