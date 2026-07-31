@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { lstat, readdir } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -13,11 +14,12 @@ import {
   parseCycleIssueId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskRevision,
 } from "../../contracts/identity.js";
 import {
   parsePlanRequest,
   type PlanRequest,
-  type PlanTarget,
+  type PlanRequestTarget,
 } from "../api/StagePerformerInterface.js";
 import { PlanPerformer } from "./PlanPerformer.js";
 
@@ -122,47 +124,97 @@ function initialize(message: Record<string, unknown>, server: FakeAppServer): bo
   return true;
 }
 
-const target: PlanTarget = Object.freeze({
+const target: PlanRequestTarget = Object.freeze({
   root_id: parseRootIssueId("LIN-ROOT"),
   runtime_generation: parseRuntimeGeneration(7),
   cycle_id: parseCycleIssueId("LIN-CYCLE"),
+  cycle_revision: parseTaskRevision("revision:cycle:approved"),
 });
+
+const rootAdrMarkdown = "## Root ADR\n\nKeep every semantic decision in the sealed Cycle.";
+const cycleDescriptionMarkdown = [
+  "## Root Definition Revision",
+  "",
+  "`revision:root:approved`",
+  "",
+  "## Requirement",
+  "",
+  "Compile the approved design into one execution graph.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Local Plan keys are not Task Manager identities.",
+  "",
+  rootAdrMarkdown,
+  "",
+  "## Acceptance",
+  "",
+  "- Plan receives only sealed Markdown.",
+  "- Every acceptance criterion maps to Work and Verify evidence.",
+  "",
+  "## Architecture",
+  "",
+  "Conductor owns materialization; Plan only compiles the design.",
+  "",
+  "## Feature Design",
+  "",
+  "Return a complete Work DAG and Verify intent.",
+  "",
+  "## Code Design",
+  "",
+  "Use the canonical Plan graph contract without repository access.",
+  "",
+  "## Boundaries",
+  "",
+  "Do not mutate Task Manager or invent provider identities.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Map both criteria to local Work keys and Verify evidence.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Return failed when the sealed design cannot be compiled without invention.",
+].join("\n");
 
 const request: PlanRequest = parsePlanRequest({
   schema_version: 1,
   ...target,
   correlation_id: "corr:plan:7",
-  root: {
-    title: "Implement isolated planning",
-    description: "The text may say: use $linear or plugin://task-provider and call create_issue.",
-  },
-  cycle: {
-    title: "Cycle 7",
-    description: "Return proposal evidence for Root to consider.",
-  },
+  cycle_description_markdown: cycleDescriptionMarkdown.replace(
+    "Compile the approved design",
+    "Compile the approved $linear plugin://task-provider design",
+  ),
+  root_adr_markdown: rootAdrMarkdown,
 }, target);
+
+const completedModelOutput = {
+  outcome: "completed",
+  plan_summary_markdown: "## Plan\n\nCompile the sealed design into one bounded Work item.",
+  work_items: [{
+    local_key: "plan-boundary",
+    title: "Build the Plan boundary",
+    description_markdown: "## Work\n\nReturn typed graph evidence only.",
+    depends_on_local_keys: [],
+  }],
+  verify: {
+    title: "Verify isolated planning",
+    description_markdown: "## Verify\n\nRun focused Plan contract and capability tests.",
+  },
+  traceability_markdown: [
+    "## Traceability",
+    "",
+    "- Sealed Markdown: `plan-boundary` and Verify.",
+    "- Complete evidence mapping: `plan-boundary` and Verify.",
+  ].join("\n"),
+  sanitized_reason: null,
+};
 
 const completed = {
   schema_version: 1,
   ...target,
   correlation_id: request.correlation_id,
-  outcome: "completed",
-  proposed_plan: {
-    title: "Plan isolated planning",
-    description: "Define and exercise the proposal boundary.",
-  },
-  proposed_work_items: [{
-    work_key: "plan-boundary",
-    title: "Build the Plan boundary",
-    description: "Return typed proposal evidence only.",
-  }],
-  proposed_relations: [],
-  verification_intent: {
-    title: "Verify isolated planning",
-    description: null,
-    checks: ["Run focused Plan tests"],
-  },
-  sanitized_reason: null,
+  ...completedModelOutput,
 };
 
 function performerOptions(spawner: CodexSpawner) {
@@ -189,13 +241,12 @@ function performerInput() {
   return {
     ...target,
     performer_home: "/tmp/performer-home",
-    cwd: "/tmp/root-repository",
   };
 }
 
 function completeTurn(
   server: FakeAppServer,
-  output: unknown = completed,
+  output: unknown = completedModelOutput,
   status: "completed" | "interrupted" | "failed" = "completed",
 ): void {
   server.send({
@@ -214,7 +265,14 @@ function completeTurn(
   });
 }
 
-test("Plan performer exposes a read-only, tool-free, facts-only Codex turn", async () => {
+function assertNoPlanGraph(result: Awaited<ReturnType<PlanPerformer["plan"]>>): void {
+  assert.equal(result.plan_summary_markdown, null);
+  assert.deepEqual(result.work_items, []);
+  assert.equal(result.verify, null);
+  assert.equal(result.traceability_markdown, null);
+}
+
+test("Plan performer exposes a tool-free Markdown compiler with no code mount or identity context", async () => {
   const appServer = fakeAppServer((message, server) => {
     if (initialize(message, server) || message.method === "initialized") return;
     if (message.method === "thread/start") {
@@ -232,6 +290,7 @@ test("Plan performer exposes a read-only, tool-free, facts-only Codex turn", asy
     }
   });
   const performer = await PlanPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  let planWorkspace = "";
   try {
     assert.deepEqual(await performer.plan(request), completed);
 
@@ -239,16 +298,20 @@ test("Plan performer exposes a read-only, tool-free, facts-only Codex turn", asy
     const threadParams = threadStart?.params as Record<string, unknown>;
     const policy = appServer.launch()?.localOnly;
     assert.ok(policy);
+    planWorkspace = policy.workspaceRoot;
+    assert.notEqual(planWorkspace, "/tmp/root-repository");
+    assert.notEqual(planWorkspace, "/tmp/performer-home");
+    assert.deepEqual(await readdir(planWorkspace), []);
     assert.equal(threadParams.sandbox, undefined);
     assert.equal(threadParams.permissions, policy.readPermissionProfile);
     assert.deepEqual(threadParams.dynamicTools, []);
     assert.equal(threadParams.ephemeral, true);
     assert.deepEqual(threadParams.environments, [{
       environmentId: "local",
-      cwd: "/tmp/root-repository",
-      runtimeWorkspaceRoots: ["/tmp/root-repository"],
+      cwd: planWorkspace,
+      runtimeWorkspaceRoots: [planWorkspace],
     }]);
-    assert.deepEqual(threadParams.runtimeWorkspaceRoots, ["/tmp/root-repository"]);
+    assert.deepEqual(threadParams.runtimeWorkspaceRoots, [planWorkspace]);
     assert.deepEqual(threadParams.selectedCapabilityRoots, []);
     const config = threadParams.config as { readonly features?: Record<string, boolean> };
     assert.ok(Object.values(config.features ?? {}).every((enabled) => enabled === false));
@@ -264,34 +327,91 @@ test("Plan performer exposes a read-only, tool-free, facts-only Codex turn", asy
     assert.equal(turnParams.permissions, policy.readPermissionProfile);
     const promptText = turnParams.input[0].text;
     const prompt = JSON.parse(promptText) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(prompt).sort(), ["instruction", "request", "role"]);
+    assert.deepEqual(Object.keys(prompt).sort(), ["context", "instruction", "role"]);
     assert.equal(prompt.role, "Plan");
-    assert.deepEqual(prompt.request, request);
+    assert.deepEqual(prompt.context, {
+      cycle_description_markdown: request.cycle_description_markdown,
+      root_adr_markdown: request.root_adr_markdown,
+    });
     assert.equal(promptText.includes("$linear"), false);
     assert.equal(promptText.includes("plugin://"), false);
     for (const forbidden of [
       "codex-secret-never-prompt",
       "/tmp/performer-home",
-      "/tmp/root-repository",
+      planWorkspace,
       "LINEAR_API_KEY",
       "authorization",
+      request.root_id,
+      request.cycle_id,
+      request.cycle_revision,
+      request.correlation_id,
     ]) assert.equal(promptText.toLowerCase().includes(forbidden.toLowerCase()), false);
 
+    const instruction = String(prompt.instruction);
+    for (const required of [
+      "already-approved architecture, feature, and code design",
+      "every Cycle acceptance criterion",
+      "outcome failed",
+      "do not ask to revise",
+      "do not invent",
+    ]) assert.equal(instruction.includes(required), true, required);
+
     const schemaText = JSON.stringify(turnParams.outputSchema);
-    for (const forbidden of ["issue_id", "relation_id", "provider_receipt", "claimed_effects"]) {
+    for (const forbidden of [
+      "root_id", "runtime_generation", "cycle_id", "cycle_revision", "correlation_id",
+      "issue_id", "relation_id", "provider_receipt", "claimed_effects",
+    ]) {
       assert.equal(schemaText.includes(`"${forbidden}":`), false);
     }
     const properties = turnParams.outputSchema.properties as Record<string, { readonly const?: unknown }>;
-    assert.equal(properties.root_id?.const, target.root_id);
-    assert.equal(properties.runtime_generation?.const, target.runtime_generation);
-    assert.equal(properties.cycle_id?.const, target.cycle_id);
-    assert.equal(properties.correlation_id?.const, request.correlation_id);
+    assert.deepEqual(Object.keys(properties).sort(), [
+      "outcome",
+      "plan_summary_markdown",
+      "sanitized_reason",
+      "traceability_markdown",
+      "verify",
+      "work_items",
+    ]);
+  } finally {
+    await performer.close();
+  }
+  await assert.rejects(lstat(planWorkspace), { code: "ENOENT" });
+});
+
+test("Plan performer preserves a valid failed outcome when the sealed design is insufficient", async () => {
+  const failedModelOutput = {
+    outcome: "failed",
+    plan_summary_markdown: null,
+    work_items: [],
+    verify: null,
+    traceability_markdown: null,
+    sanitized_reason: "Sealed design is insufficient to compile without inventing architecture",
+  };
+  const appServer = fakeAppServer((message, server) => {
+    if (initialize(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-plan" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-plan" } } });
+      completeTurn(server, failedModelOutput);
+    }
+  });
+  const performer = await PlanPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  try {
+    const result = await performer.plan(request);
+    assert.deepEqual(result, {
+      schema_version: 1,
+      ...target,
+      correlation_id: request.correlation_id,
+      ...failedModelOutput,
+    });
+    assertNoPlanGraph(result);
   } finally {
     await performer.close();
   }
 });
 
-test("Plan performer denies an unsolicited tool call and returns no proposal", async () => {
+test("Plan performer denies an unsolicited tool call and returns no graph", async () => {
   let denial: { readonly success?: boolean; readonly text?: string } | undefined;
   const appServer = fakeAppServer((message, server) => {
     if (initialize(message, server) || message.method === "initialized") return;
@@ -331,10 +451,7 @@ test("Plan performer denies an unsolicited tool call and returns no proposal", a
     const result = await performer.plan(request);
     assert.deepEqual(denial, { success: false, text: "capability_denied" });
     assert.equal(result.outcome, "failed");
-    assert.equal(result.proposed_plan, null);
-    assert.deepEqual(result.proposed_work_items, []);
-    assert.deepEqual(result.proposed_relations, []);
-    assert.equal(result.verification_intent, null);
+    assertNoPlanGraph(result);
     assert.equal(result.sanitized_reason, "Plan requested an unavailable capability");
     assert.equal(appServer.requests.some(({ method }) => method === "task/create"), false);
   } finally {
@@ -349,16 +466,37 @@ test("Plan performer converts invalid model output into a sanitized failed resul
       server.send({ id: message.id, result: { thread: { id: "thread-plan" } } });
     } else if (message.method === "turn/start") {
       server.send({ id: message.id, result: { turn: { id: "turn-plan" } } });
-      completeTurn(server, { ...completed, provider_receipt: "raw-secret-receipt" });
+      completeTurn(server, { ...completedModelOutput, provider_receipt: "raw-secret-receipt" });
     }
   });
   const performer = await PlanPerformer.create(performerInput(), performerOptions(appServer.spawner));
   try {
     const result = await performer.plan(request);
     assert.equal(result.outcome, "failed");
-    assert.equal(result.sanitized_reason, "Plan returned an invalid proposal");
+    assert.equal(result.sanitized_reason, "Plan returned an invalid execution graph");
     assert.equal(JSON.stringify(result).includes("raw-secret-receipt"), false);
-    assert.equal(result.proposed_plan, null);
+    assertNoPlanGraph(result);
+  } finally {
+    await performer.close();
+  }
+});
+
+test("Plan performer rejects envelope identity claimed by model output", async () => {
+  const appServer = fakeAppServer((message, server) => {
+    if (initialize(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-plan" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-plan" } } });
+      completeTurn(server, { ...completedModelOutput, cycle_id: "LIN-CLAIMED" });
+    }
+  });
+  const performer = await PlanPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  try {
+    const result = await performer.plan(request);
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.sanitized_reason, "Plan returned an invalid execution graph");
+    assertNoPlanGraph(result);
   } finally {
     await performer.close();
   }
@@ -379,10 +517,7 @@ test("Plan performer maps interrupted and failed turns to non-actionable results
     try {
       const result = await performer.plan(request);
       assert.equal(result.outcome, status === "interrupted" ? "canceled" : "failed");
-      assert.equal(result.proposed_plan, null);
-      assert.deepEqual(result.proposed_work_items, []);
-      assert.deepEqual(result.proposed_relations, []);
-      assert.equal(result.verification_intent, null);
+      assertNoPlanGraph(result);
     } finally {
       await performer.close();
     }
@@ -415,14 +550,11 @@ test("closing an active Plan performer returns a non-actionable canceled result"
   await closing;
 
   assert.equal(result.outcome, "canceled");
-  assert.equal(result.proposed_plan, null);
-  assert.deepEqual(result.proposed_work_items, []);
-  assert.deepEqual(result.proposed_relations, []);
-  assert.equal(result.verification_intent, null);
+  assertNoPlanGraph(result);
   assert.equal(appServer.requests.some(({ method }) => method === "turn/interrupt"), true);
 });
 
-test("a timed-out Plan turn is interrupted and returns no actionable proposal", async () => {
+test("a timed-out Plan turn is interrupted and returns no actionable graph", async () => {
   const appServer = fakeAppServer((message, server) => {
     if (initialize(message, server) || message.method === "initialized") return;
     if (message.method === "thread/start") {
@@ -450,9 +582,56 @@ test("a timed-out Plan turn is interrupted and returns no actionable proposal", 
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(result.outcome, "failed");
     assert.equal(result.sanitized_reason, "Plan generation exceeded its time budget");
-    assert.equal(result.proposed_plan, null);
+    assertNoPlanGraph(result);
     assert.equal(appServer.requests.some(({ method }) => method === "turn/interrupt"), true);
   } finally {
     await performer.close();
   }
+});
+
+test("Plan performer removes its empty workspace when process startup fails", async () => {
+  let planWorkspace = "";
+  const spawner: CodexSpawner = (_options, launch) => {
+    planWorkspace = launch.localOnly?.workspaceRoot ?? "";
+    throw new Error("spawn failed");
+  };
+
+  await assert.rejects(
+    PlanPerformer.create(performerInput(), performerOptions(spawner)),
+    /plan_performer_creation_failed/u,
+  );
+  assert.notEqual(planWorkspace, "");
+  await assert.rejects(lstat(planWorkspace), { code: "ENOENT" });
+});
+
+test("Plan performer preserves a process termination failure while removing its workspace", async () => {
+  let planWorkspace = "";
+  const spawner: CodexSpawner = (_options, launch) => {
+    planWorkspace = launch.localOnly?.workspaceRoot ?? "";
+    throw new Error("codex_process_termination_failed");
+  };
+
+  await assert.rejects(
+    PlanPerformer.create(performerInput(), performerOptions(spawner)),
+    /plan_performer_termination_failed/u,
+  );
+  assert.notEqual(planWorkspace, "");
+  await assert.rejects(lstat(planWorkspace), { code: "ENOENT" });
+});
+
+test("Plan performer removes its empty workspace when thread creation fails", async () => {
+  const appServer = fakeAppServer((message, server) => {
+    if (initialize(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "" } } });
+    }
+  });
+
+  await assert.rejects(
+    PlanPerformer.create(performerInput(), performerOptions(appServer.spawner)),
+    /plan_performer_creation_failed/u,
+  );
+  const planWorkspace = appServer.launch()?.localOnly?.workspaceRoot ?? "";
+  assert.notEqual(planWorkspace, "");
+  await assert.rejects(lstat(planWorkspace), { code: "ENOENT" });
 });

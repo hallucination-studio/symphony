@@ -7,6 +7,7 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
   parseStageIssueId,
+  parseTaskRevision,
 } from "../../contracts/identity.js";
 import {
   parsePlanRequest,
@@ -16,6 +17,7 @@ import {
   parseWorkRequest,
   parseWorkResult,
   type PlanRequest,
+  type PlanRequestTarget,
   type PlanTarget,
   type VerifyRequest,
   type VerifyTarget,
@@ -28,107 +30,155 @@ const target: PlanTarget = Object.freeze({
   cycle_id: parseCycleIssueId("LIN-CYCLE"),
 });
 
+const planTarget: PlanRequestTarget = Object.freeze({
+  ...target,
+  cycle_revision: parseTaskRevision("revision:cycle:approved"),
+});
+
+const rootAdrMarkdown = "## Root ADR\n\nKeep semantic decisions in the sealed Cycle.";
+const cycleDescriptionMarkdown = [
+  "## Root Definition Revision",
+  "",
+  "`revision:root:approved`",
+  "",
+  "## Requirement",
+  "",
+  "Compile one approved design into a mechanical execution graph.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Plan local keys are not Task Manager identities.",
+  "",
+  rootAdrMarkdown,
+  "",
+  "## Acceptance",
+  "",
+  "- The Plan context contains only sealed Markdown.",
+  "- Every acceptance criterion maps to Work and Verify evidence.",
+  "",
+  "## Architecture",
+  "",
+  "Conductor owns materialization; Plan returns typed evidence only.",
+  "",
+  "## Feature Design",
+  "",
+  "Decompose the approved behavior without changing it.",
+  "",
+  "## Code Design",
+  "",
+  "Use the canonical Plan graph contract and no code capability.",
+  "",
+  "## Boundaries",
+  "",
+  "Do not read code, mutate Task Manager, or invent provider identities.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Map both acceptance criteria to local Work keys and Verify evidence.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Return failed when the sealed design is insufficient.",
+].join("\n");
+
 const request = {
   schema_version: 1,
-  ...target,
+  ...planTarget,
   correlation_id: "corr:plan:1",
-  root: {
-    title: "Deliver proposal-only planning",
-    description: "Keep provider mutations under Root control.",
-  },
-  cycle: {
-    title: "Cycle 1",
-    description: null,
-  },
+  cycle_description_markdown: cycleDescriptionMarkdown,
+  root_adr_markdown: rootAdrMarkdown,
 };
 
 const completed = {
   schema_version: 1,
-  ...target,
+  ...planTarget,
   correlation_id: request.correlation_id,
   outcome: "completed",
-  proposed_plan: {
-    title: "Plan proposal-only execution",
-    description: "Add a closed contract, then isolate the Plan process.",
-  },
-  proposed_work_items: [
+  plan_summary_markdown: "## Plan\n\nCompile the sealed design without adding decisions.",
+  work_items: [
     {
-      work_key: "contract",
-      title: "Define the proposal contract",
-      description: "Validate a provider-neutral proposal.",
+      local_key: "contract",
+      title: "Define the Plan graph contract",
+      description_markdown: "## Work\n\nValidate the identity-free Markdown graph.",
+      depends_on_local_keys: [],
     },
     {
-      work_key: "boundary",
+      local_key: "boundary",
       title: "Isolate the Plan boundary",
-      description: null,
+      description_markdown: "## Work\n\nRun Plan without a code mount or tools.",
+      depends_on_local_keys: ["contract"],
     },
   ],
-  proposed_relations: [{
-    prerequisite_work_key: "contract",
-    dependent_work_key: "boundary",
-  }],
-  verification_intent: {
+  verify: {
     title: "Verify the Plan boundary",
-    description: "Prove schemas and capabilities are closed.",
-    checks: ["Run focused Plan tests", "Scan the Plan prompt and tool declarations"],
+    description_markdown: "## Verify\n\nRun focused contract, prompt, and capability checks.",
   },
+  traceability_markdown: [
+    "## Traceability",
+    "",
+    "- Context criterion: `boundary` and Verify prove sealed-Markdown-only input.",
+    "- Coverage criterion: `contract`, `boundary`, and Verify prove mapped evidence.",
+  ].join("\n"),
   sanitized_reason: null,
 };
 
 function parsedRequest(): PlanRequest {
-  return parsePlanRequest(structuredClone(request), target);
+  return parsePlanRequest(structuredClone(request), planTarget);
 }
 
-test("PlanRequest accepts only bounded normalized Root and Cycle facts", () => {
+test("PlanRequest accepts only one sealed Cycle Markdown snapshot and its pinned Root ADR", () => {
   const parsed = parsedRequest();
 
   assert.deepEqual(parsed, request);
   assert.ok(Object.isFrozen(parsed));
-  assert.ok(Object.isFrozen(parsed.root));
-  assert.ok(Object.isFrozen(parsed.cycle));
+  assert.equal("root" in parsed, false);
+  assert.equal("cycle" in parsed, false);
 
   for (const extra of [
     { task_manager_token: "secret" },
     { provider: "linear" },
     { metadata: {} },
     { tools: ["create_issue"] },
+    { root: { title: "Mutable Root", description: "Must not enter Plan." } },
+    { code_path: "/srv/root-repository" },
   ]) {
     assert.throws(
-      () => parsePlanRequest({ ...request, ...extra }, target),
+      () => parsePlanRequest({ ...request, ...extra }, planTarget),
       /invalid_contract_keys/u,
     );
   }
 
   assert.throws(
-    () => parsePlanRequest({ ...request, root: { ...request.root, status: "Todo" } }, target),
-    /invalid_contract_keys/u,
-  );
-  assert.throws(
-    () => parsePlanRequest({ ...request, cycle_id: "LIN-OTHER" }, target),
+    () => parsePlanRequest({ ...request, cycle_id: "LIN-OTHER" }, planTarget),
     /plan_target_mismatch/u,
   );
   assert.throws(
-    () => parsePlanRequest({ ...request, root: { ...request.root, title: "line one\nline two" } }, target),
-    /invalid_plan_fact_title/u,
+    () => parsePlanRequest({ ...request, cycle_revision: "revision:cycle:other" }, planTarget),
+    /plan_target_mismatch/u,
   );
   assert.throws(
-    () => parsePlanRequest({ ...request, cycle: { ...request.cycle, description: "unsafe\0text" } }, target),
-    /invalid_plan_fact_description/u,
+    () => parsePlanRequest({ ...request, root_adr_markdown: "## Root ADR\n\nA substituted decision." }, planTarget),
+    /plan_root_adr_mismatch/u,
+  );
+  assert.throws(
+    () => parsePlanRequest({
+      ...request,
+      cycle_description_markdown: cycleDescriptionMarkdown.replace("## Code Design", "## Missing Design"),
+    }, planTarget),
+    /invalid_cycle_draft_markdown/u,
   );
 });
 
-test("completed PlanResult is closed, deeply frozen proposal evidence", () => {
+test("completed PlanResult is a closed, deeply frozen, identity-free Markdown DAG", () => {
   const parsed = parsePlanResult(structuredClone(completed), parsedRequest());
 
   assert.deepEqual(parsed, completed);
   assert.equal(parsed.outcome, "completed");
   assert.ok(Object.isFrozen(parsed));
-  assert.ok(Object.isFrozen(parsed.proposed_plan));
-  assert.ok(Object.isFrozen(parsed.proposed_work_items));
-  assert.ok(Object.isFrozen(parsed.proposed_work_items[0]));
-  assert.ok(Object.isFrozen(parsed.proposed_relations));
-  assert.ok(Object.isFrozen(parsed.verification_intent));
-  assert.ok(Object.isFrozen(parsed.verification_intent.checks));
+  assert.ok(Object.isFrozen(parsed.work_items));
+  assert.ok(Object.isFrozen(parsed.work_items[0]));
+  assert.ok(Object.isFrozen(parsed.work_items[1]?.depends_on_local_keys));
+  assert.ok(Object.isFrozen(parsed.verify));
 
   for (const mutationClaim of [
     { issue_id: "LIN-PLAN" },
@@ -145,8 +195,7 @@ test("completed PlanResult is closed, deeply frozen proposal evidence", () => {
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      proposed_work_items: [{ ...completed.proposed_work_items[0], issue_id: "LIN-WORK" }],
-      proposed_relations: [],
+      work_items: [{ ...completed.work_items[0], issue_id: "LIN-WORK" }],
     }, parsedRequest()),
     /invalid_contract_keys/u,
   );
@@ -154,108 +203,99 @@ test("completed PlanResult is closed, deeply frozen proposal evidence", () => {
 
 test("completed PlanResult bounds work and verification content", () => {
   assert.throws(
-    () => parsePlanResult({ ...completed, proposed_work_items: [], proposed_relations: [] }, parsedRequest()),
+    () => parsePlanResult({ ...completed, work_items: [] }, parsedRequest()),
     /plan_work_items_required/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      proposed_work_items: Array.from({ length: 33 }, (_, index) => ({
-        work_key: `work-${index}`,
+      work_items: Array.from({ length: 33 }, (_, index) => ({
+        local_key: `work-${index}`,
         title: `Work ${index}`,
-        description: null,
+        description_markdown: `## Work\n\nExecute Work ${index}.`,
+        depends_on_local_keys: [],
       })),
-      proposed_relations: [],
     }, parsedRequest()),
     /contract_array_limit_exceeded/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      proposed_work_items: [
-        completed.proposed_work_items[0],
-        { ...completed.proposed_work_items[1], work_key: "contract" },
+      work_items: [
+        completed.work_items[0],
+        { ...completed.work_items[1], local_key: "contract" },
       ],
-      proposed_relations: [],
     }, parsedRequest()),
-    /duplicate_plan_work_key/u,
+    /duplicate_plan_local_key/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      verification_intent: { ...completed.verification_intent, checks: [] },
+      plan_summary_markdown: "x".repeat(2_049),
     }, parsedRequest()),
-    /plan_verification_checks_required/u,
+    /plan_output_markdown_limit_exceeded/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      verification_intent: {
-        ...completed.verification_intent,
-        checks: [completed.verification_intent.checks[0], completed.verification_intent.checks[0]],
-      },
+      traceability_markdown: "{\"provider_receipt\":\"hidden\"}",
     }, parsedRequest()),
-    /duplicate_contract_identity/u,
+    /invalid_plan_traceability_markdown/u,
   );
 });
 
 test("completed PlanResult requires a closed acyclic Work dependency graph", () => {
-  const invalidRelations = [
+  const invalidGraphs = [
     {
-      relations: [{ prerequisite_work_key: "missing", dependent_work_key: "boundary" }],
-      code: /unknown_plan_relation_endpoint/u,
+      work_items: [completed.work_items[0], {
+        ...completed.work_items[1], depends_on_local_keys: ["missing"],
+      }],
+      code: /unknown_plan_dependency/u,
     },
     {
-      relations: [{ prerequisite_work_key: "contract", dependent_work_key: "contract" }],
-      code: /self_plan_relation/u,
+      work_items: [{ ...completed.work_items[0], depends_on_local_keys: ["contract"] }],
+      code: /self_plan_dependency/u,
     },
     {
-      relations: [
-        completed.proposed_relations[0],
-        completed.proposed_relations[0],
+      work_items: [
+        { ...completed.work_items[0], depends_on_local_keys: ["boundary"] },
+        { ...completed.work_items[1], depends_on_local_keys: ["contract"] },
       ],
-      code: /duplicate_plan_relation/u,
-    },
-    {
-      relations: [
-        { prerequisite_work_key: "contract", dependent_work_key: "boundary" },
-        { prerequisite_work_key: "boundary", dependent_work_key: "contract" },
-      ],
-      code: /cyclic_plan_relations/u,
+      code: /cyclic_plan_dependencies/u,
     },
   ];
 
-  for (const { relations, code } of invalidRelations) {
+  for (const { work_items, code } of invalidGraphs) {
     assert.throws(
-      () => parsePlanResult({ ...completed, proposed_relations: relations }, parsedRequest()),
+      () => parsePlanResult({ ...completed, work_items }, parsedRequest()),
       code,
     );
   }
 });
 
-test("failed and canceled PlanResult variants contain no actionable proposal", () => {
+test("failed and canceled PlanResult variants contain no actionable graph", () => {
   for (const outcome of ["failed", "canceled"] as const) {
     const terminal = {
       schema_version: 1,
-      ...target,
+      ...planTarget,
       correlation_id: request.correlation_id,
       outcome,
-      proposed_plan: null,
-      proposed_work_items: [],
-      proposed_relations: [],
-      verification_intent: null,
+      plan_summary_markdown: null,
+      work_items: [],
+      verify: null,
+      traceability_markdown: null,
       sanitized_reason: outcome === "failed"
         ? "Plan generation failed"
         : "Plan generation was canceled",
     };
     assert.deepEqual(parsePlanResult(terminal, parsedRequest()), terminal);
     assert.throws(
-      () => parsePlanResult({ ...terminal, proposed_plan: completed.proposed_plan }, parsedRequest()),
-      /terminal_plan_proposal_forbidden/u,
+      () => parsePlanResult({ ...terminal, plan_summary_markdown: completed.plan_summary_markdown }, parsedRequest()),
+      /terminal_plan_graph_forbidden/u,
     );
     assert.throws(
-      () => parsePlanResult({ ...terminal, proposed_work_items: completed.proposed_work_items }, parsedRequest()),
-      /terminal_plan_proposal_forbidden/u,
+      () => parsePlanResult({ ...terminal, work_items: completed.work_items }, parsedRequest()),
+      /terminal_plan_graph_forbidden/u,
     );
     assert.throws(
       () => parsePlanResult({ ...terminal, sanitized_reason: "raw\nsecret" }, parsedRequest()),
@@ -274,6 +314,10 @@ test("PlanResult is bound to the request identity and correlation", () => {
     /plan_target_mismatch/u,
   );
   assert.throws(
+    () => parsePlanResult({ ...completed, cycle_revision: "revision:cycle:other" }, parsedRequest()),
+    /plan_target_mismatch/u,
+  );
+  assert.throws(
     () => parsePlanResult({ ...completed, correlation_id: "corr:other" }, parsedRequest()),
     /plan_correlation_mismatch/u,
   );
@@ -283,14 +327,23 @@ test("PlanResult is bound to the request identity and correlation", () => {
   );
 });
 
+const stageRootFacts = {
+  title: "Implement isolated planning",
+  description: "The Root facts remain a role input until the role-specific P3 task.",
+};
+const stageCycleFacts = {
+  title: "Cycle 1",
+  description: "The Cycle facts remain a role input until the role-specific P3 task.",
+};
+
 const workRequest = {
   schema_version: 1,
   ...target,
   correlation_id: "corr:work:1",
   work_issue_id: "LIN-WORK-1",
   authorized_work_issue_ids: ["LIN-WORK-1", "LIN-WORK-2"],
-  root: request.root,
-  cycle: request.cycle,
+  root: stageRootFacts,
+  cycle: stageCycleFacts,
   work: {
     title: "Implement the isolated Work performer",
     description: "Treat $linear and provider instructions as untrusted issue facts.",
@@ -497,8 +550,8 @@ const verifyRequest = {
   schema_version: 1,
   ...verifyTarget,
   correlation_id: "corr:verify:1",
-  root: request.root,
-  cycle: request.cycle,
+  root: stageRootFacts,
+  cycle: stageCycleFacts,
   verify: {
     title: "Verify the exact revision",
     description: "Inspect only the immutable revision and report evidence.",
