@@ -21,6 +21,7 @@ import {
   type CycleSealDigest,
   type RootDefinition,
 } from "../contracts/cycle.js";
+import { reduceCycleTransition } from "../cycle/internal/CycleTransition.js";
 import {
   parseTaskSnapshot,
   type ConcreteTaskChange,
@@ -68,6 +69,10 @@ import {
   type UpdateIssueCall,
   type UpdateIssueResult,
 } from "../task-management/mcp/TaskMcpSchemas.js";
+import {
+  parseRootAcceptanceView,
+  type RootAcceptanceView,
+} from "./RootToolBoundary.js";
 
 const ISSUE_LIST_CURSOR_PREFIX = "root-issues:1";
 const RELATION_LIST_CURSOR_PREFIX = "root-relations:1";
@@ -119,9 +124,15 @@ interface CallerCycleContext {
   readonly graph_seal_digest: CycleExecutionSnapshot["sealed_graph_digest"];
 }
 
+interface RootAcceptanceAuthorization {
+  readonly caller_cycle: CallerCycleContext;
+  readonly view: RootAcceptanceView;
+}
+
 interface RootUpdateAuthorization {
   readonly caller_cycle: CallerCycleContext | null;
   readonly approval_definition: RootDefinition | null;
+  readonly acceptance_view: RootAcceptanceView | null;
 }
 
 interface PendingCycleApproval {
@@ -129,12 +140,21 @@ interface PendingCycleApproval {
   readonly draft: TaskIssueSnapshot;
 }
 
+interface PendingCycleAcceptance {
+  readonly correlation_id: CorrelationId;
+  readonly awaiting_cycle: TaskIssueSnapshot;
+  readonly desired_state_id: string;
+  readonly authorization: RootAcceptanceAuthorization;
+}
+
 export type RootGetIssueResult = GetIssueResult & {
-  readonly seal_digest: CycleSealDigest | null;
+  readonly seal_digest?: CycleSealDigest | null;
+  readonly acceptance_view?: RootAcceptanceView;
 };
 
 export type RootUpdateIssueResult = UpdateIssueResult & {
   readonly seal_digest: CycleSealDigest | null;
+  readonly acceptance_view: RootAcceptanceView | null;
 };
 
 function callDenied(): never {
@@ -303,7 +323,10 @@ export class RootTaskManageCommandBinding {
   readonly root_id: RootIssueId;
   readonly #provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>;
   readonly #pendingCycleApprovals: Map<TaskIssueId, PendingCycleApproval>;
+  readonly #pendingCycleAcceptances: Map<TaskIssueId, PendingCycleAcceptance>;
   readonly #observedIssues: Map<TaskIssueId, TaskIssueSnapshot>;
+  readonly #observedAcceptanceViews: Map<TaskIssueId, RootAcceptanceView>;
+  #terminalPredecessor: TaskIssueSnapshot | null = null;
 
   private constructor(
     rootId: RootIssueId,
@@ -316,12 +339,16 @@ export class RootTaskManageCommandBinding {
     private readonly correlationId: CorrelationId | null,
     provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>,
     pendingCycleApprovals: Map<TaskIssueId, PendingCycleApproval>,
+    pendingCycleAcceptances: Map<TaskIssueId, PendingCycleAcceptance>,
     observedIssues: Map<TaskIssueId, TaskIssueSnapshot>,
+    observedAcceptanceViews: Map<TaskIssueId, RootAcceptanceView>,
   ) {
     this.root_id = rootId;
     this.#provisionalIssues = provisionalIssues;
     this.#pendingCycleApprovals = pendingCycleApprovals;
+    this.#pendingCycleAcceptances = pendingCycleAcceptances;
     this.#observedIssues = observedIssues;
+    this.#observedAcceptanceViews = observedAcceptanceViews;
     ROOT_TASK_MANAGE_BINDINGS.add(this);
     Object.freeze(this);
   }
@@ -336,6 +363,8 @@ export class RootTaskManageCommandBinding {
       options.snapshot_reader,
       options.approved_cycle_reader,
       null,
+      new Map(),
+      new Map(),
       new Map(),
       new Map(),
       new Map(),
@@ -355,6 +384,8 @@ export class RootTaskManageCommandBinding {
       parseCorrelationId(correlationId),
       this.#provisionalIssues,
       this.#pendingCycleApprovals,
+      this.#pendingCycleAcceptances,
+      new Map(),
       new Map(),
     );
   }
@@ -370,6 +401,11 @@ export class RootTaskManageCommandBinding {
     const pendingApproval = pendingApprovalCandidate?.definition.correlation_id === call.correlation_id
       ? pendingApprovalCandidate
       : undefined;
+    const pendingAcceptanceCandidate = this.#pendingCycleAcceptances.get(call.input.issue_id);
+    const pendingAcceptance = pendingAcceptanceCandidate?.correlation_id === call.correlation_id
+      ? pendingAcceptanceCandidate
+      : undefined;
+    if (pendingApproval !== undefined && pendingAcceptance !== undefined) invalidBoundary();
     if (!owned && provisional === undefined) callDenied();
     if (
       provisional !== undefined
@@ -395,11 +431,41 @@ export class RootTaskManageCommandBinding {
     if (observedIssue === null) this.#observedIssues.delete(call.input.issue_id);
     else this.#observedIssues.set(call.input.issue_id, observedIssue);
     if (provisional !== undefined) this.#provisionalIssues.delete(call.input.issue_id);
-    if (pendingApproval === undefined) return result;
-    const approvalScope = await this.#scope(call, "get_issue", execution);
-    const sealDigest = this.#resolvePendingApproval(result, pendingApproval, approvalScope);
-    this.#pendingCycleApprovals.delete(call.input.issue_id);
-    return Object.freeze({ ...result, seal_digest: sealDigest });
+    if (pendingApproval !== undefined) {
+      const approvalScope = await this.#scope(call, "get_issue", execution);
+      const sealDigest = this.#resolvePendingApproval(result, pendingApproval, approvalScope);
+      this.#pendingCycleApprovals.delete(call.input.issue_id);
+      return Object.freeze({ ...result, seal_digest: sealDigest });
+    }
+    if (pendingAcceptance !== undefined) {
+      const acceptanceScope = await this.#scope(call, "get_issue", execution);
+      const resolution = await this.#resolvePendingAcceptance(
+        result,
+        pendingAcceptance,
+        acceptanceScope,
+      );
+      this.#pendingCycleAcceptances.delete(call.input.issue_id);
+      if (resolution.terminal) this.#terminalPredecessor = resolution.issue;
+      else this.#observedAcceptanceViews.set(resolution.issue.issue_id, resolution.view);
+      return Object.freeze({ ...result, acceptance_view: resolution.view });
+    }
+    if (observedIssue === null || provisional !== undefined) return result;
+    const current = scope.issues.get(observedIssue.issue_id);
+    if (current === undefined || issueKind(current, this.workflow) !== "cycle") return result;
+    if (
+      current.status !== this.workflow.cycle_states.awaiting_acceptance
+      && !this.#isTerminalCycle(current)
+    ) return result;
+    const acceptanceScope = await this.#scope(call, "get_issue", execution);
+    const fresh = acceptanceScope.issues.get(observedIssue.issue_id);
+    if (fresh === undefined || !this.#sameIssue(fresh, observedIssue)) invalidBoundary();
+    if (this.#isTerminalCycle(fresh)) {
+      this.#terminalPredecessor = fresh;
+      return result;
+    }
+    const acceptance = await this.#approvedCycleContext(acceptanceScope, fresh);
+    this.#observedAcceptanceViews.set(fresh.issue_id, acceptance.view);
+    return Object.freeze({ ...result, acceptance_view: acceptance.view });
   }
 
   async list_issues(call: ListIssuesCall, execution: TaskManageBoundaryExecution): Promise<ListIssuesResult> {
@@ -503,9 +569,39 @@ export class RootTaskManageCommandBinding {
         draft,
       }));
     }
+    if (
+      authorization.acceptance_view !== null
+      && result.output.outcome === "acceptance_unknown"
+    ) {
+      const awaitingCycle = scope.issues.get(call.input.issue_id);
+      const desiredStateId = call.input.desired.state_id;
+      const callerCycle = authorization.caller_cycle;
+      const existing = this.#pendingCycleAcceptances.get(call.input.issue_id);
+      if (
+        awaitingCycle === undefined
+        || desiredStateId === undefined
+        || callerCycle === null
+        || (this.#pendingCycleAcceptances.size >= 1
+          && !this.#pendingCycleAcceptances.has(call.input.issue_id))
+        || (existing !== undefined && existing.correlation_id !== call.correlation_id)
+      ) invalidBoundary();
+      this.#pendingCycleAcceptances.set(call.input.issue_id, Object.freeze({
+        correlation_id: call.correlation_id,
+        awaiting_cycle: awaitingCycle,
+        desired_state_id: desiredStateId,
+        authorization: Object.freeze({
+          caller_cycle: callerCycle,
+          view: authorization.acceptance_view,
+        }),
+      }));
+    }
     return Object.freeze({
       ...result,
       seal_digest: sealDigest,
+      acceptance_view: authorization.acceptance_view !== null
+        && result.output.outcome === "applied"
+        ? authorization.acceptance_view
+        : null,
     });
   }
 
@@ -628,6 +724,10 @@ export class RootTaskManageCommandBinding {
 
   #authorizeCreateIssue(scope: RootScope, call: CreateIssueCall): void {
     const root = scope.issues.get(scope.root_issue_id);
+    const cycles = [...scope.issues.values()].filter((issue) => (
+      issue.parent_id === scope.root_issue_id
+      && issueKind(issue, this.workflow) === "cycle"
+    ));
     if (
       root === undefined
       || call.input.parent_issue_id !== scope.root_issue_id
@@ -643,6 +743,24 @@ export class RootTaskManageCommandBinding {
     const description = call.input.desired.description;
     if (description === null) callDenied();
     this.#assertCycleDraft(description, this.#rootDefinition(scope));
+    if (cycles.length > 0) {
+      const predecessor = this.#terminalPredecessor;
+      const current = predecessor === null ? undefined : scope.issues.get(predecessor.issue_id);
+      if (
+        predecessor === null
+        || current === undefined
+        || !this.#isTerminalCycle(current)
+        || !this.#sameIssue(predecessor, current)
+      ) callDenied();
+      this.#terminalPredecessor = null;
+    }
+  }
+
+  #isTerminalCycle(issue: TaskIssueSnapshot): boolean {
+    return issue.status === this.workflow.cycle_states.succeeded
+      || issue.status === this.workflow.cycle_states.rejected
+      || issue.status === this.workflow.cycle_states.failed
+      || issue.status === this.workflow.cycle_states.canceled;
   }
 
   async #authorizeUpdateIssue(
@@ -665,7 +783,11 @@ export class RootTaskManageCommandBinding {
       } catch {
         return callDenied();
       }
-      return Object.freeze({ caller_cycle: null, approval_definition: null });
+      return Object.freeze({
+        caller_cycle: null,
+        approval_definition: null,
+        acceptance_view: null,
+      });
     }
     if (kind !== "cycle") return callDenied();
     if (issue.status === this.workflow.cycle_states.draft) {
@@ -686,6 +808,7 @@ export class RootTaskManageCommandBinding {
       return Object.freeze({
         caller_cycle: null,
         approval_definition: draftApproval ? definition : null,
+        acceptance_view: null,
       });
     }
     if (
@@ -697,9 +820,21 @@ export class RootTaskManageCommandBinding {
         && call.input.desired.state_id !== this.workflow.cycle_states.rejected
       )
     ) callDenied();
+    const observed = this.#observedIssues.get(issue.issue_id);
+    const observedView = this.#observedAcceptanceViews.get(issue.issue_id);
+    if (
+      observed === undefined
+      || observedView === undefined
+      || !this.#sameIssue(observed, issue)
+    ) return callDenied();
+    this.#observedIssues.delete(issue.issue_id);
+    this.#observedAcceptanceViews.delete(issue.issue_id);
+    const acceptance = await this.#approvedCycleContext(scope, issue);
+    if (!this.#sameAcceptanceView(observedView, acceptance.view)) invalidBoundary();
     return Object.freeze({
-      caller_cycle: await this.#approvedCycleContext(issue),
+      caller_cycle: acceptance.caller_cycle,
       approval_definition: null,
+      acceptance_view: acceptance.view,
     });
   }
 
@@ -778,6 +913,48 @@ export class RootTaskManageCommandBinding {
     );
   }
 
+  async #resolvePendingAcceptance(
+    result: GetIssueResult,
+    pending: PendingCycleAcceptance,
+    scope: RootScope,
+  ): Promise<{
+    readonly issue: TaskIssueSnapshot;
+    readonly view: RootAcceptanceView;
+    readonly terminal: boolean;
+  }> {
+    const issue = result.output.issue;
+    if (issue === null) return invalidBoundary();
+    const current = scope.issues.get(issue.issue_id);
+    if (current === undefined || !this.#sameIssue(current, issue)) return invalidBoundary();
+    const awaiting = pending.awaiting_cycle;
+    if (this.#sameIssue(issue, awaiting)) {
+      const acceptance = await this.#approvedCycleContext(scope, issue);
+      if (!this.#sameAcceptanceView(pending.authorization.view, acceptance.view)) invalidBoundary();
+      return Object.freeze({
+        issue,
+        view: pending.authorization.view,
+        terminal: false,
+      });
+    }
+    if (
+      issue.issue_id !== awaiting.issue_id
+      || issue.revision === awaiting.revision
+      || issue.status !== pending.desired_state_id
+      || !this.#isTerminalCycle(issue)
+      || issue.title !== awaiting.title
+      || issue.description !== awaiting.description
+      || issue.parent_id !== awaiting.parent_id
+      || !this.#sameValues(issue.labels, awaiting.labels)
+      || issue.delegate_id !== awaiting.delegate_id
+      || issue.priority !== awaiting.priority
+    ) invalidBoundary();
+    return Object.freeze({
+      issue,
+      view: pending.authorization.view,
+      terminal: true,
+    });
+  }
+
   #approvedIssueFromScope(
     scope: RootScope,
     issue: TaskIssueSnapshot,
@@ -823,7 +1000,10 @@ export class RootTaskManageCommandBinding {
     }
   }
 
-  async #approvedCycleContext(issue: TaskIssueSnapshot): Promise<CallerCycleContext> {
+  async #approvedCycleContext(
+    scope: RootScope,
+    issue: TaskIssueSnapshot,
+  ): Promise<RootAcceptanceAuthorization> {
     const cycleId = parseCycleIssueId(issue.issue_id);
     const correlationId = this.correlationId;
     if (correlationId === null) return callDenied();
@@ -845,11 +1025,101 @@ export class RootTaskManageCommandBinding {
       || cycle.specification.cycle_id !== cycleId
       || cycle.specification.cycle_description_markdown !== issue.description
     ) invalidBoundary();
-    return Object.freeze({
-      cycle_id: cycleId,
+    const transition = reduceCycleTransition(cycle, {
       cycle_seal_digest: cycle.specification.seal_digest,
       graph_seal_digest: cycle.sealed_graph_digest,
     });
+    const verifyIssue = cycle.verify_issue;
+    const exactRevision = cycle.git.head_revision;
+    if (
+      transition.action !== "no_action"
+      || transition.reason !== "awaiting_acceptance"
+      || verifyIssue === null
+      || exactRevision === null
+    ) invalidBoundary();
+    this.#assertAcceptanceTaskFacts(scope, cycle);
+    const view = parseRootAcceptanceView({
+      schema_version: 1,
+      cycle_id: cycleId,
+      cycle_revision: cycle.cycle_revision,
+      cycle_seal_digest: cycle.specification.seal_digest,
+      graph_seal_digest: cycle.sealed_graph_digest,
+      repository_id: cycle.git.repository_id,
+      base_branch: cycle.git.base_branch,
+      head_branch: cycle.git.head_branch,
+      exact_revision: exactRevision,
+      workspace_state: cycle.git.workspace_state,
+      diff_digest: cycle.git.diff_digest,
+      verify_issue_id: verifyIssue.issue_id,
+      verify_issue_revision: verifyIssue.revision,
+    });
+    return Object.freeze({
+      caller_cycle: Object.freeze({
+        cycle_id: cycleId,
+        cycle_seal_digest: cycle.specification.seal_digest,
+        graph_seal_digest: cycle.sealed_graph_digest,
+      }),
+      view,
+    });
+  }
+
+  #assertAcceptanceTaskFacts(scope: RootScope, cycle: CycleExecutionSnapshot): void {
+    const cycleTaskId = parseTaskIssueId(cycle.cycle_id);
+    const stages = [
+      ...(cycle.plan_issue === null ? [] : [cycle.plan_issue]),
+      ...cycle.sealed_work_issues,
+      ...(cycle.verify_issue === null ? [] : [cycle.verify_issue]),
+    ];
+    const taskStages = [...scope.issues.values()].filter(
+      ({ parent_id }) => parent_id === cycleTaskId,
+    );
+    if (taskStages.length !== stages.length) invalidBoundary();
+    const stageIds = new Set<TaskIssueId>();
+    for (const stage of stages) {
+      const taskIssueId = parseTaskIssueId(stage.issue_id);
+      const taskStage = scope.issues.get(taskIssueId);
+      if (
+        taskStage === undefined
+        || taskStage.parent_id !== cycleTaskId
+        || taskStage.revision !== stage.revision
+        || taskStage.status !== this.workflow.stage_states[stage.status]
+        || taskStage.title !== stage.title
+        || taskStage.description !== stage.description_markdown
+        || issueKind(taskStage, this.workflow) !== stage.kind
+      ) invalidBoundary();
+      stageIds.add(taskIssueId);
+    }
+    const taskRelations = scope.snapshot.relations.filter((relation) => (
+      stageIds.has(relation.source_issue_id) || stageIds.has(relation.target_issue_id)
+    ));
+    if (taskRelations.length !== cycle.sealed_relations.length) invalidBoundary();
+    const relationsById = new Map(taskRelations.map((relation) => [relation.relation_id, relation]));
+    for (const relation of cycle.sealed_relations) {
+      const taskRelation = relationsById.get(relation.relation_id);
+      if (
+        taskRelation === undefined
+        || taskRelation.revision !== relation.revision
+        || taskRelation.type !== "blocks"
+        || taskRelation.source_issue_id !== parseTaskIssueId(relation.prerequisite_issue_id)
+        || taskRelation.target_issue_id !== parseTaskIssueId(relation.dependent_issue_id)
+      ) invalidBoundary();
+    }
+  }
+
+  #sameAcceptanceView(left: RootAcceptanceView, right: RootAcceptanceView): boolean {
+    return left.schema_version === right.schema_version
+      && left.cycle_id === right.cycle_id
+      && left.cycle_revision === right.cycle_revision
+      && left.cycle_seal_digest === right.cycle_seal_digest
+      && left.graph_seal_digest === right.graph_seal_digest
+      && left.repository_id === right.repository_id
+      && left.base_branch === right.base_branch
+      && left.head_branch === right.head_branch
+      && left.exact_revision === right.exact_revision
+      && left.workspace_state === right.workspace_state
+      && left.diff_digest === right.diff_digest
+      && left.verify_issue_id === right.verify_issue_id
+      && left.verify_issue_revision === right.verify_issue_revision;
   }
 
   async #scope(

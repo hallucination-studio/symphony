@@ -527,6 +527,13 @@ export function parseCycleSealDigest(value: unknown): CycleSealDigest {
   return value as CycleSealDigest;
 }
 
+export function parseExecutionGraphSealDigest(value: unknown): ExecutionGraphSealDigest {
+  if (typeof value !== "string" || !CYCLE_SEAL_PATTERN.test(value)) {
+    throw new Error("invalid_execution_graph_seal_digest");
+  }
+  return value as ExecutionGraphSealDigest;
+}
+
 export function sealCycleSpecification(
   value: unknown,
   rootDefinition: RootDefinition,

@@ -32,7 +32,7 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
     };
     readonly freshness_contract?: unknown;
     readonly define_contract?: unknown;
-    readonly phase_stop_contract?: unknown;
+    readonly cycle_boundary_contract?: unknown;
     readonly instruction?: unknown;
   };
 
@@ -102,10 +102,17 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
     cycle_creation_requires: "complete Root Markdown in current-turn fresh Task Manager facts",
     root_update_required_when: "the current-turn fresh Root Markdown is absent or incomplete",
   });
-  assert.deepEqual(prompt.phase_stop_contract, {
+  assert.deepEqual(prompt.cycle_boundary_contract, {
     in_progress: "quiescent with no mutation; Conductor owns mechanical execution",
-    awaiting_acceptance: "quiescent with no acceptance, rejection, delivery, or successor mutation",
-    terminal_cycle: "quiescent with no successor creation",
+    awaiting_acceptance: {
+      fresh_read_required: "get_issue for the exact Awaiting Acceptance Cycle in the current turn",
+      allowed_transitions: ["Succeeded", "Rejected"],
+      succeed_requires: "the returned acceptance view with complete evidence at one exact verified revision",
+    },
+    terminal_cycle: {
+      fresh_read_required: "get_issue for one exact terminal predecessor in the current turn",
+      allowed_action: "create one fresh successor Cycle Draft with no Performer context reuse or fork",
+    },
   });
 
   const instruction = String(prompt.instruction);
@@ -122,12 +129,17 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
     "constraints and consequences",
     "resolving exact get_issue",
     "In Progress, remain quiescent without mutation",
-    "Awaiting Acceptance, do not accept, reject, deliver, or create a successor",
-    "terminal Cycle, do not create a successor",
+    "Awaiting Acceptance",
+    "acceptance_view",
+    "exact verified revision",
+    "Succeeded or Rejected",
+    "terminal predecessor",
+    "fresh successor Draft",
+    "never reuse or fork Performer context",
   ]) assert.equal(instruction.includes(required), true, required);
-  assert.equal(instruction.includes("Plan Performer"), false);
-  assert.equal(instruction.includes("Work Performer"), false);
-  assert.equal(instruction.includes("Verify Performer"), false);
+  for (const forbidden of ["call Plan", "call Work", "call Verify", "create_commit"]) {
+    assert.equal(instruction.includes(forbidden), false, forbidden);
+  }
 });
 
 test("Root output schema remains a closed semantic-turn outcome", () => {

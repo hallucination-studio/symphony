@@ -33,16 +33,17 @@ import {
 import {
   RootToolCallError,
   RootToolFatalError,
+  parseRootAcceptanceView,
+  type RootAcceptanceView,
   type RootToolBinding,
   type RootToolExecution,
   type RootToolSpec,
 } from "./RootToolBoundary.js";
 
-type DeclaredRootToolFamily = "performer" | "git" | "delivery";
+type DeclaredRootToolFamily = "git" | "delivery";
 
 const APPROVED_DECLARED_TOOL_NAMES = Object.freeze({
-  performer: ["plan", "work", "verify"],
-  git: ["get_workspace", "prepare_worktree", "get_status", "get_diff", "create_commit"],
+  git: ["get_workspace", "get_status", "get_diff"],
   delivery: ["get_remote_ref", "push_revision", "list_pull_requests", "create_pull_request", "get_pull_request"],
 } as const satisfies Record<DeclaredRootToolFamily, readonly string[]>);
 
@@ -263,16 +264,28 @@ type RootTaskToolResult = TaskMcpResult | RootGetIssueResult | RootUpdateIssueRe
 
 function parseTaskResult(value: unknown, call: TaskMcpCall): RootTaskToolResult {
   let sealDigest: CycleSealDigest | null | undefined;
+  let acceptanceView: RootAcceptanceView | null | undefined;
   let taskValue = value;
   if (call.function === "update_issue" || call.function === "get_issue") {
     const record = asRecord(value);
-    if (call.function === "update_issue" && !("seal_digest" in record)) {
-      throw new Error("missing_root_seal_digest");
+    if (
+      call.function === "update_issue"
+      && (!("seal_digest" in record) || !("acceptance_view" in record))
+    ) {
+      throw new Error("missing_root_update_evidence");
     }
-    if ("seal_digest" in record) {
-      sealDigest = record.seal_digest === null ? null : parseCycleSealDigest(record.seal_digest);
+    if ("seal_digest" in record || "acceptance_view" in record) {
       const genericResult = { ...record };
-      delete genericResult.seal_digest;
+      if ("seal_digest" in record) {
+        sealDigest = record.seal_digest === null ? null : parseCycleSealDigest(record.seal_digest);
+        delete genericResult.seal_digest;
+      }
+      if ("acceptance_view" in record) {
+        acceptanceView = call.function === "update_issue" && record.acceptance_view === null
+          ? null
+          : parseRootAcceptanceView(record.acceptance_view);
+        delete genericResult.acceptance_view;
+      }
       taskValue = genericResult;
     }
   }
@@ -286,9 +299,12 @@ function parseTaskResult(value: unknown, call: TaskMcpCall): RootTaskToolResult 
   if ("concrete_diff" in result.output && result.output.concrete_diff.length > MAX_ROOT_TASK_CHANGES) {
     throw new Error("root_task_change_limit_exceeded");
   }
-  return sealDigest === undefined
-    ? result
-    : Object.freeze({ ...result, seal_digest: sealDigest });
+  if (sealDigest === undefined && acceptanceView === undefined) return result;
+  return Object.freeze({
+    ...result,
+    ...(sealDigest === undefined ? {} : { seal_digest: sealDigest }),
+    ...(acceptanceView === undefined ? {} : { acceptance_view: acceptanceView }),
+  }) as RootTaskToolResult;
 }
 
 function assertRootPageSize(call: TaskMcpCall): void {
@@ -350,6 +366,9 @@ export class RootTools {
     const declaredTools = new Map<string, DeclaredRootTool<unknown, unknown>>();
     const declaredCapabilities = new Set<string>();
     for (const declaration of declarations) {
+      if (!Object.hasOwn(APPROVED_DECLARED_TOOL_NAMES, declaration.family)) {
+        throw new Error("unapproved_root_tool");
+      }
       const approvedNames = APPROVED_DECLARED_TOOL_NAMES[declaration.family] as readonly string[];
       if (!approvedNames.includes(declaration.spec.name)) throw new Error("unapproved_root_tool");
       const expectedCapability = `${declaration.family}:${declaration.spec.name}`;

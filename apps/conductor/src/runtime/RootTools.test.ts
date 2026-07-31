@@ -382,14 +382,19 @@ function isAcceptanceUnknown(error: unknown): boolean {
   return error instanceof RootToolCallError && error.code === "acceptance_unknown";
 }
 
-function planDeclaration(calls: string[]): DeclaredRootTool<Record<string, unknown>, { readonly outcome: "completed" }> {
+function declaredReadTool(
+  family: "git" | "delivery",
+  name: "get_status" | "get_remote_ref",
+  calls: string[],
+): DeclaredRootTool<Record<string, unknown>, { readonly outcome: "completed" }> {
+  const capability = `${family}:${name}` as const;
   return {
-    family: "performer",
-    capability: "performer:plan",
+    family,
+    capability,
     spec: {
       type: "function",
-      name: "plan",
-      description: "Request a typed planning proposal",
+      name,
+      description: "Read one typed boundary fact",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -410,33 +415,21 @@ function planDeclaration(calls: string[]): DeclaredRootTool<Record<string, unkno
 
 test("Root tools expose only capability-approved generic schemas", () => {
   const calls: string[] = [];
-  const plan = planDeclaration(calls);
-  const git = {
-    ...plan,
-    family: "git" as const,
-    capability: "git:get_status" as const,
-    spec: { ...plan.spec, name: "get_status", description: "Read typed workspace status" },
-  };
-  const delivery = {
-    ...plan,
-    family: "delivery" as const,
-    capability: "delivery:get_remote_ref" as const,
-    spec: { ...plan.spec, name: "get_remote_ref", description: "Read one typed remote ref" },
-  };
+  const git = declaredReadTool("git", "get_status", calls);
+  const delivery = declaredReadTool("delivery", "get_remote_ref", calls);
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [
       TASK_MCP_CAPABILITIES.get_issue,
-      "performer:plan",
       "git:get_status",
       "delivery:get_remote_ref",
     ],
     task_manager: bindTaskManager(taskManager(calls)),
-    declared_tools: [plan, git, delivery],
+    declared_tools: [git, delivery],
   });
 
   assert.deepEqual(tools.specs.map(({ name }) => name), [
-    "get_issue", "plan", "get_status", "get_remote_ref",
+    "get_issue", "get_status", "get_remote_ref",
   ]);
   const getIssueSchema = tools.specs[0]?.inputSchema as {
     properties?: Record<string, { const?: unknown }>;
@@ -952,30 +945,18 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
       },
     }, call);
   };
-  const plan = planDeclaration(effects);
-  const git = {
-    ...plan,
-    family: "git" as const,
-    capability: "git:get_status" as const,
-    spec: { ...plan.spec, name: "get_status" },
-  };
-  const delivery = {
-    ...plan,
-    family: "delivery" as const,
-    capability: "delivery:get_remote_ref" as const,
-    spec: { ...plan.spec, name: "get_remote_ref" },
-  };
+  const git = declaredReadTool("git", "get_status", effects);
+  const delivery = declaredReadTool("delivery", "get_remote_ref", effects);
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
     capabilities: [
       TASK_MCP_CAPABILITIES.get_issue,
       TASK_MCP_CAPABILITIES.update_issue,
-      "performer:plan",
       "git:get_status",
       "delivery:get_remote_ref",
     ],
     task_manager: bindTaskManager(manager),
-    declared_tools: [plan, git, delivery],
+    declared_tools: [git, delivery],
   });
   const bindings = new Map(tools.bindings(correlationId).map((binding) => [binding.spec.name, binding]));
   const read = bindings.get("get_issue");
@@ -985,7 +966,7 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
   await read.execute(getIssueCall(), { assertActive: () => undefined });
   await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
 
-  for (const name of ["plan", "get_status", "get_remote_ref"]) {
+  for (const name of ["get_status", "get_remote_ref"]) {
     const binding = bindings.get(name);
     assert.ok(binding);
     await assert.rejects(binding.execute({
@@ -993,9 +974,7 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
       root_id: rootId,
       runtime_generation: generation,
       correlation_id: correlationId,
-      capability: binding.spec.name === "plan"
-        ? "performer:plan"
-        : binding.spec.name === "get_status"
+      capability: binding.spec.name === "get_status"
           ? "git:get_status"
           : "delivery:get_remote_ref",
     }, { assertActive: () => undefined }), isAcceptanceUnknown);
@@ -1336,12 +1315,12 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
   }, { assertActive: () => undefined }), /invalid_contract/u);
 });
 
-test("declared Performer tools retain typed parsing while unknown capabilities and internal tool names fail closed", async () => {
+test("Root tools retain typed read-only Git parsing while former execution and commit tools fail closed", async () => {
   const calls: string[] = [];
-  const declaration = planDeclaration(calls);
+  const declaration = declaredReadTool("git", "get_status", calls);
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
-    capabilities: ["performer:plan"],
+    capabilities: ["git:get_status"],
     task_manager: bindTaskManager(taskManager(calls)),
     declared_tools: [declaration],
   });
@@ -1352,20 +1331,29 @@ test("declared Performer tools retain typed parsing while unknown capabilities a
     root_id: rootId,
     runtime_generation: generation,
     correlation_id: correlationId,
-    capability: "performer:plan",
+    capability: "git:get_status",
   }, { assertActive: () => undefined });
   assert.deepEqual(result, { outcome: "completed" });
-  assert.deepEqual(calls, ["performer:plan"]);
+  assert.deepEqual(calls, ["git:get_status"]);
 
-  assert.throws(() => new RootTools({
-    target: { root_id: rootId, runtime_generation: generation },
-    capabilities: ["performer:unknown"],
-    task_manager: bindTaskManager(taskManager([])),
-  }), /unknown_root_capability/u);
-  assert.throws(() => new RootTools({
-    target: { root_id: rootId, runtime_generation: generation },
-    capabilities: ["performer:plan"],
-    task_manager: bindTaskManager(taskManager([])),
-    declared_tools: [{ ...declaration, spec: { ...declaration.spec, name: "shell" } }],
-  }), /unapproved_root_tool/u);
+  for (const [family, name, capability] of [
+    ["performer", "plan", "performer:plan"],
+    ["performer", "work", "performer:work"],
+    ["performer", "verify", "performer:verify"],
+    ["git", "prepare_worktree", "git:prepare_worktree"],
+    ["git", "create_commit", "git:create_commit"],
+  ] as const) {
+    const forbidden = {
+      ...declaration,
+      family,
+      capability,
+      spec: { ...declaration.spec, name },
+    } as unknown as DeclaredRootTool<unknown, unknown>;
+    assert.throws(() => new RootTools({
+      target: { root_id: rootId, runtime_generation: generation },
+      capabilities: [capability],
+      task_manager: bindTaskManager(taskManager([])),
+      declared_tools: [forbidden],
+    }), /unapproved_root_tool/u, capability);
+  }
 });

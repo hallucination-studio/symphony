@@ -117,8 +117,9 @@ export function rootReconcillPrompt(
       "While the Cycle is Draft, correct only its description using the expected revision returned by that current-turn fresh read-back.",
       "Approve only the exact Draft reviewed from the current-turn fresh read-back by changing its status to In Progress with that expected revision; approval is complete only when either the applied update fresh resource or the resolving exact get_issue is In Progress and seal_digest is non-null.",
       "When the Cycle is In Progress, remain quiescent without mutation because Conductor owns mechanical execution.",
-      "When the Cycle is Awaiting Acceptance, do not accept, reject, deliver, or create a successor in this implementation phase; remain quiescent.",
-      "When the current Cycle is a terminal Cycle, do not create a successor in this implementation phase; remain quiescent.",
+      "When the Cycle is Awaiting Acceptance, call get_issue for that exact Cycle in the same current turn and use its acceptance_view as the sole authorization binding while declared read-only tools inspect the sealed Cycle, complete Verify evidence, exact diff, and exact verified revision.",
+      "After that review, the only allowed mutation is changing that exact Awaiting Acceptance Cycle to Succeeded or Rejected with its current-turn expected revision; Succeeded requires the unchanged acceptance_view, and incomplete or conflicting evidence must never succeed.",
+      "When the current Cycle is terminal and another attempt is required, first call get_issue for that exact terminal predecessor in the same current turn, then create one fresh successor Draft from current Root facts; never reuse or fork Performer context, Stage identity, graph, or turn from the predecessor.",
       "The transcript, prior-turn tool results, code-inspection output, search output, and temporary reasoning are ephemeral: they are never current facts for a later turn; re-read required Task Manager Markdown in that later turn.",
       "Use only declared generic tools, carrying the exact Root, generation, correlation, capability, target identity, and fresh revision from current facts.",
       "Call at most one tool at a time and observe every typed result before choosing another minimum next action.",
@@ -175,10 +176,17 @@ export function rootReconcillPrompt(
       cycle_creation_requires: "complete Root Markdown in current-turn fresh Task Manager facts",
       root_update_required_when: "the current-turn fresh Root Markdown is absent or incomplete",
     },
-    phase_stop_contract: {
+    cycle_boundary_contract: {
       in_progress: "quiescent with no mutation; Conductor owns mechanical execution",
-      awaiting_acceptance: "quiescent with no acceptance, rejection, delivery, or successor mutation",
-      terminal_cycle: "quiescent with no successor creation",
+      awaiting_acceptance: {
+        fresh_read_required: "get_issue for the exact Awaiting Acceptance Cycle in the current turn",
+        allowed_transitions: ["Succeeded", "Rejected"],
+        succeed_requires: "the returned acceptance view with complete evidence at one exact verified revision",
+      },
+      terminal_cycle: {
+        fresh_read_required: "get_issue for one exact terminal predecessor in the current turn",
+        allowed_action: "create one fresh successor Cycle Draft with no Performer context reuse or fork",
+      },
     },
     input_kind: inputKind,
     observation: input,

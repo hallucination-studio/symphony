@@ -896,7 +896,7 @@ test("Codex Root transport rejects Performer and write-capable Git tools before 
     ["create_commit", "git:create_commit"],
   ] as const) {
     const family = name === "plan" ? "performer" as const : "git" as const;
-    const declaration: DeclaredRootTool<unknown, unknown> = Object.freeze({
+    const declaration = Object.freeze({
       family,
       capability,
       spec: Object.freeze({
@@ -913,18 +913,20 @@ test("Codex Root transport rejects Performer and write-capable Git tools before 
       parseCall: (value: unknown) => value,
       execute: (value: unknown) => Promise.resolve(value),
       parseResult: (value: unknown) => value,
-    });
-    const forbiddenTools = trustedCodexTools([capability], [declaration]);
-    const outcome = await factory.create({
-      root_id: rootId,
-      runtime_generation: generation,
-      root_home: rootHome,
-      tools: forbiddenTools,
+    }) as unknown as DeclaredRootTool<unknown, unknown>;
+    const outcome = await Promise.resolve().then(() => {
+      const forbiddenTools = trustedCodexTools([capability], [declaration]);
+      return factory.create({
+        root_id: rootId,
+        runtime_generation: generation,
+        root_home: rootHome,
+        tools: forbiddenTools,
+      });
     }).then(async (transport) => {
       await transport.close();
       return "created";
     }, (error: Error) => error.message);
-    assert.equal(outcome, "root_local_only_tool_denied", capability);
+    assert.equal(outcome, "unapproved_root_tool", capability);
   }
   assert.equal(appServer.spawns.length, 0);
 });
