@@ -107,7 +107,11 @@ export class RootRuntime implements RegisteredRootRuntime {
       || taskSnapshotDigest(observation.task) !== observation.to_task_digest
     ) return this.#observations.prepare(observation, this.#workspace);
 
-    const cycle = await this.#cycle.prepare(observation.task, observation.correlation_id);
+    const cycle = await this.#cycle.prepare(
+      observation.task,
+      observation.correlation_id,
+      this.#observations.acceptedTask(),
+    );
     if (cycle.kind !== "root_available") return cycle;
     const attempt = await this.#observations.prepare(taskInput, this.#workspace);
     if (attempt.kind === "bootstrap" || attempt.kind === "diff") this.#prepared.add(attempt);

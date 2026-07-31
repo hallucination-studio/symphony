@@ -36,10 +36,6 @@ import {
   type FreshCycleExecutionReader,
 } from "./CycleMachine.js";
 
-const MATERIALIZATION_EXECUTION: TaskManageBoundaryExecution = Object.freeze({
-  assertActive: () => undefined,
-});
-
 export interface CycleGraphMaterializerOptions {
   readonly workflow: TaskWorkflowIdentities;
   readonly caller_issuer: TaskManageCallerIssuer;
@@ -255,7 +251,9 @@ export class CycleGraphMaterializer {
   async materialize(
     request: CycleAdvanceRequest,
     plan: CompletedPlanResult,
+    execution: TaskManageBoundaryExecution,
   ): Promise<CycleAdvanceRequest> {
+    execution.assertActive();
     const workCalls = plan.work_items.map((item) => issueCall(
       request,
       this.#workflow,
@@ -285,7 +283,7 @@ export class CycleGraphMaterializer {
       const item = plan.work_items[index];
       if (call === undefined || item === undefined) throw new Error("plan_materialization_index_invalid");
       const issue = appliedIssue(
-        (await createCommand.create_issue(call, MATERIALIZATION_EXECUTION)).output,
+        (await createCommand.create_issue(call, execution)).output,
       );
       if (identities.has(issue.issue_id)) throw new Error("duplicate_materialized_issue_identity");
       identities.add(issue.issue_id);
@@ -293,7 +291,7 @@ export class CycleGraphMaterializer {
       byLocalKey.set(item.local_key, issue);
     }
     const verify = appliedIssue(
-      (await createCommand.create_issue(verifyCall, MATERIALIZATION_EXECUTION)).output,
+      (await createCommand.create_issue(verifyCall, execution)).output,
     );
     if (identities.has(verify.issue_id)) throw new Error("duplicate_materialized_issue_identity");
 
@@ -320,7 +318,7 @@ export class CycleGraphMaterializer {
     const relationIdentities = new Set<TaskRelationId>();
     for (const call of relationCalls) {
       const relation = appliedRelation(
-        (await relationCommand.create_relation(call, MATERIALIZATION_EXECUTION)).output,
+        (await relationCommand.create_relation(call, execution)).output,
       );
       if (relationIdentities.has(relation.relation_id)) {
         throw new Error("duplicate_materialized_relation_identity");
@@ -330,12 +328,14 @@ export class CycleGraphMaterializer {
     }
 
     const graph = expectedGraph(request, work, verify, relations);
+    execution.assertActive();
     const rawReadback = await this.#reader.read(Object.freeze({
       root_id: request.root_id,
       cycle_id: request.cycle_id,
       runtime_generation: request.runtime_generation,
       correlation_id: request.correlation_id,
     }));
+    execution.assertActive();
     if (rawReadback === null) throw new Error("materialized_graph_missing");
     const readback = bindCycleAdvanceRequest(rawReadback);
     assertExactReadback(request, readback, work, verify, relations, graph, this.#workflow);

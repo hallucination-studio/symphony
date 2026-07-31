@@ -72,6 +72,10 @@ export class AcceptedRootObservation {
     this.#identityFactory = options.identity_factory ?? randomUUID;
   }
 
+  acceptedTask(): TaskSnapshot | null {
+    return this.#accepted?.task ?? null;
+  }
+
   async prepare(taskInput: unknown, workspace: RootWorkspaceIdentity): Promise<RootObservationAttempt> {
     let taskEvent;
     try {

@@ -3,6 +3,13 @@ import type {
   CycleAdvanceResult,
 } from "../../contracts/cycle.js";
 
+export interface CycleMachineExecution {
+  readonly ownership: "live" | "lost";
+}
+
 export interface CycleMachineInterface {
-  advance(request: CycleAdvanceRequest): Promise<CycleAdvanceResult>;
+  advance(
+    request: CycleAdvanceRequest,
+    execution: CycleMachineExecution,
+  ): Promise<CycleAdvanceResult>;
 }

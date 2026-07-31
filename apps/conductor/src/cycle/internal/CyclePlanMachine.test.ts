@@ -71,6 +71,8 @@ const cycleId = parseCycleIssueId("CYCLE-PLAN-MACHINE");
 const generation = parseRuntimeGeneration(17);
 const correlationId = parseCorrelationId("corr:plan-machine:17");
 const callerAuthority = createTaskManageCallerAuthority();
+const LIVE_EXECUTION = Object.freeze({ ownership: "live" as const });
+const LOST_EXECUTION = Object.freeze({ ownership: "lost" as const });
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root",
@@ -359,6 +361,31 @@ function planOnlyRequest(
     relations: [],
   }, cycleId);
   return requestWithGraph(graph, { plan_status: status, plan_revision: revision });
+}
+
+function changedPlanTitleRequest(): CycleAdvanceRequest {
+  const current = planOnlyRequest();
+  const plan = current.plan_issue;
+  assert.notEqual(plan, null);
+  const changedPlan = Object.freeze({ ...plan!, title: "Externally changed Plan title" });
+  const graph = parseSealedExecutionGraph({
+    plan_issue: {
+      issue_id: changedPlan.issue_id,
+      sealed_revision: changedPlan.sealed_revision,
+      kind: changedPlan.kind,
+      title: changedPlan.title,
+      description_markdown: changedPlan.description_markdown,
+      parent_cycle_id: changedPlan.parent_cycle_id,
+    },
+    work_issues: [],
+    verify_issue: null,
+    relations: [],
+  }, cycleId);
+  return bindCycleAdvanceRequest({
+    ...current,
+    plan_issue: changedPlan,
+    sealed_graph_digest: graph.seal_digest,
+  });
 }
 
 function resultEnvelope(call: TaskMcpCall) {
@@ -759,6 +786,7 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
       }, before);
     }
     assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
+    const before = workflow.cycle_states[cycleStatus];
     const desired = call.input.desired.state_id;
     cycleStatus = desired === workflow.cycle_states.awaiting_acceptance
       ? "awaiting_acceptance"
@@ -775,7 +803,7 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
       labels: [workflow.labels.cycle],
       delegate_id: null,
       priority: null,
-    }, workflow.cycle_states.in_progress);
+    }, before);
   };
 
   const commitOutcome = options.commit_outcome ?? "applied";
@@ -874,6 +902,7 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
     gitReads: () => gitReads,
     gitCommits: () => gitCommits,
     taskReads: () => taskReads,
+    snapshot,
     verifyCreates: () => verifyCreates,
     verifyTurns: () => verifyTurns,
     verifyStatus: () => verifyStatus,
@@ -1024,7 +1053,7 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
     },
   });
 
-  const result = await machine.advance(request);
+  const result = await machine.advance(request, LIVE_EXECUTION);
 
   assert.equal(result.outcome, "advanced");
   assert.equal(result.from_cycle_revision, request.cycle_revision);
@@ -1034,6 +1063,89 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
   assert.equal(calls[0]?.function, "create_issue");
   assert.equal(calls[0]?.input.parent_issue_id, cycleId);
   assert.deepEqual(calls[0]?.input.desired.label_ids, [workflow.labels.plan]);
+});
+
+test("lost empty execution fails before Plan creation", async () => {
+  let planCreates = 0;
+  const manager = unexpectedManager();
+  manager.create_issue = async () => {
+    planCreates += 1;
+    throw new Error("unexpected_plan_creation");
+  };
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
+    return appliedIssueResult(
+      call,
+      failedCycleIssue("revision:cycle:failed-lost-empty"),
+      workflow.cycle_states.in_progress,
+    );
+  };
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+
+  const outcome = await machine.advance(emptyRequest(), LOST_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(planCreates, 0);
+});
+
+test("the exact Plan returned by creation is sealed before Plan execution", async () => {
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.create_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    events.push("plan_created");
+    return appliedIssueResult(
+      call,
+      issueFromCreate(call, "PLAN-CREATED", "revision:plan:created"),
+    );
+  };
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(planSource.issue_id)) {
+      events.push("plan_started_after_mutation");
+      return appliedIssueResult(
+        call,
+        planStatusIssue("in_progress", "revision:plan:started-after-mutation"),
+      );
+    }
+    events.push("cycle_failed");
+    return appliedIssueResult(
+      call,
+      failedCycleIssue("revision:cycle:failed-plan-mutation"),
+      workflow.cycle_states.in_progress,
+    );
+  };
+  let performerCreates = 0;
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: {
+      create: async () => {
+        performerCreates += 1;
+        throw new Error("unexpected_plan_performer");
+      },
+    },
+  });
+
+  assert.equal((await machine.advance(emptyRequest(), LIVE_EXECUTION)).outcome, "advanced");
+  const outcome = await machine.advance(changedPlanTitleRequest(), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(performerCreates, 0);
+  assert.deepEqual(events, ["plan_created", "cycle_failed"]);
 });
 
 test("completed Plan materializes one exact graph before Plan becomes Done", async () => {
@@ -1135,7 +1247,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     },
   });
 
-  const result = await machine.advance(request);
+  const result = await machine.advance(request, LIVE_EXECUTION);
 
   assert.equal(result.outcome, "advanced");
   assert.equal(performerCreates, 1);
@@ -1171,7 +1283,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     createdRelations,
     true,
     "done",
-  ));
+  ), LIVE_EXECUTION);
   assert.equal(driftResult.outcome, "terminal_failed");
   assert.equal(performerCreates, 1);
   assert.equal(events.at(-1), "cycle_failed_after_graph_drift");
@@ -1186,7 +1298,7 @@ for (const scenario of [
   test(`${scenario[0]} materialization fails the Cycle without Plan replay or repair Work`, async () => {
     const fixture = materializationFailureFixture(scenario[0]);
 
-    const result = await fixture.machine.advance(planOnlyRequest());
+    const result = await fixture.machine.advance(planOnlyRequest(), LIVE_EXECUTION);
 
     assert.equal(result.outcome, "terminal_failed");
     assert.equal(result.to_cycle_revision, parseTaskRevision("revision:cycle:failed"));
@@ -1264,11 +1376,73 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
     plan_performer_factory: { create: async () => completedPerformer(events) },
   });
 
-  const result = await machine.advance(planOnlyRequest());
+  const result = await machine.advance(planOnlyRequest(), LIVE_EXECUTION);
 
   assert.equal(result.outcome, "terminal_failed");
   assert.deepEqual(events.slice(-3), ["read_changed_graph", "plan_failed", "cycle_failed"]);
   assert.equal(events.includes("plan_done"), false);
+});
+
+test("retirement closes Plan and fences its late output from graph and status effects", async () => {
+  const events: string[] = [];
+  let releasePlan: (() => void) | undefined;
+  let markPlanStarted: (() => void) | undefined;
+  const planStarted = new Promise<void>((resolve) => { markPlanStarted = resolve; });
+  const planReleased = new Promise<void>((resolve) => { releasePlan = resolve; });
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.desired.state_id === workflow.stage_states.in_progress) {
+      events.push("plan_in_progress");
+      return appliedIssueResult(call, planStatusIssue("in_progress", "revision:plan:started-late"));
+    }
+    events.push("late_status_effect");
+    return call.input.issue_id === parseTaskIssueId(cycleId)
+      ? appliedIssueResult(
+        call,
+        failedCycleIssue("revision:cycle:failed-late-plan"),
+        workflow.cycle_states.in_progress,
+      )
+      : appliedIssueResult(
+        call,
+        planStatusIssue("failed", "revision:plan:failed-late"),
+        workflow.stage_states.in_progress,
+      );
+  };
+  manager.create_issue = async () => {
+    events.push("late_graph_effect");
+    throw new Error("late_graph_effect");
+  };
+  const performer: PlanPerformerInterface = {
+    role: "plan",
+    rootId,
+    runtimeGeneration: generation,
+    cycleId,
+    plan: async () => {
+      events.push("plan_turn");
+      markPlanStarted?.();
+      await planReleased;
+      throw new Error("late_plan_output");
+    },
+    close: async () => { events.push("close_plan_performer"); },
+  };
+  const machine = new CyclePlanMachine({
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => performer },
+  });
+
+  const running = machine.advance(planOnlyRequest(), LIVE_EXECUTION);
+  await planStarted;
+  machine.retire();
+  releasePlan?.();
+
+  await assert.rejects(running, /cycle_machine_late_output/u);
+  assert.deepEqual(events, ["plan_in_progress", "plan_turn", "close_plan_performer"]);
 });
 
 for (const outcome of ["failed", "canceled"] as const) {
@@ -1332,7 +1506,7 @@ for (const outcome of ["failed", "canceled"] as const) {
       plan_performer_factory: { create: async () => performer },
     });
 
-    const result = await machine.advance(planOnlyRequest());
+    const result = await machine.advance(planOnlyRequest(), LIVE_EXECUTION);
 
     assert.equal(result.outcome, "terminal_failed");
     assert.deepEqual(events, [
@@ -1381,12 +1555,86 @@ test("an In Progress Plan after restart fails closed without creating a performe
     },
   });
 
-  const result = await machine.advance(planOnlyRequest("in_progress"));
+  const result = await machine.advance(planOnlyRequest("in_progress"), LOST_EXECUTION);
 
   assert.equal(result.outcome, "terminal_failed");
   assert.equal(performerCreates, 0);
   assert.deepEqual(events, ["plan_failed", "cycle_failed"]);
 });
+
+for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
+  test(`lost ${lostPhase} execution context closes active status and fails the Cycle`, async () => {
+    const fixture = singleWorkGraph();
+    const doneWork = Object.freeze({
+      ...fixture.work,
+      revision: parseTaskRevision("revision:work:only:done-before-restart"),
+      status: workflow.stage_states.done,
+    });
+    const verifyStatus = lostPhase === "verify" ? "in_progress" : "done";
+    const currentVerify = Object.freeze({
+      ...fixture.verify,
+      revision: parseTaskRevision(`revision:verify:only:${verifyStatus}-before-restart`),
+      status: workflow.stage_states[verifyStatus],
+    });
+    const currentWork = lostPhase === "work"
+      ? Object.freeze({
+        ...fixture.work,
+        revision: parseTaskRevision("revision:work:only:in-progress-before-restart"),
+        status: workflow.stage_states.in_progress,
+      })
+      : doneWork;
+    const current = requestWithGraph(fixture.graph, {
+      plan_status: "done",
+      plan_revision: "revision:plan:done",
+      work_issues: [currentWork],
+      work_statuses: [lostPhase === "work" ? "in_progress" : "done"],
+      verify_issue: currentVerify,
+      verify_status: verifyStatus,
+    });
+    const request = lostPhase === "awaiting_acceptance"
+      ? bindCycleAdvanceRequest({ ...current, cycle_status: "awaiting_acceptance" })
+      : current;
+    const events: string[] = [];
+    const manager = unexpectedManager();
+    manager.update_issue = async (call, execution) => {
+      callerAuthority.verifier.assert(execution.caller, call);
+      if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+        events.push("cycle_failed");
+        return appliedIssueResult(
+          call,
+          failedCycleIssue(`revision:cycle:failed-lost-${lostPhase}`),
+          workflow.cycle_states[lostPhase === "awaiting_acceptance" ? "awaiting_acceptance" : "in_progress"],
+        );
+      }
+      const stage = lostPhase === "work" ? currentWork : currentVerify;
+      events.push(`${lostPhase}_failed`);
+      return appliedIssueResult(call, {
+        ...stage,
+        revision: parseTaskRevision(`revision:${lostPhase}:failed-after-restart`),
+        status: workflow.stage_states.failed,
+      }, workflow.stage_states.in_progress);
+    };
+    const machine = new CyclePlanMachine({
+      workflow,
+      caller_issuer: callerAuthority.issuer,
+      task_manager: manager,
+      ...unexpectedCommitVerifyDependencies,
+      reader: { read: async () => { throw new Error("unexpected_read"); } },
+      work_performer_factory: unexpectedWorkPerformerFactory,
+      plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+    });
+
+    const outcome = await machine.advance(request, LOST_EXECUTION);
+
+    assert.equal(outcome.outcome, "terminal_failed");
+    assert.deepEqual(
+      events,
+      lostPhase === "awaiting_acceptance"
+        ? ["cycle_failed"]
+        : [`${lostPhase}_failed`, "cycle_failed"],
+    );
+  });
+}
 
 test("ready Work advances in stable order through separate turns on one Cycle performer", async () => {
   const workB = Object.freeze({
@@ -1489,9 +1737,18 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
   });
   const events: string[] = [];
   let readCount = 0;
+  let gitReads = 0;
   const manager = unexpectedManager();
   manager.update_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+      events.push("cycle_failed_after_stage_reopen");
+      return appliedIssueResult(
+        call,
+        failedCycleIssue("revision:cycle:failed-after-stage-reopen"),
+        workflow.cycle_states.in_progress,
+      );
+    }
     if (call.input.desired.state_id === workflow.stage_states.in_progress) {
       const startingA = call.input.issue_id === workA.issue_id;
       events.push(startingA ? "work_a_in_progress" : "work_b_in_progress");
@@ -1574,6 +1831,14 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     ...unexpectedCommitVerifyDependencies,
+    git_workspace: {
+      prepare: async () => { throw new Error("unexpected_git_prepare"); },
+      read: async () => {
+        gitReads += 1;
+        throw new Error("unexpected_git_read");
+      },
+      commit: async () => { throw new Error("unexpected_git_commit"); },
+    },
     reader,
     plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
     work_performer_factory: {
@@ -1585,7 +1850,7 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     },
   });
 
-  const first = await machine.advance(initial);
+  const first = await machine.advance(initial, LIVE_EXECUTION);
 
   assert.equal(first.outcome, "advanced");
   assert.deepEqual(events, [
@@ -1597,7 +1862,7 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     "read_done_a",
   ]);
 
-  const second = await machine.advance(afterA);
+  const second = await machine.advance(afterA, LIVE_EXECUTION);
 
   assert.equal(second.outcome, "advanced");
   assert.equal(performerCreates, 1);
@@ -1616,6 +1881,13 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     "read_done_b",
     "close_work_performer",
   ]);
+
+  const eventCountBeforeReopen = events.length;
+  const reopened = await machine.advance(initial, LIVE_EXECUTION);
+  assert.equal(reopened.outcome, "terminal_failed");
+  assert.equal(gitReads, 0);
+  assert.equal(workTurns, 2);
+  assert.deepEqual(events.slice(eventCountBeforeReopen), ["cycle_failed_after_stage_reopen"]);
 });
 
 for (const scenario of ["failed", "canceled", "invalid"] as const) {
@@ -1700,7 +1972,7 @@ for (const scenario of ["failed", "canceled", "invalid"] as const) {
       },
     });
 
-    const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+    const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"), LIVE_EXECUTION);
 
     assert.equal(outcome.outcome, "terminal_failed");
     assert.deepEqual(events, [
@@ -1762,7 +2034,7 @@ test("a mismatched aggregate Work status read-back fails before performer creati
     },
   });
 
-  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"), LIVE_EXECUTION);
 
   assert.equal(outcome.outcome, "terminal_failed");
   assert.equal(performerCreates, 0);
@@ -1831,7 +2103,7 @@ test("a cross-Cycle Work performer is closed before any turn and fails the curre
     },
   });
 
-  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"));
+  const outcome = await machine.advance(fixture.snapshot(fixture.work, "todo"), LIVE_EXECUTION);
 
   assert.equal(outcome.outcome, "terminal_failed");
   assert.deepEqual(events, [
@@ -1870,7 +2142,7 @@ test("retirement revokes an active Work Task boundary before its provider effect
     work_performer_factory: unexpectedWorkPerformerFactory,
   });
 
-  const running = machine.advance(fixture.snapshot(fixture.work, "todo"));
+  const running = machine.advance(fixture.snapshot(fixture.work, "todo"), LIVE_EXECUTION);
   await boundaryReady;
   machine.retire();
   releaseBoundary?.();
@@ -1943,7 +2215,7 @@ test("retirement closes the active Work performer and fences its late result fro
     work_performer_factory: { create: async () => performer },
   });
 
-  const running = machine.advance(fixture.snapshot(fixture.work, "todo"));
+  const running = machine.advance(fixture.snapshot(fixture.work, "todo"), LIVE_EXECUTION);
   await workStarted;
   machine.retire();
 
@@ -2139,7 +2411,7 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
     },
   });
 
-  const outcome = await machine.advance(initial);
+  const outcome = await machine.advance(initial, LIVE_EXECUTION);
   const committed = await workspace.read(workspaceIdentity);
 
   assert.equal(outcome.outcome, "awaiting_acceptance");
@@ -2163,6 +2435,32 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
     "cycle_awaiting_acceptance",
     "task_read_done_awaiting_acceptance",
   ]);
+});
+
+test("Awaiting Acceptance requires the retained exact Verify and Git evidence", async () => {
+  const fixture = controlledCommitVerify();
+  assert.equal(
+    (await fixture.machine.advance(fixture.initial, LIVE_EXECUTION)).outcome,
+    "awaiting_acceptance",
+  );
+  const evidence = fixture.snapshot();
+  assert.equal(
+    (await fixture.machine.advance(evidence, LIVE_EXECUTION)).outcome,
+    "no_action",
+  );
+
+  const drifted = bindCycleAdvanceRequest({
+    ...evidence,
+    git: {
+      ...evidence.git,
+      diff_digest: parseObservationDigest("sha256:awaiting-acceptance-drift"),
+    },
+  });
+  const outcome = await fixture.machine.advance(drifted, LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(fixture.cycleStatus(), "failed");
+  assert.equal(fixture.verifyTurns(), 1);
 });
 
 test("Git precondition and commit conflicts fail the Cycle before Verify", async (context) => {
@@ -2202,7 +2500,7 @@ test("Git precondition and commit conflicts fail the Cycle before Verify", async
     await context.test(scenario.name, async () => {
       const fixture = controlledCommitVerify(scenario.options);
 
-      const outcome = await fixture.machine.advance(fixture.initial);
+      const outcome = await fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
 
       assert.equal(outcome.outcome, "terminal_failed");
       assert.equal(fixture.cycleStatus(), "failed");
@@ -2222,7 +2520,7 @@ test("failed and inconclusive Verify each fail exactly once without a repair tur
     await context.test(conclusion, async () => {
       const fixture = controlledCommitVerify({ conclusion });
 
-      const outcome = await fixture.machine.advance(fixture.initial);
+      const outcome = await fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
 
       assert.equal(outcome.outcome, "terminal_failed");
       assert.equal(fixture.verifyStatus(), "failed");
@@ -2254,7 +2552,7 @@ test("Verify result mismatch and post-Verify Git drift fail the sealed Verify an
     await context.test(scenario.name, async () => {
       const fixture = controlledCommitVerify(scenario.options);
 
-      const outcome = await fixture.machine.advance(fixture.initial);
+      const outcome = await fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
 
       assert.equal(outcome.outcome, "terminal_failed");
       assert.equal(fixture.verifyStatus(), "failed");
@@ -2282,7 +2580,7 @@ test("retirement closes active Verify and fences its late result from Git and Ta
     close: async () => { releaseVerify?.(); },
   });
 
-  const running = fixture.machine.advance(fixture.initial);
+  const running = fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
   await verifyStarted;
   fixture.machine.retire();
 

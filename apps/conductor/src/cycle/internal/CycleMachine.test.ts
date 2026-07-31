@@ -317,44 +317,60 @@ function result(
 test("Cycle host admits only one fresh In Progress Cycle and leaves Root-owned states unexecuted", async () => {
   const reads: string[] = [];
   const advances: CycleAdvanceRequest[] = [];
+  const reader = {
+    read: async (request: { readonly correlation_id: string }) => {
+      reads.push(request.correlation_id);
+      return snapshot(request.correlation_id);
+    },
+  };
+  const machine: CycleMachineInterface = {
+    advance: async (request) => {
+      advances.push(request);
+      return result(request, "no_action", request.cycle_revision);
+    },
+  };
   const host = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },
     workflow,
-    reader: {
-      read: async (request) => {
-        reads.push(request.correlation_id);
-        return snapshot(request.correlation_id);
-      },
-    },
-    machine: {
-      advance: async (request) => {
-        advances.push(request);
-        return result(request, "no_action", request.cycle_revision);
-      },
-    },
+    reader,
+    machine,
   });
 
   for (const status of [
     "draft",
-    "awaiting_acceptance",
     "succeeded",
     "rejected",
     "failed",
     "canceled",
   ] as const) {
-    assert.equal((await host.prepare(taskSnapshot(status), parseCorrelationId(`corr:${status}`))).kind, "root_available");
+    const rootStateHost = new CycleMachineHost({
+      target: { root_id: rootId, runtime_generation: generation },
+      workflow,
+      reader,
+      machine,
+    });
+    assert.equal((await rootStateHost.prepare(
+      taskSnapshot(status),
+      parseCorrelationId(`corr:${status}`),
+      null,
+    )).kind, "root_available");
   }
   assert.deepEqual(reads, []);
 
   const duplicate = await host.prepare(
     taskSnapshot("in_progress", "revision:cycle:current", true),
     parseCorrelationId("corr:duplicate"),
+    null,
   );
   assert.equal(duplicate.kind, "paused");
   assert.equal(duplicate.kind === "paused" ? duplicate.error.code : null, "invalid_contract");
   assert.deepEqual(reads, []);
 
-  const prepared = await host.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:admit"));
+  const prepared = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:admit"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
   assert.equal(prepared.kind, "cycle_action");
   if (prepared.kind !== "cycle_action") return;
   assert.equal(prepared.request.root_id, rootId);
@@ -393,7 +409,11 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
     },
     machine,
   });
-  const first = await host.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:first"));
+  const first = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:first"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
   assert.equal(first.kind, "cycle_action");
   if (first.kind !== "cycle_action") return;
   assert.equal((await host.run(first)).outcome, "advanced");
@@ -406,13 +426,18 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
   assert.equal((await host.run(continuation)).outcome, "no_action");
   assert.deepEqual(reads, ["corr:first", "corr:continuation"]);
 
-  const regressed = await host.prepare(taskSnapshot("draft"), parseCorrelationId("corr:regressed"));
+  const regressed = await host.prepare(
+    taskSnapshot("draft"),
+    parseCorrelationId("corr:regressed"),
+    null,
+  );
   assert.equal(regressed.kind, "paused");
   assert.equal(regressed.kind === "paused" ? regressed.error.code : null, "readback_mismatch");
 
   const bypassedAcceptance = await host.prepare(
     taskSnapshot("succeeded"),
     parseCorrelationId("corr:bypassed-acceptance"),
+    null,
   );
   assert.equal(bypassedAcceptance.kind, "paused");
   assert.equal(
@@ -420,7 +445,11 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
     "readback_mismatch",
   );
   assert.equal(
-    (await host.prepare(taskSnapshot("failed"), parseCorrelationId("corr:terminal-failure"))).kind,
+    (await host.prepare(
+      taskSnapshot("failed"),
+      parseCorrelationId("corr:terminal-failure"),
+      null,
+    )).kind,
     "root_available",
   );
 
@@ -435,7 +464,11 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
     },
     machine,
   });
-  const staleAttempt = await stale.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:stale"));
+  const staleAttempt = await stale.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:stale"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
   assert.equal(staleAttempt.kind, "paused");
   assert.equal(staleAttempt.kind === "paused" ? staleAttempt.error.code : null, "stale_generation");
 
@@ -448,16 +481,26 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
         ? snapshot(request.correlation_id)
         : snapshot(request.correlation_id, "revision:cycle:current", changedSpecification),
     },
-    machine: { advance: async (request) => result(request, "advanced", request.cycle_revision) },
+    machine: {
+      advance: async (request, execution) => result(
+        request,
+        execution.ownership === "lost" ? "terminal_failed" : "advanced",
+        request.cycle_revision,
+      ),
+    },
   });
-  const sealed = await changedSeal.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:seal:first"));
+  const sealed = await changedSeal.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:seal:first"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
   assert.equal(sealed.kind, "cycle_action");
   if (sealed.kind !== "cycle_action") return;
   await changedSeal.run(sealed);
   const changed = await changedSeal.prepareContinuation();
-  assert.equal(changed.kind, "paused");
-  assert.equal(changed.kind === "paused" ? changed.error.code : null, "invalid_contract");
-  assert.equal(changed.kind === "paused" ? changed.error.reason : null, "cycle_seal_changed");
+  assert.equal(changed.kind, "cycle_action");
+  if (changed.kind !== "cycle_action") return;
+  assert.equal((await changedSeal.run(changed)).outcome, "terminal_failed");
 });
 
 test("Cycle host rejects a fresh Stage whose configured kind label does not match the seal", async () => {
@@ -480,12 +523,23 @@ test("Cycle host rejects a fresh Stage whose configured kind label does not matc
     target: { root_id: rootId, runtime_generation: generation },
     workflow,
     reader: { read: async (request) => snapshotWithPlan(request.correlation_id) },
-    machine: { advance: async (request) => result(request, "no_action", request.cycle_revision) },
+    machine: {
+      advance: async (request, execution) => result(
+        request,
+        execution.ownership === "lost" ? "terminal_failed" : "no_action",
+        request.cycle_revision,
+      ),
+    },
   });
 
-  const attempt = await host.prepare(taskWithWrongStageKind, parseCorrelationId("corr:wrong-stage-kind"));
-  assert.equal(attempt.kind, "paused");
-  assert.equal(attempt.kind === "paused" ? attempt.error.code : null, "readback_mismatch");
+  const attempt = await host.prepare(
+    taskWithWrongStageKind,
+    parseCorrelationId("corr:wrong-stage-kind"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
+  assert.equal(attempt.kind, "cycle_action");
+  if (attempt.kind !== "cycle_action") return;
+  assert.equal((await host.run(attempt)).outcome, "terminal_failed");
 });
 
 test("Cycle host permits one action and fences output that arrives after retirement", async () => {
@@ -499,7 +553,11 @@ test("Cycle host permits one action and fences output that arrives after retirem
     machine: { advance: () => pending },
     machine_lifecycle: { retire: () => { lifecycleRetirements += 1; } },
   });
-  const prepared = await host.prepare(taskSnapshot("in_progress"), parseCorrelationId("corr:late"));
+  const prepared = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:late"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
   assert.equal(prepared.kind, "cycle_action");
   if (prepared.kind !== "cycle_action") return;
 
@@ -512,4 +570,134 @@ test("Cycle host permits one action and fences output that arrives after retirem
   assert.equal(lifecycleRetirements, 1);
   release?.(result(prepared.request, "advanced", "revision:cycle:late"));
   await assert.rejects(running, /cycle_machine_late_output/u);
+});
+
+test("Cycle host distinguishes a same-generation approval from restart and lost acceptance evidence", async () => {
+  const ownership: string[] = [];
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: { read: async (request) => snapshot(request.correlation_id) },
+    machine: {
+      advance: async (request, execution) => {
+        ownership.push(execution.ownership);
+        return execution.ownership === "lost"
+          ? result(request, "terminal_failed", "revision:cycle:failed")
+          : result(request, "advanced", request.cycle_revision);
+      },
+    },
+  });
+
+  const restarted = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:restart"),
+    null,
+  );
+  assert.equal(restarted.kind, "cycle_action");
+  if (restarted.kind !== "cycle_action") return;
+  assert.equal((await host.run(restarted)).outcome, "terminal_failed");
+  assert.deepEqual(ownership, ["lost"]);
+
+  const liveHost = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: { read: async (request) => snapshot(request.correlation_id) },
+    machine: {
+      advance: async (request, execution) => {
+        ownership.push(execution.ownership);
+        return result(request, "advanced", request.cycle_revision);
+      },
+    },
+  });
+  const admitted = await liveHost.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:same-generation"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
+  assert.equal(admitted.kind, "cycle_action");
+  if (admitted.kind !== "cycle_action") return;
+  assert.equal((await liveHost.run(admitted)).outcome, "advanced");
+  assert.deepEqual(ownership, ["lost", "live"]);
+});
+
+test("Cycle host remembers terminal Cycle identities observed before admission", async () => {
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: { read: async (request) => snapshot(request.correlation_id) },
+    machine: {
+      advance: async (request, execution) => result(
+        request,
+        execution.ownership === "lost" ? "terminal_failed" : "advanced",
+        request.cycle_revision,
+      ),
+    },
+  });
+
+  assert.equal((await host.prepare(
+    taskSnapshot("failed"),
+    parseCorrelationId("corr:observe-terminal"),
+    null,
+  )).kind, "root_available");
+  const draftReopen = await host.prepare(
+    taskSnapshot("draft", "revision:cycle:reopened-draft"),
+    parseCorrelationId("corr:reopened-draft"),
+    null,
+  );
+  assert.equal(draftReopen.kind, "paused");
+  assert.equal(
+    draftReopen.kind === "paused" ? draftReopen.error.reason : null,
+    "terminal_cycle_reopened",
+  );
+
+  const approvedReopen = await host.prepare(
+    taskSnapshot("in_progress", "revision:cycle:reopened-approved"),
+    parseCorrelationId("corr:reopened-approved"),
+    taskSnapshot("draft", "revision:cycle:reopened-draft"),
+  );
+  assert.equal(approvedReopen.kind, "cycle_action");
+  if (approvedReopen.kind !== "cycle_action") return;
+  assert.equal((await host.run(approvedReopen)).outcome, "terminal_failed");
+});
+
+test("Cycle host retains live ownership when a continuation first observes its created Plan", async () => {
+  const ownership: string[] = [];
+  let reads = 0;
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    identity_factory: () => "corr:created-plan-continuation",
+    reader: {
+      read: async (request) => {
+        reads += 1;
+        return reads === 1
+          ? snapshot(request.correlation_id)
+          : snapshotWithPlan(request.correlation_id);
+      },
+    },
+    machine: {
+      advance: async (request, execution) => {
+        ownership.push(execution.ownership);
+        return result(
+          request,
+          execution.ownership === "lost" ? "terminal_failed" : reads === 1 ? "advanced" : "no_action",
+          request.cycle_revision,
+        );
+      },
+    },
+  });
+
+  const admitted = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:create-plan"),
+    taskSnapshot("draft", "revision:cycle:draft"),
+  );
+  assert.equal(admitted.kind, "cycle_action");
+  if (admitted.kind !== "cycle_action") return;
+  assert.equal((await host.run(admitted)).outcome, "advanced");
+  const continuation = await host.prepareContinuation();
+  assert.equal(continuation.kind, "cycle_action");
+  if (continuation.kind !== "cycle_action") return;
+  assert.equal((await host.run(continuation)).outcome, "no_action");
+  assert.deepEqual(ownership, ["live", "live"]);
 });

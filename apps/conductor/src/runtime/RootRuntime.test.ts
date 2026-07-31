@@ -225,3 +225,29 @@ test("runtime hard-binds frozen target and workspace identities", async () => {
     "bootstrap",
   );
 });
+
+test("runtime passes only its accepted generation baseline to Cycle admission", async () => {
+  const baselines: (TaskSnapshot | null)[] = [];
+  const created = binding(async (input) => outcome(input.correlation_id, "quiescent"));
+  const runtime = new RootRuntime({
+    ...created,
+    cycle: {
+      ...rootAvailableCycle(),
+      prepare: async (_task, _correlationId, previousAcceptedTask) => {
+        baselines.push(previousAcceptedTask);
+        return Object.freeze({ kind: "root_available" });
+      },
+    },
+  });
+  const initial = task("revision:root:1", "Initial");
+  const latest = task("revision:root:2", "Latest");
+
+  const bootstrap = await runtime.prepare(event(initial, "corr:baseline:1"));
+  assert.equal(bootstrap.kind, "bootstrap");
+  if (bootstrap.kind !== "bootstrap") return;
+  await runtime.run(bootstrap);
+  runtime.accept(bootstrap);
+  await runtime.prepare(event(latest, "corr:baseline:2", initial));
+
+  assert.deepEqual(baselines, [null, initial]);
+});
