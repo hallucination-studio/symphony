@@ -13,10 +13,13 @@
   "scripts": {
     "build": "npm run build -w @symphony/conductor",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present && npm run lint:e2e",
+    "lint:e2e": "eslint tests/e2e --ext .mjs --max-warnings 0",
     "test:architecture": "node --test tests/architecture/*.test.mjs",
+    "test:e2e": "node --test tests/e2e/*.test.mjs",
+    "test:e2e:runner": "node --test tests/e2e/black-box-runner.test.mjs",
     "test:typescript": "npm test -w @symphony/conductor",
-    "test": "npm run test:architecture && npm run test:typescript"
+    "test": "npm run test:architecture && npm run test:typescript && npm run test:e2e:runner"
   },
   "devDependencies": {
     "@linear/sdk": "88.2.0",
