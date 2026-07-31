@@ -15,6 +15,7 @@ import {
 } from "../contracts/observation.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
 import { RootRuntime, type RootRuntimeBinding } from "./RootRuntime.js";
@@ -69,6 +70,7 @@ function binding(run: RootReconcillInterface["run"]): RootRuntimeBinding {
   return Object.freeze({
     target: Object.freeze({ root_id: rootId, runtime_generation: generation }),
     workspace,
+    cycle: rootAvailableCycle(),
     git: {
       read: async () => parseGitSnapshot({
         repository_id: workspace.repository_id,
@@ -82,6 +84,16 @@ function binding(run: RootReconcillInterface["run"]): RootRuntimeBinding {
     },
     turn,
   });
+}
+
+function rootAvailableCycle(): CycleMachineHostInterface {
+  return {
+    target: Object.freeze({ root_id: rootId, runtime_generation: generation }),
+    prepare: async () => Object.freeze({ kind: "root_available" }),
+    prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+    run: async () => { throw new Error("unexpected_cycle_action"); },
+    retire: () => undefined,
+  };
 }
 
 function outcome(

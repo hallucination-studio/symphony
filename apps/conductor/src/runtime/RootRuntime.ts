@@ -4,7 +4,14 @@ import {
   parseRuntimeGeneration,
   type RootIssueId,
 } from "../contracts/identity.js";
+import type { CycleAdvanceResult } from "../contracts/cycle.js";
+import { parseTaskObservationEvent } from "../contracts/observation.js";
 import { parseRootTurnOutcome, type RootTurnOutcome, type RuntimeTarget } from "../contracts/runtime.js";
+import type {
+  CycleMachineHostInterface,
+  CycleMachinePreparation,
+  PreparedCycleAction,
+} from "../cycle/internal/CycleMachine.js";
 import { parseBoundedString } from "../contracts/validation.js";
 import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import {
@@ -12,6 +19,7 @@ import {
   type PreparedRootObservation,
   type RootObservationAttempt,
 } from "../observation/AcceptedRootObservation.js";
+import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type {
   RootReconcillInput,
   RootReconcillInterface,
@@ -22,6 +30,7 @@ export type RootTurnInput = RootReconcillInput;
 export interface RootRuntimeBinding {
   readonly target: RuntimeTarget;
   readonly workspace: RootWorkspaceIdentity;
+  readonly cycle: CycleMachineHostInterface;
   readonly git: Pick<GitWorkspaceInterface, "read">;
   readonly turn: RootReconcillInterface;
 }
@@ -33,12 +42,17 @@ export interface RootRuntimeFactory {
 export interface RegisteredRootRuntime {
   readonly target: RuntimeTarget;
   readonly workspace: RootWorkspaceIdentity;
-  prepare(taskInput: unknown): Promise<RootObservationAttempt>;
+  prepare(taskInput: unknown): Promise<RootRuntimePreparation>;
+  prepareCycleContinuation(): Promise<CycleMachinePreparation>;
   run(prepared: PreparedRootObservation): Promise<RootTurnOutcome>;
+  runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
   accept(prepared: PreparedRootObservation): void;
 }
 
+export type RootRuntimePreparation = RootObservationAttempt | PreparedCycleAction;
+
 export class RootRuntime implements RegisteredRootRuntime {
+  readonly #cycle: CycleMachineHostInterface;
   readonly #git: Pick<GitWorkspaceInterface, "read">;
   readonly #observations: AcceptedRootObservation;
   readonly #prepared = new WeakSet<PreparedRootObservation>();
@@ -62,13 +76,18 @@ export class RootRuntime implements RegisteredRootRuntime {
     if (
       workspace.root_id !== target.root_id
       || parseRootIssueId(binding.turn.rootId) !== target.root_id
+      || parseRootIssueId(binding.cycle.target.root_id) !== target.root_id
     ) throw new Error("root_runtime_identity_mismatch");
-    if (parseRuntimeGeneration(binding.turn.runtimeGeneration) !== target.runtime_generation) {
+    if (
+      parseRuntimeGeneration(binding.turn.runtimeGeneration) !== target.runtime_generation
+      || parseRuntimeGeneration(binding.cycle.target.runtime_generation) !== target.runtime_generation
+    ) {
       throw new Error("root_runtime_generation_mismatch");
     }
     this.#target = target;
     this.#workspace = workspace;
     this.#git = binding.git;
+    this.#cycle = binding.cycle;
     this.#turn = binding.turn;
     this.#observations = new AcceptedRootObservation(this.#target, this.#git);
   }
@@ -76,10 +95,31 @@ export class RootRuntime implements RegisteredRootRuntime {
   get target(): RuntimeTarget { return this.#target; }
   get workspace(): RootWorkspaceIdentity { return this.#workspace; }
 
-  async prepare(taskInput: unknown): Promise<RootObservationAttempt> {
+  async prepare(taskInput: unknown): Promise<RootRuntimePreparation> {
+    let observation;
+    try {
+      observation = parseTaskObservationEvent(taskInput);
+    } catch {
+      return this.#observations.prepare(taskInput, this.#workspace);
+    }
+    if (
+      observation.root_id !== this.#target.root_id
+      || taskSnapshotDigest(observation.task) !== observation.to_task_digest
+    ) return this.#observations.prepare(observation, this.#workspace);
+
+    const cycle = await this.#cycle.prepare(observation.task, observation.correlation_id);
+    if (cycle.kind !== "root_available") return cycle;
     const attempt = await this.#observations.prepare(taskInput, this.#workspace);
     if (attempt.kind === "bootstrap" || attempt.kind === "diff") this.#prepared.add(attempt);
     return attempt;
+  }
+
+  prepareCycleContinuation(): Promise<CycleMachinePreparation> {
+    return this.#cycle.prepareContinuation();
+  }
+
+  runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult> {
+    return this.#cycle.run(prepared);
   }
 
   async run(prepared: PreparedRootObservation): Promise<RootTurnOutcome> {

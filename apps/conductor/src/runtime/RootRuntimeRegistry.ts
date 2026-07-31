@@ -1,5 +1,6 @@
 import { parseRootIssueId, type RootIssueId } from "../contracts/identity.js";
 import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
+import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import {
   RootRuntime,
   type RegisteredRootRuntime,
@@ -14,6 +15,7 @@ export type {
 } from "./RootRuntime.js";
 
 export class RootRuntimeRegistry {
+  readonly #cycles = new Set<CycleMachineHostInterface>();
   readonly #creating = new Map<RootIssueId, Promise<RegisteredRootRuntime>>();
   readonly #runtimes = new Map<RootIssueId, RegisteredRootRuntime>();
   readonly #turns = new Set<RootReconcillInterface>();
@@ -42,7 +44,17 @@ export class RootRuntimeRegistry {
 
   async #create(rootId: RootIssueId): Promise<RegisteredRootRuntime> {
     const binding = await this.factory.create(rootId);
-    if (this.#turns.has(binding.turn)) throw new Error("root_runtime_resource_alias");
+    const turnAliased = this.#turns.has(binding.turn);
+    const cycleAliased = this.#cycles.has(binding.cycle);
+    if (turnAliased || cycleAliased) {
+      if (!cycleAliased) {
+        try { binding.cycle.retire(); } catch { /* Preserve the alias failure. */ }
+      }
+      if (!turnAliased) {
+        try { await binding.turn.close(); } catch { /* Preserve the alias failure. */ }
+      }
+      throw new Error("root_runtime_resource_alias");
+    }
 
     let runtime: RootRuntime;
     try {
@@ -52,12 +64,18 @@ export class RootRuntimeRegistry {
       }
     } catch (error) {
       try {
+        binding.cycle.retire();
+      } catch {
+        // Preserve the sanitized validation failure over private cleanup details.
+      }
+      try {
         await binding.turn.close();
       } catch {
         // Preserve the sanitized validation failure over private cleanup details.
       }
       throw error;
     }
+    this.#cycles.add(binding.cycle);
     this.#turns.add(binding.turn);
     this.#runtimes.set(rootId, runtime);
     return runtime;

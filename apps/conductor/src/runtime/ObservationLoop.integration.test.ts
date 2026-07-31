@@ -13,6 +13,7 @@ import {
   type TaskSnapshot,
 } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { rootObservationDigest } from "../observation/RootObservationFacts.js";
 import { LinearObserver } from "../task-management/linear/LinearObserver.js";
 import { RootRuntimeRegistry, type RootTurnInput } from "./RootRuntimeRegistry.js";
@@ -111,6 +112,16 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
           runtime_generation: parseRuntimeGeneration(1),
         }),
         workspace,
+        cycle: {
+          target: Object.freeze({
+            root_id: createdRootId,
+            runtime_generation: parseRuntimeGeneration(1),
+          }),
+          prepare: async () => Object.freeze({ kind: "root_available" as const }),
+          prepareContinuation: async () => Object.freeze({ kind: "root_available" as const }),
+          run: async () => { throw new Error("unexpected_cycle_action"); },
+          retire: () => undefined,
+        } satisfies CycleMachineHostInterface,
         git: {
           read: async () => {
             gitReads += 1;

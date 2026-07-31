@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  parseCorrelationId,
+  parseCycleIssueId,
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskRevision,
   type RootIssueId,
 } from "../contracts/identity.js";
+import type { CycleAdvanceRequest, CycleAdvanceResult } from "../contracts/cycle.js";
 import {
   parseGitSnapshot,
   parseTaskObservationEvent,
@@ -15,6 +19,10 @@ import {
   type TaskSnapshot,
 } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type {
+  CycleMachineHostInterface,
+  PreparedCycleAction,
+} from "../cycle/internal/CycleMachine.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
 import { RootRuntimeRegistry, type RootTurnInput } from "./RootRuntimeRegistry.js";
@@ -74,7 +82,54 @@ interface Harness {
   readonly registry: RootRuntimeRegistry;
 }
 
-function harness(run?: RootReconcillInterface["run"]): Harness {
+function rootAvailableCycle(rootId: RootIssueId): CycleMachineHostInterface {
+  const target = Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) });
+  return {
+    target,
+    prepare: async () => Object.freeze({ kind: "root_available" }),
+    prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+    run: async () => { throw new Error("unexpected_cycle_action"); },
+    retire: () => undefined,
+  };
+}
+
+function cycleAction(rootId: RootIssueId, correlationValue: string): PreparedCycleAction {
+  const request = {
+    root_id: rootId,
+    cycle_id: parseCycleIssueId(`${rootId}:CYCLE`),
+    runtime_generation: parseRuntimeGeneration(1),
+    correlation_id: parseCorrelationId(correlationValue),
+    cycle_revision: parseTaskRevision("revision:cycle:1"),
+    specification: { seal_digest: "a".repeat(64) },
+  } as CycleAdvanceRequest;
+  return Object.freeze({ kind: "cycle_action", request });
+}
+
+function cycleResult(
+  prepared: PreparedCycleAction,
+  outcome: CycleAdvanceResult["outcome"],
+): CycleAdvanceResult {
+  const request = prepared.request;
+  return {
+    schema_version: 1,
+    root_id: request.root_id,
+    cycle_id: request.cycle_id,
+    runtime_generation: request.runtime_generation,
+    correlation_id: request.correlation_id,
+    seal_digest: request.specification.seal_digest,
+    from_cycle_revision: request.cycle_revision,
+    to_cycle_revision: request.cycle_revision,
+    outcome,
+    reason_markdown: outcome === "terminal_failed" || outcome === "precondition_failed"
+      ? "Cycle action did not advance."
+      : null,
+  } as CycleAdvanceResult;
+}
+
+function harness(
+  run?: RootReconcillInterface["run"],
+  cycleFactory: (rootId: RootIssueId) => CycleMachineHostInterface = rootAvailableCycle,
+): Harness {
   const creations: RootIssueId[] = [];
   const inputs: RootTurnInput[] = [];
   const logs: SerialConductorLog[] = [];
@@ -92,6 +147,7 @@ function harness(run?: RootReconcillInterface["run"]): Harness {
       return Object.freeze({
         target: Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) }),
         workspace,
+        cycle: cycleFactory(rootId),
         git: {
           read: async () => parseGitSnapshot({
             repository_id: workspace.repository_id,
@@ -136,6 +192,197 @@ function harness(run?: RootReconcillInterface["run"]): Harness {
     registry,
   };
 }
+
+test("Cycle actions park Root turns, own the global slot, and continue before another Root", async () => {
+  const root1 = parseRootIssueId("LIN-1");
+  const root2 = parseRootIssueId("LIN-2");
+  const order: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let root1Actions = 0;
+  const f = harness(async (input) => {
+    order.push(`root:${input.root_id}`);
+    return {
+      schema_version: 1,
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+      correlation_id: input.correlation_id,
+      outcome: "quiescent",
+    };
+  }, (rootId) => {
+    if (rootId !== root1) return rootAvailableCycle(rootId);
+    const target = Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) });
+    return {
+      target,
+      prepare: async (_task, correlationId) => cycleAction(rootId, correlationId),
+      prepareContinuation: async () => cycleAction(rootId, "corr:cycle:continuation"),
+      run: async (prepared) => {
+        root1Actions += 1;
+        order.push(`cycle:${rootId}`);
+        if (root1Actions === 1) {
+          signalStarted?.();
+          await gate;
+          return cycleResult(prepared, "advanced");
+        }
+        return cycleResult(prepared, "no_action");
+      },
+      retire: () => undefined,
+    };
+  });
+  f.conductor.admit([
+    event(task(root1), "corr:root1:1"),
+    event(task(root2), "corr:root2:1"),
+  ]);
+
+  const firstRun = f.conductor.runNext();
+  await started;
+  await assert.rejects(f.conductor.runNext(), /serial_conductor_busy/u);
+  releaseFirst?.();
+  assert.deepEqual(await firstRun, {
+    kind: "cycle_action_completed",
+    root_id: root1,
+    outcome: "advanced",
+  });
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "cycle_action_completed",
+    root_id: root1,
+    outcome: "no_action",
+  });
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "turn_completed",
+    root_id: root2,
+    outcome: "quiescent",
+  });
+  assert.deepEqual(order, [`cycle:${root1}`, `cycle:${root1}`, `root:${root2}`]);
+});
+
+test("Root resumes after a Cycle reaches Awaiting Acceptance and a fresh observation arrives", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  let active = true;
+  let rootTurns = 0;
+  const f = harness(async (input) => {
+    rootTurns += 1;
+    return {
+      schema_version: 1,
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+      correlation_id: input.correlation_id,
+      outcome: "quiescent",
+    };
+  }, (createdRootId) => {
+    const target = Object.freeze({
+      root_id: createdRootId,
+      runtime_generation: parseRuntimeGeneration(1),
+    });
+    return {
+      target,
+      prepare: async (_task, correlationId) => active
+        ? cycleAction(createdRootId, correlationId)
+        : Object.freeze({ kind: "root_available" }),
+      prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+      run: async (prepared) => {
+        active = false;
+        return cycleResult(prepared, "awaiting_acceptance");
+      },
+      retire: () => undefined,
+    };
+  });
+
+  const initial = task(rootId);
+  f.conductor.admit([event(initial, "corr:cycle")]);
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "cycle_action_completed",
+    root_id: rootId,
+    outcome: "awaiting_acceptance",
+  });
+  assert.equal(rootTurns, 0);
+  assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
+
+  const fresh = task(rootId, { revision: "revision:root:2" });
+  f.conductor.admit([event(fresh, "corr:acceptance", initial)]);
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "turn_completed",
+    root_id: rootId,
+    outcome: "quiescent",
+  });
+  assert.equal(rootTurns, 1);
+});
+
+test("a Cycle precondition failure refreshes before another Root runs", async () => {
+  const root1 = parseRootIssueId("LIN-1");
+  const root2 = parseRootIssueId("LIN-2");
+  const order: string[] = [];
+  let actions = 0;
+  const f = harness(async (input) => {
+    order.push(`root:${input.root_id}`);
+    return {
+      schema_version: 1,
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+      correlation_id: input.correlation_id,
+      outcome: "quiescent",
+    };
+  }, (rootId) => {
+    if (rootId !== root1) return rootAvailableCycle(rootId);
+    return {
+      target: Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) }),
+      prepare: async (_task, correlationId) => cycleAction(rootId, correlationId),
+      prepareContinuation: async () => cycleAction(rootId, "corr:precondition:refresh"),
+      run: async (prepared) => {
+        actions += 1;
+        order.push(`cycle:${rootId}`);
+        return cycleResult(prepared, actions === 1 ? "precondition_failed" : "no_action");
+      },
+      retire: () => undefined,
+    };
+  });
+  f.conductor.admit([
+    event(task(root1), "corr:root1"),
+    event(task(root2), "corr:root2"),
+  ]);
+
+  assert.equal((await f.conductor.runNext()).kind, "cycle_action_completed");
+  assert.equal((await f.conductor.runNext()).kind, "cycle_action_completed");
+  assert.equal((await f.conductor.runNext()).kind, "turn_completed");
+  assert.deepEqual(order, [`cycle:${root1}`, `cycle:${root1}`, `root:${root2}`]);
+});
+
+test("Cycle boundary failures are correlated, sanitized, and stop the Root runtime", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  const f = harness(undefined, (createdRootId) => ({
+    target: Object.freeze({
+      root_id: createdRootId,
+      runtime_generation: parseRuntimeGeneration(1),
+    }),
+    prepare: async (_task, correlationId) => cycleAction(createdRootId, correlationId),
+    prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+    run: async () => { throw new Error("secret-provider-cycle-payload"); },
+    retire: () => undefined,
+  }));
+  const initial = task(rootId);
+  f.conductor.admit([event(initial, "corr:cycle:failed")]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "failed",
+    root_id: rootId,
+    reason_code: "cycle_boundary_failed",
+  });
+  assert.equal(JSON.stringify(f.logs).includes("secret-provider-cycle-payload"), false);
+  assert.deepEqual(f.logs.find(({ event: name }) => name === "cycle_action_failed"), {
+    event: "cycle_action_failed",
+    root_id: rootId,
+    cycle_id: `${rootId}:CYCLE`,
+    runtime_generation: parseRuntimeGeneration(1),
+    correlation_id: "corr:cycle:failed",
+    reason_code: "cycle_boundary_failed",
+  });
+
+  const fresh = task(rootId, { revision: "revision:root:2" });
+  f.conductor.admit([event(fresh, "corr:after-failure", initial)]);
+  assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
+});
 
 test("undelegated Roots stay idle until a fresh delegated observation arrives", async () => {
   const rootId = parseRootIssueId("LIN-1");

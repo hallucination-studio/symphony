@@ -2,6 +2,7 @@ import type { BoundaryErrorCode } from "../contracts/common-outcomes.js";
 import {
   parseTaskIssueId,
   type CorrelationId,
+  type CycleIssueId,
   type RootIssueId,
   type RuntimeGeneration,
 } from "../contracts/identity.js";
@@ -10,9 +11,11 @@ import {
   type TaskIssueSnapshot,
   type TaskObservationEvent,
 } from "../contracts/observation.js";
+import type { CycleAdvanceResult } from "../contracts/cycle.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
+import type { PreparedCycleAction } from "../cycle/internal/CycleMachine.js";
 import { parseBoundedString } from "../contracts/validation.js";
-import type { RootRuntimeRegistry } from "./RootRuntimeRegistry.js";
+import type { RegisteredRootRuntime, RootRuntimeRegistry } from "./RootRuntimeRegistry.js";
 
 type AdmissionParkReason =
   | "in_review"
@@ -21,7 +24,11 @@ type AdmissionParkReason =
   | "runtime_stopped"
   | "status_not_executable";
 
-type RuntimeFailureReason = "runtime_preparation_failed" | "turn_boundary_failed";
+type RuntimeFailureReason =
+  | "cycle_boundary_failed"
+  | "cycle_preparation_failed"
+  | "runtime_preparation_failed"
+  | "turn_boundary_failed";
 
 export type SerialConductorLog =
   | {
@@ -73,6 +80,42 @@ export type SerialConductorLog =
     readonly runtime_generation: RuntimeGeneration;
     readonly correlation_id: CorrelationId;
     readonly reason_code: "turn_boundary_failed";
+  }
+  | {
+    readonly event: "cycle_action_started";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+  }
+  | {
+    readonly event: "cycle_action_completed";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly outcome: CycleAdvanceResult["outcome"];
+  }
+  | {
+    readonly event: "cycle_action_paused";
+    readonly root_id: RootIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly reason_code: BoundaryErrorCode;
+  }
+  | {
+    readonly event: "cycle_action_failed";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly reason_code: "cycle_boundary_failed";
+  }
+  | {
+    readonly event: "cycle_continuation_failed";
+    readonly root_id: RootIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly reason_code: "cycle_preparation_failed";
   };
 
 export type SerialRunResult =
@@ -81,6 +124,11 @@ export type SerialRunResult =
     readonly kind: "turn_completed";
     readonly root_id: RootIssueId;
     readonly outcome: RootTurnOutcome["outcome"];
+  }
+  | {
+    readonly kind: "cycle_action_completed";
+    readonly root_id: RootIssueId;
+    readonly outcome: CycleAdvanceResult["outcome"];
   }
   | {
     readonly kind: "paused";
@@ -121,6 +169,7 @@ function admissionReason(
 
 export class SerialConductor {
   readonly #actorId: string;
+  readonly #cycleContinuations = new Map<RootIssueId, RegisteredRootRuntime>();
   readonly #pending = new Map<RootIssueId, TaskObservationEvent>();
   readonly #stopped = new Set<RootIssueId>();
   #busy = false;
@@ -157,6 +206,9 @@ export class SerialConductor {
   }
 
   async #runNext(): Promise<SerialRunResult> {
+    const continuation = await this.#runCycleContinuation();
+    if (continuation !== null) return continuation;
+
     const observations = [...this.#pending.values()]
       .sort((left, right) => left.root_id.localeCompare(right.root_id));
     for (const observation of observations) {
@@ -219,6 +271,7 @@ export class SerialConductor {
         }));
         continue;
       }
+      if (attempt.kind === "cycle_action") return this.#runCycleAction(runtime, attempt);
 
       this.options.log(Object.freeze({
         event: "root_turn_started",
@@ -262,5 +315,96 @@ export class SerialConductor {
       });
     }
     return Object.freeze({ kind: "idle" });
+  }
+
+  async #runCycleContinuation(): Promise<SerialRunResult | null> {
+    const roots = [...this.#cycleContinuations]
+      .sort(([left], [right]) => left.localeCompare(right));
+    for (const [rootId, runtime] of roots) {
+      let preparation;
+      try {
+        preparation = await runtime.prepareCycleContinuation();
+      } catch {
+        this.#cycleContinuations.delete(rootId);
+        this.#stopped.add(rootId);
+        this.options.log(Object.freeze({
+          event: "cycle_continuation_failed",
+          root_id: rootId,
+          runtime_generation: runtime.target.runtime_generation,
+          reason_code: "cycle_preparation_failed",
+        }));
+        return Object.freeze({ kind: "failed", root_id: rootId, reason_code: "cycle_preparation_failed" });
+      }
+      if (preparation.kind === "root_available") {
+        this.#cycleContinuations.delete(rootId);
+        continue;
+      }
+      if (preparation.kind === "paused") {
+        this.#cycleContinuations.delete(rootId);
+        this.options.log(Object.freeze({
+          event: "cycle_action_paused",
+          root_id: rootId,
+          runtime_generation: runtime.target.runtime_generation,
+          correlation_id: preparation.error.correlation_id,
+          reason_code: preparation.error.code,
+        }));
+        return Object.freeze({ kind: "paused", root_id: rootId, reason_code: preparation.error.code });
+      }
+      return this.#runCycleAction(runtime, preparation);
+    }
+    return null;
+  }
+
+  async #runCycleAction(
+    runtime: RegisteredRootRuntime,
+    prepared: PreparedCycleAction,
+  ): Promise<SerialRunResult> {
+    const { request } = prepared;
+    this.options.log(Object.freeze({
+      event: "cycle_action_started",
+      root_id: request.root_id,
+      cycle_id: request.cycle_id,
+      runtime_generation: request.runtime_generation,
+      correlation_id: request.correlation_id,
+    }));
+    let result: CycleAdvanceResult;
+    try {
+      result = await runtime.runCycle(prepared);
+    } catch {
+      this.#cycleContinuations.delete(runtime.target.root_id);
+      this.#stopped.add(runtime.target.root_id);
+      this.options.log(Object.freeze({
+        event: "cycle_action_failed",
+        root_id: runtime.target.root_id,
+        cycle_id: request.cycle_id,
+        runtime_generation: runtime.target.runtime_generation,
+        correlation_id: request.correlation_id,
+        reason_code: "cycle_boundary_failed",
+      }));
+      return Object.freeze({
+        kind: "failed",
+        root_id: runtime.target.root_id,
+        reason_code: "cycle_boundary_failed",
+      });
+    }
+
+    if (result.outcome === "advanced" || result.outcome === "precondition_failed") {
+      this.#cycleContinuations.set(runtime.target.root_id, runtime);
+    } else {
+      this.#cycleContinuations.delete(runtime.target.root_id);
+    }
+    this.options.log(Object.freeze({
+      event: "cycle_action_completed",
+      root_id: result.root_id,
+      cycle_id: result.cycle_id,
+      runtime_generation: result.runtime_generation,
+      correlation_id: result.correlation_id,
+      outcome: result.outcome,
+    }));
+    return Object.freeze({
+      kind: "cycle_action_completed",
+      root_id: result.root_id,
+      outcome: result.outcome,
+    });
   }
 }

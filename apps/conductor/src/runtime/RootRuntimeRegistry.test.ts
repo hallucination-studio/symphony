@@ -6,9 +6,11 @@ import {
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  type RootIssueId,
 } from "../contracts/identity.js";
 import { parseGitSnapshot, parseTaskObservationEvent, parseTaskSnapshot } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
 import {
@@ -59,6 +61,7 @@ function binding(
   return Object.freeze({
     target: Object.freeze({ root_id: rootId, runtime_generation: parseRuntimeGeneration(1) }),
     workspace,
+    cycle: rootAvailableCycle(rootId),
     git: {
       read: async () => parseGitSnapshot({
         repository_id: workspace.repository_id,
@@ -77,6 +80,20 @@ function binding(
       close,
     }),
   });
+}
+
+function rootAvailableCycle(cycleRootId: RootIssueId): CycleMachineHostInterface {
+  const target = Object.freeze({
+    root_id: cycleRootId,
+    runtime_generation: parseRuntimeGeneration(1),
+  });
+  return {
+    target,
+    prepare: async () => Object.freeze({ kind: "root_available" }),
+    prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+    run: async () => { throw new Error("unexpected_cycle_action"); },
+    retire: () => undefined,
+  };
 }
 
 test("registry creates one identity-bound runtime under concurrent lookup", async () => {
@@ -172,6 +189,33 @@ test("registry rejects wrong-root and aliased turn resources", async () => {
   await aliasRegistry.getOrCreate(rootId);
   await assert.rejects(aliasRegistry.getOrCreate(wrongRoot), /root_runtime_resource_alias/u);
   assert.equal(aliasCloses, 0);
+
+  let uniqueTurnCloses = 0;
+  const sharedCycle = rootAvailableCycle(rootId);
+  const cycleAliasRegistry = new RootRuntimeRegistry({
+    create: async (requestedRootId) => {
+      const created = binding(
+        async (input) => ({
+          schema_version: 1,
+          root_id: input.root_id,
+          runtime_generation: input.runtime_generation,
+          correlation_id: input.correlation_id,
+          outcome: "quiescent",
+        }),
+        async () => { uniqueTurnCloses += 1; },
+      );
+      return Object.freeze({
+        ...created,
+        target: Object.freeze({ root_id: requestedRootId, runtime_generation: parseRuntimeGeneration(1) }),
+        workspace: Object.freeze({ ...created.workspace, root_id: requestedRootId }),
+        cycle: sharedCycle,
+        turn: Object.freeze({ ...created.turn, rootId: requestedRootId }),
+      });
+    },
+  });
+  await cycleAliasRegistry.getOrCreate(rootId);
+  await assert.rejects(cycleAliasRegistry.getOrCreate(wrongRoot), /root_runtime_resource_alias/u);
+  assert.equal(uniqueTurnCloses, 1);
 });
 
 test("registry closes a unique Reconcill rejected by aggregate validation", async () => {
