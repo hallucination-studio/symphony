@@ -34,12 +34,14 @@ import {
   bindRootTaskManageCommand,
   type RootTaskManageCommandBinding,
 } from "./RootTaskManageCommand.js";
+import { createAcceptedRevisionAuthority } from "./RootAcceptedRevision.js";
 import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
 const callerAuthority = createTaskManageCallerAuthority();
+const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root", cycle: "label:cycle", plan: "label:plan",
@@ -184,6 +186,7 @@ function bindTaskManager(
     task_manager: manager,
     snapshot_reader: { readRootSnapshot },
     approved_cycle_reader: { readApprovedCycle: async () => null },
+    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
 }
 
@@ -1212,6 +1215,7 @@ test("Root tools fail composition closed for raw or differently bound Task manag
     task_manager: taskManager([]),
     snapshot_reader: { readRootSnapshot: async () => otherSnapshot },
     approved_cycle_reader: { readApprovedCycle: async () => null },
+    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
   assert.throws(() => new RootTools({
     target: { root_id: rootId, runtime_generation: generation },

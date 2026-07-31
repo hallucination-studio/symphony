@@ -69,6 +69,11 @@ import {
   type UpdateIssueCall,
   type UpdateIssueResult,
 } from "../task-management/mcp/TaskMcpSchemas.js";
+import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type {
+  AcceptedRevisionAuthorization,
+  AcceptedRevisionIssuer,
+} from "./RootAcceptedRevision.js";
 import {
   parseRootAcceptanceView,
   type RootAcceptanceView,
@@ -91,6 +96,7 @@ export interface BindRootTaskManageCommandOptions {
   readonly task_manager: TaskManageCommandInterface;
   readonly snapshot_reader: RootTaskSnapshotReader;
   readonly approved_cycle_reader: RootApprovedCycleReader;
+  readonly accepted_revision_issuer: AcceptedRevisionIssuer;
 }
 
 export interface RootApprovedCycleReader {
@@ -326,6 +332,7 @@ export class RootTaskManageCommandBinding {
   readonly #pendingCycleAcceptances: Map<TaskIssueId, PendingCycleAcceptance>;
   readonly #observedIssues: Map<TaskIssueId, TaskIssueSnapshot>;
   readonly #observedAcceptanceViews: Map<TaskIssueId, RootAcceptanceView>;
+  readonly #acceptedRevisions: Map<CycleIssueId, AcceptedRevisionAuthorization>;
   #terminalPredecessor: TaskIssueSnapshot | null = null;
 
   private constructor(
@@ -336,12 +343,14 @@ export class RootTaskManageCommandBinding {
     private readonly taskManager: TaskManageCommandInterface,
     private readonly snapshotReader: RootTaskSnapshotReader,
     private readonly approvedCycleReader: RootApprovedCycleReader,
+    private readonly acceptedRevisionIssuer: AcceptedRevisionIssuer,
     private readonly correlationId: CorrelationId | null,
     provisionalIssues: Map<TaskIssueId, CreateIssueCall["input"]>,
     pendingCycleApprovals: Map<TaskIssueId, PendingCycleApproval>,
     pendingCycleAcceptances: Map<TaskIssueId, PendingCycleAcceptance>,
     observedIssues: Map<TaskIssueId, TaskIssueSnapshot>,
     observedAcceptanceViews: Map<TaskIssueId, RootAcceptanceView>,
+    acceptedRevisions: Map<CycleIssueId, AcceptedRevisionAuthorization>,
   ) {
     this.root_id = rootId;
     this.#provisionalIssues = provisionalIssues;
@@ -349,6 +358,7 @@ export class RootTaskManageCommandBinding {
     this.#pendingCycleAcceptances = pendingCycleAcceptances;
     this.#observedIssues = observedIssues;
     this.#observedAcceptanceViews = observedAcceptanceViews;
+    this.#acceptedRevisions = acceptedRevisions;
     ROOT_TASK_MANAGE_BINDINGS.add(this);
     Object.freeze(this);
   }
@@ -362,7 +372,9 @@ export class RootTaskManageCommandBinding {
       options.task_manager,
       options.snapshot_reader,
       options.approved_cycle_reader,
+      options.accepted_revision_issuer,
       null,
+      new Map(),
       new Map(),
       new Map(),
       new Map(),
@@ -381,13 +393,24 @@ export class RootTaskManageCommandBinding {
       this.taskManager,
       this.snapshotReader,
       this.approvedCycleReader,
+      this.acceptedRevisionIssuer,
       parseCorrelationId(correlationId),
       this.#provisionalIssues,
       this.#pendingCycleApprovals,
       this.#pendingCycleAcceptances,
       new Map(),
       new Map(),
+      this.#acceptedRevisions,
     );
+  }
+
+  takeAcceptedRevisionAuthorization(): AcceptedRevisionAuthorization | null {
+    const first = this.#acceptedRevisions.entries().next().value as
+      | [CycleIssueId, AcceptedRevisionAuthorization]
+      | undefined;
+    if (first === undefined) return null;
+    this.#acceptedRevisions.delete(first[0]);
+    return first[1];
   }
 
   async get_issue(
@@ -445,7 +468,12 @@ export class RootTaskManageCommandBinding {
         acceptanceScope,
       );
       this.#pendingCycleAcceptances.delete(call.input.issue_id);
-      if (resolution.terminal) this.#terminalPredecessor = resolution.issue;
+      if (resolution.terminal) {
+        this.#terminalPredecessor = resolution.issue;
+        if (pendingAcceptance.desired_state_id === this.workflow.cycle_states.succeeded) {
+          this.#rememberAcceptedRevision(resolution.view);
+        }
+      }
       else this.#observedAcceptanceViews.set(resolution.issue.issue_id, resolution.view);
       return Object.freeze({ ...result, acceptance_view: resolution.view });
     }
@@ -595,6 +623,11 @@ export class RootTaskManageCommandBinding {
         }),
       }));
     }
+    if (
+      authorization.acceptance_view !== null
+      && result.output.outcome === "applied"
+      && call.input.desired.state_id === this.workflow.cycle_states.succeeded
+    ) this.#rememberAcceptedRevision(authorization.acceptance_view);
     return Object.freeze({
       ...result,
       seal_digest: sealDigest,
@@ -1024,6 +1057,7 @@ export class RootTaskManageCommandBinding {
       || cycle.specification.root_id !== this.root_id
       || cycle.specification.cycle_id !== cycleId
       || cycle.specification.cycle_description_markdown !== issue.description
+      || cycle.git.head_branch !== createRootHeadBranch(this.root_id)
     ) invalidBoundary();
     const transition = reduceCycleTransition(cycle, {
       cycle_seal_digest: cycle.specification.seal_digest,
@@ -1120,6 +1154,21 @@ export class RootTaskManageCommandBinding {
       && left.diff_digest === right.diff_digest
       && left.verify_issue_id === right.verify_issue_id
       && left.verify_issue_revision === right.verify_issue_revision;
+  }
+
+  #rememberAcceptedRevision(view: RootAcceptanceView): void {
+    if (this.#acceptedRevisions.has(view.cycle_id)) invalidBoundary();
+    let authorization: AcceptedRevisionAuthorization;
+    try {
+      authorization = this.acceptedRevisionIssuer.issue({
+        root_id: this.root_id,
+        runtime_generation: this.runtimeGeneration,
+        acceptance_view: view,
+      });
+    } catch {
+      return invalidBoundary();
+    }
+    this.#acceptedRevisions.set(view.cycle_id, authorization);
   }
 
   async #scope(

@@ -34,6 +34,7 @@ import {
   bindRootTaskManageCommand,
   RootTaskManageCommandBinding,
 } from "../../runtime/RootTaskManageCommand.js";
+import { createAcceptedRevisionAuthority } from "../../runtime/RootAcceptedRevision.js";
 import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
 import {
@@ -83,6 +84,7 @@ const workflow = parseTaskWorkflowIdentities({
   },
 });
 const callerAuthority = createTaskManageCallerAuthority();
+const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 
 const reconciledRootDescription = [
   "# Root",
@@ -563,6 +565,7 @@ function trustedCodexTools(
       task_manager: taskManager(() => Promise.reject(new Error("unexpected_task_manager_call"))),
       snapshot_reader: { readRootSnapshot: async () => bootstrap().task },
       approved_cycle_reader: { readApprovedCycle: async () => null },
+      accepted_revision_issuer: acceptedRevisionAuthority.issuer,
     }),
     declared_tools: declaredTools,
   });
@@ -622,6 +625,7 @@ async function controlledFixture(
         task_manager: manager,
         snapshot_reader: { readRootSnapshot },
         approved_cycle_reader: { readApprovedCycle: async () => null },
+        accepted_revision_issuer: acceptedRevisionAuthority.issuer,
       }),
       capabilities,
     }),

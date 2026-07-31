@@ -84,6 +84,9 @@ test("GitScmDelivery pushes only the exact local revision to the approved remote
   const f = await fixture();
   try {
     assert.equal((await f.delivery.read(f.identity)).remote_revision, null);
+    await git(f.repository, "commit", "--allow-empty", "-m", "unaccepted local head");
+    const otherRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
+    assert.notEqual(otherRevision, f.revision);
     const pushed = await f.delivery.push({
       identity: f.identity,
       verified_revision: f.revision,
@@ -93,8 +96,6 @@ test("GitScmDelivery pushes only the exact local revision to the approved remote
     assert.equal(pushed.outcome, "applied");
     assert.equal((await f.delivery.read(f.identity)).remote_revision, f.revision);
 
-    await git(f.repository, "commit", "--allow-empty", "-m", "conflict");
-    const otherRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
     await git(f.repository, "push", "origin", `${otherRevision}:refs/heads/${f.identity.head_branch}`);
     const conflict = await f.delivery.push({
       identity: f.identity,
