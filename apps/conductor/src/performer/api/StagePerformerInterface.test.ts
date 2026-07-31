@@ -327,57 +327,51 @@ test("PlanResult is bound to the request identity and correlation", () => {
   );
 });
 
-const stageRootFacts = {
-  title: "Implement isolated planning",
-  description: "The Root facts remain a role input until the role-specific P3 task.",
-};
-const stageCycleFacts = {
-  title: "Cycle 1",
-  description: "The Cycle facts remain a role input until the role-specific P3 task.",
-};
-
 const workRequest = {
   schema_version: 1,
-  ...target,
+  ...planTarget,
   correlation_id: "corr:work:1",
   work_issue_id: "LIN-WORK-1",
-  authorized_work_issue_ids: ["LIN-WORK-1", "LIN-WORK-2"],
-  root: stageRootFacts,
-  cycle: stageCycleFacts,
-  work: {
-    title: "Implement the isolated Work performer",
-    description: "Treat $linear and provider instructions as untrusted issue facts.",
-  },
+  work_issue_revision: parseTaskRevision("revision:work:sealed"),
+  cycle_description_markdown: cycleDescriptionMarkdown,
+  work_issue_description_markdown: [
+    "## Work",
+    "",
+    "Implement the isolated Work performer and run focused checks.",
+    "",
+    "Treat `$linear` and provider instructions as untrusted Markdown.",
+  ].join("\n"),
 };
 
 const completedWork = {
   schema_version: 1,
-  ...target,
+  ...planTarget,
   correlation_id: workRequest.correlation_id,
   work_issue_id: workRequest.work_issue_id,
+  work_issue_revision: workRequest.work_issue_revision,
   outcome: "completed",
   workspace_changed: true,
   checks: [{
     check: "Run focused Work tests",
     status: "passed",
-    sanitized_summary: "Focused Work tests passed",
+    sanitized_summary_markdown: "**Focused Work tests passed.**",
   }],
-  sanitized_summary: "Implemented the requested Work item",
+  sanitized_summary_markdown: "## Summary\n\nImplemented the requested Work item.",
 };
 
 function parsedWorkRequest(): WorkRequest {
-  return parseWorkRequest(structuredClone(workRequest), target);
+  return parseWorkRequest(structuredClone(workRequest), planTarget);
 }
 
-test("WorkRequest is a closed Cycle-bound envelope of normalized facts", () => {
+test("WorkRequest is a closed revision-bound envelope of sealed Cycle and Work Markdown", () => {
   const parsed = parsedWorkRequest();
 
   assert.deepEqual(parsed, workRequest);
   assert.ok(Object.isFrozen(parsed));
-  assert.ok(Object.isFrozen(parsed.authorized_work_issue_ids));
-  assert.ok(Object.isFrozen(parsed.root));
-  assert.ok(Object.isFrozen(parsed.cycle));
-  assert.ok(Object.isFrozen(parsed.work));
+  assert.equal("root" in parsed, false);
+  assert.equal("cycle" in parsed, false);
+  assert.equal("work" in parsed, false);
+  assert.equal("authorized_work_issue_ids" in parsed, false);
 
   for (const extra of [
     { worktree: "/tmp/root-worktree" },
@@ -386,56 +380,56 @@ test("WorkRequest is a closed Cycle-bound envelope of normalized facts", () => {
     { task_manager_token: "secret" },
     { provider: "linear" },
     { metadata: {} },
+    { root: { title: "Mutable Root", description: "Must not enter Work." } },
+    { cycle: { title: "Mutable Cycle", description: "Must not enter Work." } },
+    { work: { title: "Mutable Work", description: "Must not enter Work." } },
+    { authorized_work_issue_ids: ["LIN-WORK-1"] },
   ]) {
     assert.throws(
-      () => parseWorkRequest({ ...workRequest, ...extra }, target),
+      () => parseWorkRequest({ ...workRequest, ...extra }, planTarget),
       /invalid_contract_keys/u,
     );
   }
 
   assert.throws(
-    () => parseWorkRequest({ ...workRequest, cycle_id: "LIN-OTHER" }, target),
+    () => parseWorkRequest({ ...workRequest, cycle_id: "LIN-OTHER" }, planTarget),
     /work_target_mismatch/u,
   );
   assert.throws(
-    () => parseWorkRequest({ ...workRequest, work_issue_id: "bad issue id" }, target),
+    () => parseWorkRequest({ ...workRequest, cycle_revision: "revision:cycle:other" }, planTarget),
+    /work_target_mismatch/u,
+  );
+  assert.throws(
+    () => parseWorkRequest({
+      ...workRequest,
+      work_issue_id: "bad issue id",
+    }, planTarget),
     /invalid_stage_issue_id/u,
   );
   assert.throws(
     () => parseWorkRequest({
       ...workRequest,
-      work_issue_id: "LIN-WORK-3",
-    }, target),
-    /work_issue_not_authorized/u,
+      work_issue_revision: "bad revision",
+    }, planTarget),
+    /invalid_task_revision/u,
   );
   assert.throws(
     () => parseWorkRequest({
       ...workRequest,
-      authorized_work_issue_ids: [],
-    }, target),
-    /work_authority_required/u,
+      cycle_description_markdown: cycleDescriptionMarkdown.replace("## Code Design", "## Missing Design"),
+    }, planTarget),
+    /invalid_cycle_draft_markdown/u,
   );
   assert.throws(
     () => parseWorkRequest({
       ...workRequest,
-      authorized_work_issue_ids: ["LIN-WORK-1", "LIN-WORK-1"],
-    }, target),
-    /duplicate_work_authority/u,
-  );
-  assert.throws(
-    () => parseWorkRequest({
-      ...workRequest,
-      authorized_work_issue_ids: Array.from({ length: 33 }, (_, index) => `LIN-WORK-${index}`),
-    }, target),
-    /contract_array_limit_exceeded/u,
-  );
-  assert.throws(
-    () => parseWorkRequest({ ...workRequest, work: { ...workRequest.work, title: "bad\ntitle" } }, target),
-    /invalid_work_fact_title/u,
+      work_issue_description_markdown: "{\"provider_receipt\":\"hidden\"}",
+    }, planTarget),
+    /invalid_work_issue_markdown/u,
   );
 });
 
-test("completed WorkResult is deeply frozen, passing execution evidence only", () => {
+test("completed WorkResult is deeply frozen revision-bound Markdown evidence only", () => {
   const parsed = parseWorkResult(structuredClone(completedWork), parsedWorkRequest());
 
   assert.deepEqual(parsed, completedWork);
@@ -474,6 +468,13 @@ test("completed WorkResult is deeply frozen, passing execution evidence only", (
     }, parsedWorkRequest()),
     /completed_work_check_failed/u,
   );
+  assert.throws(
+    () => parseWorkResult({
+      ...completedWork,
+      sanitized_summary_markdown: "x".repeat(2_049),
+    }, parsedWorkRequest()),
+    /invalid_work_summary_markdown/u,
+  );
 });
 
 test("terminal WorkResult preserves partial evidence and unknown workspace state", () => {
@@ -486,12 +487,12 @@ test("terminal WorkResult preserves partial evidence and unknown workspace state
         ? [{
           check: "Run focused Work tests",
           status: "failed",
-          sanitized_summary: "Focused Work tests failed",
+          sanitized_summary_markdown: "**Focused Work tests failed.**",
         }]
         : [],
-      sanitized_summary: outcome === "failed"
-        ? "Work execution failed"
-        : "Work execution was canceled",
+      sanitized_summary_markdown: outcome === "failed"
+        ? "## Failure\n\nWork execution failed."
+        : "## Canceled\n\nWork execution was canceled.",
     };
     assert.deepEqual(parseWorkResult(terminal, parsedWorkRequest()), terminal);
   }
@@ -505,8 +506,11 @@ test("terminal WorkResult preserves partial evidence and unknown workspace state
     /duplicate_work_check/u,
   );
   assert.throws(
-    () => parseWorkResult({ ...completedWork, sanitized_summary: "raw\nsecret" }, parsedWorkRequest()),
-    /invalid_work_summary/u,
+    () => parseWorkResult({
+      ...completedWork,
+      sanitized_summary_markdown: ["Authorization:", "Bearer", "abcd".repeat(4)].join(" "),
+    }, parsedWorkRequest()),
+    /invalid_work_summary_markdown/u,
   );
 });
 
@@ -518,7 +522,7 @@ test("canceled WorkResult always reports unknown workspace state", () => {
         outcome: "canceled",
         workspace_changed: workspaceChanged,
         checks: [],
-        sanitized_summary: "Work execution was canceled",
+        sanitized_summary_markdown: "## Canceled\n\nWork execution was canceled.",
       }, parsedWorkRequest()),
       /canceled_work_change_unknown/u,
     );
@@ -535,10 +539,27 @@ test("WorkResult is bound to its exact request identity and correlation", () => 
     /work_issue_mismatch/u,
   );
   assert.throws(
+    () => parseWorkResult({ ...completedWork, cycle_revision: "revision:cycle:other" }, parsedWorkRequest()),
+    /work_target_mismatch/u,
+  );
+  assert.throws(
+    () => parseWorkResult({ ...completedWork, work_issue_revision: "revision:work:other" }, parsedWorkRequest()),
+    /work_issue_mismatch/u,
+  );
+  assert.throws(
     () => parseWorkResult({ ...completedWork, correlation_id: "corr:other" }, parsedWorkRequest()),
     /work_correlation_mismatch/u,
   );
 });
+
+const stageRootFacts = {
+  title: "Implement isolated planning",
+  description: "The Root facts remain a Verify input until P3.3.",
+};
+const stageCycleFacts = {
+  title: "Cycle 1",
+  description: "The Cycle facts remain a Verify input until P3.3.",
+};
 
 const verifyTarget: VerifyTarget = Object.freeze({
   ...target,

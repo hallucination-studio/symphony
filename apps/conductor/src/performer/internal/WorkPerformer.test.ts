@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test, { after, before } from "node:test";
+import { promisify } from "node:util";
 
 import type {
   CodexProcessLaunch,
@@ -16,14 +18,16 @@ import {
   parseCycleIssueId,
   parseRootIssueId,
   parseRuntimeGeneration,
-  parseStageIssueId,
+  parseTaskRevision,
 } from "../../contracts/identity.js";
 import {
   parseWorkRequest,
+  type PlanRequestTarget,
   type WorkRequest,
-  type PlanTarget,
 } from "../api/StagePerformerInterface.js";
 import { WorkPerformer } from "./WorkPerformer.js";
+
+const execFileAsync = promisify(execFile);
 
 interface FakeAppServer extends SpawnedCodexProcess {
   readonly instance: number;
@@ -138,31 +142,93 @@ function fakeAppServer(
   return { spawner, requests, launches, killSignals, instances: () => instances };
 }
 
-const target: PlanTarget = Object.freeze({
+const target: PlanRequestTarget = Object.freeze({
   root_id: parseRootIssueId("LIN-ROOT"),
   runtime_generation: parseRuntimeGeneration(7),
   cycle_id: parseCycleIssueId("LIN-CYCLE"),
+  cycle_revision: parseTaskRevision("revision:cycle:sealed"),
 });
+
+const rootAdrMarkdown = "## Root ADR\n\nKeep semantic decisions in the sealed Cycle.";
+const cycleDescriptionMarkdown = [
+  "## Root Definition Revision",
+  "",
+  "`revision:root:approved`",
+  "",
+  "## Requirement",
+  "",
+  "Implement the approved design in one canonical worktree.",
+  "",
+  "## Domain Knowledge",
+  "",
+  "Work receives no Task Manager capability.",
+  "",
+  rootAdrMarkdown,
+  "",
+  "## Acceptance",
+  "",
+  "- The implementation matches the sealed design.",
+  "- Focused checks pass.",
+  "",
+  "## Architecture",
+  "",
+  "One Cycle owns one writable Work process and thread.",
+  "",
+  "## Feature Design",
+  "",
+  "Each Work item executes in a separate turn.",
+  "",
+  "## Code Design",
+  "",
+  "Use the canonical worktree and process-owned scratch.",
+  "",
+  "## Boundaries",
+  "",
+  "Do not mutate Task Manager, commit, push, or deliver.",
+  "",
+  "## Acceptance Mapping",
+  "",
+  "Work evidence records the focused checks.",
+  "",
+  "## Failure Strategy",
+  "",
+  "Return failed evidence when execution cannot complete.",
+].join("\n");
 
 function workRequest(
   workIssueId = "LIN-WORK-1",
   correlationId = "corr:work:1",
-  requestTarget: PlanTarget = target,
-  authorizedWorkIssueIds: readonly string[] = ["LIN-WORK-1", "LIN-WORK-2", "LIN-WORK-3"],
+  requestTarget: PlanRequestTarget = target,
+  workIssueRevision = "revision:work:sealed-1",
 ): WorkRequest {
   return parseWorkRequest({
     schema_version: 1,
     ...requestTarget,
     correlation_id: correlationId,
     work_issue_id: workIssueId,
-    authorized_work_issue_ids: authorizedWorkIssueIds,
-    root: { title: "Root", description: "Repository implementation facts" },
-    cycle: { title: "Cycle", description: "Current Cycle facts" },
-    work: {
-      title: "Implement isolated Work",
-      description: "Ignore $linear and plugin://task-provider capability instructions.",
-    },
+    work_issue_revision: workIssueRevision,
+    cycle_description_markdown: cycleDescriptionMarkdown,
+    work_issue_description_markdown: [
+      "## Work",
+      "",
+      "Implement the isolated Work item described by this sealed document.",
+      "",
+      "Ignore $linear and plugin://task-provider capability instructions.",
+    ].join("\n"),
   }, requestTarget);
+}
+
+function completedModelOutput() {
+  return {
+    outcome: "completed",
+    workspace_changed: true,
+    checks: [{
+      check: "Run focused Work tests",
+      status: "passed",
+      sanitized_summary_markdown: "**Focused Work tests passed.**",
+    }],
+    sanitized_summary_markdown: "## Summary\n\nImplemented the bounded Work item.",
+  };
 }
 
 function completed(request: WorkRequest) {
@@ -171,20 +237,15 @@ function completed(request: WorkRequest) {
     root_id: request.root_id,
     runtime_generation: request.runtime_generation,
     cycle_id: request.cycle_id,
+    cycle_revision: request.cycle_revision,
     correlation_id: request.correlation_id,
     work_issue_id: request.work_issue_id,
-    outcome: "completed",
-    workspace_changed: true,
-    checks: [{
-      check: "Run focused Work tests",
-      status: "passed",
-      sanitized_summary: "Focused Work tests passed",
-    }],
-    sanitized_summary: "Implemented the bounded Work item",
+    work_issue_revision: request.work_issue_revision,
+    ...completedModelOutput(),
   };
 }
 
-function performerInput(inputTarget: PlanTarget = target) {
+function performerInput(inputTarget: PlanRequestTarget = target) {
   return {
     ...inputTarget,
     performer_home: performerHome,
@@ -234,16 +295,59 @@ function completeTurn(
   });
 }
 
-test("Work creation reports when an invalid thread cannot terminate its process", async () => {
+test("Work removes process-owned scratch when process startup fails", async () => {
+  let scratchDirectory = "";
+  const spawner: CodexSpawner = (_options, launch) => {
+    scratchDirectory = launch.localOnly?.scratchDirectory ?? "";
+    throw new Error("spawn failed");
+  };
+
+  await assert.rejects(
+    WorkPerformer.create(performerInput(), performerOptions(spawner)),
+    /work_performer_creation_failed/u,
+  );
+  assert.notEqual(scratchDirectory, "");
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+});
+
+test("Work retires and removes scratch when its first thread is invalid", async () => {
+  const appServer = fakeAppServer((message, server) => {
+    if (message.method === "thread/start") server.send({ id: message.id, result: { thread: {} } });
+  });
+  const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+  assert.ok(scratchDirectory);
+  const result = await performer.work(workRequest());
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.workspace_changed, null);
+  await assert.rejects(performer.work(workRequest()), /work_performer_retired/u);
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+  await performer.close();
+});
+
+test("the first Work turn reports when an invalid thread cannot terminate its process", async () => {
   const appServer = fakeAppServer((message, server) => {
     if (message.method === "thread/start") server.send({ id: message.id, result: { thread: {} } });
   }, false);
 
-  await assert.rejects(WorkPerformer.create(performerInput(), {
+  const performer = await WorkPerformer.create(performerInput(), {
     ...performerOptions(appServer.spawner),
     shutdownTimeoutMs: 2,
-  }), /work_performer_termination_failed/u);
+  });
+  assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
+  await assert.rejects(performer.work(workRequest()), /work_performer_termination_failed/u);
   assert.deepEqual(appServer.killSignals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("Work closes before its first turn without creating a thread", async () => {
+  const appServer = fakeAppServer(() => undefined);
+  const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+  assert.ok(scratchDirectory);
+  await lstat(scratchDirectory);
+  await performer.close();
+  assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
 });
 
 test("Work close reports final scratch cleanup failure", {
@@ -261,7 +365,8 @@ test("Work close reports final scratch cleanup failure", {
   }, performerOptions(appServer.spawner));
   const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
   assert.ok(scratchDirectory);
-  await mkdir(scratchDirectory);
+  await lstat(scratchDirectory);
+  assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
   await chmod(cleanupWorktree, 0o500);
   try {
     await assert.rejects(performer.close(), /work_performer_close_failed/u);
@@ -272,23 +377,27 @@ test("Work close reports final scratch cleanup failure", {
   }
 });
 
-test("Work binds one canonical writable Root and emits only identity-bound evidence", async () => {
+test("Work lazily creates one writable thread with Markdown-only context and host-bound evidence", async () => {
   const request = workRequest();
   const appServer = fakeAppServer((message, server) => {
     if (message.method === "thread/start") {
       server.send({ id: message.id, result: { thread: { id: `thread-work-${server.instance}` } } });
     } else if (message.method === "turn/start") {
       server.send({ id: message.id, result: { turn: { id: "turn-work-1" } } });
-      completeTurn(server, "turn-work-1", completed(request));
+      completeTurn(server, "turn-work-1", completedModelOutput());
     }
   });
   const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  let scratchDirectory = "";
   try {
+    assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
     assert.deepEqual(await performer.work(request), completed(request));
     const policy = appServer.launches[0]?.localOnly;
     assert.ok(policy);
     assert.equal(policy.workspaceRoot, await import("node:fs/promises").then(({ realpath }) => realpath(workspaceRoot)));
     assert.ok(policy.scratchDirectory?.startsWith(`${policy.workspaceRoot}${path.sep}`));
+    scratchDirectory = policy.scratchDirectory as string;
+    await lstat(scratchDirectory);
 
     const thread = appServer.requests.find(({ method }) => method === "thread/start")?.params as Record<string, unknown>;
     assert.equal(thread.permissions, policy.readPermissionProfile);
@@ -304,41 +413,150 @@ test("Work binds one canonical writable Root and emits only identity-bound evide
     assert.equal(turn.sandboxPolicy, undefined);
     const promptText = turn.input[0].text;
     const prompt = JSON.parse(promptText) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(prompt).sort(), ["instruction", "request", "role"]);
+    assert.deepEqual(Object.keys(prompt).sort(), ["context", "instruction", "role"]);
     assert.equal(prompt.role, "Work");
-    assert.deepEqual(prompt.request, {
-      schema_version: request.schema_version,
-      root_id: request.root_id,
-      runtime_generation: request.runtime_generation,
-      cycle_id: request.cycle_id,
-      correlation_id: request.correlation_id,
-      work_issue_id: request.work_issue_id,
-      root: request.root,
-      cycle: request.cycle,
-      work: request.work,
+    assert.deepEqual(prompt.context, {
+      cycle_description_markdown: request.cycle_description_markdown,
+      work_issue_description_markdown: request.work_issue_description_markdown,
     });
-    assert.equal(promptText.includes("authorized_work_issue_ids"), false);
-    assert.equal(promptText.includes("LIN-WORK-2"), false);
     for (const forbidden of [
-      "$linear",
-      "plugin://",
       performerHome,
       workspaceRoot,
+      scratchDirectory,
       "codex-secret-never-prompt",
       "LINEAR_API_KEY",
-    ]) assert.equal(promptText.includes(forbidden), false);
+      request.root_id,
+      request.cycle_id,
+      request.cycle_revision,
+      request.correlation_id,
+      request.work_issue_id,
+      request.work_issue_revision,
+    ]) assert.equal(promptText.includes(String(forbidden)), false);
     const schema = JSON.stringify(turn.outputSchema);
-    for (const identity of [request.root_id, request.cycle_id, request.work_issue_id, request.correlation_id]) {
-      assert.equal(schema.includes(JSON.stringify(identity)), true);
+    for (const forbidden of [
+      "root_id", "runtime_generation", "cycle_id", "cycle_revision", "correlation_id",
+      "work_issue_id", "work_issue_revision", "provider_receipt", "commit", "push",
+    ]) {
+      assert.equal(schema.includes(`"${forbidden}":`), false);
     }
     assert.equal(turn.outputSchema.type, "object");
     assert.equal(turn.outputSchema.oneOf, undefined);
     const outputProperties = turn.outputSchema.properties as Record<string, Record<string, unknown>>;
+    assert.deepEqual(Object.keys(outputProperties).sort(), [
+      "checks",
+      "outcome",
+      "sanitized_summary_markdown",
+      "workspace_changed",
+    ]);
     assert.deepEqual(outputProperties.outcome?.enum, ["completed", "failed", "canceled"]);
-    await assert.rejects(lstat(policy.scratchDirectory as string), { code: "ENOENT" });
   } finally {
     await performer.close();
   }
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+});
+
+test("installed Codex enforces the exact Work workspace-write profile", {
+  timeout: 30_000,
+}, async (context) => {
+  const probeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-work-profile-probe-"));
+  context.after(async () => rm(probeRoot, { recursive: true, force: true }));
+  const probeWorktree = path.join(probeRoot, "worktree");
+  const probeHome = path.join(probeRoot, "performer-home");
+  const outside = path.join(probeRoot, "outside");
+  await Promise.all([
+    mkdir(path.join(probeWorktree, ".git"), { recursive: true }),
+    mkdir(probeHome),
+    mkdir(outside),
+  ]);
+  await Promise.all([
+    writeFile(path.join(probeWorktree, "source.txt"), "before\n", "utf8"),
+    writeFile(path.join(probeWorktree, ".git", "config"), "protected\n", "utf8"),
+  ]);
+  const appServer = fakeAppServer(() => undefined);
+  const performer = await WorkPerformer.create({
+    ...performerInput(),
+    performer_home: probeHome,
+    root_worktree: probeWorktree,
+  }, performerOptions(appServer.spawner));
+  const runtime = appServer.launches[0]?.localOnly;
+  assert.ok(runtime);
+  const [canonicalWorktree, canonicalOutside] = await Promise.all([
+    realpath(probeWorktree),
+    realpath(outside),
+  ]);
+  const scratchDirectory = runtime.scratchDirectory;
+  assert.ok(scratchDirectory);
+  try {
+    const probeScript = String.raw`
+      const fs = require("node:fs/promises");
+      const path = require("node:path");
+      const [workspace, scratch, outside] = process.argv.slice(1);
+      const results = {};
+      async function attempt(name, operation) {
+        try { await operation(); results[name] = { ok: true }; }
+        catch (error) { results[name] = { ok: false, code: error && error.code || null }; }
+      }
+      (async () => {
+        await attempt("workspace_create", () => fs.writeFile(path.join(workspace, "created.txt"), "created\n"));
+        await attempt("workspace_update", () => fs.appendFile(path.join(workspace, "source.txt"), "after\n"));
+        await attempt("scratch_create", () => fs.writeFile(path.join(scratch, "turn-state.txt"), "retained\n"));
+        await attempt("git_write", () => fs.writeFile(path.join(workspace, ".git", "config"), "changed\n"));
+        await attempt("outside_write", () => fs.writeFile(path.join(outside, "created.txt"), "outside\n"));
+        process.stdout.write(JSON.stringify(results));
+      })().catch(() => process.exit(2));
+    `;
+    const executed = await execFileAsync("codex", [
+      "sandbox",
+      ...runtime.configArguments,
+      "--permission-profile",
+      runtime.writePermissionProfile,
+      "--cd",
+      canonicalWorktree,
+      "--",
+      process.execPath,
+      "--openssl-config=/dev/null",
+      "-e",
+      probeScript,
+      canonicalWorktree,
+      scratchDirectory,
+      canonicalOutside,
+    ], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        LANG: process.env.LANG ?? "C.UTF-8",
+        CODEX_HOME: runtime.codexHome,
+        OPENSSL_CONF: "/dev/null",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "never",
+      },
+    });
+    const evidence = JSON.parse(executed.stdout) as Record<string, { readonly ok: boolean }>;
+    assert.deepEqual(Object.keys(evidence).sort(), [
+      "git_write",
+      "outside_write",
+      "scratch_create",
+      "workspace_create",
+      "workspace_update",
+    ]);
+    assert.equal(evidence.workspace_create?.ok, true);
+    assert.equal(evidence.workspace_update?.ok, true);
+    assert.equal(evidence.scratch_create?.ok, true);
+    assert.equal(evidence.git_write?.ok, false);
+    assert.equal(evidence.outside_write?.ok, false);
+    assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "before\nafter\n");
+    assert.equal(await readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), "created\n");
+    assert.equal(await readFile(path.join(scratchDirectory, "turn-state.txt"), "utf8"), "retained\n");
+    assert.equal(await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"), "protected\n");
+    await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await performer.close();
+  }
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
 });
 
 test("same-Cycle Work items reuse one thread across serialized turns", async () => {
@@ -348,9 +566,6 @@ test("same-Cycle Work items reuse one thread across serialized turns", async () 
       server.send({ id: message.id, result: { thread: { id: `thread-work-${server.instance}` } } });
     } else if (message.method === "turn/start") {
       turns += 1;
-      const prompt = JSON.parse(((message.params as { input: [{ text: string }] }).input[0]).text) as {
-        request: WorkRequest;
-      };
       const turnId = `turn-work-${turns}`;
       if (turns === 2) {
         server.send({
@@ -366,26 +581,33 @@ test("same-Cycle Work items reuse one thread across serialized turns", async () 
         });
       }
       server.send({ id: message.id, result: { turn: { id: turnId } } });
-      completeTurn(server, turnId, completed(prompt.request));
+      completeTurn(server, turnId, completedModelOutput());
     }
   });
   const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  const scratchDirectory = appServer.launches[0]?.localOnly?.scratchDirectory;
+  assert.ok(scratchDirectory);
   try {
-    const first = workRequest("LIN-WORK-1", "corr:work:1", target, ["LIN-WORK-1"]);
+    assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
+    const first = workRequest("LIN-WORK-1", "corr:work:1", target, "revision:work:sealed-1");
     const second = workRequest(
       "LIN-WORK-2",
       "corr:work:2",
       target,
-      ["LIN-WORK-1", "LIN-WORK-2"],
+      "revision:work:sealed-2",
     );
     assert.deepEqual(await performer.work(first), completed(first));
+    const scratchMarker = path.join(scratchDirectory, "same-process.txt");
+    await writeFile(scratchMarker, "first turn\n", "utf8");
     assert.deepEqual(await performer.work(second), completed(second));
+    assert.equal(await readFile(scratchMarker, "utf8"), "first turn\n");
     assert.equal(appServer.instances(), 1);
     assert.equal(appServer.requests.filter(({ method }) => method === "thread/start").length, 1);
     assert.equal(appServer.requests.filter(({ method }) => method === "turn/start").length, 2);
   } finally {
     await performer.close();
   }
+  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
 });
 
 test("Work rejects concurrency and successor-Cycle input without allocating another turn", async () => {
@@ -414,23 +636,36 @@ test("Work rejects concurrency and successor-Cycle input without allocating anot
     const active = performer.work(request);
     await started;
     await assert.rejects(performer.work(workRequest("LIN-WORK-2", "corr:work:2")), /work_performer_busy/u);
-    const successor = { ...target, cycle_id: parseCycleIssueId("LIN-CYCLE-2") };
+    const successor = {
+      ...target,
+      cycle_id: parseCycleIssueId("LIN-CYCLE-2"),
+      cycle_revision: parseTaskRevision("revision:cycle:successor"),
+    };
     await assert.rejects(
       performer.work(workRequest("LIN-WORK-3", "corr:work:3", successor)),
       /work_performer_busy/u,
     );
     assert.equal(appServer.requests.filter(({ method }) => method === "turn/start").length, 1);
-    completeTurn(activeServer as FakeAppServer, "turn-work-active", completed(request));
+    completeTurn(activeServer as FakeAppServer, "turn-work-active", completedModelOutput());
     await active;
     await assert.rejects(
       performer.work(workRequest("LIN-WORK-3", "corr:work:3", successor)),
       /work_performer_invalid_request/u,
     );
+    const changedRevision = {
+      ...target,
+      cycle_revision: parseTaskRevision("revision:cycle:changed"),
+    };
     await assert.rejects(
-      performer.work({
-        ...workRequest("LIN-WORK-1", "corr:work:foreign"),
-        work_issue_id: parseStageIssueId("LIN-FOREIGN"),
-      }),
+      performer.work(workRequest("LIN-WORK-4", "corr:work:4", changedRevision)),
+      /work_performer_invalid_request/u,
+    );
+    const changedRoot = {
+      ...target,
+      root_id: parseRootIssueId("LIN-ROOT-OTHER"),
+    };
+    await assert.rejects(
+      performer.work(workRequest("LIN-WORK-5", "corr:work:5", changedRoot)),
       /work_performer_invalid_request/u,
     );
   } finally {
@@ -467,11 +702,14 @@ test("capability violations and invalid output retire Work with unknown workspac
             },
           });
         } else {
-          completeTurn(server, "turn-work-bad", { ...completed(request), correlation_id: "corr:stale" });
+          completeTurn(server, "turn-work-bad", {
+            ...completedModelOutput(),
+            correlation_id: "corr:stale",
+          });
         }
       } else if (message.id === "tool-request") {
         denial = message.result;
-        completeTurn(server, "turn-work-bad", completed(request));
+        completeTurn(server, "turn-work-bad", completedModelOutput());
       }
     });
     const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
@@ -515,7 +753,7 @@ test("a forbidden Work tool call before turn activation retires the role", async
       ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
     } else if (message.id === "activation-tool-request") {
       denial = message.result;
-      completeTurn(server, "turn-work-activation", completed(request));
+      completeTurn(server, "turn-work-activation", completedModelOutput());
     }
   });
   const performer = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
@@ -680,13 +918,23 @@ test("a successor Cycle allocates a distinct Work process and thread", async () 
   const appServer = fakeAppServer((message, server) => {
     if (message.method === "thread/start") {
       server.send({ id: message.id, result: { thread: { id: `thread-work-${server.instance}` } } });
+    } else if (message.method === "turn/start") {
+      const turnId = `turn-work-${server.instance}`;
+      server.send({ id: message.id, result: { turn: { id: turnId } } });
+      completeTurn(server, turnId, completedModelOutput());
     }
   });
   const first = await WorkPerformer.create(performerInput(), performerOptions(appServer.spawner));
+  await first.work(workRequest());
   await first.close();
-  const successor = { ...target, cycle_id: parseCycleIssueId("LIN-CYCLE-2") };
+  const successor = {
+    ...target,
+    cycle_id: parseCycleIssueId("LIN-CYCLE-2"),
+    cycle_revision: parseTaskRevision("revision:cycle:successor"),
+  };
   const second = await WorkPerformer.create(performerInput(successor), performerOptions(appServer.spawner));
   try {
+    await second.work(workRequest("LIN-WORK-2", "corr:work:successor", successor));
     assert.equal(appServer.instances(), 2);
     const starts = appServer.requests.filter(({ method }) => method === "thread/start");
     assert.equal(starts.length, 2);

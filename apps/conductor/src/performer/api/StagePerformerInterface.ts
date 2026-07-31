@@ -39,7 +39,6 @@ export const MAX_PLAN_WORK_ITEMS = 32;
 export const MAX_PLAN_OUTPUT_MARKDOWN_LENGTH = 2_048;
 export const MAX_PERFORMER_CHECKS = 32;
 export const MAX_PERFORMER_SUMMARY_LENGTH = 2_048;
-export const MAX_AUTHORIZED_WORK_ISSUES = 32;
 
 export const WORK_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export const VERIFY_CONCLUSIONS = ["passed", "failed", "inconclusive"] as const;
@@ -99,14 +98,16 @@ export interface PlanPerformerInterface extends StagePerformerLifecycle {
   plan(request: PlanRequest): Promise<PlanResult>;
 }
 
-export interface WorkRequest extends PlanTarget {
+export interface WorkRequestTarget extends PlanRequestTarget {
+  readonly work_issue_id: StageIssueId;
+  readonly work_issue_revision: TaskRevision;
+}
+
+export interface WorkRequest extends WorkRequestTarget {
   readonly schema_version: SchemaVersion;
   readonly correlation_id: CorrelationId;
-  readonly work_issue_id: StageIssueId;
-  readonly authorized_work_issue_ids: readonly StageIssueId[];
-  readonly root: PlanIssueFacts;
-  readonly cycle: PlanIssueFacts;
-  readonly work: PlanIssueFacts;
+  readonly cycle_description_markdown: MarkdownText;
+  readonly work_issue_description_markdown: MarkdownText;
 }
 
 export interface CheckEvidence {
@@ -115,31 +116,36 @@ export interface CheckEvidence {
   readonly sanitized_summary: string | null;
 }
 
-interface WorkResultEnvelope extends PlanTarget {
+export interface WorkCheckEvidence {
+  readonly check: string;
+  readonly status: typeof CHECK_STATUSES[number];
+  readonly sanitized_summary_markdown: MarkdownText | null;
+}
+
+interface WorkResultEnvelope extends WorkRequestTarget {
   readonly schema_version: SchemaVersion;
   readonly correlation_id: CorrelationId;
-  readonly work_issue_id: StageIssueId;
 }
 
 export interface CompletedWorkResult extends WorkResultEnvelope {
   readonly outcome: "completed";
   readonly workspace_changed: boolean;
-  readonly checks: readonly CheckEvidence[];
-  readonly sanitized_summary: string;
+  readonly checks: readonly WorkCheckEvidence[];
+  readonly sanitized_summary_markdown: MarkdownText;
 }
 
 export interface FailedWorkResult extends WorkResultEnvelope {
   readonly outcome: "failed";
   readonly workspace_changed: boolean | null;
-  readonly checks: readonly CheckEvidence[];
-  readonly sanitized_summary: string;
+  readonly checks: readonly WorkCheckEvidence[];
+  readonly sanitized_summary_markdown: MarkdownText;
 }
 
 export interface CanceledWorkResult extends WorkResultEnvelope {
   readonly outcome: "canceled";
   readonly workspace_changed: null;
-  readonly checks: readonly CheckEvidence[];
-  readonly sanitized_summary: string;
+  readonly checks: readonly WorkCheckEvidence[];
+  readonly sanitized_summary_markdown: MarkdownText;
 }
 
 export type WorkResult = CompletedWorkResult | FailedWorkResult | CanceledWorkResult;
@@ -339,12 +345,14 @@ const WORK_RESULT_KEYS = [
   "root_id",
   "runtime_generation",
   "cycle_id",
+  "cycle_revision",
   "correlation_id",
   "work_issue_id",
+  "work_issue_revision",
   "outcome",
   "workspace_changed",
   "checks",
-  "sanitized_summary",
+  "sanitized_summary_markdown",
 ] as const;
 
 const VERIFY_RESULT_KEYS = [
@@ -385,42 +393,50 @@ function assertCycleTarget(
   ) throw new Error(code);
 }
 
-export function parseWorkRequest(value: unknown, expected: PlanTarget): WorkRequest {
+function assertWorkCycleTarget(
+  actual: PlanRequestTarget,
+  expected: PlanRequestTarget,
+): void {
+  if (
+    actual.root_id !== expected.root_id
+    || actual.runtime_generation !== expected.runtime_generation
+    || actual.cycle_id !== expected.cycle_id
+    || actual.cycle_revision !== expected.cycle_revision
+  ) throw new Error("work_target_mismatch");
+}
+
+export function parseWorkRequest(value: unknown, expected: PlanRequestTarget): WorkRequest {
   const record = asRecord(value);
   assertExactKeys(record, [
     "schema_version",
     "root_id",
     "runtime_generation",
     "cycle_id",
+    "cycle_revision",
     "correlation_id",
     "work_issue_id",
-    "authorized_work_issue_ids",
-    "root",
-    "cycle",
-    "work",
+    "work_issue_revision",
+    "cycle_description_markdown",
+    "work_issue_description_markdown",
   ]);
-  const target = parsedTarget(record);
-  assertCycleTarget(target, expected, "work_target_mismatch");
-  const workIssueId = parseStageIssueId(record.work_issue_id);
-  const authorizedWorkIssueIds = parseArray(
-    record.authorized_work_issue_ids,
-    parseStageIssueId,
-    MAX_AUTHORIZED_WORK_ISSUES,
+  const target = parsedPlanRequestTarget(record);
+  assertWorkCycleTarget(target, expected);
+  const cycleDescription = parseMarkdownText(
+    record.cycle_description_markdown,
+    "invalid_work_cycle_markdown",
   );
-  if (authorizedWorkIssueIds.length === 0) throw new Error("work_authority_required");
-  if (new Set(authorizedWorkIssueIds).size !== authorizedWorkIssueIds.length) {
-    throw new Error("duplicate_work_authority");
-  }
-  if (!authorizedWorkIssueIds.includes(workIssueId)) throw new Error("work_issue_not_authorized");
+  parseCycleDraftMarkdown(cycleDescription);
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     ...target,
     correlation_id: parseCorrelationId(record.correlation_id),
-    work_issue_id: workIssueId,
-    authorized_work_issue_ids: authorizedWorkIssueIds,
-    root: parseRoleFacts(record.root, "work"),
-    cycle: parseRoleFacts(record.cycle, "work"),
-    work: parseRoleFacts(record.work, "work"),
+    work_issue_id: parseStageIssueId(record.work_issue_id),
+    work_issue_revision: parseTaskRevision(record.work_issue_revision),
+    cycle_description_markdown: cycleDescription,
+    work_issue_description_markdown: parseMarkdownText(
+      record.work_issue_description_markdown,
+      "invalid_work_issue_markdown",
+    ),
   });
 }
 
@@ -434,11 +450,11 @@ function parseSanitizedSummary(
   return summary;
 }
 
-function parseCheckEvidence(value: unknown, role: "work" | "verify"): CheckEvidence {
+function parseCheckEvidence(value: unknown): CheckEvidence {
   const record = asRecord(value);
   assertExactKeys(record, ["check", "status", "sanitized_summary"]);
   return Object.freeze({
-    check: parseBoundedString(record.check, `invalid_${role}_check`, 1_024),
+    check: parseBoundedString(record.check, "invalid_verify_check", 1_024),
     status: parseEnum(record.status, CHECK_STATUSES),
     sanitized_summary: record.sanitized_summary === null
       ? null
@@ -446,14 +462,38 @@ function parseCheckEvidence(value: unknown, role: "work" | "verify"): CheckEvide
   });
 }
 
-function parseChecks(value: unknown, role: "work" | "verify"): readonly CheckEvidence[] {
+function parseVerifyChecks(value: unknown): readonly CheckEvidence[] {
   const checks = parseArray(
     value,
-    (entry) => parseCheckEvidence(entry, role),
+    parseCheckEvidence,
     MAX_PERFORMER_CHECKS,
   );
   if (new Set(checks.map(({ check }) => check)).size !== checks.length) {
-    throw new Error(`duplicate_${role}_check`);
+    throw new Error("duplicate_verify_check");
+  }
+  return checks;
+}
+
+function parseWorkCheckEvidence(value: unknown): WorkCheckEvidence {
+  const record = asRecord(value);
+  assertExactKeys(record, ["check", "status", "sanitized_summary_markdown"]);
+  return Object.freeze({
+    check: parseBoundedString(record.check, "invalid_work_check", 1_024),
+    status: parseEnum(record.status, CHECK_STATUSES),
+    sanitized_summary_markdown: record.sanitized_summary_markdown === null
+      ? null
+      : parseMarkdownText(
+        record.sanitized_summary_markdown,
+        "invalid_check_summary_markdown",
+        1_024,
+      ),
+  });
+}
+
+function parseWorkChecks(value: unknown): readonly WorkCheckEvidence[] {
+  const checks = parseArray(value, parseWorkCheckEvidence, MAX_PERFORMER_CHECKS);
+  if (new Set(checks.map(({ check }) => check)).size !== checks.length) {
+    throw new Error("duplicate_work_check");
   }
   return checks;
 }
@@ -467,17 +507,20 @@ function parseWorkResultEnvelope(
   record: UnknownRecord,
   request: WorkRequest,
 ): WorkResultEnvelope {
-  const target = parsedTarget(record);
-  assertCycleTarget(target, request, "work_target_mismatch");
+  const target = parsedPlanRequestTarget(record);
+  assertWorkCycleTarget(target, request);
   const correlationId = parseCorrelationId(record.correlation_id);
   if (correlationId !== request.correlation_id) throw new Error("work_correlation_mismatch");
   const workIssueId = parseStageIssueId(record.work_issue_id);
   if (workIssueId !== request.work_issue_id) throw new Error("work_issue_mismatch");
+  const workIssueRevision = parseTaskRevision(record.work_issue_revision);
+  if (workIssueRevision !== request.work_issue_revision) throw new Error("work_issue_mismatch");
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     ...target,
     correlation_id: correlationId,
     work_issue_id: workIssueId,
+    work_issue_revision: workIssueRevision,
   });
 }
 
@@ -487,8 +530,12 @@ export function parseWorkResult(value: unknown, request: WorkRequest): WorkResul
   const envelope = parseWorkResultEnvelope(record, request);
   const outcome = parseEnum(record.outcome, WORK_OUTCOMES);
   const workspaceChanged = parseWorkspaceChanged(record.workspace_changed);
-  const checks = parseChecks(record.checks, "work");
-  const sanitizedSummary = parseSanitizedSummary(record.sanitized_summary, "invalid_work_summary");
+  const checks = parseWorkChecks(record.checks);
+  const sanitizedSummary = parseMarkdownText(
+    record.sanitized_summary_markdown,
+    "invalid_work_summary_markdown",
+    MAX_PERFORMER_SUMMARY_LENGTH,
+  );
 
   if (outcome === "completed") {
     if (workspaceChanged === null) throw new Error("completed_work_change_unknown");
@@ -501,7 +548,7 @@ export function parseWorkResult(value: unknown, request: WorkRequest): WorkResul
       outcome,
       workspace_changed: workspaceChanged,
       checks,
-      sanitized_summary: sanitizedSummary,
+      sanitized_summary_markdown: sanitizedSummary,
     });
   }
 
@@ -511,7 +558,7 @@ export function parseWorkResult(value: unknown, request: WorkRequest): WorkResul
       outcome,
       workspace_changed: workspaceChanged,
       checks,
-      sanitized_summary: sanitizedSummary,
+      sanitized_summary_markdown: sanitizedSummary,
     });
   }
   if (workspaceChanged !== null) throw new Error("canceled_work_change_unknown");
@@ -520,7 +567,7 @@ export function parseWorkResult(value: unknown, request: WorkRequest): WorkResul
     outcome,
     workspace_changed: null,
     checks,
-    sanitized_summary: sanitizedSummary,
+    sanitized_summary_markdown: sanitizedSummary,
   });
 }
 
@@ -594,7 +641,7 @@ export function parseVerifyResult(value: unknown, request: VerifyRequest): Verif
   assertExactKeys(record, VERIFY_RESULT_KEYS);
   const envelope = parseVerifyResultEnvelope(record, request);
   const conclusion = parseEnum(record.conclusion, VERIFY_CONCLUSIONS);
-  const checks = parseChecks(record.checks, "verify");
+  const checks = parseVerifyChecks(record.checks);
   const requestedChecks = new Set(request.requested_checks);
   if (checks.some(({ check }) => !requestedChecks.has(check))) {
     throw new Error("unknown_verify_check");
