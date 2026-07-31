@@ -101,7 +101,7 @@ function executionStage(stage: StageExecutionSnapshot) {
   };
 }
 
-function bindSnapshot(value: CycleAdvanceRequest): CycleAdvanceRequest {
+export function bindCycleAdvanceRequest(value: CycleAdvanceRequest): CycleAdvanceRequest {
   const cycleId = parseCycleIssueId(value.cycle_id);
   const graph = parseSealedExecutionGraph({
     plan_issue: value.plan_issue === null ? null : sealedStage(value.plan_issue),
@@ -318,7 +318,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     }
     let snapshot: CycleAdvanceRequest;
     try {
-      snapshot = bindSnapshot(raw);
+      snapshot = bindCycleAdvanceRequest(raw);
     } catch {
       return this.#paused("invalid_contract", "cycle_snapshot_invalid", correlationId);
     }
