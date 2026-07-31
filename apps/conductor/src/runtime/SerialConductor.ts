@@ -1,10 +1,14 @@
 import type { BoundaryErrorCode } from "../contracts/common-outcomes.js";
 import {
   parseTaskIssueId,
+  parseTaskLabelId,
+  parseTaskStateId,
   type CorrelationId,
   type CycleIssueId,
   type RootIssueId,
   type RuntimeGeneration,
+  type TaskLabelId,
+  type TaskStateId,
 } from "../contracts/identity.js";
 import {
   parseTaskObservationEvent,
@@ -143,6 +147,13 @@ export type SerialRunResult =
 
 export interface SerialConductorOptions {
   readonly agent_actor_id: string;
+  readonly root_kind_label_id: string;
+  readonly root_states: {
+    readonly todo: string;
+    readonly in_progress: string;
+    readonly in_review: string;
+    readonly done: string;
+  };
   readonly log: (entry: SerialConductorLog) => void;
 }
 
@@ -156,19 +167,35 @@ function rootIssue(observation: TaskObservationEvent): TaskIssueSnapshot {
 function admissionReason(
   observation: TaskObservationEvent,
   actorId: string,
+  rootKindLabelId: TaskLabelId,
+  rootStates: Readonly<{
+    todo: TaskStateId;
+    in_progress: TaskStateId;
+    in_review: TaskStateId;
+    done: TaskStateId;
+  }>,
   stopped: boolean,
 ): AdmissionParkReason | null {
   if (stopped) return "runtime_stopped";
   const issue = rootIssue(observation);
-  if (!issue.labels.includes("symphony:kind/root")) return "invalid_root_kind";
+  if (!issue.labels.includes(rootKindLabelId)) return "invalid_root_kind";
   if (issue.delegate_id !== actorId) return "not_delegated";
-  if (issue.status === "In Review") return "in_review";
-  if (issue.status !== "Todo" && issue.status !== "In Progress") return "status_not_executable";
+  if (issue.status === rootStates.in_review) return "in_review";
+  if (issue.status !== rootStates.todo && issue.status !== rootStates.in_progress) {
+    return "status_not_executable";
+  }
   return null;
 }
 
 export class SerialConductor {
   readonly #actorId: string;
+  readonly #rootKindLabelId: TaskLabelId;
+  readonly #rootStates: Readonly<{
+    todo: TaskStateId;
+    in_progress: TaskStateId;
+    in_review: TaskStateId;
+    done: TaskStateId;
+  }>;
   readonly #cycleContinuations = new Map<RootIssueId, RegisteredRootRuntime>();
   readonly #pending = new Map<RootIssueId, TaskObservationEvent>();
   readonly #stopped = new Set<RootIssueId>();
@@ -179,6 +206,16 @@ export class SerialConductor {
     private readonly options: SerialConductorOptions,
   ) {
     this.#actorId = parseBoundedString(options.agent_actor_id, "invalid_agent_actor_id", 256);
+    this.#rootKindLabelId = parseTaskLabelId(options.root_kind_label_id);
+    this.#rootStates = Object.freeze({
+      todo: parseTaskStateId(options.root_states.todo),
+      in_progress: parseTaskStateId(options.root_states.in_progress),
+      in_review: parseTaskStateId(options.root_states.in_review),
+      done: parseTaskStateId(options.root_states.done),
+    });
+    if (new Set(Object.values(this.#rootStates)).size !== Object.keys(this.#rootStates).length) {
+      throw new Error("duplicate_root_state_identity");
+    }
   }
 
   admit(inputs: readonly unknown[]): void {
@@ -216,6 +253,8 @@ export class SerialConductor {
       const parkReason = admissionReason(
         observation,
         this.#actorId,
+        this.#rootKindLabelId,
+        this.#rootStates,
         this.#stopped.has(observation.root_id),
       );
       if (parkReason !== null) {

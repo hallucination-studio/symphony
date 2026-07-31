@@ -34,22 +34,22 @@ function task(
       {
         issue_id: rootId,
         revision,
-        status: "Todo",
+        status: "state:root:todo",
         title,
         description: null,
         parent_id: null,
-        labels: ["symphony:kind/root"],
+        labels: ["label:root"],
         delegate_id: delegateId,
         priority: 1,
       },
       {
         issue_id: cycleId,
         revision: "revision:cycle:1",
-        status: "Todo",
+        status: "state:cycle:draft",
         title: "Cycle",
         description: null,
         parent_id: rootId,
-        labels: ["symphony:kind/cycle"],
+        labels: ["label:cycle"],
         delegate_id: agentActor,
         priority: 2,
       },
@@ -148,6 +148,13 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
   });
   const conductor = new SerialConductor(registry, {
     agent_actor_id: agentActor,
+    root_kind_label_id: "label:root",
+    root_states: {
+      todo: "state:root:todo",
+      in_progress: "state:root:in-progress",
+      in_review: "state:root:in-review",
+      done: "state:root:done",
+    },
     log: () => undefined,
   });
 

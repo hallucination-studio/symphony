@@ -29,6 +29,13 @@ import { RootRuntimeRegistry, type RootTurnInput } from "./RootRuntimeRegistry.j
 import { SerialConductor, type SerialConductorLog } from "./SerialConductor.js";
 
 const agentActor = "actor:agent";
+const rootLabelId = "label:root";
+const rootStates = Object.freeze({
+  todo: "state:root:todo",
+  in_progress: "state:root:in-progress",
+  in_review: "state:root:in-review",
+  done: "state:root:done",
+});
 
 interface TaskOptions {
   readonly delegateId?: string | null;
@@ -44,11 +51,11 @@ function task(rootId: RootIssueId, options: TaskOptions = {}): TaskSnapshot {
     issues: [{
       issue_id: rootId,
       revision: options.revision ?? "revision:root:1",
-      status: options.status ?? "Todo",
+      status: options.status ?? rootStates.todo,
       title: options.title ?? `Root ${rootId}`,
       description: null,
       parent_id: null,
-      labels: [options.label ?? "symphony:kind/root"],
+      labels: [options.label ?? rootLabelId],
       delegate_id: options.delegateId === undefined ? agentActor : options.delegateId,
       priority: 1,
     }],
@@ -184,7 +191,12 @@ function harness(
     },
   });
   return {
-    conductor: new SerialConductor(registry, { agent_actor_id: agentActor, log: (entry) => logs.push(entry) }),
+    conductor: new SerialConductor(registry, {
+      agent_actor_id: agentActor,
+      root_kind_label_id: rootLabelId,
+      root_states: rootStates,
+      log: (entry) => logs.push(entry),
+    }),
     creations,
     inputs,
     logs,
@@ -503,8 +515,8 @@ test("In Review and invalid admission facts park without blocking the next eligi
   const eligible = parseRootIssueId("LIN-3");
   const f = harness();
   f.conductor.admit([
-    event(task(inReview, { status: "In Review" }), "corr:review"),
-    event(task(wrongKind, { label: "symphony:kind/cycle" }), "corr:kind"),
+    event(task(inReview, { status: rootStates.in_review }), "corr:review"),
+    event(task(wrongKind, { label: "label:cycle" }), "corr:kind"),
     event(task(eligible), "corr:eligible"),
   ]);
 
