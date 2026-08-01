@@ -4,7 +4,7 @@ import { asRecord, assertExactKeys, parseBoundedString, parseEnum } from "../../
 export const CODEX_REQUEST_METHODS = [
   "initialize",
   "config/read",
-  "configRequirements/read",
+  "remoteControl/status/read",
   "permissionProfile/list",
   "mcpServerStatus/list",
   "thread/start",
@@ -33,6 +33,14 @@ function requestId(value: unknown): string {
     throw new Error("invalid_codex_request_id");
   }
   return String(value);
+}
+
+function assertNotificationEnvelope(record: Record<string, unknown>): void {
+  const hasTimestamp = "emittedAtMs" in record;
+  assertExactKeys(record, hasTimestamp ? ["method", "params", "emittedAtMs"] : ["method", "params"]);
+  if (hasTimestamp && !Number.isSafeInteger(record.emittedAtMs)) {
+    throw new Error("invalid_codex_notification_timestamp");
+  }
 }
 
 function turnEvent(params: unknown, kind: "turn_started" | "turn_completed"): CodexInboundMessage {
@@ -65,11 +73,11 @@ export function parseCodexInbound(value: unknown): CodexInboundMessage {
   if ("method" in record) {
     const method = parseBoundedString(record.method, "invalid_codex_method", 128);
     if (method === "turn/started") {
-      assertExactKeys(record, ["method", "params"]);
+      assertNotificationEnvelope(record);
       return turnEvent(record.params, "turn_started");
     }
     if (method === "turn/completed") {
-      assertExactKeys(record, ["method", "params"]);
+      assertNotificationEnvelope(record);
       return turnEvent(record.params, "turn_completed");
     }
     if (method === "item/tool/call") {

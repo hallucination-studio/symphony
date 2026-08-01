@@ -25,7 +25,7 @@ import {
   assertCodexLocalOnlyInitialize,
   assertCodexLocalOnlyMcpInventory,
   assertCodexLocalOnlyPermissionProfiles,
-  assertCodexLocalOnlyRequirements,
+  assertCodexLocalOnlyRemoteControlStatus,
   createCodexLocalOnlyRuntime,
   type CodexLocalOnlyMode,
   type CodexLocalOnlyRuntime,
@@ -178,7 +178,6 @@ async function resolveLaunch(options: CodexProcessOptions): Promise<CodexProcess
     TMPDIR: process.env.TMPDIR,
     CODEX_HOME: options.codexHome,
     OPENAI_API_KEY: options.apiKey,
-    OPENAI_BASE_URL: options.baseUrl,
     RUST_LOG: "error",
   };
   if (
@@ -193,7 +192,11 @@ async function resolveLaunch(options: CodexProcessOptions): Promise<CodexProcess
   }
   if (process.platform === "win32") throw new Error("codex_local_only_platform_unsupported");
 
-  const localOnly = createCodexLocalOnlyRuntime(options.capabilityMode, options.codexHome);
+  const localOnly = createCodexLocalOnlyRuntime(
+    options.capabilityMode,
+    options.codexHome,
+    options.baseUrl,
+  );
   await assertNoRemoteEnvironmentConfig(options.codexHome);
   return Object.freeze({
     executable: options.executable,
@@ -311,7 +314,7 @@ export class CodexProcess {
   async #preflightLocalOnly(): Promise<void> {
     const runtime = this.localOnly;
     if (runtime === undefined) return;
-    let stage: "config" | "requirements" | "permissions" | "mcp" = "config";
+    let stage: "config" | "remote_control" | "permissions" | "mcp" = "config";
     try {
       assertCodexLocalOnlyConfig(await this.request(
         "config/read",
@@ -319,11 +322,11 @@ export class CodexProcess {
         parseCorrelationId("local-only:config"),
         this.options.startupTimeoutMs,
       ), runtime);
-      stage = "requirements";
-      assertCodexLocalOnlyRequirements(await this.request(
-        "configRequirements/read",
-        {},
-        parseCorrelationId("local-only:requirements"),
+      stage = "remote_control";
+      assertCodexLocalOnlyRemoteControlStatus(await this.request(
+        "remoteControl/status/read",
+        undefined,
+        parseCorrelationId("local-only:remote-control"),
         this.options.startupTimeoutMs,
       ));
       stage = "permissions";
@@ -361,7 +364,7 @@ export class CodexProcess {
 
   request(
     method: CodexRequestMethod,
-    params: Record<string, unknown>,
+    params: Record<string, unknown> | undefined,
     correlationId: CorrelationId,
     timeoutMs = this.options.requestTimeoutMs,
   ): Promise<unknown> {
@@ -377,7 +380,8 @@ export class CodexProcess {
         this.#fail("codex_request_timed_out");
       }, timeoutMs);
       this.#pending.set(id, { timer, resolve, reject });
-      void this.#write({ id, method, params }).catch(() => this.#fail("codex_process_write_failed"));
+      void this.#write({ id, method, ...(params === undefined ? {} : { params }) })
+        .catch(() => this.#fail("codex_process_write_failed"));
     });
   }
 

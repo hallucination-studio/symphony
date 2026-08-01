@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -37,6 +37,8 @@ interface FakeServer extends SpawnedCodexProcess {
 const workspaceRoot = "/tmp/symphony-root-worktree";
 const codexHome = "/tmp/symphony-performer-home";
 const rootHome = "/tmp/symphony-root-home";
+const providerBaseUrl = "https://api.openai.com/v1";
+const providerApiKey = "test-api-key";
 const deploymentPolicy = Object.freeze({
   managedMcpDenyAll: true as const,
   managedRemoteControlDisabled: true as const,
@@ -68,6 +70,18 @@ function rootLocalOnlyOptions(
       deploymentPolicy,
     },
   };
+}
+
+async function assertDirectoryExcludes(directory: string, forbidden: string): Promise<void> {
+  const forbiddenBytes = Buffer.from(forbidden, "utf8");
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await assertDirectoryExcludes(entryPath, forbidden);
+    } else if (entry.isFile()) {
+      assert.equal((await readFile(entryPath)).includes(forbiddenBytes), false);
+    }
+  }
 }
 
 function fakeSpawner(
@@ -119,7 +133,18 @@ function fakeSpawner(
         } else if (message.method === "config/read") {
           send(message, { result: { config: policy?.expectedConfig, origins: {} } });
         } else if (message.method === "configRequirements/read") {
-          send(message, { result: { requirements: { allowRemoteControl: false } } });
+          send(message, {
+            error: { code: -32_601, message: "unexpected managed requirements request" },
+          });
+        } else if (message.method === "remoteControl/status/read") {
+          send(message, {
+            result: {
+              status: "disabled",
+              serverName: "symphony-test",
+              installationId: "installation-local",
+              environmentId: null,
+            },
+          });
         } else if (message.method === "permissionProfile/list") {
           send(message, {
             result: {
@@ -143,7 +168,7 @@ function fakeSpawner(
                 extends: null,
               },
               instructionSources: [],
-              runtimeWorkspaceRoots: [workspaceRoot],
+              runtimeWorkspaceRoots: policy?.role === "root" ? [] : [workspaceRoot],
             },
           });
         } else if (message.method === "turn/start") {
@@ -178,10 +203,52 @@ test("local-only process launch pins and preflights one isolated Codex capabilit
     assert.equal(launch.args[0], "app-server");
     assert.equal(launch.args.includes("--strict-config"), true);
     assert.equal(launch.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED, "1");
+    assert.equal(launch.env.OPENAI_API_KEY, providerApiKey);
+    assert.equal("OPENAI_BASE_URL" in launch.env, false);
     assert.equal("HOME" in launch.env, false);
     assert.equal("LINEAR_API_KEY" in launch.env, false);
+    assert.equal(launch.args.includes('model_provider="symphony"'), true);
+    assert.equal(launch.args.includes('model_providers.symphony.name="Symphony"'), true);
+    assert.equal(launch.args.includes(`model_providers.symphony.base_url=${JSON.stringify(providerBaseUrl)}`), true);
+    assert.equal(launch.args.includes('model_providers.symphony.env_key="OPENAI_API_KEY"'), true);
+    assert.equal(launch.args.includes('model_providers.symphony.wire_api="responses"'), true);
+    assert.equal(launch.args.includes("model_providers.symphony.requires_openai_auth=false"), true);
+    assert.equal(launch.args.includes("tools.experimental_request_user_input.enabled=false"), true);
+    assert.equal(launch.args.includes("tools.update_plan.enabled=false"), true);
+    assert.equal(launch.args.includes("orchestrator.skills.enabled=false"), true);
+    assert.equal(launch.args.some((argument) => argument.includes(providerApiKey)), false);
 
     const policy = launch.localOnly;
+    assert.equal(policy.expectedConfig.model_provider, "symphony");
+    assert.deepEqual(policy.expectedConfig.model_providers, {
+      symphony: {
+        name: "Symphony",
+        base_url: providerBaseUrl,
+        env_key: "OPENAI_API_KEY",
+        env_key_instructions: null,
+        experimental_bearer_token: null,
+        auth: null,
+        aws: null,
+        wire_api: "responses",
+        query_params: null,
+        http_headers: null,
+        env_http_headers: null,
+        request_max_retries: null,
+        stream_max_retries: null,
+        stream_idle_timeout_ms: null,
+        websocket_connect_timeout_ms: null,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+      },
+    });
+    assert.equal(Object.hasOwn(policy.expectedConfig, "tools"), false);
+    assert.deepEqual(policy.threadConfig.tools, {
+      experimental_request_user_input: { enabled: false },
+      update_plan: { enabled: false },
+    });
+    assert.deepEqual(policy.expectedConfig.orchestrator, { skills: { enabled: false } });
+    assert.deepEqual(policy.threadConfig.orchestrator, { skills: { enabled: false } });
     assert.notEqual(policy.readPermissionProfile, policy.writePermissionProfile);
     assert.match(policy.readPermissionProfile, /^symphony_read_[a-f0-9]{32}$/u);
     assert.match(policy.writePermissionProfile, /^symphony_write_[a-f0-9]{32}$/u);
@@ -210,7 +277,7 @@ test("local-only process launch pins and preflights one isolated Codex capabilit
         "initialize",
         "initialized",
         "config/read",
-        "configRequirements/read",
+        "remoteControl/status/read",
         "permissionProfile/list",
         "mcpServerStatus/list",
       ],
@@ -219,6 +286,11 @@ test("local-only process launch pins and preflights one isolated Codex capabilit
       fake.requests.find(({ method }) => method === "config/read")?.params,
       { cwd: workspaceRoot, includeLayers: false },
     );
+    const remoteControlStatusRequest = fake.requests.find(
+      ({ method }) => method === "remoteControl/status/read",
+    );
+    assert.ok(remoteControlStatusRequest);
+    assert.equal(Object.hasOwn(remoteControlStatusRequest, "params"), false);
     assert.deepEqual(
       fake.requests.find(({ method }) => method === "permissionProfile/list")?.params,
       { cwd: workspaceRoot, limit: 1_000 },
@@ -235,7 +307,7 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
     workspaceRoot,
     deniedWorkspacePaths: [deniedPath, deniedPath],
     deploymentPolicy,
-  }, codexHome);
+  }, codexHome, providerBaseUrl);
   const permissions = runtime.expectedConfig.permissions as Record<
     string,
     { readonly filesystem: Record<string, string> }
@@ -259,7 +331,7 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
       workspaceRoot,
       deniedWorkspacePaths: invalid,
       deploymentPolicy,
-    }, codexHome), /invalid_codex_local_only_denied_path/u);
+    }, codexHome, providerBaseUrl), /invalid_codex_local_only_denied_path/u);
   }
 
   const scratchDirectory = path.join(workspaceRoot, "scratch");
@@ -269,7 +341,7 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
     scratchDirectory,
     deniedWorkspacePaths: [path.join(scratchDirectory, ".env")],
     deploymentPolicy,
-  }, codexHome), /invalid_codex_local_only_scratch/u);
+  }, codexHome, providerBaseUrl), /invalid_codex_local_only_scratch/u);
 });
 
 test("Root local-only authority exposes no native filesystem access and repeats every turn boundary", async (context) => {
@@ -324,6 +396,8 @@ test("Root local-only authority exposes no native filesystem access and repeats 
   assert.deepEqual(shellEnvironment.include_only, []);
   assert.equal(shellEnvironment.filters, null);
   assert.equal(shellEnvironment.experimental_use_profile, false);
+  assert.equal(Object.hasOwn(policy.expectedConfig, "shell_environment_policy"), true);
+  assert.equal(Object.hasOwn(policy.threadConfig, "shell_environment_policy"), false);
   assert.deepEqual(
     Object.values(policy.expectedConfig.features as Readonly<Record<string, boolean>>),
     Object.values(policy.expectedConfig.features as Readonly<Record<string, boolean>>).map(() => false),
@@ -391,11 +465,7 @@ test("Root local-only authority exposes no native filesystem access and repeats 
         permissions: policy.readPermissionProfile,
         dynamicTools: [tool],
         ephemeral: true,
-        environments: [{
-          environmentId: "local",
-          cwd: workspaceRoot,
-          runtimeWorkspaceRoots: [workspaceRoot],
-        }],
+        environments: [],
         runtimeWorkspaceRoots: [workspaceRoot],
         selectedCapabilityRoots: [],
         baseInstructions: policy.baseInstructions,
@@ -412,11 +482,7 @@ test("Root local-only authority exposes no native filesystem access and repeats 
         approvalPolicy: "never",
         approvalsReviewer: "user",
         permissions: policy.readPermissionProfile,
-        environments: [{
-          environmentId: "local",
-          cwd: workspaceRoot,
-          runtimeWorkspaceRoots: [workspaceRoot],
-        }],
+        environments: [],
         runtimeWorkspaceRoots: [workspaceRoot],
       },
     );
@@ -426,7 +492,7 @@ test("Root local-only authority exposes no native filesystem access and repeats 
   }
 });
 
-test("installed Codex app-server exposes only declared Root tools or rejects before model effects", {
+test("installed Codex app-server exposes only declared Root tools without administrator requirements", {
   skip: process.platform === "win32",
   timeout: 30_000,
 }, async (context) => {
@@ -442,6 +508,7 @@ test("installed Codex app-server exposes only declared Root tools or rejects bef
   ]);
   const canonicalRootHome = await realpath(rootHome);
   const canonicalWorkspace = await realpath(workspace);
+  const probeApiKey = "probe-api-key";
   const declaredTool: RootToolSpec = Object.freeze({
     type: "function",
     name: "read_code_file",
@@ -466,7 +533,7 @@ test("installed Codex app-server exposes only declared Root tools or rejects bef
         type: "message",
         role: "assistant",
         id: messageId,
-        content: [{ type: "output_text", text: "done" }],
+        content: [{ type: "output_text", text: "{}" }],
       },
     },
     {
@@ -509,61 +576,46 @@ test("installed Codex app-server exposes only declared Root tools or rejects bef
     apiServer.listen(0, "127.0.0.1", resolve);
   });
   const address = apiServer.address() as AddressInfo;
-  let codex: CodexProcess | undefined;
   try {
+    const codex = await CodexProcess.start({
+      ...testCodexOptions(canonicalRootHome),
+      apiKey: probeApiKey,
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      startupTimeoutMs: 5_000,
+      requestTimeoutMs: 5_000,
+      shutdownTimeoutMs: 2_000,
+      capabilityMode: {
+        kind: "root_local_only",
+        workspaceRoot: canonicalWorkspace,
+        dynamicTools: [declaredTool],
+        deploymentPolicy,
+      },
+    });
     try {
-      codex = await CodexProcess.start({
-        ...testCodexOptions(canonicalRootHome),
-        apiKey: "probe-api-key",
-        baseUrl: `http://127.0.0.1:${address.port}/v1`,
-        startupTimeoutMs: 5_000,
-        requestTimeoutMs: 5_000,
-        shutdownTimeoutMs: 2_000,
-        capabilityMode: {
-          kind: "root_local_only",
-          workspaceRoot: canonicalWorkspace,
-          dynamicTools: [declaredTool],
-          deploymentPolicy,
-        },
+      const rootRuntime = codex.localOnly;
+      assert.ok(rootRuntime);
+      assert.equal(rootRuntime.role, "root");
+      const thread = await CodexThread.create(codex, {
+        cwd: canonicalWorkspace,
+        tools: rootRuntime.dynamicTools,
+        correlationId: parseCorrelationId("thread:installed-root"),
+        access: { kind: "read_only" },
+        toolMode: "local_only",
+        nativeTools: false,
       });
-    } catch (error) {
-      assert.equal((error as Error).message, "codex_local_only_preflight_failed:requirements");
-    }
-    if (codex !== undefined) {
       try {
-        const rootRuntime = codex.localOnly;
-        assert.ok(rootRuntime);
-        assert.equal(rootRuntime.role, "root");
-        const thread = await CodexThread.create(codex, {
-          cwd: canonicalWorkspace,
-          tools: rootRuntime.dynamicTools,
-          correlationId: parseCorrelationId("thread:installed-root"),
-          access: { kind: "read_only" },
-          toolMode: "local_only",
-          nativeTools: false,
-        });
-        try {
-          for (const correlationId of ["turn:installed-root:1", "turn:installed-root:2"] as const) {
-            const turn = await thread.turn("Run the requested probe.", parseCorrelationId(correlationId), 10_000);
-            assert.equal(turn.status, "completed");
-          }
-        } finally {
-          thread.close();
+        for (const correlationId of ["turn:installed-root:1", "turn:installed-root:2"] as const) {
+          const turn = await thread.turn("Run the requested probe.", parseCorrelationId(correlationId), 10_000);
+          assert.equal(turn.status, "completed");
         }
       } finally {
-        await codex.shutdown();
+        thread.close();
       }
+    } finally {
+      await codex.shutdown();
     }
   } finally {
     await new Promise<void>((resolve, reject) => apiServer.close((error) => error ? reject(error) : resolve()));
-  }
-
-  if (codex === undefined) {
-    assert.equal(requests.length, 0);
-    assert.equal(responses.length, 2);
-    assert.equal(await readFile(path.join(canonicalWorkspace, "code.ts"), "utf8"), "export const answer = 42;\n");
-    assert.equal(await readFile(path.join(canonicalRootHome, "auth.json"), "utf8"), "root-auth-secret\n");
-    return;
   }
 
   assert.equal(responses.length, 0);
@@ -579,9 +631,11 @@ test("installed Codex app-server exposes only declared Root tools or rejects bef
     assert.equal(request.includes("apply_patch"), false);
     assert.equal(request.includes("repository-secret"), false);
     assert.equal(request.includes("root-auth-secret"), false);
+    assert.equal(request.includes(probeApiKey), false);
   }
   assert.equal(await readFile(path.join(canonicalWorkspace, "code.ts"), "utf8"), "export const answer = 42;\n");
   assert.equal(await readFile(path.join(canonicalRootHome, "auth.json"), "utf8"), "root-auth-secret\n");
+  await assertDirectoryExcludes(canonicalRootHome, probeApiKey);
 });
 
 test("local-only thread starts read-only and repeats the exact local boundary on every turn", async () => {
@@ -677,6 +731,16 @@ test("local-only startup fails closed on an unattested or mismatched effective b
     (method: string, response: Record<string, unknown>) => method === "config/read"
       ? { result: { config: {}, origins: {} } }
       : response,
+    (method: string, response: Record<string, unknown>) => method === "remoteControl/status/read"
+      ? {
+          result: {
+            status: "connected",
+            serverName: "symphony-test",
+            installationId: "installation-local",
+            environmentId: "remote-environment",
+          },
+        }
+      : response,
     (method: string, response: Record<string, unknown>) => method === "mcpServerStatus/list"
       ? { result: { data: [{ name: "linear" }], nextCursor: null } }
       : response,
@@ -690,7 +754,7 @@ test("local-only startup fails closed on an unattested or mismatched effective b
   }
 });
 
-test("installed Codex CLI proves the local-only boundary or fails at the managed-policy precondition", { timeout: 15_000 }, async () => {
+test("installed Codex CLI proves the local-only boundary without administrator requirements", { timeout: 15_000 }, async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-local-only-probe-"));
   const installedHome = path.join(temporary, "home");
   const installedWorkspace = path.join(temporary, "workspace");
@@ -700,20 +764,14 @@ test("installed Codex CLI proves the local-only boundary or fails at the managed
     realpath(installedWorkspace),
   ]);
   try {
-    let process: CodexProcess;
-    try {
-      process = await CodexProcess.start({
-        ...testCodexOptions(canonicalHome),
-        capabilityMode: {
-          kind: "local_only",
-          workspaceRoot: canonicalWorkspace,
-          deploymentPolicy,
-        },
-      });
-    } catch (error) {
-      assert.equal((error as Error).message, "codex_local_only_preflight_failed:requirements");
-      return;
-    }
+    const process = await CodexProcess.start({
+      ...testCodexOptions(canonicalHome),
+      capabilityMode: {
+        kind: "local_only",
+        workspaceRoot: canonicalWorkspace,
+        deploymentPolicy,
+      },
+    });
     try {
       const thread = await CodexThread.create(process, {
         cwd: canonicalWorkspace,
@@ -827,7 +885,7 @@ test("installed Codex sandbox enforces the Root filesystem profile without parti
     kind: "root_local_only",
     workspaceRoot: canonicalWorkspace,
     deploymentPolicy,
-  }, canonicalRootHome, "01234567-89ab-cdef-0123-456789abcdef");
+  }, canonicalRootHome, providerBaseUrl, "01234567-89ab-cdef-0123-456789abcdef");
   const sandboxArguments = [
     "sandbox",
     ...runtime.configArguments,

@@ -13,6 +13,7 @@ test("Codex protocol validates official response, turn, and dynamic tool shapes"
     kind: "response", id: "1", result: { thread: { id: "thread-1" } },
   });
   assert.deepEqual(parseCodexInbound({
+    emittedAtMs: 1_234,
     method: "turn/completed",
     params: {
       threadId: "thread-1",
@@ -37,6 +38,14 @@ test("Codex protocol validates official response, turn, and dynamic tool shapes"
     method: "item/tool/call",
     params: { threadId: "thread-1", turnId: "turn-1", callId: "call-2", tool: "plan", arguments: {} },
   }).kind, "tool_call");
+  assert.throws(() => parseCodexInbound({
+    emittedAtMs: "1234",
+    method: "turn/started",
+    params: {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "inProgress", items: [], error: null },
+    },
+  }), /invalid_codex_notification_timestamp/u);
   assert.throws(() => parseCodexInbound({ method: "legacy/event", params: {} }), /unknown_codex_method/u);
   assert.throws(() => parseCodexInbound({
     method: "turn/completed",

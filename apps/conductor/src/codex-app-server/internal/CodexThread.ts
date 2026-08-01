@@ -130,6 +130,7 @@ export class CodexThread {
     const response = asRecord(await process.request("thread/start", params, input.correlationId), "invalid_codex_thread_response");
     if (localOnly !== undefined) {
       const profile = asRecord(response.activePermissionProfile, "codex_local_only_capability_mismatch");
+      const expectedWorkspaceRoots = localOnly.role === "root" ? [] : [localOnly.workspaceRoot];
       if (
         response.cwd !== localOnly.workspaceRoot
         || response.approvalPolicy !== "never"
@@ -139,8 +140,8 @@ export class CodexThread {
         || !Array.isArray(response.instructionSources)
         || response.instructionSources.length !== 0
         || !Array.isArray(response.runtimeWorkspaceRoots)
-        || response.runtimeWorkspaceRoots.length !== 1
-        || response.runtimeWorkspaceRoots[0] !== localOnly.workspaceRoot
+        || response.runtimeWorkspaceRoots.length !== expectedWorkspaceRoots.length
+        || !response.runtimeWorkspaceRoots.every((root, index) => root === expectedWorkspaceRoots[index])
       ) throw new Error("codex_local_only_capability_mismatch");
     }
     const thread = asRecord(response.thread, "invalid_codex_thread_response");

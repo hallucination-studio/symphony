@@ -10,6 +10,17 @@ import { snapshotDeniedWorkspacePaths } from "./SensitiveWorkspacePaths.js";
 
 export const SUPPORTED_LOCAL_ONLY_CODEX_VERSION = "0.146.0";
 
+const SYMPHONY_MODEL_PROVIDER_ID = "symphony";
+const SYMPHONY_MODEL_PROVIDER_NAME = "Symphony";
+const SYMPHONY_MODEL_PROVIDER_ENV_KEY = "OPENAI_API_KEY";
+const DISABLED_NATIVE_TOOL_CONFIG = Object.freeze({
+  experimental_request_user_input: Object.freeze({ enabled: false }),
+  update_plan: Object.freeze({ enabled: false }),
+});
+const DISABLED_ORCHESTRATOR_CONFIG = Object.freeze({
+  skills: Object.freeze({ enabled: false }),
+});
+
 export interface CodexLocalOnlyDeploymentPolicy {
   readonly managedMcpDenyAll: true;
   readonly managedRemoteControlDisabled: true;
@@ -375,6 +386,39 @@ function configArguments(
   writePermissionProfile: string,
 ): readonly string[] {
   const arguments_: string[] = [];
+  const modelProviders = expectedConfig.model_providers as Readonly<
+    Record<string, Readonly<Record<string, unknown>>>
+  >;
+  const modelProvider = modelProviders[SYMPHONY_MODEL_PROVIDER_ID] ?? {};
+  pushOverride(arguments_, "model_provider", SYMPHONY_MODEL_PROVIDER_ID);
+  pushOverride(
+    arguments_,
+    `model_providers.${SYMPHONY_MODEL_PROVIDER_ID}.name`,
+    SYMPHONY_MODEL_PROVIDER_NAME,
+  );
+  pushOverride(
+    arguments_,
+    `model_providers.${SYMPHONY_MODEL_PROVIDER_ID}.base_url`,
+    String(modelProvider.base_url),
+  );
+  pushOverride(
+    arguments_,
+    `model_providers.${SYMPHONY_MODEL_PROVIDER_ID}.env_key`,
+    SYMPHONY_MODEL_PROVIDER_ENV_KEY,
+  );
+  pushOverride(
+    arguments_,
+    `model_providers.${SYMPHONY_MODEL_PROVIDER_ID}.wire_api`,
+    "responses",
+  );
+  pushOverride(
+    arguments_,
+    `model_providers.${SYMPHONY_MODEL_PROVIDER_ID}.requires_openai_auth`,
+    false,
+  );
+  pushOverride(arguments_, "tools.experimental_request_user_input.enabled", false);
+  pushOverride(arguments_, "tools.update_plan.enabled", false);
+  pushOverride(arguments_, "orchestrator.skills.enabled", false);
   pushOverride(arguments_, "default_permissions", readPermissionProfile);
   const permissions = expectedConfig.permissions as Record<
     string,
@@ -433,6 +477,7 @@ function configArguments(
 export function createCodexLocalOnlyRuntime(
   mode: CodexLocalOnlyMode | CodexRootLocalOnlyMode,
   codexHomeValue: string,
+  baseUrl: string,
   nonce = randomUUID(),
 ): CodexLocalOnlyRuntime {
   if (
@@ -480,6 +525,26 @@ export function createCodexLocalOnlyRuntime(
     : profileName("write", nonce);
   const features = featureConfig(role !== "root");
   const shellEnvironmentPolicy = shellEnvironment(scratchDirectory);
+  const modelProvider = Object.freeze({
+    name: SYMPHONY_MODEL_PROVIDER_NAME,
+    base_url: baseUrl,
+    env_key: SYMPHONY_MODEL_PROVIDER_ENV_KEY,
+    env_key_instructions: null,
+    experimental_bearer_token: null,
+    auth: null,
+    aws: null,
+    wire_api: "responses",
+    query_params: null,
+    http_headers: null,
+    env_http_headers: null,
+    request_max_retries: null,
+    stream_max_retries: null,
+    stream_idle_timeout_ms: null,
+    websocket_connect_timeout_ms: null,
+    requires_openai_auth: false,
+    supports_websockets: false,
+    supports_standalone_web_search: false,
+  });
   const permissions = role === "root"
     ? Object.freeze({
         [readPermissionProfile]: Object.freeze({
@@ -528,10 +593,13 @@ export function createCodexLocalOnlyRuntime(
     project_doc_max_bytes: 0,
     project_doc_fallback_filenames: Object.freeze([]),
     skills: Object.freeze({ include_instructions: false }),
+    tools: DISABLED_NATIVE_TOOL_CONFIG,
+    orchestrator: DISABLED_ORCHESTRATOR_CONFIG,
     features,
-    shell_environment_policy: shellEnvironmentPolicy,
   });
   const expectedConfig = Object.freeze({
+    model_provider: SYMPHONY_MODEL_PROVIDER_ID,
+    model_providers: Object.freeze({ [SYMPHONY_MODEL_PROVIDER_ID]: modelProvider }),
     default_permissions: readPermissionProfile,
     approval_policy: "never",
     approvals_reviewer: "user",
@@ -545,6 +613,7 @@ export function createCodexLocalOnlyRuntime(
     project_doc_max_bytes: 0,
     project_doc_fallback_filenames: Object.freeze([]),
     skills: Object.freeze({ include_instructions: false }),
+    orchestrator: DISABLED_ORCHESTRATOR_CONFIG,
     features,
     shell_environment_policy: shellEnvironmentPolicy,
     permissions,
@@ -641,6 +710,10 @@ export function assertCodexLocalOnlyConfig(
     }
     if (
       !matchesExactly(
+        config.model_providers,
+        runtime.expectedConfig.model_providers,
+      )
+      || !matchesExactly(
         config.shell_environment_policy,
         runtime.expectedConfig.shell_environment_policy,
       )
@@ -672,11 +745,15 @@ export function assertCodexLocalOnlyConfig(
   }
 }
 
-export function assertCodexLocalOnlyRequirements(result: unknown): void {
+export function assertCodexLocalOnlyRemoteControlStatus(result: unknown): void {
   try {
     const response = asRecord(result, "codex_local_only_preflight_failed");
-    const requirements = asRecord(response.requirements, "codex_local_only_preflight_failed");
-    if (requirements.allowRemoteControl !== false) throw new Error("codex_local_only_preflight_failed");
+    assertExactKeys(response, ["status", "serverName", "installationId", "environmentId"]);
+    if (response.status !== "disabled" || response.environmentId !== null) {
+      throw new Error("codex_local_only_preflight_failed");
+    }
+    parseBoundedString(response.serverName, "codex_local_only_preflight_failed", 1024);
+    parseBoundedString(response.installationId, "codex_local_only_preflight_failed", 1024);
   } catch {
     throw new Error("codex_local_only_preflight_failed");
   }
@@ -719,6 +796,7 @@ export function assertCodexLocalOnlyMcpInventory(result: unknown): void {
 }
 
 export function localOnlyEnvironment(runtime: CodexLocalOnlyRuntime): readonly Record<string, unknown>[] {
+  if (runtime.role === "root") return Object.freeze([]);
   return Object.freeze([Object.freeze({
     environmentId: "local",
     cwd: runtime.workspaceRoot,
