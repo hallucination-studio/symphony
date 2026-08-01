@@ -5,7 +5,6 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   CodexProcess,
-  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -820,11 +819,11 @@ export class CodexRootTurnTransportFactory implements RootTurnTransportFactory {
       codexHome: input.root_home,
       rootId: input.root_id,
       runtimeGeneration: input.runtime_generation,
-      capabilityMode: createCodexProcessLocalOnlyMode({
+      capabilityMode: {
         kind: "root_local_only",
         workspaceRoot,
         dynamicTools: toolSpecs,
-      }),
+      },
     }, this.options.spawner);
     try {
       const runtime = process.localOnly;

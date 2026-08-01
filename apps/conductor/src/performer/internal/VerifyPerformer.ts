@@ -6,7 +6,6 @@ import path from "node:path";
 import { scanSensitiveWorkspacePaths } from "../../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import {
   CodexProcess,
-  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -292,12 +291,12 @@ export class VerifyPerformer implements VerifyPerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
-        capabilityMode: createCodexProcessLocalOnlyMode({
+        capabilityMode: {
           kind: "local_only",
           workspaceRoot: revisionWorktree,
           scratchDirectory,
           deniedWorkspacePaths,
-        }),
+        },
       }, spawner);
     } catch (error) {
       await cleanupFailedCreation(

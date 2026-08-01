@@ -55,12 +55,6 @@ const config = {
     "git:get_status",
     "git:get_diff",
   ],
-  permission_policy: {
-    managedMcpDenyAll: true,
-    managedRemoteControlDisabled: true,
-    remoteEnvironmentsAbsent: true,
-    configurationImmutable: true,
-  },
   root_routing: [
     { root_id: "LIN-1", repository_id: "repo:1", repository_path: "/srv/repo", base_branch: "main" },
   ],
@@ -68,28 +62,32 @@ const config = {
 
 test("configuration accepts only approved static integration fields", () => {
   assert.equal(parseConductorConfig(config).root_routing[0]?.repository_id, "repo:1");
+  assert.throws(() => parseConductorConfig({
+    ...config,
+    permission_policy: {
+      managedMcpDenyAll: true,
+      managedRemoteControlDisabled: true,
+      remoteEnvironmentsAbsent: true,
+      configurationImmutable: true,
+    },
+  }), /invalid_contract_keys/u);
   for (const secretKey of ["token", "api_key", "client_secret", "profile"]) {
     assert.throws(() => parseConductorConfig({ ...config, [secretKey]: "do-not-log" }), /invalid_contract_keys/u);
   }
   assert.throws(() => parseConductorConfig({ ...config, root_routing: [] }), /invalid_root_routing/u);
 });
 
-test("configuration fails closed when status, capability, or permission policy is missing or incomplete", () => {
+test("configuration fails closed when status or capability fields are missing or incomplete", () => {
   const without = (key: keyof typeof config) => Object.fromEntries(
     Object.entries(config).filter(([entry]) => entry !== key),
   );
 
   assert.throws(() => parseConductorConfig(without("root_states")), /invalid_contract_keys/u);
   assert.throws(() => parseConductorConfig(without("root_capabilities")), /invalid_contract_keys/u);
-  assert.throws(() => parseConductorConfig(without("permission_policy")), /invalid_contract_keys/u);
   assert.throws(() => parseConductorConfig({
     ...config,
     root_capabilities: config.root_capabilities.slice(1),
   }), /invalid_root_capabilities/u);
-  assert.throws(() => parseConductorConfig({
-    ...config,
-    permission_policy: { ...config.permission_policy, managedMcpDenyAll: false },
-  }), /invalid_permission_policy/u);
   assert.throws(() => parseConductorConfig({
     ...config,
     root_states: { ...config.root_states, done: config.root_states.todo },

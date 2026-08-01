@@ -21,26 +21,17 @@ const DISABLED_ORCHESTRATOR_CONFIG = Object.freeze({
   skills: Object.freeze({ enabled: false }),
 });
 
-export interface CodexLocalOnlyDeploymentPolicy {
-  readonly managedMcpDenyAll: true;
-  readonly managedRemoteControlDisabled: true;
-  readonly remoteEnvironmentsAbsent: true;
-  readonly configurationImmutable: true;
-}
-
 export interface CodexLocalOnlyMode {
   readonly kind: "local_only";
   readonly workspaceRoot: string;
   readonly scratchDirectory?: string;
   readonly deniedWorkspacePaths?: readonly string[];
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
 }
 
 export interface CodexRootLocalOnlyMode {
   readonly kind: "root_local_only";
   readonly workspaceRoot: string;
   readonly dynamicTools?: readonly RootToolSpec[];
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
 }
 
 export interface CodexLocalOnlyRuntime {
@@ -480,13 +471,6 @@ export function createCodexLocalOnlyRuntime(
   baseUrl: string,
   nonce = randomUUID(),
 ): CodexLocalOnlyRuntime {
-  if (
-    mode.deploymentPolicy.managedMcpDenyAll !== true
-    || mode.deploymentPolicy.managedRemoteControlDisabled !== true
-    || mode.deploymentPolicy.remoteEnvironmentsAbsent !== true
-    || mode.deploymentPolicy.configurationImmutable !== true
-  ) throw new Error("codex_local_only_policy_unattested");
-
   const workspaceRoot = absolutePath(mode.workspaceRoot, "invalid_codex_local_only_root");
   const codexHome = absolutePath(codexHomeValue, "invalid_codex_home");
   const role = mode.kind === "root_local_only" ? "root" : "performer";

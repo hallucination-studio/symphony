@@ -5,7 +5,6 @@ import path from "node:path";
 
 import {
   CodexProcess,
-  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -306,10 +305,10 @@ export class PlanPerformer implements PlanPerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
-        capabilityMode: createCodexProcessLocalOnlyMode({
+        capabilityMode: {
           kind: "local_only",
           workspaceRoot: workspace,
-        }),
+        },
       }, spawner);
     } catch (error) {
       await cleanupFailedCreation(

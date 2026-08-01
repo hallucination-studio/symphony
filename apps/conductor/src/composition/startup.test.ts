@@ -66,12 +66,6 @@ function config(programData: string) {
       "git:get_status",
       "git:get_diff",
     ],
-    permission_policy: {
-      managedMcpDenyAll: true,
-      managedRemoteControlDisabled: true,
-      remoteEnvironmentsAbsent: true,
-      configurationImmutable: true,
-    },
     root_routing: [{
       root_id: "ROOT-1",
       repository_id: "repo-1",

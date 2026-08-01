@@ -39,20 +39,12 @@ const codexHome = "/tmp/symphony-performer-home";
 const rootHome = "/tmp/symphony-root-home";
 const providerBaseUrl = "https://api.openai.com/v1";
 const providerApiKey = "test-api-key";
-const deploymentPolicy = Object.freeze({
-  managedMcpDenyAll: true as const,
-  managedRemoteControlDisabled: true as const,
-  remoteEnvironmentsAbsent: true as const,
-  configurationImmutable: true as const,
-});
-
 function localOnlyOptions() {
   return {
     ...testCodexOptions(codexHome),
     capabilityMode: {
       kind: "local_only" as const,
       workspaceRoot,
-      deploymentPolicy,
     },
   };
 }
@@ -67,7 +59,6 @@ function rootLocalOnlyOptions(
       kind: "root_local_only",
       workspaceRoot,
       dynamicTools,
-      deploymentPolicy,
     },
   };
 }
@@ -306,7 +297,6 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
     kind: "local_only",
     workspaceRoot,
     deniedWorkspacePaths: [deniedPath, deniedPath],
-    deploymentPolicy,
   }, codexHome, providerBaseUrl);
   const permissions = runtime.expectedConfig.permissions as Record<
     string,
@@ -330,7 +320,6 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
       kind: "local_only",
       workspaceRoot,
       deniedWorkspacePaths: invalid,
-      deploymentPolicy,
     }, codexHome, providerBaseUrl), /invalid_codex_local_only_denied_path/u);
   }
 
@@ -340,7 +329,6 @@ test("local-only profiles apply only bounded workspace-contained deny paths", ()
     workspaceRoot,
     scratchDirectory,
     deniedWorkspacePaths: [path.join(scratchDirectory, ".env")],
-    deploymentPolicy,
   }, codexHome, providerBaseUrl), /invalid_codex_local_only_scratch/u);
 });
 
@@ -588,7 +576,6 @@ test("installed Codex app-server exposes only declared Root tools without admini
         kind: "root_local_only",
         workspaceRoot: canonicalWorkspace,
         dynamicTools: [declaredTool],
-        deploymentPolicy,
       },
     });
     try {
@@ -696,24 +683,7 @@ test("local-only thread starts read-only and repeats the exact local boundary on
   }
 });
 
-test("local-only startup fails closed on an unattested or mismatched effective boundary", async () => {
-  let spawns = 0;
-  const neverSpawn: CodexSpawner = () => {
-    spawns += 1;
-    throw new Error("unexpected_spawn");
-  };
-  await assert.rejects(
-    CodexProcess.start({
-      ...localOnlyOptions(),
-      capabilityMode: {
-        ...localOnlyOptions().capabilityMode,
-        deploymentPolicy: { ...deploymentPolicy, managedMcpDenyAll: false as never },
-      },
-    }, neverSpawn),
-    /codex_local_only_policy_unattested/u,
-  );
-  assert.equal(spawns, 0);
-
+test("local-only startup fails closed on a mismatched effective boundary", async () => {
   for (const mutate of [
     (method: string, response: Record<string, unknown>) => method === "initialize"
       ? { result: { codexHome, platformFamily: "unix", platformOs: "macos", userAgent: "symphony/0.147.0" } }
@@ -769,7 +739,6 @@ test("installed Codex CLI proves the local-only boundary without administrator r
       capabilityMode: {
         kind: "local_only",
         workspaceRoot: canonicalWorkspace,
-        deploymentPolicy,
       },
     });
     try {
@@ -884,7 +853,6 @@ test("installed Codex sandbox enforces the Root filesystem profile without parti
   const runtime = createCodexLocalOnlyRuntime({
     kind: "root_local_only",
     workspaceRoot: canonicalWorkspace,
-    deploymentPolicy,
   }, canonicalRootHome, providerBaseUrl, "01234567-89ab-cdef-0123-456789abcdef");
   const sandboxArguments = [
     "sandbox",

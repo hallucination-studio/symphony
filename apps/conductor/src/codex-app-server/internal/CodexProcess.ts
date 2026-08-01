@@ -69,31 +69,6 @@ export type CodexSpawner = (
   launch: CodexProcessLaunch,
 ) => SpawnedCodexProcess;
 
-const CODEX_PROCESS_LOCAL_ONLY_DEPLOYMENT_POLICY: CodexLocalOnlyMode["deploymentPolicy"] =
-  Object.freeze({
-    managedMcpDenyAll: true,
-    managedRemoteControlDisabled: true,
-    remoteEnvironmentsAbsent: true,
-    configurationImmutable: true,
-  });
-
-export function createCodexProcessLocalOnlyMode(
-  mode: Omit<CodexLocalOnlyMode, "deploymentPolicy">,
-): CodexLocalOnlyMode;
-export function createCodexProcessLocalOnlyMode(
-  mode: Omit<CodexRootLocalOnlyMode, "deploymentPolicy">,
-): CodexRootLocalOnlyMode;
-export function createCodexProcessLocalOnlyMode(
-  mode:
-    | Omit<CodexLocalOnlyMode, "deploymentPolicy">
-    | Omit<CodexRootLocalOnlyMode, "deploymentPolicy">,
-): CodexLocalOnlyMode | CodexRootLocalOnlyMode {
-  return Object.freeze({
-    ...mode,
-    deploymentPolicy: CODEX_PROCESS_LOCAL_ONLY_DEPLOYMENT_POLICY,
-  });
-}
-
 interface RootHomeAuthorityReservation {
   readonly key: string;
   readonly directory: string;

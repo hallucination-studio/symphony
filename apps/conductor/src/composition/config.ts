@@ -1,6 +1,5 @@
 import path from "node:path";
 
-import type { CodexLocalOnlyDeploymentPolicy } from "../codex-app-server/internal/CodexLocalOnly.js";
 import {
   parseRepositoryId,
   parseRootIssueId,
@@ -55,7 +54,6 @@ export interface ConductorConfig {
   readonly root_states: RootStateIdentities;
   readonly workflow: TaskWorkflowIdentities;
   readonly root_capabilities: readonly string[];
-  readonly permission_policy: CodexLocalOnlyDeploymentPolicy;
   readonly root_routing: readonly RootRoutingConfig[];
 }
 
@@ -101,28 +99,6 @@ function rootCapabilities(value: unknown): readonly string[] {
   return capabilities;
 }
 
-function permissionPolicy(value: unknown): CodexLocalOnlyDeploymentPolicy {
-  const record = asRecord(value, "invalid_permission_policy");
-  assertExactKeys(record, [
-    "managedMcpDenyAll",
-    "managedRemoteControlDisabled",
-    "remoteEnvironmentsAbsent",
-    "configurationImmutable",
-  ]);
-  if (
-    record.managedMcpDenyAll !== true
-    || record.managedRemoteControlDisabled !== true
-    || record.remoteEnvironmentsAbsent !== true
-    || record.configurationImmutable !== true
-  ) throw new Error("invalid_permission_policy");
-  return Object.freeze({
-    managedMcpDenyAll: true,
-    managedRemoteControlDisabled: true,
-    remoteEnvironmentsAbsent: true,
-    configurationImmutable: true,
-  });
-}
-
 export function parseConductorConfig(value: unknown): ConductorConfig {
   const record = asRecord(value, "invalid_conductor_config");
   assertExactKeys(record, [
@@ -136,7 +112,6 @@ export function parseConductorConfig(value: unknown): ConductorConfig {
     "root_states",
     "workflow",
     "root_capabilities",
-    "permission_policy",
     "root_routing",
   ]);
   if (!Array.isArray(record.root_routing) || record.root_routing.length < 1) {
@@ -170,7 +145,6 @@ export function parseConductorConfig(value: unknown): ConductorConfig {
     root_states: rootStates(record.root_states),
     workflow: parseTaskWorkflowIdentities(record.workflow),
     root_capabilities: rootCapabilities(record.root_capabilities),
-    permission_policy: permissionPolicy(record.permission_policy),
     root_routing: Object.freeze(routing),
   });
 }

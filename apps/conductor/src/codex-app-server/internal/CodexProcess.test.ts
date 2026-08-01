@@ -133,12 +133,6 @@ test("unconfirmed Root process termination retains exclusive Root Home authority
     capabilityMode: {
       kind: "root_local_only" as const,
       workspaceRoot,
-      deploymentPolicy: {
-        managedMcpDenyAll: true as const,
-        managedRemoteControlDisabled: true as const,
-        remoteEnvironmentsAbsent: true as const,
-        configurationImmutable: true as const,
-      },
     },
   };
   const surviving = fakeSpawner((message, server) => {
@@ -202,12 +196,6 @@ test("a persistent Root Home authority blocks a restarted Conductor before proce
     capabilityMode: {
       kind: "root_local_only",
       workspaceRoot,
-      deploymentPolicy: {
-        managedMcpDenyAll: true,
-        managedRemoteControlDisabled: true,
-        remoteEnvironmentsAbsent: true,
-        configurationImmutable: true,
-      },
     },
   }, spawner), /codex_root_home_authority_retained/u);
   assert.equal(spawns, 0);
@@ -394,12 +382,6 @@ setInterval(() => undefined, 1_000);
       capabilityMode: {
         kind: "local_only",
         workspaceRoot,
-        deploymentPolicy: {
-          managedMcpDenyAll: true,
-          managedRemoteControlDisabled: true,
-          remoteEnvironmentsAbsent: true,
-          configurationImmutable: true,
-        },
       },
     }), /invalid_codex_initialize_response/u);
 
