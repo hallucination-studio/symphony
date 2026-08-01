@@ -117,8 +117,21 @@ function fakeAppServer(
           });
         } else if (message.method === "config/read") {
           server.send({ id: message.id, result: { config: policy?.expectedConfig, origins: {} } });
+        } else if (message.method === "remoteControl/status/read") {
+          server.send({
+            id: message.id,
+            result: {
+              status: "disabled",
+              serverName: "symphony-work-test",
+              installationId: "installation-local",
+              environmentId: null,
+            },
+          });
         } else if (message.method === "configRequirements/read") {
-          server.send({ id: message.id, result: { requirements: { allowRemoteControl: false } } });
+          server.send({
+            id: message.id,
+            error: { code: -32_601, message: "unexpected managed requirements request" },
+          });
         } else if (message.method === "permissionProfile/list") {
           server.send({
             id: message.id,
@@ -263,12 +276,6 @@ function performerOptions(spawner: CodexSpawner, turnTimeoutMs = 2_000) {
     baseUrl: "https://api.openai.com/v1",
     model: "codex-test",
     turnTimeoutMs,
-    deploymentPolicy: {
-      managedMcpDenyAll: true,
-      managedRemoteControlDisabled: true,
-      remoteEnvironmentsAbsent: true,
-      configurationImmutable: true,
-    } as const,
     spawner,
   };
 }
@@ -391,6 +398,17 @@ test("Work lazily creates one writable thread with Markdown-only context and hos
   let scratchDirectory = "";
   try {
     assert.equal(appServer.requests.some(({ method }) => method === "thread/start"), false);
+    assert.deepEqual(
+      appServer.requests.map(({ method }) => method).slice(0, 6),
+      [
+        "initialize",
+        "initialized",
+        "config/read",
+        "remoteControl/status/read",
+        "permissionProfile/list",
+        "mcpServerStatus/list",
+      ],
+    );
     assert.deepEqual(await performer.work(request), completed(request));
     const policy = appServer.launches[0]?.localOnly;
     assert.ok(policy);

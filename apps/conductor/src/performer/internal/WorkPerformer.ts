@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import type { CodexLocalOnlyDeploymentPolicy } from "../../codex-app-server/internal/CodexLocalOnly.js";
 import {
   CodexProcess,
+  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -61,7 +61,6 @@ export interface WorkPerformerOptions
     "codexHome" | "rootId" | "runtimeGeneration" | "capabilityMode"
   > {
   readonly turnTimeoutMs: number;
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
   readonly spawner?: CodexSpawner;
 }
 
@@ -297,7 +296,7 @@ export class WorkPerformer implements WorkPerformerInterface {
     } catch {
       throw new Error("work_performer_creation_failed");
     }
-    const { deploymentPolicy, spawner, turnTimeoutMs, ...codexOptions } = options;
+    const { spawner, turnTimeoutMs, ...codexOptions } = options;
     let process: CodexProcess;
     try {
       process = await CodexProcess.start({
@@ -305,12 +304,11 @@ export class WorkPerformer implements WorkPerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
-        capabilityMode: {
+        capabilityMode: createCodexProcessLocalOnlyMode({
           kind: "local_only",
           workspaceRoot: worktree,
           scratchDirectory,
-          deploymentPolicy,
-        },
+        }),
       }, spawner);
     } catch (error) {
       await cleanupFailedCreation(

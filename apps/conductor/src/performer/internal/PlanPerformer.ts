@@ -5,10 +5,10 @@ import path from "node:path";
 
 import {
   CodexProcess,
+  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
-import type { CodexLocalOnlyDeploymentPolicy } from "../../codex-app-server/internal/CodexLocalOnly.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
 import {
   parseCorrelationId,
@@ -63,7 +63,6 @@ export interface PlanPerformerOptions
     "codexHome" | "rootId" | "runtimeGeneration" | "capabilityMode"
   > {
   readonly turnTimeoutMs: number;
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
   readonly spawner?: CodexSpawner;
 }
 
@@ -299,7 +298,7 @@ export class PlanPerformer implements PlanPerformerInterface {
     } catch {
       throw new Error("plan_performer_creation_failed");
     }
-    const { deploymentPolicy, spawner, turnTimeoutMs, ...codexOptions } = options;
+    const { spawner, turnTimeoutMs, ...codexOptions } = options;
     let process: CodexProcess;
     try {
       process = await CodexProcess.start({
@@ -307,11 +306,10 @@ export class PlanPerformer implements PlanPerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
-        capabilityMode: {
+        capabilityMode: createCodexProcessLocalOnlyMode({
           kind: "local_only",
           workspaceRoot: workspace,
-          deploymentPolicy,
-        },
+        }),
       }, spawner);
     } catch (error) {
       await cleanupFailedCreation(

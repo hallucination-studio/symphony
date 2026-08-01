@@ -85,8 +85,21 @@ function fakeAppServer(
         const policy = launch.localOnly;
         if (message.method === "config/read") {
           server.send({ id: message.id, result: { config: policy?.expectedConfig, origins: {} } });
+        } else if (message.method === "remoteControl/status/read") {
+          server.send({
+            id: message.id,
+            result: {
+              status: "disabled",
+              serverName: "symphony-plan-test",
+              installationId: "installation-local",
+              environmentId: null,
+            },
+          });
         } else if (message.method === "configRequirements/read") {
-          server.send({ id: message.id, result: { requirements: { allowRemoteControl: false } } });
+          server.send({
+            id: message.id,
+            error: { code: -32_601, message: "unexpected managed requirements request" },
+          });
         } else if (message.method === "permissionProfile/list") {
           server.send({
             id: message.id,
@@ -227,12 +240,6 @@ function performerOptions(spawner: CodexSpawner) {
     baseUrl: "https://api.openai.com/v1",
     model: "codex-test",
     turnTimeoutMs: 2_000,
-    deploymentPolicy: {
-      managedMcpDenyAll: true,
-      managedRemoteControlDisabled: true,
-      remoteEnvironmentsAbsent: true,
-      configurationImmutable: true,
-    } as const,
     spawner,
   };
 }
@@ -293,6 +300,17 @@ test("Plan performer exposes a tool-free Markdown compiler with no code mount or
   let planWorkspace = "";
   try {
     assert.deepEqual(await performer.plan(request), completed);
+    assert.deepEqual(
+      appServer.requests.map(({ method }) => method).slice(0, 6),
+      [
+        "initialize",
+        "initialized",
+        "config/read",
+        "remoteControl/status/read",
+        "permissionProfile/list",
+        "mcpServerStatus/list",
+      ],
+    );
 
     const threadStart = appServer.requests.find(({ method }) => method === "thread/start");
     const threadParams = threadStart?.params as Record<string, unknown>;

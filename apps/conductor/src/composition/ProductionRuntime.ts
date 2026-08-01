@@ -649,7 +649,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         }, {
           ...codexOptions,
           turnTimeoutMs: CODEX_TURN_TIMEOUT_MS,
-          deploymentPolicy: this.options.startup.config.permission_policy,
         }),
       },
       work_performer_factory: {
@@ -660,7 +659,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         }, {
           ...codexOptions,
           turnTimeoutMs: CODEX_TURN_TIMEOUT_MS,
-          deploymentPolicy: this.options.startup.config.permission_policy,
         }),
       },
       verify_performer_factory: {
