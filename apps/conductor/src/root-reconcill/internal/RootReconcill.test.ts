@@ -62,12 +62,6 @@ import {
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
-const deploymentPolicy = Object.freeze({
-  managedMcpDenyAll: true as const,
-  managedRemoteControlDisabled: true as const,
-  remoteEnvironmentsAbsent: true as const,
-  configurationImmutable: true as const,
-});
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root", cycle: "label:cycle", plan: "label:plan",
@@ -340,7 +334,7 @@ function controlledAppServer(
                 approvalsReviewer: "user",
                 activePermissionProfile: { id: localOnly.readPermissionProfile, extends: null },
                 instructionSources: [],
-                runtimeWorkspaceRoots: [localOnly.workspaceRoot],
+                runtimeWorkspaceRoots: [],
               },
             }
           : message;
@@ -361,8 +355,23 @@ function controlledAppServer(
               server.send({ id: message.id, result: { config: localOnly.expectedConfig, origins: {} } });
               return;
             }
+            if (message.method === "remoteControl/status/read") {
+              server.send({
+                id: message.id,
+                result: {
+                  status: "disabled",
+                  serverName: "symphony-root-test",
+                  installationId: "installation-local",
+                  environmentId: null,
+                },
+              });
+              return;
+            }
             if (message.method === "configRequirements/read") {
-              server.send({ id: message.id, result: { requirements: { allowRemoteControl: false } } });
+              server.send({
+                id: message.id,
+                error: { code: -32_601, message: "unexpected managed requirements request" },
+              });
               return;
             }
             if (message.method === "permissionProfile/list") {
@@ -613,7 +622,6 @@ async function controlledFixture(
     spawner: appServer.spawner,
     log: (entry) => toolLogs.push(entry),
     resolveWorkspaceRoot: async () => workspaceRoot,
-    deploymentPolicy,
   });
   const factory = new RootReconcillFactory(transportFactory, {
     create: (target) => new RootTools({
@@ -762,7 +770,6 @@ test("Codex Root transport enforces local read-only authority and executes brand
       resolvedRoots.push(requestedRootId);
       return workspaceAlias;
     },
-    deploymentPolicy,
   });
 
   const transport = await factory.create({
@@ -773,6 +780,17 @@ test("Codex Root transport enforces local read-only authority and executes brand
   });
   try {
     assert.deepEqual(resolvedRoots, [rootId]);
+    assert.deepEqual(
+      appServer.requests.map(({ method }) => method).slice(0, 6),
+      [
+        "initialize",
+        "initialized",
+        "config/read",
+        "remoteControl/status/read",
+        "permissionProfile/list",
+        "mcpServerStatus/list",
+      ],
+    );
     const launch = appServer.spawns[0]?.launch;
     assert.ok(launch?.localOnly);
     assert.equal(launch.localOnly.role, "root");
@@ -790,11 +808,7 @@ test("Codex Root transport enforces local read-only authority and executes brand
         permissions: launch.localOnly.readPermissionProfile,
         dynamicTools: launch.localOnly.dynamicTools,
         ephemeral: true,
-        environments: [{
-          environmentId: "local",
-          cwd: canonicalWorkspace,
-          runtimeWorkspaceRoots: [canonicalWorkspace],
-        }],
+        environments: [],
         runtimeWorkspaceRoots: [canonicalWorkspace],
         selectedCapabilityRoots: [],
         baseInstructions: launch.localOnly.baseInstructions,
@@ -852,7 +866,6 @@ test("Codex Root transport rejects an invalid routed workspace before process al
     spawner: appServer.spawner,
     log: () => undefined,
     resolveWorkspaceRoot: async () => resolvedWorkspace,
-    deploymentPolicy,
   });
 
   for (const invalid of [filePath, path.join(temporary, "missing"), "relative/workspace"]) {
@@ -891,7 +904,6 @@ test("Codex Root transport rejects Performer and write-capable Git tools before 
     spawner: appServer.spawner,
     log: () => undefined,
     resolveWorkspaceRoot: async () => workspace,
-    deploymentPolicy,
   });
 
   for (const [name, capability] of [
@@ -981,7 +993,6 @@ test("Codex Root transport rejects caller-declared read tool callbacks before pr
     spawner: appServer.spawner,
     log: () => undefined,
     resolveWorkspaceRoot: async () => workspace,
-    deploymentPolicy,
   });
 
   const outcome = await factory.create({
@@ -1041,7 +1052,6 @@ test("Codex Root transport rejects an untrusted same-identity tool implementatio
     spawner: appServer.spawner,
     log: () => undefined,
     resolveWorkspaceRoot: async () => workspace,
-    deploymentPolicy,
   });
 
   await assert.rejects(factory.create({
@@ -1071,7 +1081,6 @@ test("Codex Root transport bounds workspace resolution by its startup timeout", 
     spawner: appServer.spawner,
     log: () => undefined,
     resolveWorkspaceRoot: () => new Promise<string>(() => undefined),
-    deploymentPolicy,
   });
 
   const outcome = await Promise.race([

@@ -5,13 +5,11 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   CodexProcess,
+  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
-import {
-  snapshotCodexRootLocalOnlyTools,
-  type CodexLocalOnlyDeploymentPolicy,
-} from "../../codex-app-server/internal/CodexLocalOnly.js";
+import { snapshotCodexRootLocalOnlyTools } from "../../codex-app-server/internal/CodexLocalOnly.js";
 import { CodexThread } from "../../codex-app-server/internal/CodexThread.js";
 import {
   bindDynamicTools,
@@ -598,7 +596,6 @@ interface CodexTransportFactoryOptions {
   readonly spawner?: CodexSpawner;
   readonly log: (entry: RootToolBridgeLog) => void;
   readonly resolveWorkspaceRoot: (rootId: RootIssueId) => Promise<string>;
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
 }
 
 type TransportAbort =
@@ -823,12 +820,11 @@ export class CodexRootTurnTransportFactory implements RootTurnTransportFactory {
       codexHome: input.root_home,
       rootId: input.root_id,
       runtimeGeneration: input.runtime_generation,
-      capabilityMode: {
+      capabilityMode: createCodexProcessLocalOnlyMode({
         kind: "root_local_only",
         workspaceRoot,
         dynamicTools: toolSpecs,
-        deploymentPolicy: this.options.deploymentPolicy,
-      },
+      }),
     }, this.options.spawner);
     try {
       const runtime = process.localOnly;

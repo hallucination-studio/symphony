@@ -79,7 +79,15 @@ const CODEX_PROCESS_LOCAL_ONLY_DEPLOYMENT_POLICY: CodexLocalOnlyMode["deployment
 
 export function createCodexProcessLocalOnlyMode(
   mode: Omit<CodexLocalOnlyMode, "deploymentPolicy">,
-): CodexLocalOnlyMode {
+): CodexLocalOnlyMode;
+export function createCodexProcessLocalOnlyMode(
+  mode: Omit<CodexRootLocalOnlyMode, "deploymentPolicy">,
+): CodexRootLocalOnlyMode;
+export function createCodexProcessLocalOnlyMode(
+  mode:
+    | Omit<CodexLocalOnlyMode, "deploymentPolicy">
+    | Omit<CodexRootLocalOnlyMode, "deploymentPolicy">,
+): CodexLocalOnlyMode | CodexRootLocalOnlyMode {
   return Object.freeze({
     ...mode,
     deploymentPolicy: CODEX_PROCESS_LOCAL_ONLY_DEPLOYMENT_POLICY,

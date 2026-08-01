@@ -126,8 +126,21 @@ function fakeAppServer(
           });
         } else if (message.method === "config/read") {
           server.send({ id: message.id, result: { config: policy?.expectedConfig, origins: {} } });
+        } else if (message.method === "remoteControl/status/read") {
+          server.send({
+            id: message.id,
+            result: {
+              status: "disabled",
+              serverName: "symphony-verify-test",
+              installationId: "installation-local",
+              environmentId: null,
+            },
+          });
         } else if (message.method === "configRequirements/read") {
-          server.send({ id: message.id, result: { requirements: { allowRemoteControl: false } } });
+          server.send({
+            id: message.id,
+            error: { code: -32_601, message: "unexpected managed requirements request" },
+          });
         } else if (message.method === "permissionProfile/list") {
           server.send({
             id: message.id,
@@ -275,12 +288,6 @@ function performerOptions(spawner: CodexSpawner, turnTimeoutMs = 2_000) {
     baseUrl: "https://api.openai.com/v1",
     model: "codex-test",
     turnTimeoutMs,
-    deploymentPolicy: {
-      managedMcpDenyAll: true,
-      managedRemoteControlDisabled: true,
-      remoteEnvironmentsAbsent: true,
-      configurationImmutable: true,
-    } as const,
     spawner,
   };
 }
@@ -383,6 +390,17 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
   });
   const performer = await VerifyPerformer.create(performerInput(), performerOptions(appServer.spawner));
   try {
+    assert.deepEqual(
+      appServer.requests.map(({ method }) => method).slice(0, 6),
+      [
+        "initialize",
+        "initialized",
+        "config/read",
+        "remoteControl/status/read",
+        "permissionProfile/list",
+        "mcpServerStatus/list",
+      ],
+    );
     assert.deepEqual(await performer.verify(request), passed(request));
     const policy = appServer.launches[0]?.localOnly;
     assert.ok(policy);
@@ -406,7 +424,8 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
     assert.equal(turn.permissions, policy.readPermissionProfile);
     assert.equal(turn.sandboxPolicy, undefined);
     assert.equal(
-      appServer.requests.some(({ params }) => JSON.stringify(params).includes(policy.writePermissionProfile)),
+      appServer.requests.some(({ params }) =>
+        JSON.stringify(params)?.includes(policy.writePermissionProfile) === true),
       false,
     );
     const promptText = turn.input[0].text;

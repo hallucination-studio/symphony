@@ -3,10 +3,10 @@ import { mkdir, realpath, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import type { CodexLocalOnlyDeploymentPolicy } from "../../codex-app-server/internal/CodexLocalOnly.js";
 import { scanSensitiveWorkspacePaths } from "../../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import {
   CodexProcess,
+  createCodexProcessLocalOnlyMode,
   type CodexProcessOptions,
   type CodexSpawner,
 } from "../../codex-app-server/internal/CodexProcess.js";
@@ -63,7 +63,6 @@ export interface VerifyPerformerOptions
     "codexHome" | "rootId" | "runtimeGeneration" | "capabilityMode"
   > {
   readonly turnTimeoutMs: number;
-  readonly deploymentPolicy: CodexLocalOnlyDeploymentPolicy;
   readonly spawner?: CodexSpawner;
 }
 
@@ -285,7 +284,7 @@ export class VerifyPerformer implements VerifyPerformerInterface {
     } catch {
       throw new Error("verify_performer_creation_failed");
     }
-    const { deploymentPolicy, spawner, turnTimeoutMs, ...codexOptions } = options;
+    const { spawner, turnTimeoutMs, ...codexOptions } = options;
     let process: CodexProcess;
     try {
       process = await CodexProcess.start({
@@ -293,13 +292,12 @@ export class VerifyPerformer implements VerifyPerformerInterface {
         codexHome: performerHome,
         rootId: target.root_id,
         runtimeGeneration: target.runtime_generation,
-        capabilityMode: {
+        capabilityMode: createCodexProcessLocalOnlyMode({
           kind: "local_only",
           workspaceRoot: revisionWorktree,
           scratchDirectory,
           deniedWorkspacePaths,
-          deploymentPolicy,
-        },
+        }),
       }, spawner);
     } catch (error) {
       await cleanupFailedCreation(

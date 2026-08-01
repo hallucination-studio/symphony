@@ -608,7 +608,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         if (requestedRootId !== rootId) throw new Error("root_route_identity_mismatch");
         return route.git.pathFor(rootId);
       },
-      deploymentPolicy: this.options.startup.config.permission_policy,
       log: (entry) => this.options.log(entry),
     });
     const reconcillFactory = new RootReconcillFactory(
@@ -669,7 +668,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         }, {
           ...codexOptions,
           turnTimeoutMs: CODEX_TURN_TIMEOUT_MS,
-          deploymentPolicy: this.options.startup.config.permission_policy,
         }),
       },
     });
