@@ -1,85 +1,123 @@
 # Git Worktree and Delivery
 
-状态：Phase 1 目标设计。本文定义 Conductor mechanical Cycle 和 Root acceptance boundary 使用的 provider-neutral Git/Delivery operations，以及从 Work 修改到 exact-revision PR 的事实边界。
+| Status | Owns | Does not own |
+|---|---|---|
+| Phase 1 target | worktree、commit proof、Verify revision、remote lease、PR identity、convergence mechanics | workflow transition、failure policy |
 
-## Generic tools
+## Git tool table
 
-Git 与 Delivery surface 只暴露资源级 functions：
+| Rule | Tool | Required input | Typed output | Forbidden effect |
+|---|---|---|---|---|
+| `GD-TOOL-001` | `get_status,get_diff,get_head,get_commit_proof` | exact Cycle worktree or immutable revision | fresh normalized Git facts | Task mutation、credential exposure |
+| `GD-TOOL-002` | `prepare_worktree` | Cycle ID and approval base revision | exact disposable worktree identity | reuse predecessor worktree |
+| `GD-TOOL-003` | `create_commit` | final Work parent/diff and closed proof | carrying commit object ID | self-referential revision trailer |
+| `GD-TOOL-004` | `get_remote_ref,push_revision` | repository/ref plus expected-old revision | exact ref result and effect ambiguity | unconditional force push |
+| `GD-TOOL-005` | `get_or_create_pull_request,get_pull_request` | closed repository/base/head identity | exact provider PR fact | list-then-create uniqueness claim |
 
-```text
-get_workspace
-prepare_worktree
-get_status
-get_diff
-create_commit
-get_remote_ref
-push_revision
-list_pull_requests
-create_pull_request
-get_pull_request
-```
+## Worktree table
 
-这些 functions 不包含 “complete Work”“accept Cycle” 或 “move In Review”等语义命令。Conductor Cycle machine按 sealed graph 调用 Git operations；Root Reconcill在 acceptance 后只授权 exact revision 的 Delivery operations。每个 call 都校验 ownership、capability、revision/precondition并 fresh read-back。
-
-## Worktree authority
-
-每个 Root 使用独立 deterministic branch 和 canonical worktree，不同 Root 不得共享。权限固定为：
-
-- Root Reconcill 对用户 repository、worktree 和 exact revision 始终 read-only。
-- Plan 不挂载用户代码。
-- 当前 Cycle 的 Work Performer 对唯一 Root worktree read/write。
-- Verify 对 exact-revision worktree read-only，只能写 process-owned scratch。
-- Conductor只能通过 `GitWorkspaceInterface` 执行 prepared worktree、read、commit 等 typed operations，不向模型暴露 shell。
-
-worktree missing、path/owner conflict、unexpected dirty state 或 branch mismatch 返回 fresh Git facts并 fail closed。Phase 1不自动 reset、clean、repair 或切换 alternate worktree。
+| Rule | Fact | Requirement | Failure behavior |
+|---|---|---|---|
+| `GD-WT-001` | one approved Cycle | one detached disposable worktree at deterministic owner/path and approval base | ownership/base/path mismatch fails closed |
+| `GD-WT-002` | Work mutation | only current Cycle worktree is writable | other worktree/Home/user path access denied |
+| `GD-WT-003` | dirty state | recoverable only when Linear Work completion chain and fresh parent/diff match | unexpected dirty state fails Cycle |
+| `GD-WT-004` | terminal Cycle | exact worktree may be deleted after terminal read-back | never reset/clean/cherry-pick into successor |
 
 ## Commit and Verify
 
-sealed graph 的全部 required Work `Done` 后，Conductor mechanical Cycle machine：
-
-1. fresh `get_status`/`get_diff`，确认 HEAD、worktree ownership 和 sealed Cycle correlation。
-2. 以 exact diff digest 调用 `create_commit`，fresh read-back immutable revision。
-3. 创建 fresh isolated Verify context，只读检查该 exact revision。
-4. Verify 后再次确认 HEAD、diff 和 revision 未变化。
-5. `passed` 时把 Cycle 置为 `Awaiting Acceptance`；`failed | inconclusive` 或 mismatch 时置为 `Failed`。
-
-Verify 检查的 revision、Root Reconcill验收的 revision、push 的 revision、remote ref 和 PR head 必须相同。任何 mismatch 都是可见 terminal 或 delivery conflict；不得验证一个 revision 后交付另一个 revision。
-
-## Acceptance and delivery
-
-Root Reconcill 在 `Awaiting Acceptance` 对 sealed Cycle design 和 exact revision 做 code-read-only semantic review。接受时把 Cycle fresh update 为 `Succeeded`；拒绝时为 `Rejected`。Cycle terminal 后不 reopen，不在同一 worktree turn 中修复。
-
-`Succeeded` 是 exact revision 的交付授权。Root Reconcill只能指定该 accepted revision 和 closed PR identity；Conductor执行：
-
-```text
-push_revision
--> fresh get_remote_ref
--> list/get or create one exact pull request
--> fresh get_pull_request
--> generic Task Manager update_issue(Root, In Review)
+```mermaid
+%% source-rules: WF-PERSIST-003 WF-PERSIST-004 WF-RESTART-007 WF-RESTART-008
+%% source-rules: CO-EXEC-006 CO-EXEC-007
+%% source-rules: GD-COMMIT-001 GD-COMMIT-002 GD-COMMIT-003 GD-VERIFY-001 GD-VERIFY-002
+sequenceDiagram
+  participant C as Cycle machine
+  participant L as Linear
+  participant G as Git
+  participant V as Fresh Verify
+  C->>L: read final ordered Work completion parent/diff
+  C->>G: fresh worktree status and diff
+  C->>G: create commit with typed proof
+  C->>G: read carrying object ID and recompute parent/diff
+  C->>L: project Verify In Progress
+  C->>V: verify exact immutable revision
+  C->>L: persist Verify Result/Handoff before terminal status
 ```
 
-Symphony不自动 merge，也不自动将 Root 设为 `Done`。delivery失败不改变 accepted revision，不 force-push、不回退到其他 commit，也不重开 Cycle。
+| Rule | Contract | Independent facts compared | Success fact | Failure |
+|---|---|---|---|---|
+| `GD-COMMIT-001` | commit input | final stable-order Work record parent/diff versus fresh worktree parent/diff | exact equality | no commit |
+| `GD-COMMIT-002` | commit proof | Root/Cycle seals, Work completion-set digest, parent and diff | proof carried by commit; revision derived from object ID | proof mismatch fails closed |
+| `GD-COMMIT-003` | restart commit recovery | carrying object proof and actual parent/diff versus Linear facts | unique exact HEAD | `WF-RESTART-007` or fail closed |
+| `GD-VERIFY-001` | Verify dispatch | immutable exact revision and Verify `Todo` | fresh isolated context | no other revision or reused thread |
+| `GD-VERIFY-002` | Verify completion | revision before/after Verify plus typed evidence | exact-revision Linear record | `WF-RESTART-008` if context is lost |
 
-## PR identity and conflicts
+## Convergence table
 
-每个 Root 的 delivery identity 是 closed tuple：
+| Rule | Scope | Round order | Equality requirement | Claim boundary |
+|---|---|---|---|---|
+| `GD-CONVERGE-001` | acceptance | Linear-only snapshot digest<br>then separate Git revision<br>repeat once | both rounds have identical decision basis<br>validate expected own mutation separately | bounded stable observation, not atomic snapshot or a digest containing Git |
+| `GD-CONVERGE-002` | delivery | Linear accepted/Root digest<br>then Git remote ref<br>then delivery PR<br>repeat once | canonical IDs/revisions/values/states match within and across rounds | bounded stable observation, not atomic snapshot or a composed cross-provider first read |
+| `GD-CONVERGE-003` | `AcceptanceConvergenceProof | DeliveryConvergenceProof` | each scope carries only its provider rounds, fixed order and stable basis digest | matching typed proof is closed and fresh-read from Linear record | no interchangeable scope or wall-clock simultaneity claim |
+| `GD-CONVERGE-004` | post-proof external change | facts after the final round | no retroactive record rewrite | PR/ref review and management remain outside Phase 1 |
 
-```text
-(provider, repository_id, base_branch, head_branch)
-head_branch = symphony/root-<normalized-task-root-id>
+| Observation type | Allowed consumer | Excluded data |
+|---|---|---|
+| `GitSnapshot` | CycleMachine、Root acceptance | remote ref、PR |
+| `RemoteRefSnapshot` | DeliveryFinalizer | PR |
+| `PullRequestSnapshot` | DeliveryFinalizer | local worktree/diff |
+
+```mermaid
+%% source-rules: GD-CONVERGE-001 GD-CONVERGE-002 GD-CONVERGE-003 GD-CONVERGE-004 WF-FAIL-011 WF-PERSIST-006
+sequenceDiagram
+  participant F as Fenced finalizer
+  participant L as Linear
+  participant G as Git provider
+  participant P as PR provider
+  F->>L: round 1 accepted and Root facts
+  F->>G: round 1 exact ref
+  F->>P: round 1 exact PR
+  F->>L: round 2 accepted and Root facts
+  F->>G: round 2 exact ref
+  F->>P: round 2 exact PR
+  alt identical decision basis
+    F->>L: persist convergence completion
+  else mismatch
+    F->>L: persist delivery invalidation
+  end
 ```
 
-Root identity normalization 必须 injective、deterministic 且仅生成 provider 允许的 ref characters。PR title、body、URL 或 description 不参与 identity matching。相同 identity 的重复 call 只能读取/确认同一个 open PR，不能创建第二个。
+## PR identity table
 
-| Fresh read result | Tool result |
-|---|---|
-| remote ref 不存在，matching open PR 为 0 | 可按 accepted exact revision push/create，再 read-back |
-| remote ref 等于 exact revision，matching open PR 为 0 | 可创建一个 PR，再 read-back |
-| remote ref 和唯一 open PR head 都等于 exact revision | 返回 existing exact match |
-| remote ref 指向其他 revision | `precondition_failed`；不 force-push |
-| matching open PR 多于 1 | fail closed；不选择或关闭 PR |
-| matching PR identity 不符或 closed/merged | fail closed；不 reopen、不创建 replacement |
-| mutation `acceptance_unknown` | fresh read 同一 identity；仅 exact match 时接受 |
+| Rule | Requirement | Provider proof | Conflict outcome |
+|---|---|---|---|
+| `GD-PR-001` | delivery identity is `(provider, repository_id, base_branch, head_branch)` | deterministic injective Root branch normalization | identity mismatch fails closed |
+| `GD-PR-002` | at most one open PR for `(repository,base,head)` | real provider atomic create-if-absent or enforced uniqueness | capability disabled if unproven |
+| `GD-PR-003` | remote update uses expected-old server-side lease | absent ref uses provider zero OID; present ref uses exact observed revision | lease rejection is `conflict_observed`, never retried |
+| `GD-PR-004` | Verify、accepted record、pushed ref and PR head use one revision | exact fresh reads | any mismatch uses `WF-FAIL-011` |
+| `GD-PR-005` | closed/merged/multiple/wrong-identity PR | no replacement or winner selection | permanent delivery failure |
 
-任何 mutation 后都重新读取 remote ref 与 PR。Phase 1 不提供 fallback provider、alternate branch、force push、自动 conflict repair、compatibility adapter 或 migration path。
+## Delivery table
+
+| Rule | Step | Preconditions | Durable result | Restart behavior |
+|---|---|---|---|---|
+| `GD-DELIVERY-001` | authorize | valid accepted Cycle record, `Succeeded` projection, exact revision and `AcceptanceConvergenceProof` | closed delivery tuple | no transcript/cache authority |
+| `GD-DELIVERY-002` | push and PR | expected-old lease and `GD-PR-002` provider capability | exact remote ref and unique PR | fresh exact read resolves unknown effect |
+| `GD-DELIVERY-003` | project Root | accepted Cycle record and delivery effects exact | Root `In Review` fresh read-back under `WF-TR-002` | continue same fenced finalizer; restart uses `WF-RESTART-013` |
+| `GD-DELIVERY-004` | prove delivery | `GD-CONVERGE-002` two-round exact match | Root-attached `DeliveryCompletionRecord` containing `DeliveryConvergenceProof` | `WF-RESTART-009` |
+| `GD-DELIVERY-005` | invalidate delivery | any convergence mismatch、slot conflict or external `Done` before completion | Root-attached `DeliveryInvalidationRecord` | `WF-RESTART-014`; project `Failed` unless Root already external `Done` |
+| `GD-DELIVERY-006` | delivery-side cleanup proof | no delivery obligation<br>or valid delivery completion/invalidation record | delivery gap is closed for `CO-CLEAN-001` | global cleanup eligibility remains Conductor-owned<br>never infer from Root status or memory receipt |
+
+| Delivery boundary | Allowed | Forbidden |
+|---|---|---|
+| Root Reconcill | semantic acceptance under `RR-ACCEPT-*` | mechanical delivery effect |
+| Delivery finalizer | accepted-record delivery mechanics | Root model turn、`CycleInvalidationRecord` authorization、automatic merge、Root `Done` projection |
+
+## Explicit non-goals
+
+| Rule | Non-goal | Reason |
+|---|---|---|
+| `GD-NON-001` | cross-provider atomic snapshot | Linear/Git/PR providers expose no shared transaction or fence |
+| `GD-NON-002` | unconditional force push or automatic conflict repair | would overwrite external facts |
+| `GD-NON-003` | replacement/reopened PR and automatic redelivery | would add unapproved retry policy |
+| `GD-NON-004` | automatic merge、PR review/rejection handling | outside Phase 1 product boundary |
+| `GD-NON-005` | fallback provider、alternate branch、compatibility/migration path | hard-cut architecture only |

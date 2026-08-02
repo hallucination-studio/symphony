@@ -1,97 +1,155 @@
-# Root Issue 模型
+# Root Issue Model
 
-状态：Phase 1 目标设计。本文只定义 Task Manager 中持久化的 Symphony 工作流事实。Root Reconcill 只写 Cycle 边界事实；Conductor 只写 approved Cycle 的机械执行事实。
+| Status | Owns | Does not own |
+|---|---|---|
+| Phase 1 target | Linear documents、deterministic identities、seal anchors、Plan manifest | topology cardinality、transition、routing、failure、restart |
 
-## 结构
+## Document graph
 
-```text
-Root Issue (one description Markdown)
-├── Requirement / Domain Knowledge / Root ADR / Acceptance sections
-├── Cycle Issue 1 (Draft, executing, awaiting acceptance, or terminal)
-│   ├── Plan Issue
-│   ├── Work Issue 1
-│   ├── Work Issue 2
-│   └── Verify Issue
-└── Cycle Issue 2 (successor, only after Cycle 1 is terminal)
+```mermaid
+%% source-rules: WF-TOPO-001 WF-TOPO-002 WF-TOPO-003 WF-TOPO-004
+%% source-rules: WF-TOPO-005 WF-TOPO-006 WF-TOPO-007
+%% source-rules: RI-DOC-001 RI-DOC-002 RI-ID-001 RI-ID-002
+flowchart TD
+  Root[Root Issue<br/>Requirement / Domain / ADR / Acceptance]
+  Cycle[Cycle Issue<br/>Frozen decision snapshot]
+  Plan[Plan Issue<br/>Immutable Instruction]
+  Work[Work Issues<br/>Immutable Instruction]
+  Verify[Verify Issue<br/>Immutable Instruction]
+  Root --> Cycle
+  Cycle --> Plan
+  Cycle --> Work
+  Cycle --> Verify
+  Root --> RootRecords[Delivery and family records]
+  Cycle --> CycleRecords[Approval and terminal records]
+  Plan --> PlanRecord[Plan Result/Handoff and manifest]
+  Work --> WorkRecord[Work Result/Handoff]
+  Verify --> VerifyRecord[Verify Result/Handoff]
 ```
 
-Root 是用户完整需求和最终 PR 的单位。Cycle 是按一个 frozen design 完成该需求的一次尝试。Plan、Work、Verify 是该 Cycle 的执行记录，并使用：
+## Document authority table
 
-```text
-symphony:kind/root
-symphony:kind/cycle
-symphony:kind/plan
-symphony:kind/work
-symphony:kind/verify
+| Rule | Document | Required closed content | Mutable window | Forbidden content |
+|---|---|---|---|---|
+| `RI-DOC-001` | Root description | Requirement、Domain Knowledge、Root ADR、Acceptance | Define and explicit external user semantic edits | transcript、provider payload、runtime state |
+| `RI-DOC-002` | Cycle description | Root requirement/ADR snapshot<br>functional/architecture/code design<br>acceptance map and sealed groups | Draft before approval record | newer Root content after approval、hidden JSON |
+| `RI-DOC-003` | Stage description | one closed immutable Instruction | never after Issue create | Result/Handoff、runtime metadata、sibling content |
+| `RI-DOC-004` | attached record | one closed typed approval/completion/invalidation projection | absent to present only by contract | raw performer output、receipt、credential、correlation |
+| `RI-DOC-005` | all managed Markdown | bounded text parsed through the standard Markdown AST and named sections | only as listed above | ad-hoc string parsing as authority |
+
+| Root knowledge boundary | Required | Forbidden |
+|---|---|---|
+| Root ADR | named section in Root Markdown | second provider field |
+| Cycle snapshot | copy exact applicable Root knowledge before review | active Cycle re-read of newer Root content |
+
+## Identity table
+
+| Rule | Identity | Deterministic basis | Persisted anchor | Unknown create outcome |
+|---|---|---|---|---|
+| `RI-ID-001` | `cycle_issue_id` | Root/predecessor/terminal-record IDs<br>derivation version<br>`first_cycle` sentinel for the first Cycle | Cycle description and approval record | exact-read same ID and direct Root children<br>never allocate another |
+| `RI-ID-002` | Cycle-owned record IDs and `plan_issue_id` | Cycle ID, record kind, derivation version | Cycle description then approval record | exact-read same ID |
+| `RI-ID-003` | Work/Verify/relation/record IDs | approved group/directive IDs, Plan ID, graph derivation version | Plan completion manifest | exact-read manifest identity and creation evidence |
+| `RI-ID-004` | direct ownership | provider-native parent ID | current Issue plus identity-closure reads | relation/title/text/memory cannot reconstruct parent |
+| `RI-ID-005` | Root family invalidation record | Root ID, record kind, derivation version | exact Root-attached record slot | exact-read same ID; never allocate another |
+
+## Seal table
+
+| Rule | Seal | Created by | Authoritative fact | Consequence |
+|---|---|---|---|---|
+| `RI-SEAL-001` | Cycle specification seal | Root boundary after semantic review | exact `CycleApprovalRecord` fresh read-back | Cycle description and approved Work partition freeze |
+| `RI-SEAL-002` | Stage Instruction digest | Conductor mechanical assembly | Issue description fresh read-back | completion must bind the same digest |
+| `RI-SEAL-003` | graph seal | Conductor after closed Plan validation | Plan completion record with exact manifest | current graph is checked against manifest, never resealed |
+| `RI-SEAL-004` | acceptance basis | Root boundary over complete execution facts | Cycle terminal record plus convergence proof | status alone cannot authorize delivery |
+
+```mermaid
+%% source-rules: RI-SEAL-001 RI-SEAL-002 RI-SEAL-003 RI-SEAL-004 WF-ROUTE-003 WF-TR-005 WF-TR-007 WF-TR-009
+sequenceDiagram
+  participant R as Root boundary
+  participant L as Linear
+  participant C as Cycle machine
+  R->>L: create CycleApprovalRecord
+  R->>L: fresh read exact record and Cycle
+  R-->>C: semantic boundary complete
+  C->>L: project Cycle In Progress from exact record
+  C->>L: create Plan and persist manifest record
+  C->>L: materialize exact graph and read back
+  C->>L: persist each Stage completion before status
+  R->>L: persist accepted/rejected record before terminal status
 ```
 
-Task Manager 原生 Issue identity 是唯一标识。Root description 是一个带 closed named sections 的 Markdown document；Root ADR 是其中的显式 section，不是第二个 provider field 或 hidden payload。Root description、Root ADR、Cycle description、Stage description 和所有 handoff 都必须是 bounded Markdown；不得保存 hidden Symphony JSON、model transcript、provider receipt、correlation、credential 或 runtime state。
+## Manifest table
 
-## Define 和 Root ADR
+| Rule | Requirement | Exact check | Failure rule |
+|---|---|---|---|
+| `RI-MANIFEST-001` | Root seals at least one execution directive and at least one non-empty Work group | groups exactly cover directives<br>Verify directives are non-empty and constructible | `WF-FAIL-015` |
+| `RI-MANIFEST-002` | Plan only validates and returns a stable legal total order of sealed group IDs | no merge、split、new instruction、new dependency or regrouping | `WF-FAIL-015` |
+| `RI-MANIFEST-003` | Plan record stores one Plan、ordered Work nodes and one Verify | Cycle/spec/approval IDs equal<br>Plan Issue/completion/invalidation IDs equal | `WF-FAIL-008` |
+| `RI-MANIFEST-004` | materialization starts only after Plan completion record | Plan record provider time is earlier than every materialized Work、Verify and relation provider time | `WF-FAIL-007` |
+| `RI-MANIFEST-005` | every Issue/relation has exact service-actor creation evidence | identity、parent、kind、content、endpoints and creator all match | `WF-FAIL-007` |
+| `RI-MANIFEST-006` | first complete graph equals the persisted manifest | every node parent equals manifest `cycle_id`<br>no extra、missing、external-created or mismatched resource | `WF-FAIL-007` |
+| `RI-MANIFEST-007` | Work execution order is the persisted total order | restart never re-toposorts or uses memory readiness order | `WF-RESTART-005` |
+| `RI-MANIFEST-008` | sealed dependency DAG projection | one exact `blocks` relation per Work dependency<br>one Verify barrier per Work<br>no extra relation | `WF-FAIL-007` |
 
-delegated Root 首先处于 Define。Root Reconcill 对用户代码目录只有 read-only capability，可以读取和搜索代码，但不能修改文件。Define 必须在同一个 Root description Markdown 中形成完整 Requirement、Domain Knowledge、Root ADR 和 Acceptance sections；Root ADR section 记录跨全部 Cycles 通用的架构决策、约束与后果。
+### Manifest anchor equality
 
-Root ADR 是 Root 的共享知识，但不是活动 Cycle 的可变输入。创建 Cycle Draft 时，Root Reconcill 必须把本次适用的完整需求、ADR 内容与版本、功能设计、架构设计、代码设计和验收映射写入 Cycle description Markdown。Cycle 因而持有本次尝试可独立审查的完整 decision snapshot；Plan 和 restart 都不能改读较新的 Root 内容来改变该 snapshot。
+| Binding | Values that must be equal |
+|---|---|
+| approval owner | approval record ID、Cycle Issue ID、record Cycle ID |
+| lineage | derivation version、predecessor Cycle ID、predecessor terminal record ID |
+| Plan slots | Plan Issue ID、Plan completion ID、Plan invalidation ID |
+| terminal slots | Cycle completion/invalidation IDs、delivery completion/invalidation IDs |
+| sealed basis | specification seal、workspace base revision |
+| manifest basis | Cycle ID、approval record ID、specification seal |
+| Plan node | Plan Issue ID、Cycle parent、completion ID、invalidation ID |
+| relation endpoints | Work-group node IDs、unique Verify Issue ID |
 
-Root requirement 或 ADR 后续变化只影响未来 Cycle。若已有 approved Cycle，该 Cycle 继续使用自己的 frozen snapshot；需要采用新决策时，必须先让旧 Cycle terminal，再创建 successor。
-
-## Lifecycle facts
-
-```text
-Root:  Todo -> In Progress -> In Review -> Done
-Cycle: Draft -> In Progress -> Awaiting Acceptance -> Succeeded | Rejected
-       Draft | In Progress | Awaiting Acceptance -> Failed | Canceled
-Stage: Todo -> In Progress -> Done | Failed | Canceled
+```mermaid
+%% source-rules: RI-MANIFEST-003 RI-MANIFEST-006
+flowchart TD
+  Basis[Sealed Cycle basis] --> Manifest[Plan manifest anchors]
+  Manifest --> Plan[Same Plan ID and Cycle parent]
+  Manifest --> Works[Ordered Work nodes with Cycle parent]
+  Manifest --> Verify[One Verify node with Cycle parent]
+  Plan --> Record[Plan completion record with same Stage ID]
 ```
 
-- `Draft` 是尚未批准的 proposal；Root Reconcill 可以在 review 期间修正其 Markdown description。
-- 从 `Draft` 到 `In Progress` 是 seal 和一次性执行授权。进入 `In Progress` 后，Cycle 的规格事实不可变。
-- `Awaiting Acceptance` 表示 Plan、全部 Work、exact commit 和 fresh Verify 已机械完成，但尚未经过 Root semantic acceptance。
-- `Succeeded | Rejected | Failed | Canceled` 是 terminal Cycle；terminal Cycle 保留为历史事实，不 reopen。
-- `Done | Failed | Canceled` Stage 不 reopen。任何重试都在 successor Cycle 中获得新 Stage identity。
-- 一个 Root 任意时刻最多有一个 non-terminal Cycle，包括 `Draft | In Progress | Awaiting Acceptance`。
-- Root 只有在 accepted exact revision 已交付并 fresh read-back 后才能进入 `In Review`。
-- Root `Done` 只由用户或外部流程设置；Symphony 不自动 merge 或设置 `Done`。
+## Record table
 
-状态、identity、revision、parent 和 relation 是结构化 Task Manager facts。Conductor 不从 Markdown 文本猜测状态；Root Reconcill 和 Conductor 都通过 exact provider state identity、fresh precondition 和 read-back 执行各自被授权的 transition。
+| Rule | Record owner | Required payload | Projection relationship | Mutation handling |
+|---|---|---|---|---|
+| `RI-REC-001` | Plan Issue | outcome/instruction basis<br>completed: non-empty order、Verify、manifest/seal/traceability<br>failed/canceled: reason only | record before Plan terminal status | invalid observation then `WF-FAIL-008` |
+| `RI-REC-002` | Work Issue | normalized outcome/handoff, checks, workspace parent/diff | record before Work terminal status | mutated observation uses `WF-FAIL-015` |
+| `RI-REC-003` | Verify Issue | conclusion, checks/evidence and exact revision | record before Verify terminal status | mutated observation uses `WF-FAIL-015` |
+| `RI-REC-004` | Cycle Issue | approval or phase-owned terminal/invalidation payload with explicit successor policy | record before matching Cycle projection | status alone is invalid predecessor |
+| `RI-REC-005` | Root Issue | family or delivery completion/invalidation payload | drives quarantine/park/cleanup facts | memory receipt cannot substitute |
+| `RI-REC-006` | exact comment slot | actor、provider times、basis revision/status/document digest and current body digest | `updated_at == created_at`, unarchived | update/archive/malformed remain sanitized invalid observations |
 
-上述 semantic state 在启动时通过 `list_states` 解析为唯一 provider identity。任一 required state 缺失、重复或归类不符都 fail closed；状态名本身不能被当作 provider identity。
+| Comment fact | Contract interpretation |
+|---|---|
+| provider-mutable Linear comment | write-once only by Symphony contract |
+| missing exact slot | `WF-FAIL-001` through `WF-FAIL-003` |
+| malformed、updated or archived exact slot | record kind and phase map through `TM-OBS-005` |
+| provider-proven permanent Issue destruction | `WF-FAIL-013` |
 
-## Cycle review 和 seal
+## Successor rule
 
-Root Reconcill 创建 Cycle Draft 后必须 review：确认 Cycle description 已包含完整需求 snapshot、适用 Root ADR snapshot、明确功能与代码设计、边界、验收标准和失败策略。该 review 是语义批准与 seal，不宣称是独立 adversarial review。
+| Rule | Preconditions | New identity | Reused state | Forbidden cases |
+|---|---|---|---|---|
+| `RI-SUCC-001` | Root freshly delegated<br>intact terminal record permits successor<br>known graph/history proof complete | derive a new Cycle using `RI-ID-001` | copy current Root requirement/ADR into new Draft | unadmitted Root<br>reopen predecessor<br>reuse Stage/thread/worktree<br>partial/lost authority<br>delivery effect |
 
-review 通过后，Root Reconcill 以 fresh revision 把 Cycle 设为 `In Progress`。这一个 transition 同时授权 Conductor 执行整个 Cycle。Root Reconcill 此后不得修改 Cycle/Stage description、调用 Performer、增删 Stage 或改变 relation；外部对 sealed 规格或执行图的修改是 invariant violation，不会被吸收到当前尝试。
+| Predecessor record | `successor_policy` | Successor | Delivery |
+|---|---|---|---|
+| accepted completion | `not_applicable` | forbidden | allowed only by the accepted record |
+| normal rejected/failed/canceled completion | `allowed` | `WF-ROUTE-008` may create a new Draft | forbidden |
+| intact `WF-FAIL-005` invalid terminal | explicit `allowed` or `permanently_quarantined` | only the explicit policy applies | forbidden |
+| every other invalidation | `permanently_quarantined` | forbidden | forbidden |
 
-## Plan 和 sealed execution graph
+A successor never repairs or legitimizes its predecessor.
 
-Conductor 在 approved Cycle 上首先创建并运行恰好一个 Plan Issue。Plan 只把已经批准的设计分解为 executable Work Items、dependency DAG 和 Verify intent，不得新增或修改 architecture、feature 或 code design。
+## Fact boundary
 
-Plan `completed` 只有在 closed validation 同时证明以下条件后才算通过：
-
-1. 每个 Work 和 Verify description 都是 bounded Markdown。
-2. Work key 唯一、DAG 完整且无环，Verify 依赖全部 required Work。
-3. 每项 Cycle acceptance criterion 都映射到 Work 或 Verify evidence。
-4. 结果没有新增 decision、Task Manager identity、credential 或任意 metadata。
-
-通过后，Conductor 根据 typed Plan result 一次性物化全部 Work/Verify Issues 与 relations，并立即 seal execution graph。物化后不得新增、删除、archive、reparent 或改写 description/relation；只能按状态机更新 status 和追加外部执行事实。partial、重复、歧义或被外部修改的 graph 无法修补，当前 Cycle terminally fails。
-
-required Work 是 sealed graph 中全部且仅有的、parent 直接指向该 Cycle、kind 为 `symphony:kind/work` 且 identity 唯一的 Work Issues。Conductor按稳定拓扑顺序机械判断 readiness，并在一个 Cycle-bound Work thread 中以独立 turns 串行执行。
-
-全部 Work `Done` 后，Conductor fresh read worktree、创建 immutable commit，并用一个 fresh isolated Verify context 检查 exact revision。`passed` 进入 `Awaiting Acceptance`；`failed | inconclusive` 或任何无法唯一确认的执行事实使 Cycle 进入 `Failed`。
-
-## Acceptance 和 successor
-
-`Awaiting Acceptance` 时，Root Reconcill 对用户代码仍只有 read-only capability。它根据 sealed Cycle description、Root ADR snapshot、exact diff/revision 和 Verify evidence进行语义验收：
-
-- 接受：把 Cycle 设为 `Succeeded`，授权 exact revision 交付。
-- 拒绝：把 Cycle 设为 `Rejected`，记录 sanitized Markdown reason。
-- 无法确认：不猜测接受；保留可见状态或终止为 `Rejected`。
-
-需要修复、重规划或采用新需求时，只能在 predecessor fresh read 为 terminal 后创建新 Cycle identity。successor 可以引用 predecessor，但不得修改、复制续跑或 reopen 旧 execution graph。
-
-## Fact authority
-
-Task Manager 的 Markdown descriptions、Issue identity/revision/status/parent/labels/relations 是需求和执行事实；Git 的 worktree、diff、commit、remote ref 和 PR 是交付事实。Performer result 只有被 Conductor 通过 typed validation 并 fresh materialization/read-back 接受后，才会形成对应 Task/Git facts。
-
-model transcript、raw Plan result、MCP receipt、polling cursor/event 和 in-memory diff 都不是持久事实。任何外部变化由下一次 scheduled fresh poll 观察；sealed Cycle 只按 frozen snapshot 推进，不把后到变化隐式合并进当前尝试。
+| Fact class | Authority | Explicit exclusion |
+|---|---|---|
+| Task documents、native graph/status<br>provider times/creation evidence<br>grouped history/record observations | Linear | memory、Root Home、event receipt |
+| code、diff、exact revision | Git under `WF-AUTH-002` | Linear commit claim、memory SHA |
+| same-Cycle Work continuation | live thread under `WF-PERSIST-007` | every durable store and every workflow decision |

@@ -1,127 +1,156 @@
 # Conductor
 
-状态：Phase 1 目标设计。Conductor 是静态、机械、串行的 runtime host，并拥有 approved Cycle 内唯一的确定性的 Cycle 状态机。
+| Status | Owns | Does not own |
+|---|---|---|
+| Phase 1 target | single-Root serial runtime、mechanical execution、runtime fences | workflow state、routing、failure policy |
 
-## 职责
+## Runtime loop
 
-Conductor 负责：
-
-- 承接 changed-only `TaskObservationEvent`；startup 立即 poll，此后按有界间隔持续 fresh observation。
-- 串行选择 Root；任意时刻最多运行一个 Root semantic turn 或一个 Cycle mechanical action。
-- 消费完整 Task snapshot、fresh Git snapshot，维护 accepted in-memory baseline，并计算 concrete adjacent diff。
-- 创建、暂停、重建和回收 per-Root runtime，以及隔离 Root/Plan/Work/Verify contexts。
-- 向 Root app-server 暴露 boundary-scoped Task Manager、read-only code inspection 和 acceptance/delivery tools。
-- 在 Cycle `In Progress` 后创建 Plan、一次性物化 Work/Verify DAG、推进 Stage、创建 exact commit、调用 fresh Verify，并进入 `Awaiting Acceptance`。
-- 对每个 effect 校验 schema、Root/Cycle ownership、runtime generation、correlation、capability、sealed revision 与 fresh precondition。
-- 管理 cancellation、timeout、late-output fence、structured logs 和 sanitized terminal failure。
-
-Conductor 不解释需求、架构或验收标准，不创建设计，不修改 sealed Markdown，不决定 exact revision 是否满足用户目标，也不在失败后设计 successor。它的全部选择必须由 closed state、sealed graph 和 typed result唯一确定。
-
-## Serial event loop
-
-```text
-await_observation
--> align_latest_task_snapshot
--> fresh_git_snapshot
--> choose one eligible Root boundary or approved Cycle action
--> execute one fenced action
--> fresh_read_back
--> continue | park_root | expose_terminal_failure
+```mermaid
+%% source-rules: WF-AUTH-003 WF-AUTH-004 WF-AUTH-005 WF-AUTH-006 WF-AUTH-008
+%% source-rules: WF-ROUTE-001 WF-ROUTE-002 WF-ROUTE-003 WF-ROUTE-004 WF-ROUTE-005 WF-ROUTE-006
+%% source-rules: WF-ROUTE-007 WF-ROUTE-008 WF-ROUTE-009 WF-ROUTE-010 WF-ROUTE-011 WF-ROUTE-012
+%% source-rules: WF-ROUTE-013 WF-ROUTE-014 WF-ROUTE-015 WF-ROUTE-016 WF-ROUTE-017 WF-ROUTE-018
+%% source-rules: CO-LOOP-001 CO-LOOP-002 CO-LOOP-003 CO-LOOP-004 CO-LOOP-005 CO-LOOP-006 CO-LOOP-007
+flowchart TD
+  Start[Launch with exact Root ID] --> Bind[Bind identity for process lifetime]
+  Bind --> Tick[Scheduled tick]
+  Tick --> Poll[Fresh bound-Root TaskPollResult]
+  Poll --> Identity{Exact bound Root family?}
+  Identity -->|no| Fail[Fail closed]
+  Identity -->|yes| Git[Fresh Git facts]
+  Git --> Route[Evaluate every matching WF route]
+  Route --> Rank[Select unique lowest Priority]
+  Rank --> Fence[Create one fenced action]
+  Fence --> Execute[Execute selected boundary]
+  Execute --> Readback[Fresh exact read-back]
+  Readback --> Tick
 ```
 
-同一 Root 尚未处理的 polling observations可以合并，但只能保留最新完整 snapshot；不能只合并一步 diff。Conductor 从 runtime accepted baseline 到该最新 snapshot 生成 Root-facing concrete diff，不 replay 中间 observation。
+## Loop authority table
 
-`In Review` Root 保留观察但不占执行槽；Task Manager fresh observation 确认 `Done` 后只触发资源回收。
+| Rule | Runtime fact | Required behavior | Forbidden behavior |
+|---|---|---|---|
+| `CO-LOOP-001` | exact launch Root ID | bind that Root for the whole process lifetime and hold at most one in-flight action | discover/adopt a second Root、reuse a freed slot、multi-Root orchestration |
+| `CO-LOOP-002` | every scheduled tick | run fresh actionability scan even without changed notification | use changed-only event as action queue |
+| `CO-LOOP-003` | selected action | fresh-read Linear/Git before effect and exact-read after effect | continue from cached accepted snapshot |
+| `CO-LOOP-004` | internal Cycle writeback | return to scheduled poll; select one fresh no-model route | directly or recursively wake Root |
+| `CO-LOOP-005` | external Root semantic edit during active Cycle | allow `WF-ROUTE-005`; sealed Cycle remains unchanged | inject newer Root facts into current DAG |
+| `CO-LOOP-006` | no actionable fact | park without durable cursor | write consumed-event state |
+| `CO-LOOP-007` | multiple rows match one fresh snapshot | select the unique lowest numeric `Priority`; closure/mechanical rows outrank `WF-ROUTE-005` | first-match order、notification order、repeat Root turn starving Cycle |
 
-## Mechanical Cycle state machine
+## Mechanical Cycle flow
 
-Cycle `Draft` 只由 Root Reconcill review。`Draft -> In Progress` 是 seal 和一次性执行授权；Conductor 只接管 fresh read 已确认的 `In Progress` Cycle：
-
-```text
-validate sealed Cycle specification
--> create and run one isolated Plan
--> validate Plan contract
--> materialize and seal Work/Verify graph exactly once
--> execute ready Work Items in stable topological order
--> fresh status/diff -> create and read back exact commit
--> start one fresh Verify context at that revision
--> passed: Awaiting Acceptance
--> failed/inconclusive/ambiguous: Failed
+```mermaid
+%% source-rules: WF-TR-007 WF-TR-008 WF-TR-011 WF-TR-012 WF-TR-013
+%% source-rules: WF-PERSIST-002 WF-PERSIST-003 WF-PERSIST-004
+%% source-rules: CO-EXEC-001 CO-EXEC-002 CO-EXEC-003 CO-EXEC-004 CO-EXEC-005 CO-EXEC-006 CO-EXEC-007
+%% source-rules: CO-WORK-001 CO-WORK-002
+flowchart TD
+  Approval[Valid approval plus In Progress] --> PlanCreate[Exact Plan create]
+  PlanCreate --> PlanRun[Fresh isolated Plan]
+  PlanRun --> Manifest[Persist Plan Result/Handoff manifest]
+  Manifest --> Materialize[Materialize exact Work/Verify graph]
+  Materialize --> WorkTurn[Next ordered Work turn]
+  WorkTurn --> WorkRecord[Persist corresponding Work record]
+  WorkRecord --> More{More Work?}
+  More -->|yes, same live thread| WorkTurn
+  More -->|no| Commit[Create exact commit]
+  Commit --> Verify[Fresh isolated Verify]
+  Verify --> VerifyRecord[Persist corresponding Verify record]
+  VerifyRecord --> Boundary[Awaiting Acceptance or mechanical failure]
 ```
 
-稳定拓扑执行只选择 sealed dependencies 均为 `Done` 的 `Todo` Work；多个 Work 同时 ready 时，
-按 provider-neutral `StageIssueId` 升序打破并列。
+## Execution authority table
 
-多个 Work Items 必须在同一个 Cycle-bound Work thread 中用不同 turns 串行执行。Plan、Work、Verify 互不共享 context；Verify 永远不复用 Plan/Work thread。Conductor 不使用 fork 构造任何 role context。
+| Rule | Action | Fresh precondition | Durable output | Next selection |
+|---|---|---|---|---|
+| `CO-EXEC-001` | create Plan | exact approval record, matching seal/status, Plan absent | exact Plan Issue read-back | isolated Plan dispatch |
+| `CO-EXEC-002` | validate Plan | sealed groups/directives and closed Plan result | completed: non-empty order and exact manifest<br>failed/canceled: phase record only | materialize or close Plan/Cycle |
+| `CO-EXEC-003` | materialize graph | Plan completion record already read-back | exact Issues/relations plus service-actor evidence and complete graph read-back | first ordered Work |
+| `CO-EXEC-004` | dispatch Stage | Stage `Todo`, dependencies complete, expected Instruction digest | `In Progress` projection read-back | one role call |
+| `CO-EXEC-005` | complete Stage | typed candidate plus fresh Issue/Git/worktree facts | corresponding exact Result/Handoff read-back, then terminal projection | next `WF-TR-*` row |
+| `CO-EXEC-006` | create commit | all Work records complete; final Work parent/diff matches fresh worktree | carrying commit object with non-self-referential proof | Verify dispatch |
+| `CO-EXEC-007` | Verify | exact commit proof and Verify `Todo` | fresh Verify context, exact-revision record and projection | `WF-TR-007` or `WF-TR-008` |
 
-Plan 通过表示 typed shape、Markdown、boundedness、DAG、coverage 和 no-new-decision validation 通过，不是 Conductor 对计划质量作语义判断。Plan failure、Work failure、Verify failure、partial graph materialization、sealed fact mutation、lost in-flight context 或无法唯一 read-back 都按 closed table 进入 terminal `Failed`；Conductor不修补、不重做设计、不向当前 Cycle 追加 Work。
+## Work continuity table
 
-`Awaiting Acceptance` 将执行权交回 Root Reconcill。只有 Root Reconcill 可以基于 exact revision 把它变为 `Succeeded | Rejected`。成功后 exact delivery 是由 accepted revision 决定的机械效果；失败或拒绝后的 successor 设计仍只属于 Root Reconcill。
+| Rule | State | Allowed continuity | Persistence | Loss behavior |
+|---|---|---|---|---|
+| `CO-WORK-001` | one approved Cycle | one Work performer instance and one live thread across ordered Work turns | no transcript or thread ID persisted | `WF-RESTART-004` |
+| `CO-WORK-002` | current Work turn | explicit input contains sealed Cycle and current Work Instruction only | completion candidate normalized under `WF-PERSIST-003` | role failure closes current Stage |
+| `CO-WORK-003` | next Work `Todo` | prior assistant turn may remain naturally in same live thread | ephemeral only under `WF-PERSIST-007` | never reconstruct from Linear/Git/logs |
+| `CO-WORK-004` | Plan or Verify | always separate process/thread context from Work and each other | none | fresh dispatch only where `WF-RESTART-*` permits |
 
-## Mechanical Task Manager authority
+## Failure dispatch
 
-Conductor 通过 private、Cycle-scoped capability 使用 provider-neutral `TaskManageCommandInterface`。它只能：
+This table is the exhaustive Conductor projection of `WF-FAIL-*`; it defines no recovery policy.
 
-- 在一个 approved Cycle 内创建一个 Plan Issue。
-- 根据一个已验证 PlanResult 一次性创建 Work/Verify Issues 与 dependency relations。
-- 按 closed transition table 更新该 Cycle 和 Stage statuses。
-- fresh read-back 自己刚执行的 exact mutation。
+| Rule | Failure rules consumed | Mechanical responsibility |
+|---|---|---|
+| `CO-FAIL-001` | `WF-FAIL-002`, `WF-FAIL-003`, `WF-FAIL-004`, `WF-FAIL-018` | Stage/Work-thread lost-context、slot and external-terminal closure |
+| `CO-FAIL-002` | `WF-FAIL-005`, `WF-FAIL-006` | close dispatched Stage before Cycle invalidation; derive last valid phase |
+| `CO-FAIL-003` | `WF-FAIL-007`, `WF-FAIL-008`, `WF-FAIL-009` | stop materialization/execution and preserve permanent quarantine |
+| `CO-FAIL-004` | `WF-FAIL-015` | bind observed violation and never repair sealed content |
+| `CO-FAIL-005` | `WF-FAIL-016` | close any dispatched Stage before phase-owned cancellation; never invoke Root |
 
-它不能修改 Root description/ADR、Cycle description、已物化 Stage description、sealed relations、delegate、priority 或其他 Root/Cycle。Root Reconcill 与 Conductor 使用不同 capability；Performer 不获得任何 Task Manager capability。
+| Stage when Cycle terminalizes | Required fact | Later behavior |
+|---|---|---|
+| `In Progress` | matching completion/invalidation and terminal projection first | closed Stage |
+| terminal | matching authoritative terminal record | preserved |
+| never-dispatched `Todo` | terminal Cycle record proves it was not run | frozen、never dispatched、not an open Stage |
 
-## Fresh precondition semantics
+## Runtime fence table
 
-dispatch 前的 fresh precondition 验证 identity ownership、generation/correlation、capability、expected revision、seal digest 和唯一资源。Root boundary 的正常并发变化返回：
+| Rule | Runtime-only value | Allowed purpose | Must never decide |
+|---|---|---|---|
+| `CO-FENCE-001` | Root ID and runtime generation | late-output rejection and exact Home ownership | workflow phase or successor |
+| `CO-FENCE-002` | in-flight correlation | match one live call/result | accepted completion or retry |
+| `CO-FENCE-003` | process/thread handles | cancellation and lifecycle management | durable context recovery |
+| `CO-FENCE-004` | polling notification baseline | emit changed-only notification | actionability or transition |
 
-```text
-precondition_failed + fresh resource/concrete diff
+| Runtime state boundary | Allowed | Forbidden |
+|---|---|---|
+| `<program-data>/root-reconcills/<root-id>/symphony/state.json` | values in `CO-FENCE-*` only | workflow/content fields<br>thread identity、next action、prompt<br>Performer or acceptance evidence |
+
+## Restart mechanics
+
+```mermaid
+%% source-rules: WF-RESTART-001 WF-RESTART-002 WF-RESTART-003 WF-RESTART-004
+%% source-rules: WF-RESTART-005 WF-RESTART-006 WF-RESTART-007 WF-RESTART-008
+%% source-rules: WF-RESTART-009 WF-RESTART-010 WF-RESTART-011 WF-RESTART-012
+%% source-rules: WF-RESTART-013 WF-RESTART-014
+%% source-rules: CO-RESTART-001 CO-RESTART-002 CO-RESTART-003 CO-RESTART-004
+flowchart TD
+  Start[Process start] --> Isolate[Invalidate old generation and outputs]
+  Isolate --> Poll[Immediate complete poll plus fresh Git]
+  Poll --> Route[Evaluate WF restart and routing tables]
+  Route --> Projection[Projection-only gap]
+  Route --> Resume[Exact recoverable pre-dispatch gap]
+  Route --> Fail[Stage-first failure or quarantine]
+  Route --> Park[Delivery park or no action]
 ```
 
-结果回到同一个 Root Reconcill 重新观察。Cycle machine 遇到冲突时只 fresh read 一次并重新计算唯一机械 transition；若 sealed specification、graph 或 in-flight ownership 已变化，Cycle fail closed，而不是请求模型选择修补或重试。
+| Rule | Restart step | Authority | Result |
+|---|---|---|---|
+| `CO-RESTART-001` | validate launch Root ID/Home owner, increment generation, fence every old output | runtime fence only | same Root binding; no workflow state restored from disk |
+| `CO-RESTART-002` | immediate complete Linear poll plus fresh Git/provider reads | `WF-AUTH-001`, `WF-AUTH-002` | one fresh routing/restart match |
+| `CO-RESTART-003` | execute exactly one matching `WF-RESTART-*` row | persisted facts | projection、resume、failure、quarantine or park |
+| `CO-RESTART-004` | no unique complete observation | no fallback authority | visible fail-closed error; no model guess |
 
-## Discovery, admission, and configuration
+## Cleanup table
 
-每次 polling observation 只 admit 同时满足以下 fresh facts 的 Root：
+| Rule | Cleanup fact | Required closure | Allowed deletion | Forbidden deletion |
+|---|---|---|---|---|
+| `CO-CLEAN-001` | external Root `Done` | `WF-ROUTE-013` only after no non-terminal Cycle、no dispatched open Stage and no delivery gap<br>terminal-Cycle `Todo` descendants are frozen | matching Root runtime/process/thread/Home, then terminate this Conductor | user code、Performer Home、another Root Home、Linear Issues、second Root adoption |
+| `CO-CLEAN-002` | terminal Cycle worktree | terminal record/status read-back and no live action | exact disposable Cycle worktree | reset/clean/cherry-pick into successor |
+| `CO-CLEAN-003` | cleanup error | workflow facts remain closed | emit bounded correlated error | reopen workflow or delete broader path |
 
-- 位于配置的单一 Linear workspace/team，kind 为 `symphony:kind/root`，delegate 精确等于配置 actor。
-- Root status 是 `Todo | In Progress`；`In Review` 只观察，`Done` 只回收。
-- 最多一个 non-terminal Cycle，Root Tree identity/ancestry 唯一。
-- repository identity 和 base branch 从启动配置唯一解析，没有跨 Root worktree/head ownership 冲突。
+## Audit evidence
 
-Conductor 按 `(priority, created_at, issue_id)` 稳定排序。eligibility 缺失、重复或冲突时 fail closed，并留下 sanitized reason；它不修改 Task Manager 来猜测修复 admission。
-
-启动配置只包含 Task Manager/Linear API、bounded polling interval、workspace/team/agent identity、Root-to-repository routing、base branch、program-data path、Performer Home、Codex executable 和 delivery endpoint。配置只在进程启动时解析验证，不从 Issue description 或 arbitrary metadata 推导，也不包含 webhook URL 或 signing secret。
-
-## Per-Root runtime
-
-每个 Root 独占：
-
-```text
-RootReconcill object and private Root app-server process/thread
-Cycle machine generation and role-specific Performer processes/threads
-accepted Task/Git observation baseline
-Root Home
-```
-
-Root Home 位于：
-
-```text
-<program-data>/root-reconcills/<root-id>/
-  symphony/state.json
-```
-
-`state.json` 只保存 Root identity、runtime generation、thread identities、accepted observation digest 和 in-flight correlation 等最小 continuity。它不保存需求、ADR、Cycle/DAG mirror、next action、diff、prompt 或 Performer result；这些内容只能从 fresh Task/Git facts 重建或被判定为不可恢复。
-
-Root `Done` 后，Conductor 先停止 turn/process，撤销 capability，隔离旧 generation 与 late output，验证 Home owner，再删除且只删除该 Root Home。Performer Home 和其他 Root Home 不受影响。
-
-## Restart
-
-进程启动或内存 baseline 丢失后只有一个 restart path：
-
-1. 验证 `state.json` owner/identity，隔离其中的 in-flight correlation 和全部旧输出。
-2. 由 startup immediate poll 产生完整 Task observation，并 fresh read Git facts。
-3. 创建递增 generation 和全新 Root thread，atomic replace `state.json`。
-4. 向新 Root thread 发送当前完整 bootstrap。
-5. 任一 non-terminal approved Cycle 若不能由 live matching generation 证明全部 role context、seal 和 accepted execution evidence，fresh read 后机械标记该 Cycle `Failed`；这包括丢失 evidence correlation 的 `Awaiting Acceptance`，且不续跑或猜测接受未知 context。
-
-旧 thread 不恢复、不继续、不 replay。旧 transcript、tool result、digest 或 event 都不能重建 workflow；当前 Cycle 的 sealed Markdown 与 Task/Git facts是唯一恢复输入。Phase 1 不提供 compatibility、fallback 或 alternate restart behavior。
+| Rule | Evidence | Proves | Does not prove |
+|---|---|---|---|
+| `CO-AUDIT-001` | structured process event with Root/Cycle/Stage/role/generation/correlation and sanitized digest | positive boundary invocation | a call never happened |
+| `CO-AUDIT-002` | complete controlled-provider request audit | negative Root-silence and context-input assertions | workflow authority or raw value retention |
+| `CO-AUDIT-003` | Linear/Git/provider public facts | persisted records、identity、revision and outcome | hidden transcript contents |
+| `CO-AUDIT-004` | audit payload allowlist | identity、correlation、role and sanitized digests only | prompts、assistant text、tool payloads、diffs、credentials、E7 continuity value、routing input |

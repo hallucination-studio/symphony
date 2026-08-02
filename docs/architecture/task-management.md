@@ -1,94 +1,121 @@
 # Task Management
 
-状态：Phase 1 目标设计。本文拥有 Task Manager 的 provider-neutral 边界、定时 Root Tree observation、fresh snapshot/diff，以及 Root semantic boundary 与 Conductor mechanical boundary 的 capability rules。Linear 是第一版唯一 provider implementation。
-
-## 两个边界
-
-| Boundary | 输入 | 输出 | 职责 |
-|---|---|---|---|
-| `TaskManageObserver` | bounded scheduled tick | `TaskObservationEvent` | fresh read Root inventory/Tree，检测具体事实变化并发出完整观察 |
-| `TaskManageCommand` | capability-scoped generic function call | typed result + fresh read-back | 查询或修改 Issue graph，并在边界处强制 caller authority |
-
-Symphony 是没有公网 ingress 的本地客户端，因此 Phase 1 不依赖 Linear webhook。`TaskManageObserver` 是唯一 intake：进程启动后立即 observation，此后按配置的有界间隔串行 fresh poll。每个 tick 从不按 delegate/status 预过滤的 Root inventory 和已有 polling baseline 开始读取完整 Root Tree；这样 delegation/status 的移除发生时仍可观察。provider cursor、`updatedAt` 或局部 Issue 不得代替完整 snapshot。
-
-```text
-bounded scheduled tick
--> fresh Root inventory + complete Root Tree snapshots
--> canonicalize and compare with prior polling observation
--> unchanged: emit nothing
--> first/change: emit current complete snapshot + concrete changes
--> coalesce by Root to latest complete observation
-```
-
-polling observation baseline 只用于判断是否发事件，且仅在完整 poll 成功后前进；它不能替代 runtime accepted baseline。失败时保留旧 baseline。事件必须携带当前完整 snapshot 和 digest，不能只携带一步 diff。事件合并后，`from_task_digest` 不要求等于 runtime 已接受的 digest；Conductor 从 runtime accepted baseline 到最新完整 snapshot 重新计算 Root-facing diff。
-
-未委托给配置 actor 的 Root 不进入执行槽。Phase 1 不提供 webhook fallback、增量 cursor intake、provider event replay 或第二条 observation path。
-
-## Snapshot 与 concrete diff
-
-`TaskSnapshot` 是某个 Root 在一个时点的规范化完整任务图，包含 Root、Cycle/Stage descendants、relations，以及 identity、revision、status、title、Markdown description、parent、labels、delegate 和 priority。SDK object、poll cursor、credential 和任意 provider metadata 不得进入 snapshot。
-
-首次运行或 restart 向 Root Reconcill 发送完整 `RootBootstrap`。之后，Conductor 比较相邻 accepted snapshots，生成 closed concrete diff：
-
-```text
-issue_created
-issue_archived
-field_changed: status | title | description | parent | labels | delegate | priority
-relation_added
-relation_removed
-```
-
-diff 不携带 `should_replan`、架构建议或 successor design。Root Reconcill 在 semantic boundary 解释需求事实；Conductor Cycle machine 可以根据 typed status、identity、relation 和 seal digest 计算机械 readiness，但不得从 description 文本推导 decision。无法形成唯一完整 snapshot 时 fail closed。
-
-## Generic functions
-
-`TaskManageCommand` 只实现 provider-neutral 资源操作：
-
-```text
-get_issue
-list_issues
-list_children
-create_issue
-update_issue
-archive_issue
-list_relations
-create_relation
-delete_relation
-list_states
-list_labels
-```
-
-函数名与 schema 不含 Plan/Work/Verify 执行命令。Root thread 通过 capability-scoped MCP 连接 approved generic schemas；Conductor Cycle machine 从 private typed interface 调用相同资源操作；Performer 不连接该 boundary。Linear implementation、SDK 和 credential 保持 private。
-
-所有 list function 显式分页并返回稳定 cursor。mutation 必须带 caller capability、exact identity、fresh expected revision 或等价 precondition；关系 mutation 同时约束 endpoints 和 relation revision。`update_issue` 是 strict partial update。
-
-## Capability matrix
-
-| Caller | 允许 | 拒绝 |
+| Status | Owns | Does not own |
 |---|---|---|
-| Root Define/Draft | 更新 Root description/ADR，创建和修正一个 Cycle Draft，review 后把 exact Draft 设为 `In Progress` | 写用户代码、创建 Stage、修改其他 Root、修改 approved Cycle |
-| Root Acceptance | 对 `Awaiting Acceptance` exact Cycle 写 `Succeeded | Rejected` 和 bounded Markdown reason；terminal 后创建 successor Draft | 修改 sealed description/DAG、重开 terminal Cycle、执行 Stage |
-| Conductor Cycle machine | 在 approved Cycle 创建一个 Plan；一次性物化 PlanResult 的 Work/Verify/DAG；按 closed table更新 statuses | 修改 Root/ADR/Cycle specification，重写 Stage description，改变 sealed graph，创建 successor |
-| Performer | query/mutation capability 均为空 | 任何 Task Manager access |
+| Phase 1 target | provider-neutral observation/command boundary、Linear limits | consumer selection、semantic/mechanical workflow decision |
 
-capability 在每次 call 上绑定 Root/Cycle identity、runtime generation、correlation 和允许字段。不存在一个模型可调用的 aggregate lifecycle command；domain transition 只能由 Root boundary 的 exact generic mutation或 Conductor private state machine的一组 exact generic mutations体现。
+## Observation flow
 
-外部修改 sealed Cycle/Stage description 或 relation不会成为合法扩展。fresh observer 可以报告该事实，但 Cycle machine 必须以 `sealed_spec_changed | execution_graph_invalid` fail closed，而不是吸收变化或让 Root 在当前 Cycle 中调整。
-
-## Mutation result
-
-每次 mutation 都执行 fresh precondition，并在 provider 调用后 fresh read-back：
-
-```text
-applied | not_applied | precondition_failed | acceptance_unknown | readback_mismatch
+```mermaid
+%% source-rules: WF-AUTH-001 WF-AUTH-003 WF-AUTH-004
+%% source-rules: WF-ROUTE-001 WF-ROUTE-004 WF-ROUTE-009 WF-ROUTE-013 WF-ROUTE-016
+%% source-rules: WF-FAIL-013 WF-FAIL-017
+%% source-rules: TM-OBS-001 TM-OBS-002 TM-OBS-003 TM-OBS-004 TM-OBS-005
+flowchart TD
+  Tick[Bounded scheduled tick] --> Inventory[All-team Issue inventory]
+  Inventory --> Family[Select only exact launch-bound Root family]
+  Family --> Closure[Read identity closure, records and history]
+  Closure --> Observation[One TaskSnapshotObservation]
+  Observation --> Scan[Fresh actionability scan]
+  Observation --> Diff[Compare notification baseline]
+  Diff --> Notification[Optional changed-only notification]
+  Scan --> Router[WF routing table]
 ```
 
-结果包含 correlation、target identity、sanitized reason 和可安全返回的 fresh resource/diff。Root call 的 `precondition_failed` 回到 Root Reconcill 重新推理；Cycle-machine call 的 `precondition_failed` 触发一次 fresh state recomputation，无法得到同一 seal 下唯一合法 transition 就 terminally fail。`acceptance_unknown` 只能通过同一 identity 的 fresh read判定，不能盲目重试。
+## Observation authority table
 
-runtime accepted baseline 只在消费者接受 fresh observation 后前进。MCP response、provider mutation receipt 或 model transcript 都不是任务事实。
+| Rule | Input | Required output | Baseline effect | Failure behavior |
+|---|---|---|---|---|
+| `TM-OBS-001` | exact launch Root ID, startup immediate poll and bounded scheduled ticks | fully paginated all-team inventory including archived、trashed、de-labeled and reparented Issues | none | inventory overflow or page failure fails the whole poll visibly |
+| `TM-OBS-002` | exact launch-bound Root family | one fresh `TaskSnapshotObservation` with complete current/known identity facts | none | never return a partial valid snapshot or another Root family |
+| `TM-OBS-003` | successful complete poll | optional changed-only `TaskObservationEvent` plus the fresh bound-Root observation for actionability | advance notification baseline only after success | baseline never controls workflow action |
+| `TM-OBS-004` | provider-proven permanent known-Issue loss or incomplete known identity evidence | sanitized reason-discriminated `InvalidTaskSnapshot` with Root/failing identity | baseline may describe observation change | Router selects `WF-ROUTE-016`; observation never preselects disposition |
+| `TM-OBS-005` | expected exact record is missing or malformed/updated/archived | sanitized `InvalidTaskIssueRecord` in an otherwise routable snapshot | notification only | select by absence/corruption、record kind and phase |
+| `TM-OBS-006` | no notification change | same fresh bound-Root observation still enters actionability scan | no notification | actionable projection/restart/delivery cannot park on unchanged facts |
 
-## Provider boundary
+| Observation path | Included | Excluded |
+|---|---|---|
+| Phase 1 | scheduled Linear polling | public ingress、webhook、provider replay、incremental workflow cursor、fallback path |
 
-Linear SDK、OAuth token、workspace/team objects、raw state/label records 和 provider error 只存在于 private Linear implementation。所有外部数据在边界处验证并规范化；所有错误在离开边界前 sanitize。
+| Invalid record observation | Failure selection |
+|---|---|
+| missing | `WF-FAIL-001` through `WF-FAIL-003` |
+| malformed、updated or archived | record kind and phase select `WF-FAIL-008`, `WF-FAIL-009`, `WF-FAIL-011` or `WF-FAIL-015` |
 
-Codex 不获得 Linear 原生 skill、SDK、token 或未声明 provider operation。Phase 1 只有一个 Linear polling implementation 和一个 Linear-backed command implementation；不提供 webhook、compatibility adapter、fallback command、dual path 或 migration behavior。
+## Discovery table
+
+| Rule | Resource class | Discovery anchor | Required follow-up | Unsupported claim |
+|---|---|---|---|---|
+| `TM-DISC-001` | launch-bound Root/Cycle family | exact launch Root ID<br>current/historical kind labels<br>parent and predecessor anchors | read current and complete grouped history | current Root-label query is complete inventory or another Root is schedulable |
+| `TM-DISC-002` | Plan | Cycle description or intact approval `plan_issue_id` | exact read regardless current ancestry/archive | current children alone prove absence |
+| `TM-DISC-003` | Work/Verify/relation | intact Plan manifest identities | exact read current resource, history and creation evidence | detached/reparented resource is irrelevant |
+| `TM-DISC-004` | attached record | deterministic exact record identity | read exact comment and complete owner comment set | latest comment page is complete |
+| `TM-DISC-005` | unknown create-then-detach before manifest | no provider enumeration exists | never execute or admit it into sealed graph | proving such an object never existed |
+
+## Snapshot table
+
+| Rule | Fact | Normalized fields | Excluded fields | Authority use |
+|---|---|---|---|---|
+| `TM-SNAP-001` | Issue | identity/revision/times/creator/status<br>document/parent/labels/delegate/archive/trash | SDK object、raw metadata、credential | current workflow fact |
+| `TM-SNAP-002` | relation | exact ID/endpoints/type, canonical revision, provider times, creation evidence | mutation receipt | sealed graph check |
+| `TM-SNAP-003` | grouped Issue history | actor/origin, changed fields, endpoints, parent/label/archive changes, provider times | raw provider payload | conflict and lifecycle evidence, never per-mutation ordering |
+| `TM-SNAP-004` | record/terminal observation | valid closed record set with invalidation precedence<br>or external terminal plus no matching record evidence | fabricated completed document | transition evidence or pre-effect mechanical route |
+| `TM-SNAP-005` | canonical revision | versioned deterministic digest of all normalized fields and provider times | `updatedAt` alias or CAS claim | fresh basis and change detection |
+| `TM-SNAP-006` | workflow state map | exact team and one distinct state ID for every required semantic status | name inference、cached/default state | validate every Issue status pair and status mutation |
+
+## Command surface
+
+```mermaid
+%% source-rules: WF-AUTH-001 WF-AUTH-007 TM-CMD-001 TM-CMD-002 TM-CMD-003 TM-CONFLICT-001 TM-CONFLICT-002
+sequenceDiagram
+  participant Caller as Capability-scoped caller
+  participant Boundary as TaskManageCommand
+  participant Linear
+  Caller->>Boundary: typed generic call plus fresh basis
+  Boundary->>Linear: fresh pre-effect read
+  Boundary->>Linear: one provider operation
+  Boundary->>Linear: fresh exact read-back and history
+  Boundary-->>Caller: typed result with effect ambiguity
+```
+
+| Rule | Surface | Allowed shape | Forbidden shape | Read-back |
+|---|---|---|---|---|
+| `TM-CMD-001` | query | Issue get/list/children/history/comments<br>relation/state/label lists | workflow-specific `StartCycle` or semantic advice | complete pagination and normalization |
+| `TM-CMD-002` | mutation | Issue create/update/archive/comment<br>relation create/delete | SDK objects、credentials、arbitrary metadata、caller timestamps | exact target/resource/history read-back |
+| `TM-CMD-003` | caller capability | exact Root/Cycle phase, target kinds, fields and record kinds | ambient provider mutation access | boundary rejects mismatch before provider call |
+| `TM-CMD-004` | performer access | none | every Task Manager call | not applicable |
+
+## Capability table
+
+| Rule | Caller | Permitted effects | Workflow references | Explicit denial |
+|---|---|---|---|---|
+| `TM-CAP-001` | `RootBoundary` | Root Define fields, deterministic Cycle Draft, approval/semantic terminal/successor records | `WF-TR-001`, `WF-TR-005`, `WF-TR-006`, `WF-TR-009`, `WF-TR-010` | Stage execution、sealed graph mutation |
+| `TM-CAP-002` | `CycleMachine` | exact Cycle-record projection<br>graph/Stage mechanics<br>phase-owned Cycle closure | `WF-ROUTE-003`, `WF-ROUTE-011`, `WF-ROUTE-015`, `WF-ROUTE-017`, `WF-ROUTE-018`<br>`WF-TR-007`, `WF-TR-008`, `WF-TR-011` through `WF-TR-015` | semantic acceptance、successor |
+| `TM-CAP-003` | `FamilyGuard` | deterministic Root-attached family invalidation only | `WF-FAIL-010` | select owner/winner、modify Cycle |
+| `TM-CAP-004` | `DeliveryFinalizer` | Root delivery records/status and closed Git/PR calls | `WF-TR-002`, `WF-TR-003`, `WF-FAIL-011` | semantic accept、automatic redelivery |
+| `TM-CAP-005` | `Cleanup` | delete exact matching Root runtime/Home after cleanup-ready | `WF-ROUTE-013` | delete workflow Issues、other Homes、user code |
+
+## Conflict table
+
+| Rule | Observation | Typed result | Effect guarantee | Next authority |
+|---|---|---|---|---|
+| `TM-CONFLICT-001` | basis mismatch before provider call | `stale_before_effect` | provider operation not invoked | fresh `WF-ROUTE-*` evaluation |
+| `TM-CONFLICT-002` | provider call started, then unexpected delta or unknown result | `conflict_observed` with `effect_may_have_occurred: true` | no rollback claim | exact fresh read and matching failure/invalidation rule |
+| `TM-CONFLICT-003` | effect read-back exactly matches closed expected delta | success | only observed provider fact is authoritative | corresponding `WF-TR-*` projection |
+| `TM-CONFLICT-004` | Linear has no atomic compare-and-swap | one field per update plus pre/read-back evidence | no CAS claim | client mutex、memory lock、rollback and blind retry are non-authoritative |
+
+## Linear provider gates
+
+| Rule | Provider fact | Phase 1 requirement | If unproven or violated |
+|---|---|---|---|
+| `TM-PROVIDER-001` | Issue create accepts caller exact UUID and exposes creator/provider time | public schema supplies exact ID but rejects caller `createdAt` | materialization disabled |
+| `TM-PROVIDER-002` | relation create can accept exact identity but SDK permits `overrideCreatedAt` | public schema rejects override; real provider audit proves exact relation creator/time | materialization disabled |
+| `TM-PROVIDER-003` | comment create accepts deterministic exact ID; comments remain provider-mutable | fresh observation requires actor、unarchived and `updated_at == created_at` | invalid-record path |
+| `TM-PROVIDER-004` | mutation actor may be grouped in history | dedicated non-human service actor credential is externally exclusive | deployment capability disabled |
+| `TM-PROVIDER-005` | Issue permanent delete exists<br>comment hard delete has no tombstone | policy、permissions and audit prohibit both before cleanup | proven Issue loss -> `WF-FAIL-013`<br>missing comment -> `WF-FAIL-001` through `WF-FAIL-003` |
+| `TM-PROVIDER-006` | startup API can read actor identity but not prove all credential copies or human permissions | provisioning、secret isolation、rotation and operator audit provide the external gate | fail closed before production mutation |
+| `TM-PROVIDER-007` | Linear workflow states are team-specific IDs and may omit a required semantic state | exact map covers every semantic state<br>each ID is present、active、distinct<br>fresh `list_states` validates before admission/mutation | observation/admission/mutation boundary stays unavailable<br>visible sanitized capability error |
+
+| Provider response | Boundary action | Default |
+|---|---|---|
+| every Linear response | validate against [Contracts](contracts.md) | missing evidence fails closed |
