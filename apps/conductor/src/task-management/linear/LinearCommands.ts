@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   parseTaskIssueId,
   parseTaskRelationId,
@@ -42,6 +40,10 @@ import {
   type LinearCommandPage,
   type LinearProviderOutcome,
 } from "./LinearCommandResources.js";
+import type {
+  LinearIssueCommentEvidence,
+  LinearIssueHistoryEvidence,
+} from "./LinearQueries.js";
 
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
@@ -78,6 +80,7 @@ export interface LinearCreateRelationInput {
 }
 
 export interface LinearCommandClient {
+  getIssue(issueId: string): Promise<unknown>;
   readIssue(issueId: string): Promise<unknown>;
   listRelations(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   createIssue(input: LinearCreateIssueInput): Promise<unknown>;
@@ -89,9 +92,18 @@ export interface LinearCommandClient {
 
 export interface LinearCommandOptions {
   readonly team_id: string;
+  readonly service_actor_id: string;
 }
 
-type IdentityFactory = () => string;
+export interface LinearMutationEvidenceReader {
+  readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]>;
+  readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]>;
+}
+
+interface LinearMutationEvidence {
+  readonly history: readonly LinearIssueHistoryEvidence[];
+  readonly comments: readonly LinearIssueCommentEvidence[];
+}
 
 function resultEnvelope(call: TaskMcpMutationCall) {
   return {
@@ -106,13 +118,19 @@ function resultEnvelope(call: TaskMcpMutationCall) {
 
 export class LinearCommands {
   readonly #teamId: string;
+  readonly #serviceActorId: string;
 
   constructor(
     private readonly client: LinearCommandClient,
+    private readonly evidenceReader: LinearMutationEvidenceReader,
     options: LinearCommandOptions,
-    private readonly identityFactory: IdentityFactory = randomUUID,
   ) {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
+    this.#serviceActorId = parseBoundedString(
+      options.service_actor_id,
+      "invalid_linear_service_actor_id",
+      128,
+    );
   }
 
   execute(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult>;
@@ -135,12 +153,21 @@ export class LinearCommands {
   }
 
   async #createIssue(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult> {
-    const issueId = parseTaskIssueId(this.identityFactory());
+    const issueId = parseTaskIssueId(call.input.issue_id);
     const target: TaskMutationTarget = Object.freeze({ kind: "issue", issue_id: issueId });
     const parent = await this.#preconditionIssue(call.input.parent_issue_id);
     if (parent === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
     if (parent.snapshot.revision !== call.input.expected_parent_revision) {
-      return this.#result(call, target, "precondition_failed", null, [], "fresh_precondition_mismatch");
+      return this.#result(call, target, "stale_before_effect", null, [], "fresh_precondition_mismatch");
+    }
+    let existing: LinearCommandIssueRecord | null;
+    try {
+      existing = await this.#readOptionalIssue(issueId);
+    } catch {
+      return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
+    }
+    if (existing !== null) {
+      return this.#result(call, target, "stale_before_effect", existing.snapshot, [], "fresh_precondition_mismatch");
     }
     if (call.input.desired.priority !== null && call.input.desired.priority > 4) {
       return this.#result(call, target, "not_applied", null, [], "linear_invalid_priority");
@@ -157,12 +184,16 @@ export class LinearCommands {
       priority: call.input.desired.priority,
     }));
     let after: LinearCommandIssueRecord;
+    let afterEvidence: LinearMutationEvidence;
     try {
       after = await this.#readIssue(issueId);
+      afterEvidence = await this.#readEvidence(issueId);
     } catch {
-      return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
+      return this.#result(call, target, "conflict_observed", null, [], "fresh_readback_unavailable");
     }
     const matches = !after.archived
+      && !after.trashed
+      && after.creatorId === this.#serviceActorId
       && after.snapshot.parent_id === call.input.parent_issue_id
       && linearIssueMatches(after.snapshot, {
         title: call.input.desired.title,
@@ -172,8 +203,22 @@ export class LinearCommands {
         delegate_id: call.input.desired.delegate_id,
         priority: call.input.desired.priority,
       });
-    if (matches) {
+    const evidenceMatches = !this.#hasUnexpectedEvidence(
+      Object.freeze({ history: [], comments: [] }),
+      afterEvidence,
+    );
+    if (matches && evidenceMatches && provider !== "rejected") {
       return this.#result(call, target, "applied", after.snapshot, [{ kind: "issue_created", issue: after.snapshot }], null);
+    }
+    if (matches && !evidenceMatches) {
+      return this.#result(
+        call,
+        target,
+        "conflict_observed",
+        after.snapshot,
+        [{ kind: "issue_created", issue: after.snapshot }],
+        "unexpected_post_effect_evidence",
+      );
     }
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
@@ -183,7 +228,13 @@ export class LinearCommands {
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
     if (before.snapshot.revision !== call.input.expected_revision) {
-      return this.#result(call, target, "precondition_failed", before.snapshot, [], "fresh_precondition_mismatch");
+      return this.#result(call, target, "stale_before_effect", before.snapshot, [], "fresh_precondition_mismatch");
+    }
+    let beforeEvidence: LinearMutationEvidence;
+    try {
+      beforeEvidence = await this.#readEvidence(call.input.issue_id);
+    } catch {
+      return this.#result(call, target, "not_applied", before.snapshot, [], "fresh_precondition_unavailable");
     }
     if (call.input.desired.priority !== undefined && call.input.desired.priority !== null && call.input.desired.priority > 4) {
       return this.#result(call, target, "not_applied", before.snapshot, [], "linear_invalid_priority");
@@ -196,16 +247,31 @@ export class LinearCommands {
       () => this.client.updateIssue(call.input.issue_id, this.#updateInput(call.input.desired)),
     );
     let after: LinearCommandIssueRecord;
+    let afterEvidence: LinearMutationEvidence;
     try {
       after = await this.#readIssue(call.input.issue_id);
+      afterEvidence = await this.#readEvidence(call.input.issue_id);
     } catch {
-      return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
+      return this.#result(call, target, "conflict_observed", null, [], "fresh_readback_unavailable");
     }
-    if (!after.archived && linearIssueMatches(after.snapshot, call.input.desired)) {
+    if (provider !== "rejected" && !after.archived && linearIssueMatches(after.snapshot, call.input.desired)) {
       const changes = taskIssueChanges(before.snapshot, after.snapshot);
-      if (changes.length > 0) return this.#result(call, target, "applied", after.snapshot, changes, null);
+      if (this.#hasUnexpectedEvidence(beforeEvidence, afterEvidence)) {
+        return this.#result(
+          call,
+          target,
+          "conflict_observed",
+          after.snapshot,
+          changes,
+          "unexpected_post_effect_evidence",
+        );
+      }
+      if (changes.length === 1) return this.#result(call, target, "applied", after.snapshot, changes, null);
+      if (changes.length > 1) {
+        return this.#result(call, target, "conflict_observed", after.snapshot, changes, "unexpected_post_effect_delta");
+      }
     }
-    return this.#postconditionFailure(call, target, provider, after.snapshot);
+    return this.#postconditionFailure(call, target, provider, after.snapshot, before.snapshot);
   }
 
   async #archiveIssue(call: ArchiveIssueCall, execution: TaskManageBoundaryExecution): Promise<ArchiveIssueResult> {
@@ -213,33 +279,67 @@ export class LinearCommands {
     const before = await this.#preconditionIssue(call.input.issue_id);
     if (before === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
     if (before.snapshot.revision !== call.input.expected_revision) {
-      return this.#result(call, target, "precondition_failed", before.snapshot, [], "fresh_precondition_mismatch");
+      return this.#result(call, target, "stale_before_effect", before.snapshot, [], "fresh_precondition_mismatch");
+    }
+    let beforeEvidence: LinearMutationEvidence;
+    try {
+      beforeEvidence = await this.#readEvidence(call.input.issue_id);
+    } catch {
+      return this.#result(call, target, "not_applied", before.snapshot, [], "fresh_precondition_unavailable");
     }
     if (before.archived) return this.#result(call, target, "not_applied", before.snapshot, [], "desired_state_already_present");
     const provider = await this.#effect(execution, () => this.client.archiveIssue(call.input.issue_id));
     let after: LinearCommandIssueRecord;
+    let afterEvidence: LinearMutationEvidence;
     try {
       after = await this.#readIssue(call.input.issue_id);
+      afterEvidence = await this.#readEvidence(call.input.issue_id);
     } catch {
-      return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
+      return this.#result(call, target, "conflict_observed", null, [], "fresh_readback_unavailable");
     }
-    if (after.archived) {
+    const unexpectedEvidence = this.#hasUnexpectedEvidence(beforeEvidence, afterEvidence);
+    if (provider !== "rejected" && after.archived && !unexpectedEvidence) {
       return this.#result(call, target, "applied", after.snapshot, [{ kind: "issue_archived", issue: after.snapshot }], null);
+    }
+    if (after.archived && unexpectedEvidence) {
+      return this.#result(
+        call,
+        target,
+        "conflict_observed",
+        after.snapshot,
+        [{ kind: "issue_archived", issue: after.snapshot }],
+        "unexpected_post_effect_evidence",
+      );
     }
     return this.#postconditionFailure(call, target, provider, after.snapshot);
   }
 
   async #createRelation(call: CreateRelationCall, execution: TaskManageBoundaryExecution): Promise<CreateRelationResult> {
-    const relationId = parseTaskRelationId(this.identityFactory());
+    const relationId = parseTaskRelationId(call.input.relation_id);
     const target = this.#relationTarget(relationId, call.input.source_issue_id, call.input.target_issue_id);
     const endpoints = await this.#preconditionEndpoints(call.input.source_issue_id, call.input.target_issue_id);
     if (endpoints === null) return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
     if (
       endpoints[0].snapshot.revision !== call.input.expected_source_revision
       || endpoints[1].snapshot.revision !== call.input.expected_target_revision
-    ) return this.#result(call, target, "precondition_failed", null, [], "fresh_precondition_mismatch");
+    ) return this.#result(call, target, "stale_before_effect", null, [], "fresh_precondition_mismatch");
     if (!RELATION_TYPES.has(call.input.relation_type)) {
       return this.#result(call, target, "not_applied", null, [], "linear_invalid_relation_type");
+    }
+    let existing: TaskRelationSnapshot | null;
+    try {
+      existing = await this.#readRelation(call.input.source_issue_id, relationId);
+    } catch {
+      return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
+    }
+    if (existing !== null) {
+      return this.#result(call, target, "stale_before_effect", existing, [], "fresh_precondition_mismatch");
+    }
+    let beforeEvidence: readonly [LinearMutationEvidence, LinearMutationEvidence];
+    try {
+      beforeEvidence = await this.#readEndpointEvidence(call.input.source_issue_id, call.input.target_issue_id);
+    } catch {
+      return this.#result(call, target, "not_applied", null, [], "fresh_precondition_unavailable");
     }
     const provider = await this.#effect(execution, () => this.client.createRelation({
       id: relationId,
@@ -248,17 +348,32 @@ export class LinearCommands {
       target_issue_id: call.input.target_issue_id,
     }));
     let after: TaskRelationSnapshot | null;
+    let afterEvidence: readonly [LinearMutationEvidence, LinearMutationEvidence];
     try {
       after = await this.#readRelation(call.input.source_issue_id, relationId);
+      afterEvidence = await this.#readEndpointEvidence(call.input.source_issue_id, call.input.target_issue_id);
     } catch {
-      return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
+      return this.#result(call, target, "conflict_observed", null, [], "fresh_readback_unavailable");
     }
+    const unexpectedEvidence = this.#hasUnexpectedEndpointEvidence(beforeEvidence, afterEvidence);
     if (
-      after !== null
+      provider !== "rejected"
+      && after !== null
       && after.type === call.input.relation_type
       && after.source_issue_id === call.input.source_issue_id
       && after.target_issue_id === call.input.target_issue_id
+      && !unexpectedEvidence
     ) return this.#result(call, target, "applied", after, [{ kind: "relation_added", relation: after }], null);
+    if (after !== null && unexpectedEvidence) {
+      return this.#result(
+        call,
+        target,
+        "conflict_observed",
+        after,
+        [{ kind: "relation_added", relation: after }],
+        "unexpected_post_effect_evidence",
+      );
+    }
     return this.#postconditionFailure(call, target, provider, after);
   }
 
@@ -269,7 +384,7 @@ export class LinearCommands {
     if (
       endpoints[0].snapshot.revision !== call.input.expected_source_revision
       || endpoints[1].snapshot.revision !== call.input.expected_target_revision
-    ) return this.#result(call, target, "precondition_failed", null, [], "fresh_precondition_mismatch");
+    ) return this.#result(call, target, "stale_before_effect", null, [], "fresh_precondition_mismatch");
     let before: TaskRelationSnapshot | null;
     try {
       before = await this.#readRelation(call.input.source_issue_id, call.input.relation_id);
@@ -281,16 +396,39 @@ export class LinearCommands {
       || before.revision !== call.input.expected_relation_revision
       || before.source_issue_id !== call.input.source_issue_id
       || before.target_issue_id !== call.input.target_issue_id
-    ) return this.#result(call, target, "precondition_failed", before, [], "fresh_precondition_mismatch");
+    ) return this.#result(call, target, "stale_before_effect", before, [], "fresh_precondition_mismatch");
+    let beforeEvidence: readonly [LinearMutationEvidence, LinearMutationEvidence];
+    try {
+      beforeEvidence = await this.#readEndpointEvidence(call.input.source_issue_id, call.input.target_issue_id);
+    } catch {
+      return this.#result(call, target, "not_applied", before, [], "fresh_precondition_unavailable");
+    }
     const provider = await this.#effect(execution, () => this.client.deleteRelation(call.input.relation_id));
     let after: TaskRelationSnapshot | null;
+    let afterEvidence: readonly [LinearMutationEvidence, LinearMutationEvidence];
     try {
       after = await this.#readRelation(call.input.source_issue_id, call.input.relation_id);
+      afterEvidence = await this.#readEndpointEvidence(call.input.source_issue_id, call.input.target_issue_id);
     } catch {
-      return this.#result(call, target, "acceptance_unknown", null, [], "fresh_readback_unavailable");
+      return this.#result(call, target, "conflict_observed", null, [], "fresh_readback_unavailable");
     }
-    if (after === null) {
+    const unexpectedEvidence = this.#hasUnexpectedEndpointEvidence(beforeEvidence, afterEvidence);
+    if (
+      provider !== "rejected"
+      && after === null
+      && !unexpectedEvidence
+    ) {
       return this.#result(call, target, "applied", null, [{ kind: "relation_removed", relation: before }], null);
+    }
+    if (after === null && unexpectedEvidence) {
+      return this.#result(
+        call,
+        target,
+        "conflict_observed",
+        null,
+        [{ kind: "relation_removed", relation: before }],
+        "unexpected_post_effect_evidence",
+      );
     }
     return this.#postconditionFailure(call, target, provider, after);
   }
@@ -320,6 +458,49 @@ export class LinearCommands {
       issueId,
       this.#teamId,
     );
+  }
+
+  async #readOptionalIssue(issueId: TaskIssueId): Promise<LinearCommandIssueRecord | null> {
+    const value = await this.client.getIssue(issueId);
+    return value === null ? null : assertLinearIssueIdentity(parseLinearCommandIssue(value), issueId, this.#teamId);
+  }
+
+  async #readEvidence(issueId: TaskIssueId): Promise<LinearMutationEvidence> {
+    const [history, comments] = await Promise.all([
+      this.evidenceReader.readIssueHistory(issueId),
+      this.evidenceReader.readIssueComments(issueId),
+    ]);
+    return Object.freeze({ history, comments });
+  }
+
+  #readEndpointEvidence(
+    sourceIssueId: TaskIssueId,
+    targetIssueId: TaskIssueId,
+  ): Promise<readonly [LinearMutationEvidence, LinearMutationEvidence]> {
+    return Promise.all([this.#readEvidence(sourceIssueId), this.#readEvidence(targetIssueId)]);
+  }
+
+  #hasUnexpectedEndpointEvidence(
+    before: readonly [LinearMutationEvidence, LinearMutationEvidence],
+    after: readonly [LinearMutationEvidence, LinearMutationEvidence],
+  ): boolean {
+    return this.#hasUnexpectedEvidence(before[0], after[0])
+      || this.#hasUnexpectedEvidence(before[1], after[1]);
+  }
+
+  #hasUnexpectedEvidence(before: LinearMutationEvidence, after: LinearMutationEvidence): boolean {
+    const beforeHistory = new Map(before.history.map((entry) => [entry.history_id, JSON.stringify(entry)]));
+    const afterHistory = new Map(after.history.map((entry) => [entry.history_id, entry]));
+    for (const [identity, value] of beforeHistory) {
+      const observed = afterHistory.get(identity);
+      if (observed === undefined || JSON.stringify(observed) !== value) return true;
+    }
+    for (const entry of after.history) {
+      if (!beforeHistory.has(entry.history_id) && entry.change_origin !== "symphony") return true;
+    }
+    const beforeComments = new Map(before.comments.map((entry) => [entry.comment_id, JSON.stringify(entry)]));
+    if (beforeComments.size !== after.comments.length) return true;
+    return after.comments.some((entry) => beforeComments.get(entry.comment_id) !== JSON.stringify(entry));
   }
 
   async #readRelation(issueId: TaskIssueId, relationId: TaskRelationId): Promise<TaskRelationSnapshot | null> {
@@ -388,14 +569,18 @@ export class LinearCommands {
     target: TaskMutationTarget,
     provider: LinearProviderOutcome,
     freshResource: TaskIssueSnapshot | TaskRelationSnapshot | null,
+    beforeResource: TaskIssueSnapshot | TaskRelationSnapshot | null = null,
   ): Extract<TaskMcpMutationResult, { readonly function: C["function"] }> {
-    if (provider === "uncertain") {
-      return this.#result(call, target, "acceptance_unknown", freshResource, [], "provider_acceptance_unknown");
-    }
-    if (provider === "rejected") {
-      return this.#result(call, target, "not_applied", freshResource, [], "provider_rejected");
-    }
-    return this.#result(call, target, "readback_mismatch", freshResource, [], "fresh_postcondition_mismatch");
+    if (
+      provider === "rejected"
+      && freshResource !== null
+      && beforeResource !== null
+      && freshResource.revision === beforeResource.revision
+    ) return this.#result(call, target, "not_applied", freshResource, [], "provider_rejected");
+    const reason = provider === "uncertain"
+      ? "provider_acceptance_unknown"
+      : provider === "rejected" ? "provider_rejected_with_unexpected_readback" : "fresh_postcondition_mismatch";
+    return this.#result(call, target, "conflict_observed", freshResource, [], reason);
   }
 
   #result<C extends TaskMcpMutationCall>(
@@ -410,6 +595,7 @@ export class LinearCommands {
       ...resultEnvelope(call),
       output: Object.freeze({
         outcome,
+        effect_may_have_occurred: outcome === "applied" || outcome === "conflict_observed",
         target,
         fresh_resource: freshResource,
         concrete_diff: Object.freeze(concreteDiff),

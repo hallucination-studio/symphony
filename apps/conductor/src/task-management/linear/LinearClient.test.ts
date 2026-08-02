@@ -19,9 +19,19 @@ function sdkIssue(id: string, parentId: string | null = null) {
     delegateId: "actor:1",
     priority: 2,
     createdAt: new Date("2026-07-28T00:00:00.000Z"),
+    creatorId: "actor:creator",
+    trashed: false,
     stateId: parentId === null ? "state:todo" : "state:planning",
     labelIds: [parentId === null ? "label:root" : "label:cycle", "label:queued"],
     children: async () => connection([]),
+    history: async (variables?: unknown) => {
+      void variables;
+      return connection([]);
+    },
+    comments: async (variables?: unknown) => {
+      void variables;
+      return connection([]);
+    },
     relations: async () => connection([]),
     inverseRelations: async () => connection([]),
   };
@@ -39,6 +49,8 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     type: "blocks",
     issueId: "root-1",
     relatedIssueId: "cycle-1",
+    createdAt: new Date("2026-07-28T00:00:00.000Z"),
+    archivedAt: null,
   }]);
   root.inverseRelations = async () => connection([{
     id: "relation:2",
@@ -46,6 +58,8 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     type: "related",
     issueId: "cycle-1",
     relatedIssueId: "root-1",
+    createdAt: new Date("2026-07-28T00:00:00.000Z"),
+    archivedAt: null,
   }]);
   const sdk = {
     issue: async (id: string) => { calls.push({ issue: id }); return id === "no-priority" ? noPriority : root; },
@@ -107,9 +121,13 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     delegate_id: "actor:1",
     priority: 2,
     created_at: "2026-07-28T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    creator_id: "actor:creator",
+    archived: false,
+    trashed: false,
   });
   assert.equal((await client.getIssue("no-priority") as { priority: number | null }).priority, null);
-  assert.deepEqual(await client.listIssues("team:1", "issues:1", 20), {
+  assert.deepEqual(await client.listIssues("issues:1", 20), {
     nodes: [await client.getIssue("root-1")],
     page_info: { has_next_page: false, end_cursor: null },
   });
@@ -126,6 +144,10 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
       delegate_id: "actor:1",
       priority: 2,
       created_at: "2026-07-28T00:00:00.000Z",
+      updated_at: "2026-07-29T00:00:00.000Z",
+      creator_id: "actor:creator",
+      archived: false,
+      trashed: false,
     }],
     page_info: { has_next_page: false, end_cursor: null },
   });
@@ -140,6 +162,9 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     type: "blocks",
     source_issue_id: "root-1",
     target_issue_id: "cycle-1",
+    created_at: "2026-07-28T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    archived: false,
   }]);
   assert.match(outgoing.page_info.end_cursor ?? "", /^relation:/u);
   assert.deepEqual((await client.listRelations("root-1", outgoing.page_info.end_cursor, 20) as { nodes: unknown }).nodes, [{
@@ -148,6 +173,9 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     type: "related",
     source_issue_id: "cycle-1",
     target_issue_id: "root-1",
+    created_at: "2026-07-28T00:00:00.000Z",
+    updated_at: "2026-07-30T01:00:00.000Z",
+    archived: false,
   }]);
   await assert.rejects(
     client.listRelations("cycle-1", outgoing.page_info.end_cursor, 20),
@@ -155,7 +183,9 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
   );
 
   assert.deepEqual(await client.listStates("team:1", "states:1", 20), {
-    nodes: [{ id: "state:todo", revision: "2026-07-30T00:00:00.000Z", name: "Todo", team_id: "team:1" }],
+    nodes: [{
+      id: "state:todo", revision: "2026-07-30T00:00:00.000Z", name: "Todo", team_id: "team:1", archived: false,
+    }],
     page_info: { has_next_page: false, end_cursor: null },
   });
   assert.deepEqual(await client.listLabels("team:1", "labels:1", 20), {
@@ -163,10 +193,8 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     page_info: { has_next_page: false, end_cursor: null },
   });
   assert.deepEqual(calls.find((entry) => (
-    (entry as { issues?: { filter?: { team?: unknown } } }).issues?.filter?.team !== undefined
-  )), {
-    issues: { after: "issues:1", first: 20, filter: { team: { id: { eq: "team:1" } } } },
-  });
+    (entry as { issues?: { after?: unknown } }).issues?.after === "issues:1"
+  )), { issues: { after: "issues:1", first: 20, includeArchived: true } });
   assert.deepEqual(calls.find((entry) => "workflowStates" in (entry as object)), {
     workflowStates: { after: "states:1", first: 20, filter: { team: { id: { eq: "team:1" } } } },
   });
@@ -247,7 +275,7 @@ test("exact getIssue includes archived issues and returns null when the identity
   }]);
 });
 
-test("exact getIssue maps an archived exact identity to typed absence without dropping archived lookup", async () => {
+test("exact getIssue preserves an archived exact identity as a current fact", async () => {
   const calls: unknown[] = [];
   const archived = {
     ...sdkIssue("archived-1"),
@@ -260,7 +288,7 @@ test("exact getIssue maps an archived exact identity to typed absence without dr
     },
   } as never);
 
-  assert.equal(await client.getIssue("archived-1"), null);
+  assert.equal((await client.getIssue("archived-1") as { archived: boolean }).archived, true);
   assert.deepEqual(calls, [{
     first: 2,
     includeArchived: true,
@@ -277,4 +305,64 @@ test("exact getIssue does not infer absence from an incomplete provider page", a
     client.getIssue("missing-1"),
     /linear_issue_lookup_incomplete/u,
   );
+});
+
+test("SDK history, comments, and viewer projections remain bounded and data-only", async () => {
+  const calls: unknown[] = [];
+  const issue = sdkIssue("root-1");
+  issue.history = async (variables: unknown) => {
+    calls.push({ history: variables });
+    return connection([{
+      id: "history-1",
+      createdAt: new Date("2026-07-30T00:00:00.000Z"),
+      updatedAt: new Date("2026-07-30T01:00:00.000Z"),
+      actorId: "actor:creator",
+      fromStateId: "state:todo",
+      toStateId: "state:doing",
+      fromTitle: null,
+      toTitle: null,
+      updatedDescription: false,
+      fromParentId: null,
+      toParentId: null,
+      addedLabelIds: [],
+      removedLabelIds: [],
+      fromDelegate: undefined,
+      toDelegate: undefined,
+      fromPriority: null,
+      toPriority: null,
+      archived: null,
+      trashed: null,
+      relationChanges: [],
+    }], true, "history:next");
+  };
+  issue.comments = async (variables: unknown) => {
+    calls.push({ comments: variables });
+    return connection([{
+      id: "comment-1",
+      issueId: "root-1",
+      createdAt: new Date("2026-07-30T00:00:00.000Z"),
+      updatedAt: new Date("2026-07-30T01:00:00.000Z"),
+      editedAt: new Date("2026-07-30T01:00:00.000Z"),
+      archivedAt: null,
+      userId: "actor:creator",
+      botActor: null,
+      body: "record body",
+    }]);
+  };
+  const client = new LinearSdkQueryClient({
+    issue: async () => issue,
+    viewer: Promise.resolve({ id: "actor:creator", active: true, app: true, credential: "secret" }),
+  } as never);
+
+  assert.equal((await client.listIssueHistory("root-1", null, 20) as {
+    page_info: { end_cursor: string | null };
+  }).page_info.end_cursor, "history:next");
+  const comments = await client.listIssueComments("root-1", null, 20) as { nodes: readonly unknown[] };
+  assert.equal(JSON.stringify(comments).includes("credential"), false);
+  assert.equal((comments.nodes[0] as { body_digest: string }).body_digest.length, 64);
+  assert.deepEqual(await client.readViewer(), { id: "actor:creator", active: true, app: true });
+  assert.deepEqual(calls, [
+    { history: { after: null, first: 20 } },
+    { comments: { after: null, first: 20 } },
+  ]);
 });

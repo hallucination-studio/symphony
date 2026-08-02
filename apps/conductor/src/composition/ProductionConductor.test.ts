@@ -73,22 +73,22 @@ function config() {
 
 const expectedCatalog = Object.freeze({
   states: Object.freeze([
-    ["state:root:todo", "Todo"],
-    ["state:root:in-progress", "In Progress"],
-    ["state:root:in-review", "In Review"],
-    ["state:root:done", "Done"],
-    ["state:cycle:draft", "Draft"],
-    ["state:cycle:in-progress", "In Progress"],
-    ["state:cycle:awaiting-acceptance", "Awaiting Acceptance"],
-    ["state:cycle:succeeded", "Succeeded"],
-    ["state:cycle:rejected", "Rejected"],
-    ["state:cycle:failed", "Failed"],
-    ["state:cycle:canceled", "Canceled"],
-    ["state:stage:todo", "Todo"],
-    ["state:stage:in-progress", "In Progress"],
-    ["state:stage:done", "Done"],
-    ["state:stage:failed", "Failed"],
-    ["state:stage:canceled", "Canceled"],
+    ["state:root:todo", "Todo", false],
+    ["state:root:in-progress", "In Progress", false],
+    ["state:root:in-review", "In Review", false],
+    ["state:root:done", "Done", false],
+    ["state:cycle:draft", "Draft", false],
+    ["state:cycle:in-progress", "In Progress", false],
+    ["state:cycle:awaiting-acceptance", "Awaiting Acceptance", false],
+    ["state:cycle:succeeded", "Succeeded", false],
+    ["state:cycle:rejected", "Rejected", false],
+    ["state:cycle:failed", "Failed", false],
+    ["state:cycle:canceled", "Canceled", false],
+    ["state:stage:todo", "Todo", false],
+    ["state:stage:in-progress", "In Progress", false],
+    ["state:stage:done", "Done", false],
+    ["state:stage:failed", "Failed", false],
+    ["state:stage:canceled", "Canceled", false],
   ]),
   labels: Object.freeze([
     ["label:root", "symphony:kind/root"],
@@ -104,6 +104,12 @@ test("startup validates every configured status and kind identity against the fr
   assert.throws(() => assertTaskWorkflowConfiguration(config(), {
     ...expectedCatalog,
     states: expectedCatalog.states.filter(([identity]) => identity !== "state:cycle:draft"),
+  }), /invalid_task_workflow_configuration/u);
+  assert.throws(() => assertTaskWorkflowConfiguration(config(), {
+    ...expectedCatalog,
+    states: expectedCatalog.states.map(([identity, name, archived]) => (
+      identity === "state:cycle:draft" ? [identity, name, true] as const : [identity, name, archived] as const
+    )),
   }), /invalid_task_workflow_configuration/u);
   assert.throws(() => assertTaskWorkflowConfiguration(config(), {
     ...expectedCatalog,

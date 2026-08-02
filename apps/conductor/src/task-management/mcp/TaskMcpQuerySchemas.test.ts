@@ -92,7 +92,7 @@ test("every list query requires explicit cursor pagination and returns a bounded
       function: "list_states" as const,
       input: { cursor: null, page_size: 50 },
       output: {
-        states: [{ state_id: "state:todo", revision: "revision:state:1", name: "Todo" }],
+        states: [{ state_id: "state:todo", revision: "revision:state:1", name: "Todo", archived: false }],
         next_cursor: null,
       },
     },

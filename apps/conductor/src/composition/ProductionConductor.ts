@@ -127,7 +127,11 @@ export async function createProductionConductor(
   await mkdir(startup.config.program_data_path, { recursive: true, mode: 0o700 });
 
   const sdk = LinearSdkQueryClient.fromAccessToken(startup.linear_token);
-  const queries = new LinearQueries(sdk, { team_id: startup.config.linear_team_id });
+  const queries = new LinearQueries(sdk, {
+    team_id: startup.config.linear_team_id,
+    service_actor_id: startup.config.agent_actor_id,
+  });
+  await queries.readServiceActor();
   const firstRoot = startup.config.root_routing[0]?.root_id;
   if (firstRoot === undefined) throw new Error("invalid_root_routing");
   let catalog;
@@ -157,7 +161,10 @@ export async function createProductionConductor(
   }
 
   const callerAuthority = createTaskManageCallerAuthority();
-  const commands = new LinearCommands(sdk, { team_id: startup.config.linear_team_id });
+  const commands = new LinearCommands(sdk, queries, {
+    team_id: startup.config.linear_team_id,
+    service_actor_id: startup.config.agent_actor_id,
+  });
   const taskManager = new LinearTaskManageCommand(queries, commands, callerAuthority.verifier);
   const homes = await RootHomeManager.create(
     startup.config.program_data_path,

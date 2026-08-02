@@ -313,7 +313,7 @@ export class CycleTaskManageCommandBinding {
       this.#taskManager.create_issue(call, this.#providerExecution(call, execution)));
     execution.assertActive();
     const result = this.#validateMutationResult<CreateIssueResult>(call, value);
-    if (result.output.outcome === "acceptance_unknown" && result.output.target.kind === "issue") {
+    if (result.output.outcome === "conflict_observed" && result.output.target.kind === "issue") {
       if (this.#provisionalIssues.size >= 64) invalidBoundary();
       this.#provisionalIssues.set(result.output.target.issue_id, call.input);
     }
@@ -374,7 +374,7 @@ export class CycleTaskManageCommandBinding {
     ));
     execution.assertActive();
     const result = this.#validateMutationResult<CreateRelationResult>(call, value);
-    if (result.output.outcome === "acceptance_unknown" && result.output.target.kind === "relation") {
+    if (result.output.outcome === "conflict_observed" && result.output.target.kind === "relation") {
       if (this.#provisionalRelations.size >= 64) invalidBoundary();
       this.#provisionalRelations.set(result.output.target.relation_id, call.input);
     }

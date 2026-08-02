@@ -4,8 +4,14 @@ import test from "node:test";
 import { parseRootIssueId, parseRuntimeGeneration } from "../../contracts/identity.js";
 import { parseTaskMcpCall, parseTaskMcpResult, type TaskMcpMutationCall } from "../mcp/TaskMcpSchemas.js";
 import { LinearCommands, type LinearCommandClient } from "./LinearCommands.js";
+import type {
+  LinearIssueCommentEvidence,
+  LinearIssueHistoryEvidence,
+} from "./LinearQueries.js";
 
 const TEAM_ID = "team:1";
+const ISSUE_UUID = "11111111-1111-4111-8111-111111111111";
+const RELATION_UUID = "22222222-2222-4222-8222-222222222222";
 const target = { root_id: parseRootIssueId("root-1"), runtime_generation: parseRuntimeGeneration(1) };
 const ACTIVE_EXECUTION = Object.freeze({ assertActive: () => undefined });
 
@@ -21,7 +27,11 @@ function issue(id: string, revision: string, overrides: Record<string, unknown> 
     labels: ["label:work"],
     delegate_id: "actor:1",
     priority: 2,
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    creator_id: "actor:1",
     archived: false,
+    trashed: false,
     ...overrides,
   };
 }
@@ -33,6 +43,9 @@ function relation(id: string, revision: string) {
     type: "blocks",
     source_issue_id: "source-1",
     target_issue_id: "target-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    archived: false,
   };
 }
 
@@ -57,6 +70,12 @@ class FakeCommandClient implements LinearCommandClient {
     return value;
   }
 
+  async getIssue(issueId: string) {
+    const value = this.issueReads.get(issueId)?.shift();
+    if (value instanceof Error) throw value;
+    return value ?? null;
+  }
+
   async listRelations(issueId: string) {
     const value = this.relationReads.get(issueId)?.shift();
     if (value instanceof Error) throw value;
@@ -73,6 +92,27 @@ class FakeCommandClient implements LinearCommandClient {
     this.effects.push({ kind, input });
     if (this.failure !== null) throw this.failure;
     return this.response;
+  }
+}
+
+class FakeEvidenceReader {
+  readonly historyReads = new Map<string, Array<readonly LinearIssueHistoryEvidence[]>>();
+  readonly commentReads = new Map<string, Array<readonly LinearIssueCommentEvidence[]>>();
+
+  enqueueHistory(issueId: string, ...values: Array<readonly LinearIssueHistoryEvidence[]>) {
+    this.historyReads.set(issueId, values);
+  }
+
+  enqueueComments(issueId: string, ...values: Array<readonly LinearIssueCommentEvidence[]>) {
+    this.commentReads.set(issueId, values);
+  }
+
+  async readIssueHistory(issueId: string) {
+    return this.historyReads.get(issueId)?.shift() ?? [];
+  }
+
+  async readIssueComments(issueId: string) {
+    return this.commentReads.get(issueId)?.shift() ?? [];
   }
 }
 
@@ -95,6 +135,7 @@ function mutationCall(functionName: TaskMcpMutationCall["function"], input: unkn
 
 const calls = {
   createIssue: mutationCall("create_issue", {
+    issue_id: ISSUE_UUID,
     parent_issue_id: "root-1",
     expected_parent_revision: "revision:parent:1",
     desired: {
@@ -109,21 +150,14 @@ const calls = {
   updateIssue: mutationCall("update_issue", {
     issue_id: "issue-1",
     expected_revision: "revision:issue:1",
-    desired: {
-      title: "Updated",
-      description: "New body",
-      state_id: "state:doing",
-      parent_id: "parent-2",
-      label_ids: ["label:work", "label:urgent"],
-      delegate_id: null,
-      priority: 1,
-    },
+    desired: { title: "Updated" },
   }),
   archiveIssue: mutationCall("archive_issue", {
     issue_id: "issue-1",
     expected_revision: "revision:issue:1",
   }),
   createRelation: mutationCall("create_relation", {
+    relation_id: RELATION_UUID,
     relation_type: "blocks",
     source_issue_id: "source-1",
     expected_source_revision: "revision:source:1",
@@ -140,49 +174,41 @@ const calls = {
   }),
 } as const;
 
-function commands(client: FakeCommandClient, identities: string[] = []) {
-  return new LinearCommands(client, { team_id: TEAM_ID }, () => identities.shift() ?? "identity-missing");
+function commands(client: FakeCommandClient, evidence = new FakeEvidenceReader()) {
+  return new LinearCommands(client, evidence, { team_id: TEAM_ID, service_actor_id: "actor:1" });
 }
 
 test("all five generic mutations apply one exact effect after fresh preconditions and exact read-back", async () => {
   const cases: Array<{
     call: TaskMcpMutationCall;
-    ids?: string[];
     arrange(client: FakeCommandClient): void;
     expectedEffect: unknown;
     expectedTarget: unknown;
   }> = [
     {
       call: calls.createIssue,
-      ids: ["new-issue-1"],
       arrange(client) {
         client.enqueueIssue("root-1", issue("root-1", "revision:parent:1"));
-        client.enqueueIssue("new-issue-1", issue("new-issue-1", "revision:new:1", {
+        client.enqueueIssue(ISSUE_UUID, null, issue(ISSUE_UUID, "revision:new:1", {
           title: "New issue", description: "Body", status: "state:todo", parent_id: "root-1",
         }));
       },
       expectedEffect: {
-        id: "new-issue-1", team_id: TEAM_ID, parent_issue_id: "root-1", title: "New issue",
+        id: ISSUE_UUID, team_id: TEAM_ID, parent_issue_id: "root-1", title: "New issue",
         description: "Body", state_id: "state:todo", label_ids: ["label:work"], delegate_id: "actor:1", priority: 2,
       },
-      expectedTarget: { kind: "issue", issue_id: "new-issue-1" },
+      expectedTarget: { kind: "issue", issue_id: ISSUE_UUID },
     },
     {
       call: calls.updateIssue,
       arrange(client) {
         client.enqueueIssue("issue-1",
           issue("issue-1", "revision:issue:1"),
-          issue("issue-1", "revision:issue:2", {
-            title: "Updated", description: "New body", status: "state:doing", parent_id: "parent-2",
-            labels: ["label:work", "label:urgent"], delegate_id: null, priority: 1,
-          }));
+          issue("issue-1", "revision:issue:2", { title: "Updated" }));
       },
       expectedEffect: {
         issue_id: "issue-1",
-        input: {
-          title: "Updated", description: "New body", state_id: "state:doing", parent_issue_id: "parent-2",
-          label_ids: ["label:work", "label:urgent"], delegate_id: null, priority: 1,
-        },
+        input: { title: "Updated" },
       },
       expectedTarget: { kind: "issue", issue_id: "issue-1" },
     },
@@ -198,19 +224,18 @@ test("all five generic mutations apply one exact effect after fresh precondition
     },
     {
       call: calls.createRelation,
-      ids: ["new-relation-1"],
       arrange(client) {
         client.enqueueIssue("source-1", issue("source-1", "revision:source:1"));
         client.enqueueIssue("target-1", issue("target-1", "revision:target:1"));
-        client.enqueueRelations("source-1", page([{
-          ...relation("new-relation-1", "revision:new-relation:1"), id: "new-relation-1",
+        client.enqueueRelations("source-1", page([]), page([{
+          ...relation(RELATION_UUID, "revision:new-relation:1"), id: RELATION_UUID,
         }]));
       },
       expectedEffect: {
-        id: "new-relation-1", type: "blocks", source_issue_id: "source-1", target_issue_id: "target-1",
+        id: RELATION_UUID, type: "blocks", source_issue_id: "source-1", target_issue_id: "target-1",
       },
       expectedTarget: {
-        kind: "relation", relation_id: "new-relation-1", source_issue_id: "source-1", target_issue_id: "target-1",
+        kind: "relation", relation_id: RELATION_UUID, source_issue_id: "source-1", target_issue_id: "target-1",
       },
     },
     {
@@ -230,7 +255,7 @@ test("all five generic mutations apply one exact effect after fresh precondition
   for (const entry of cases) {
     const client = new FakeCommandClient();
     entry.arrange(client);
-    const result = await commands(client, entry.ids).execute(entry.call, ACTIVE_EXECUTION);
+    const result = await commands(client).execute(entry.call, ACTIVE_EXECUTION);
     assert.equal(result.output.outcome, "applied", entry.call.function);
     assert.deepEqual(result.output.target, entry.expectedTarget);
     assert.equal(result.output.concrete_diff.length > 0, true);
@@ -240,7 +265,64 @@ test("all five generic mutations apply one exact effect after fresh precondition
   }
 });
 
-test("fresh revision mismatches return ordinary precondition_failed results before every effect", async () => {
+test("create mutations prove the caller-owned identity absent before provider effects", async () => {
+  const existingIssue = new FakeCommandClient();
+  existingIssue.enqueueIssue("root-1", issue("root-1", "revision:parent:1"));
+  existingIssue.enqueueIssue(ISSUE_UUID, issue(ISSUE_UUID, "revision:existing", {
+    title: "New issue", description: "Body", status: "state:todo", parent_id: "root-1",
+  }));
+
+  const issueResult = await commands(existingIssue).execute(calls.createIssue, ACTIVE_EXECUTION);
+  assert.equal(issueResult.output.outcome, "stale_before_effect");
+  assert.equal(issueResult.output.effect_may_have_occurred, false);
+  assert.deepEqual(existingIssue.effects, []);
+
+  const existingRelation = new FakeCommandClient();
+  existingRelation.enqueueIssue("source-1", issue("source-1", "revision:source:1"));
+  existingRelation.enqueueIssue("target-1", issue("target-1", "revision:target:1"));
+  existingRelation.enqueueRelations("source-1", page([relation(RELATION_UUID, "revision:existing")]));
+
+  const relationResult = await commands(existingRelation).execute(calls.createRelation, ACTIVE_EXECUTION);
+  assert.equal(relationResult.output.outcome, "stale_before_effect");
+  assert.equal(relationResult.output.effect_may_have_occurred, false);
+  assert.deepEqual(existingRelation.effects, []);
+});
+
+test("provider rejection cannot adopt a concurrent matching mutation as applied", async () => {
+  const client = new FakeCommandClient();
+  client.response = { success: false };
+  client.enqueueIssue("issue-1",
+    issue("issue-1", "revision:issue:1"),
+    issue("issue-1", "revision:issue:2", { title: "Updated" }));
+
+  const result = await commands(client).execute(calls.updateIssue, ACTIVE_EXECUTION);
+
+  assert.equal(result.output.outcome, "conflict_observed");
+  assert.equal(result.output.effect_may_have_occurred, true);
+  assert.equal(result.output.sanitized_reason, "provider_rejected_with_unexpected_readback");
+  assert.equal(client.effects.length, 1);
+});
+
+test("Issue creation requires exact provider time and dedicated service-actor provenance", async () => {
+  const client = new FakeCommandClient();
+  client.enqueueIssue("root-1", issue("root-1", "revision:parent:1"));
+  client.enqueueIssue(ISSUE_UUID, null, issue(ISSUE_UUID, "revision:new:1", {
+    title: "New issue",
+    description: "Body",
+    status: "state:todo",
+    parent_id: "root-1",
+    creator_id: "actor:external",
+  }));
+
+  const result = await commands(client).execute(calls.createIssue, ACTIVE_EXECUTION);
+
+  assert.equal(result.output.outcome, "conflict_observed");
+  assert.equal(result.output.effect_may_have_occurred, true);
+  assert.equal(result.output.sanitized_reason, "fresh_postcondition_mismatch");
+  assert.equal(client.effects.length, 1);
+});
+
+test("fresh revision mismatches return stale_before_effect before every provider call", async () => {
   for (const call of Object.values(calls)) {
     const client = new FakeCommandClient();
     if (call.function === "create_issue") {
@@ -251,33 +333,32 @@ test("fresh revision mismatches return ordinary precondition_failed results befo
       client.enqueueIssue("source-1", issue("source-1", "revision:stale"));
       client.enqueueIssue("target-1", issue("target-1", "revision:target:1"));
     }
-    const result = await commands(client, ["unused-id"]).execute(call, ACTIVE_EXECUTION);
-    assert.equal(result.output.outcome, "precondition_failed", call.function);
+    const result = await commands(client).execute(call, ACTIVE_EXECUTION);
+    assert.equal(result.output.outcome, "stale_before_effect", call.function);
+    assert.equal(result.output.effect_may_have_occurred, false);
     assert.equal(result.output.sanitized_reason, "fresh_precondition_mismatch");
     assert.deepEqual(client.effects, []);
   }
 });
 
-test("provider acknowledgement and exact read-back produce all five closed outcomes without retry", async () => {
+test("provider acknowledgement and exact read-back produce closed no-CAS outcomes without retry", async () => {
   const cases: Array<{
     name: string;
     beforeRevision: string;
     response?: unknown;
     failure?: unknown;
     after?: unknown;
-    outcome: "applied" | "not_applied" | "precondition_failed" | "acceptance_unknown" | "readback_mismatch";
+    outcome: "applied" | "not_applied" | "stale_before_effect" | "conflict_observed";
   }> = [
-    { name: "applied", beforeRevision: "revision:issue:1", after: issue("issue-1", "revision:2", {
-      title: "Updated", description: "New body", status: "state:doing", parent_id: "parent-2",
-      labels: ["label:work", "label:urgent"], delegate_id: null, priority: 1,
-    }), outcome: "applied" },
+    { name: "applied", beforeRevision: "revision:issue:1",
+      after: issue("issue-1", "revision:2", { title: "Updated" }), outcome: "applied" },
     { name: "not applied", beforeRevision: "revision:issue:1", response: { success: false },
       after: issue("issue-1", "revision:issue:1"), outcome: "not_applied" },
-    { name: "precondition", beforeRevision: "revision:stale", outcome: "precondition_failed" },
+    { name: "precondition", beforeRevision: "revision:stale", outcome: "stale_before_effect" },
     { name: "unknown", beforeRevision: "revision:issue:1", failure: new Error("provider-secret"),
-      after: issue("issue-1", "revision:issue:1"), outcome: "acceptance_unknown" },
+      after: issue("issue-1", "revision:issue:1"), outcome: "conflict_observed" },
     { name: "mismatch", beforeRevision: "revision:issue:1", response: { success: true },
-      after: issue("issue-1", "revision:issue:1"), outcome: "readback_mismatch" },
+      after: issue("issue-1", "revision:issue:1"), outcome: "conflict_observed" },
   ];
 
   for (const entry of cases) {
@@ -287,7 +368,7 @@ test("provider acknowledgement and exact read-back produce all five closed outco
     if (entry.failure !== undefined) client.failure = entry.failure;
     const result = await commands(client).execute(calls.updateIssue, ACTIVE_EXECUTION);
     assert.equal(result.output.outcome, entry.outcome, entry.name);
-    assert.equal(client.effects.length, entry.outcome === "precondition_failed" ? 0 : 1);
+    assert.equal(client.effects.length, entry.outcome === "stale_before_effect" ? 0 : 1);
     assert.equal(JSON.stringify(result).includes("provider-secret"), false);
   }
 });
@@ -296,10 +377,7 @@ test("an uncertain provider call is accepted only from same-identity read-back a
   const client = new FakeCommandClient();
   client.enqueueIssue("issue-1",
     issue("issue-1", "revision:issue:1"),
-    issue("issue-1", "revision:2", {
-      title: "Updated", description: "New body", status: "state:doing", parent_id: "parent-2",
-      labels: ["label:work", "label:urgent"], delegate_id: null, priority: 1,
-    }));
+    issue("issue-1", "revision:2", { title: "Updated" }));
   client.failure = new Error("Authorization provider-secret");
 
   const result = await commands(client).execute(calls.updateIssue, ACTIVE_EXECUTION);
@@ -311,7 +389,8 @@ test("an uncertain provider call is accepted only from same-identity read-back a
   const unavailable = new FakeCommandClient();
   unavailable.enqueueIssue("issue-1", issue("issue-1", "revision:issue:1"), new Error("readback-secret"));
   const unknown = await commands(unavailable).execute(calls.updateIssue, ACTIVE_EXECUTION);
-  assert.equal(unknown.output.outcome, "acceptance_unknown");
+  assert.equal(unknown.output.outcome, "conflict_observed");
+  assert.equal(unknown.output.effect_may_have_occurred, true);
   assert.equal(unavailable.effects.length, 1);
   assert.equal(JSON.stringify(unknown).includes("readback-secret"), false);
 });
@@ -369,11 +448,58 @@ test("update read-back reports concurrent non-desired field changes in the concr
 
   const result = await commands(client).execute(call, ACTIVE_EXECUTION);
 
-  assert.equal(result.output.outcome, "applied");
+  assert.equal(result.output.outcome, "conflict_observed");
+  assert.equal(result.output.effect_may_have_occurred, true);
   assert.deepEqual(result.output.concrete_diff.map((change) => "field" in change ? change.field : change.kind), [
     "title",
     "delegate",
   ]);
+});
+
+test("update read-back rejects external history and concurrent attached-record evidence", async () => {
+  for (const kind of ["history", "comment"] as const) {
+    const client = new FakeCommandClient();
+    client.enqueueIssue("issue-1",
+      issue("issue-1", "revision:issue:1"),
+      issue("issue-1", "revision:issue:2", { title: "Updated" }));
+    const evidence = new FakeEvidenceReader();
+    if (kind === "history") {
+      evidence.enqueueHistory("issue-1", [], [{
+        history_id: "history:external",
+        issue_id: "issue-1",
+        provider_created_at: "2026-07-30T00:00:01.000Z",
+        provider_updated_at: "2026-07-30T00:00:01.000Z",
+        actor_id: "actor:external",
+        change_origin: "external",
+        changed_fields: ["title"],
+        from_state_id: null,
+        to_state_id: null,
+        from_parent_id: null,
+        to_parent_id: null,
+        added_label_ids: [],
+        removed_label_ids: [],
+        archived: null,
+        trashed: null,
+        relation_changes: [],
+      }]);
+    } else {
+      evidence.enqueueComments("issue-1", [], [{
+        comment_id: "comment:concurrent",
+        issue_id: "issue-1",
+        provider_created_at: "2026-07-30T00:00:01.000Z",
+        provider_updated_at: "2026-07-30T00:00:01.000Z",
+        provider_edited_at: null,
+        provider_archived_at: null,
+        actor_id: "actor:1",
+        body_digest: "a".repeat(64),
+      }]);
+    }
+
+    const result = await commands(client, evidence).execute(calls.updateIssue, ACTIVE_EXECUTION);
+
+    assert.equal(result.output.outcome, "conflict_observed", kind);
+    assert.equal(result.output.sanitized_reason, "unexpected_post_effect_evidence", kind);
+  }
 });
 
 test("Linear no-priority normalization and malformed receipts remain closed", async () => {
@@ -397,7 +523,7 @@ test("Linear no-priority normalization and malformed receipts remain closed", as
     issue("issue-1", "revision:issue:1"),
     issue("issue-1", "revision:issue:1"));
   const result = await commands(malformed).execute(calls.updateIssue, ACTIVE_EXECUTION);
-  assert.equal(result.output.outcome, "readback_mismatch");
+  assert.equal(result.output.outcome, "conflict_observed");
   assert.equal(JSON.stringify(result).includes("do-not-return"), false);
   assert.equal(malformed.effects.length, 1);
 });

@@ -68,6 +68,10 @@ type JsonSchema = Record<string, unknown>;
 const ROOT_TASK_PAGE_SIZE = 32;
 const MAX_ROOT_TASK_CHANGES = 8;
 const IDENTITY_SCHEMA = Object.freeze({ type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
+const UUID_V4_SCHEMA = Object.freeze({
+  type: "string",
+  pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+});
 const NULLABLE_IDENTITY_SCHEMA = Object.freeze({ anyOf: [IDENTITY_SCHEMA, { type: "null" }] });
 const NULLABLE_DELEGATE_SCHEMA = Object.freeze({
   anyOf: [{ type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\r\\n\\u0000]+$" }, { type: "null" }],
@@ -92,6 +96,7 @@ function taskInputSchema(functionName: TaskMcpFunction): JsonSchema {
     case "list_children": return objectSchema({ parent_issue_id: IDENTITY_SCHEMA, ...PAGE_PROPERTIES });
     case "list_relations": return objectSchema({ issue_id: IDENTITY_SCHEMA, ...PAGE_PROPERTIES });
     case "create_issue": return objectSchema({
+      issue_id: UUID_V4_SCHEMA,
       parent_issue_id: IDENTITY_SCHEMA,
       expected_parent_revision: IDENTITY_SCHEMA,
       desired: objectSchema({
@@ -121,6 +126,7 @@ function taskInputSchema(functionName: TaskMcpFunction): JsonSchema {
       expected_revision: IDENTITY_SCHEMA,
     });
     case "create_relation": return objectSchema({
+      relation_id: UUID_V4_SCHEMA,
       relation_type: { type: "string", minLength: 1, maxLength: 128, pattern: "^[^\\r\\n\\u0000]+$" },
       source_issue_id: IDENTITY_SCHEMA,
       expected_source_revision: IDENTITY_SCHEMA,
@@ -502,7 +508,7 @@ export class RootTools {
   }
 
   #observeTaskResult(call: TaskMcpCall, result: RootTaskToolResult): void {
-    if ("outcome" in result.output && result.output.outcome === "acceptance_unknown") {
+    if ("outcome" in result.output && result.output.outcome === "conflict_observed") {
       const target = result.output.target;
       this.#unknownAcceptance = target.kind === "issue"
         ? Object.freeze({ kind: "issue", target })

@@ -499,7 +499,7 @@ function toolResponse(message: Record<string, unknown>): { readonly success: boo
 
 function updateResult(
   call: UpdateIssueCall,
-  outcome: "applied" | "precondition_failed",
+  outcome: "applied" | "stale_before_effect",
   revision: string,
 ): UpdateIssueResult {
   return parseTaskMcpResult({
@@ -511,6 +511,7 @@ function updateResult(
     capability: call.capability,
     output: {
       outcome,
+      effect_may_have_occurred: outcome === "applied",
       target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: {
         issue_id: call.input.issue_id,
@@ -1975,7 +1976,7 @@ test("tool-call budget abort cannot accept while an earlier effect is in flight"
 });
 
 test("controlled app-server resumes from complete Root Markdown by creating the Draft directly", async () => {
-  const cycleId = parseTaskIssueId("LIN-CYCLE-RESUME");
+  const cycleId = parseTaskIssueId("33333333-3333-4333-8333-333333333333");
   const responses: Array<ReturnType<typeof toolResponse>> = [];
   const appServer = controlledAppServer((message, server) => {
     if (initializeResponse(message, server) || message.method === "initialized") return;
@@ -1994,6 +1995,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
           },
         },
         taskToolCall("tool:create-resumed-draft", "turn-root", "create_issue", {
+          issue_id: cycleId,
           parent_issue_id: rootId,
           expected_parent_revision: "revision:root:2",
           desired: {
@@ -2026,7 +2028,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
     assert.ok(parent);
     assert.equal(call.input.expected_parent_revision, parent.revision);
     const fresh = {
-      issue_id: cycleId,
+      issue_id: call.input.issue_id,
       revision: "revision:cycle:1",
       status: call.input.desired.state_id,
       title: call.input.desired.title,
@@ -2050,6 +2052,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: fresh.issue_id },
         fresh_resource: fresh,
         concrete_diff: [{ kind: "issue_created", issue: fresh }],
@@ -2083,7 +2086,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
 
 test("controlled app-server completes fresh Define, Draft review, correction, and one-way seal", async () => {
   const rootTaskIssueId = parseTaskIssueId(rootId);
-  const cycleId = parseTaskIssueId("LIN-CYCLE-1");
+  const cycleId = parseTaskIssueId("44444444-4444-4444-8444-444444444444");
   const responses = new Map<string, ReturnType<typeof toolResponse>>();
   const reviewedDraftDescriptions: string[] = [];
   const readIssue = (response: ReturnType<typeof toolResponse>) => {
@@ -2148,6 +2151,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
         const root = readIssue(response);
         assert.equal(root.description, reconciledRootDescription);
         setImmediate(() => server.send(taskToolCall("tool:create-draft", "turn-root", "create_issue", {
+          issue_id: cycleId,
           parent_issue_id: root.issue_id,
           expected_parent_revision: root.revision,
           desired: {
@@ -2246,6 +2250,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: fresh,
         concrete_diff: [{
@@ -2265,7 +2270,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     assert.ok(parent);
     assert.equal(call.input.expected_parent_revision, parent.revision);
     const fresh = {
-      issue_id: cycleId,
+      issue_id: call.input.issue_id,
       revision: "revision:cycle:1",
       status: call.input.desired.state_id,
       title: call.input.desired.title,
@@ -2289,6 +2294,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: fresh.issue_id },
         fresh_resource: fresh,
         concrete_diff: [{ kind: "issue_created", issue: fresh }],
@@ -2409,7 +2415,7 @@ test("a precondition conflict is re-observed in the same process, thread, and tu
         "revision:root:2",
         concurrentRootDescription,
       );
-      return updateResult(call, "precondition_failed", "revision:root:2");
+      return updateResult(call, "stale_before_effect", "revision:root:2");
     }
     return updateResult(call, "applied", "revision:root:3");
   });
@@ -2426,7 +2432,7 @@ test("a precondition conflict is re-observed in the same process, thread, and tu
   assert.deepEqual(revisions, ["revision:root:1", "revision:root:2"]);
   assert.equal(responses.length, 2);
   assert.equal(responses[0]?.success, true);
-  assert.equal((responses[0]?.body as { output?: { outcome?: unknown } }).output?.outcome, "precondition_failed");
+  assert.equal((responses[0]?.body as { output?: { outcome?: unknown } }).output?.outcome, "stale_before_effect");
   assert.equal(responses[1]?.success, true);
   assert.equal((responses[1]?.body as { output?: { outcome?: unknown } }).output?.outcome, "applied");
   assert.equal(appServer.spawns.length, 1);
@@ -2499,7 +2505,8 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
         correlation_id: call.correlation_id,
         capability: call.capability,
         output: {
-          outcome: "acceptance_unknown",
+          outcome: "conflict_observed",
+          effect_may_have_occurred: true,
           target: { kind: "issue", issue_id: call.input.issue_id },
           fresh_resource: null,
           concrete_diff: [],
@@ -2560,7 +2567,7 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
       ? (response.body as { output?: { outcome?: unknown } }).output?.outcome ?? "read"
       : (response.body as { code?: unknown }).code,
   ]), [
-    ["tool:unknown", true, "acceptance_unknown"],
+    ["tool:unknown", true, "conflict_observed"],
     ["tool:blind-retry", false, "acceptance_unknown"],
     ["tool:fresh-read", true, "read"],
     ["tool:informed-retry", true, "applied"],
@@ -2626,7 +2633,8 @@ test("unresolved acceptance replaces model quiescence with a visible stopped out
     correlation_id: call.correlation_id,
     capability: call.capability,
     output: {
-      outcome: "acceptance_unknown",
+      outcome: "conflict_observed",
+      effect_may_have_occurred: true,
       target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: null,
       concrete_diff: [],
@@ -2701,7 +2709,8 @@ test("explicit model stop remains authoritative while acceptance is unresolved",
     correlation_id: call.correlation_id,
     capability: call.capability,
     output: {
-      outcome: "acceptance_unknown",
+      outcome: "conflict_observed",
+      effect_may_have_occurred: true,
       target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: null,
       concrete_diff: [],

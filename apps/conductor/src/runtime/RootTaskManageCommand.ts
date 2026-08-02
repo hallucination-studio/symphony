@@ -542,7 +542,7 @@ export class RootTaskManageCommandBinding {
     execution.assertActive();
     const result = validateResult<CreateIssueResult>(value, call, (parsed) =>
       this.#assertMutationResult(scope, call, parsed));
-    if (result.output.outcome === "acceptance_unknown" && result.output.target.kind === "issue") {
+    if (result.output.outcome === "conflict_observed" && result.output.target.kind === "issue") {
       if (
         this.#provisionalIssues.size >= 8
         && !this.#provisionalIssues.has(result.output.target.issue_id)
@@ -579,7 +579,7 @@ export class RootTaskManageCommandBinding {
     );
     if (
       authorization.approval_definition !== null
-      && result.output.outcome === "acceptance_unknown"
+      && result.output.outcome === "conflict_observed"
     ) {
       const draft = scope.issues.get(call.input.issue_id);
       const existing = this.#pendingCycleApprovals.get(call.input.issue_id);
@@ -599,7 +599,7 @@ export class RootTaskManageCommandBinding {
     }
     if (
       authorization.acceptance_view !== null
-      && result.output.outcome === "acceptance_unknown"
+      && result.output.outcome === "conflict_observed"
     ) {
       const awaitingCycle = scope.issues.get(call.input.issue_id);
       const desiredStateId = call.input.desired.state_id;
@@ -1218,7 +1218,7 @@ export class RootTaskManageCommandBinding {
         !(error instanceof RootTaskManageBindingError)
         || error.code !== "invalid_contract"
         || !error.fatal
-        || result.output.outcome !== "precondition_failed"
+        || result.output.outcome !== "stale_before_effect"
       ) throw error;
       const latestScope = await this.#scope(call, call.function, execution);
       if (latestScope.issues.has(call.input.issue_id)) throw error;

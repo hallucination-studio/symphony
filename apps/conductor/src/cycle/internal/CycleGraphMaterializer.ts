@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   parseSealedExecutionGraph,
   type CycleAdvanceRequest,
@@ -7,6 +9,7 @@ import {
 import {
   parseStageIssueId,
   parseTaskIssueId,
+  parseTaskRelationId,
   type TaskIssueId,
   type TaskRelationId,
 } from "../../contracts/identity.js";
@@ -58,6 +61,7 @@ function issueCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: Object.freeze({
+      issue_id: parseTaskIssueId(randomUUID()),
       parent_issue_id: parseTaskIssueId(request.cycle_id),
       expected_parent_revision: request.cycle_revision,
       desired: Object.freeze({
@@ -85,6 +89,7 @@ function relationCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_relation,
     input: Object.freeze({
+      relation_id: parseTaskRelationId(randomUUID()),
       relation_type: "blocks",
       source_issue_id: source.issue_id,
       expected_source_revision: source.revision,

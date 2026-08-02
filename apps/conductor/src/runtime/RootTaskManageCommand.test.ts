@@ -460,6 +460,7 @@ function createDraft(): CreateIssueCall {
     ...envelope("create_issue"),
     function: "create_issue",
     input: {
+      issue_id: parseTaskIssueId("11111111-1111-4111-8111-111111111111"),
       parent_issue_id: parseTaskIssueId("ROOT-A"),
       expected_parent_revision: parseTaskRevision("revision:root:1"),
       desired: {
@@ -606,7 +607,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
         assert.equal(providerExecution.caller.cycle_id, null);
         effects.push(call.function);
         const created = {
-          issue_id: "CYCLE-NEW",
+          issue_id: call.input.issue_id,
           revision: "revision:cycle:new",
           status: call.input.desired.state_id,
           title: call.input.desired.title,
@@ -620,6 +621,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
           ...envelope("create_issue"), function: "create_issue",
           output: {
             outcome: "applied",
+            effect_may_have_occurred: true,
             target: { kind: "issue", issue_id: created.issue_id },
             fresh_resource: created,
             concrete_diff: [{ kind: "issue_created", issue: created }],
@@ -657,6 +659,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
           ...envelope("update_issue"), function: "update_issue",
           output: {
             outcome: "applied",
+            effect_may_have_occurred: true,
             target: { kind: "issue", issue_id: call.input.issue_id },
             fresh_resource: fresh,
             concrete_diff: [{
@@ -876,7 +879,8 @@ test("Root resolves unknown Succeeded acceptance into the original exact deliver
       ...envelope("update_issue"),
       function: "update_issue",
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -897,7 +901,7 @@ test("Root resolves unknown Succeeded acceptance into the original exact deliver
     }),
     execution,
   );
-  assert.equal(unknown.output.outcome, "acceptance_unknown");
+  assert.equal(unknown.output.outcome, "conflict_observed");
   assert.equal(unknown.acceptance_view, null);
 
   const otherRead = await base.forCorrelation(otherCorrelation).get_issue({
@@ -953,7 +957,8 @@ test("Root rejects substituted terminal facts while resolving unknown acceptance
       ...envelope("update_issue"),
       function: "update_issue",
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -973,7 +978,7 @@ test("Root rejects substituted terminal facts while resolving unknown acceptance
       state_id: workflow.cycle_states.rejected,
     }),
     execution,
-  )).output.outcome, "acceptance_unknown");
+  )).output.outcome, "conflict_observed");
   await assert.rejects(
     bound.get_issue(getIssue("CYCLE-A"), execution),
     (error: unknown) => error instanceof RootTaskManageBindingError
@@ -1094,6 +1099,7 @@ test("Root compares Draft labels as facts independent of provider order", async 
       function: "update_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: fresh,
         concrete_diff: [{
@@ -1201,6 +1207,7 @@ test("Root rejects a Stage inserted while an approval is being applied", async (
       function: "update_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: approved.issue_id },
         fresh_resource: approved,
         concrete_diff: [{
@@ -1251,7 +1258,8 @@ test("Root rejects a Stage present when an unknown approval is resolved", async 
       ...envelope("update_issue"),
       function: "update_issue",
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -1267,7 +1275,7 @@ test("Root rejects a Stage present when an unknown approval is resolved", async 
     }),
     execution,
   );
-  assert.equal(unknown.output.outcome, "acceptance_unknown");
+  assert.equal(unknown.output.outcome, "conflict_observed");
 
   await assert.rejects(
     bound.get_issue(getIssue("CYCLE-A"), execution),
@@ -1312,7 +1320,8 @@ test("Root resolves an unknown approval only in its originating correlation", as
       ...envelope("update_issue"),
       function: "update_issue",
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -1329,7 +1338,7 @@ test("Root resolves an unknown approval only in its originating correlation", as
     }),
     execution,
   );
-  assert.equal(unknown.output.outcome, "acceptance_unknown");
+  assert.equal(unknown.output.outcome, "conflict_observed");
 
   const otherRead = await base.forCorrelation(otherCorrelation).get_issue({
     ...getIssue("CYCLE-A"),
@@ -1376,6 +1385,7 @@ test("Root rejects an applied read-back that changes a field outside the exact g
       function: "update_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: received.input.issue_id },
         fresh_resource: fresh,
         concrete_diff: [{
@@ -1437,7 +1447,7 @@ test("Root creates a successor Draft only after a current-turn exact terminal pr
     assert.equal(providerExecution.caller.cycle_id, null);
     effects.push("create_issue");
     const created = {
-      issue_id: "CYCLE-SUCCESSOR",
+      issue_id: call.input.issue_id,
       revision: "revision:cycle:successor",
       status: call.input.desired.state_id,
       title: call.input.desired.title,
@@ -1452,6 +1462,7 @@ test("Root creates a successor Draft only after a current-turn exact terminal pr
       function: "create_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: created.issue_id },
         fresh_resource: created,
         concrete_diff: [{ kind: "issue_created", issue: created }],
@@ -1465,7 +1476,10 @@ test("Root creates a successor Draft only after a current-turn exact terminal pr
 
   assert.equal(result.output.outcome, "applied");
   assert.equal(result.output.target.kind, "issue");
-  assert.equal(result.output.target.kind === "issue" ? result.output.target.issue_id : null, "CYCLE-SUCCESSOR");
+  assert.equal(
+    result.output.target.kind === "issue" ? result.output.target.issue_id : null,
+    createDraft().input.issue_id,
+  );
   assert.deepEqual(effects, ["get_issue", "create_issue"]);
 });
 
@@ -1499,8 +1513,9 @@ test("Root grants one exact scoped read after unknown successor creation accepta
     return parseTaskMcpResult({
       ...envelope("create_issue"), function: "create_issue",
       output: {
-        outcome: "acceptance_unknown",
-        target: { kind: "issue", issue_id: "CYCLE-PENDING" },
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
         sanitized_reason: "fresh_readback_unavailable",
@@ -1518,11 +1533,11 @@ test("Root grants one exact scoped read after unknown successor creation accepta
   const mutationBinding = base.forCorrelation(correlationId);
   assert.equal(
     (await mutationBinding.create_issue(createDraft(), execution)).output.outcome,
-    "acceptance_unknown",
+    "conflict_observed",
   );
   const readBinding = base.forCorrelation(correlationId);
-  assert.equal((await readBinding.get_issue(getIssue("CYCLE-PENDING"), execution)).output.issue, null);
-  await assert.rejects(readBinding.get_issue(getIssue("CYCLE-PENDING"), execution), denied);
+  assert.equal((await readBinding.get_issue(getIssue(createDraft().input.issue_id), execution)).output.issue, null);
+  await assert.rejects(readBinding.get_issue(getIssue(createDraft().input.issue_id), execution), denied);
   assert.deepEqual(effects, ["create_issue", "get_issue"]);
 });
 
@@ -1534,8 +1549,9 @@ test("Root rejects a substituted Draft after unknown successor creation acceptan
     return parseTaskMcpResult({
       ...envelope("create_issue"), function: "create_issue",
       output: {
-        outcome: "acceptance_unknown",
-        target: { kind: "issue", issue_id: "CYCLE-PENDING" },
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: received.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
         sanitized_reason: "fresh_readback_unavailable",
@@ -1546,7 +1562,7 @@ test("Root rejects a substituted Draft after unknown successor creation acceptan
     callerAuthority.verifier.assert(providerExecution.caller, received);
     return parseTaskMcpResult({
       ...envelope("get_issue"), function: "get_issue", output: { issue: {
-        issue_id: "CYCLE-PENDING",
+        issue_id: received.input.issue_id,
         revision: "revision:cycle:pending",
         status: call.input.desired.state_id,
         title: "Provider-substituted title",
@@ -1560,9 +1576,9 @@ test("Root rejects a substituted Draft after unknown successor creation acceptan
   };
   const bound = bind(() => snapshot(), manager);
 
-  assert.equal((await bound.create_issue(call, execution)).output.outcome, "acceptance_unknown");
+  assert.equal((await bound.create_issue(call, execution)).output.outcome, "conflict_observed");
   await assert.rejects(
-    bound.get_issue(getIssue("CYCLE-PENDING"), execution),
+    bound.get_issue(getIssue(call.input.issue_id), execution),
     (error: unknown) => error instanceof RootTaskManageBindingError
       && error.code === "invalid_contract" && error.fatal === true,
   );

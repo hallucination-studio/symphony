@@ -156,7 +156,7 @@ function rootIssue(status = rootInProgress, taskRevision = "revision:root:1"): T
 
 class FakeTaskManager implements TaskManageCommandInterface {
   current = rootIssue();
-  updateOutcome: MutationOutcome = "applied";
+  updateOutcome: "applied" | "conflict_observed" = "applied";
   materializeUpdate = true;
   substituteAppliedReceipt = false;
   readonly effects: string[] = [];
@@ -198,6 +198,7 @@ class FakeTaskManager implements TaskManageCommandInterface {
       capability: TASK_MCP_CAPABILITIES.update_issue,
       output: {
         outcome: this.updateOutcome,
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: rootId },
         fresh_resource: this.updateOutcome === "applied" ? receiptResource : null,
         concrete_diff: this.updateOutcome === "applied" ? [{
@@ -257,7 +258,7 @@ test("accepted revision delivery uses only acceptance-time evidence and fresh ex
   const f = fixture();
   f.delivery.pushOutcome = "acceptance_unknown";
   f.delivery.createOutcome = "acceptance_unknown";
-  f.task.updateOutcome = "acceptance_unknown";
+  f.task.updateOutcome = "conflict_observed";
 
   const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
 
@@ -358,7 +359,7 @@ test("unknown delivery and Root mutations are read once and never retried", asyn
     const f = fixture();
     f.delivery.remoteRevision = revision;
     f.delivery.pullRequests = [pullRequest()];
-    f.task.updateOutcome = "acceptance_unknown";
+    f.task.updateOutcome = "conflict_observed";
     f.task.materializeUpdate = false;
     const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
     assert.equal(result.outcome, "not_delivered");

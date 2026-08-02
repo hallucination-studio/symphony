@@ -43,7 +43,7 @@ const CATALOG_PAGE_SIZE = 50;
 const MAX_CATALOG_PAGES = 100;
 
 export interface TaskWorkflowCatalog {
-  readonly states: readonly (readonly [identity: string, name: string])[];
+  readonly states: readonly (readonly [identity: string, name: string, archived: boolean])[];
   readonly labels: readonly (readonly [identity: string, name: string])[];
 }
 
@@ -59,7 +59,8 @@ export function assertTaskWorkflowConfiguration(
   config: ConductorConfig,
   catalog: TaskWorkflowCatalog,
 ): void {
-  const states = catalogMap(catalog.states);
+  const states = new Map(catalog.states.map(([identity, name, archived]) => [identity, { name, archived }] as const));
+  if (states.size !== catalog.states.length) throw new Error("invalid_task_workflow_configuration");
   const labels = catalogMap(catalog.labels);
   const expectedStates = [
     [config.root_states.todo, "Todo"],
@@ -87,7 +88,11 @@ export function assertTaskWorkflowConfiguration(
     [config.workflow.labels.verify, "symphony:kind/verify"],
   ] as const;
   if (
-    expectedStates.some(([identity, name]) => states.get(identity) !== name)
+    new Set(expectedStates.map(([identity]) => identity)).size !== expectedStates.length
+    || expectedStates.some(([identity, name]) => {
+      const observed = states.get(identity);
+      return observed === undefined || observed.name !== name || observed.archived;
+    })
     || expectedLabels.some(([identity, name]) => labels.get(identity) !== name)
   ) throw new Error("invalid_task_workflow_configuration");
 }
@@ -106,7 +111,7 @@ export async function readTaskWorkflowCatalog(
   rootId: RootIssueId,
 ): Promise<TaskWorkflowCatalog> {
   const envelope = catalogEnvelope(rootId);
-  const states: (readonly [string, string])[] = [];
+  const states: (readonly [string, string, boolean])[] = [];
   const labels: (readonly [string, string])[] = [];
   let stateCursor: string | null = null;
   let labelCursor: string | null = null;
@@ -118,7 +123,7 @@ export async function readTaskWorkflowCatalog(
       input: Object.freeze({ cursor: stateCursor, page_size: CATALOG_PAGE_SIZE }),
     });
     const result = await queries.list_states(call);
-    states.push(...result.output.states.map(({ state_id, name }) => [state_id, name] as const));
+    states.push(...result.output.states.map(({ state_id, name, archived }) => [state_id, name, archived] as const));
     stateCursor = result.output.next_cursor;
     if (stateCursor === null) break;
     if (page === MAX_CATALOG_PAGES - 1) throw new Error("invalid_task_workflow_configuration");

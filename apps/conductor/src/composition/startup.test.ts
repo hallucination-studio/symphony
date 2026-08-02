@@ -11,6 +11,9 @@ const secrets = {
   SYMPHONY_CODEX_API_KEY: "codex-secret",
   SYMPHONY_CODEX_BASE_URL: "https://api.example.com/v1",
   SYMPHONY_CODEX_MODEL: "model-1",
+  SYMPHONY_LINEAR_EXCLUSIVE_MUTATION_ACTOR: "acknowledged",
+  SYMPHONY_LINEAR_MANAGED_DESTRUCTION_PROHIBITED: "acknowledged",
+  SYMPHONY_LINEAR_RELATION_PROVENANCE_AUDITED: "acknowledged",
 };
 
 function config(programData: string) {
@@ -88,6 +91,11 @@ test("startup loads one strict public config and required Linear secret", async 
   assert.equal(startup.codex_api_key, "codex-secret");
   assert.equal(startup.codex_base_url, "https://api.example.com/v1");
   assert.equal(startup.codex_model, "model-1");
+  assert.deepEqual(startup.linear_provider_capabilities, {
+    exclusive_mutation_actor: true,
+    managed_destruction_prohibited: true,
+    relation_provenance_audited: true,
+  });
   assert.ok(Object.isFrozen(startup));
 });
 
@@ -132,4 +140,22 @@ test("startup fails closed without exposing missing or malformed secrets and con
       && error.message === "invalid_startup_config"
       && !error.message.includes("secret-value"),
   );
+});
+
+test("startup requires explicit external Linear safety attestations", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-startup-"));
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(configPath, JSON.stringify(config(directory)), { mode: 0o600 });
+
+  for (const name of [
+    "SYMPHONY_LINEAR_EXCLUSIVE_MUTATION_ACTOR",
+    "SYMPHONY_LINEAR_MANAGED_DESTRUCTION_PROHIBITED",
+    "SYMPHONY_LINEAR_RELATION_PROVENANCE_AUDITED",
+  ]) {
+    const incomplete = { ...secrets, [name]: "" };
+    await assert.rejects(
+      loadStartup(["--config", configPath], incomplete),
+      /unsupported_linear_provider_capability/u,
+    );
+  }
 });

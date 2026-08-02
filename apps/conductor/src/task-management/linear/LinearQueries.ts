@@ -48,15 +48,55 @@ const STAGE_STATUSES = ["Todo", "In Progress", "Done", "Failed", "Canceled"] as 
 
 export interface LinearQueryClient {
   getIssue(issueId: string): Promise<unknown>;
-  listIssues(teamId: string, cursor: string | null, pageSize: number): Promise<unknown>;
+  listIssues(cursor: string | null, pageSize: number): Promise<unknown>;
   listChildren(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
+  listIssueHistory(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
+  listIssueComments(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   listRelations(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   listStates(teamId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   listLabels(teamId: string, cursor: string | null, pageSize: number): Promise<unknown>;
+  readViewer(): Promise<unknown>;
 }
 
 export interface LinearQueryOptions {
   readonly team_id: string;
+  readonly service_actor_id: string;
+}
+
+export interface LinearServiceActor {
+  readonly actor_id: string;
+  readonly active: true;
+  readonly app: true;
+}
+
+export interface LinearIssueCommentEvidence {
+  readonly comment_id: string;
+  readonly issue_id: string;
+  readonly provider_created_at: string;
+  readonly provider_updated_at: string;
+  readonly provider_edited_at: string | null;
+  readonly provider_archived_at: string | null;
+  readonly actor_id: string | null;
+  readonly body_digest: string;
+}
+
+export interface LinearIssueHistoryEvidence {
+  readonly history_id: string;
+  readonly issue_id: string;
+  readonly provider_created_at: string;
+  readonly provider_updated_at: string;
+  readonly actor_id: string | null;
+  readonly change_origin: "symphony" | "external" | "unknown";
+  readonly changed_fields: readonly string[];
+  readonly from_state_id: string | null;
+  readonly to_state_id: string | null;
+  readonly from_parent_id: string | null;
+  readonly to_parent_id: string | null;
+  readonly added_label_ids: readonly string[];
+  readonly removed_label_ids: readonly string[];
+  readonly archived: boolean | null;
+  readonly trashed: boolean | null;
+  readonly relation_changes: readonly { readonly type: string; readonly related_issue_identifier: string }[];
 }
 
 export interface RootInventoryItem {
@@ -71,6 +111,10 @@ interface LinearIssueRecord {
   readonly snapshot: TaskIssueSnapshot;
   readonly teamId: string;
   readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly creatorId: string | null;
+  readonly archived: boolean;
+  readonly trashed: boolean;
 }
 
 interface Page<T> {
@@ -78,8 +122,10 @@ interface Page<T> {
   readonly nextCursor: string | null;
 }
 
-type StateRecord = TaskStateResource & { readonly team_id: string };
+type StateRecord = TaskStateResource & { readonly team_id: string; readonly archived: boolean };
 type LabelRecord = TaskLabelResource & { readonly team_id: string | null };
+type HistoryRecord = Omit<LinearIssueHistoryEvidence, "change_origin">;
+type CommentRecord = LinearIssueCommentEvidence & { readonly body_markdown: string };
 
 class LinearQueryError extends Error {}
 
@@ -119,7 +165,7 @@ function parseIssue(value: unknown): LinearIssueRecord {
     const record = asRecord(value);
     assertExactKeys(record, [
       "id", "revision", "team_id", "parent_id", "status", "title", "description", "labels",
-      "delegate_id", "priority", "created_at",
+      "delegate_id", "priority", "created_at", "updated_at", "creator_id", "archived", "trashed",
     ]);
     const labels = parseArray(record.labels, (label) => parseBoundedString(label, "invalid_linear_label", 256), 256);
     return Object.freeze({
@@ -136,6 +182,12 @@ function parseIssue(value: unknown): LinearIssueRecord {
       }),
       teamId: parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
       createdAt: parseTimestamp(record.created_at),
+      updatedAt: parseTimestamp(record.updated_at),
+      creatorId: record.creator_id === null
+        ? null
+        : parseBoundedString(record.creator_id, "invalid_linear_creator_id", 128),
+      archived: typeof record.archived === "boolean" ? record.archived : fail("linear_invalid_payload"),
+      trashed: typeof record.trashed === "boolean" ? record.trashed : fail("linear_invalid_payload"),
     });
   });
 }
@@ -143,7 +195,12 @@ function parseIssue(value: unknown): LinearIssueRecord {
 function parseRelation(value: unknown): TaskRelationSnapshot {
   return providerPayload(() => {
     const record = asRecord(value);
-    assertExactKeys(record, ["id", "revision", "type", "source_issue_id", "target_issue_id"]);
+    assertExactKeys(record, [
+      "id", "revision", "type", "source_issue_id", "target_issue_id", "created_at", "updated_at", "archived",
+    ]);
+    parseTimestamp(record.created_at);
+    parseTimestamp(record.updated_at);
+    if (typeof record.archived !== "boolean") fail("linear_invalid_payload");
     return parseTaskRelationSnapshot({
       relation_id: record.id,
       revision: record.revision,
@@ -157,12 +214,14 @@ function parseRelation(value: unknown): TaskRelationSnapshot {
 function parseState(value: unknown): StateRecord {
   return providerPayload(() => {
     const record = asRecord(value);
-    assertExactKeys(record, ["id", "revision", "name", "team_id"]);
+    assertExactKeys(record, ["id", "revision", "name", "team_id", "archived"]);
+    if (typeof record.archived !== "boolean") return fail("linear_invalid_payload");
     return Object.freeze({
       state_id: parseTaskStateId(record.id),
       revision: parseTaskRevision(record.revision),
       name: parseBoundedString(record.name, "invalid_linear_state_name", 256),
       team_id: parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
+      archived: record.archived,
     });
   });
 }
@@ -178,6 +237,84 @@ function parseLabel(value: unknown): LabelRecord {
       team_id: record.team_id === null
         ? null
         : parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
+    });
+  });
+}
+
+function parseNullableBoolean(value: unknown): boolean | null {
+  if (value === null) return null;
+  return typeof value === "boolean" ? value : fail("linear_invalid_payload");
+}
+
+function parseHistory(value: unknown): HistoryRecord {
+  return providerPayload(() => {
+    const record = asRecord(value);
+    assertExactKeys(record, [
+      "id", "issue_id", "created_at", "updated_at", "actor_id", "changed_fields", "from_state_id",
+      "to_state_id", "from_parent_id", "to_parent_id", "added_label_ids", "removed_label_ids", "archived",
+      "trashed", "relation_changes",
+    ]);
+    const nullableId = (entry: unknown) => entry === null
+      ? null
+      : parseBoundedString(entry, "invalid_linear_identity", 128);
+    const relationChanges = parseArray(record.relation_changes, (entry) => {
+      const change = asRecord(entry);
+      assertExactKeys(change, ["type", "related_issue_identifier"]);
+      return Object.freeze({
+        type: parseBoundedString(change.type, "invalid_linear_relation_type", 64),
+        related_issue_identifier: parseBoundedString(
+          change.related_issue_identifier,
+          "invalid_linear_related_issue",
+          128,
+        ),
+      });
+    }, 64);
+    const changedFields = parseArray(
+      record.changed_fields,
+      (entry) => parseBoundedString(entry, "invalid_linear_history_field", 32),
+      16,
+    );
+    if (changedFields.length === 0) fail("linear_empty_history_entry");
+    return Object.freeze({
+      history_id: parseBoundedString(record.id, "invalid_linear_history_id", 128),
+      issue_id: parseBoundedString(record.issue_id, "invalid_linear_issue_id", 128),
+      provider_created_at: parseTimestamp(record.created_at),
+      provider_updated_at: parseTimestamp(record.updated_at),
+      actor_id: nullableId(record.actor_id),
+      changed_fields: changedFields,
+      from_state_id: nullableId(record.from_state_id),
+      to_state_id: nullableId(record.to_state_id),
+      from_parent_id: nullableId(record.from_parent_id),
+      to_parent_id: nullableId(record.to_parent_id),
+      added_label_ids: parseArray(record.added_label_ids, (entry) => parseBoundedString(entry, "invalid_linear_label", 128), 32),
+      removed_label_ids: parseArray(record.removed_label_ids, (entry) => parseBoundedString(entry, "invalid_linear_label", 128), 32),
+      archived: parseNullableBoolean(record.archived),
+      trashed: parseNullableBoolean(record.trashed),
+      relation_changes: relationChanges,
+    });
+  });
+}
+
+function parseComment(value: unknown): CommentRecord {
+  return providerPayload(() => {
+    const record = asRecord(value);
+    assertExactKeys(record, [
+      "id", "issue_id", "created_at", "updated_at", "edited_at", "archived_at", "actor_id",
+      "body_markdown", "body_digest",
+    ]);
+    const nullableTimestamp = (entry: unknown) => entry === null ? null : parseTimestamp(entry);
+    const digest = parseBoundedString(record.body_digest, "invalid_linear_comment_digest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(digest)) fail("linear_invalid_payload");
+    return Object.freeze({
+      comment_id: parseBoundedString(record.id, "invalid_linear_comment_id", 128),
+      issue_id: parseBoundedString(record.issue_id, "invalid_linear_issue_id", 128),
+      provider_created_at: parseTimestamp(record.created_at),
+      provider_updated_at: parseTimestamp(record.updated_at),
+      provider_edited_at: nullableTimestamp(record.edited_at),
+      provider_archived_at: nullableTimestamp(record.archived_at),
+      actor_id: record.actor_id === null ? null : parseBoundedString(record.actor_id, "invalid_linear_actor_id", 128),
+      body_markdown: parseBoundedString(record.body_markdown, "invalid_linear_comment_body", 100_000),
+      body_digest: digest,
     });
   });
 }
@@ -234,9 +371,64 @@ function parseProviderEnum<const T extends readonly string[]>(value: unknown, al
 
 export class LinearQueries {
   readonly #teamId: string;
+  readonly #serviceActorId: string;
 
   constructor(private readonly client: LinearQueryClient, options: LinearQueryOptions) {
     this.#teamId = parseBoundedString(options.team_id, "invalid_linear_team_id", 128);
+    this.#serviceActorId = parseBoundedString(options.service_actor_id, "invalid_linear_service_actor_id", 128);
+  }
+
+  readServiceActor(): Promise<LinearServiceActor> {
+    return this.#boundary(async () => {
+      const record = asRecord(await this.client.readViewer());
+      assertExactKeys(record, ["id", "active", "app"]);
+      if (record.id !== this.#serviceActorId || record.active !== true || record.app !== true) {
+        fail("linear_service_actor_unsupported");
+      }
+      return Object.freeze({ actor_id: this.#serviceActorId, active: true, app: true });
+    });
+  }
+
+  readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]> {
+    return this.#boundary(async () => {
+      const history = await this.#all(
+        (cursor) => this.client.listIssueHistory(issueId, cursor, INTERNAL_PAGE_SIZE),
+        parseHistory,
+      );
+      this.#assertUnique(history.map(({ history_id }) => history_id), "linear_duplicate_history_identity");
+      return Object.freeze(history.map((entry) => {
+        if (entry.issue_id !== issueId) fail("linear_history_issue_mismatch");
+        return Object.freeze({
+          ...entry,
+          change_origin: entry.actor_id === null
+            ? "unknown" as const
+            : entry.actor_id === this.#serviceActorId ? "symphony" as const : "external" as const,
+        });
+      }));
+    });
+  }
+
+  readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]> {
+    return this.#boundary(async () => {
+      const comments = await this.#all(
+        (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
+        parseComment,
+      );
+      this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
+      return Object.freeze(comments.map((comment) => {
+        if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
+        return Object.freeze({
+          comment_id: comment.comment_id,
+          issue_id: comment.issue_id,
+          provider_created_at: comment.provider_created_at,
+          provider_updated_at: comment.provider_updated_at,
+          provider_edited_at: comment.provider_edited_at,
+          provider_archived_at: comment.provider_archived_at,
+          actor_id: comment.actor_id,
+          body_digest: comment.body_digest,
+        });
+      }));
+    });
   }
 
   get_issue(call: GetIssueCall): Promise<GetIssueResult> {
@@ -260,13 +452,13 @@ export class LinearQueries {
   list_issues(call: ListIssuesCall): Promise<ListIssuesResult> {
     return this.#boundary(async () => {
       const page = parsePage(
-        await this.client.listIssues(this.#teamId, call.input.cursor, call.input.page_size),
+        await this.client.listIssues(call.input.cursor, call.input.page_size),
         parseIssue,
         call.input.page_size,
       );
-      this.#assertTeam(page.nodes);
+      const teamIssues = page.nodes.filter(({ teamId }) => teamId === this.#teamId);
       return Object.freeze({ ...resultEnvelope(call), output: Object.freeze({
-        issues: Object.freeze(page.nodes.map(({ snapshot }) => snapshot)),
+        issues: Object.freeze(teamIssues.map(({ snapshot }) => snapshot)),
         next_cursor: page.nextCursor,
       }) });
     });
@@ -322,6 +514,7 @@ export class LinearQueries {
           state_id: state.state_id,
           revision: state.revision,
           name: state.name,
+          archived: state.archived,
         }))),
         next_cursor: page.nextCursor,
       }) });
@@ -352,15 +545,15 @@ export class LinearQueries {
   inventoryRoots(): Promise<readonly RootInventoryItem[]> {
     return this.#boundary(async () => {
       const issues = await this.#all(
-        (cursor) => this.client.listIssues(this.#teamId, cursor, INTERNAL_PAGE_SIZE),
+        (cursor) => this.client.listIssues(cursor, INTERNAL_PAGE_SIZE),
         parseIssue,
       );
       this.#assertUniqueIssues(issues);
-      this.#assertTeam(issues);
+      const teamIssues = issues.filter(({ teamId }) => teamId === this.#teamId);
       const labelNames = await this.#labelNames();
       const stateNames = await this.#stateNames();
       const roots: RootInventoryItem[] = [];
-      for (const issue of issues) {
+      for (const issue of teamIssues) {
         if (issueKind(issue, labelNames) !== "root") continue;
         if (issue.snapshot.parent_id !== null) fail("linear_root_has_parent");
         roots.push(Object.freeze({
@@ -510,6 +703,10 @@ export class LinearQueries {
     if (new Set(issues.map(({ snapshot }) => snapshot.issue_id)).size !== issues.length) {
       fail("linear_duplicate_issue_identity");
     }
+  }
+
+  #assertUnique(identities: readonly string[], code: string): void {
+    if (new Set(identities).size !== identities.length) fail(code);
   }
 
   async #boundary<T>(operation: () => Promise<T>): Promise<T> {

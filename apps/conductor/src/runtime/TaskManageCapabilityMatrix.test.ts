@@ -7,6 +7,7 @@ import {
   parseRuntimeGeneration,
   parseTaskIssueId,
   parseTaskLabelId,
+  parseTaskRelationId,
   parseTaskRevision,
   parseTaskStateId,
 } from "../contracts/identity.js";
@@ -151,6 +152,7 @@ function createStage(): CreateIssueCall {
     ...envelope("create_issue"),
     function: "create_issue",
     input: {
+      issue_id: parseTaskIssueId("11111111-1111-4111-8111-111111111111"),
       parent_issue_id: parseTaskIssueId("CYCLE-A"),
       expected_parent_revision: parseTaskRevision("revision:cycle:1"),
       desired: {
@@ -170,6 +172,7 @@ function createRelation(): CreateRelationCall {
     ...envelope("create_relation"),
     function: "create_relation",
     input: {
+      relation_id: parseTaskRelationId("22222222-2222-4222-8222-222222222222"),
       relation_type: "blocks",
       source_issue_id: parseTaskIssueId("WORK-A"),
       expected_source_revision: parseTaskRevision("revision:work:1"),

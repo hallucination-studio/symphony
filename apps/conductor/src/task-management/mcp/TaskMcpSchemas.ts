@@ -27,7 +27,6 @@ import {
   type TaskRelationSnapshot,
 } from "../../contracts/observation.js";
 import { assertRuntimeTarget, type RuntimeTarget } from "../../contracts/runtime.js";
-import { MUTATION_OUTCOMES, type MutationOutcome } from "../../contracts/mutation.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString, parseEnum, parseStringArray } from "../../contracts/validation.js";
 
 export const TASK_MCP_FUNCTIONS = [
@@ -110,6 +109,7 @@ export interface UpdateIssueDesired {
 
 export type CreateIssueCall = TaskMcpEnvelope<"create_issue"> & {
   readonly input: {
+    readonly issue_id: TaskIssueId;
     readonly parent_issue_id: TaskIssueId;
     readonly expected_parent_revision: TaskRevision;
     readonly desired: CreateIssueDesired;
@@ -127,6 +127,7 @@ export type ArchiveIssueCall = TaskMcpEnvelope<"archive_issue"> & {
 };
 export type CreateRelationCall = TaskMcpEnvelope<"create_relation"> & {
   readonly input: {
+    readonly relation_id: TaskRelationId;
     readonly relation_type: string;
     readonly source_issue_id: TaskIssueId;
     readonly expected_source_revision: TaskRevision;
@@ -166,6 +167,7 @@ export interface TaskStateResource {
   readonly state_id: TaskStateId;
   readonly revision: TaskRevision;
   readonly name: string;
+  readonly archived: boolean;
 }
 
 export interface TaskLabelResource {
@@ -211,7 +213,8 @@ export type TaskMutationTarget =
   };
 
 export interface TaskMutationOutput {
-  readonly outcome: MutationOutcome;
+  readonly outcome: "applied" | "not_applied" | "stale_before_effect" | "conflict_observed";
+  readonly effect_may_have_occurred: boolean;
   readonly target: TaskMutationTarget;
   readonly fresh_resource: TaskIssueSnapshot | TaskRelationSnapshot | null;
   readonly concrete_diff: readonly ConcreteTaskChange[];
@@ -288,10 +291,10 @@ const UPDATE_FIELDS = [
 function parseUpdateDesired(value: unknown): UpdateIssueDesired {
   const record = asRecord(value);
   const keys = Object.keys(record);
-  if (keys.length === 0) throw new Error("empty_issue_update");
   if (keys.some((key) => !UPDATE_FIELDS.includes(key as typeof UPDATE_FIELDS[number]))) {
     throw new Error("invalid_contract_keys");
   }
+  if (keys.length !== 1) throw new Error(keys.length === 0 ? "empty_issue_update" : "compound_issue_update");
   const desired: Record<string, unknown> = {};
   if ("title" in record) desired.title = parseBoundedString(record.title, "invalid_task_title", 1_024);
   if ("description" in record) desired.description = parseDescription(record.description);
@@ -303,6 +306,14 @@ function parseUpdateDesired(value: unknown): UpdateIssueDesired {
   }
   if ("priority" in record) desired.priority = parsePriority(record.priority);
   return Object.freeze(desired) as UpdateIssueDesired;
+}
+
+function parseCallerUuid(value: unknown, kind: "issue" | "relation"): string {
+  const parsed = kind === "issue" ? parseTaskIssueId(value) : parseTaskRelationId(value);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(parsed)) {
+    throw new Error(`invalid_${kind}_uuid`);
+  }
+  return parsed;
 }
 
 function parsePageInput(value: unknown, extraKeys: readonly string[] = []): CursorPageInput {
@@ -365,8 +376,9 @@ export function parseTaskMcpCall(value: unknown, expected: RuntimeTarget): TaskM
       }) });
     }
     case "create_issue":
-      assertExactKeys(input, ["parent_issue_id", "expected_parent_revision", "desired"]);
+      assertExactKeys(input, ["issue_id", "parent_issue_id", "expected_parent_revision", "desired"]);
       return Object.freeze({ ...parseCallEnvelope(record, functionName, expected), input: Object.freeze({
+        issue_id: parseCallerUuid(input.issue_id, "issue") as TaskIssueId,
         parent_issue_id: parseTaskIssueId(input.parent_issue_id),
         expected_parent_revision: parseTaskRevision(input.expected_parent_revision),
         desired: parseCreateDesired(input.desired),
@@ -386,12 +398,14 @@ export function parseTaskMcpCall(value: unknown, expected: RuntimeTarget): TaskM
       }) });
     case "create_relation": {
       assertExactKeys(input, [
-        "relation_type", "source_issue_id", "expected_source_revision", "target_issue_id", "expected_target_revision",
+        "relation_id", "relation_type", "source_issue_id", "expected_source_revision", "target_issue_id",
+        "expected_target_revision",
       ]);
       const sourceIssueId = parseTaskIssueId(input.source_issue_id);
       const targetIssueId = parseTaskIssueId(input.target_issue_id);
       if (sourceIssueId === targetIssueId) throw new Error("self_task_relation");
       return Object.freeze({ ...parseCallEnvelope(record, functionName, expected), input: Object.freeze({
+        relation_id: parseCallerUuid(input.relation_id, "relation") as TaskRelationId,
         relation_type: parseBoundedString(input.relation_type, "invalid_task_relation_type", 128),
         source_issue_id: sourceIssueId,
         expected_source_revision: parseTaskRevision(input.expected_source_revision),
@@ -450,12 +464,25 @@ function parseMutationTarget(value: unknown): TaskMutationTarget {
 
 function parseMutationOutput(value: unknown, call: TaskMcpMutationCall): TaskMutationOutput {
   const record = asRecord(value);
-  assertExactKeys(record, ["outcome", "target", "fresh_resource", "concrete_diff", "sanitized_reason"]);
-  const outcome = parseEnum(record.outcome, MUTATION_OUTCOMES);
+  assertExactKeys(record, [
+    "outcome", "effect_may_have_occurred", "target", "fresh_resource", "concrete_diff", "sanitized_reason",
+  ]);
+  const outcome = parseEnum(record.outcome, [
+    "applied", "not_applied", "stale_before_effect", "conflict_observed",
+  ] as const);
+  if (typeof record.effect_may_have_occurred !== "boolean") throw new Error("invalid_effect_ambiguity");
+  if (record.effect_may_have_occurred !== (outcome === "applied" || outcome === "conflict_observed")) {
+    throw new Error("invalid_effect_ambiguity");
+  }
   const mutationTarget = parseMutationTarget(record.target);
   const relationCall = call.function === "create_relation" || call.function === "delete_relation";
   if ((mutationTarget.kind === "relation") !== relationCall) throw new Error("mutation_target_mismatch");
   if (call.function === "update_issue" || call.function === "archive_issue") {
+    if (mutationTarget.kind !== "issue" || mutationTarget.issue_id !== call.input.issue_id) {
+      throw new Error("mutation_target_mismatch");
+    }
+  }
+  if (call.function === "create_issue") {
     if (mutationTarget.kind !== "issue" || mutationTarget.issue_id !== call.input.issue_id) {
       throw new Error("mutation_target_mismatch");
     }
@@ -465,6 +492,7 @@ function parseMutationOutput(value: unknown, call: TaskMcpMutationCall): TaskMut
       mutationTarget.kind !== "relation"
       || mutationTarget.source_issue_id !== call.input.source_issue_id
       || mutationTarget.target_issue_id !== call.input.target_issue_id
+      || (call.function === "create_relation" && mutationTarget.relation_id !== call.input.relation_id)
       || (call.function === "delete_relation" && mutationTarget.relation_id !== call.input.relation_id)
     ) throw new Error("mutation_target_mismatch");
   }
@@ -489,6 +517,7 @@ function parseMutationOutput(value: unknown, call: TaskMcpMutationCall): TaskMut
   if (outcome === "applied" ? reason !== null : reason === null) throw new Error("invalid_mutation_reason");
   return Object.freeze({
     outcome,
+    effect_may_have_occurred: record.effect_may_have_occurred,
     target: mutationTarget,
     fresh_resource: freshResource,
     concrete_diff: concreteDiff,
@@ -520,11 +549,13 @@ function parsePageOutput<T>(
 
 function parseTaskState(value: unknown): TaskStateResource {
   const record = asRecord(value);
-  assertExactKeys(record, ["state_id", "revision", "name"]);
+  assertExactKeys(record, ["state_id", "revision", "name", "archived"]);
+  if (typeof record.archived !== "boolean") throw new Error("invalid_task_state_activity");
   return Object.freeze({
     state_id: parseTaskStateId(record.state_id),
     revision: parseTaskRevision(record.revision),
     name: parseBoundedString(record.name, "invalid_task_state_name", 256),
+    archived: record.archived,
   });
 }
 

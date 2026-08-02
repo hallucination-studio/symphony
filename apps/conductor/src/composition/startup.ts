@@ -13,6 +13,11 @@ export interface ConductorStartup {
   readonly codex_api_key: string;
   readonly codex_base_url: string;
   readonly codex_model: string;
+  readonly linear_provider_capabilities: {
+    readonly exclusive_mutation_actor: true;
+    readonly managed_destruction_prohibited: true;
+    readonly relation_provenance_audited: true;
+  };
 }
 
 function configPath(argv: readonly string[]): string {
@@ -27,6 +32,11 @@ function secret(env: Readonly<Record<string, string | undefined>>, name: string,
   if (value === undefined || value.length === 0) throw new Error(missing);
   if (value.length > MAX_TOKEN_LENGTH || /\s/u.test(value)) throw new Error(invalid);
   return value;
+}
+
+function requiredAttestation(env: Readonly<Record<string, string | undefined>>, name: string): true {
+  if (env[name] !== "acknowledged") throw new Error("unsupported_linear_provider_capability");
+  return true;
 }
 
 async function readConfig(configFile: string): Promise<unknown> {
@@ -51,6 +61,11 @@ export async function loadStartup(
   const linearToken = secret(env, "SYMPHONY_LINEAR_TOKEN", "missing_linear_token", "invalid_linear_token");
   const codexApiKey = secret(env, "SYMPHONY_CODEX_API_KEY", "missing_codex_api_key", "invalid_codex_api_key");
   const codexModel = secret(env, "SYMPHONY_CODEX_MODEL", "missing_codex_model", "invalid_codex_model");
+  const linearProviderCapabilities = Object.freeze({
+    exclusive_mutation_actor: requiredAttestation(env, "SYMPHONY_LINEAR_EXCLUSIVE_MUTATION_ACTOR"),
+    managed_destruction_prohibited: requiredAttestation(env, "SYMPHONY_LINEAR_MANAGED_DESTRUCTION_PROHIBITED"),
+    relation_provenance_audited: requiredAttestation(env, "SYMPHONY_LINEAR_RELATION_PROVENANCE_AUDITED"),
+  });
   const codexBaseUrl = env.SYMPHONY_CODEX_BASE_URL;
   const parsedBaseUrl = codexBaseUrl && URL.canParse(codexBaseUrl) ? new URL(codexBaseUrl) : null;
   if (
@@ -75,5 +90,6 @@ export async function loadStartup(
     codex_api_key: codexApiKey,
     codex_base_url: codexBaseUrl,
     codex_model: codexModel,
+    linear_provider_capabilities: linearProviderCapabilities,
   });
 }

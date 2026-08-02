@@ -318,6 +318,7 @@ function createIssueCall(expectedParentRevision: string): Record<string, unknown
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: {
+      issue_id: "11111111-1111-4111-8111-111111111111",
       parent_issue_id: "LIN-1",
       expected_parent_revision: expectedParentRevision,
       desired: {
@@ -341,6 +342,7 @@ function createRelationCall(expectedSourceRevision: string): Record<string, unkn
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.create_relation,
     input: {
+      relation_id: "22222222-2222-4222-8222-222222222222",
       relation_type: "blocks",
       source_issue_id: "LIN-2",
       expected_source_revision: expectedSourceRevision,
@@ -465,6 +467,26 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
       TASK_MCP_CAPABILITIES[spec.name as keyof typeof TASK_MCP_CAPABILITIES],
     );
   }
+
+  for (const [functionName, field, identity] of [
+    ["create_issue", "issue_id", "11111111-1111-4111-8111-111111111111"],
+    ["create_relation", "relation_id", "22222222-2222-4222-8222-222222222222"],
+  ] as const) {
+    const spec = tools.specs.find(({ name }) => name === functionName);
+    assert.ok(spec);
+    const input = (spec.inputSchema as {
+      properties: Record<string, {
+        properties?: Record<string, { type?: unknown; pattern?: unknown }>;
+      }>;
+    }).properties.input?.properties;
+    assert.equal(input?.[field]?.type, "string");
+    const pattern = input?.[field]?.pattern;
+    assert.equal(typeof pattern, "string");
+    assert.match(identity, new RegExp(String(pattern), "u"));
+    assert.equal(new RegExp(String(pattern), "u").test(
+      field === "issue_id" ? "LIN-CREATED" : "REL-CREATED",
+    ), false);
+  }
 });
 
 test("Root tools dispatch a typed Task MCP result after all identity fences pass", async () => {
@@ -543,6 +565,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: {
           issue_id: call.input.issue_id,
@@ -644,6 +667,7 @@ test("Root tools return a seal digest only from an applied approval fresh read-b
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: approved,
         concrete_diff: [{
@@ -704,7 +728,8 @@ test("Root tools do not return a seal for a stale approval precondition", async 
     correlation_id: call.correlation_id,
     capability: call.capability,
     output: {
-      outcome: "precondition_failed",
+      outcome: "stale_before_effect",
+      effect_may_have_occurred: false,
       target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: {
         issue_id: call.input.issue_id,
@@ -753,7 +778,7 @@ test("Root tools do not return a seal for a stale approval precondition", async 
     },
   }, { assertActive: () => undefined });
 
-  assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "precondition_failed");
+  assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "stale_before_effect");
   assert.equal((result as { seal_digest?: unknown }).seal_digest, null);
 });
 
@@ -780,7 +805,8 @@ test("an exact read resolves an unknown applied approval with the sealed fresh r
       correlation_id: call.correlation_id,
       capability: call.capability,
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -840,16 +866,16 @@ test("an exact read resolves an unknown applied approval with the sealed fresh r
   assert.equal(tools.hasPendingAcceptance(), false);
 });
 
-test("acceptance_unknown blocks every mutation until get_issue reads the exact target", async () => {
+test("conflict_observed blocks every mutation until get_issue reads the exact target", async () => {
   const effects: string[] = [];
   const manager = taskManager([]);
   let firstUnknown = true;
   manager.update_issue = async (call) => {
     effects.push(`update:${call.input.issue_id}`);
     const outcome = call.input.issue_id === "LIN-2" && firstUnknown
-      ? "acceptance_unknown"
+      ? "conflict_observed"
       : "not_applied";
-    if (outcome === "acceptance_unknown") firstUnknown = false;
+    if (outcome === "conflict_observed") firstUnknown = false;
     return parseTaskMcpResult({
       schema_version: 1,
       function: call.function,
@@ -859,10 +885,11 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
       capability: call.capability,
       output: {
         outcome,
+        effect_may_have_occurred: outcome === "conflict_observed",
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
-        sanitized_reason: outcome === "acceptance_unknown"
+        sanitized_reason: outcome === "conflict_observed"
           ? "provider_acceptance_unknown"
           : "requested_state_not_applied",
       },
@@ -893,7 +920,7 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
     updateIssueCall("LIN-2", "revision:issue:1"),
     { assertActive: () => undefined },
   );
-  assert.equal((unknown as { output?: { outcome?: unknown } }).output?.outcome, "acceptance_unknown");
+  assert.equal((unknown as { output?: { outcome?: unknown } }).output?.outcome, "conflict_observed");
   assert.equal(tools.hasPendingAcceptance(), true);
   await assert.rejects(
     update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined }),
@@ -926,7 +953,7 @@ test("acceptance_unknown blocks every mutation until get_issue reads the exact t
   ]);
 });
 
-test("acceptance_unknown blocks every declared tool while an exact Task mutation is unresolved", async () => {
+test("conflict_observed blocks every declared tool while an exact Task mutation is unresolved", async () => {
   const effects: string[] = [];
   const manager = taskManager([]);
   serveSnapshotIssues(manager, undefined, (issueId) => effects.push(`read:${issueId}`));
@@ -940,7 +967,8 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
       correlation_id: call.correlation_id,
       capability: call.capability,
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
@@ -985,14 +1013,14 @@ test("acceptance_unknown blocks every declared tool while an exact Task mutation
   assert.deepEqual(effects, ["read:LIN-2", "update:LIN-2"]);
 });
 
-test("acceptance_unknown from create_issue blocks create retries until the generated issue is read", async () => {
+test("conflict_observed from create_issue blocks create retries until the caller identity is read", async () => {
   const effects: string[] = [];
   const manager = taskManager([]);
   let creations = 0;
   manager.create_issue = async (call) => {
     creations += 1;
     effects.push(`create:${creations}`);
-    const outcome = creations === 1 ? "acceptance_unknown" : "not_applied";
+    const outcome = creations === 1 ? "conflict_observed" : "not_applied";
     return parseTaskMcpResult({
       schema_version: 1,
       function: call.function,
@@ -1002,10 +1030,11 @@ test("acceptance_unknown from create_issue blocks create retries until the gener
       capability: call.capability,
       output: {
         outcome,
-        target: { kind: "issue", issue_id: "LIN-CREATED" },
+        effect_may_have_occurred: outcome === "conflict_observed",
+        target: { kind: "issue", issue_id: call.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
-        sanitized_reason: outcome === "acceptance_unknown"
+        sanitized_reason: outcome === "conflict_observed"
           ? "provider_acceptance_unknown"
           : "requested_state_not_applied",
       },
@@ -1040,11 +1069,15 @@ test("acceptance_unknown from create_issue blocks create retries until the gener
     isAcceptanceUnknown,
   );
   await read.execute(
-    getIssueCall({ input: { issue_id: "LIN-CREATED" } }),
+    getIssueCall({ input: { issue_id: "11111111-1111-4111-8111-111111111111" } }),
     { assertActive: () => undefined },
   );
   await create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined });
-  assert.deepEqual(effects, ["create:1", "read:LIN-CREATED", "create:2"]);
+  assert.deepEqual(effects, [
+    "create:1",
+    "read:11111111-1111-4111-8111-111111111111",
+    "create:2",
+  ]);
 });
 
 test("Root relation mutations are denied before provider effects", async () => {
@@ -1054,7 +1087,7 @@ test("Root relation mutations are denied before provider effects", async () => {
   manager.create_relation = async (call) => {
     creations += 1;
     effects.push(`create:${creations}`);
-    const outcome = creations <= 2 ? "acceptance_unknown" : "not_applied";
+    const outcome = creations <= 2 ? "conflict_observed" : "not_applied";
     return parseTaskMcpResult({
       schema_version: 1,
       function: call.function,
@@ -1064,15 +1097,16 @@ test("Root relation mutations are denied before provider effects", async () => {
       capability: call.capability,
       output: {
         outcome,
+        effect_may_have_occurred: outcome === "conflict_observed",
         target: {
           kind: "relation",
-          relation_id: `REL-${creations}`,
+          relation_id: call.input.relation_id,
           source_issue_id: call.input.source_issue_id,
           target_issue_id: call.input.target_issue_id,
         },
         fresh_resource: null,
         concrete_diff: [],
-        sanitized_reason: outcome === "acceptance_unknown"
+        sanitized_reason: outcome === "conflict_observed"
           ? "provider_acceptance_unknown"
           : "requested_state_not_applied",
       },
@@ -1280,6 +1314,7 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
     capability: call.capability,
     output: {
       outcome: "applied",
+      effect_may_have_occurred: true,
       target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: null,
       concrete_diff: Array.from({ length: 9 }, (_, index) => ({

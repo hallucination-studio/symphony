@@ -12,7 +12,11 @@ import type { UpdateIssueDesired } from "../mcp/TaskMcpSchemas.js";
 export interface LinearCommandIssueRecord {
   readonly snapshot: TaskIssueSnapshot;
   readonly teamId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly creatorId: string | null;
   readonly archived: boolean;
+  readonly trashed: boolean;
 }
 
 export interface LinearCommandPage<T> {
@@ -22,13 +26,24 @@ export interface LinearCommandPage<T> {
 
 export type LinearProviderOutcome = "accepted" | "rejected" | "uncertain" | "malformed";
 
+function parseTimestamp(value: unknown): string {
+  const timestamp = parseBoundedString(value, "invalid_linear_timestamp", 64);
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== timestamp) {
+    throw new Error("linear_invalid_payload");
+  }
+  return timestamp;
+}
+
 export function parseLinearCommandIssue(value: unknown): LinearCommandIssueRecord {
   const record = asRecord(value);
   assertExactKeys(record, [
     "id", "revision", "team_id", "parent_id", "status", "title", "description", "labels",
-    "delegate_id", "priority", "archived",
+    "delegate_id", "priority", "created_at", "updated_at", "creator_id", "archived", "trashed",
   ]);
-  if (typeof record.archived !== "boolean") throw new Error("linear_invalid_payload");
+  if (typeof record.archived !== "boolean" || typeof record.trashed !== "boolean") {
+    throw new Error("linear_invalid_payload");
+  }
   return Object.freeze({
     snapshot: parseTaskIssueSnapshot({
       issue_id: record.id,
@@ -42,13 +57,24 @@ export function parseLinearCommandIssue(value: unknown): LinearCommandIssueRecor
       priority: record.priority,
     }),
     teamId: parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
+    createdAt: parseTimestamp(record.created_at),
+    updatedAt: parseTimestamp(record.updated_at),
+    creatorId: record.creator_id === null
+      ? null
+      : parseBoundedString(record.creator_id, "invalid_linear_creator_id", 128),
     archived: record.archived,
+    trashed: record.trashed,
   });
 }
 
 function parseRelation(value: unknown): TaskRelationSnapshot {
   const record = asRecord(value);
-  assertExactKeys(record, ["id", "revision", "type", "source_issue_id", "target_issue_id"]);
+  assertExactKeys(record, [
+    "id", "revision", "type", "source_issue_id", "target_issue_id", "created_at", "updated_at", "archived",
+  ]);
+  parseTimestamp(record.created_at);
+  parseTimestamp(record.updated_at);
+  if (typeof record.archived !== "boolean") throw new Error("linear_invalid_payload");
   return parseTaskRelationSnapshot({
     relation_id: record.id,
     revision: record.revision,

@@ -271,6 +271,7 @@ function create(parentId: string, revision: string, label: string): CreateIssueC
     ...envelope("create_issue"),
     function: "create_issue",
     input: {
+      issue_id: parseTaskIssueId("11111111-1111-4111-8111-111111111111"),
       parent_issue_id: parseTaskIssueId(parentId),
       expected_parent_revision: parseTaskRevision(revision),
       desired: {
@@ -305,6 +306,7 @@ function createMaterializedRelation(): CreateRelationCall {
     ...envelope("create_relation"),
     function: "create_relation",
     input: {
+      relation_id: parseTaskRelationId("22222222-2222-4222-8222-222222222222"),
       relation_type: "blocks",
       source_issue_id: parseTaskIssueId("WORK-NEW"),
       expected_source_revision: parseTaskRevision("revision:work:new"),
@@ -444,6 +446,7 @@ test("Cycle machine accepts one exact legal transition grant and binds issued ca
       function: "update_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: "WORK-A" },
         fresh_resource: {
           issue_id: "WORK-A",
@@ -504,6 +507,7 @@ test("Cycle machine rejects an applied status read-back without a fresh revision
       function: "update_issue",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: "WORK-A" },
         fresh_resource: {
           issue_id: "WORK-A",
@@ -573,7 +577,8 @@ test("Cycle machine returns fresh same-seal facts after a provider revision race
       ...envelope("update_issue"),
       function: "update_issue",
       output: {
-        outcome: "precondition_failed",
+        outcome: "stale_before_effect",
+        effect_may_have_occurred: false,
         target: { kind: "issue", issue_id: "WORK-A" },
         fresh_resource: {
           issue_id: "WORK-A",
@@ -605,7 +610,7 @@ test("Cycle machine returns fresh same-seal facts after a provider revision race
     mutation_manifest: [call],
   });
 
-  assert.equal((await bound.update_issue(call, execution)).output.outcome, "precondition_failed");
+  assert.equal((await bound.update_issue(call, execution)).output.outcome, "stale_before_effect");
 });
 
 test("Cycle machine maps provider failures to a closed boundary error", async () => {
@@ -729,7 +734,7 @@ test("Cycle machine can create one exact Plan under an approved Cycle and cannot
     callerAuthority.verifier.assert(providerExecution.caller, received);
     effects.push("create_issue");
     const created = {
-      issue_id: "PLAN-NEW", revision: "revision:plan:new", status: workflow.stage_states.todo,
+      issue_id: received.input.issue_id, revision: "revision:plan:new", status: workflow.stage_states.todo,
       title: received.input.desired.title, description: received.input.desired.description,
       parent_id: cycleId, labels: [workflow.labels.plan], delegate_id: null, priority: null,
     };
@@ -738,7 +743,8 @@ test("Cycle machine can create one exact Plan under an approved Cycle and cannot
       function: "create_issue",
       output: {
         outcome: "applied",
-        target: { kind: "issue", issue_id: "PLAN-NEW" },
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: received.input.issue_id },
         fresh_resource: created,
         concrete_diff: [{ kind: "issue_created", issue: created }],
         sanitized_reason: null,
@@ -771,10 +777,11 @@ test("Cycle machine preserves a scoped create readback_mismatch outcome", async 
       ...envelope("create_issue"),
       function: "create_issue",
       output: {
-        outcome: "readback_mismatch",
-        target: { kind: "issue", issue_id: "PLAN-MISMATCH" },
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: received.input.issue_id },
         fresh_resource: {
-          issue_id: "PLAN-MISMATCH",
+          issue_id: received.input.issue_id,
           revision: "revision:plan:mismatch",
           status: call.input.desired.state_id,
           title: "Provider returned a different title",
@@ -797,7 +804,7 @@ test("Cycle machine preserves a scoped create readback_mismatch outcome", async 
     mutation_manifest: [call],
   });
 
-  assert.equal((await bound.create_issue(call, execution)).output.outcome, "readback_mismatch");
+  assert.equal((await bound.create_issue(call, execution)).output.outcome, "conflict_observed");
 });
 
 test("Cycle machine permits one exact read after unknown Issue creation acceptance", async () => {
@@ -809,7 +816,7 @@ test("Cycle machine permits one exact read after unknown Issue creation acceptan
   const getCall: GetIssueCall = {
     ...envelope("get_issue"),
     function: "get_issue",
-    input: { issue_id: parseTaskIssueId("PLAN-PENDING") },
+    input: { issue_id: call.input.issue_id },
   };
   const effects: string[] = [];
   const manager = recordingManager(effects);
@@ -820,8 +827,9 @@ test("Cycle machine permits one exact read after unknown Issue creation acceptan
       ...envelope("create_issue"),
       function: "create_issue",
       output: {
-        outcome: "acceptance_unknown",
-        target: { kind: "issue", issue_id: "PLAN-PENDING" },
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: received.input.issue_id },
         fresh_resource: null,
         concrete_diff: [],
         sanitized_reason: "fresh_readback_unavailable",
@@ -835,7 +843,7 @@ test("Cycle machine permits one exact read after unknown Issue creation acceptan
       ...envelope("get_issue"),
       function: "get_issue",
       output: { issue: {
-        issue_id: "PLAN-PENDING",
+        issue_id: received.input.issue_id,
         revision: "revision:plan:pending",
         status: call.input.desired.state_id,
         title: call.input.desired.title,
@@ -855,7 +863,7 @@ test("Cycle machine permits one exact read after unknown Issue creation acceptan
     mutation_manifest: [call],
   });
 
-  assert.equal((await bound.create_issue(call, execution)).output.outcome, "acceptance_unknown");
+  assert.equal((await bound.create_issue(call, execution)).output.outcome, "conflict_observed");
   assert.equal((await bound.get_issue(getCall, execution)).output.issue?.issue_id, getCall.input.issue_id);
   await assert.rejects(bound.get_issue(getCall, execution), denied);
   assert.deepEqual(effects, ["create_issue", "get_issue"]);
@@ -904,10 +912,11 @@ test("Cycle machine can materialize one exact relation between freshly read-back
       ...envelope("create_relation"),
       function: "create_relation",
       output: {
-        outcome: "acceptance_unknown",
+        outcome: "conflict_observed",
+        effect_may_have_occurred: true,
         target: {
           kind: "relation",
-          relation_id: "REL-PENDING",
+          relation_id: received.input.relation_id,
           source_issue_id: received.input.source_issue_id,
           target_issue_id: received.input.target_issue_id,
         },
@@ -923,7 +932,7 @@ test("Cycle machine can materialize one exact relation between freshly read-back
       ...envelope("list_relations"),
       function: "list_relations",
       output: { relations: [{
-        relation_id: "REL-PENDING",
+        relation_id: call.input.relation_id,
         revision: "revision:relation:pending",
         type: call.input.relation_type,
         source_issue_id: call.input.source_issue_id,
@@ -941,11 +950,11 @@ test("Cycle machine can materialize one exact relation between freshly read-back
   });
   assert.equal(
     (await unknownBinding.create_relation(call, execution)).output.outcome,
-    "acceptance_unknown",
+    "conflict_observed",
   );
   assert.equal(
     (await unknownBinding.list_relations(relationRead, execution)).output.relations[0]?.relation_id,
-    parseTaskRelationId("REL-PENDING"),
+    call.input.relation_id,
   );
 
   const invalidRelation = {
@@ -980,7 +989,7 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     callerAuthority.verifier.assert(providerExecution.caller, received);
     effects.push("create_relation");
     const relation = {
-      relation_id: "REL-NEW",
+      relation_id: received.input.relation_id,
       revision: "revision:relation:new",
       type: received.input.relation_type,
       source_issue_id: received.input.source_issue_id,
@@ -991,6 +1000,7 @@ test("Cycle machine can materialize one exact relation between freshly read-back
       function: "create_relation",
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: {
           kind: "relation",
           relation_id: relation.relation_id,

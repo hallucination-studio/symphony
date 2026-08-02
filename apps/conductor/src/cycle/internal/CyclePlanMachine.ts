@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   parseSealedExecutionGraph,
   type CycleAdvanceRequest,
@@ -178,6 +180,7 @@ function createPlanCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: Object.freeze({
+      issue_id: parseTaskIssueId(randomUUID()),
       parent_issue_id: parseTaskIssueId(request.cycle_id),
       expected_parent_revision: request.cycle_revision,
       desired: Object.freeze({

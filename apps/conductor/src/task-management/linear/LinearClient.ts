@@ -1,7 +1,13 @@
+import { createHash } from "node:crypto";
+
 import {
+  type Comment,
+  type CommentConnection,
   LinearClient,
   type Issue,
   type IssueConnection,
+  type IssueHistory,
+  type IssueHistoryConnection,
   type IssueLabelConnection,
   type IssueRelation,
   type IssueRelationConnection,
@@ -47,14 +53,15 @@ function issueRecord(issue: Issue) {
     delegate_id: issue.delegateId ?? null,
     priority: issue.priority === 0 ? null : issue.priority,
     created_at: issue.createdAt.toISOString(),
+    updated_at: issue.updatedAt.toISOString(),
+    creator_id: issue.creatorId ?? null,
+    archived: issue.archivedAt != null,
+    trashed: issue.trashed === true,
   });
 }
 
 function mutationIssueRecord(issue: Issue) {
-  return Object.freeze({
-    ...issueRecord(issue),
-    archived: issue.archivedAt != null,
-  });
+  return issueRecord(issue);
 }
 
 function issuePage(connection: IssueConnection) {
@@ -74,6 +81,61 @@ function relationRecord(relation: IssueRelation) {
     type: relation.type,
     source_issue_id: relation.issueId,
     target_issue_id: relation.relatedIssueId,
+    created_at: relation.createdAt.toISOString(),
+    updated_at: relation.updatedAt.toISOString(),
+    archived: relation.archivedAt != null,
+  });
+}
+
+function changedFields(history: IssueHistory): readonly string[] {
+  const fields: string[] = [];
+  if (history.fromStateId != null || history.toStateId != null) fields.push("status");
+  if (history.fromTitle != null || history.toTitle != null) fields.push("title");
+  if (history.updatedDescription === true) fields.push("description");
+  if (history.fromParentId != null || history.toParentId != null) fields.push("parent");
+  if ((history.addedLabelIds?.length ?? 0) > 0 || (history.removedLabelIds?.length ?? 0) > 0) fields.push("labels");
+  if (history.fromDelegate != null || history.toDelegate != null) fields.push("delegate");
+  if (history.fromPriority != null || history.toPriority != null) fields.push("priority");
+  if (history.archived != null) fields.push("archived");
+  if (history.trashed != null) fields.push("trashed");
+  if ((history.relationChanges?.length ?? 0) > 0) fields.push("relation");
+  return Object.freeze(fields);
+}
+
+function historyRecord(issueId: string, history: IssueHistory) {
+  return Object.freeze({
+    id: history.id,
+    issue_id: issueId,
+    created_at: history.createdAt.toISOString(),
+    updated_at: history.updatedAt.toISOString(),
+    actor_id: history.actorId ?? null,
+    changed_fields: changedFields(history),
+    from_state_id: history.fromStateId ?? null,
+    to_state_id: history.toStateId ?? null,
+    from_parent_id: history.fromParentId ?? null,
+    to_parent_id: history.toParentId ?? null,
+    added_label_ids: Object.freeze([...(history.addedLabelIds ?? [])]),
+    removed_label_ids: Object.freeze([...(history.removedLabelIds ?? [])]),
+    archived: history.archived ?? null,
+    trashed: history.trashed ?? null,
+    relation_changes: Object.freeze((history.relationChanges ?? []).map((change) => Object.freeze({
+      type: change.type,
+      related_issue_identifier: change.identifier,
+    }))),
+  });
+}
+
+function commentRecord(issueId: string, comment: Comment) {
+  return Object.freeze({
+    id: comment.id,
+    issue_id: comment.issueId ?? issueId,
+    created_at: comment.createdAt.toISOString(),
+    updated_at: comment.updatedAt.toISOString(),
+    edited_at: comment.editedAt?.toISOString() ?? null,
+    archived_at: comment.archivedAt?.toISOString() ?? null,
+    actor_id: comment.userId ?? comment.botActor?.id ?? null,
+    body_markdown: comment.body,
+    body_digest: createHash("sha256").update(comment.body, "utf8").digest("hex"),
   });
 }
 
@@ -139,7 +201,6 @@ export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandCli
     if (issues.nodes.length !== 1 || issues.nodes[0]?.id !== issueId) {
       throw new Error("linear_issue_identity_mismatch");
     }
-    if (issues.nodes[0].archivedAt != null) return null;
     return issueRecord(issues.nodes[0]);
   }
 
@@ -147,17 +208,34 @@ export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandCli
     return mutationIssueRecord(await this.client.issue(issueId));
   }
 
-  async listIssues(teamId: string, cursor: string | null, pageSize: number): Promise<unknown> {
+  async listIssues(cursor: string | null, pageSize: number): Promise<unknown> {
     return issuePage(await this.client.issues({
       after: cursor,
       first: pageSize,
-      filter: { team: { id: { eq: teamId } } },
+      includeArchived: true,
     }));
   }
 
   async listChildren(issueId: string, cursor: string | null, pageSize: number): Promise<unknown> {
     const issue = await this.client.issue(issueId);
     return issuePage(await issue.children({ after: cursor, first: pageSize }));
+  }
+
+  async listIssueHistory(issueId: string, cursor: string | null, pageSize: number): Promise<unknown> {
+    const issue = await this.client.issue(issueId);
+    const history: IssueHistoryConnection = await issue.history({ after: cursor, first: pageSize });
+    return projectedPage(history, (entry) => historyRecord(issueId, entry));
+  }
+
+  async listIssueComments(issueId: string, cursor: string | null, pageSize: number): Promise<unknown> {
+    const issue = await this.client.issue(issueId);
+    const comments: CommentConnection = await issue.comments({ after: cursor, first: pageSize });
+    return projectedPage(comments, (entry) => commentRecord(issueId, entry));
+  }
+
+  async readViewer(): Promise<unknown> {
+    const viewer = await this.client.viewer;
+    return Object.freeze({ id: viewer.id, active: viewer.active, app: viewer.app });
   }
 
   async listRelations(issueId: string, cursor: string | null, pageSize: number): Promise<unknown> {
@@ -180,6 +258,7 @@ export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandCli
       revision: state.updatedAt.toISOString(),
       name: state.name,
       team_id: state.teamId,
+      archived: state.archivedAt != null,
     }));
   }
 

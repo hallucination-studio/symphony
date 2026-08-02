@@ -18,6 +18,7 @@ import {
   parseTaskIssueId,
   parseTaskRelationId,
   parseTaskRevision,
+  type TaskIssueId,
 } from "../../contracts/identity.js";
 import {
   parseCycleExecutionSnapshot,
@@ -427,6 +428,7 @@ function appliedIssueResult(
     ...resultEnvelope(call),
     output: {
       outcome: "applied",
+      effect_may_have_occurred: true,
       target: { kind: "issue", issue_id: issue.issue_id },
       fresh_resource: issue,
       concrete_diff: concreteDiff,
@@ -443,6 +445,7 @@ function appliedRelationResult(call: CreateRelationCall, relation: TaskRelationS
     ...resultEnvelope(call),
     output: {
       outcome: "applied",
+      effect_may_have_occurred: true,
       target: {
         kind: "relation",
         relation_id: relation.relation_id,
@@ -457,8 +460,9 @@ function appliedRelationResult(call: CreateRelationCall, relation: TaskRelationS
 }
 
 function issueFromCreate(call: CreateIssueCall, issueId: string, revision: string): TaskIssueSnapshot {
+  void issueId;
   return Object.freeze({
-    issue_id: parseTaskIssueId(issueId),
+    issue_id: call.input.issue_id,
     revision: parseTaskRevision(revision),
     status: call.input.desired.state_id,
     title: call.input.desired.title,
@@ -912,17 +916,19 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
 
 function nonAppliedIssueResult(
   call: CreateIssueCall,
-  outcome: "not_applied" | "acceptance_unknown",
+  outcome: "not_applied" | "conflict_observed",
   issueId: string,
 ): CreateIssueResult {
+  void issueId;
   return parseTaskMcpResult({
     ...resultEnvelope(call),
     output: {
       outcome,
-      target: { kind: "issue", issue_id: issueId },
+      effect_may_have_occurred: outcome === "conflict_observed",
+      target: { kind: "issue", issue_id: call.input.issue_id },
       fresh_resource: null,
       concrete_diff: [],
-      sanitized_reason: outcome === "acceptance_unknown"
+      sanitized_reason: outcome === "conflict_observed"
         ? "provider_acceptance_unknown"
         : "provider_did_not_apply",
     },
@@ -935,6 +941,7 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
   const events: string[] = [];
   const manager = unexpectedManager();
   let createCount = 0;
+  let firstCreatedIssueId: TaskIssueId | null = null;
   manager.update_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     if (call.input.issue_id === parseTaskIssueId(cycleId)) {
@@ -962,7 +969,7 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
     createCount += 1;
     events.push(`create_${createCount}`);
     if (mode === "uncertain" && createCount === 1) {
-      return nonAppliedIssueResult(call, "acceptance_unknown", "WORK-UNKNOWN");
+      return nonAppliedIssueResult(call, "conflict_observed", "WORK-UNKNOWN");
     }
     if (mode === "partial" && createCount === 2) {
       return nonAppliedIssueResult(call, "not_applied", "WORK-NOT-APPLIED");
@@ -970,12 +977,20 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
     if (mode === "interrupted" && createCount === 2) {
       throw new Error("provider_interrupted");
     }
-    const issueId = mode === "duplicate" && createCount <= 2
-      ? "WORK-DUPLICATE"
-      : `WORK-CREATED-${createCount}`;
+    const issue = issueFromCreate(
+      call,
+      `WORK-CREATED-${createCount}`,
+      `revision:work:created:${createCount}`,
+    );
+    if (createCount === 1) firstCreatedIssueId = issue.issue_id;
+    let returnedIssue = issue;
+    if (mode === "duplicate" && createCount === 2) {
+      assert.ok(firstCreatedIssueId);
+      returnedIssue = Object.freeze({ ...issue, issue_id: firstCreatedIssueId });
+    }
     return appliedIssueResult(
       call,
-      issueFromCreate(call, issueId, `revision:work:created:${createCount}`),
+      returnedIssue,
     );
   };
   const performer = completedPerformer(events);
@@ -1012,7 +1027,7 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
     callerAuthority.verifier.assert(execution.caller, call);
     calls.push(call);
     const issue = {
-      issue_id: "PLAN-CREATED",
+      issue_id: call.input.issue_id,
       revision: "revision:plan:created",
       status: workflow.stage_states.todo,
       title: call.input.desired.title,
@@ -1031,6 +1046,7 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
       capability: call.capability,
       output: {
         outcome: "applied",
+        effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: issue.issue_id },
         fresh_resource: issue,
         concrete_diff: [{ kind: "issue_created", issue }],
@@ -1151,6 +1167,7 @@ test("the exact Plan returned by creation is sealed before Plan execution", asyn
 test("completed Plan materializes one exact graph before Plan becomes Done", async () => {
   const request = planOnlyRequest();
   const events: string[] = [];
+  const createIssueIds: TaskIssueId[] = [];
   const createdIssues: TaskIssueSnapshot[] = [];
   const createdRelations: TaskRelationSnapshot[] = [];
   const manager = unexpectedManager();
@@ -1197,6 +1214,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   };
   manager.create_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
+    createIssueIds.push(call.input.issue_id);
     const index = createdIssues.length;
     const identities = [
       ["WORK-CONTRACTS", "revision:work:contracts"],
@@ -1213,7 +1231,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   manager.create_relation = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     const relation = Object.freeze({
-      relation_id: parseTaskRelationId(`REL-${createdRelations.length + 1}`),
+      relation_id: call.input.relation_id,
       revision: parseTaskRevision(`revision:relation:${createdRelations.length + 1}`),
       type: "blocks",
       source_issue_id: call.input.source_issue_id,
@@ -1251,17 +1269,17 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
 
   assert.equal(result.outcome, "advanced");
   assert.equal(performerCreates, 1);
-  assert.deepEqual(createdIssues.map(({ issue_id }) => issue_id), [
-    parseTaskIssueId("WORK-CONTRACTS"),
-    parseTaskIssueId("WORK-RUNTIME"),
-    parseTaskIssueId("VERIFY-CYCLE"),
-  ]);
+  assert.deepEqual(createdIssues.map(({ issue_id }) => issue_id), createIssueIds);
+  const [contractsId, runtimeId, verifyId] = createIssueIds;
+  assert.ok(contractsId);
+  assert.ok(runtimeId);
+  assert.ok(verifyId);
   assert.deepEqual(createdRelations.map(({ source_issue_id, target_issue_id }) => (
     [source_issue_id, target_issue_id]
   )), [
-    [parseTaskIssueId("WORK-CONTRACTS"), parseTaskIssueId("WORK-RUNTIME")],
-    [parseTaskIssueId("WORK-CONTRACTS"), parseTaskIssueId("VERIFY-CYCLE")],
-    [parseTaskIssueId("WORK-RUNTIME"), parseTaskIssueId("VERIFY-CYCLE")],
+    [contractsId, runtimeId],
+    [contractsId, verifyId],
+    [runtimeId, verifyId],
   ]);
   assert.deepEqual(events, [
     "plan_in_progress",
@@ -1271,9 +1289,9 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     "create_Implement contracts",
     "create_Wire runtime",
     "create_Verify approved Cycle",
-    "relate_WORK-CONTRACTS_WORK-RUNTIME",
-    "relate_WORK-CONTRACTS_VERIFY-CYCLE",
-    "relate_WORK-RUNTIME_VERIFY-CYCLE",
+    `relate_${contractsId}_${runtimeId}`,
+    `relate_${contractsId}_${verifyId}`,
+    `relate_${runtimeId}_${verifyId}`,
     "read_graph",
     "plan_done",
   ]);
@@ -1352,7 +1370,7 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
     callerAuthority.verifier.assert(execution.caller, call);
     const index = createdRelations.length + 1;
     const relation = Object.freeze({
-      relation_id: parseTaskRelationId(`REL-READBACK-${index}`),
+      relation_id: call.input.relation_id,
       revision: parseTaskRevision(`revision:relation:readback:${index}`),
       type: "blocks",
       source_issue_id: call.input.source_issue_id,
