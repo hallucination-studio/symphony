@@ -1,29 +1,27 @@
-import { spawn } from "node:child_process";
 import { open } from "node:fs/promises";
+import { createConnection } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ENV_PATH = path.join(REPOSITORY_ROOT, ".env");
-const CONDUCTOR_ENTRY = path.join(REPOSITORY_ROOT, "apps", "conductor", "dist", "main.js");
 const MAX_ENV_BYTES = 64 * 1024;
 const MAX_SECRET_LENGTH = 4096;
 const MAX_OUTPUT_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 10_000;
-const PASSTHROUGH_ENVIRONMENT = Object.freeze([
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LOGNAME",
-  "PATH",
-  "SSH_AUTH_SOCK",
-  "TMP",
-  "TMPDIR",
-  "TEMP",
-  "USER",
-  "XDG_CONFIG_HOME",
+const PRODUCTION_LINEAR_CREDENTIAL = /^SYMPHONY_(?:E2E_LINEAR_DEV|LINEAR)_TOKEN$/u;
+const DIAGNOSTIC_EVENTS = new Set([
+  "code_inspection_diagnostic",
+  "root_task_authorization_diagnostic",
+  "root_task_tool_diagnostic",
+  "root_tool_call_accepted",
+  "root_tool_call_denied",
+  "root_tool_call_failed",
+  "root_turn_completed",
+  "root_turn_failed",
+  "root_turn_started",
 ]);
 
 class E2ERunnerError extends Error {
@@ -77,19 +75,9 @@ function projectSlugId(environment) {
   return value;
 }
 
-function baseUrl(environment) {
-  const value = requiredValue(environment, "SYMPHONY_E2E_CODEX_BASE_URL", 2048);
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw runnerError("invalid_e2e_configuration");
-  }
-  if (
-    !["http:", "https:"].includes(parsed.protocol)
-    || parsed.username !== ""
-    || parsed.password !== ""
-  ) throw runnerError("invalid_e2e_configuration");
+function launcherSocketPath(environment) {
+  const value = requiredValue(environment, "SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET", 4096);
+  if (!path.isAbsolute(value)) throw runnerError("invalid_e2e_configuration");
   return value;
 }
 
@@ -111,7 +99,13 @@ async function readEnvironment(envPath) {
 }
 
 async function loadConfiguration(envPath) {
+  if (Object.keys(process.env).some((key) => PRODUCTION_LINEAR_CREDENTIAL.test(key))) {
+    throw runnerError("invalid_e2e_configuration");
+  }
   const environment = await readEnvironment(envPath);
+  if (Object.keys(environment).some((key) => PRODUCTION_LINEAR_CREDENTIAL.test(key))) {
+    throw runnerError("invalid_e2e_configuration");
+  }
   if (environment.SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED !== "true") {
     throw runnerError("invalid_e2e_configuration");
   }
@@ -119,13 +113,7 @@ async function loadConfiguration(envPath) {
     linearHumanToken: requiredSecret(environment, "SYMPHONY_E2E_LINEAR_HUMAN_TOKEN"),
     projectSlugId: projectSlugId(environment),
   });
-  const productEnvironment = Object.freeze({
-    SYMPHONY_LINEAR_TOKEN: requiredSecret(environment, "SYMPHONY_E2E_LINEAR_DEV_TOKEN"),
-    SYMPHONY_CODEX_API_KEY: requiredSecret(environment, "SYMPHONY_E2E_CODEX_API_KEY"),
-    SYMPHONY_CODEX_BASE_URL: baseUrl(environment),
-    SYMPHONY_CODEX_MODEL: requiredSecret(environment, "SYMPHONY_E2E_CODEX_MODEL"),
-  });
-  return Object.freeze({ fixtureAccess, productEnvironment });
+  return Object.freeze({ fixtureAccess, launcherSocketPath: launcherSocketPath(environment) });
 }
 
 async function assertReadableFile(file, failureCode) {
@@ -141,18 +129,55 @@ async function assertReadableFile(file, failureCode) {
   }
 }
 
-function childEnvironment(productEnvironment) {
-  const environment = {};
-  for (const key of PASSTHROUGH_ENVIRONMENT) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
-  }
-  return Object.freeze({ ...environment, ...productEnvironment });
+function safeReasonCode(value) {
+  return typeof value === "string"
+    && /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,31})?$/u.test(value)
+    ? value
+    : undefined;
 }
 
-function safeReasonCode(value) {
-  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(value)
-    ? value
+export function conductorFailureFromEvent(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (value.event === "conductor_failed") {
+    return runnerError("conductor_failed", safeReasonCode(value.reason_code));
+  }
+  if (value.event === "root_observation_failed") {
+    const reasonCode = value.reason_code === "runtime_preparation_failed"
+      ? value.reason_code
+      : undefined;
+    return runnerError("conductor_runtime_failed", safeReasonCode(value.cause_code) ?? reasonCode);
+  }
+  if (value.event === "root_turn_completed") {
+    const reasonCode = {
+      timed_out: "root_turn_timed_out",
+      stopped: "root_turn_stopped",
+      canceled: "root_turn_canceled",
+    }[value.outcome];
+    return reasonCode === undefined
+      ? undefined
+      : runnerError("conductor_runtime_failed", reasonCode);
+  }
+  if ([
+    "root_turn_failed",
+    "cycle_action_failed",
+    "cycle_continuation_failed",
+    "root_cleanup_failed",
+  ].includes(value.event)) {
+    return runnerError(
+      "conductor_runtime_failed",
+      safeReasonCode(value.cause_code) ?? safeReasonCode(value.reason_code),
+    );
+  }
+  return undefined;
+}
+
+export function conductorDiagnosticFromEvent(value) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof value.event === "string"
+    && DIAGNOSTIC_EVENTS.has(value.event)
+    ? Object.freeze({ diagnostic: "conductor_event", event: value.event })
     : undefined;
 }
 
@@ -190,55 +215,54 @@ function watchJsonLines(stream, onEvent, onInvalid) {
   });
 }
 
-function waitForExit(child) {
+function waitForClose(connection) {
   return new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
+    if (connection.destroyed) {
       resolve();
       return;
     }
-    child.once("close", () => resolve());
+    connection.once("close", () => resolve());
   });
 }
 
-async function terminateChild(child, exit, timeoutMilliseconds) {
-  if (child.exitCode !== null || child.signalCode !== null) return false;
-  child.kill("SIGTERM");
-  const stopped = await Promise.race([
-    exit.then(() => true),
+async function closeLauncher(connection, close, timeoutMilliseconds) {
+  if (connection.destroyed) return false;
+  connection.end(`${JSON.stringify({ type: "stop" })}\n`);
+  const closed = await Promise.race([
+    close.then(() => true),
     new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMilliseconds);
       timer.unref();
     }),
   ]);
-  if (!stopped && child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-    await exit;
+  if (!closed) {
+    connection.destroy();
+    await close;
     return true;
   }
   return false;
 }
 
-async function startBuiltConductor({ configPath, environment }) {
-  if (typeof configPath !== "string" || !path.isAbsolute(configPath)) {
+async function startBuiltConductor({ configPath, launcherSocketPath: socketPath }) {
+  if (
+    typeof configPath !== "string"
+    || !path.isAbsolute(configPath)
+    || typeof socketPath !== "string"
+    || !path.isAbsolute(socketPath)
+  ) {
     throw runnerError("invalid_conductor_config_path");
   }
-  await Promise.all([
-    assertReadableFile(CONDUCTOR_ENTRY, "conductor_build_missing"),
-    assertReadableFile(configPath, "invalid_conductor_config_path"),
-  ]);
+  await assertReadableFile(configPath, "invalid_conductor_config_path");
 
-  const conductorArguments = ["--config", configPath];
-  const child = spawn(process.execPath, [CONDUCTOR_ENTRY, ...conductorArguments], {
-    cwd: REPOSITORY_ROOT,
-    env: childEnvironment(environment),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const exit = waitForExit(child);
+  const connection = createConnection({ path: socketPath });
+  const close = waitForClose(connection);
   let settled = false;
   let stopping = false;
   let runtimeFailure;
+  let resolveFailure;
   let resolveReady;
   let rejectReady;
+  const failure = new Promise((resolve) => { resolveFailure = resolve; });
   const ready = new Promise((resolve, reject) => {
     resolveReady = resolve;
     rejectReady = reject;
@@ -248,23 +272,33 @@ async function startBuiltConductor({ configPath, environment }) {
     if (!settled) {
       settled = true;
       rejectReady(error);
+    } else {
+      resolveFailure(runtimeFailure);
     }
   };
   const event = (value) => {
+    const diagnostic = conductorDiagnosticFromEvent(value);
+    if (process.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS === "1" && diagnostic !== undefined) {
+      process.stderr.write(`# ${JSON.stringify(diagnostic)}\n`);
+    }
     if (value.event === "conductor_ready" && !settled) {
       settled = true;
       resolveReady();
-    } else if (value.event === "conductor_failed") {
-      fail(runnerError("conductor_failed", safeReasonCode(value.reason_code)));
+    } else {
+      const eventFailure = conductorFailureFromEvent(value);
+      if (eventFailure !== undefined) fail(eventFailure);
     }
   };
-  watchJsonLines(child.stdout, event, () => fail(runnerError("invalid_conductor_output")));
-  watchJsonLines(child.stderr, event, () => fail(runnerError("invalid_conductor_output")));
-  child.once("error", () => fail(runnerError("conductor_start_failed")));
-  child.once("close", () => {
+  watchJsonLines(connection, event, () => fail(runnerError("invalid_conductor_output")));
+  connection.once("connect", () => {
+    connection.write(`${JSON.stringify({ type: "start", config_path: configPath })}\n`);
+  });
+  connection.once("error", () => fail(runnerError("conductor_start_failed")));
+  connection.once("close", () => {
     if (!settled) fail(runnerError("conductor_start_failed"));
     else if (!stopping && runtimeFailure === undefined) {
       runtimeFailure = runnerError("conductor_exited");
+      resolveFailure(runtimeFailure);
     }
   });
 
@@ -273,16 +307,18 @@ async function startBuiltConductor({ configPath, environment }) {
   try {
     await ready;
   } catch (error) {
-    await terminateChild(child, exit, STOP_TIMEOUT_MS);
+    connection.destroy();
+    await close;
     throw isRunnerError(error) ? error : runnerError("conductor_start_failed");
   } finally {
     clearTimeout(timeout);
   }
 
   return Object.freeze({
+    waitForFailure: async () => { throw await failure; },
     stop: async () => {
       stopping = true;
-      const forced = await terminateChild(child, exit, STOP_TIMEOUT_MS);
+      const forced = await closeLauncher(connection, close, STOP_TIMEOUT_MS);
       if (runtimeFailure) throw runtimeFailure;
       if (forced) throw runnerError("conductor_stop_timeout");
     },
@@ -317,7 +353,7 @@ function fixtureManager(fixtureAccess, cleanupOperations) {
   });
 }
 
-function productManager(productEnvironment, productHandles, startProduct) {
+function productManager(launcherSocketPath, productHandles, startProduct) {
   return Object.freeze({
     start: async (configPath) => {
       if (typeof configPath !== "string" || !path.isAbsolute(configPath)) {
@@ -325,7 +361,7 @@ function productManager(productEnvironment, productHandles, startProduct) {
       }
       let handle;
       try {
-        handle = await startProduct(Object.freeze({ configPath, environment: productEnvironment }));
+        handle = await startProduct(Object.freeze({ configPath, launcherSocketPath }));
       } catch (error) {
         if (isRunnerError(error)) throw error;
         throw runnerError("conductor_start_failed");
@@ -334,6 +370,20 @@ function productManager(productEnvironment, productHandles, startProduct) {
         throw runnerError("invalid_conductor_process_handle");
       }
       productHandles.push(handle);
+      return Object.freeze({
+        waitForFailure: async () => {
+          if (typeof handle.waitForFailure !== "function") {
+            await new Promise(() => undefined);
+          }
+          try {
+            await handle.waitForFailure();
+          } catch (error) {
+            if (isRunnerError(error)) throw error;
+            throw runnerError("conductor_runtime_failed");
+          }
+          throw runnerError("conductor_exited");
+        },
+      });
     },
   });
 }
@@ -367,7 +417,7 @@ export async function runBlackBoxScenario({
   const cleanupOperations = [];
   const productHandles = [];
   const fixtures = fixtureManager(configuration.fixtureAccess, cleanupOperations);
-  const product = productManager(configuration.productEnvironment, productHandles, startProduct);
+  const product = productManager(configuration.launcherSocketPath, productHandles, startProduct);
   let result;
   let scenarioFailure;
 
@@ -394,6 +444,12 @@ export async function runBlackBoxScenario({
       ? runnerError("e2e_cleanup_failed")
       : undefined;
 
+  if (
+    scenarioFailure
+    && cleanupFailure
+    && scenarioFailure.code === cleanupFailure.code
+    && scenarioFailure.reasonCode === cleanupFailure.reasonCode
+  ) throw scenarioFailure;
   if (scenarioFailure && cleanupFailure) throw runnerError("black_box_scenario_cleanup_failed");
   if (scenarioFailure) throw scenarioFailure;
   if (cleanupFailure) throw cleanupFailure;

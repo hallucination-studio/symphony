@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { runBlackBoxScenario } from "./black-box-runner.mjs";
+import {
+  conductorDiagnosticFromEvent,
+  conductorFailureFromEvent,
+  runBlackBoxScenario,
+} from "./black-box-runner.mjs";
 
 const secretValues = Object.freeze({
   human: "human-fixture-token-7e21",
@@ -14,12 +21,9 @@ const secretValues = Object.freeze({
 
 const requiredEnvironment = Object.freeze({
   SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: secretValues.human,
-  SYMPHONY_E2E_LINEAR_DEV_TOKEN: secretValues.product,
   SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
   SYMPHONY_E2E_PROJECT_SLUG_ID: "project-fixture",
-  SYMPHONY_E2E_CODEX_API_KEY: secretValues.codex,
-  SYMPHONY_E2E_CODEX_BASE_URL: "https://api.example.com/v1",
-  SYMPHONY_E2E_CODEX_MODEL: "model-fixture",
+  SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: "/tmp/symphony-launcher.sock",
 });
 
 function envSource(environment = requiredEnvironment) {
@@ -75,7 +79,7 @@ test("missing or incomplete configuration fails before fixture or product operat
   }
 });
 
-test("runner keeps fixture credentials out of the built product environment", async (t) => {
+test("runner exposes only public launcher coordinates to product startup", async (t) => {
   const directory = await temporaryDirectory(t);
   const envPath = path.join(directory, ".env");
   const configPath = path.join(directory, "conductor.json");
@@ -128,14 +132,113 @@ test("runner keeps fixture credentials out of the built product environment", as
     "cleanup_fixture",
   ]);
   assert.equal(launch.configPath, configPath);
-  assert.deepEqual(launch.environment, {
-    SYMPHONY_LINEAR_TOKEN: secretValues.product,
-    SYMPHONY_CODEX_API_KEY: secretValues.codex,
-    SYMPHONY_CODEX_BASE_URL: "https://api.example.com/v1",
-    SYMPHONY_CODEX_MODEL: "model-fixture",
-  });
+  assert.equal(launch.launcherSocketPath, "/tmp/symphony-launcher.sock");
+  assert.equal("environment" in launch, false);
   assert.equal(JSON.stringify(launch).includes(secretValues.human), false);
-  assert.equal(Object.keys(launch.environment).some((key) => key.startsWith("SYMPHONY_E2E_")), false);
+  assert.equal(JSON.stringify(launch).includes(secretValues.product), false);
+  assert.equal(JSON.stringify(launch).includes(secretValues.codex), false);
+});
+
+test("runner rejects production credentials in its file or process environment before effects", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const envPath = path.join(directory, ".env");
+  const forbiddenKeys = ["SYMPHONY_E2E_LINEAR_DEV_TOKEN", "SYMPHONY_LINEAR_TOKEN"];
+
+  for (const key of forbiddenKeys) {
+    await writeFile(envPath, envSource({ ...requiredEnvironment, [key]: secretValues.product }), {
+      mode: 0o600,
+    });
+    let scenarioCalled = false;
+    await assert.rejects(
+      runBlackBoxScenario({
+        envPath,
+        scenario: async () => { scenarioCalled = true; },
+        startProduct: async () => { throw new Error("product_must_not_start"); },
+      }),
+      (error) => error?.code === "invalid_e2e_configuration",
+    );
+    assert.equal(scenarioCalled, false);
+  }
+
+  await writeFile(envPath, envSource(), { mode: 0o600 });
+  const previous = process.env.SYMPHONY_LINEAR_TOKEN;
+  process.env.SYMPHONY_LINEAR_TOKEN = secretValues.product;
+  try {
+    await assert.rejects(
+      runBlackBoxScenario({ envPath, scenario: async () => undefined }),
+      (error) => error?.code === "invalid_e2e_configuration",
+    );
+  } finally {
+    if (previous === undefined) delete process.env.SYMPHONY_LINEAR_TOKEN;
+    else process.env.SYMPHONY_LINEAR_TOKEN = previous;
+  }
+});
+
+test("deployment launcher injects the production credential outside runner requests and output", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const socketPath = path.join(directory, "launcher.sock");
+  const envPath = path.join(directory, ".env");
+  const configPath = path.join(directory, "conductor.json");
+  const fakeConductorPath = path.join(directory, "fake-conductor.mjs");
+  await writeFile(envPath, envSource({
+    ...requiredEnvironment,
+    SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: socketPath,
+  }), { mode: 0o600 });
+  await writeFile(configPath, "{}", { mode: 0o600 });
+  await writeFile(fakeConductorPath, [
+    "const credential = process.env.SYMPHONY_LINEAR_TOKEN;",
+    "if (!credential || process.argv.join(' ').includes(credential)) process.exit(2);",
+    "process.stdout.write(JSON.stringify({ event: 'conductor_ready' }) + '\\n');",
+    "process.on('SIGTERM', () => process.exit(0));",
+    "setInterval(() => undefined, 1000).unref();",
+  ].join("\n"), { mode: 0o600 });
+
+  const requests = [];
+  const outputs = [];
+  const server = createServer((connection) => {
+    let buffered = "";
+    let conductor;
+    connection.setEncoding("utf8");
+    connection.on("data", (chunk) => {
+      buffered += chunk;
+      let newline = buffered.indexOf("\n");
+      while (newline >= 0) {
+        const request = JSON.parse(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        requests.push(request);
+        if (request.type === "start") {
+          conductor = spawn(process.execPath, [fakeConductorPath, "--config", request.config_path], {
+            env: { SYMPHONY_LINEAR_TOKEN: secretValues.product },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          conductor.stdout.on("data", (value) => {
+            outputs.push(String(value));
+            connection.write(value);
+          });
+        } else if (request.type === "stop") {
+          conductor?.kill("SIGTERM");
+          connection.end();
+        }
+        newline = buffered.indexOf("\n");
+      }
+    });
+  });
+  server.listen(socketPath);
+  await once(server, "listening");
+  t.after(() => server.close());
+
+  await runBlackBoxScenario({
+    envPath,
+    scenario: async ({ product }) => { await product.start(configPath); },
+  });
+
+  assert.deepEqual(requests, [
+    { type: "start", config_path: configPath },
+    { type: "stop" },
+  ]);
+  assert.equal(JSON.stringify(requests).includes(secretValues.product), false);
+  assert.equal(outputs.join("").includes(secretValues.product), false);
+  assert.equal((await readFile(fakeConductorPath, "utf8")).includes(secretValues.product), false);
 });
 
 test("runner sanitizes untrusted fixture and product failures", async (t) => {
@@ -192,15 +295,104 @@ test("fixture cleanup still runs when product shutdown fails", async (t) => {
   for (const secret of Object.values(secretValues)) assert.doesNotMatch(errorText(failure), new RegExp(secret, "u"));
 });
 
+test("product health monitor reports a sanitized runtime failure", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const envPath = path.join(directory, ".env");
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(envPath, envSource(), { mode: 0o600 });
+  await writeFile(configPath, "{}", { mode: 0o600 });
+  let productStopped = false;
+
+  const failure = await runBlackBoxScenario({
+    envPath,
+    startProduct: async () => ({
+      stop: async () => { productStopped = true; },
+      waitForFailure: async () => { throw new Error(`runtime rejected ${secretValues.codex}`); },
+    }),
+    scenario: async ({ product }) => {
+      const running = await product.start(configPath);
+      await running.waitForFailure();
+    },
+  }).catch((error) => error);
+
+  assert.equal(productStopped, true);
+  assert.equal(failure?.code, "conductor_runtime_failed");
+  for (const secret of Object.values(secretValues)) assert.doesNotMatch(errorText(failure), new RegExp(secret, "u"));
+});
+
+test("Conductor Root preparation failures stop the health monitor with a closed reason", () => {
+  const failure = conductorFailureFromEvent({
+    event: "root_observation_failed",
+    root_id: "fixture-root",
+    correlation_id: "fixture-correlation",
+    reason_code: "runtime_preparation_failed",
+    cause_code: "codex_local_only_preflight_failed:config",
+  });
+  assert.equal(failure?.code, "conductor_runtime_failed");
+  assert.equal(failure?.reasonCode, "codex_local_only_preflight_failed:config");
+
+  const untrusted = conductorFailureFromEvent({
+    event: "root_observation_failed",
+    reason_code: `provider rejected ${secretValues.codex}`,
+  });
+  assert.equal(untrusted?.code, "conductor_runtime_failed");
+  assert.equal(untrusted?.reasonCode, undefined);
+  assert.doesNotMatch(errorText(untrusted), new RegExp(secretValues.codex, "u"));
+  const untrustedCause = conductorFailureFromEvent({
+    event: "root_observation_failed",
+    reason_code: "runtime_preparation_failed",
+    cause_code: `provider rejected ${secretValues.codex}`,
+  });
+  assert.equal(untrustedCause?.reasonCode, "runtime_preparation_failed");
+  assert.doesNotMatch(errorText(untrustedCause), new RegExp(secretValues.codex, "u"));
+  assert.equal(conductorFailureFromEvent({ event: "root_turn_started" }), undefined);
+});
+
+test("Conductor terminal Root and runtime failures stop the health monitor", () => {
+  for (const [event, reasonCode] of [
+    [{ event: "root_turn_completed", outcome: "timed_out" }, "root_turn_timed_out"],
+    [{ event: "root_turn_completed", outcome: "stopped" }, "root_turn_stopped"],
+    [{ event: "root_turn_completed", outcome: "canceled" }, "root_turn_canceled"],
+    [{
+      event: "root_turn_failed",
+      reason_code: "turn_boundary_failed",
+      cause_code: "codex_thread_turn_failed",
+    }, "codex_thread_turn_failed"],
+    [{ event: "cycle_action_failed", reason_code: "cycle_boundary_failed" }, "cycle_boundary_failed"],
+    [{ event: "cycle_continuation_failed", reason_code: "cycle_preparation_failed" }, "cycle_preparation_failed"],
+    [{ event: "root_cleanup_failed", reason_code: "runtime_shutdown_failed" }, "runtime_shutdown_failed"],
+  ]) {
+    const failure = conductorFailureFromEvent(event);
+    assert.equal(failure?.code, "conductor_runtime_failed");
+    assert.equal(failure?.reasonCode, reasonCode);
+  }
+  assert.equal(conductorFailureFromEvent({ event: "root_turn_completed", outcome: "quiescent" }), undefined);
+  assert.equal(conductorFailureFromEvent({}), undefined);
+});
+
+test("diagnostic projection drops every untrusted event field", () => {
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_turn_failed",
+    cause_code: secretValues.product,
+    tool: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_turn_failed",
+  });
+  assert.equal(conductorDiagnosticFromEvent({ event: `root_turn_${secretValues.product}` }), undefined);
+});
+
 test("runner source stays outside Conductor and internal operation boundaries", async () => {
   const source = await readFile(new URL("./black-box-runner.mjs", import.meta.url), "utf8");
   const conductorImport = /\b(?:from\s*|import\s*\()\s*["'][^"']*(?:apps\/conductor|conductor\/(?:src|dist))[^"']*["']/u;
   const internalOperation = /\b(?:RootReconcill|runProductionPoll|LinearCommands|CycleMachine|TaskManageCommand|CodexLocalOnly|GitCommand|GitHubDelivery)\b/u;
-  const credentialOutput = /\b(?:console\.|process\.(?:stdout|stderr)|writeFile|appendFile|createWriteStream)\b/u;
+  const unsafeOutput = /\b(?:console\.|process\.stdout|writeFile|appendFile|createWriteStream)\b/u;
 
   assert.doesNotMatch(source, conductorImport);
   assert.doesNotMatch(source, internalOperation);
-  assert.doesNotMatch(source, credentialOutput);
-  assert.match(source, /"apps",\s*"conductor",\s*"dist",\s*"main\.js"/u);
-  assert.match(source, /\["--config",\s*configPath\]/u);
+  assert.doesNotMatch(source, unsafeOutput);
+  assert.equal(source.match(/process\.stderr\.write/gu)?.length, 1);
+  assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN/u);
+  assert.doesNotMatch(source, /SYMPHONY_CODEX_API_KEY/u);
+  assert.match(source, /SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET/u);
 });
