@@ -550,25 +550,52 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
     );
   }
 
-  for (const [functionName, field, identity] of [
-    ["create_issue", "issue_id", "11111111-1111-4111-8111-111111111111"],
-    ["create_relation", "relation_id", "22222222-2222-4222-8222-222222222222"],
-  ] as const) {
-    const spec = tools.specs.find(({ name }) => name === functionName);
-    assert.ok(spec);
-    const input = (spec.inputSchema as {
-      properties: Record<string, {
-        properties?: Record<string, { type?: unknown; pattern?: unknown }>;
-      }>;
-    }).properties.input?.properties;
-    assert.equal(input?.[field]?.type, "string");
-    const pattern = input?.[field]?.pattern;
-    assert.equal(typeof pattern, "string");
-    assert.match(identity, new RegExp(String(pattern), "u"));
-    assert.equal(new RegExp(String(pattern), "u").test(
-      field === "issue_id" ? "LIN-CREATED" : "REL-CREATED",
-    ), false);
-  }
+  const createIssue = tools.specs.find(({ name }) => name === "create_issue");
+  assert.ok(createIssue);
+  const inputSchema = (createIssue.inputSchema as {
+    properties: Record<string, { properties?: Record<string, unknown> }>;
+  }).properties.input;
+  assert.ok(inputSchema);
+  const createInput = inputSchema.properties as Record<string, {
+    enum?: unknown;
+    type?: unknown;
+    pattern?: unknown;
+    minItems?: unknown;
+    maxItems?: unknown;
+    items?: { enum?: unknown };
+    properties?: Record<string, {
+      enum?: unknown;
+      type?: unknown;
+      minItems?: unknown;
+      maxItems?: unknown;
+      items?: { enum?: unknown };
+    }>;
+  }>;
+  assert.equal(createInput.issue_id?.type, "string");
+  assert.match(
+    "11111111-1111-4111-8111-111111111111",
+    new RegExp(String(createInput.issue_id?.pattern), "u"),
+  );
+  assert.deepEqual(createInput.parent_issue_id?.enum, [rootId]);
+  const desired = createInput.desired?.properties;
+  assert.equal(desired?.description?.type, "string");
+  assert.deepEqual(desired?.state_id?.enum, [workflow.cycle_states.draft]);
+  assert.equal(desired?.label_ids?.minItems, 1);
+  assert.equal(desired?.label_ids?.maxItems, 1);
+  assert.deepEqual(desired?.label_ids?.items?.enum, [workflow.labels.cycle]);
+  assert.deepEqual(desired?.delegate_id?.enum, [null]);
+  assert.deepEqual(desired?.priority?.enum, [null]);
+
+  const createRelation = tools.specs.find(({ name }) => name === "create_relation");
+  assert.ok(createRelation);
+  const relationInput = (createRelation.inputSchema as {
+    properties: Record<string, { properties?: Record<string, { type?: unknown; pattern?: unknown }> }>;
+  }).properties.input?.properties;
+  assert.equal(relationInput?.relation_id?.type, "string");
+  assert.match(
+    "22222222-2222-4222-8222-222222222222",
+    new RegExp(String(relationInput?.relation_id?.pattern), "u"),
+  );
 });
 
 test("Root tools dispatch a typed Task MCP result after all identity fences pass", async () => {

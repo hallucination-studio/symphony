@@ -76,10 +76,10 @@ export function rootReconcillOutputSchema(
   correlationId: CorrelationId,
 ): Record<string, unknown> {
   const properties = Object.freeze({
-    schema_version: { const: 1 },
-    root_id: { const: target.root_id },
-    runtime_generation: { const: target.runtime_generation },
-    correlation_id: { const: correlationId },
+    schema_version: { enum: [1] },
+    root_id: { enum: [target.root_id] },
+    runtime_generation: { enum: [target.runtime_generation] },
+    correlation_id: { enum: [correlationId] },
     outcome: { enum: ["quiescent", "stopped"] },
     sanitized_reason: {
       anyOf: [
@@ -175,6 +175,14 @@ export function rootReconcillPrompt(
     define_contract: {
       cycle_creation_requires: "complete Root Markdown in current-turn fresh Task Manager facts",
       root_update_required_when: "the current-turn fresh Root Markdown is absent or incomplete",
+      cycle_creation_mutation: {
+        parent_issue_id: "exact Root identity",
+        expected_parent_revision: "fresh Root revision after complete Markdown read-back",
+        desired_state_id: "configured Cycle Draft state",
+        desired_label_ids: "exactly the configured Cycle label",
+        desired_delegate_id: null,
+        desired_priority: null,
+      },
     },
     cycle_boundary_contract: {
       in_progress: "quiescent with no mutation; Conductor owns mechanical execution",

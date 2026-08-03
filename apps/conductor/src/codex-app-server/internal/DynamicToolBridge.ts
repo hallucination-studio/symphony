@@ -13,7 +13,7 @@ import {
   type RootToolBinding,
   type RootToolExecution,
 } from "../../runtime/RootToolBoundary.js";
-import type { CodexInboundMessage } from "./CodexProtocol.js";
+import type { CodexInboundMessage, CodexRequestId } from "./CodexProtocol.js";
 
 const FAILURE_REASONS = Object.freeze({
   invalid_contract: "tool call did not match the declared contract",
@@ -36,7 +36,7 @@ export function isHardToolDenial(reasonCode: BoundaryErrorCode): boolean {
 
 interface ToolProcess {
   onNotification(listener: (message: CodexInboundMessage) => void): () => void;
-  respondToTool(requestId: string, success: boolean, text: string): Promise<void>;
+  respondToTool(requestId: CodexRequestId, success: boolean, text: string): Promise<void>;
 }
 
 interface RootToolLogIdentity {
@@ -116,9 +116,9 @@ export function bindDynamicTools(
   }
   const byName = new Map(options.bindings.map((binding) => [binding.spec.name, binding]));
   if (byName.size !== options.bindings.length) throw new Error("duplicate_dynamic_tool");
-  const seenCalls = new Map<string, string>();
-  const seenRequests = new Set<string>();
-  const seenStaleRequests = new Set<string>();
+  const seenCalls = new Map<string, CodexRequestId>();
+  const seenRequests = new Set<CodexRequestId>();
+  const seenStaleRequests = new Set<CodexRequestId>();
   let active = true;
   let accepting = true;
   let inFlight = false;

@@ -1,4 +1,7 @@
 import { Buffer } from "node:buffer";
+import hostProcess from "node:process";
+
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 import {
   parseCorrelationId,
@@ -183,6 +186,48 @@ function callDenied(): never {
   throw new RootTaskManageBindingError("capability_denied", false);
 }
 
+function diagnosticAuthorizationFailure(tool: string, category: string): never {
+  if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS === "1") {
+    hostProcess.stderr.write(`${JSON.stringify({
+      event: "root_task_authorization_diagnostic",
+      tool,
+      stage: "authorization",
+      category,
+    })}\n`);
+  }
+  return callDenied();
+}
+
+function rootMarkdownDiagnostic(value: unknown): string {
+  if (typeof value !== "string") return "root_markdown_content_invalid";
+  const tree = fromMarkdown(value) as {
+    readonly children?: readonly {
+      readonly type: string;
+      readonly depth?: number;
+      readonly children?: readonly { readonly type: string; readonly value?: string }[];
+    }[];
+  };
+  const children = tree.children ?? [];
+  const headings = children.filter((node) => node.type === "heading" && node.depth === 2);
+  if (headings.length !== 4) return "root_markdown_heading_count";
+  const names = headings.map((heading) => (
+    heading.children?.length === 1 && heading.children[0]?.type === "text"
+      ? heading.children[0].value
+      : undefined
+  ));
+  if (names.some((name, index) => name !== ["Requirement", "Domain Knowledge", "Root ADR", "Acceptance"][index])) {
+    return "root_markdown_heading_order";
+  }
+  const firstSection = children.indexOf(headings[0] as (typeof children)[number]);
+  const prefix = children.slice(0, firstSection);
+  if (
+    prefix.length > 1
+    || (prefix.length === 1 && (prefix[0]?.type !== "heading" || prefix[0].depth !== 1))
+    || children.filter((node) => node.type === "heading" && node.depth === 1).length !== prefix.length
+  ) return "root_markdown_title_structure";
+  return "root_markdown_content_invalid";
+}
+
 function invalidBoundary(): never {
   throw new RootTaskManageBindingError("invalid_contract", true);
 }
@@ -339,7 +384,13 @@ function assertScopedIssue(
   }
 }
 
-const ROOT_TASK_MANAGE_BINDINGS = new WeakSet<object>();
+export interface RootTaskManageToolContract {
+  readonly root_id: RootIssueId;
+  readonly cycle_draft_state_id: string;
+  readonly cycle_label_id: string;
+}
+
+const ROOT_TASK_MANAGE_BINDINGS = new WeakMap<object, RootTaskManageToolContract>();
 
 export class RootTaskManageCommandBinding {
   readonly root_id: RootIssueId;
@@ -377,7 +428,11 @@ export class RootTaskManageCommandBinding {
     this.#observedIssues = observedIssues;
     this.#observedAcceptanceViews = observedAcceptanceViews;
     this.#acceptedRevisions = acceptedRevisions;
-    ROOT_TASK_MANAGE_BINDINGS.add(this);
+    ROOT_TASK_MANAGE_BINDINGS.set(this, Object.freeze({
+      root_id: rootId,
+      cycle_draft_state_id: workflow.cycle_states.draft,
+      cycle_label_id: workflow.labels.cycle,
+    }));
     Object.freeze(this);
   }
 
@@ -800,21 +855,44 @@ export class RootTaskManageCommandBinding {
       issue.parent_id === scope.root_issue_id
       && issueKind(issue, this.workflow) === "cycle"
     ));
-    if (
-      root === undefined
-      || call.input.parent_issue_id !== scope.root_issue_id
-      || call.input.expected_parent_revision !== root.revision
-      || this.#activeCycles(scope).length !== 0
-      || call.input.desired.description === null
-      || call.input.desired.state_id !== this.workflow.cycle_states.draft
-      || call.input.desired.label_ids.length !== 1
-      || call.input.desired.label_ids[0] !== this.workflow.labels.cycle
-      || call.input.desired.delegate_id !== null
-      || call.input.desired.priority !== null
-    ) callDenied();
+    if (root === undefined) diagnosticAuthorizationFailure("create_issue", "root_missing");
+    if (call.input.parent_issue_id !== scope.root_issue_id) {
+      diagnosticAuthorizationFailure("create_issue", "parent_mismatch");
+    }
+    if (call.input.expected_parent_revision !== root.revision) {
+      diagnosticAuthorizationFailure("create_issue", "parent_revision_mismatch");
+    }
+    if (this.#activeCycles(scope).length !== 0) {
+      diagnosticAuthorizationFailure("create_issue", "active_cycle_present");
+    }
+    if (call.input.desired.description === null) {
+      diagnosticAuthorizationFailure("create_issue", "description_missing");
+    }
+    if (call.input.desired.state_id !== this.workflow.cycle_states.draft) {
+      diagnosticAuthorizationFailure("create_issue", "state_mismatch");
+    }
+    if (call.input.desired.label_ids.length !== 1) {
+      diagnosticAuthorizationFailure("create_issue", "label_count_mismatch");
+    }
+    if (call.input.desired.label_ids[0] !== this.workflow.labels.cycle) {
+      diagnosticAuthorizationFailure("create_issue", "label_mismatch");
+    }
+    if (call.input.desired.delegate_id !== null) {
+      diagnosticAuthorizationFailure("create_issue", "delegate_present");
+    }
+    if (call.input.desired.priority !== null) {
+      diagnosticAuthorizationFailure("create_issue", "priority_present");
+    }
     const description = call.input.desired.description;
-    if (description === null) callDenied();
-    this.#assertCycleDraft(description, this.#rootDefinition(scope));
+    if (description === null) diagnosticAuthorizationFailure("create_issue", "description_missing");
+    try {
+      this.#assertCycleDraft(description, this.#rootDefinition(scope));
+    } catch (error) {
+      if (error instanceof RootTaskManageBindingError && !error.fatal) {
+        diagnosticAuthorizationFailure("create_issue", "cycle_draft_invalid");
+      }
+      throw error;
+    }
     if (cycles.length > 0) {
       const predecessor = this.#terminalPredecessor;
       const current = predecessor === null ? undefined : scope.issues.get(predecessor.issue_id);
@@ -823,7 +901,7 @@ export class RootTaskManageCommandBinding {
         || current === undefined
         || !this.#isTerminalCycle(current)
         || !this.#sameIssue(predecessor, current)
-      ) callDenied();
+      ) diagnosticAuthorizationFailure("create_issue", "terminal_predecessor_missing");
       this.#terminalPredecessor = null;
     }
   }
@@ -840,7 +918,10 @@ export class RootTaskManageCommandBinding {
     call: UpdateIssueCall,
   ): Promise<RootUpdateAuthorization> {
     const issue = scope.issues.get(call.input.issue_id);
-    if (issue === undefined || call.input.expected_revision !== issue.revision) return callDenied();
+    if (issue === undefined) diagnosticAuthorizationFailure("update_issue", "issue_missing");
+    if (call.input.expected_revision !== issue.revision) {
+      diagnosticAuthorizationFailure("update_issue", "revision_mismatch");
+    }
     const desiredKeys = Object.keys(call.input.desired);
     const kind = issueKind(issue, this.workflow);
     if (kind === "root") {
@@ -849,11 +930,14 @@ export class RootTaskManageCommandBinding {
         || desiredKeys[0] !== "description"
         || call.input.desired.description === null
         || this.#activeCycles(scope).length !== 0
-      ) callDenied();
+      ) diagnosticAuthorizationFailure("update_issue", "root_update_shape");
       try {
         parseRootDefinitionMarkdown(call.input.desired.description);
       } catch {
-        return callDenied();
+        return diagnosticAuthorizationFailure(
+          "update_issue",
+          rootMarkdownDiagnostic(call.input.desired.description),
+        );
       }
       return Object.freeze({
         caller_cycle: null,
@@ -861,7 +945,7 @@ export class RootTaskManageCommandBinding {
         acceptance_view: null,
       });
     }
-    if (kind !== "cycle") return callDenied();
+    if (kind !== "cycle") return diagnosticAuthorizationFailure("update_issue", "target_kind_denied");
     if (issue.status === this.workflow.cycle_states.draft) {
       const draftDescription = desiredKeys.length === 1
         && desiredKeys[0] === "description"
@@ -869,14 +953,27 @@ export class RootTaskManageCommandBinding {
       const draftApproval = desiredKeys.length === 1
         && desiredKeys[0] === "state_id"
         && call.input.desired.state_id === this.workflow.cycle_states.in_progress;
-      if (!draftDescription && !draftApproval) callDenied();
+      if (!draftDescription && !draftApproval) {
+        diagnosticAuthorizationFailure("update_issue", "draft_update_shape");
+      }
       const observed = this.#observedIssues.get(issue.issue_id);
-      if (observed === undefined || !this.#sameIssue(observed, issue)) callDenied();
+      if (observed === undefined || !this.#sameIssue(observed, issue)) {
+        diagnosticAuthorizationFailure("update_issue", "draft_not_observed");
+      }
       this.#observedIssues.delete(issue.issue_id);
       const definition = this.#rootDefinition(scope);
       const description = draftDescription ? call.input.desired.description : issue.description;
-      if (typeof description !== "string") callDenied();
-      this.#assertCycleDraft(description, definition);
+      if (typeof description !== "string") {
+        diagnosticAuthorizationFailure("update_issue", "draft_description_missing");
+      }
+      try {
+        this.#assertCycleDraft(description, definition);
+      } catch (error) {
+        if (error instanceof RootTaskManageBindingError && !error.fatal) {
+          diagnosticAuthorizationFailure("update_issue", "draft_markdown_invalid");
+        }
+        throw error;
+      }
       return Object.freeze({
         caller_cycle: null,
         approval_definition: draftApproval ? definition : null,
@@ -891,14 +988,14 @@ export class RootTaskManageCommandBinding {
         call.input.desired.state_id !== this.workflow.cycle_states.succeeded
         && call.input.desired.state_id !== this.workflow.cycle_states.rejected
       )
-    ) callDenied();
+    ) diagnosticAuthorizationFailure("update_issue", "acceptance_update_shape");
     const observed = this.#observedIssues.get(issue.issue_id);
     const observedView = this.#observedAcceptanceViews.get(issue.issue_id);
     if (
       observed === undefined
       || observedView === undefined
       || !this.#sameIssue(observed, issue)
-    ) return callDenied();
+    ) return diagnosticAuthorizationFailure("update_issue", "acceptance_not_observed");
     this.#observedIssues.delete(issue.issue_id);
     this.#observedAcceptanceViews.delete(issue.issue_id);
     const acceptance = await this.#approvedCycleContext(scope, issue);
@@ -1512,6 +1609,15 @@ export function bindRootTaskManageCommandCorrelation(
 ): RootTaskManageCommandBinding {
   if (!isRootTaskManageCommandBinding(binding)) throw new Error("unbound_root_task_manager");
   return FOR_ROOT_TASK_CORRELATION.call(binding, correlationId);
+}
+
+export function rootTaskManageToolContract(
+  binding: RootTaskManageCommandBinding,
+): RootTaskManageToolContract {
+  if (!isRootTaskManageCommandBinding(binding)) throw new Error("unbound_root_task_manager");
+  const contract = ROOT_TASK_MANAGE_BINDINGS.get(binding);
+  if (contract === undefined) throw new Error("unbound_root_task_manager");
+  return contract;
 }
 
 export function bindRootTaskManageCommand(

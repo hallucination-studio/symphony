@@ -284,6 +284,19 @@ export class CodexThread {
   }
 
   #handle(message: CodexInboundMessage): void {
+    if (message.kind === "turn_error") {
+      if (message.thread_id !== this.threadId || message.will_retry) return;
+      const failureCode = message.error_code === undefined
+        ? "codex_turn_failed"
+        : `codex_turn_failed:${message.error_code}`;
+      if (this.#startingTurn) {
+        if (this.#observedTurn === null) this.#activateTurn(message.turn_id);
+        if (this.#observedTurn === message.turn_id) this.#earlyFailure = new Error(failureCode);
+        return;
+      }
+      if (message.turn_id === this.#activeTurn) this.#failTurn(failureCode);
+      return;
+    }
     if (message.kind === "turn_started" && message.thread_id === this.threadId) {
       if (this.#startingTurn) this.#activateTurn(message.turn_id);
       return;

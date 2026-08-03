@@ -16,8 +16,10 @@ import { asRecord, parseBoundedString } from "../../contracts/validation.js";
 import { MAX_ROOT_TOOL_RESPONSE_BYTES } from "../../runtime/RootToolBoundary.js";
 import {
   CodexCorrelationRegistry,
+  parseCodexRequestId,
   parseCodexInbound,
   type CodexInboundMessage,
+  type CodexRequestId,
   type CodexRequestMethod,
 } from "./CodexProtocol.js";
 import {
@@ -385,8 +387,8 @@ export class CodexProcess {
     });
   }
 
-  async respondToTool(requestId: string, success: boolean, text: string): Promise<void> {
-    parseBoundedString(requestId, "invalid_codex_request_id", 128);
+  async respondToTool(requestId: CodexRequestId, success: boolean, text: string): Promise<void> {
+    parseCodexRequestId(requestId);
     parseBoundedString(text, "invalid_codex_tool_response", MAX_ROOT_TOOL_RESPONSE_BYTES);
     if (Buffer.byteLength(text, "utf8") > MAX_ROOT_TOOL_RESPONSE_BYTES) {
       throw new Error("invalid_codex_tool_response");

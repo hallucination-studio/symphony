@@ -106,6 +106,68 @@ test("Root code inspection lists, reads, and searches fresh non-sensitive code w
   assert.equal(searched.truncated, false);
 });
 
+test("Root code inspection reports a missing non-sensitive target as a typed read-only fact", async (context) => {
+  const { workspace } = await fixture(context);
+  const inspection = await RootCodeInspection.create({ target, workspaceRoot: workspace });
+  const calls = [
+    {
+      name: "list_code_directory" as const,
+      arguments: { path: "not-created", cursor: null, page_size: 128 },
+      operation: "list_code_directory",
+    },
+    {
+      name: "read_code_file" as const,
+      arguments: { path: "not-created/file.ts", start_line: 1, max_lines: 200 },
+      operation: "read_code_file",
+    },
+    {
+      name: "search_code" as const,
+      arguments: { path: "not-created", query: "needle", max_results: 100 },
+      operation: "search_code",
+    },
+  ];
+
+  for (const entry of calls) {
+    const result = await binding(inspection, entry.name).execute({
+      ...envelope(`code_inspection:${entry.name === "list_code_directory"
+        ? "list_directory"
+        : entry.name === "read_code_file" ? "read_file" : "search"}`),
+      ...entry.arguments,
+    }, execution);
+    assert.deepEqual(result, {
+      schema_version: 1,
+      root_id: target.root_id,
+      runtime_generation: target.runtime_generation,
+      correlation_id: correlationId,
+      operation: entry.operation,
+      path: entry.arguments.path,
+      outcome: "not_found",
+    });
+  }
+});
+
+test("Root code inspection caps an oversized positive read request at its output boundary", async (context) => {
+  const { workspace } = await fixture(context);
+  await writeFile(
+    path.join(workspace, "many-lines.txt"),
+    `${Array.from({ length: 250 }, (_, index) => `line-${index + 1}`).join("\n")}\n`,
+    "utf8",
+  );
+  const inspection = await RootCodeInspection.create({ target, workspaceRoot: workspace });
+
+  const result = await binding(inspection, "read_code_file").execute({
+    ...envelope("code_inspection:read_file"),
+    path: "many-lines.txt",
+    start_line: 1,
+    max_lines: 500,
+  }, execution) as { content: string; start_line: number; end_line: number; truncated: boolean };
+
+  assert.equal(result.content.split("\n").filter(Boolean).length, 200);
+  assert.equal(result.start_line, 1);
+  assert.equal(result.end_line, 200);
+  assert.equal(result.truncated, true);
+});
+
 test("Root code directory pagination uses one deterministic cursor ordering", async (context) => {
   const { workspace } = await fixture(context);
   const directory = path.join(workspace, "paged");
@@ -260,7 +322,7 @@ test("Root code inspection binds exact runtime identity, correlation, schema, an
     { ...envelope("code_inspection:read_file"), correlation_id: "turn:other", path: "README.md", start_line: 1, max_lines: 200 },
     { ...envelope("code_inspection:read_file"), path: "/etc/passwd", start_line: 1, max_lines: 200 },
     { ...envelope("code_inspection:read_file"), path: "README.md", start_line: 0, max_lines: 200 },
-    { ...envelope("code_inspection:read_file"), path: "README.md", start_line: 1, max_lines: 201 },
+    { ...envelope("code_inspection:read_file"), path: "README.md", start_line: 1, max_lines: 0 },
     { ...envelope("code_inspection:read_file"), path: "README.md", start_line: 1, max_lines: 200, extra: true },
   ]) {
     await assert.rejects(read.execute(invalid, execution), RootToolCallError);

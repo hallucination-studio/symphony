@@ -32,6 +32,7 @@ import {
 } from "../../contracts/observation.js";
 import { rootObservationDigest } from "../../observation/RootObservationFacts.js";
 import { RootTools, type DeclaredRootTool } from "../../runtime/RootTools.js";
+import { createRootGitReadTools } from "../../runtime/RootGitReadTools.js";
 import {
   bindRootTaskManageCommand,
   RootTaskManageCommandBinding,
@@ -712,6 +713,30 @@ const noTools: RootReconcillToolSet = Object.freeze({
 
 const toolFactory: RootReconcillToolSetFactory = { create: () => noTools };
 
+test("factory preserves a sanitized transport cause for orchestration diagnostics", async (context) => {
+  const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-root-transport-failure-"));
+  context.after(async () => rm(rootHome, { recursive: true, force: true }));
+  await mkdir(path.join(rootHome, "symphony"));
+  const transportFailure = new Error("codex_local_only_preflight_failed:config");
+  const factory = new RootReconcillFactory({
+    create: async () => { throw transportFailure; },
+  }, toolFactory, {
+    max_tool_calls: 4,
+    turn_timeout_ms: 2_000,
+    log: () => undefined,
+  });
+
+  await assert.rejects(factory.create({
+    root_id: rootId,
+    runtime_generation: generation,
+    root_home: rootHome,
+  }), (error) => {
+    assert.equal(error instanceof Error ? error.message : null, "root_transport_creation_failed");
+    assert.equal(error instanceof Error ? error.cause : null, transportFailure);
+    return true;
+  });
+});
+
 test("Codex Root transport enforces local read-only authority and executes branded code inspection", async (context) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-root-transport-"));
   context.after(async () => rm(temporary, { recursive: true, force: true }));
@@ -954,6 +979,72 @@ test("Codex Root transport rejects Performer and write-capable Git tools before 
     assert.equal(outcome, "unapproved_root_tool", capability);
   }
   assert.equal(appServer.spawns.length, 0);
+});
+
+test("Codex Root transport admits module-bound production read-only Git tools", async (context) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-production-git-tools-"));
+  context.after(async () => rm(temporary, { recursive: true, force: true }));
+  const rootHome = path.join(temporary, "root-home");
+  const workspaceRoot = path.join(temporary, "workspace");
+  await Promise.all([mkdir(rootHome), mkdir(workspaceRoot)]);
+  const appServer = controlledAppServer((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-production-git" } } });
+    }
+  });
+  const gitSnapshot = bootstrap().git;
+  const declarations = createRootGitReadTools({
+    git: { read: async () => gitSnapshot },
+    workspace: {
+      root_id: rootId,
+      repository_id: gitSnapshot.repository_id,
+      base_branch: gitSnapshot.base_branch,
+      head_branch: gitSnapshot.head_branch,
+    },
+    diff_reader: {
+      read: async () => ({
+        repository_id: gitSnapshot.repository_id,
+        base_branch: gitSnapshot.base_branch,
+        head_branch: gitSnapshot.head_branch,
+        head_revision: "1111111111111111111111111111111111111111",
+        diff_digest: gitSnapshot.diff_digest,
+        diff_markdown: "## Exact Diff\n\n```diff\n```",
+      }),
+    },
+  });
+  const factory = new CodexRootTurnTransportFactory({
+    executable: "codex",
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    shutdownTimeoutMs: 100,
+    apiKey: "test-api-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+  }, {
+    spawner: appServer.spawner,
+    log: () => undefined,
+    resolveWorkspaceRoot: async () => workspaceRoot,
+  });
+
+  const transport = await factory.create({
+    root_id: rootId,
+    runtime_generation: generation,
+    root_home: rootHome,
+    tools: trustedCodexTools(declarations.map(({ capability }) => capability), declarations),
+  });
+  try {
+    assert.equal(appServer.spawns.length, 1);
+    assert.deepEqual(
+      appServer.spawns[0]?.launch.localOnly?.dynamicTools.map(({ name }) => name),
+      [
+        "get_workspace", "get_status", "get_diff",
+        "list_code_directory", "read_code_file", "search_code",
+      ],
+    );
+  } finally {
+    await transport.close();
+  }
 });
 
 test("Codex Root transport rejects caller-declared read tool callbacks before process allocation", async (context) => {
@@ -1485,6 +1576,7 @@ test("process and output failures stay sanitized and preserve the in-flight fenc
     f.root.run(diff(firstDigest, "sha256:failed", "corr:diff:failure")),
     (error: Error) => {
       assert.equal(error.message, "root_reconcill_boundary_failed");
+      assert.equal(error.cause instanceof Error ? error.cause.message : null, "provider-secret-and-command-line");
       assert.equal(error.message.includes("secret"), false);
       return true;
     },

@@ -20,19 +20,55 @@ export interface CodexRequestContext {
   readonly method: CodexRequestMethod;
 }
 
+export type CodexRequestId = string | number;
+
 export type CodexInboundMessage =
   | { readonly kind: "response"; readonly id: string; readonly result: unknown }
   | { readonly kind: "error"; readonly id: string; readonly code: number; readonly message: string }
   | { readonly kind: "turn_started"; readonly thread_id: string; readonly turn_id: string }
   | { readonly kind: "turn_completed"; readonly thread_id: string; readonly turn_id: string; readonly status: "completed"; readonly output: unknown }
   | { readonly kind: "turn_completed"; readonly thread_id: string; readonly turn_id: string; readonly status: "interrupted" | "failed" | "inProgress" }
-  | { readonly kind: "tool_call"; readonly request_id: string; readonly thread_id: string; readonly turn_id: string; readonly call_id: string; readonly tool: string; readonly arguments: unknown };
+  | {
+      readonly kind: "turn_error";
+      readonly thread_id: string;
+      readonly turn_id: string;
+      readonly will_retry: boolean;
+      readonly error_code?: CodexTurnErrorCode;
+    }
+  | { readonly kind: "tool_call"; readonly request_id: CodexRequestId; readonly thread_id: string; readonly turn_id: string; readonly call_id: string; readonly tool: string; readonly arguments: unknown };
 
-function requestId(value: unknown): string {
-  if ((typeof value !== "string" && typeof value !== "number") || String(value).length > 128) {
+const CODEX_ERROR_INFO_CODES = Object.freeze({
+  contextWindowExceeded: "context_window_exceeded",
+  sessionBudgetExceeded: "session_budget_exceeded",
+  usageLimitExceeded: "usage_limit_exceeded",
+  serverOverloaded: "server_overloaded",
+  cyberPolicy: "cyber_policy",
+  internalServerError: "internal_server_error",
+  unauthorized: "unauthorized",
+  badRequest: "bad_request",
+  threadRollbackFailed: "thread_rollback_failed",
+  sandboxError: "sandbox_error",
+  other: "other",
+} as const);
+const CODEX_HTTP_ERROR_INFO_CODES = Object.freeze({
+  httpConnectionFailed: "http_connection_failed",
+  responseStreamConnectionFailed: "response_stream_connect_failed",
+  responseStreamDisconnected: "response_stream_disconnected",
+  responseTooManyFailedAttempts: "response_retry_limit",
+} as const);
+type CodexTurnErrorCode =
+  | typeof CODEX_ERROR_INFO_CODES[keyof typeof CODEX_ERROR_INFO_CODES]
+  | typeof CODEX_HTTP_ERROR_INFO_CODES[keyof typeof CODEX_HTTP_ERROR_INFO_CODES]
+  | "active_turn_not_steerable";
+
+export function parseCodexRequestId(value: unknown): CodexRequestId {
+  if (typeof value === "string") {
+    return parseBoundedString(value, "invalid_codex_request_id", 128);
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     throw new Error("invalid_codex_request_id");
   }
-  return String(value);
+  return value;
 }
 
 function assertNotificationEnvelope(record: Record<string, unknown>): void {
@@ -41,6 +77,60 @@ function assertNotificationEnvelope(record: Record<string, unknown>): void {
   if (hasTimestamp && !Number.isSafeInteger(record.emittedAtMs)) {
     throw new Error("invalid_codex_notification_timestamp");
   }
+}
+
+function parseCodexErrorInfo(value: unknown): CodexTurnErrorCode {
+  if (typeof value === "string") {
+    const name = parseEnum(value, Object.keys(CODEX_ERROR_INFO_CODES) as (keyof typeof CODEX_ERROR_INFO_CODES)[]);
+    return CODEX_ERROR_INFO_CODES[name];
+  }
+  const info = asRecord(value, "invalid_codex_turn_error");
+  const keys = Object.keys(info);
+  if (keys.length !== 1) throw new Error("invalid_codex_turn_error");
+  const key = keys[0];
+  if (key !== undefined && Object.hasOwn(CODEX_HTTP_ERROR_INFO_CODES, key)) {
+    const payload = asRecord(info[key as string], "invalid_codex_turn_error");
+    assertExactKeys(payload, ["httpStatusCode"]);
+    if (
+      payload.httpStatusCode !== null
+      && (!Number.isSafeInteger(payload.httpStatusCode)
+        || (payload.httpStatusCode as number) < 0
+        || (payload.httpStatusCode as number) > 65_535)
+    ) throw new Error("invalid_codex_turn_error");
+    return CODEX_HTTP_ERROR_INFO_CODES[key as keyof typeof CODEX_HTTP_ERROR_INFO_CODES];
+  }
+  if (key !== "activeTurnNotSteerable") throw new Error("invalid_codex_turn_error");
+  const payload = asRecord(info.activeTurnNotSteerable, "invalid_codex_turn_error");
+  assertExactKeys(payload, ["turnKind"]);
+  parseEnum(payload.turnKind, ["review", "compact"] as const);
+  return "active_turn_not_steerable";
+}
+
+function turnErrorEvent(params: unknown): CodexInboundMessage {
+  const record = asRecord(params, "invalid_codex_turn_error");
+  assertExactKeys(record, ["error", "willRetry", "threadId", "turnId"]);
+  if (typeof record.willRetry !== "boolean") throw new Error("invalid_codex_turn_error");
+  const error = asRecord(record.error, "invalid_codex_turn_error");
+  const errorKeys = [
+    "message",
+    ...(Object.hasOwn(error, "codexErrorInfo") ? ["codexErrorInfo"] : []),
+    ...(Object.hasOwn(error, "additionalDetails") ? ["additionalDetails"] : []),
+  ];
+  assertExactKeys(error, errorKeys);
+  parseBoundedString(error.message, "invalid_codex_turn_error", 64 * 1024);
+  const errorCode = Object.hasOwn(error, "codexErrorInfo") && error.codexErrorInfo !== null
+    ? parseCodexErrorInfo(error.codexErrorInfo)
+    : undefined;
+  if (Object.hasOwn(error, "additionalDetails") && error.additionalDetails !== null) {
+    parseBoundedString(error.additionalDetails, "invalid_codex_turn_error", 64 * 1024);
+  }
+  return Object.freeze({
+    kind: "turn_error",
+    thread_id: parseBoundedString(record.threadId, "invalid_codex_thread_id", 128),
+    turn_id: parseBoundedString(record.turnId, "invalid_codex_turn_id", 128),
+    will_retry: record.willRetry,
+    ...(errorCode === undefined ? {} : { error_code: errorCode }),
+  });
 }
 
 function turnEvent(params: unknown, kind: "turn_started" | "turn_completed"): CodexInboundMessage {
@@ -80,6 +170,10 @@ export function parseCodexInbound(value: unknown): CodexInboundMessage {
       assertNotificationEnvelope(record);
       return turnEvent(record.params, "turn_completed");
     }
+    if (method === "error") {
+      assertNotificationEnvelope(record);
+      return turnErrorEvent(record.params);
+    }
     if (method === "item/tool/call") {
       assertExactKeys(record, ["id", "method", "params"]);
       const params = asRecord(record.params, "invalid_codex_tool_call");
@@ -91,7 +185,7 @@ export function parseCodexInbound(value: unknown): CodexInboundMessage {
       }
       return Object.freeze({
         kind: "tool_call",
-        request_id: requestId(record.id),
+        request_id: parseCodexRequestId(record.id),
         thread_id: parseBoundedString(params.threadId, "invalid_codex_thread_id", 128),
         turn_id: parseBoundedString(params.turnId, "invalid_codex_turn_id", 128),
         call_id: parseBoundedString(params.callId, "invalid_codex_call_id", 128),
@@ -103,7 +197,7 @@ export function parseCodexInbound(value: unknown): CodexInboundMessage {
   }
 
   if (!("id" in record)) throw new Error("invalid_codex_message");
-  const id = requestId(record.id);
+  const id = parseBoundedString(record.id, "invalid_codex_request_id", 128);
   if ("result" in record) {
     assertExactKeys(record, ["id", "result"]);
     return Object.freeze({ kind: "response", id, result: record.result });

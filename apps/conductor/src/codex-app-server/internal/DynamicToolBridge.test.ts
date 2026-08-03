@@ -7,7 +7,7 @@ import {
   parseRuntimeGeneration,
   parseThreadId,
 } from "../../contracts/identity.js";
-import type { CodexInboundMessage } from "./CodexProtocol.js";
+import type { CodexInboundMessage, CodexRequestId } from "./CodexProtocol.js";
 import {
   bindDynamicTools,
   type RootToolBridgeLog,
@@ -37,7 +37,7 @@ function call(
 
 test("dynamic tool bridge returns typed output only to the bound Root thread and accepts each call once", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   const executions: unknown[] = [];
   const logs: RootToolBridgeLog[] = [];
   const fatals: string[] = [];
@@ -95,7 +95,7 @@ test("dynamic tool bridge returns typed output only to the bound Root thread and
 
 test("dynamic tool bridge revocation fences queued calls and late results from effects or responses", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   let executions = 0;
   let resolveExecution: ((value: unknown) => void) | null = null;
   const binding = {
@@ -321,7 +321,7 @@ test("dynamic tool bridge keeps a soft denial in flight through response deliver
 test("dynamic tool bridge seals before a same-chunk call following a hard capability denial", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
   let executions = 0;
-  const responses: Array<[string, boolean]> = [];
+  const responses: Array<[CodexRequestId, boolean]> = [];
   const close = bindDynamicTools({
     onNotification: (next) => { listener = next; return () => { listener = null; }; },
     respondToTool: (id, success) => { responses.push([id, success]); return Promise.resolve(); },
@@ -357,7 +357,7 @@ test("dynamic tool bridge seals before a same-chunk call following a hard capabi
 
 test("dynamic tool bridge rejects stale turns, carries large typed resources, and treats response loss as fatal", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   const fatals: string[] = [];
   let executions = 0;
   let rejectResponses = false;
@@ -416,7 +416,7 @@ test("dynamic tool bridge rejects stale turns, carries large typed resources, an
 
 test("a stale turn cannot poison exact-turn call deduplication", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   let executions = 0;
   bindDynamicTools({
     onNotification: (next) => { listener = next; return () => undefined; },
@@ -469,7 +469,7 @@ test("a stale turn cannot poison exact-turn call deduplication", async () => {
 
 test("dynamic tool bridge bounds unique stale-turn requests independently", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean]> = [];
+  const responses: Array<[CodexRequestId, boolean]> = [];
   const fatals: string[] = [];
   const close = bindDynamicTools({
     onNotification: (next) => { listener = next; return () => { listener = null; }; },
@@ -511,7 +511,7 @@ test("dynamic tool bridge bounds unique stale-turn requests independently", asyn
 
 test("dynamic tool bridge responds once to exact replay of an over-budget denial", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   bindDynamicTools({
     onNotification: (next) => { listener = next; return () => undefined; },
     respondToTool: (id, success, text) => {
@@ -548,7 +548,7 @@ test("dynamic tool bridge responds once to exact replay of an over-budget denial
 
 test("dynamic tool bridge coalesces unique calls after the first over-budget denial", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   const logs: RootToolBridgeLog[] = [];
   let executions = 0;
   let budgetSignals = 0;
@@ -658,7 +658,7 @@ test("dynamic tool bridge reports exact-turn budget and contract violations to i
 
 test("throwing log observers cannot alter accepted, denied, or budget responses", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   const denials: string[] = [];
   const fatals: string[] = [];
   let budgetExhaustions = 0;
@@ -783,7 +783,7 @@ test("a throwing log observer cannot prevent fatal closure and notification", as
 
 test("dynamic tool bridge exposes only stable reason codes and never logs arguments or provider errors", async () => {
   let listener: ((message: CodexInboundMessage) => void) | null = null;
-  const responses: Array<[string, boolean, string]> = [];
+  const responses: Array<[CodexRequestId, boolean, string]> = [];
   const logs: RootToolBridgeLog[] = [];
   const fatals: string[] = [];
   bindDynamicTools({
@@ -850,7 +850,7 @@ test("dynamic tool bridge treats non-JSON tool results as fatal invalid contract
     return cyclic;
   })()]) {
     let listener: ((message: CodexInboundMessage) => void) | null = null;
-    const responses: Array<[string, boolean, string]> = [];
+    const responses: Array<[CodexRequestId, boolean, string]> = [];
     const fatals: string[] = [];
     bindDynamicTools({
       onNotification: (next) => { listener = next; return () => { listener = null; }; },

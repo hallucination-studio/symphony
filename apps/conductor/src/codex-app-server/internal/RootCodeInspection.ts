@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import hostProcess from "node:process";
 
 import {
   parseCorrelationId,
@@ -46,6 +47,35 @@ const MAX_SEARCH_ENTRIES = 20_000;
 const MAX_SEARCH_BYTES = 32 * 1024 * 1024;
 const MAX_SEARCH_MATCH_CHARACTERS = 4_096;
 const SENSITIVE_LINE = "[sensitive line omitted]";
+const DIAGNOSTIC_ERROR_MESSAGES = new Set([
+  "invalid_contract_keys",
+  "invalid_code_cursor",
+  "invalid_code_file",
+  "invalid_code_inspection_integer",
+  "invalid_code_page_size",
+  "invalid_code_path",
+  "invalid_code_query",
+  "invalid_code_start_line",
+  "invalid_code_max_lines",
+  "invalid_correlation_identity",
+  "invalid_root_identity",
+  "invalid_root_issue_id",
+  "invalid_runtime_generation",
+  "missing_capability",
+  "missing_correlation_id",
+  "missing_cursor",
+  "missing_max_lines",
+  "missing_max_results",
+  "missing_page_size",
+  "missing_path",
+  "missing_query",
+  "missing_root_id",
+  "missing_runtime_generation",
+  "missing_schema_version",
+  "missing_start_line",
+  "unexpected_fields",
+  "unsupported_schema_version",
+]);
 
 const PRIVATE_KEY_MATERIAL = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u,
@@ -115,7 +145,11 @@ function specs(target: RuntimeTarget): readonly RootToolSpec[] {
         ...commonProperties(target, ROOT_CODE_INSPECTION_CAPABILITIES.read_code_file),
         path: codePath,
         start_line: Object.freeze({ type: "integer", minimum: 1 }),
-        max_lines: Object.freeze({ type: "integer", minimum: 1, maximum: MAX_READ_LINES }),
+        max_lines: Object.freeze({
+          type: "integer",
+          minimum: 1,
+          description: `Requested line count; output is capped at ${MAX_READ_LINES} lines`,
+        }),
       }),
     },
     {
@@ -198,6 +232,41 @@ function callError(error: unknown): RootToolCallError | RootToolFatalError {
   return new RootToolFatalError("boundary_unavailable");
 }
 
+function isMissingCodePath(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function missingCodePath(
+  target: RuntimeTarget,
+  correlationId: CorrelationId,
+  operation: RootCodeInspectionTool,
+  relativePath: string,
+): Record<string, unknown> {
+  return Object.freeze({
+    schema_version: 1,
+    root_id: target.root_id,
+    runtime_generation: target.runtime_generation,
+    correlation_id: correlationId,
+    operation,
+    path: relativePath,
+    outcome: "not_found",
+  });
+}
+
+function diagnosticFailure(tool: RootCodeInspectionTool, stage: "envelope" | "execution", error: unknown): void {
+  if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS !== "1") return;
+  const nodeCode = (error as NodeJS.ErrnoException).code;
+  const category = error instanceof RootToolCallError || error instanceof RootToolFatalError
+    ? `boundary_${error.code}`
+    : typeof nodeCode === "string" && ["EACCES", "EISDIR", "ELOOP", "ENOENT", "ENOTDIR", "EPERM"].includes(nodeCode)
+      ? `fs_${nodeCode.toLowerCase()}`
+      : error instanceof Error && DIAGNOSTIC_ERROR_MESSAGES.has(error.message)
+        ? error.message
+        : "other";
+  hostProcess.stderr.write(`${JSON.stringify({ event: "code_inspection_diagnostic", tool, stage, category })}\n`);
+}
+
 function parseEnvelope(
   value: unknown,
   expected: RuntimeTarget,
@@ -207,14 +276,23 @@ function parseEnvelope(
 ): Record<string, unknown> {
   try {
     const record = asRecord(value);
-    assertExactKeys(record, [
+    const expectedKeys = [
       "schema_version",
       "root_id",
       "runtime_generation",
       "correlation_id",
       "capability",
       ...fields,
-    ]);
+    ];
+    if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS === "1") {
+      const missing = expectedKeys.find((key) => !Object.hasOwn(record, key));
+      if (missing !== undefined) {
+        diagnosticFailure(tool, "envelope", new Error(`missing_${missing}`));
+      } else if (Object.keys(record).some((key) => !expectedKeys.includes(key))) {
+        diagnosticFailure(tool, "envelope", new Error("unexpected_fields"));
+      }
+    }
+    assertExactKeys(record, expectedKeys);
     parseSchemaVersion(record.schema_version);
     if (parseRootIssueId(record.root_id) !== expected.root_id) throw new Error("invalid_root_identity");
     if (parseRuntimeGeneration(record.runtime_generation) !== expected.runtime_generation) {
@@ -228,6 +306,7 @@ function parseEnvelope(
     }
     return record;
   } catch (error) {
+    diagnosticFailure(tool, "envelope", error);
     throw callError(error);
   }
 }
@@ -304,6 +383,7 @@ export class RootCodeInspection {
         case "search_code": return await this.#search(value, correlationId, execution);
       }
     } catch (error) {
+      diagnosticFailure(tool, "execution", error);
       throw callError(error);
     }
   }
@@ -325,7 +405,15 @@ export class RootCodeInspection {
       ? null
       : parseBoundedString(call.cursor, "invalid_code_cursor", 255);
     if (call.page_size !== CODE_DIRECTORY_PAGE_SIZE) throw new Error("invalid_code_page_size");
-    const entries = await this.#directoryEntries(relativePath);
+    let entries;
+    try {
+      entries = await this.#directoryEntries(relativePath);
+    } catch (error) {
+      if (isMissingCodePath(error)) {
+        return missingCodePath(this.target, correlationId, "list_code_directory", relativePath);
+      }
+      throw error;
+    }
     execution.assertActive();
     const remaining = cursor === null
       ? entries
@@ -357,9 +445,29 @@ export class RootCodeInspection {
     );
     const relativePath = codePath(call.path);
     if (relativePath === ".") throw new Error("invalid_code_file");
-    const startLine = integer(call.start_line, 1, Number.MAX_SAFE_INTEGER);
-    const maxLines = integer(call.max_lines, 1, MAX_READ_LINES);
-    const file = await this.#openCodeFile(relativePath);
+    let startLine;
+    try {
+      startLine = integer(call.start_line, 1, Number.MAX_SAFE_INTEGER);
+    } catch (error) {
+      diagnosticFailure("read_code_file", "execution", new Error("invalid_code_start_line"));
+      throw error;
+    }
+    let maxLines;
+    try {
+      maxLines = Math.min(integer(call.max_lines, 1, Number.MAX_SAFE_INTEGER), MAX_READ_LINES);
+    } catch (error) {
+      diagnosticFailure("read_code_file", "execution", new Error("invalid_code_max_lines"));
+      throw error;
+    }
+    let file;
+    try {
+      file = await this.#openCodeFile(relativePath);
+    } catch (error) {
+      if (isMissingCodePath(error)) {
+        return missingCodePath(this.target, correlationId, "read_code_file", relativePath);
+      }
+      throw error;
+    }
     execution.assertActive();
     const lines = file.text.split("\n");
     const hasFinalNewline = lines.at(-1) === "";
@@ -409,6 +517,7 @@ export class RootCodeInspection {
     let scannedEntries = 0;
     let scannedBytes = 0;
     let truncated = false;
+    let firstDirectory = true;
     while (pending.length > 0) {
       execution.assertActive();
       if (scannedDirectories >= MAX_SEARCH_DIRECTORIES) {
@@ -418,7 +527,16 @@ export class RootCodeInspection {
       const directory = pending.shift();
       if (directory === undefined) break;
       scannedDirectories += 1;
-      const entries = await this.#directoryEntries(directory);
+      let entries;
+      try {
+        entries = await this.#directoryEntries(directory);
+      } catch (error) {
+        if (firstDirectory && isMissingCodePath(error)) {
+          return missingCodePath(this.target, correlationId, "search_code", relativePath);
+        }
+        throw error;
+      }
+      firstDirectory = false;
       for (const entry of entries) {
         execution.assertActive();
         if (scannedEntries >= MAX_SEARCH_ENTRIES) {

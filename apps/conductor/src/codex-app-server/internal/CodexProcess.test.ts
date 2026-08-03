@@ -93,6 +93,80 @@ test("Codex process initializes one experimental dynamic-tool protocol", async (
   await process.shutdown();
 });
 
+test("a non-retryable official turn error fails only the active turn with a closed code", async () => {
+  const fake = fakeSpawner((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-error" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-error" } } });
+      setImmediate(() => server.send({
+        method: "error",
+        params: {
+          threadId: "thread-error",
+          turnId: "turn-error",
+          willRetry: false,
+          error: {
+            message: "provider-secret-detail",
+            codexErrorInfo: "unauthorized",
+            additionalDetails: null,
+          },
+        },
+      }));
+    }
+  });
+  const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
+  const thread = await CodexThread.create(process, {
+    cwd: "/tmp", tools: [], correlationId: parseCorrelationId("thread:error"),
+    access: { kind: "read_only" },
+  });
+
+  await assert.rejects(
+    thread.turn("fail", parseCorrelationId("turn:error"), 2_000),
+    (error: Error) => error.message === "codex_turn_failed:unauthorized" && !error.message.includes("secret"),
+  );
+  thread.close();
+  await process.shutdown();
+});
+
+test("a retryable official turn error keeps the active turn alive", async () => {
+  const fake = fakeSpawner((message, server) => {
+    if (initializeResponse(message, server) || message.method === "initialized") return;
+    if (message.method === "thread/start") {
+      server.send({ id: message.id, result: { thread: { id: "thread-retry" } } });
+    } else if (message.method === "turn/start") {
+      server.send({ id: message.id, result: { turn: { id: "turn-retry" } } });
+      setImmediate(() => server.sendMany([{
+        method: "error",
+        params: {
+          threadId: "thread-retry",
+          turnId: "turn-retry",
+          willRetry: true,
+          error: { message: "transient provider detail" },
+        },
+      }, {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-retry",
+          turn: {
+            id: "turn-retry", status: "completed", error: null,
+            items: [{ id: "answer", type: "agentMessage", text: '{"outcome":"quiescent"}' }],
+          },
+        },
+      }]));
+    }
+  });
+  const process = await CodexProcess.start(testCodexOptions("/tmp/codex"), fake.spawner);
+  const thread = await CodexThread.create(process, {
+    cwd: "/tmp", tools: [], correlationId: parseCorrelationId("thread:retry"),
+    access: { kind: "read_only" },
+  });
+
+  assert.equal((await thread.turn("retry", parseCorrelationId("turn:retry"), 2_000)).status, "completed");
+  thread.close();
+  await process.shutdown();
+});
+
 test("invalid initialization closes the spawned private process", async () => {
   const fake = fakeSpawner((message, server) => {
     if (message.method === "initialize") server.send({ id: message.id, result: { codexHome: "/tmp/codex" } });
@@ -412,7 +486,7 @@ setInterval(() => undefined, 1_000);
   }
 });
 
-test("turn-start activation observes a coalesced first tool call before the caller resumes", async () => {
+test("turn-start activation preserves a numeric app-server tool request id before the caller resumes", async () => {
   const toolCalls: string[] = [];
   const fake = fakeSpawner((message, server) => {
     if (initializeResponse(message, server) || message.method === "initialized") return;
@@ -423,7 +497,7 @@ test("turn-start activation observes a coalesced first tool call before the call
         { id: message.id as string, result: { turn: { id: "turn-race" } } },
         { method: "turn/started", params: { threadId: "thread-race", turn: { id: "turn-race", status: "inProgress", items: [], error: null } } },
         {
-          id: "tool-request-race",
+          id: 17,
           method: "item/tool/call",
           params: {
             threadId: "thread-race",
@@ -434,7 +508,7 @@ test("turn-start activation observes a coalesced first tool call before the call
           },
         },
       ]);
-    } else if (message.id === "tool-request-race") {
+    } else if (message.id === 17) {
       server.send({
         method: "turn/completed",
         params: {
@@ -1017,6 +1091,11 @@ test("tool response uses the official request id and bounded content shape", asy
   assert.deepEqual(response, {
     id: "tool-request-1",
     result: { success: true, contentItems: [{ type: "inputText", text: "accepted" }] },
+  });
+  await process.respondToTool(7, true, "numeric-accepted");
+  assert.deepEqual(fake.requests.at(-1), {
+    id: 7,
+    result: { success: true, contentItems: [{ type: "inputText", text: "numeric-accepted" }] },
   });
   const large = "x".repeat(100_000);
   await process.respondToTool("tool-request-2", true, large);

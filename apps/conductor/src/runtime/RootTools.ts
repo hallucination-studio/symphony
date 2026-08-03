@@ -1,3 +1,5 @@
+import hostProcess from "node:process";
+
 import {
   parseCycleSealDigest,
   type CycleSealDigest,
@@ -26,7 +28,9 @@ import {
 import {
   bindRootTaskManageCommandCorrelation,
   isRootTaskManageCommandBinding,
+  rootTaskManageToolContract,
   RootTaskManageBindingError,
+  type RootTaskManageToolContract,
   type RootGetIssueResult,
   type RootUpdateIssueResult,
   type RootTaskManageCommandBinding,
@@ -40,6 +44,7 @@ import {
   type RootToolExecution,
   type RootToolSpec,
 } from "./RootToolBoundary.js";
+import { isRootGitReadTool } from "./RootGitReadTools.js";
 
 type DeclaredRootToolFamily = "git" | "delivery";
 
@@ -88,7 +93,10 @@ function objectSchema(properties: JsonSchema, required = Object.keys(properties)
   return { type: "object", additionalProperties: false, properties, required, ...extra };
 }
 
-function taskInputSchema(functionName: TaskMcpPublicFunction): JsonSchema {
+function taskInputSchema(
+  functionName: TaskMcpPublicFunction,
+  taskContract: RootTaskManageToolContract,
+): JsonSchema {
   switch (functionName) {
     case "get_issue": return objectSchema({ issue_id: IDENTITY_SCHEMA });
     case "list_issues":
@@ -98,15 +106,21 @@ function taskInputSchema(functionName: TaskMcpPublicFunction): JsonSchema {
     case "list_relations": return objectSchema({ issue_id: IDENTITY_SCHEMA, ...PAGE_PROPERTIES });
     case "create_issue": return objectSchema({
       issue_id: UUID_V4_SCHEMA,
-      parent_issue_id: IDENTITY_SCHEMA,
+      parent_issue_id: { enum: [taskContract.root_id] },
       expected_parent_revision: IDENTITY_SCHEMA,
       desired: objectSchema({
         title: { type: "string", minLength: 1, maxLength: 1024, pattern: "^[^\\r\\n\\u0000]+$" },
-        description: { anyOf: [{ type: "string", maxLength: 100_000, pattern: "^[^\\u0000]*$" }, { type: "null" }] },
-        state_id: IDENTITY_SCHEMA,
-        label_ids: { type: "array", maxItems: 256, uniqueItems: true, items: IDENTITY_SCHEMA },
-        delegate_id: NULLABLE_DELEGATE_SCHEMA,
-        priority: { anyOf: [{ type: "integer", minimum: 0, maximum: 100 }, { type: "null" }] },
+        description: { type: "string", maxLength: 100_000, pattern: "^[^\\u0000]*$" },
+        state_id: { enum: [taskContract.cycle_draft_state_id] },
+        label_ids: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1,
+          uniqueItems: true,
+          items: { enum: [taskContract.cycle_label_id] },
+        },
+        delegate_id: { enum: [null] },
+        priority: { enum: [null] },
       }),
     });
     case "update_issue": return objectSchema({
@@ -149,7 +163,7 @@ const TASK_DESCRIPTIONS = Object.freeze({
   get_issue: "Read one Task Manager issue by exact identity",
   list_issues: "List Task Manager issues with explicit cursor pagination",
   list_children: "List direct child issues with explicit cursor pagination",
-  create_issue: "Create one issue using exact parent preconditions",
+  create_issue: "Create one complete Cycle Draft under the exact Root using the schema-bound Draft state and Cycle label",
   update_issue: "Update approved fields on one exact issue revision",
   archive_issue: "Archive one exact issue revision",
   list_relations: "List relations for one issue with explicit cursor pagination",
@@ -175,7 +189,11 @@ function commonProperties(target: RuntimeTarget, capability: string): JsonSchema
   };
 }
 
-function taskSpec(functionName: TaskMcpPublicFunction, target: RuntimeTarget): RootToolSpec {
+function taskSpec(
+  functionName: TaskMcpPublicFunction,
+  target: RuntimeTarget,
+  taskContract: RootTaskManageToolContract,
+): RootToolSpec {
   const capability = TASK_MCP_CAPABILITIES[functionName];
   return deepFreeze({
     type: "function" as const,
@@ -184,7 +202,7 @@ function taskSpec(functionName: TaskMcpPublicFunction, target: RuntimeTarget): R
     inputSchema: objectSchema({
       ...commonProperties(target, capability),
       function: { const: functionName },
-      input: taskInputSchema(functionName),
+      input: taskInputSchema(functionName, taskContract),
     }),
   });
 }
@@ -223,6 +241,27 @@ function mapCallError(error: unknown): RootToolCallError {
     return new RootToolCallError("capability_denied");
   }
   return new RootToolCallError("invalid_contract");
+}
+
+function diagnosticTaskFailure(
+  tool: string,
+  stage: "parse_call" | "acceptance_guard" | "task_dispatch" | "result_validation",
+  error: unknown,
+): void {
+  if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS !== "1") return;
+  const mapped = error instanceof RootTaskManageBindingError
+    ? { code: error.code, fatal: error.fatal }
+    : error instanceof RootToolCallError || error instanceof RootToolFatalError
+      ? { code: error.code }
+      : error instanceof Error && /^[a-z][a-z0-9_]{0,63}$/u.test(error.message)
+        ? { code: "other", category: error.message }
+        : { code: "other" };
+  hostProcess.stderr.write(`${JSON.stringify({
+    event: "root_task_tool_diagnostic",
+    tool,
+    stage,
+    ...mapped,
+  })}\n`);
 }
 
 function assertEnvelope(
@@ -336,8 +375,12 @@ type UnknownAcceptance =
     readonly next_cursor: string | null;
   };
 
-type RootToolBinder = (correlationId: CorrelationId) => readonly RootToolBinding[];
-const ROOT_TOOL_BINDERS = new WeakMap<object, RootToolBinder>();
+interface RootToolAuthority {
+  readonly bind: (correlationId: CorrelationId) => readonly RootToolBinding[];
+  readonly codex_local_only_capabilities: readonly string[];
+}
+
+const ROOT_TOOL_AUTHORITIES = new WeakMap<object, RootToolAuthority>();
 
 function isTaskMutation(call: TaskMcpCall): call is TaskMcpMutationCall {
   return call.function === "create_issue"
@@ -365,6 +408,7 @@ export class RootTools {
       || options.task_manager.root_id !== this.target.root_id
     ) throw new Error("unbound_root_task_manager");
     this.#taskManager = options.task_manager;
+    const taskContract = rootTaskManageToolContract(options.task_manager);
     const capabilities = options.capabilities.map((capability) =>
       parseBoundedString(capability, "invalid_root_capability", 128));
     if (new Set(capabilities).size !== capabilities.length) throw new Error("duplicate_root_capability");
@@ -395,7 +439,7 @@ export class RootTools {
       knownCapabilities.add(capability);
       if (capabilities.includes(capability)) {
         taskFunctions.add(functionName);
-        specs.push(taskSpec(functionName, this.target));
+        specs.push(taskSpec(functionName, this.target, taskContract));
       }
     }
     for (const declaration of declarations) {
@@ -408,7 +452,12 @@ export class RootTools {
     this.#taskFunctions = taskFunctions;
     this.#declaredTools = declaredTools;
     this.specs = Object.freeze(specs);
-    ROOT_TOOL_BINDERS.set(this, (correlationId) => this.#bindings(correlationId));
+    ROOT_TOOL_AUTHORITIES.set(this, Object.freeze({
+      bind: (correlationId: CorrelationId) => this.#bindings(correlationId),
+      codex_local_only_capabilities: Object.freeze(declarations
+        .filter((declaration) => capabilities.includes(declaration.capability) && isRootGitReadTool(declaration))
+        .map(({ capability }) => capability)),
+    }));
     Object.freeze(this);
   }
 
@@ -445,15 +494,22 @@ export class RootTools {
         if (call.function !== toolName) throw new Error("function_mismatch");
         if (call.correlation_id !== correlationId) throw new Error("correlation_mismatch");
         assertRootPageSize(call);
+      } catch (error) {
+        diagnosticTaskFailure(toolName, "parse_call", error);
+        throw mapCallError(error);
+      }
+      try {
         this.#assertAcceptanceKnown(call);
       } catch (error) {
-        throw mapCallError(error);
+        diagnosticTaskFailure(toolName, "acceptance_guard", error);
+        throw error;
       }
       execution.assertActive();
       let rawResult: unknown;
       try {
         rawResult = await dispatchTask(taskManager, call, execution);
       } catch (error) {
+        diagnosticTaskFailure(toolName, "task_dispatch", error);
         if (error instanceof RootToolCallError) throw error;
         if (error instanceof RootTaskManageBindingError) {
           if (error.fatal) {
@@ -470,7 +526,8 @@ export class RootTools {
         const result = parseTaskResult(rawResult, call);
         this.#observeTaskResult(call, result);
         return result;
-      } catch {
+      } catch (error) {
+        diagnosticTaskFailure(toolName, "result_validation", error);
         throw new RootToolFatalError("invalid_contract");
       }
     }
@@ -567,7 +624,7 @@ export function isRootTools(value: unknown): value is RootTools {
     && value !== null
     && Object.getPrototypeOf(value) === RootTools.prototype
     && Object.isFrozen(value)
-    && ROOT_TOOL_BINDERS.has(value);
+    && ROOT_TOOL_AUTHORITIES.has(value);
 }
 
 export function bindRootTools(
@@ -575,7 +632,14 @@ export function bindRootTools(
   correlationId: CorrelationId,
 ): readonly RootToolBinding[] {
   if (!isRootTools(tools)) throw new Error("unbound_root_tools");
-  const binder = ROOT_TOOL_BINDERS.get(tools);
-  if (binder === undefined) throw new Error("unbound_root_tools");
-  return binder(correlationId);
+  const authority = ROOT_TOOL_AUTHORITIES.get(tools);
+  if (authority === undefined) throw new Error("unbound_root_tools");
+  return authority.bind(correlationId);
+}
+
+export function codexRootLocalOnlyCapabilities(tools: RootTools): readonly string[] {
+  if (!isRootTools(tools)) throw new Error("unbound_root_tools");
+  const authority = ROOT_TOOL_AUTHORITIES.get(tools);
+  if (authority === undefined) throw new Error("unbound_root_tools");
+  return authority.codex_local_only_capabilities;
 }

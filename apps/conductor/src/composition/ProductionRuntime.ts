@@ -4,8 +4,6 @@ import path from "node:path";
 import {
   parseCorrelationId,
   parseCycleIssueId,
-  parseObservationDigest,
-  parseRepositoryId,
   parseRootIssueId,
   parseRevision,
   parseRuntimeGeneration,
@@ -33,16 +31,12 @@ import {
   type StageKind,
 } from "../contracts/cycle.js";
 import {
-  parseGitSnapshot,
   type GitSnapshot,
   type TaskIssueSnapshot,
   type TaskSnapshot,
 } from "../contracts/observation.js";
 import {
-  asRecord,
-  assertExactKeys,
   parseMarkdownText,
-  parseBoundedString,
 } from "../contracts/validation.js";
 import { canonicalTaskRevision } from "../contracts/task-management.js";
 import { isSensitiveWorkspacePath } from "../codex-app-server/internal/SensitiveWorkspacePaths.js";
@@ -80,6 +74,7 @@ import {
   type AcceptedRevisionDeliveryResult,
 } from "../runtime/AcceptedRevisionDelivery.js";
 import { createAcceptedRevisionAuthority } from "../runtime/RootAcceptedRevision.js";
+import { createRootGitReadTools } from "../runtime/RootGitReadTools.js";
 import type { RootRuntimeBinding, RootRuntimeFactory } from "../runtime/RootRuntime.js";
 import {
   bindRootTaskManageCommand,
@@ -88,9 +83,8 @@ import {
 } from "../runtime/RootTaskManageCommand.js";
 import {
   RootTools,
-  type DeclaredRootTool,
 } from "../runtime/RootTools.js";
-import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
+import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import type {
   TaskManageCallerIssuer,
   TaskWorkflowIdentities,
@@ -103,7 +97,7 @@ const COMMAND_TIMEOUT_MS = 30_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const CODEX_STARTUP_TIMEOUT_MS = 30_000;
 const CODEX_REQUEST_TIMEOUT_MS = 30_000;
-const CODEX_TURN_TIMEOUT_MS = 30 * 60_000;
+const CODEX_TURN_TIMEOUT_MS = 10 * 60_000;
 const CODEX_SHUTDOWN_TIMEOUT_MS = 10_000;
 const ROOT_MAX_TOOL_CALLS = 64;
 
@@ -473,73 +467,6 @@ export class ExactGitDiffReader {
   }
 }
 
-function rootGitTool(
-  name: "get_workspace" | "get_status" | "get_diff",
-  git: Pick<GitWorkspaceInterface, "read">,
-  workspace: RootWorkspaceIdentity,
-  diffReader: ExactGitDiffReader,
-): DeclaredRootTool<null, unknown> {
-  const capability = `git:${name}` as const;
-  return Object.freeze({
-    family: "git" as const,
-    capability,
-    spec: Object.freeze({
-      type: "function" as const,
-      name,
-      description: `Read the exact Root Git ${name.slice(4)} facts.`,
-      inputSchema: Object.freeze({
-        type: "object",
-        additionalProperties: false,
-        properties: Object.freeze({ function: Object.freeze({ const: name }) }),
-        required: Object.freeze(["function"]),
-      }),
-    }),
-    parseCall(value: unknown): null {
-      const record = asRecord(value);
-      assertExactKeys(record, [
-        "schema_version", "root_id", "runtime_generation", "correlation_id", "capability", "function",
-      ]);
-      if (record.function !== name) throw new Error("invalid_git_tool_call");
-      return null;
-    },
-    execute(_call: null, execution: TaskManageBoundaryExecution): Promise<GitSnapshot | GitDiffReadback> {
-      execution.assertActive();
-      return name === "get_diff" ? diffReader.read() : git.read(workspace);
-    },
-    parseResult(value: unknown): unknown {
-      if (name === "get_diff") {
-        const record = asRecord(value);
-        assertExactKeys(record, [
-          "repository_id", "base_branch", "head_branch", "head_revision", "diff_digest", "diff_markdown",
-        ]);
-        return Object.freeze({
-          repository_id: parseRepositoryId(record.repository_id),
-          base_branch: parseBoundedString(record.base_branch, "invalid_base_branch", 255),
-          head_branch: parseBoundedString(record.head_branch, "invalid_head_branch", 255),
-          head_revision: parseRevision(record.head_revision),
-          diff_digest: parseObservationDigest(record.diff_digest),
-          diff_markdown: parseMarkdownText(record.diff_markdown, "invalid_git_diff_markdown"),
-        });
-      }
-      const snapshot = parseGitSnapshot(value);
-      if (name === "get_workspace") {
-        return Object.freeze({
-          repository_id: snapshot.repository_id,
-          base_branch: snapshot.base_branch,
-          head_branch: snapshot.head_branch,
-        });
-      }
-      if (name === "get_status") {
-        return Object.freeze({
-          head_revision: snapshot.head_revision,
-          workspace_state: snapshot.workspace_state,
-        });
-      }
-      throw new Error("invalid_git_tool_result");
-    },
-  });
-}
-
 class DeliveringRootReconcill implements RootReconcillInterface {
   constructor(
     private readonly inner: RootReconcillInterface,
@@ -554,10 +481,12 @@ class DeliveringRootReconcill implements RootReconcillInterface {
   async run(input: RootReconcillInput) {
     let outcome: Awaited<ReturnType<RootReconcillInterface["run"]>> | null = null;
     let turnFailed = false;
+    let turnFailure: unknown;
     try {
       outcome = await this.inner.run(input);
-    } catch {
+    } catch (error) {
       turnFailed = true;
+      turnFailure = error;
     }
     const authorization = this.taskBinding.takeAcceptedRevisionAuthorization();
     if (authorization !== null) {
@@ -589,7 +518,9 @@ class DeliveringRootReconcill implements RootReconcillInterface {
       }));
       if (result.outcome !== "delivered") throw new Error("accepted_revision_delivery_failed");
     }
-    if (turnFailed || outcome === null) throw new Error("root_turn_boundary_failed");
+    if (turnFailed || outcome === null) {
+      throw new Error("root_turn_boundary_failed", { cause: turnFailure });
+    }
     return outcome;
   }
 
@@ -654,11 +585,11 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       accepted_revision_issuer: acceptedRevision.issuer,
     });
     const diffReader = new ExactGitDiffReader(route.git, route.git.pathFor(rootId), workspace);
-    const gitTools = [
-      rootGitTool("get_workspace", route.git, workspace, diffReader),
-      rootGitTool("get_status", route.git, workspace, diffReader),
-      rootGitTool("get_diff", route.git, workspace, diffReader),
-    ];
+    const gitTools = createRootGitReadTools({
+      git: route.git,
+      workspace,
+      diff_reader: diffReader,
+    });
     const tools = new RootTools({
       target,
       capabilities: this.options.startup.config.root_capabilities,

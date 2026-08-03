@@ -28,16 +28,44 @@ test("Codex protocol validates official response, turn, and dynamic tool shapes"
     kind: "turn_completed", thread_id: "thread-1", turn_id: "turn-1", status: "completed",
     output: { kind: "decision" },
   });
-  assert.equal(parseCodexInbound({
+  assert.deepEqual(parseCodexInbound({
     id: 7,
     method: "item/tool/call",
     params: { threadId: "thread-1", turnId: "turn-1", callId: "call-1", tool: "work", arguments: {}, namespace: null },
-  }).kind, "tool_call");
+  }), {
+    kind: "tool_call",
+    request_id: 7,
+    thread_id: "thread-1",
+    turn_id: "turn-1",
+    call_id: "call-1",
+    tool: "work",
+    arguments: {},
+  });
   assert.equal(parseCodexInbound({
     id: 8,
     method: "item/tool/call",
     params: { threadId: "thread-1", turnId: "turn-1", callId: "call-2", tool: "plan", arguments: {} },
   }).kind, "tool_call");
+  assert.deepEqual(parseCodexInbound({
+    emittedAtMs: 1_235,
+    method: "error",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      willRetry: false,
+      error: {
+        message: "untrusted provider detail",
+        codexErrorInfo: "unauthorized",
+        additionalDetails: null,
+      },
+    },
+  }), {
+    kind: "turn_error",
+    thread_id: "thread-1",
+    turn_id: "turn-1",
+    will_retry: false,
+    error_code: "unauthorized",
+  });
   assert.throws(() => parseCodexInbound({
     emittedAtMs: "1234",
     method: "turn/started",
@@ -47,6 +75,15 @@ test("Codex protocol validates official response, turn, and dynamic tool shapes"
     },
   }), /invalid_codex_notification_timestamp/u);
   assert.throws(() => parseCodexInbound({ method: "legacy/event", params: {} }), /unknown_codex_method/u);
+  assert.throws(() => parseCodexInbound({
+    method: "error",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      willRetry: "false",
+      error: { message: "malformed" },
+    },
+  }), /invalid_codex_turn_error/u);
   assert.throws(() => parseCodexInbound({
     method: "turn/completed",
     params: {

@@ -101,6 +101,14 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
   assert.deepEqual(prompt.define_contract, {
     cycle_creation_requires: "complete Root Markdown in current-turn fresh Task Manager facts",
     root_update_required_when: "the current-turn fresh Root Markdown is absent or incomplete",
+    cycle_creation_mutation: {
+      parent_issue_id: "exact Root identity",
+      expected_parent_revision: "fresh Root revision after complete Markdown read-back",
+      desired_state_id: "configured Cycle Draft state",
+      desired_label_ids: "exactly the configured Cycle label",
+      desired_delegate_id: null,
+      desired_priority: null,
+    },
   });
   assert.deepEqual(prompt.cycle_boundary_contract, {
     in_progress: "quiescent with no mutation; Conductor owns mechanical execution",
@@ -145,14 +153,15 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
 test("Root output schema remains a closed semantic-turn outcome", () => {
   const schema = rootReconcillOutputSchema(target, correlationId) as {
     readonly additionalProperties?: unknown;
-    readonly properties?: Record<string, { readonly const?: unknown; readonly enum?: unknown }>;
+    readonly properties?: Record<string, { readonly enum?: unknown }>;
     readonly required?: readonly string[];
   };
 
   assert.equal(schema.additionalProperties, false);
-  assert.equal(schema.properties?.root_id?.const, target.root_id);
-  assert.equal(schema.properties?.runtime_generation?.const, target.runtime_generation);
-  assert.equal(schema.properties?.correlation_id?.const, correlationId);
+  assert.deepEqual(schema.properties?.schema_version?.enum, [1]);
+  assert.deepEqual(schema.properties?.root_id?.enum, [target.root_id]);
+  assert.deepEqual(schema.properties?.runtime_generation?.enum, [target.runtime_generation]);
+  assert.deepEqual(schema.properties?.correlation_id?.enum, [correlationId]);
   assert.deepEqual(schema.properties?.outcome?.enum, ["quiescent", "stopped"]);
   assert.deepEqual(schema.required, [
     "schema_version",
@@ -162,4 +171,5 @@ test("Root output schema remains a closed semantic-turn outcome", () => {
     "outcome",
     "sanitized_reason",
   ]);
+  assert.equal(JSON.stringify(schema).includes('"const"'), false);
 });

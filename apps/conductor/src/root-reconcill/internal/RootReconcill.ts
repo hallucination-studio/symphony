@@ -50,7 +50,12 @@ import type {
   RootToolExecution,
   RootToolSpec,
 } from "../../runtime/RootToolBoundary.js";
-import { bindRootTools, isRootTools, type RootTools } from "../../runtime/RootTools.js";
+import {
+  bindRootTools,
+  codexRootLocalOnlyCapabilities,
+  isRootTools,
+  type RootTools,
+} from "../../runtime/RootTools.js";
 import type {
   RootReconcillFactoryInput,
   RootReconcillFactoryInterface,
@@ -374,7 +379,7 @@ class BoundRootReconcill implements RootReconcillInterface {
         ...identity,
         reason_code: "boundary_unavailable",
       }));
-      throw new Error("root_reconcill_boundary_failed");
+      throw new Error("root_reconcill_boundary_failed", { cause: error });
     }
 
     if (result.status === "interrupted") {
@@ -570,8 +575,8 @@ export class RootReconcillFactory implements RootReconcillFactoryInterface {
         || toolTarget.runtime_generation !== target.runtime_generation
       ) throw new Error("root_tools_identity_mismatch");
       this.#toolSets.add(toolSet);
-      const transport = await this.transports.create(Object.freeze({ ...input, tools: toolSet })).catch(() => {
-        throw new Error("root_transport_creation_failed");
+      const transport = await this.transports.create(Object.freeze({ ...input, tools: toolSet })).catch((error) => {
+        throw new Error("root_transport_creation_failed", { cause: error });
       });
       if (typeof transport !== "object" || transport === null || this.#transports.has(transport)) {
         throw new Error("root_reconcill_resource_alias");
@@ -813,7 +818,7 @@ export class CodexRootTurnTransportFactory implements RootTurnTransportFactory {
     const toolSpecs = snapshotCodexRootLocalOnlyTools([
       ...tools.specs,
       ...codeInspection.specs,
-    ]);
+    ], codexRootLocalOnlyCapabilities(tools));
     const process = await CodexProcess.start({
       ...this.codex,
       codexHome: input.root_home,

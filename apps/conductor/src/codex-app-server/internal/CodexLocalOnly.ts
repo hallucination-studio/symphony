@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { asRecord, assertExactKeys, parseBoundedString } from "../../contracts/validation.js";
+import { ROOT_GIT_READ_TOOL_CAPABILITIES } from "../../runtime/RootGitReadTools.js";
 import type { RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import { ROOT_CODE_INSPECTION_CAPABILITIES } from "./RootCodeInspection.js";
 import { snapshotDeniedWorkspacePaths } from "./SensitiveWorkspacePaths.js";
@@ -172,8 +173,8 @@ function profileName(prefix: "read" | "root" | "write", nonce: string): string {
   return `symphony_${prefix}_${compact}`;
 }
 
-// Only module-owned Task Manager bindings are transport authority. Caller-declared
-// Git, Delivery, and Performer callbacks cannot be authenticated by schema metadata.
+// Caller-declared Git, Delivery, and Performer callbacks cannot be authenticated by
+// schema metadata. Canonical Git reads are admitted separately with module provenance.
 const ROOT_LOCAL_ONLY_TOOL_CAPABILITIES = Object.freeze({
   get_issue: "task_manage:get_issue",
   list_issues: "task_manage:list_issues",
@@ -189,6 +190,14 @@ const ROOT_LOCAL_ONLY_TOOL_CAPABILITIES = Object.freeze({
   ...ROOT_CODE_INSPECTION_CAPABILITIES,
 } as const);
 
+const ROOT_GIT_CAPABILITY_NAMES = new Map<string, keyof typeof ROOT_GIT_READ_TOOL_CAPABILITIES>(
+  Object.entries(ROOT_GIT_READ_TOOL_CAPABILITIES).map(([name, capability]) => [
+    capability,
+    name as keyof typeof ROOT_GIT_READ_TOOL_CAPABILITIES,
+  ]),
+);
+const ROOT_LOCAL_ONLY_TOOL_SNAPSHOTS = new WeakMap<object, readonly string[]>();
+
 function deepFreeze<T>(value: T): T {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
   for (const nested of Object.values(value)) deepFreeze(nested);
@@ -197,11 +206,22 @@ function deepFreeze<T>(value: T): T {
 
 export function snapshotCodexRootLocalOnlyTools(
   value: readonly RootToolSpec[],
+  authorizedGitCapabilities: readonly string[] = ROOT_LOCAL_ONLY_TOOL_SNAPSHOTS.get(value) ?? [],
 ): readonly RootToolSpec[] {
   try {
-    if (!Array.isArray(value) || value.length > Object.keys(ROOT_LOCAL_ONLY_TOOL_CAPABILITIES).length) {
+    if (!Array.isArray(value) || !Array.isArray(authorizedGitCapabilities)) {
       throw new Error("root_local_only_tool_denied");
     }
+    const allowedCapabilities: Record<string, string> = { ...ROOT_LOCAL_ONLY_TOOL_CAPABILITIES };
+    const authorized = new Set<string>();
+    for (const rawCapability of authorizedGitCapabilities) {
+      const capability = parseBoundedString(rawCapability, "root_local_only_tool_denied", 128);
+      const name = ROOT_GIT_CAPABILITY_NAMES.get(capability);
+      if (name === undefined || authorized.has(capability)) throw new Error("root_local_only_tool_denied");
+      authorized.add(capability);
+      allowedCapabilities[name] = capability;
+    }
+    if (value.length > Object.keys(allowedCapabilities).length) throw new Error("root_local_only_tool_denied");
     const snapshot = structuredClone(value) as unknown;
     if (!Array.isArray(snapshot)) throw new Error("root_local_only_tool_denied");
     const names = new Set<string>();
@@ -213,9 +233,7 @@ export function snapshotCodexRootLocalOnlyTools(
       parseBoundedString(spec.description, "root_local_only_tool_denied", 1_024);
       if (names.has(name)) throw new Error("root_local_only_tool_denied");
       names.add(name);
-      const expected = ROOT_LOCAL_ONLY_TOOL_CAPABILITIES[
-        name as keyof typeof ROOT_LOCAL_ONLY_TOOL_CAPABILITIES
-      ];
+      const expected = allowedCapabilities[name];
       if (expected === undefined) throw new Error("root_local_only_tool_denied");
       const schema = asRecord(spec.inputSchema, "root_local_only_tool_denied");
       const properties = asRecord(schema.properties, "root_local_only_tool_denied");
@@ -223,7 +241,9 @@ export function snapshotCodexRootLocalOnlyTools(
       assertExactKeys(capability, ["const"]);
       if (capability.const !== expected) throw new Error("root_local_only_tool_denied");
     }
-    return deepFreeze(snapshot as RootToolSpec[]);
+    const frozen = deepFreeze(snapshot as RootToolSpec[]);
+    ROOT_LOCAL_ONLY_TOOL_SNAPSHOTS.set(frozen, Object.freeze([...authorized]));
+    return frozen;
   } catch {
     throw new Error("root_local_only_tool_denied");
   }
